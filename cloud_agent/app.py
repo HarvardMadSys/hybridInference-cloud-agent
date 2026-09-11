@@ -72,6 +72,7 @@ def install_admin_no_store(app: FastAPI, *, prefix: str = ADMIN_READ_PREFIX) -> 
     prefix = prefix.rstrip("/")
 
     async def with_no_store(request: Request, exc: Exception) -> Response:
+        response: Response
         if isinstance(exc, RequestValidationError):
             response = await request_validation_exception_handler(request, exc)
         else:
@@ -484,10 +485,10 @@ async def _cleanup_reaped_shared_residencies(
     grants: Any | None,
 ) -> None:
     """Fence exact shared member processes orphaned by attempt expiry."""
-    cleanups = [
-        (action, action.get("cleanup_residency"))
+    cleanups: list[tuple[Any, Any]] = [
+        (action, residency_cleanup)
         for action in actions
-        if action.get("cleanup_residency")
+        if (residency_cleanup := action.get("cleanup_residency"))
     ]
     if not cleanups:
         return

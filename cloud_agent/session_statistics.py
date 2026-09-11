@@ -53,12 +53,12 @@ def summarize_session_statistics(
     allowed_jobs = set(job_ids)
     by_attempt: dict[tuple[str, Any], list[Mapping[str, Any]]] = {}
     attempt_rows: dict[tuple[str, Any], Mapping[str, Any]] = {}
-    for attempt in attempts:
-        job_id = str(attempt.get("job_id"))
-        if job_id not in allowed_jobs or attempt.get("attempt_id") is None:
+    for candidate in attempts:
+        job_id = str(candidate.get("job_id"))
+        if job_id not in allowed_jobs or candidate.get("attempt_id") is None:
             continue
-        key = (job_id, attempt["attempt_id"])
-        attempt_rows[key] = attempt
+        key = (job_id, candidate["attempt_id"])
+        attempt_rows[key] = candidate
         by_attempt[key] = []
 
     missing_identity = False

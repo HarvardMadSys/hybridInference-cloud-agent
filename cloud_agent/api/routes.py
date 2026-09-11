@@ -200,6 +200,7 @@ from cloud_agent_host.workspace_browser import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from cloud_agent.gateway import GatewayClient
     from cloud_agent.storage.store import AgentJobStore
 
 logger = get_logger(__name__)
@@ -296,7 +297,7 @@ async def authenticate_agent_owner(
 async def require_agent_owner(
     request: Request,
     user: dict[str, Any] = Depends(authenticate_agent_owner),
-    gateway=Depends(get_gateway_client),
+    gateway: GatewayClient = Depends(get_gateway_client),
 ) -> dict[str, Any]:
     """Require current Gateway admission for every owner read and write.
 
@@ -681,7 +682,7 @@ async def _source_control_providers(
     )
     github_connect_url = None
     github_error = None
-    if github_configured:
+    if github_configured and app_credentials is not None:
         try:
             state = await issue_oauth_state(store, user_id=user_id, provider="github")
             github_connect_url = app_credentials.user_authorization_url(state)
@@ -1698,7 +1699,7 @@ async def get_agent_job(
     include_resources: bool = Query(True),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: AgentJobStore | None = Depends(get_agent_job_store),
-    log_store=Depends(get_log_store),
+    log_store: Any | None = Depends(get_log_store),
 ) -> AgentJobResponse:
     """Fetch one of the caller's agent jobs, with what it has spent so far."""
     job_store = _require_store(store)
@@ -2290,7 +2291,7 @@ async def fork_agent_job(
                     }
                 },
             )
-        launch_common = {
+        launch_common: dict[str, Any] = {
             "runtime_id": str(operation["runtime_id"]),
             "runtime_version": operation.get("runtime_version"),
             "model": str(source_job.get("model") or ""),
@@ -3108,7 +3109,7 @@ async def stream_agent_job_events(
         with contextlib.suppress(ValueError):
             cursor = int(last_event_id)
 
-    async def event_source():
+    async def event_source() -> AsyncIterator[Any]:
         nonlocal cursor
         idle_polls = 0
         try:
@@ -3678,7 +3679,7 @@ async def worker_claim(
 
     response = WorkerClaimResponse(
         job_id=claim["id"],
-        thread_id=claim.get("thread_id"),
+        thread_id=str(claim["thread_id"]),
         parent_job_id=claim.get("parent_job_id"),
         turn_no=claim.get("turn_no") or 1,
         attempt_id=claim["attempt_id"],
@@ -4119,6 +4120,7 @@ async def worker_suspend_terminals(
     broker = await _worker_workspace_broker(
         job_store, job, attempt_id=claims["attempt_id"], required=True
     )
+    assert broker is not None
     try:
         await broker.suspend_terminals(
             workspace_id,
@@ -4161,6 +4163,7 @@ async def worker_resume_terminals(
     broker = await _worker_workspace_broker(
         job_store, job, attempt_id=claims["attempt_id"], required=True
     )
+    assert broker is not None
     try:
         await broker.resume_terminals(
             workspace_id,
