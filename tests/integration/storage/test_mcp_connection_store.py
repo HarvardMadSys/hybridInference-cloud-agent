@@ -961,6 +961,120 @@ async def test_capabilities_cannot_be_saved_for_a_disconnected_connection(
     assert revision == 0
 
 
+async def test_a_transport_session_records_who_owns_it(store: AgentJobStore) -> None:
+    """The row names the versions a session was opened under.
+
+    That is what lets a superseded owner's session be found from another
+    instance -- the socket cannot be handed back by a table, but the fact that
+    somebody still holds one can be.
+    """
+    connection = await _connect(store, _OWNER)
+    await store.open_mcp_transport_session(
+        handle="mcp1.abc",
+        connection_id=int(connection["id"]),
+        member="ajob_1:5",
+        job_id="ajob_1",
+        attempt_id=5,
+        owner_lease_generation=2,
+        protocol_version="2025-11-25",
+        upstream_session_id="upstream-1",
+        config_revision=int(connection["config_revision"]),
+        authorization_epoch=int(connection["authorization_epoch"]),
+    )
+    rows = await store.list_mcp_transport_sessions(connection_id=int(connection["id"]))
+    assert len(rows) == 1
+    assert rows[0]["handle"] == "mcp1.abc"
+    assert rows[0]["member"] == "ajob_1:5"
+    assert rows[0]["owner_lease_generation"] == 2
+    assert rows[0]["protocol_version"] == "2025-11-25"
+    # Re-opening the same handle updates rather than duplicating: one session,
+    # one record.
+    await store.open_mcp_transport_session(
+        handle="mcp1.abc",
+        connection_id=int(connection["id"]),
+        member="ajob_1:5",
+        job_id="ajob_1",
+        attempt_id=5,
+        owner_lease_generation=3,
+        protocol_version="2025-11-25",
+        upstream_session_id="upstream-2",
+        config_revision=int(connection["config_revision"]),
+        authorization_epoch=int(connection["authorization_epoch"]),
+    )
+    rows = await store.list_mcp_transport_sessions(connection_id=int(connection["id"]))
+    assert len(rows) == 1
+    assert rows[0]["owner_lease_generation"] == 3
+    assert await store.close_mcp_transport_session(handle="mcp1.abc")
+    assert not await store.close_mcp_transport_session(handle="mcp1.abc")
+
+
+async def test_reaping_a_member_keeps_exactly_the_new_session(store: AgentJobStore) -> None:
+    """A takeover removes the old session and leaves the new one alone.
+
+    Scoped by connection *and* member, so reaping one job's session cannot reach
+    another job's session on the same server -- which would be the platform
+    closing a connection somebody else is still using.
+    """
+    connection = await _connect(store, _OWNER)
+    other = await _connect(store, _OWNER, label="DeepWiki", template="deepwiki")
+
+    async def open_on(target: int, handle: str, member: str) -> None:
+        await store.open_mcp_transport_session(
+            handle=handle,
+            connection_id=target,
+            member=member,
+            job_id=member.split(":")[0],
+            attempt_id=int(member.split(":")[1]),
+            owner_lease_generation=1,
+            protocol_version="2025-11-25",
+            upstream_session_id=None,
+            config_revision=1,
+            authorization_epoch=1,
+        )
+
+    await open_on(int(connection["id"]), "mcp1.old", "ajob_1:5")
+    await open_on(int(connection["id"]), "mcp1.new", "ajob_1:5")
+    await open_on(int(connection["id"]), "mcp1.other-job", "ajob_2:9")
+    await open_on(int(other["id"]), "mcp1.other-conn", "ajob_1:5")
+
+    reaped = await store.reap_mcp_transport_sessions(
+        connection_id=int(connection["id"]), member="ajob_1:5", keep_handle="mcp1.new"
+    )
+    assert [row["handle"] for row in reaped] == ["mcp1.old"]
+    remaining = {
+        row["handle"]
+        for row in await store.list_mcp_transport_sessions(connection_id=int(connection["id"]))
+    }
+    assert remaining == {"mcp1.new", "mcp1.other-job"}
+    # The other connection's row for the same member is untouched.
+    assert [
+        row["handle"]
+        for row in await store.list_mcp_transport_sessions(connection_id=int(other["id"]))
+    ] == ["mcp1.other-conn"]
+
+
+async def test_touching_a_session_keeps_a_live_one_visible(store: AgentJobStore) -> None:
+    """``last_used_at`` is what tells a diagnosis which sessions are live."""
+    connection = await _connect(store, _OWNER)
+    await store.open_mcp_transport_session(
+        handle="mcp1.abc",
+        connection_id=int(connection["id"]),
+        member="ajob_1:5",
+        job_id="ajob_1",
+        attempt_id=5,
+        owner_lease_generation=1,
+        protocol_version="2025-11-25",
+        upstream_session_id=None,
+        config_revision=1,
+        authorization_epoch=1,
+    )
+    before = (await store.list_mcp_transport_sessions(connection_id=int(connection["id"])))[0]
+    assert await store.touch_mcp_transport_session(handle="mcp1.abc")
+    after = (await store.list_mcp_transport_sessions(connection_id=int(connection["id"])))[0]
+    assert after["last_used_at"] >= before["last_used_at"]
+    assert not await store.touch_mcp_transport_session(handle="mcp1.gone")
+
+
 async def test_the_0005_migration_maps_legacy_server_names_onto_bindings() -> None:
     """Build the pre-0005 shape, upgrade over it, and read what it decided.
 

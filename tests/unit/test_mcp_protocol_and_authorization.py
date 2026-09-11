@@ -784,3 +784,128 @@ class TestAuthProfile:
                 location=ExecutionLocation.REMOTE,
                 url="https://mcp.example.com/mcp",
             )
+
+
+class TestSessionRecords:
+    """Opening a session records it; superseding one closes what it replaces."""
+
+    def _connection(self, **overrides: object) -> host.McpConnection:
+        """A remote connection the host will never actually dial."""
+        base: dict[str, object] = {
+            "connection_id": "7",
+            "user_id": "u1",
+            "label": "Docs",
+            "config": ConnectionConfig(
+                transport=Transport.STREAMABLE_HTTP,
+                location=ExecutionLocation.REMOTE,
+                url="https://mcp.example.com/mcp",
+            ),
+        }
+        base.update(overrides)
+        return host.McpConnection(**base)  # type: ignore[arg-type]
+
+    class _Store:
+        """A store that records what the host asked it to remember."""
+
+        def __init__(self) -> None:
+            """Start with nothing recorded."""
+            self.opened: list[dict[str, object]] = []
+            self.closed: list[str] = []
+            self.reaped: list[dict[str, object]] = []
+
+        async def open_mcp_transport_session(self, **kwargs: object) -> None:
+            self.opened.append(kwargs)
+
+        async def close_mcp_transport_session(self, *, handle: str) -> bool:
+            self.closed.append(handle)
+            return True
+
+        async def reap_mcp_transport_sessions(self, **kwargs: object) -> list[object]:
+            self.reaped.append(kwargs)
+            return []
+
+    def _host(self, store: object) -> host.McpHost:
+        """A host whose only session-opening step is replaced."""
+        built = host.McpHost(store=store)
+        return built
+
+    @pytest.mark.asyncio
+    async def test_opening_a_session_records_the_versions_it_was_opened_under(self) -> None:
+        """The record is what lets another instance find a session it cannot hold."""
+        store = self._Store()
+        built = self._host(store)
+
+        async def connect(connection: object, *, secret: object) -> tuple:
+            # A handshake, because the record names the revision it agreed.
+            return object(), protocol.Handshake(protocol_version="2025-11-25"), None
+
+        built._connect = connect  # type: ignore[method-assign]
+        key = host.SessionKey(connection_id="7", member="ajob:5", owner_lease_generation=2)
+        await built.open(self._connection(), secret=None, key=key)
+
+        assert len(store.opened) == 1
+        recorded = store.opened[0]
+        assert recorded["handle"] == key.handle()
+        assert recorded["connection_id"] == 7
+        assert recorded["member"] == "ajob:5"
+        assert recorded["job_id"] == "ajob"
+        assert recorded["attempt_id"] == 5
+        assert recorded["owner_lease_generation"] == 2
+        assert store.reaped, "a new session reaps whatever the member left behind"
+
+    @pytest.mark.asyncio
+    async def test_superseding_a_session_closes_it_and_forgets_it(self) -> None:
+        """Otherwise a superseded owner is one lookup away from its own session."""
+        store = self._Store()
+        built = self._host(store)
+
+        async def connect(connection: object, *, secret: object) -> tuple:
+            # A handshake, because the record names the revision it agreed.
+            return object(), protocol.Handshake(protocol_version="2025-11-25"), None
+
+        built._connect = connect  # type: ignore[method-assign]
+        first = host.SessionKey(connection_id="7", member="ajob:5", owner_lease_generation=2)
+        second = host.SessionKey(connection_id="7", member="ajob:5", owner_lease_generation=3)
+        await built.open(self._connection(), secret=None, key=first)
+        await built.open(self._connection(), secret=None, key=second)
+
+        assert built.session(first) is None
+        assert first.handle() in store.closed
+        assert built.session(second) is not None
+
+    @pytest.mark.asyncio
+    async def test_a_record_that_cannot_be_written_does_not_fail_the_call(self) -> None:
+        """The socket is process-local; losing its row costs a diagnosis, not
+        the call."""
+
+        class _Broken(self._Store):
+            async def open_mcp_transport_session(self, **kwargs: object) -> None:
+                raise RuntimeError("the database is gone")
+
+        built = self._host(_Broken())
+
+        async def connect(connection: object, *, secret: object) -> tuple:
+            # A handshake, because the record names the revision it agreed.
+            return object(), protocol.Handshake(protocol_version="2025-11-25"), None
+
+        built._connect = connect  # type: ignore[method-assign]
+        key = host.SessionKey(connection_id="7", member="ajob:5")
+        session = await built.open(self._connection(), secret=None, key=key)
+        assert session is not None
+
+    @pytest.mark.asyncio
+    async def test_closing_a_session_removes_its_record(self) -> None:
+        """A record nobody can serve is not a session."""
+        store = self._Store()
+        built = self._host(store)
+
+        async def connect(connection: object, *, secret: object) -> tuple:
+            # A handshake, because the record names the revision it agreed.
+            return object(), protocol.Handshake(protocol_version="2025-11-25"), None
+
+        built._connect = connect  # type: ignore[method-assign]
+        key = host.SessionKey(connection_id="7", member="ajob:5")
+        await built.open(self._connection(), secret=None, key=key)
+        assert await built.close(key)
+        assert key.handle() in store.closed
+        assert built.session(key) is None

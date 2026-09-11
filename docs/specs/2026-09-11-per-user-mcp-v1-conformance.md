@@ -46,8 +46,8 @@ are outside this repository.
 | Types, binary / media and size limits presented truthfully | Done | `host.ContentBlock` carries `truncated` and names `unsupportedContent` rather than returning an empty result |
 | Correlate by request id, method and context — including cancel and progress | **Partial** | the transports correlate replies by id and tolerate progress frames before the answer. On the merged endpoint a `notifications/cancelled` and an upstream progress notification are both dropped: the surface is request/response, so a cancel that arrives on a later HTTP request has nothing to reach |
 | External URI is the server's own resource identifier | Done | `resources/list` publishes the upstream URIs; routing is a lookup in the catalogue |
-| Opaque session / event handles bound to connection, revisions, epoch, member, attempt, owner lease generation | **Schema only** | `agent_mcp_transport_sessions` exists in `0005` with every one of those columns, and **nothing writes to it**. Sessions live in `McpHost._sessions`, keyed by a digest of connection + member + lease generation, which gives the fencing but not the durability |
-| Rebuild the protocol session when the owner is superseded, without resending dispatched work | **Partial** | the key includes the lease generation, so a takeover gets a new session and the old one is never reused. Nothing evicts the old entry, so the map grows for the lifetime of the process |
+| Opaque session / event handles bound to connection, revisions, epoch, member, attempt, owner lease generation | Done | the handle is `mcp1.<digest>` over connection, member and lease generation, and `McpHost` records every session it opens in `agent_mcp_transport_sessions` with those columns. The row is a *record*, not the session — a socket cannot be handed back by a table — and what it buys is finding a session from elsewhere |
+| Rebuild the protocol session when the owner is superseded, without resending dispatched work | Done | the key includes the lease generation, so a takeover produces a new session; `McpHost.reap_superseded` closes the superseded one, deletes its record and clears any record another instance left under that member. The map no longer grows for the lifetime of the process |
 | Bounded request, frame, cumulative response and events | Done | `jsonrpc.MAX_MESSAGE_BYTES`, `sse.MAX_EVENT_BYTES`, `transports.MAX_RESPONSE_BYTES` |
 | SSE handles LF / CRLF and fragmentation, and closes on overflow | Done | `mcp/sse.py`; 6 cases |
 | Separate finite timeouts for execution, confirmation and subscription | **Partial** | a held call has the four-clock contract in `mcp/invocations.py`. Execution uses one relay constant (`_UPSTREAM_TIMEOUT_S = 120`) for every server, which the design explicitly says not to do |
@@ -98,14 +98,12 @@ are outside this repository.
 4. **Elicitation**: a user form, a persisted request, and a continuation that
    carries the answers back — which the merged endpoint can already express
    (`inputResponses` / `requestState` are implemented on the client side).
-5. **Session durability**: write `agent_mcp_transport_sessions`, and evict
-   superseded entries from the host's map.
-6. **Per-service timeouts**: make the relay's execution timeout a property of
+5. **Per-service timeouts**: make the relay's execution timeout a property of
    the connection rather than one constant.
-7. **Cancellation and progress on the merged endpoint**: the surface would have
+6. **Cancellation and progress on the merged endpoint**: the surface would have
    to hold a call open across HTTP requests, or report them as unsupported
    rather than accepting the notification silently.
-8. **Deployment acceptance**: a staging run, a real OAuth round trip, and
+7. **Deployment acceptance**: a staging run, a real OAuth round trip, and
    interoperation with two real third-party servers and one real stdio server.
 
 ## How to check this document

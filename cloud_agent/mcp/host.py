@@ -39,6 +39,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import protocol
 from cloud_agent.mcp.models import (
     CapabilitySnapshot,
@@ -53,6 +54,8 @@ from cloud_agent.mcp.transports import (
     connect_legacy_sse,
     connect_streamable,
 )
+
+logger = get_logger(__name__)
 
 #: A single text or base64 block the runtimes will render. Bounded because a
 #: tool result is on its way into a model's context, and an unbounded one is a
@@ -234,10 +237,21 @@ class McpHost:
         *,
         policy: EgressPolicy | None = None,
         limits: HostLimits | None = None,
+        store: Any | None = None,
     ) -> None:
-        """Build a host with an egress policy and result bounds."""
+        """Build a host with an egress policy, result bounds and a session record.
+
+        ``store`` is optional because a host is also useful without a database --
+        a diagnostic opens one connection and closes it. With a store, every
+        session it opens is *recorded*: the row names the connection, the member,
+        the owner lease generation and the revisions the session was opened
+        under, which is what lets a superseded owner's session be found and
+        closed. The record is not the session: the socket cannot be handed back
+        by a table, and no attempt is made to pretend otherwise.
+        """
         self._policy = policy or EgressPolicy()
         self._limits = limits or HostLimits()
+        self._store = store
         self._sessions: dict[str, Session] = {}
 
     def session(self, key: SessionKey) -> Session | None:
@@ -265,12 +279,91 @@ class McpHost:
         existing = self._sessions.get(key.handle())
         if existing is not None:
             return existing
+        await self.reap_superseded(key)
         transport, handshake, stream_task = await self._connect(connection, secret=secret)
         session = Session(
             key=key, transport=transport, handshake=handshake, stream_task=stream_task
         )
         self._sessions[key.handle()] = session
+        await self._record(connection, session)
         return session
+
+    async def reap_superseded(self, key: SessionKey) -> int:
+        """Close what this member held under an older owner, and forget it.
+
+        The design's "rebuild the protocol session when the owner is superseded"
+        is this and only this. A takeover produces a new key -- the lease
+        generation is part of it -- so the old session is a socket the platform
+        will never drive again: it is closed here, its record removed, and any
+        record another instance left under the same member goes with it. Left
+        alone, the map grows for the lifetime of the process and a superseded
+        owner stays one dictionary lookup away from being handed its own session
+        back.
+        """
+        closed = 0
+        for handle, session in list(self._sessions.items()):
+            if (
+                session.key.connection_id == key.connection_id
+                and session.key.member == key.member
+                and session.key.owner_lease_generation < key.owner_lease_generation
+            ):
+                del self._sessions[handle]
+                await session.aclose()
+                closed += 1
+                if self._store is not None:
+                    await self._store.close_mcp_transport_session(handle=handle)
+        if self._store is not None:
+            await self._store.reap_mcp_transport_sessions(
+                connection_id=int(key.connection_id),
+                member=key.member,
+                keep_handle=key.handle(),
+            )
+        return closed
+
+    async def close(self, key: SessionKey) -> bool:
+        """Close one session and remove its record."""
+        session = self._sessions.pop(key.handle(), None)
+        if session is not None:
+            await session.aclose()
+        if self._store is not None:
+            return bool(await self._store.close_mcp_transport_session(handle=key.handle()))
+        return session is not None
+
+    async def _record(self, connection: McpConnection, session: Session) -> None:
+        """Write the session's record, if this host has somewhere to write it.
+
+        A record that cannot be written does not fail the call it describes. The
+        socket is process-local, so what is lost is the ability to *find* this
+        session from elsewhere -- a diagnostic says less, and a reaper on another
+        instance has one fewer row to clean. Nothing about the call's safety
+        depends on it, which is exactly why it must not take the call down.
+        """
+        if self._store is None:
+            return
+        job_id, _, attempt = session.key.member.partition(":")
+        try:
+            await self._store.open_mcp_transport_session(
+                handle=session.key.handle(),
+                connection_id=int(session.key.connection_id),
+                member=session.key.member,
+                job_id=job_id or None,
+                attempt_id=int(attempt) if attempt.isdigit() else None,
+                owner_lease_generation=session.key.owner_lease_generation,
+                protocol_version=session.protocol_version,
+                upstream_session_id=getattr(session.transport, "session_id", None),
+                config_revision=connection.config_revision,
+                authorization_epoch=connection.authorization_epoch,
+            )
+        except Exception:
+            logger.warning(
+                "agent_mcp_session_record_failed",
+                extra={
+                    "event": "agent_mcp_session_record_failed",
+                    "connection_id": session.key.connection_id,
+                    "member": session.key.member,
+                },
+                exc_info=True,
+            )
 
     async def _connect(
         self, connection: McpConnection, *, secret: str | None
