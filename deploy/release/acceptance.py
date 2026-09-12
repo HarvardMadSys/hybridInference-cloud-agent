@@ -277,14 +277,36 @@ def check_stages(result: subprocess.CompletedProcess[str]) -> list[str]:
     return evidence
 
 
-def docker(*arguments: str, check: bool = True) -> str:
-    result = subprocess.run(["docker", *arguments], text=True, capture_output=True, timeout=120)
+def docker(*arguments: str, check: bool = True, env: Mapping[str, str] | None = None) -> str:
+    result = subprocess.run(
+        ["docker", *arguments],
+        text=True,
+        capture_output=True,
+        timeout=120,
+        env={**os.environ, **(env or {})} if env else None,
+    )
     if check and result.returncode != 0:
         raise AcceptanceFailure(f"`docker {' '.join(arguments)}` failed: {result.stderr.strip()}")
     return result.stdout.strip()
 
 
-def compose(project: str, file: Path, root: Path, *arguments: str, check: bool = True) -> str:
+def compose(
+    project: str,
+    file: Path,
+    root: Path,
+    *arguments: str,
+    check: bool = True,
+    env: Mapping[str, str] | None = None,
+) -> str:
+    """Compose against the generated file, with the release's own values supplied.
+
+    `env` is how `AGENT_DEPLOYMENT_SHA` arrives. It is deliberately absent from
+    the deployment's `.env` — a host that could name the commit it serves would
+    make the exact-SHA readiness fence compare a value against itself — so the
+    deploy script takes it from the manifest and exports it. A command issued
+    here has to do the same, and Compose interpolates the *whole* file before it
+    decides which service to act on, so even `up web` needs it.
+    """
     return docker(
         "compose",
         "-p",
@@ -295,6 +317,7 @@ def compose(project: str, file: Path, root: Path, *arguments: str, check: bool =
         str(file),
         *arguments,
         check=check,
+        env=env,
     )
 
 
@@ -443,12 +466,35 @@ def accept(
         )
     evidence.append("nothing was recorded as deployed, because nothing finished deploying")
 
-    # The fence stops the deploy before `web` starts. Bringing it up here is the
-    # acceptance's own step, under the deploy's own restrictions: no build, and
-    # no implicit pull of anything the release did not pin.
+    # The fence leaves the stack half-raised, in two ways. `web` never started,
+    # because it comes after. And the two listeners that *did* start were stopped
+    # again on the way out: `deploy.sh`'s EXIT trap restores the services a failed
+    # bring-up had bootstrapped, which is right for a deployment and leaves
+    # nothing running to inspect here.
+    #
+    # So the acceptance raises all three itself, from the same generated Compose
+    # file and under the deploy's own restrictions: no build, and no implicit
+    # pull of anything the release did not pin. That they start from the
+    # release's digests is the thing being checked; that they answered /healthz
+    # first is already established by the stages above.
     file = generated_compose(root)
-    compose(project, file, root, "up", "-d", "--no-build", "--pull", "never", "web")
-    evidence.append(f"the web service started from {file.name} with no build and no implicit pull")
+    release_values = {"AGENT_DEPLOYMENT_SHA": str(manifest["source_commit"])}
+    services = sorted(aa.STACK_SERVICES["control-plane"])
+    compose(
+        project,
+        file,
+        root,
+        "up",
+        "-d",
+        "--no-build",
+        "--pull",
+        "never",
+        *services,
+        env=release_values,
+    )
+    evidence.append(
+        f"{', '.join(services)} run from {file.name} with no build and no implicit pull"
+    )
 
     expected = aa.expected_services(manifest, "control-plane", variant)
     evidence += aa.check_running(expected, observed_services(project, list(expected)))

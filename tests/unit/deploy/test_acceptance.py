@@ -375,3 +375,57 @@ def test_teardown_removes_the_network_this_run_created(monkeypatch) -> None:
     monkeypatch.setattr(ac, "docker", fake_docker)
     ac.teardown("p")
     assert ("network", "rm", "net-1") in calls
+
+
+# ----------------------------------------------------------- release values
+
+
+def test_the_web_bring_up_carries_the_commit_the_env_file_must_not(monkeypatch) -> None:
+    """`AGENT_DEPLOYMENT_SHA` is the release's to supply, not the deployment's.
+
+    It is absent from the `.env` on purpose — a host that could name the commit
+    it serves would make the exact-SHA readiness fence compare a value against
+    itself — so the deploy script exports it from the manifest. A command issued
+    by the acceptance has to do the same, and Compose interpolates the whole
+    file before choosing a service, so even `up web` fails without it.
+    """
+    captured: dict[str, str] = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs.get("env") or {})
+        captured["__argv__"] = " ".join(command)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    ac.compose(
+        "p",
+        Path("/tmp/x.yml"),
+        Path("/tmp/root"),
+        "up",
+        "-d",
+        "web",
+        env={"AGENT_DEPLOYMENT_SHA": "a" * 40},
+    )
+
+    assert captured["AGENT_DEPLOYMENT_SHA"] == "a" * 40
+    assert "up -d web" in captured["__argv__"]
+
+
+def test_the_commit_is_never_written_into_the_deployment_env_file() -> None:
+    environment = ac.synthetic_environment(COMPOSE, "agents", "p")
+    assert "AGENT_DEPLOYMENT_SHA" not in environment
+
+
+def test_the_acceptance_raises_every_service_it_then_inspects() -> None:
+    """The fence leaves nothing running: `web` never started, and the two
+    listeners that did were stopped again by `deploy.sh`'s EXIT trap, which
+    restores what a failed bring-up had bootstrapped. So the check has to raise
+    them, and it has to raise exactly the set it is about to compare."""
+    source = (REPO_ROOT / "deploy/release/acceptance.py").read_text()
+    assert 'services = sorted(aa.STACK_SERVICES["control-plane"])' in source
+    assert "*services," in source
+    deploy = (REPO_ROOT / "deploy/control-plane/deploy.sh").read_text()
+    assert "cleanup_failed_bootstrap" in deploy and "compose stop" in deploy, (
+        "if the deploy stopped restoring bootstrap services, this step would be raising "
+        "containers that were already up — worth knowing, not worth guessing"
+    )
