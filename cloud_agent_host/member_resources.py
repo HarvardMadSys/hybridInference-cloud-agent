@@ -157,11 +157,17 @@ class WindowSample:
 
     @property
     def readings_are_complete(self) -> bool:
-        """Whether every task in this cycle answered both counter reads.
+        """Whether every task in this cycle answered its scheduler counter.
 
         A cycle that could not read some task still reports real readings for
         the tasks that answered, but it does not know how many tasks it
         missed, so it can neither open nor close an instance's range.
+
+        It says nothing about the task I/O counters. A kernel that does not
+        account them is not a kernel that failed to read CPU, and tying the two
+        together left a guest without task I/O accounting measuring no CPU at
+        all. A member with no live task at all does set this: a turn that
+        finished its work and went quiet is a measured zero.
         """
         return self.counters & WINDOW_READING_COMPLETE != 0
 
@@ -181,6 +187,11 @@ class ThreadExit:
     read_bytes: int | None = None
     write_bytes: int | None = None
     counter_bits: int = 0
+    #: True when this window watched the task start. Only then may its settled
+    #: figure be charged in full: the kernel reports a lifetime, and a lifetime
+    #: that began before the window is not this window's work. The default is
+    #: False because an unproven birth must never be assumed.
+    born_in_window: bool = False
 
 
 @dataclass
@@ -198,6 +209,11 @@ class _ThreadState:
     last_guest_mono_ns: int = 0
     closed: bool = False
     regressed: bool = False
+    #: Whether this window saw the instance start, from a census reading whose
+    #: start time falls inside the window or from the fork record itself. It is
+    #: what separates a task the window may charge in full from one whose
+    #: earlier life belongs to whatever ran before.
+    born_in_window: bool = False
 
 
 @dataclass
@@ -300,6 +316,11 @@ class MemberWindowReducer:
         for reading in sample.tasks:
             state = self._state_for(reading)
             state.last_guest_mono_ns = max(state.last_guest_mono_ns, sample.guest_mono_ns)
+            # The proof is kept even when this cycle may not move a total: a
+            # cycle that failed to read one task still saw when the others
+            # started, and that fact outlives the cycle it arrived in.
+            if reading.born_in_window:
+                state.born_in_window = True
             if not sample.readings_are_complete or state.closed:
                 continue
             for field_name, value in (
@@ -334,6 +355,8 @@ class MemberWindowReducer:
         if state is None:
             state = _ThreadState()
             self._threads[exit_event.instance] = state
+        if exit_event.born_in_window:
+            state.born_in_window = True
         if state.closed:
             # A closed instance can still be restated: the kernel's exit record
             # carries the settled I/O and reads zero CPU, and the scheduler's
@@ -450,6 +473,14 @@ class MemberWindowReducer:
             if previous is not None and value < previous:
                 self._regressed(state, field_name)
                 continue
+            if previous is None and not state.born_in_window:
+                # Same rule as a first close: an unproven birth means the
+                # figure may include work from before the window.
+                self._missing_baseline(
+                    field_name,
+                    self._cpu_reasons if field_name == "cpu_ns" else self._io_reasons,
+                )
+                continue
             if previous is None or value > previous:
                 delta = value if previous is None else value - previous
                 setattr(state, field_name, value)
@@ -492,11 +523,18 @@ class MemberWindowReducer:
             return
         previous = getattr(state, field_name)
         if previous is None:
-            if state.last_guest_mono_ns <= 0 and not state.closed:
-                # The window never read this instance at all. It was born and
-                # died between two censuses, which is exactly the case the
-                # exit record exists to measure.
-                pass
+            if not state.born_in_window:
+                # No reading ever opened a range for this instance and nothing
+                # proved it started here. The kernel's figure is a lifetime,
+                # and a lifetime that may predate the window cannot be charged
+                # to it: a resident process that has run for an hour and exits
+                # during this turn would otherwise bill the hour. So the part
+                # is reported missing rather than repaired with a zero
+                # baseline, which is the one repair this reducer never makes.
+                self._missing_baseline(field_name, reasons)
+                return
+            # Born and died between two censuses, which is exactly the case
+            # the exit record exists to measure.
             setattr(state, field_name, value)
             self._add(field_name, value)
             return
@@ -518,6 +556,19 @@ class MemberWindowReducer:
         else:
             self._write_bytes += amount
             self._io_measured = True
+
+    def _missing_baseline(self, field_name: str, reasons: set[str]) -> None:
+        """Mark a metric short because an instance had no range to close.
+
+        The amount is not guessed at from either end: an instance with no
+        baseline contributes nothing rather than its whole settled figure, and
+        the metric says it is a floor.
+        """
+        if field_name == "cpu_ns":
+            self._cpu_partial = True
+        else:
+            self._io_partial = True
+        reasons.add("missing_thread_baseline")
 
     def _counter_missing(self, field_name: str) -> None:
         """A counter this kernel does not account is unmeasured, not zero."""
@@ -872,18 +923,38 @@ class ExitTracker:
         #: exit record reads zero CPU and the done record carries the
         #: scheduler's final runtime -- is reported again rather than dropped.
         self._last_emitted: dict[str, ThreadExit] = {}
+        #: Instances this window watched start, which is what lets the reducer
+        #: charge a settled exit in full. Only a fork record inside the window
+        #: proves it here; a task first seen at its own exit is not proven, and
+        #: is left for the reducer to refuse rather than guessed at.
+        self._born: dict[str, bool] = {}
 
     def _key_for(self, tid: int, starttime_ticks: int) -> str:
         return instance_key(boot_id=self._boot_id, starttime_ticks=starttime_ticks, tid=tid)
 
-    def _start_life(self, tid: int, tgid: int, starttime_ticks: int) -> str:
-        """Begin a new lifecycle for one task number."""
+    def _start_life(
+        self,
+        tid: int,
+        tgid: int,
+        starttime_ticks: int,
+        *,
+        born: bool = False,
+    ) -> str:
+        """Begin a new lifecycle for one task number.
+
+        ``born`` records that this window saw the life begin. It defaults to
+        False because most lives are discovered rather than witnessed: a census
+        that lists a task, or an exit record for one nobody had seen, says
+        nothing about whether it started before the window opened.
+        """
         identifier = self._key_for(tid, starttime_ticks)
         self._births[(tid, tgid)] = starttime_ticks
         self._current[(tid, tgid)] = identifier
         self._ended[(tid, tgid)] = False
         self._event_index.pop(identifier, None)
         self._seen_exit.discard(identifier)
+        if born:
+            self._born[identifier] = True
         return identifier
 
     def consume(self, payload: bytes) -> list[ThreadExit]:
@@ -959,12 +1030,16 @@ class ExitTracker:
                 # was carrying: the old life is over either way, so a reused
                 # number becomes a second instance and this becomes the
                 # authoritative stamp for a life still in progress.
+                carried = False
                 if not self._ended.get(task):
                     previous = self._current.get(task)
                     if previous is not None:
                         self._event_index.pop(previous, None)
                         self._emitted.discard(previous)
-                self._start_life(tid, tgid, starttime)
+                        # The same life under a better stamp, so what was
+                        # proved about its start is proved about this key too.
+                        carried = self._born.get(previous, False)
+                self._start_life(tid, tgid, starttime, born=carried)
             return
         tid = _int_or_none(decoded.get("pid"))
         tgid = _int_or_none(decoded.get("tgid"))
@@ -973,7 +1048,13 @@ class ExitTracker:
         task = (tid, tgid)
         if kind == "fork":
             if self._ended.get(task, True) or task not in self._births:
-                self._start_life(tid, tgid, mono_ns // NS_PER_TICK)
+                self._start_life(tid, tgid, mono_ns // NS_PER_TICK, born=True)
+            else:
+                # The life is already being followed, and this record is what
+                # proves it began inside the window.
+                current = self._current.get(task)
+                if current is not None:
+                    self._born[current] = True
             return
         if kind not in ("exit", "done"):
             return
@@ -1006,6 +1087,7 @@ class ExitTracker:
                     read_bytes=read_bytes if counters & _EXIT_COUNTER_IO else None,
                     write_bytes=write_bytes if counters & _EXIT_COUNTER_IO else None,
                     counter_bits=counters & (_EXIT_COUNTER_CPU | _EXIT_COUNTER_IO),
+                    born_in_window=self._born.get(identifier, False),
                 )
             )
         else:
@@ -1018,6 +1100,8 @@ class ExitTracker:
                 write_bytes=write_bytes if write_bytes is not None else merged.write_bytes,
                 counter_bits=merged.counter_bits
                 | (counters & (_EXIT_COUNTER_CPU | _EXIT_COUNTER_IO)),
+                # Proof can arrive after the first record of an exit did.
+                born_in_window=merged.born_in_window or self._born.get(identifier, False),
             )
         if kind == "exit":
             self._ended[task] = True

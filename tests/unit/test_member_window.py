@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from guest_serializer import run_serializer
+from guest_window_counters import run_chooser
 
 from cloud_agent_host.member_resources import (
     EXIT_COUNTER_CPU,
@@ -58,8 +59,14 @@ def reading(
     read_bytes: int | None = 0,
     write_bytes: int | None = 0,
     uid: int = 11001,
+    born: bool = False,
 ) -> ThreadReading:
-    """One live task's cumulative readings at one census."""
+    """One live task's cumulative readings at one census.
+
+    ``born`` is what the parser sets when the task's own start time falls
+    inside the window, and it defaults to False here because the ordinary task
+    a census lists -- the resident agent -- was already running.
+    """
     return ThreadReading(
         instance=instance_key(boot_id=BOOT, starttime_ticks=starttime, tid=tid),
         tid=tid,
@@ -68,6 +75,7 @@ def reading(
         cpu_ns=cpu_ns,
         read_bytes=read_bytes,
         write_bytes=write_bytes,
+        born_in_window=born,
     )
 
 
@@ -101,8 +109,16 @@ def exit_of(
     write_bytes: int | None = 0,
     mono_ns: int = 1_000_000_000,
     counter_bits: int = EXIT_COUNTER_CPU | EXIT_COUNTER_IO,
+    born_in_window: bool = True,
 ) -> ThreadExit:
-    """One task's settled exit, as the kernel reported it."""
+    """One task's settled exit, as the kernel reported it.
+
+    ``born_in_window`` defaults to True because that is what a task the window
+    itself started looks like: the guest's fork record arrives inside the
+    cursor's slice and the tracker stamps the proof onto the exit. Pass False
+    to model a task that was already running when the window opened, whose
+    settled lifetime the reducer must refuse to charge here.
+    """
     return ThreadExit(
         instance=instance_key(boot_id=BOOT, starttime_ticks=starttime, tid=tid),
         guest_mono_ns=mono_ns,
@@ -110,6 +126,7 @@ def exit_of(
         read_bytes=read_bytes,
         write_bytes=write_bytes,
         counter_bits=counter_bits,
+        born_in_window=born_in_window,
     )
 
 
@@ -251,6 +268,77 @@ class TestExitEstimate:
         assert result["cpu"]["usec"] == 400
         assert result["storage_io"]["status"] == STATUS_UNAVAILABLE
         assert result["storage_io"]["read_bytes"] is None
+
+    def test_an_unproven_exit_is_refused_rather_than_charged_in_full(self) -> None:
+        """A lifetime the window did not watch begin is not the window's work.
+
+        The kernel's exit record carries what the task consumed over its whole
+        life. A resident process that has run for ninety seconds across earlier
+        turns and exits during this one would, charged in full, make a two
+        second turn report ninety seconds of CPU -- and it would report it as a
+        measurement rather than as a gap.
+        """
+        window = opened()
+        window.observe_exit(exit_of(7, starttime=500, cpu_ns=90_000_000_000, born_in_window=False))
+
+        result = summary(window, duration_ms=2_000)
+
+        # Nothing was measured, so the metric is absent rather than a zero --
+        # and above all it is not ninety seconds.
+        assert result["cpu"]["usec"] is None
+        assert result["cpu"]["status"] == STATUS_UNAVAILABLE
+        assert "missing_thread_baseline" in result["cpu"]["reason_codes"]
+
+    def test_an_incomplete_opening_census_cannot_donate_a_lifetime(self) -> None:
+        """The 901x case: no baseline, then the resident exits inside the window.
+
+        An opening census that could not read one task baselines nothing, so
+        the resident that exits a second later has no range to close. Its
+        settled lifetime must not become this turn's total.
+        """
+        window = opened()
+        window.observe_sample(
+            cycle(0, reading(7, starttime=500, cpu_ns=90_000_000_000), counters=WINDOW_CPU)
+        )
+        window.observe_exit(
+            exit_of(
+                7,
+                starttime=500,
+                cpu_ns=90_100_000_000,
+                mono_ns=1_200_000_000,
+                born_in_window=False,
+            )
+        )
+
+        result = summary(window, duration_ms=2_000)
+
+        assert result["cpu"]["usec"] is None
+        assert result["cpu"]["status"] == STATUS_UNAVAILABLE
+        assert "missing_thread_baseline" in result["cpu"]["reason_codes"]
+
+    def test_a_refused_instance_does_not_poison_the_rest_of_the_window(self) -> None:
+        """One unproven exit must not cost the window the work it did measure."""
+        window = opened()
+        window.observe_sample(cycle(0, reading(7, starttime=500, cpu_ns=90_000_000_000)))
+        window.observe_sample(cycle(1, reading(7, starttime=500, cpu_ns=90_500_000_000)))
+        window.observe_exit(exit_of(8, starttime=400, cpu_ns=30_000_000_000, born_in_window=False))
+
+        result = summary(window)
+
+        # The resident's half second is still counted; the unproven instance
+        # contributes nothing and says so.
+        assert result["cpu"]["usec"] == 500_000
+        assert result["cpu"]["status"] == STATUS_PARTIAL
+        assert "missing_thread_baseline" in result["cpu"]["reason_codes"]
+
+    def test_a_proven_birth_still_closes_a_range_it_opened(self) -> None:
+        """The refusal is about proof, not about exits in general."""
+        window = opened()
+        window.observe_sample(cycle(0, reading(9, starttime=5, cpu_ns=100_000, born=True)))
+        window.observe_exit(exit_of(9, starttime=5, cpu_ns=400_000, born_in_window=False))
+
+        # The reading proved the birth; the exit only closes what it opened.
+        assert summary(window)["cpu"]["usec"] == 400
 
     def test_a_recycled_tid_is_a_different_instance(self) -> None:
         """Two threads that shared a TID at different times are two threads."""
@@ -621,6 +709,78 @@ class TestExitEventProjection:
     def test_a_row_without_a_start_time_is_not_keyed_by_pid(self) -> None:
         """Without the kernel's start time there is no stable identity."""
         assert exit_events_from_processes([self.Row(started_guest_mono_ns=0)], boot_id=BOOT) == []
+
+
+class TestTheGuestCycleBits:
+    """What one census claims about itself, from the guest's own code.
+
+    The host gates every per-instance range on ``FI_WINDOW_READING_COMPLETE``,
+    so whatever sets that bit decides whether a turn is measured at all. These
+    cases are computed by compiling ``window_counter_bits`` out of
+    ``guest-observer.c``, for the same reason the wire format below is: a rule
+    checked by reading it is a rule that drifts.
+    """
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def cycle_bits(cls, tmp_path_factory: pytest.TempPathFactory) -> dict[str, int]:
+        return run_chooser(tmp_path_factory.mktemp("guest-window-counters"))
+
+    def test_a_kernel_without_task_io_accounting_still_measures_cpu(
+        self, cycle_bits: dict[str, int]
+    ) -> None:
+        """The coupling that made the whole metric depend on an unused counter.
+
+        Task I/O accounting has its own bit and the platform declines to publish
+        the figure at all. While it also had to be present for a cycle to count
+        as complete, a guest whose kernel does not account it -- or one process
+        whose io file could not be read -- left every cycle short, so no range
+        ever opened and the turn measured no CPU.
+        """
+        bits = cycle_bits["io_unaccounted"]
+
+        assert bits & WINDOW_READING_COMPLETE
+        assert bits & WINDOW_CPU
+        assert not bits & WINDOW_STORAGE_IO
+
+    def test_an_empty_member_is_a_complete_cycle(self, cycle_bits: dict[str, int]) -> None:
+        """A turn that finished its work and went quiet is a measured zero."""
+        bits = cycle_bits["empty_member"]
+
+        assert bits & WINDOW_READING_COMPLETE
+        assert not bits & WINDOW_PSS
+
+    def test_an_unread_cpu_counter_still_makes_the_cycle_short(
+        self, cycle_bits: dict[str, int]
+    ) -> None:
+        """The bit is about CPU, so a missing CPU counter must still clear it."""
+        bits = cycle_bits["cpu_unread"]
+
+        assert not bits & WINDOW_READING_COMPLETE
+        assert not bits & WINDOW_CPU
+
+    def test_a_failed_pss_read_does_not_touch_the_cpu_bits(
+        self, cycle_bits: dict[str, int]
+    ) -> None:
+        """Per-metric independence, at the cycle level where it starts."""
+        bits = cycle_bits["pss_failed"]
+
+        assert bits & WINDOW_READING_COMPLETE
+        assert not bits & WINDOW_PSS_COMPLETE
+
+    def test_the_host_advances_a_cycle_the_guest_calls_complete(
+        self, cycle_bits: dict[str, int]
+    ) -> None:
+        """The two halves agree: these exact bits open and close a range."""
+        window = opened()
+        bits = cycle_bits["io_unaccounted"]
+        window.observe_sample(cycle(0, reading(7, cpu_ns=1_000_000_000), counters=bits))
+        window.observe_sample(cycle(1, reading(7, cpu_ns=1_400_000_000), counters=bits))
+
+        result = summary(window)
+
+        assert result["cpu"]["usec"] == 400_000
+        assert "sampling_over_budget" not in result["cpu"]["reason_codes"]
 
 
 class TestTheGuestWireFormat:
@@ -1117,8 +1277,21 @@ class TestSlicesAndLateRecords:
         import json as _json
 
         window = self.accumulator()
+        # The guest emits a fork record for every task started inside the
+        # window, and it is that record which proves the settled figure below
+        # is this window's work rather than a lifetime that predates it.
         escape = (
             _json.dumps(
+                {
+                    "kind": "fork",
+                    "pid": 9,
+                    "tgid": 9,
+                    "uid": 11001,
+                    "mono_ns": self.OPENED + 500_000_000,
+                }
+            )
+            + "\n"
+            + _json.dumps(
                 {
                     "kind": "exit",
                     "pid": 9,

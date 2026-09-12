@@ -854,6 +854,22 @@ static void read_task_counters(uint32_t tid, struct window_task *task)
     }
 }
 
+/* Whether this task's scheduler counter is still there to be read.
+ *
+ * Asked only after a counter read came back empty, to separate the two reasons
+ * it can: the task exited while the census was walking it, or this kernel does
+ * not expose the counter at all. The first is not a hole in the cycle -- the
+ * task's exit record accounts for it -- and the second is, so they must not
+ * both mark the cycle short.
+ */
+static bool task_counters_present(uint32_t tid)
+{
+    char path[64];
+
+    snprintf(path, sizeof(path), "/proc/%u/schedstat", tid);
+    return access(path, F_OK) == 0;
+}
+
 /* The thread group and start time of one task.
  *
  * Tgid is what makes PSS summing correct: every thread of a group shares one
@@ -1105,6 +1121,16 @@ static void census_task_dir(struct window_census *census, uint32_t tgid)
         if (!read_task_identity((uint32_t)tid, task))
             continue;
         read_task_counters((uint32_t)tid, task);
+        /* A task that left between the identity read and the counter read is
+         * not a gap in this cycle: its own exit record is the kernel's final
+         * accounting for it, which is more precise than a census reading would
+         * have been. Keeping it here as a task with no counters would instead
+         * mark the whole cycle short, and one tool child finishing mid-scan
+         * would then cost the window its baseline for that second. A counter
+         * that is missing while the task is still there is a real capability
+         * gap and is still reported as one. */
+        if ((task->counters & FI_WINDOW_CPU) == 0 && !task_counters_present(task->tid))
+            continue;
         census->tasks_count += 1;
     }
     closedir(entries);
@@ -1324,6 +1350,44 @@ static int journal_window_sample(struct observer *observer,
     return 0;
 }
 
+/* Which per-cycle facts this census established.
+ *
+ * Its own function because these are the bits every later decision rests on,
+ * and because a rule stated in one expression inside a hundred-line function
+ * is a rule no test can reach. ``tests/unit/guest_window_counters.py`` calls
+ * exactly this code.
+ *
+ * FI_WINDOW_READING_COMPLETE is what the host gates its per-instance ranges
+ * on, so it is about the counter the platform actually reports. It used to
+ * require the task I/O counters as well, which tied the CPU measurement to a
+ * counter this platform declines to publish: a kernel built without task I/O
+ * accounting, or one process whose io file could not be read, left every cycle
+ * short and the window measured no CPU at all. An empty member also counts as
+ * complete -- a turn that finished its work and went quiet is a measured zero,
+ * which is the one case where a total of zero is a measurement rather than an
+ * absence, and requiring a live task here made that state unreachable.
+ */
+static uint8_t window_counter_bits(const struct window_census *census,
+                                   bool cpu_complete,
+                                   bool io_complete)
+{
+    uint8_t counters = 0;
+
+    if (census->tasks_count == 0 || cpu_complete)
+        counters |= FI_WINDOW_CPU;
+    if (census->tasks_count == 0 || io_complete)
+        counters |= FI_WINDOW_STORAGE_IO;
+    if (cpu_complete)
+        counters |= FI_WINDOW_READING_COMPLETE;
+    if (census->pss_complete && census->address_spaces > 0)
+        counters |= (uint8_t)(FI_WINDOW_PSS | FI_WINDOW_PSS_COMPLETE);
+    if (census->deduped)
+        counters |= FI_WINDOW_ADDRESS_SPACES_DEDUPED;
+    if (census->truncated)
+        counters |= FI_WINDOW_TRUNCATED;
+    return counters;
+}
+
 /* Reduce a census into the one window record the host reads.
  *
  * The per-task sums are computed here and only here. Writing one record per
@@ -1369,18 +1433,7 @@ static int emit_window_sample(struct observer *observer,
             io_complete = false;
         }
     }
-    if (census.tasks_count == 0 || cpu_complete)
-        counters |= FI_WINDOW_CPU;
-    if (census.tasks_count == 0 || io_complete)
-        counters |= FI_WINDOW_STORAGE_IO;
-    if (cpu_complete && io_complete && census.tasks_count > 0)
-        counters |= FI_WINDOW_READING_COMPLETE;
-    if (census.pss_complete && census.address_spaces > 0)
-        counters |= FI_WINDOW_PSS | FI_WINDOW_PSS_COMPLETE;
-    if (census.deduped)
-        counters |= FI_WINDOW_ADDRESS_SPACES_DEDUPED;
-    if (census.truncated)
-        counters |= FI_WINDOW_TRUNCATED;
+    counters = window_counter_bits(&census, cpu_complete, io_complete);
     if (journal_window_sample(observer,
                               window->uid,
                               window->measurement_id,

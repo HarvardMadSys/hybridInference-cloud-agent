@@ -45,9 +45,12 @@ enum fi_window_counter {
      * by thread. Without it the PSS figure may count one mapping twice. */
     FI_WINDOW_ADDRESS_SPACES_DEDUPED = 1U << 4,
     FI_WINDOW_TRUNCATED = 1U << 5, /* the census hit its task bound */
-    /* Every live task in this cycle yielded both its scheduler runtime and
-     * its task I/O counters. Clear means the totals above are a floor over
-     * the tasks that did answer, and the cycle may not become a baseline. */
+    /* Every live task in this cycle yielded its scheduler runtime, or the
+     * member had no live task at all. Clear means the CPU total above is a
+     * floor over the tasks that did answer, and the cycle may not open or
+     * close an instance's range. Deliberately says nothing about the task I/O
+     * counters: they are reported through FI_WINDOW_STORAGE_IO, and a kernel
+     * that does not account them must not cost the window its CPU baseline. */
     FI_WINDOW_READING_COMPLETE = 1U << 6,
 };
 
