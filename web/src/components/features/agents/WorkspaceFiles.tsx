@@ -442,7 +442,34 @@ function PaneMessage({ children }: { children: React.ReactNode }) {
  * by hand belongs in the conversation, not in this pane. Every successful
  * response comes from the retained container's current workspace.
  */
+/** How long a run of diff additions must go quiet before the tree reloads. */
+const DIFF_SETTLE_MS = 1500;
+
+/**
+ * The diff count, but only once it stops moving.
+ *
+ * The agent adds files to the diff one at a time, and this count is part of
+ * the workspace refresh key — so every single addition used to reload the
+ * root, every expanded directory and the open file, each its own request over
+ * a link where one round trip is several hundred milliseconds. A turn touching
+ * twenty files with four directories open issued around a hundred and twenty.
+ *
+ * Collapsing a burst into one reload leaves the tree briefly stale while the
+ * agent is mid-write, which is the right trade: `job.state` is also in the key,
+ * so a settled turn still reloads immediately regardless of this delay.
+ */
+export function useSettledCount(value: number, delayMs: number = DIFF_SETTLE_MS): number {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    if (settled === value) return;
+    const timer = setTimeout(() => setSettled(value), delayMs);
+    return () => clearTimeout(timer);
+  }, [value, delayMs, settled]);
+  return settled;
+}
+
 export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean }) {
+  const settledDiffCount = useSettledCount(job.diffFiles.length);
   const {
     directories,
     expanded,
@@ -455,7 +482,7 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
     openFile,
     closeFile,
     reload,
-  } = useWorkspaceFiles(job.id, active, `${job.state}:${job.diffFiles.length}`);
+  } = useWorkspaceFiles(job.id, active, `${job.state}:${settledDiffCount}`);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [paneWidth, setPaneWidth] = useState(0);

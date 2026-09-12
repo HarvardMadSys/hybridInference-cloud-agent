@@ -673,7 +673,11 @@ export function useWorkspaceFiles(
   useEffect(() => {
     if (!enabled || !jobId) return;
     generation.current += 1;
-    setDirectories({});
+    // Deliberately not `setDirectories({})`. `loadDirectory` already keeps the
+    // entries it has while it reloads, so clearing here bought nothing except
+    // a full blank-and-repaint of the tree on every refresh — and the refresh
+    // fires while the agent is writing, which is exactly when the user is
+    // watching. A stale row for one round trip beats an empty panel.
     const open = expandedRef.current;
     for (const path of ['', ...Object.keys(open).filter((path) => open[path])]) {
       void loadDirectory(path);

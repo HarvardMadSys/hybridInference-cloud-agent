@@ -114,3 +114,58 @@ describe('workspace preview response ordering', () => {
     expect(result.current.file).toEqual(file('a.ts', 'fresh'));
   });
 });
+
+describe('workspace refresh', () => {
+  it('keeps the tree on screen while it reloads', async () => {
+    // A refresh fires while the agent is writing — exactly when the user is
+    // watching the panel. Clearing the directories first blanked and
+    // repainted the whole tree for a round trip and bought nothing:
+    // `loadDirectory` already keeps the entries it has while it reloads.
+    const entry = { path: 'a.txt', name: 'a.txt', kind: 'file' as const, size: 1 };
+    const loaded: AgentJobFilesApi = { path: '', kind: 'directory', entries: [entry] };
+    vi.mocked(getAgentJobFiles).mockResolvedValue(loaded);
+
+    const hook = renderHook(({ key }) => useWorkspaceFiles('ajob_test', true, key), {
+      initialProps: { key: 'running:0' },
+    });
+    await waitFor(() => expect(hook.result.current.directories['']?.entries).toEqual([entry]));
+
+    const pending = deferred();
+    vi.mocked(getAgentJobFiles).mockReturnValue(pending.promise);
+    hook.rerender({ key: 'running:1' });
+
+    await waitFor(() => expect(hook.result.current.directories['']?.loading).toBe(true));
+    expect(hook.result.current.directories['']?.entries).toEqual([entry]);
+
+    pending.resolve(loaded);
+    await waitFor(() => expect(hook.result.current.directories['']?.loading).toBe(false));
+  });
+
+  it('reloads every expanded directory and the open file, and nothing else', async () => {
+    // The fan-out is the reason a refresh is expensive: one request per
+    // expanded directory plus the open file, each its own round trip. This
+    // pins the shape so a future change cannot quietly widen it.
+    vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') =>
+      path.endsWith('.txt') ? file(path) : { path, kind: 'directory' as const, entries: [] },
+    );
+
+    const hook = renderHook(({ key }) => useWorkspaceFiles('ajob_test', true, key), {
+      initialProps: { key: 'running:0' },
+    });
+    await waitFor(() => expect(hook.result.current.directories['']?.entries).toEqual([]));
+    await act(async () => hook.result.current.toggleDirectory('src'));
+    await act(async () => hook.result.current.openFile('a.txt'));
+    vi.mocked(getAgentJobFiles).mockClear();
+
+    await act(async () => {
+      hook.rerender({ key: 'running:1' });
+    });
+
+    await waitFor(() => expect(vi.mocked(getAgentJobFiles).mock.calls.length).toBe(3));
+    const paths = vi
+      .mocked(getAgentJobFiles)
+      .mock.calls.map(([, path]) => path)
+      .sort();
+    expect(paths).toEqual(['', 'a.txt', 'src']);
+  });
+});
