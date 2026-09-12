@@ -14,6 +14,7 @@ reads is a claim nothing checks.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import asyncpg
@@ -90,30 +91,72 @@ async def broker_pools(monkeypatch):
     await broker_routing.close_broker_clients()
 
 
-async def test_one_pool_per_broker_url(broker_pools) -> None:
+def _row(host: str, url: str) -> dict[str, str]:
+    """The two fields of a host row this path reads."""
+    return {"host": host, "broker_url": url}
+
+
+async def test_one_pool_per_enrolled_host(broker_pools) -> None:
     """A client is built per request, so the pool cannot live on the client."""
-    first = broker_routing._client_for({"broker_url": "http://host-a:9000"})
-    second = broker_routing._client_for({"broker_url": "http://host-a:9000"})
-    other = broker_routing._client_for({"broker_url": "http://host-b:9000"})
+    first = broker_routing._client_for(_row("host-a", "http://a:9000"))
+    second = broker_routing._client_for(_row("host-a", "http://a:9000"))
+    other = broker_routing._client_for(_row("host-b", "http://b:9000"))
 
     assert first is not second, "these are still built per request"
-    assert first._client is second._client
+    assert set(broker_routing._POOLS) == {"host-a", "host-b"}
+    assert first._client is broker_routing._POOLS["host-a"][1]
+    assert second._client is first._client
     assert other._client is not first._client
+
+
+async def test_a_host_that_moves_replaces_and_closes_its_pool(broker_pools) -> None:
+    """Keyed by host, not by address — a heartbeat overwrites the address.
+
+    `host_pool.py` upserts `broker_url = EXCLUDED.broker_url`, so a rebuilt
+    machine reports a new one. Keyed by URL, the old pool would sit in the
+    dictionary holding sockets until the process ended, and with
+    `AGENT_BROKER_URL_ALLOWED_HOSTS` unset the key would be a value the far
+    side chooses.
+    """
+    broker_routing._client_for(_row("host-a", "http://old:9000"))
+    stale = broker_routing._POOLS["host-a"][1]
+
+    broker_routing._client_for(_row("host-a", "http://new:9000"))
+
+    # The close is scheduled rather than awaited, so that the factory on the
+    # request path can stay synchronous. It still has to actually happen.
+    assert broker_routing._RETIRING, "the replaced pool was dropped, not retired"
+    await asyncio.gather(*broker_routing._RETIRING)
+    assert stale.is_closed, "the pool for the old address was left open"
+    assert not broker_routing._RETIRING, "a finished close must not be held forever"
+    assert list(broker_routing._POOLS) == ["host-a"], "one host, one entry"
+    assert broker_routing._POOLS["host-a"][0] == "http://new:9000"
 
 
 async def test_closing_the_pools_lets_the_next_request_open_a_new_one(broker_pools) -> None:
     """Shutdown must release them, and must not leave a closed one behind."""
-    before = broker_routing._client_for({"broker_url": "http://host-a:9000"})._client
+    before = broker_routing._client_for(_row("host-a", "http://a:9000"))._client
 
     await broker_routing.close_broker_clients()
     assert before.is_closed
+    assert not broker_routing._POOLS
 
-    after = broker_routing._client_for({"broker_url": "http://host-a:9000"})._client
+    after = broker_routing._client_for(_row("host-a", "http://a:9000"))._client
     assert after is not before
     assert not after.is_closed
 
 
+async def test_a_row_with_no_host_identity_gets_no_pool(broker_pools) -> None:
+    """Nothing to bound a dictionary by, so this row keeps its old behaviour."""
+    client = broker_routing._client_for({"broker_url": "http://a:9000"})
+
+    assert client is not None
+    assert client._client is None, "an unbounded key must not become a pool key"
+    assert not broker_routing._POOLS
+
+
 async def test_a_host_with_no_broker_url_still_gets_no_client(broker_pools) -> None:
     """Pooling must not turn an unreachable host row into a reachable one."""
-    assert broker_routing._client_for({"broker_url": ""}) is None
+    assert broker_routing._client_for(_row("host-a", "")) is None
     assert broker_routing._client_for({}) is None
+    assert not broker_routing._POOLS

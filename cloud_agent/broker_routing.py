@@ -18,6 +18,7 @@ opens every other host's broker.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import time
@@ -85,28 +86,67 @@ def validate_broker_url(url: str | None) -> str | None:
 
 ENV_BROKER_TOKEN = "AGENT_WORKSPACE_BROKER_TOKEN"
 
-#: One connection pool per broker origin, keyed by the exact URL the host row
-#: named. A broker client is built per request — one per file read, one per
-#: terminal keystroke — so a pool on the instance would be a pool of one; it
-#: has to outlive the object that uses it.
+#: `{host: (url, pool)}` — one connection pool per enrolled host. A broker
+#: client is built per request — one per file read, one per terminal keystroke
+#: — so a pool on the instance would be a pool of one; it has to outlive the
+#: object that uses it.
+#:
+#: **Keyed by host, not by URL.** A heartbeat overwrites the address
+#: (`host_pool.py`: `broker_url = EXCLUDED.broker_url`), so a rebuilt machine
+#: that comes back on a different one would leave its old pool in a URL-keyed
+#: dictionary for the life of the process — and with
+#: `AGENT_BROKER_URL_ALLOWED_HOSTS` unset, `validate_broker_url` accepts any
+#: host, which makes the URL a value the far side chooses. Growth keyed on
+#: that is not growth this deployment controls. The host set is. This mirrors
+#: `_PROBE_CACHE` below, which keys by host and re-checks when the URL moves,
+#: for the same reason.
 #:
 #: **This is not the process-global fallback the module docstring refuses.**
 #: That rule is about *which* broker a request reaches, and the host row still
 #: decides that: nothing is looked up here without a URL that resolution
 #: already produced. What this removes is the TCP connect in front of a broker
-#: the row had already named. The dictionary is bounded by the number of
-#: enrolled hosts.
-_POOLS: dict[str, httpx.AsyncClient] = {}
+#: the row had already named.
+_POOLS: dict[str, tuple[str, httpx.AsyncClient]] = {}
 
 
-def _pool_for(url: str) -> httpx.AsyncClient:
-    """Return the shared pool for one broker URL, opening it on first use."""
-    pool = _POOLS.get(url)
-    if pool is None or pool.is_closed:
-        # No default timeout: every borrowed call passes its own, because the
-        # deadlines differ per operation and one client cannot carry them all.
-        pool = httpx.AsyncClient()
-        _POOLS[url] = pool
+#: Closes in flight for pools a moved host left behind. Held so the garbage
+#: collector cannot cancel one part-way; discarded as each finishes.
+_RETIRING: set[asyncio.Task[None]] = set()
+
+
+def _retire(pool: httpx.AsyncClient) -> None:
+    """Close a pool its host moved away from, without blocking the caller.
+
+    Nothing else here needs awaiting, and making the factory async just for
+    this would push ``await`` into every caller — and into every test that
+    substitutes a stub for it. An idle httpx pool does not expire its own
+    sockets until it is used again, so a replaced pool that is never closed
+    keeps them until the process ends; this is what stops that.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:  # pragma: no cover - every caller is async today
+        return
+    task = loop.create_task(pool.aclose())
+    _RETIRING.add(task)
+    task.add_done_callback(_RETIRING.discard)
+
+
+def _pool_for(host: str, url: str) -> httpx.AsyncClient:
+    """Return this host's pool, replacing it when the host moved."""
+    existing = _POOLS.get(host)
+    if existing is not None:
+        cached_url, pool = existing
+        if cached_url == url and not pool.is_closed:
+            return pool
+        # The address changed, or shutdown closed the pool under us. Either
+        # way the old one is unusable and must not be left holding sockets.
+        del _POOLS[host]
+        _retire(pool)
+    # No default timeout: every borrowed call passes its own, because the
+    # deadlines differ per operation and one client cannot carry them all.
+    pool = httpx.AsyncClient()
+    _POOLS[host] = (url, pool)
     return pool
 
 
@@ -117,11 +157,14 @@ async def close_broker_clients() -> None:
     already going away, and a broker that has stopped answering must not turn
     shutdown into a traceback.
     """
-    pools = list(_POOLS.values())
+    retiring = list(_RETIRING)
+    pools = [pool for _, pool in _POOLS.values()]
     _POOLS.clear()
     for pool in pools:
         with contextlib.suppress(Exception):
             await pool.aclose()
+    if retiring:
+        await asyncio.gather(*retiring, return_exceptions=True)
 
 
 def _client_for(host: dict[str, Any]) -> WorkspaceBrokerClient | None:
@@ -132,7 +175,13 @@ def _client_for(host: dict[str, Any]) -> WorkspaceBrokerClient | None:
     token = (os.environ.get(ENV_BROKER_TOKEN) or "").strip()
     if not token:
         return None
-    return WorkspaceBrokerClient(url, token, client=_pool_for(url))
+    name = str(host.get("host") or "").strip()
+    if not name:
+        # Nothing to bound a pool by, so this row does not get one: a
+        # connection per call is what it had before, and that is better than a
+        # dictionary keyed on whatever happened to be in the row.
+        return WorkspaceBrokerClient(url, token)
+    return WorkspaceBrokerClient(url, token, client=_pool_for(name, url))
 
 
 async def broker_for_attempt(
@@ -214,7 +263,7 @@ async def probe_broker(host: str, broker_url: str | None, *, force: bool = False
     if not force and cached is not None and cached[0] > now and cached[1] == url:
         return None
 
-    client = _client_for({"broker_url": url})
+    client = _client_for({"host": host, "broker_url": url})
     if client is None:
         return "control plane has no workspace broker credential"
 
