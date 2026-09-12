@@ -32,7 +32,10 @@ SHARED_SANDBOX_HELPER_PINS = {
     "claude-agent-sdk": "0.2.148",
     # The host's OpenCode/Kilo reply collector requires message-role metadata.
     "http-agent-live-bridge": "2",
-    "guest-observer": "1",
+    # Bumped with the observer's own protocol: the image that carries a v2
+    # observer publishes v2 here, and a host whose pin still said v1 refused to
+    # attest at all rather than reporting a mismatch.
+    "guest-observer": "2",
     "tool-mark": "1",
 }
 # Protocol v1 predates guest-kernel accounting. Those helpers are not needed
