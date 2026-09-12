@@ -408,3 +408,104 @@ async def test_repository_contents_rejects_a_moving_ref(config):
     """A branch name must never make the Files tab diverge from the agent tree."""
     with pytest.raises(GitHubAppError, match="pinned"):
         await GitHubAppCredentials(config).repository_contents("o/n", ref="dev")
+
+
+def _entitlement_handler(minted: list[dict], listed: list[int]):
+    """Answer the three calls repository entitlement makes, counting each."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 1})
+        if request.url.path.endswith("/access_tokens"):
+            import json as _json
+
+            payload = _json.loads(request.content) if request.content else {}
+            minted.append(payload)
+            label = "ro" if payload.get("permissions") else "full"
+            return httpx.Response(
+                201, json={"token": f"ghs_{label}", "expires_at": "2099-01-01T00:00:00Z"}
+            )
+        if request.url.path == "/installation/repositories":
+            listed.append(1)
+            return httpx.Response(200, json={"repositories": [{"full_name": "o/n"}]})
+        raise AssertionError(f"unexpected call to {request.url}")
+
+    return handler
+
+
+async def test_entitlement_stops_minting_a_token_on_every_call(config):
+    """`_installation_token` bypassed the cache its own class already keeps.
+
+    Repository entitlement runs on every workspace file read, every write and
+    every terminal create/list/stream, so a mint that never consulted the
+    cache put a GitHub round trip on the interactive path and kept it there.
+    The repository list itself stays live — only the credential is reused.
+    """
+    minted: list[dict] = []
+    listed: list[int] = []
+    original, patched = _client_returning(_entitlement_handler(minted, listed))
+    httpx.AsyncClient = patched
+    try:
+        creds = GitHubAppCredentials(config)
+        first = await creds.repositories_for_installation(1)
+        second = await creds.repositories_for_installation(1)
+    finally:
+        httpx.AsyncClient = original
+
+    assert first == second == ["o/n"]
+    assert len(minted) == 1, "the second call should have reused the cached token"
+    assert len(listed) == 2, "the repository list must not be cached by this change"
+
+
+async def test_entitlement_shares_the_unnarrowed_slot_with_token_for(config):
+    """It is the same request, so it is the same slot — that is why this is safe."""
+    minted: list[dict] = []
+    listed: list[int] = []
+    original, patched = _client_returning(_entitlement_handler(minted, listed))
+    httpx.AsyncClient = patched
+    try:
+        creds = GitHubAppCredentials(config)
+        await creds.token_for("o/n")
+        await creds.repositories_for_installation(1)
+    finally:
+        httpx.AsyncClient = original
+
+    assert len(minted) == 1
+
+
+async def test_a_narrowed_token_is_never_served_to_the_entitlement_path(config):
+    """The scope key still separates them; sharing a slot must stay impossible."""
+    minted: list[dict] = []
+    listed: list[int] = []
+    original, patched = _client_returning(_entitlement_handler(minted, listed))
+    httpx.AsyncClient = patched
+    try:
+        creds = GitHubAppCredentials(config)
+        narrowed = await creds.token_for(
+            "o/n", permissions={"contents": "read"}, repository_scoped=True
+        )
+        await creds.repositories_for_installation(1)
+    finally:
+        httpx.AsyncClient = original
+
+    assert narrowed == "ghs_ro"
+    assert len(minted) == 2, "entitlement must not be handed the narrowed token"
+    assert minted[1] == {}, "and must still ask for an unnarrowed one"
+
+
+async def test_forget_drops_the_entitlement_token_too(config):
+    """Uninstalling the App must not leave a cached credential behind."""
+    minted: list[dict] = []
+    listed: list[int] = []
+    original, patched = _client_returning(_entitlement_handler(minted, listed))
+    httpx.AsyncClient = patched
+    try:
+        creds = GitHubAppCredentials(config)
+        await creds.token_for("o/n")
+        await creds.repositories_for_installation(1)
+        creds.forget("o/n")
+        await creds.repositories_for_installation(1)
+    finally:
+        httpx.AsyncClient = original
+
+    assert len(minted) == 2

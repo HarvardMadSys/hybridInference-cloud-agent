@@ -233,22 +233,52 @@ class GitHubAppCredentials:
         runner push rights on a host that executes untrusted code.
         """
         installation_id = await self.installation_id_for(repo)
-        # Narrowed tokens must not share a cache slot with full ones, in either
-        # direction: serving a read-only token to the publisher would break
-        # every push, and serving a full one to the runner would silently undo
-        # the narrowing this parameter exists for.
-        scope_key = json_module.dumps(
-            {"p": permissions, "r": repo if repository_scoped else None}, sort_keys=True
+        token, minted = await self._token_in_scope(
+            installation_id,
+            permissions=permissions,
+            repository=repo if repository_scoped else None,
         )
+        if minted:
+            logger.info(
+                "agent_github_app_token_minted",
+                extra={
+                    "event": "agent_github_app_token_minted",
+                    "repo": repo,
+                    "installation_id": installation_id,
+                    "permissions": sorted(permissions or ()) or "inherited",
+                },
+            )
+        return token
+
+    async def _token_in_scope(
+        self,
+        installation_id: int,
+        *,
+        permissions: dict[str, str] | None = None,
+        repository: str | None = None,
+    ) -> tuple[str, bool]:
+        """Return a token for one installation and scope, and whether it is new.
+
+        The one place a token is looked up, minted and cached, so that every
+        caller lands in the cache rather than only the ones that remembered to.
+
+        Narrowed tokens must not share a cache slot with full ones, in either
+        direction: serving a read-only token to the publisher would break every
+        push, and serving a full one to the runner would silently undo the
+        narrowing that parameter exists for. The scope key is what keeps them
+        apart, and it is derived from the same two values that shape the
+        request — so a slot cannot describe a scope the token does not have.
+        """
+        scope_key = json_module.dumps({"p": permissions, "r": repository}, sort_keys=True)
         cached = self._tokens.get((installation_id, scope_key))
         if cached and cached.expires_at - _TOKEN_REFRESH_MARGIN_S > time.time():
-            return cached.token
+            return cached.token, False
 
         payload: dict[str, Any] = {}
         if permissions:
             payload["permissions"] = permissions
-        if repository_scoped:
-            payload["repositories"] = [repo.partition("/")[2]]
+        if repository:
+            payload["repositories"] = [repository.partition("/")[2]]
         body = await self._request(
             "POST",
             f"/app/installations/{installation_id}/access_tokens",
@@ -264,16 +294,7 @@ class GitHubAppCredentials:
         if raw_expiry := body.get("expires_at"):
             expires_at = _parse_expiry(raw_expiry, default=expires_at)
         self._tokens[installation_id, scope_key] = _CachedToken(token=token, expires_at=expires_at)
-        logger.info(
-            "agent_github_app_token_minted",
-            extra={
-                "event": "agent_github_app_token_minted",
-                "repo": repo,
-                "installation_id": installation_id,
-                "permissions": sorted(permissions or ()) or "inherited",
-            },
-        )
-        return token
+        return token, True
 
     async def exchange_user_code(self, code: str) -> str:
         """Trade the callback's code for a token that speaks *as the user*.
@@ -480,15 +501,21 @@ class GitHubAppCredentials:
         return body
 
     async def _installation_token(self, installation_id: int) -> str:
-        """Mint a plain installation token for a known installation id."""
-        body = await self._request(
-            "POST",
-            f"/app/installations/{installation_id}/access_tokens",
-            token=build_app_jwt(self._config),
-        )
-        token = body.get("token")
-        if not token:
-            raise GitHubAppError("GitHub returned no installation token")
+        """Return a plain installation token for a known installation id.
+
+        This is byte-for-byte the request :meth:`token_for` makes when it is
+        asked to narrow nothing, so it belongs in that same unnarrowed cache
+        slot — and it was not using it. Every workspace file read, file write
+        and terminal create/list/stream resolves repository entitlement
+        through :meth:`repositories_for_installation`, which starts here, so
+        the omission put a token mint on the interactive path and kept it
+        there.
+
+        Sharing the slot is correct rather than merely convenient: the scope
+        key is derived from the same values that shape the request, so an
+        unnarrowed token can only ever satisfy an unnarrowed caller.
+        """
+        token, _ = await self._token_in_scope(installation_id)
         return token
 
     def forget(self, repo: str) -> None:
