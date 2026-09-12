@@ -5,18 +5,79 @@ Mirrors the host package's shim and exists for the same reason: the gateway's
 context, none of which this service has. Duplicated rather than shared because
 the two packages are separate deployment units — the control plane runs as a
 web service and the host runs on a machine in the pool, and a shared module
-would be a dependency between them that the split exists to remove.
+would be a dependency between them that the split exists to remove. The JSON
+formatter below is duplicated into the host shim under that same rule.
+
+Call sites throughout this package already pass structured fields —
+``extra={"event": ..., "job_id": ..., "duration_ms": ...}`` — but the text
+format renders ``%(message)s`` and nothing else, so every one of those fields
+was discarded before it reached the log. ``AGENT_LOG_FORMAT=json`` renders them
+instead. Text stays the default because it is what an operator reading
+``docker logs`` by eye already has, and changing that for everyone is not this
+switch's job.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+from datetime import UTC, datetime
+from typing import Any
 
 #: Set the control plane's log level without touching code or flags.
 ENV_LOG_LEVEL = "AGENT_LOG_LEVEL"
 
+#: ``json`` renders one JSON object per record; anything else keeps the text
+#: format. Named per-process rather than per-handler: this service's entrypoint
+#: configures logging once, and a deployment picks the shape it can parse.
+ENV_LOG_FORMAT = "AGENT_LOG_FORMAT"
+
 _FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+#: Attributes the stdlib puts on every record — the envelope, not a caller's
+#: ``extra``. Read off a real record rather than hand-listed so an interpreter
+#: that adds one (3.12 added ``taskName``) does not start reporting it as
+#: caller data; ``message`` and ``asctime`` are set while formatting rather
+#: than in ``__init__``, so they are named here.
+_RECORD_ATTRS = frozenset(logging.LogRecord("", logging.NOTSET, "", 0, "", None, None).__dict__) | {
+    "message",
+    "asctime",
+}
+
+
+class JsonLogFormatter(logging.Formatter):
+    """Render a record as one JSON object, with ``extra`` fields at the top level.
+
+    Top level rather than nested under a key, so a field can be selected
+    directly — ``jq 'select(.event == "…") | .duration_ms'`` — which is the
+    only query a deployment without a log pipeline has. The envelope wins a
+    name collision: reshaping ``level`` or ``logger`` out from under whoever
+    reads the stream is worse than dropping one caller field, and no field in
+    use collides.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Return the record and its ``extra`` fields as a single-line object."""
+        payload: dict[str, Any] = {
+            "time": datetime.fromtimestamp(record.created, tz=UTC).isoformat(
+                timespec="milliseconds"
+            ),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        for key, value in record.__dict__.items():
+            if key not in _RECORD_ATTRS and key not in payload:
+                payload[key] = value
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        if record.stack_info:
+            payload["stack"] = self.formatStack(record.stack_info)
+        # `default=str` rather than letting a value raise: a formatter that
+        # raises loses the record and prints a traceback from inside logging,
+        # which is a worse outcome than one field rendered as its repr.
+        return json.dumps(payload, default=str, ensure_ascii=False)
 
 
 def get_logger(name: str | None = None) -> logging.Logger:
@@ -24,7 +85,7 @@ def get_logger(name: str | None = None) -> logging.Logger:
     return logging.getLogger(name or __name__)
 
 
-def configure_process_logging(level: str | None = None) -> None:
+def configure_process_logging(level: str | None = None, log_format: str | None = None) -> None:
     """Configure root logging for the control plane's entrypoint.
 
     Defers to any configuration already in place, so an embedding process — or
@@ -32,7 +93,19 @@ def configure_process_logging(level: str | None = None) -> None:
 
     Args:
         level: Level name to use; defaults to ``AGENT_LOG_LEVEL`` or INFO.
+        log_format: ``json`` or ``text``; defaults to ``AGENT_LOG_FORMAT`` or
+            text. An unrecognised value falls back to text and says so, because
+            a misspelled log format is not worth refusing to serve over.
     """
-    logging.basicConfig(
-        level=(level or os.environ.get(ENV_LOG_LEVEL) or "INFO").upper(), format=_FORMAT
-    )
+    resolved = (level or os.environ.get(ENV_LOG_LEVEL) or "INFO").upper()
+    requested = (log_format or os.environ.get(ENV_LOG_FORMAT) or "text").strip().lower()
+    if requested == "json":
+        handler = logging.StreamHandler()
+        handler.setFormatter(JsonLogFormatter())
+        logging.basicConfig(level=resolved, handlers=[handler])
+        return
+    logging.basicConfig(level=resolved, format=_FORMAT)
+    if requested != "text":
+        get_logger(__name__).warning(
+            "unrecognised %s=%r; logging as text", ENV_LOG_FORMAT, requested
+        )

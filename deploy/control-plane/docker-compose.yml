@@ -114,6 +114,7 @@ services:
       AGENT_SESSION_COOKIE_SECURE: ${AGENT_SESSION_COOKIE_SECURE:-true}
       AGENT_TRUST_PROXY_HEADERS: ${AGENT_TRUST_PROXY_HEADERS:-false}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+      AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
       AGENT_DEFAULT_EXECUTION_PROFILE: ${AGENT_DEFAULT_EXECUTION_PROFILE:-untrusted-kata-v1}
       # --- Publishing and source control ------------------------------------
       # The only component that holds a git credential, which is precisely what
@@ -215,6 +216,7 @@ services:
       # is reported as unavailable at the first tool call.
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:?32 random bytes, unique per environment}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+      AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
     depends_on:
       migrate:
         condition: service_completed_successfully

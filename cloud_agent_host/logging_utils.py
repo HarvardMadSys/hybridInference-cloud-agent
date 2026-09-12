@@ -13,17 +13,75 @@ Configuration happens exactly once instead, when a process entrypoint calls
 :func:`configure_process_logging` — the runner's ``main()`` does. An embedding
 process that configured logging first keeps its own setup: ``basicConfig`` is
 a no-op once the root logger has handlers.
+
+:class:`JsonLogFormatter` is duplicated from the control plane's shim rather
+than imported from it, under the same rule: the two packages are separate
+deployment units, and the runner must not grow an import into the web service
+to render its own logs. Host modules pass structured fields the text format
+discards — ``extra={"event": ..., "job_id": ...}`` — so a host that sets
+``AGENT_LOG_FORMAT=json`` gets them, and one that does not is unchanged.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+from datetime import UTC, datetime
+from typing import Any
 
 #: Set the host process log level without touching code or flags.
 ENV_LOG_LEVEL = "AGENT_LOG_LEVEL"
 
+#: ``json`` renders one JSON object per record; anything else keeps the text
+#: format. Set by the operator on the machine, like the level beside it.
+ENV_LOG_FORMAT = "AGENT_LOG_FORMAT"
+
 _FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+#: Attributes the stdlib puts on every record — the envelope, not a caller's
+#: ``extra``. Read off a real record rather than hand-listed so an interpreter
+#: that adds one (3.12 added ``taskName``) does not start reporting it as
+#: caller data; ``message`` and ``asctime`` are set while formatting rather
+#: than in ``__init__``, so they are named here.
+_RECORD_ATTRS = frozenset(logging.LogRecord("", logging.NOTSET, "", 0, "", None, None).__dict__) | {
+    "message",
+    "asctime",
+}
+
+
+class JsonLogFormatter(logging.Formatter):
+    """Render a record as one JSON object, with ``extra`` fields at the top level.
+
+    Top level rather than nested under a key, so a field can be selected
+    directly — ``jq 'select(.event == "…") | .duration_ms'`` — which is the
+    only query a host without a log pipeline has. The envelope wins a name
+    collision: reshaping ``level`` or ``logger`` out from under whoever reads
+    the stream is worse than dropping one caller field, and no field in use
+    collides.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Return the record and its ``extra`` fields as a single-line object."""
+        payload: dict[str, Any] = {
+            "time": datetime.fromtimestamp(record.created, tz=UTC).isoformat(
+                timespec="milliseconds"
+            ),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        for key, value in record.__dict__.items():
+            if key not in _RECORD_ATTRS and key not in payload:
+                payload[key] = value
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        if record.stack_info:
+            payload["stack"] = self.formatStack(record.stack_info)
+        # `default=str` rather than letting a value raise: a formatter that
+        # raises loses the record and prints a traceback from inside logging,
+        # which is a worse outcome than one field rendered as its repr.
+        return json.dumps(payload, default=str, ensure_ascii=False)
 
 
 def get_logger(name: str | None = None) -> logging.Logger:
@@ -31,7 +89,7 @@ def get_logger(name: str | None = None) -> logging.Logger:
     return logging.getLogger(name or __name__)
 
 
-def configure_process_logging(level: str | None = None) -> None:
+def configure_process_logging(level: str | None = None, log_format: str | None = None) -> None:
     """Configure root logging for a host process entrypoint.
 
     The one sanctioned place logging gets set up — module import must stay
@@ -42,6 +100,19 @@ def configure_process_logging(level: str | None = None) -> None:
 
     Args:
         level: Level name to use; defaults to ``AGENT_LOG_LEVEL`` or INFO.
+        log_format: ``json`` or ``text``; defaults to ``AGENT_LOG_FORMAT`` or
+            text. An unrecognised value falls back to text and says so, because
+            a misspelled log format is not worth refusing to start over.
     """
     resolved = (level or os.environ.get(ENV_LOG_LEVEL) or "INFO").upper()
+    requested = (log_format or os.environ.get(ENV_LOG_FORMAT) or "text").strip().lower()
+    if requested == "json":
+        handler = logging.StreamHandler()
+        handler.setFormatter(JsonLogFormatter())
+        logging.basicConfig(level=resolved, handlers=[handler])
+        return
     logging.basicConfig(level=resolved, format=_FORMAT)
+    if requested != "text":
+        get_logger(__name__).warning(
+            "unrecognised %s=%r; logging as text", ENV_LOG_FORMAT, requested
+        )
