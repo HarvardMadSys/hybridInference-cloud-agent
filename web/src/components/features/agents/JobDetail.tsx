@@ -1450,12 +1450,6 @@ export function JobDetail({
   const currentTurn = describeCurrentTurn(job, { attemptNo, currentAttemptNo });
   const threadMessages = currentTurn.messages;
   const visibleEvents = currentTurn.events;
-  const continuingConversation =
-    job.state === 'running' &&
-    currentTurn.displayNo > 1 &&
-    selectedAttemptIsCurrent &&
-    visibleEvents.length === 0 &&
-    !job.liveNote;
   const currentRewindAnchor = job.historyTurns
     ? [...job.historyTurns].reverse().find((turn) => turn.forkable)?.jobId
     : undefined;
@@ -1884,15 +1878,6 @@ export function JobDetail({
                         <div className="flex items-center gap-2.5 py-3 text-[13px] text-gray-500 dark:text-gray-400">
                           <span className="h-2 w-2 animate-pulse rounded-full bg-gray-400 dark:bg-gray-600" />
                           Waiting to start
-                        </div>
-                      ) : null}
-                      {continuingConversation ? (
-                        <div
-                          role="status"
-                          className="flex items-center gap-2.5 py-3 text-[13px] text-gray-500 dark:text-gray-400"
-                        >
-                          <span className="h-2 w-2 animate-pulse rounded-full bg-gray-400 dark:bg-gray-600" />
-                          Continuing conversation…
                         </div>
                       ) : null}
                     </div>

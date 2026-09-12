@@ -476,7 +476,7 @@ describe('JobDetail', () => {
     expect(screen.getByText(/with all of its detail/)).toBeInTheDocument();
   });
 
-  it('shows one continuation status until a follow-up produces activity', () => {
+  it('keeps follow-up startup quiet while retaining the running controls and real activity', () => {
     const startup = [
       'started',
       'workspace_preparing',
@@ -487,8 +487,9 @@ describe('JobDetail', () => {
     const job = makeJob({ turnNo: 2, events: startup });
     const view = render(<JobDetail job={job} />);
     const activity = screen.getByLabelText('Agent activity');
-    expect(within(activity).getByRole('status')).toHaveTextContent('Continuing conversation…');
-    expect(activity).not.toHaveTextContent(/workspace|Run started|Agent ready/i);
+    expect(activity).toBeEmptyDOMElement();
+    expect(screen.queryByText('Continuing conversation…')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();
 
     view.rerender(
       <JobDetail
