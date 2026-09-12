@@ -202,6 +202,44 @@ connect.
 Disconnecting removes the platform's half. Uninstalling the App on GitHub is
 the other half, and is what actually revokes the platform's reach.
 
+## Reading a task's recorded events
+
+The admin console shows per-tool-call measurements (Resources) and per-request
+model records (LLM requests), but it does not list a task's raw runtime events.
+That panel was removed; the two routes behind it were not, and they are how an
+operator answers "what did this task actually do" for a support case or an
+abuse report. See the amendment in
+[the admin observability spec](specs/2026-09-10-admin-observability-v1.md).
+
+**Metadata.** `GET /admin/agent/runs/{job_id}/activity` returns event
+envelopes ordered by execution: `event_type`, `created_at`, `is_error`,
+`has_content`, and — for `tool_use` and `tool_result` only — `tool_name` and
+`tool_use_id`. It accepts `attempt_id`, `cursor` and `limit` (1-200, default
+100). Timestamps are when the event reached the control plane, so they do not
+measure model latency, and one `message` is not one model request. Nothing in
+this response is content: lifecycle `phase` is deliberately not an allowlisted
+column, so a run's opening events all read as indistinguishable `lifecycle`
+rows here.
+
+**Content.** `POST /admin/agent/runs/{job_id}/events/{event_id}/content`
+returns one event's stored payload — prompt text, tool arguments, tool output
+or raw error text. It is audited before it is returned: the audit store records
+`agent.run.event_content.read` with the acting administrator, their IP, the
+task owner, and the job, event, attempt and sequence identity. **If the audit
+write fails the route answers 503 and discloses nothing.** Responses are capped
+at 256 KiB and set `truncated` when an oversized old record had to be
+previewed.
+
+Both routes require admin authorization. A task's owner does not use them: they
+read their own events through the session routes, which need no audit because
+the data is already theirs.
+
+**Do not read `agent_job_events.payload` directly.** A `psql` query returns the
+same content with no audit record, no size bound and no column allowlist, which
+is the situation the content route exists to prevent. If reading events one at
+a time through the API is too awkward for a real investigation, that is a
+reason to improve the tooling, not a reason to go around the audit.
+
 ## MCP servers
 
 An agent with no egress can still use the MCP ecosystem, because it never
