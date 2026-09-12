@@ -37,6 +37,7 @@ from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_ROOT,
     GUEST_OBSERVER_ROTATE_BYTES,
+    GUEST_OBSERVER_VERSION,
     GuestObservation,
     GuestObserverController,
     GuestObserverCursor,
@@ -74,7 +75,7 @@ def _observer_snapshot_payload(snapshot: GuestObserverSnapshot) -> bytes:
     return json.dumps(
         {
             "status": {
-                "version": 1,
+                "version": GUEST_OBSERVER_VERSION,
                 "ready": True,
                 "pid": status.pid,
                 "poll_seq": status.poll_seq,
@@ -263,7 +264,7 @@ def test_guest_observer_snapshot_verifies_the_status_pid_binary(monkeypatch):
     payload = json.dumps(
         {
             "status": {
-                "version": 1,
+                "version": GUEST_OBSERVER_VERSION,
                 "ready": True,
                 "pid": 91,
                 "poll_seq": 22,

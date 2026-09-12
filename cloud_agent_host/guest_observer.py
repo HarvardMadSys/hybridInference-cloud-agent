@@ -29,7 +29,12 @@ if TYPE_CHECKING:
 
     from cloud_agent_host.tool_windows import ToolWindow
 
-GUEST_OBSERVER_VERSION = 1
+#: The observer protocol this host speaks. It must equal
+#: ``FI_OBSERVER_VERSION`` in ``deploy/sandbox/guest-observer.h``: the guest
+#: stamps it into its status object and into every journal record, and both
+#: readers here refuse anything else. They are two halves of one handshake,
+#: and ``tests/unit/test_guest_observer.py`` pins them together.
+GUEST_OBSERVER_VERSION = 2
 GUEST_OBSERVER_SOURCE = "kata-guest-ebpf-v1"
 GUEST_OBSERVER_ROOT = "/run/freeinference-observer"
 GUEST_OBSERVER_EVENTS = f"{GUEST_OBSERVER_ROOT}/events.jsonl"

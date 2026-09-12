@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import pathlib
 import subprocess
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_ROTATE_BYTES,
     GUEST_OBSERVER_SOURCE,
+    GUEST_OBSERVER_VERSION,
     MAX_OBSERVED_TOOL_MARKS,
     GuestObserverController,
     GuestObserverCursor,
@@ -21,6 +23,7 @@ from cloud_agent_host.guest_observer import (
     attribute_processes,
     finish_observation,
     parse_snapshot,
+    parse_status,
 )
 from cloud_agent_host.tool_windows import TOOL_MARK_HELPER, ToolWindow
 
@@ -59,7 +62,7 @@ def _snapshot(**overrides) -> GuestObserverSnapshot:
 
 def _event(seq: int, kind: str, mono_ns: int, **overrides) -> bytes:
     value = {
-        "version": 1,
+        "version": GUEST_OBSERVER_VERSION,
         "seq": seq,
         "kind": kind,
         "mono_ns": mono_ns,
@@ -79,7 +82,7 @@ def test_snapshot_contract_requires_ready_versioned_monotonic_state():
     payload = json.dumps(
         {
             "status": {
-                "version": 1,
+                "version": GUEST_OBSERVER_VERSION,
                 "ready": True,
                 "pid": 9,
                 "poll_seq": 12,
@@ -108,7 +111,7 @@ def test_snapshot_refuses_a_status_that_could_make_no_events_look_complete():
             json.dumps(
                 {
                     "status": {
-                        "version": 1,
+                        "version": GUEST_OBSERVER_VERSION,
                         "ready": False,
                         "pid": 9,
                         "poll_seq": 1,
@@ -897,3 +900,50 @@ def test_a_lossy_census_makes_every_charged_call_a_floor():
     assert with_processes["process_resources_partial"] is True
     assert without["process_cpu_usec"] is None
     assert without["process_resources_partial"] is False
+
+
+class TestTheVersionHandshake:
+    """The number the guest stamps and the number this host accepts.
+
+    ``parse_status`` refuses a status object whose ``version`` is not
+    ``GUEST_OBSERVER_VERSION``, and the journal reader refuses every record the
+    same way. So the constant in ``deploy/sandbox/guest-observer.h`` and the one
+    here are not two settings -- they are one handshake written twice, and a
+    guest that publishes a number this host does not accept is a host that can
+    never open an observation at all.
+
+    That failure cannot appear in a test that builds both sides from the Python
+    constant, and it cannot appear on a machine with no Kata guest: it appears
+    on a real host, at preflight, as "the observer is unavailable", after the
+    image has already been built and shipped. Reading the header is what makes
+    it a test failure instead.
+    """
+
+    HEADER = pathlib.Path(__file__).resolve().parents[2] / "deploy" / "sandbox" / "guest-observer.h"
+
+    def guest_version(self) -> int:
+        for line in self.HEADER.read_text(encoding="utf-8").splitlines():
+            if line.startswith("#define FI_OBSERVER_VERSION"):
+                return int(line.split()[2])
+        raise AssertionError("guest-observer.h no longer defines FI_OBSERVER_VERSION")
+
+    def test_the_guest_stamps_the_version_this_host_accepts(self) -> None:
+        assert self.guest_version() == GUEST_OBSERVER_VERSION
+
+    def test_a_status_from_another_version_is_refused(self) -> None:
+        """Pins why the two must agree, so the check above reads as a rule."""
+        with pytest.raises(GuestObserverProtocolError):
+            parse_status(
+                {
+                    "version": GUEST_OBSERVER_VERSION + 1,
+                    "ready": True,
+                    "pid": 7,
+                    "poll_seq": 1,
+                    "event_seq": 1,
+                    "lost": 0,
+                    "journal_dropped": 0,
+                    "journal_bytes": 0,
+                    "journal_dev": 1,
+                    "journal_ino": 1,
+                }
+            )
