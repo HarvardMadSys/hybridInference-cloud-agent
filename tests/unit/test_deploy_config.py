@@ -729,6 +729,49 @@ def test_staging_and_production_host_rollouts_are_independently_serialized() -> 
     assert "concurrency" not in production_jobs["deploy"]
 
 
+def test_staging_bounds_the_readiness_fence_and_production_keeps_the_default() -> None:
+    """Both halves of a staging rollout give up at the same moment.
+
+    The fence is what stops a control plane from replacing the live API while a
+    host still serves the previous commit, and both jobs wait on it: the host
+    for its own post-rollout check, the control plane for the host to publish
+    readiness. A value set on one and not the other would let one half declare
+    the rollout dead while the other was still working, so the test that matters
+    is that they agree -- not what the number is.
+
+    Production is deliberately absent here: it keeps the script's conservative
+    default, where waiting longer is cheaper than retrying.
+    """
+    staging = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-staging.yml").read_text())
+    production = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-prod.yml").read_text())
+
+    def deploy_env(workflow: dict, job: str) -> dict:
+        step = next(s for s in workflow["jobs"][job]["steps"] if s.get("name") == "Deploy")
+        return step.get("env", {})
+
+    control = deploy_env(staging, "deploy").get("SHARED_READY_TIMEOUT")
+    host = deploy_env(staging, "deploy-host").get("SHARED_READY_TIMEOUT")
+
+    assert control is not None, "the staging control job no longer bounds the readiness fence"
+    assert control == host, (
+        f"staging waits {control}s on one side and {host}s on the other; "
+        "one half would abandon a rollout the other was still completing"
+    )
+    assert int(control) > 0
+
+    default = re.search(
+        r'SHARED_READY_TIMEOUT="\$\{SHARED_READY_TIMEOUT:-(\d+)\}"',
+        (REPO_ROOT / "deploy/control-plane/deploy.sh").read_text(),
+    )
+    assert default, "deploy.sh no longer defines a SHARED_READY_TIMEOUT default"
+    assert int(control) < int(default.group(1))
+
+    for job in ("deploy", "deploy-host"):
+        assert "SHARED_READY_TIMEOUT" not in deploy_env(production, job), (
+            "production is meant to keep the conservative default"
+        )
+
+
 def test_target_commit_can_activate_staging_under_the_default_branch_workflow() -> None:
     """Readiness is unconditional and no stale feature flag can bypass it."""
     for relative in (
