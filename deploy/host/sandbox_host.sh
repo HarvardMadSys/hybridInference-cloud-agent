@@ -529,6 +529,43 @@ cleanup_attest_dir() {
   fi
 }
 
+wait_for_broker_health() {
+  # The runners' preflight asks the broker for its retained sandboxes, and it
+  # asks exactly once. `compose up -d` returns as soon as the containers are
+  # created, so on a rollout that replaced the broker the replicas were judging
+  # one that had been alive for a second: long enough to accept a connection,
+  # not long enough to have finished reconciling the sandboxes it serves. Every
+  # replica then reported "chat Session Supervisor is unavailable" and the
+  # rollout failed over a stack that was healthy a few seconds later.
+  #
+  # Waiting here is what taking the fixed five-second pause out of this path was
+  # supposed to leave behind: a wait on the fact the next step depends on rather
+  # than on a timer. A broker that is already serving costs one exec.
+  local deadline="${1:-$SECONDS}" broker_id
+  broker_id="$(compose ps -q workspace-broker)" || broker_id=""
+  [[ -n "$broker_id" ]] \
+    || die "no workspace-broker replica is running; shared-live cannot be attested"
+  while :; do
+    # Any HTTP answer settles it, including the 401 an unauthenticated probe
+    # gets: this waits for the server to be serving, not for it to authorize.
+    # A refused connection is the state worth waiting out.
+    if docker exec "$broker_id" python3 -c 'import urllib.error, urllib.request
+try:
+    urllib.request.urlopen("http://127.0.0.1:8092/health", timeout=2)
+except urllib.error.HTTPError:
+    pass' >/dev/null 2>&1; then
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      die "the workspace broker did not answer /health before the readiness deadline.
+     'docker logs ${broker_id}' shows why it is not serving; a reconcile that
+     raises at startup exits the process and every runner then reports the chat
+     session supervisor as unavailable."
+    fi
+    sleep 1
+  done
+}
+
 check_shared_live_stack() {
   local deadline="${1:-$SECONDS}"
   # Ask every running replica to complete the same executable preflight as its
@@ -547,6 +584,11 @@ check_shared_live_stack() {
   expected_replicas="${expected_replicas:-3}"
   [[ "$running_replicas" -ge "$expected_replicas" ]] \
     || die "only $running_replicas of $expected_replicas configured runner replicas are running; shared-live concurrency is not ready"
+
+  # Only once the replicas that will be asked are known to be there: this is
+  # about what they are about to ask the broker, so it must not pre-empt a more
+  # specific verdict about the replicas themselves.
+  wait_for_broker_health "$deadline"
 
   # Replicas attest at the same time. The preflight is dominated by the real
   # request it makes through the tunnels, not by anything the replicas share,

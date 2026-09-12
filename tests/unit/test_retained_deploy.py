@@ -32,6 +32,8 @@ def _host(
     capability: str = "shared-sandbox-v1,native-fork-at-anchor-v1",
     credential_rejected: bool = False,
     attest_exit: int = 0,
+    broker_running: bool = True,
+    broker_serving: bool = True,
 ) -> dict[str, str]:
     app_dir = tmp_path / "app"
     app_dir.mkdir()
@@ -57,6 +59,11 @@ def _host(
     fake_bin.mkdir()
     rejection_log = "agent_host_credential_rejected" if credential_rejected else ""
     runner_ids = "\n".join(f"runner-{index}" for index in range(1, running_replicas + 1))
+    broker_id = "workspace-broker-1" if broker_running else ""
+    # The readiness wait probes the broker with urllib; the fake answers it
+    # separately from the attestation exec so a broker that is up but not yet
+    # serving can be modelled.
+    broker_probe_exit = 0 if broker_serving else 1
     _write_executable(
         fake_bin / "docker",
         "#!/bin/sh\n"
@@ -65,8 +72,10 @@ def _host(
         f"  'info --format {{{{.DockerRootDir}}}}') echo '{daemon_root}' ;;\n"
         "  'info') exit 0 ;;\n"
         f"  *' ps -q runner') printf '%s\\n' '{runner_ids}' ;;\n"
+        f"  *' ps -q workspace-broker') printf '%s\\n' '{broker_id}' ;;\n"
         f"  *' logs --since 2m runner') echo '{rejection_log}' ;;\n"
         f"  exec*'_shared_live_host_capabilities'*) echo '{capability}'; exit {attest_exit} ;;\n"
+        f"  exec*8092/health*) exit {broker_probe_exit} ;;\n"
         f"  exec*'retained_docker_data_root'*) echo '{daemon_root}' ;;\n"
         "  exec*'AGENT_CONTROL_PLANE_URL'*) echo '200' ;;\n"
         "  run*) printf '200' ;;\n"
@@ -603,3 +612,26 @@ def test_shared_live_check_fails_for_a_rejected_host_credential(tmp_path: Path) 
 
     assert result.returncode != 0
     assert "rejected this host's persisted credential" in result.stderr
+
+
+def test_shared_live_check_waits_for_the_broker_and_names_it_on_timeout(tmp_path: Path) -> None:
+    """A broker that is up but not yet serving is what a rollout must wait out.
+
+    The runners' preflight asks the broker for its retained sandboxes once, so a
+    replica judging a broker that started a second ago reports the session
+    supervisor as unavailable and fails a rollout whose stack is healthy moments
+    later. With no time left to wait, the verdict has to name the broker rather
+    than the runners that merely repeated its silence.
+    """
+    result = _run(_host(tmp_path, broker_serving=False), "check")
+
+    assert result.returncode != 0
+    assert "workspace broker did not answer /health" in result.stderr
+
+
+def test_shared_live_check_reports_a_missing_broker_replica(tmp_path: Path) -> None:
+    """No broker at all is a different statement from one still starting."""
+    result = _run(_host(tmp_path, broker_running=False), "check")
+
+    assert result.returncode != 0
+    assert "no workspace-broker replica is running" in result.stderr
