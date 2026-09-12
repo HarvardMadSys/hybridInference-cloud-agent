@@ -66,6 +66,19 @@ if TYPE_CHECKING:
 ContextStatus = Literal["new", "live", "restored", "lost"]
 ResidentState = Literal["stopped", "starting", "live", "restarting", "lost"]
 
+#: One window the census loop is about to sample, as it leaves the lock: the
+#: handle, its sampler, the census number, and the cursor and accumulator the
+#: journal read needs. Named because the hand-off is what lets the guest exec
+#: happen outside the lock, and a reader has to be able to see that the handle
+#: and the sampler are already known to be present while the other two are not.
+DueCensus = tuple[
+    MemberWindowHandle,
+    MemberWindowSampler,
+    int,
+    GuestObserverCursor | None,
+    WindowAccumulator | None,
+]
+
 logger = logging.getLogger(__name__)
 
 
@@ -1031,17 +1044,24 @@ class SharedChatSessionSupervisor:
                 and member.window_sampler is not None
                 and member.window.baseline_taken
             ]
-            due: list[tuple[Any, MemberWindowSampler, int]] = []
+            due: list[DueCensus] = []
             for member in members:
+                window = member.window
                 sampler = member.window_sampler
-                assert sampler is not None
+                # The comprehension above already dropped a member without
+                # both. Re-reading them into locals is what carries that fact
+                # into the hand-off, so the census loop below works on a
+                # handle and a sampler rather than on two values a reader has
+                # to go back and prove are there.
+                if window is None or sampler is None:
+                    continue
                 if now < member.window_next_sample_mono:
                     continue
                 member.window_next_sample_mono = now + sampler.interval_s
                 member.window_sequence += 1
                 due.append(
                     (
-                        member.window,
+                        window,
                         sampler,
                         member.window_sequence,
                         member.observer_cursor,
@@ -1226,8 +1246,15 @@ class SharedChatSessionSupervisor:
             if accumulator is not None:
                 # The same counters the final report will carry, with the
                 # window still open: a crash keeps everything measured so far.
-                with contextlib.suppress(Exception):
-                    self._consume_window_journal(accumulator, cursor)
+                #
+                # Without a cursor there is no journal fence to read from, so
+                # the checkpoint reports what the accumulator already holds.
+                # Calling through anyway raised inside the suppression below,
+                # which read as a fold that happened rather than one that was
+                # never possible.
+                if cursor is not None:
+                    with contextlib.suppress(Exception):
+                        self._consume_window_journal(accumulator, cursor)
                 snapshot = accumulator.snapshot(
                     state="collecting",
                     duration_ms=duration_ms,

@@ -2913,7 +2913,7 @@ class ChatSandboxManager:
         argv: list[str],
         *,
         timeout_s: float,
-    ) -> subprocess.CompletedProcess[str]:
+    ) -> subprocess.CompletedProcess[bytes]:
         """Ask the guest observer for one member execution window operation.
 
         The window helper is a second reviewed binary beside the tool marker,

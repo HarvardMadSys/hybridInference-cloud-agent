@@ -41,7 +41,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
 import httpx
 
@@ -416,7 +416,7 @@ class ControlPlane:
         except Exception:
             pass
 
-    def report_turn_resources(self, payload: Mapping[str, Any]) -> None:
+    def report_turn_resources(self, payload: dict[str, Any]) -> None:
         """Report one cumulative whole-turn member execution snapshot.
 
         The same method serves a running ``collecting`` checkpoint and the
@@ -1345,7 +1345,7 @@ _TURN_RESOURCES_KEYS = (
 )
 
 
-def _report_checkpoint_quietly(control: Any, payload: Mapping[str, Any]) -> None:
+def _report_checkpoint_quietly(control: Any, payload: dict[str, Any]) -> None:
     """Report one running checkpoint, never letting it disturb the stream.
 
     A checkpoint exists so a crashed turn keeps the work it already did. That
