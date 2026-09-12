@@ -2636,6 +2636,31 @@ def test_a_pruned_chat_network_is_released_rather_than_failing_the_reconcile():
     ]
 
 
+def test_the_null_network_is_what_a_finished_release_looks_like():
+    """Docker's `none` is the absence of egress, not an egress nobody owns.
+
+    A container reports the null network once its last real endpoint is gone,
+    which is the state `stop()` itself leaves behind. Reading it as an unknown
+    egress network made every later stop of an already-released sandbox raise,
+    and because the supervisor stops every retained sandbox while reconciling
+    at startup, one such container kept the workspace broker from starting at
+    all.
+    """
+    spec = _spec()
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="unused", egress=_isolated_policy())
+    )
+    inspection = _stopped_on(manager, spec, "none")
+    manager._inspect_network = lambda _name: pytest.fail(  # type: ignore[method-assign]
+        "the null network must not be inspected"
+    )
+    manager._disconnect_endpoint = lambda *_a, **_k: pytest.fail(  # type: ignore[method-assign]
+        "there is no endpoint to disconnect from the null network"
+    )
+
+    assert manager._release_sandbox_networks(spec, inspection) is inspection
+
+
 def test_a_live_network_this_chat_does_not_own_is_still_an_ownership_violation():
     """The repair above is about absence, and must not weaken the guard."""
     spec = _spec()

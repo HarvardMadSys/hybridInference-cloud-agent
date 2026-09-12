@@ -90,6 +90,10 @@ CHAT_NETWORK_PREFIX_LENGTH = 29
 CHAT_NETWORK_PRUNE_GRACE_S = 300
 CHAT_NETWORK_INHIBIT_IPV4_OPTION = "com.docker.network.bridge.inhibit_ipv4"
 CHAT_BOOTSTRAP_NETWORK = "bridge"
+#: Docker's built-in null network. A container reports it once its last real
+#: endpoint is gone, which is exactly the state a completed release leaves
+#: behind, so it means "no egress" rather than "an egress nobody claims".
+CHAT_NULL_NETWORK = "none"
 CHAT_DNS_UPSTREAM = "127.0.0.1"
 CHAT_WORKDIR = "/workspace"
 CHAT_STATE_DIR = "/agent-state"
@@ -1071,6 +1075,15 @@ class ChatSandboxManager:
         if current.running:
             raise SandboxError("refusing to release networking from a running chat sandbox")
         for network_name in current.networks:
+            if network_name == CHAT_NULL_NETWORK:
+                # There is no connectivity here to withdraw. Docker reports the
+                # null network for a container whose last endpoint has gone, so
+                # this is what a release that already succeeded looks like --
+                # and reading it as an egress network nobody owns made every
+                # later stop of an already-released sandbox raise. Because the
+                # supervisor stops every retained sandbox while reconciling, one
+                # such container was enough to keep the broker from starting.
+                continue
             if (
                 network_name == CHAT_BOOTSTRAP_NETWORK
                 and current.status is ChatSandboxStatus.CREATED
