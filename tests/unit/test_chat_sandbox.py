@@ -2592,3 +2592,60 @@ def test_a_peer_that_vanished_mid_reconcile_is_simply_absent(monkeypatch):
     )
 
     assert manager._service_owners(base, ("agent-gateway",)) == {"gw": ["agent-gateway"]}
+
+
+def _stopped_on(manager: ChatSandboxManager, spec: ChatSandboxSpec, network: str):
+    """One retained container that stopped while attached to ``network``."""
+    inspection = ChatSandboxInspection(
+        container_id="c0ffee",
+        name=spec.container_name,
+        status=ChatSandboxStatus.STOPPED,
+        running=False,
+        image="registry/agent:1",
+        labels={CHAT_SANDBOX_ID_LABEL: spec.sandbox_id},
+        mounts=(),
+        networks=(network,),
+    )
+    manager._require = lambda _spec: inspection  # type: ignore[method-assign]
+    return inspection
+
+
+def test_a_pruned_chat_network_is_released_rather_than_failing_the_reconcile():
+    """The bridge is gone; its stale endpoint must not fail the whole broker.
+
+    The chat-private network is pruned on its own grace timer, so a container
+    that stopped before that timer can outlive it and keep an endpoint record
+    naming a network the daemon no longer has. Reading that as an unknown
+    egress network failed this sandbox's stop, and because the supervisor stops
+    every retained sandbox while reconciling at startup, the workspace broker
+    exited instead of serving.
+    """
+    spec = _spec()
+    policy = _isolated_policy()
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="unused", egress=policy))
+    inspection = _stopped_on(manager, spec, "freeinference-chat-net-deadbeefdeadbeefdeadbeef")
+    disconnected: list[tuple[str, str]] = []
+    manager._inspect_network = lambda _name: None  # type: ignore[method-assign]
+    manager._disconnect_endpoint = (  # type: ignore[method-assign]
+        lambda network, container_id, **_: disconnected.append((network, container_id))
+    )
+
+    assert manager._release_sandbox_networks(spec, inspection) is inspection
+    assert disconnected == [
+        ("freeinference-chat-net-deadbeefdeadbeefdeadbeef", "c0ffee"),
+    ]
+
+
+def test_a_live_network_this_chat_does_not_own_is_still_an_ownership_violation():
+    """The repair above is about absence, and must not weaken the guard."""
+    spec = _spec()
+    policy = _isolated_policy()
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="unused", egress=policy))
+    inspection = _stopped_on(manager, spec, "someone-elses-bridge")
+    manager._inspect_network = lambda _name: {  # type: ignore[method-assign]
+        "Internal": True,
+        "Labels": {CHAT_NETWORK_LABEL: "true"},
+    }
+
+    with pytest.raises(SandboxError, match="unknown egress network"):
+        manager._release_sandbox_networks(spec, inspection)

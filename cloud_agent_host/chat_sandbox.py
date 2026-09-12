@@ -1106,6 +1106,17 @@ class ChatSandboxManager:
                 for phase in ("agent", "setup")
             ):
                 continue
+            # A network that no longer exists cannot be an ownership violation:
+            # there is nothing left to release and nothing left to leak. The
+            # chat-private bridge is pruned on its own grace timer, so a
+            # container that stopped before that timer can outlive its network
+            # and keep a stale endpoint record. Reading that record as an
+            # unknown network failed this sandbox's stop -- and with it the
+            # whole reconcile, and with that the broker's startup -- over a
+            # bridge the platform had already removed itself.
+            if self._inspect_network(network_name) is None:
+                self._disconnect_endpoint(network_name, current.container_id)
+                continue
             raise SandboxError("retained chat is attached to an unknown egress network")
         return self._require(spec)
 
