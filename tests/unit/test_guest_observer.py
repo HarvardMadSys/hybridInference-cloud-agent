@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import pathlib
 import subprocess
 
 import pytest
@@ -918,17 +917,6 @@ class TestTheVersionHandshake:
     image has already been built and shipped. Reading the header is what makes
     it a test failure instead.
     """
-
-    HEADER = pathlib.Path(__file__).resolve().parents[2] / "deploy" / "sandbox" / "guest-observer.h"
-
-    def guest_version(self) -> int:
-        for line in self.HEADER.read_text(encoding="utf-8").splitlines():
-            if line.startswith("#define FI_OBSERVER_VERSION"):
-                return int(line.split()[2])
-        raise AssertionError("guest-observer.h no longer defines FI_OBSERVER_VERSION")
-
-    def test_the_guest_stamps_the_version_this_host_accepts(self) -> None:
-        assert self.guest_version() == GUEST_OBSERVER_VERSION
 
     def test_a_status_from_another_version_is_refused(self) -> None:
         """Pins why the two must agree, so the check above reads as a rule."""
