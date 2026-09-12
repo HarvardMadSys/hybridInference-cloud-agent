@@ -165,6 +165,20 @@ def synthetic_environment(compose: Path, variant: str, project: str) -> dict[str
             "AGENT_WEB_VARIANT": variant,
             "AGENT_WEB_BASE_PATH": base_path,
             "AGENT_WEB_API_URL": api_url,
+            # A network of this run's own. The stack's network is *named*
+            # rather than project-scoped — `${AGENT_NETWORK_NAME:-cloud-agent}`,
+            # deliberately, so the gateway's console can resolve `web` and
+            # `control-plane` by name — which means two stacks on one machine
+            # join the same bridge by default, each attaching a container
+            # aliased `postgres`. Docker's DNS then round-robins between them.
+            #
+            # That is what the second and third live acceptances hit: the
+            # migration opened one connection and got the right database, the
+            # service opened ten and reached staging's, which refused a password
+            # it had never been given. `deploy/local/dev.sh` already tells a
+            # second checkout to choose its own name; this is that rule, applied
+            # to a stack that comes and goes inside one job.
+            "AGENT_NETWORK_NAME": f"{project}-control",
             "AGENT_CONTROL_PLANE_PORT": str(free_port()),
             "AGENT_MCP_RELAY_PORT": str(free_port()),
             "AGENT_WEB_PORT": str(free_port()),
@@ -389,15 +403,12 @@ def teardown(project: str) -> None:
         docker("rm", "-f", *containers, check=False)
     for volume in docker("volume", "ls", "-q", "--filter", f"name={project}", check=False).split():
         docker("volume", "rm", "-f", volume, check=False)
-    for network in docker(
-        "network",
-        "ls",
-        "-q",
-        "--filter",
-        f"label=com.docker.compose.project={project}",
-        check=False,
-    ).split():
-        docker("network", "rm", network, check=False)
+    # By label and by name: the stack's network carries a name of this run's
+    # choosing rather than a project prefix, so both selectors are needed to be
+    # sure a shared runner is left as it was found.
+    for selector in (f"label=com.docker.compose.project={project}", f"name={project}-control"):
+        for network in docker("network", "ls", "-q", "--filter", selector, check=False).split():
+            docker("network", "rm", network, check=False)
 
 
 def accept(

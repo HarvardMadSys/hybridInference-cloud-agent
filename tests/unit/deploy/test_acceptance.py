@@ -333,3 +333,45 @@ def test_the_probe_says_so_when_there_is_nothing_to_inspect(monkeypatch) -> None
         "postgres: no container to inspect",
         "control-plane: no container to inspect",
     ]
+
+
+# ------------------------------------------------------------------ network
+
+
+def test_each_acceptance_gets_a_network_of_its_own() -> None:
+    """The stack's network is named, not project-scoped, so two stacks collide.
+
+    `${AGENT_NETWORK_NAME:-cloud-agent}` is deliberate — the gateway's console
+    resolves `web` and `control-plane` by name — but it means a second stack on
+    one machine joins the first's bridge and attaches a container under the
+    same `postgres` alias. Docker's DNS round-robins between them, so a
+    connection reaches whichever it likes: the second and third live
+    acceptances failed with `password authentication failed` against staging's
+    database, which had never been given the password they held.
+    """
+    first = ac.synthetic_environment(COMPOSE, "agents", "run-one")
+    second = ac.synthetic_environment(COMPOSE, "agents", "run-two")
+    assert first["AGENT_NETWORK_NAME"] != second["AGENT_NETWORK_NAME"]
+    assert "run-one" in first["AGENT_NETWORK_NAME"]
+    assert first["AGENT_NETWORK_NAME"] != "cloud-agent", (
+        "the default is the shared one, which is what a staging deployment is already on"
+    )
+
+
+def test_the_compose_file_still_takes_the_network_name_from_that_variable() -> None:
+    """If the stack stopped reading it, the isolation above would be silent."""
+    assert "${AGENT_NETWORK_NAME:-cloud-agent}" in COMPOSE.read_text()
+
+
+def test_teardown_removes_the_network_this_run_created(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_docker(*arguments: str, check: bool = True) -> str:
+        calls.append(arguments)
+        if arguments[0] == "network" and arguments[1] == "ls":
+            return "net-1" if "name=p-control" in arguments else ""
+        return ""
+
+    monkeypatch.setattr(ac, "docker", fake_docker)
+    ac.teardown("p")
+    assert ("network", "rm", "net-1") in calls
