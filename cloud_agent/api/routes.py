@@ -3271,7 +3271,11 @@ _HOST_TOKEN_HINT = "aht."
 
 async def verify_claiming_host(
     authorization: str | None = Header(None),
-    store: HostPoolRepository | None = Depends(get_storage),
+    # The assembly, because that is what `get_storage` returns. Annotating one
+    # port here did not narrow anything -- `Depends` erases the type, so the
+    # annotation was simply false and the attribute below resolved against the
+    # assembly at runtime, where it does not exist.
+    store: _RoutesStorage | None = Depends(get_storage),
 ) -> dict[str, str]:
     """Authenticate the enrolled host that is claiming retained work.
 
@@ -3290,7 +3294,7 @@ async def verify_claiming_host(
             claims = None
         if claims is not None:
             credential_hash = hash_secret(presented)
-            host = await store.authenticate_host(
+            host = await store.host_pool.authenticate_host(
                 host=claims["host"], credential_hash=credential_hash
             )
             if host is None:
