@@ -215,6 +215,11 @@ services:
     # default, which can SIGKILL the supervisor mid-cleanup.
     stop_grace_period: ${AGENT_BROKER_STOP_GRACE:-30s}
     environment:
+      # Both host processes read these, and neither was reachable from this
+      # file — setting them in the host's .env was a no-op. `json` renders the
+      # structured fields these services already log.
+      AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+      AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
       # A broker-only secret. Host enrollment/claim uses its persisted host
       # credential; neither credential is accepted at the other's surface.
       AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?a secret for this host's workspace broker}
@@ -277,6 +282,11 @@ services:
       dockerfile: deploy/host/Dockerfile.agent-runner
     restart: unless-stopped
     environment:
+      # Both host processes read these, and neither was reachable from this
+      # file — setting them in the host's .env was a no-op. `json` renders the
+      # structured fields these services already log.
+      AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+      AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
       # The tunnel, by the name both this container and the sandboxes resolve.
       # Overriding it with the gateway's real address is a mistake worth naming:
       # the runner would reach it and the sandbox — on the closed network —

@@ -51,10 +51,10 @@ class JsonLogFormatter(logging.Formatter):
 
     Top level rather than nested under a key, so a field can be selected
     directly — ``jq 'select(.event == "…") | .duration_ms'`` — which is the
-    only query a deployment without a log pipeline has. The envelope wins a
-    name collision: reshaping ``level`` or ``logger`` out from under whoever
-    reads the stream is worse than dropping one caller field, and no field in
-    use collides.
+    only query a process with no log pipeline has. The envelope wins a name
+    collision: reshaping ``level`` or ``logger`` out from under whoever reads
+    the stream is worse than dropping one caller field, and no field in use
+    collides.
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -80,6 +80,29 @@ class JsonLogFormatter(logging.Formatter):
         return json.dumps(payload, default=str, ensure_ascii=False)
 
 
+#: uvicorn's own loggers. Its default config gives ``uvicorn`` and
+#: ``uvicorn.access`` their own text handlers with ``propagate: False``, and
+#: declares no ``root`` entry at all — so nothing it writes reaches a handler
+#: installed here.
+_UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+
+def _adopt_uvicorn_loggers() -> None:
+    """Let uvicorn's records reach the handler this process installed.
+
+    Without this the stream is half JSON and half text, and ``jq`` fails on
+    the first uvicorn line rather than on anything this service wrote — which
+    makes "one JSON object per record" false exactly where an operator would
+    check it. Ordering works out: uvicorn configures its logging in
+    ``Config.__init__`` and imports the application afterwards, so a
+    ``--factory`` target runs second and this undoes what it set up.
+    """
+    for name in _UVICORN_LOGGERS:
+        adopted = logging.getLogger(name)
+        adopted.handlers.clear()
+        adopted.propagate = True
+
+
 def get_logger(name: str | None = None) -> logging.Logger:
     """Return a module logger; handler configuration belongs to the entrypoint."""
     return logging.getLogger(name or __name__)
@@ -103,6 +126,12 @@ def configure_process_logging(level: str | None = None, log_format: str | None =
         handler = logging.StreamHandler()
         handler.setFormatter(JsonLogFormatter())
         logging.basicConfig(level=resolved, handlers=[handler])
+        if handler in logging.getLogger().handlers:
+            # Only when this call is the one that configured logging. An
+            # embedding process that got there first keeps its own setup, and
+            # reshaping uvicorn's loggers around a handler we did not install
+            # is not ours to do.
+            _adopt_uvicorn_loggers()
         return
     logging.basicConfig(level=resolved, format=_FORMAT)
     if requested != "text":

@@ -14,6 +14,7 @@ across both packages already pass were discarded before reaching a log.
 from __future__ import annotations
 
 import contextlib
+import inspect
 import io
 import json
 import logging
@@ -156,3 +157,73 @@ def test_json_still_defers_to_configuration_already_in_place(module, monkeypatch
 
         assert root.handlers == [sentinel]
         assert root.level == logging.ERROR
+
+
+def test_the_two_copies_have_not_drifted() -> None:
+    """Behaviour is checked above; this catches wording and shape.
+
+    The duplication is deliberate, so the duplicate has to stay a duplicate.
+    A parametrised case only proves the behaviours it happens to cover —
+    comparing the source catches the change nobody thought to test, which is
+    the one that will be made.
+    """
+    for name in ("JsonLogFormatter", "_adopt_uvicorn_loggers"):
+        assert inspect.getsource(getattr(control_plane, name)) == inspect.getsource(
+            getattr(host, name)
+        ), f"{name} differs between the two shims"
+
+
+def test_uvicorn_is_handed_to_the_json_handler(module, monkeypatch) -> None:
+    """Otherwise the stream is half JSON and `jq` fails on uvicorn's first line."""
+    monkeypatch.setenv(module.ENV_LOG_FORMAT, "json")
+    with _pristine_root() as root:
+        access = logging.getLogger("uvicorn.access")
+        saved_handlers, saved_propagate = list(access.handlers), access.propagate
+        access.handlers = [logging.NullHandler()]
+        access.propagate = False
+        try:
+            module.configure_process_logging()
+
+            assert access.handlers == []
+            assert access.propagate is True
+            assert isinstance(root.handlers[0].formatter, module.JsonLogFormatter)
+        finally:
+            access.handlers = saved_handlers
+            access.propagate = saved_propagate
+
+
+def test_uvicorn_is_left_alone_when_this_call_configured_nothing(module, monkeypatch) -> None:
+    """Reshaping loggers around a handler we did not install is not ours to do."""
+    monkeypatch.setenv(module.ENV_LOG_FORMAT, "json")
+    with _pristine_root() as root:
+        root.addHandler(logging.NullHandler())
+        access = logging.getLogger("uvicorn.access")
+        sentinel = logging.NullHandler()
+        saved_handlers, saved_propagate = list(access.handlers), access.propagate
+        access.handlers = [sentinel]
+        access.propagate = False
+        try:
+            module.configure_process_logging()
+            assert access.handlers == [sentinel]
+            assert access.propagate is False
+        finally:
+            access.handlers = saved_handlers
+            access.propagate = saved_propagate
+
+
+def test_text_leaves_uvicorn_as_uvicorn_configured_it(module, monkeypatch) -> None:
+    """The default must not quietly reshape another library's logging."""
+    monkeypatch.delenv(module.ENV_LOG_FORMAT, raising=False)
+    with _pristine_root():
+        access = logging.getLogger("uvicorn.access")
+        sentinel = logging.NullHandler()
+        saved_handlers, saved_propagate = list(access.handlers), access.propagate
+        access.handlers = [sentinel]
+        access.propagate = False
+        try:
+            module.configure_process_logging()
+            assert access.handlers == [sentinel]
+            assert access.propagate is False
+        finally:
+            access.handlers = saved_handlers
+            access.propagate = saved_propagate

@@ -46,7 +46,7 @@ from cloud_agent_host.guest_observer import (
     add_process_resources,
     attribute_processes,
 )
-from cloud_agent_host.logging_utils import get_logger
+from cloud_agent_host.logging_utils import configure_process_logging, get_logger
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
 from cloud_agent_host.retained_workspace import (
@@ -2061,6 +2061,13 @@ def create_app(
 
 def main(argv: list[str] | None = None) -> int:
     """Run the broker on the private Compose network."""
+    # This process had no logging configuration at all: uvicorn sets up its own
+    # loggers and declares no `root`, so every `logger.info(...)` here — the
+    # terminal and workspace events among them — reached no handler, and
+    # anything at WARNING or above came out through `logging.lastResort` as a
+    # bare message. The runner's `main()` has always done this; the broker was
+    # simply missed.
+    configure_process_logging()
     parser = argparse.ArgumentParser(description="Serve durable agent workspaces.")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8092)
