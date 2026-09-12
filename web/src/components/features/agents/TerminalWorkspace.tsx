@@ -10,8 +10,34 @@ import {
 } from '@/lib/api/agents';
 
 import { TerminalPane } from './TerminalPane';
+import { loadTerminalRuntime } from './terminalRuntime';
 
 const MAX_SESSIONS = 4;
+
+// xterm's cell box for this pane's font (13px monospace, 1.25 line height),
+// and the chrome around it. Both are first guesses: `fitAddon.fit()` measures
+// for real once the pane mounts and corrects the server. Guessing close is
+// still worth it — it is the difference between the first prompt painting at
+// the right width and painting at 80 columns and reflowing.
+const CELL_WIDTH_PX = 7.8;
+const CELL_HEIGHT_PX = 16.25;
+const PANE_CHROME_X_PX = 24;
+const PANE_CHROME_Y_PX = 72;
+const DEFAULT_SIZE = { rows: 24, cols: 80 };
+
+function estimateSize(host: HTMLElement | null): { rows: number; cols: number } {
+  if (!host?.clientWidth || !host.clientHeight) return DEFAULT_SIZE;
+  return {
+    cols: Math.min(
+      400,
+      Math.max(40, Math.floor((host.clientWidth - PANE_CHROME_X_PX) / CELL_WIDTH_PX)),
+    ),
+    rows: Math.min(
+      200,
+      Math.max(10, Math.floor((host.clientHeight - PANE_CHROME_Y_PX) / CELL_HEIGHT_PX)),
+    ),
+  };
+}
 
 interface TerminalWorkspaceProps {
   jobId: string;
@@ -30,6 +56,7 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
   const currentJobRef = useRef(jobId);
   const jobGenerationRef = useRef(0);
   const mountedRef = useRef(false);
+  const sectionRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -59,6 +86,12 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
   }, [jobId]);
 
   useEffect(() => {
+    // The click that needs these has not happened yet; the fetch belongs
+    // beside the create request, not after it.
+    if (active) void loadTerminalRuntime();
+  }, [active]);
+
+  useEffect(() => {
     if (!active || !ready || loadFailed || loadedJobRef.current === jobId) return;
     const generation = jobGenerationRef.current;
     loadedJobRef.current = jobId;
@@ -66,8 +99,15 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
     void listAgentTerminals(jobId)
       .then((items) => {
         if (!requestIsCurrent(jobId, generation)) return;
-        setSessions(items);
-        if (items.length) setVisibleIds([items[0].id]);
+        setSessions((current) => {
+          const listed = new Set(items.map((item) => item.id));
+          // Creating no longer waits for this request, so a terminal opened
+          // while it was in flight is legitimately absent from its answer.
+          return [...items, ...current.filter((session) => !listed.has(session.id))];
+        });
+        setVisibleIds((current) =>
+          current.length ? current : items.length ? [items[0].id] : current,
+        );
       })
       .catch((cause: unknown) => {
         if (requestIsCurrent(jobId, generation)) {
@@ -87,8 +127,12 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
   ) as AgentTerminalApi[];
 
   const awaitingInitialLoad = active && !loadFailed && (!ready || loadedJobRef.current !== jobId);
-  const canCreate =
-    !loadFailed && !loading && !awaitingInitialLoad && sessions.length < MAX_SESSIONS;
+  // Deliberately not gated on the initial listing. That request answers "which
+  // terminals already exist", which is not a precondition for opening another
+  // one — and it is a full round trip, so gating on it made the first click
+  // wait for an answer it did not need. The cap is still enforced here once the
+  // listing lands, and by the broker regardless.
+  const canCreate = !loadFailed && sessions.length < MAX_SESSIONS;
 
   function retryLoad() {
     loadedJobRef.current = null;
@@ -103,7 +147,7 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
     setBusy(true);
     setError(null);
     try {
-      const session = await createAgentTerminal(requestJobId);
+      const session = await createAgentTerminal(requestJobId, estimateSize(sectionRef.current));
       if (!requestIsCurrent(requestJobId, generation)) {
         void deleteAgentTerminal(requestJobId, session.id).catch(() => {
           // The old workspace may already have been reclaimed.
@@ -181,7 +225,11 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
   }
 
   return (
-    <section aria-label="Workspace terminal" className="flex h-full min-h-[28rem] flex-col">
+    <section
+      ref={sectionRef}
+      aria-label="Workspace terminal"
+      className="flex h-full min-h-[28rem] flex-col"
+    >
       {error ? (
         <p
           role="alert"
@@ -245,7 +293,7 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
             Terminal changes appear in this workspace&apos;s Git and Files views, but do not
             automatically update an existing pull request.
           </p>
-          {loading || awaitingInitialLoad ? null : loadFailed ? (
+          {loadFailed ? (
             <button
               type="button"
               onClick={retryLoad}

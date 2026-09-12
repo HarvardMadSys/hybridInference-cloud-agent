@@ -524,4 +524,71 @@ describe('TerminalWorkspace', () => {
     await waitFor(() => expect(writeAgentTerminalInput).toHaveBeenCalledTimes(2));
     expect(writeAgentTerminalInput).toHaveBeenNthCalledWith(2, 'job-1', first.id, 'cd');
   });
+
+  it('does not make the first click wait for the terminal listing', async () => {
+    // The listing answers "which terminals already exist", which is not a
+    // precondition for opening another one — and it is a full round trip. It
+    // used to disable the button until it landed, so the first click waited on
+    // an answer it did not need.
+    let settleListing: (items: AgentTerminalApi[]) => void = () => undefined;
+    vi.mocked(listAgentTerminals).mockReturnValue(
+      new Promise<AgentTerminalApi[]>((resolve) => {
+        settleListing = resolve;
+      }),
+    );
+    vi.mocked(createAgentTerminal).mockResolvedValue(terminal('term-1'));
+
+    render(<TerminalWorkspace jobId="job-1" active />);
+
+    const button = await screen.findByRole('button', { name: 'New terminal' });
+    expect(button).toBeEnabled();
+
+    fireEvent.click(button);
+    expect(
+      await screen.findByRole('application', { name: 'Terminal 1 terminal' }),
+    ).toBeInTheDocument();
+
+    settleListing([]);
+    await waitFor(() => expect(listAgentTerminals).toHaveBeenCalledTimes(1));
+  });
+
+  it('keeps a terminal created while the listing was still in flight', async () => {
+    // The listing was issued before that terminal existed, so its answer is
+    // legitimately missing it. Replacing state with the answer would delete a
+    // terminal the user is looking at.
+    let settleListing: (items: AgentTerminalApi[]) => void = () => undefined;
+    vi.mocked(listAgentTerminals).mockReturnValue(
+      new Promise<AgentTerminalApi[]>((resolve) => {
+        settleListing = resolve;
+      }),
+    );
+    vi.mocked(createAgentTerminal).mockResolvedValue(terminal('term-1'));
+
+    render(<TerminalWorkspace jobId="job-1" active />);
+    fireEvent.click(await screen.findByRole('button', { name: 'New terminal' }));
+    expect(
+      await screen.findByRole('application', { name: 'Terminal 1 terminal' }),
+    ).toBeInTheDocument();
+
+    settleListing([]);
+
+    await waitFor(() => expect(listAgentTerminals).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('application', { name: 'Terminal 1 terminal' })).toBeInTheDocument();
+  });
+
+  it('asks the broker for a size it measured rather than a fixed 24x80', async () => {
+    vi.mocked(listAgentTerminals).mockResolvedValue([]);
+    vi.mocked(createAgentTerminal).mockResolvedValue(terminal('term-1'));
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(1200);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600);
+
+    render(<TerminalWorkspace jobId="job-1" active />);
+    fireEvent.click(await screen.findByRole('button', { name: 'New terminal' }));
+
+    await waitFor(() => expect(createAgentTerminal).toHaveBeenCalledTimes(1));
+    const size = vi.mocked(createAgentTerminal).mock.calls[0][1];
+    expect(size).toBeDefined();
+    expect(size!.cols).toBeGreaterThan(80);
+    expect(size!.rows).toBeGreaterThan(24);
+  });
 });

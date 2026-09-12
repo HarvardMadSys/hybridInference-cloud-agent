@@ -3,6 +3,8 @@
 import { useEffect, useRef } from 'react';
 import type { ITheme, Terminal } from '@xterm/xterm';
 
+import { loadTerminalRuntime } from './terminalRuntime';
+
 import { useTheme } from '@/components/providers';
 import type { ResolvedTheme } from '@/lib/theme';
 import {
@@ -203,7 +205,7 @@ export function TerminalPane({
     let pendingInput = '';
     let flushingInput = false;
 
-    void Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit')])
+    void loadTerminalRuntime()
       .then(async ([{ Terminal: Xterm }, { FitAddon }]) => {
         if (disposed) return;
 
