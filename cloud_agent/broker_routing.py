@@ -18,10 +18,13 @@ opens every other host's broker.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
+
+import httpx
 
 from cloud_agent_host.workspace_broker_client import (
     WorkspaceBrokerClient,
@@ -82,6 +85,44 @@ def validate_broker_url(url: str | None) -> str | None:
 
 ENV_BROKER_TOKEN = "AGENT_WORKSPACE_BROKER_TOKEN"
 
+#: One connection pool per broker origin, keyed by the exact URL the host row
+#: named. A broker client is built per request — one per file read, one per
+#: terminal keystroke — so a pool on the instance would be a pool of one; it
+#: has to outlive the object that uses it.
+#:
+#: **This is not the process-global fallback the module docstring refuses.**
+#: That rule is about *which* broker a request reaches, and the host row still
+#: decides that: nothing is looked up here without a URL that resolution
+#: already produced. What this removes is the TCP connect in front of a broker
+#: the row had already named. The dictionary is bounded by the number of
+#: enrolled hosts.
+_POOLS: dict[str, httpx.AsyncClient] = {}
+
+
+def _pool_for(url: str) -> httpx.AsyncClient:
+    """Return the shared pool for one broker URL, opening it on first use."""
+    pool = _POOLS.get(url)
+    if pool is None or pool.is_closed:
+        # No default timeout: every borrowed call passes its own, because the
+        # deadlines differ per operation and one client cannot carry them all.
+        pool = httpx.AsyncClient()
+        _POOLS[url] = pool
+    return pool
+
+
+async def close_broker_clients() -> None:
+    """Close every broker pool this process opened; called at shutdown.
+
+    Failures are swallowed deliberately: this runs while the application is
+    already going away, and a broker that has stopped answering must not turn
+    shutdown into a traceback.
+    """
+    pools = list(_POOLS.values())
+    _POOLS.clear()
+    for pool in pools:
+        with contextlib.suppress(Exception):
+            await pool.aclose()
+
 
 def _client_for(host: dict[str, Any]) -> WorkspaceBrokerClient | None:
     """Build a client for one host row, or ``None`` when it cannot be reached."""
@@ -91,7 +132,7 @@ def _client_for(host: dict[str, Any]) -> WorkspaceBrokerClient | None:
     token = (os.environ.get(ENV_BROKER_TOKEN) or "").strip()
     if not token:
         return None
-    return WorkspaceBrokerClient(url, token)
+    return WorkspaceBrokerClient(url, token, client=_pool_for(url))
 
 
 async def broker_for_attempt(

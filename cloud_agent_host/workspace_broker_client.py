@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -45,9 +46,43 @@ class WorkspaceBrokerStream:
 class WorkspaceBrokerClient:
     """Talk to the broker without exposing its credential to the browser."""
 
-    def __init__(self, base_url: str, token: str) -> None:
+    def __init__(
+        self, base_url: str, token: str, *, client: httpx.AsyncClient | None = None
+    ) -> None:
+        """Address one broker.
+
+        Args:
+            base_url: The broker's origin, as its host reported it.
+            token: The pool's shared broker credential.
+            client: A client to borrow for request-shaped calls. These objects
+                are built per request — one per file read, per terminal
+                keystroke — so the pool cannot live on the instance; the
+                caller keeps it, keyed by ``base_url``, and closes it. Without
+                one, each call opens and closes its own connection as before.
+        """
         self._base_url = base_url.rstrip("/")
         self._headers = {"X-Agent-Workspace-Token": token}
+        self._client = client
+
+    @asynccontextmanager
+    async def _http(self, timeout: float) -> AsyncIterator[httpx.AsyncClient]:
+        """Yield a client for one request-shaped call.
+
+        A borrowed client is left open — it outlives this object by design.
+        The timeout travels with the request rather than the client for the
+        same reason: the deadlines here differ per call (3s for a health
+        probe, 60s for the shared supervisor) and a shared client cannot carry
+        all of them.
+
+        The terminal *stream* deliberately does not come through here. It
+        needs ``read=None`` and it hands its client to the caller to close,
+        neither of which a shared pool can offer.
+        """
+        if self._client is not None:
+            yield self._client
+            return
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            yield client
 
     @staticmethod
     def _response_error(response: httpx.Response) -> WorkspaceBrokerError:
@@ -73,13 +108,14 @@ class WorkspaceBrokerClient:
         timeout: float = 30,
     ) -> dict[str, Any]:
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with self._http(timeout) as client:
                 response = await client.request(
                     method,
                     f"{self._base_url}/workspaces/{workspace_id}/{suffix}",
                     headers=self._headers,
                     params=params,
                     json=json,
+                    timeout=timeout,
                 )
         except httpx.HTTPError as exc:
             raise WorkspaceBrokerError(
@@ -107,12 +143,13 @@ class WorkspaceBrokerClient:
         if suffix:
             path += f"/{suffix}"
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with self._http(timeout) as client:
                 response = await client.request(
                     method,
                     f"{self._base_url}{path}",
                     headers=self._headers,
                     json=json,
+                    timeout=timeout,
                 )
         except httpx.HTTPError as exc:
             raise WorkspaceBrokerError(
@@ -140,8 +177,10 @@ class WorkspaceBrokerClient:
         Deliberately short: a hanging broker must not hold up a heartbeat.
         """
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.get(f"{self._base_url}/health", headers=self._headers)
+            async with self._http(timeout) as client:
+                response = await client.get(
+                    f"{self._base_url}/health", headers=self._headers, timeout=timeout
+                )
         except httpx.HTTPError as exc:
             raise WorkspaceBrokerError(503, f"unreachable: {exc}") from exc
         if response.is_error:

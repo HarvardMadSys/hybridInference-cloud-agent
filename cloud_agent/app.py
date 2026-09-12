@@ -904,7 +904,9 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     fails at every call.
     """
     import asyncpg
+    import httpx
 
+    from cloud_agent.broker_routing import close_broker_clients
     from cloud_agent.capacity_history import collect_host_capacity_history
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
@@ -932,11 +934,20 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         raise
 
     app.state.storage = storage
-    app.state.gateway = GatewayClient()
+    # One pool, shared by both gateway clients. Each call used to build its own
+    # client and pay a connect — and a TLS handshake, where the gateway is
+    # behind TLS — and admission is not an occasional call: `require_agent_owner`
+    # is a dependency of every owner route, terminal input and resize included.
+    # Both clients pass their own deadline per request, so this one carries no
+    # default timeout of its own.
+    http = httpx.AsyncClient()
+    app.state.http = http
+    app.state.gateway = GatewayClient(client=http)
     # The sandbox's credential is minted at the gateway now (E9), so the claim
-    # path and the renewal/revocation passes share one client — and one
-    # connection pool — rather than each building their own per call.
-    app.state.grants = GrantClient()
+    # path and the renewal/revocation passes share that pool rather than each
+    # building their own per call. They take the same seam; until this was
+    # wired, the comment here described sharing that was not happening.
+    app.state.grants = GrantClient(client=http)
     _build_source_control(app)
 
     # **The background work belongs to exactly one process.** The reaper
@@ -996,6 +1007,13 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        # Close what was opened, innermost first: the per-broker pools, the
+        # GitHub App's own client, then the shared gateway pool.
+        await close_broker_clients()
+        credentials = getattr(app.state, "app_credentials", None)
+        if credentials is not None:
+            await credentials.aclose()
+        await http.aclose()
         await pool.close()
         logger.info("cloud agent control plane stopped")
 

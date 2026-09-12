@@ -22,14 +22,18 @@ from __future__ import annotations
 import json as json_module
 import re
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlencode
 
 import httpx
 import jwt
 
 from cloud_agent.logging_utils import get_logger
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 logger = get_logger(__name__)
 
@@ -137,11 +141,60 @@ class _CachedToken:
 class GitHubAppCredentials:
     """Mints and caches installation tokens for the publisher."""
 
-    def __init__(self, config: AppConfig, *, timeout_s: float = 30.0) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        timeout_s: float = 30.0,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        """Build a minter.
+
+        Args:
+            config: The App's identity and private key.
+            timeout_s: Deadline for one GitHub call.
+            client: An existing client to borrow. Supplying one makes this
+                object a user of someone else's pool rather than the owner of
+                its own, which is what tests want; :meth:`aclose` then leaves
+                it alone.
+        """
         self._config = config
         self._timeout_s = timeout_s
         self._tokens: dict[tuple[int, str], _CachedToken] = {}
         self._installations: dict[str, int] = {}
+        self._client = client
+        self._owned: httpx.AsyncClient | None = None
+
+    @asynccontextmanager
+    async def _http(self) -> AsyncIterator[httpx.AsyncClient]:
+        """Yield a client for one GitHub call, reusing this object's own.
+
+        A client per call meant a fresh TCP connection and a fresh TLS
+        handshake to api.github.com every time — and these calls are not
+        occasional. Repository entitlement resolves through
+        :meth:`repositories_for_installation` on every workspace file read and
+        every terminal open, so a per-call handshake was on the interactive
+        path, not just the publisher's.
+
+        One client for this object's lifetime instead. It is created on first
+        use rather than in ``__init__`` because a client binds to the running
+        loop, and this object is built during application startup.
+        """
+        if self._client is not None:
+            yield self._client
+            return
+        if self._owned is None:
+            self._owned = httpx.AsyncClient(timeout=self._timeout_s)
+        yield self._owned
+
+    async def aclose(self) -> None:
+        """Release the client this object created, if it created one.
+
+        A borrowed client belongs to whoever passed it in and is left open.
+        """
+        owned, self._owned = self._owned, None
+        if owned is not None:
+            await owned.aclose()
 
     @property
     def user_authorization_configured(self) -> bool:
@@ -165,7 +218,7 @@ class GitHubAppCredentials:
         self, method: str, path: str, *, token: str, json: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         """Call the GitHub API and return the decoded body."""
-        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+        async with self._http() as client:
             response = await client.request(
                 method,
                 f"{self._config.api_base}{path}",
@@ -288,7 +341,7 @@ class GitHubAppCredentials:
                 "the GitHub App's client id and secret are not configured, so the "
                 "connect flow cannot verify who is connecting"
             )
-        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+        async with self._http() as client:
             response = await client.post(
                 "https://github.com/login/oauth/access_token",
                 headers={"Accept": "application/json"},
@@ -309,7 +362,7 @@ class GitHubAppCredentials:
 
     async def installations_for_user(self, user_token: str) -> list[dict[str, Any]]:
         """List the installations this user can actually reach."""
-        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+        async with self._http() as client:
             response = await client.get(
                 f"{self._config.api_base}/user/installations",
                 headers={
@@ -337,7 +390,7 @@ class GitHubAppCredentials:
         token = await self._installation_token(installation_id)
         repos: list[str] = []
         page = 1
-        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+        async with self._http() as client:
             while page <= 10:  # bounded: 1000 repositories is plenty
                 response = await client.get(
                     f"{self._config.api_base}/installation/repositories",
@@ -380,7 +433,7 @@ class GitHubAppCredentials:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+        async with self._http() as client:
             meta = await client.get(
                 f"{self._config.api_base}/repos/{owner}/{name}", headers=headers
             )
@@ -408,7 +461,7 @@ class GitHubAppCredentials:
         if not owner or not name:
             raise GitHubAppError(f"repo must be 'owner/name', got {repo!r}")
         token = await self.token_for(repo, permissions={"contents": "read"}, repository_scoped=True)
-        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+        async with self._http() as client:
             response = await client.get(
                 f"{self._config.api_base}/repos/{owner}/{name}/commits/{ref}",
                 headers={
@@ -459,7 +512,7 @@ class GitHubAppCredentials:
         endpoint = f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/contents"
         if parts:
             endpoint += "/" + "/".join(quote(part, safe="") for part in parts)
-        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+        async with self._http() as client:
             response = await client.get(
                 f"{self._config.api_base}{endpoint}",
                 params={"ref": ref},
