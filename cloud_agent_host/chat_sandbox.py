@@ -61,7 +61,7 @@ from cloud_agent_host.sandbox import (
 from cloud_agent_host.tool_windows import MAX_TOOL_MARK_BYTES, TOOL_MARK_FILE, ToolMarkReader
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
 
 
 CHAT_SANDBOX_LABEL = "org.freeinference.chat-sandbox"
@@ -438,6 +438,75 @@ class ChatSandboxManager:
             and ipv4_subnets[0].subnet_of(self._chat_network_pool)
         )
 
+    def _inspect_containers(self, container_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Inspect many containers in one call, keyed by the id asked for.
+
+        ``docker container inspect`` takes any number of ids and answers for
+        all of them at once, and the marginal cost of an extra id is a few
+        hundred microseconds against roughly twelve milliseconds for the
+        process itself. Asking once per container — which is what the callers
+        below used to do — made a reconcile's cost scale with the size of the
+        egress backplane for no reason.
+
+        An id that does not resolve is simply absent from the result. Docker
+        exits non-zero when *any* id is missing while still answering for the
+        rest, so the output is parsed regardless of the exit code: a partial
+        answer is the normal case here, since Compose replacement can remove
+        an endpoint between the network inspection and this one.
+        """
+        wanted = list(dict.fromkeys(str(container_id) for container_id in container_ids))
+        if not wanted:
+            return {}
+        result = self._run(
+            [self.backend.docker_binary, "container", "inspect", *wanted], timeout=30
+        )
+        try:
+            payload = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(payload, list):
+            return {}
+
+        found: dict[str, dict[str, Any]] = {}
+        for raw in payload:
+            if not isinstance(raw, dict):
+                continue
+            identifier = str(raw.get("Id") or "")
+            name = str(raw.get("Name") or "").removeprefix("/")
+            for container_id in wanted:
+                if container_id in found:
+                    continue
+                # A caller may hold a full id, a short id, or a name; Docker
+                # always answers with the full id and the name.
+                if container_id in (identifier, name) or identifier.startswith(container_id):
+                    found[container_id] = raw
+                    break
+        return found
+
+    @staticmethod
+    def _endpoint_aliases(raw: dict[str, Any], network: str) -> set[str] | None:
+        """Every name one container answers to on ``network``, or ``None``."""
+        endpoint = ((raw.get("NetworkSettings") or {}).get("Networks") or {}).get(network)
+        if endpoint is None:
+            return None
+        return {
+            str(alias).lower().rstrip(".")
+            for alias in [*(endpoint.get("Aliases") or []), *(endpoint.get("DNSNames") or [])]
+            if alias
+        }
+
+    def _network_aliases_for(
+        self, container_ids: Sequence[str], network: str
+    ) -> dict[str, set[str]]:
+        """``_container_network_aliases`` for many containers, in one call."""
+        inspected = self._inspect_containers(container_ids)
+        resolved: dict[str, set[str]] = {}
+        for container_id, raw in inspected.items():
+            aliases = self._endpoint_aliases(raw, network)
+            if aliases is not None:
+                resolved[container_id] = aliases
+        return resolved
+
     def _service_owners(self, base: str, aliases: tuple[str, ...]) -> dict[str, list[str]]:
         """Resolve each configured service alias to one running base-network peer."""
         network = self._inspect_network(base)
@@ -447,19 +516,14 @@ class ChatSandboxManager:
         if not isinstance(containers, dict):
             raise SandboxError(f"configured egress backplane {base!r} is invalid")
         matches: dict[str, list[str]] = {alias: [] for alias in aliases}
-        for container_id in containers:
-            result = self._run(
-                [self.backend.docker_binary, "container", "inspect", str(container_id)],
-                timeout=30,
-            )
-            if result.returncode != 0:
-                # Compose replacement can remove an endpoint between the two
-                # inspections. The final exact-one check below turns that race
-                # into a retryable activation failure rather than selecting a
-                # different container.
-                continue
+        # One inspection for the whole backplane. A container that Compose
+        # replaced between the network inspection and this one is simply
+        # absent, and the exact-one check below turns that race into a
+        # retryable activation failure rather than selecting a different
+        # container — which is what the per-container non-zero exit used to do.
+        inspected = self._inspect_containers([str(entry) for entry in containers])
+        for container_id, raw in inspected.items():
             try:
-                raw = json.loads(result.stdout)[0]
                 if not bool((raw.get("State") or {}).get("Running")):
                     continue
                 endpoint = ((raw.get("NetworkSettings") or {}).get("Networks") or {}).get(
@@ -475,11 +539,11 @@ class ChatSandboxManager:
                     ]
                     if name
                 }
-            except (IndexError, TypeError, json.JSONDecodeError):
+            except (TypeError, AttributeError):
                 continue
             for alias in aliases:
                 if alias in names:
-                    matches[alias].append(str(container_id))
+                    matches[alias].append(container_id)
 
         owners: dict[str, list[str]] = {}
         for alias, candidates in matches.items():
@@ -494,23 +558,8 @@ class ChatSandboxManager:
         return owners
 
     def _container_network_aliases(self, container_id: str, network: str) -> set[str] | None:
-        result = self._run(
-            [self.backend.docker_binary, "container", "inspect", container_id], timeout=30
-        )
-        if result.returncode != 0:
-            return None
-        try:
-            raw = json.loads(result.stdout)[0]
-            endpoint = ((raw.get("NetworkSettings") or {}).get("Networks") or {}).get(network)
-            if endpoint is None:
-                return None
-            return {
-                str(alias).lower().rstrip(".")
-                for alias in [*(endpoint.get("Aliases") or []), *(endpoint.get("DNSNames") or [])]
-                if alias
-            }
-        except (IndexError, TypeError, json.JSONDecodeError):
-            return None
+        """One container's names on ``network``; ``None`` if it is not on it."""
+        return self._network_aliases_for([container_id], network).get(container_id)
 
     def fixed_service_addresses(self, phase: str, network: str) -> dict[str, str]:
         """Resolve only configured relays to their addresses on the given bridge."""
@@ -641,9 +690,10 @@ class ChatSandboxManager:
             permitted.add(sandbox.container_id)
 
         required_aliases = set(service_aliases)
-        unexpected = set(map(str, containers)) - permitted
-        for container_id in sorted(unexpected):
-            endpoint_aliases = self._container_network_aliases(container_id, network)
+        unexpected = sorted(set(map(str, containers)) - permitted)
+        peer_aliases = self._network_aliases_for(unexpected, network)
+        for container_id in unexpected:
+            endpoint_aliases = peer_aliases.get(container_id)
             if not endpoint_aliases or not endpoint_aliases.intersection(required_aliases):
                 raise SandboxError(
                     f"chat-private egress network {network!r} contains an unexpected peer"
@@ -912,10 +962,14 @@ class ChatSandboxManager:
             for value in str(labels.get(CHAT_NETWORK_SERVICES_LABEL) or "").split(",")
             if value.strip()
         }
-        for container_id in sorted(map(str, containers)):
-            if container_id == sandbox_id:
-                continue
-            endpoint_aliases = self._container_network_aliases(container_id, network_name)
+        peers = [
+            container_id
+            for container_id in sorted(map(str, containers))
+            if container_id != sandbox_id
+        ]
+        peer_aliases = self._network_aliases_for(peers, network_name)
+        for container_id in peers:
+            endpoint_aliases = peer_aliases.get(container_id)
             if not endpoint_aliases or not endpoint_aliases.intersection(recorded_aliases):
                 raise SandboxError(
                     f"chat-private egress network {network_name!r} contains an unexpected peer"
@@ -970,8 +1024,10 @@ class ChatSandboxManager:
             raise SandboxError("orphan chat-private network has invalid ownership metadata")
         if not isinstance(containers, dict):
             raise SandboxError("orphan chat-private network has invalid ownership metadata")
-        for container_id in sorted(map(str, containers)):
-            endpoint_aliases = self._container_network_aliases(container_id, network_name)
+        peers = sorted(map(str, containers))
+        peer_aliases = self._network_aliases_for(peers, network_name)
+        for container_id in peers:
+            endpoint_aliases = peer_aliases.get(container_id)
             if not endpoint_aliases or not endpoint_aliases.intersection(recorded_aliases):
                 raise SandboxError("orphan chat-private network contains an unexpected peer")
         for container_id in sorted(map(str, containers)):

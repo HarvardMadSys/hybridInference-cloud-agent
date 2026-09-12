@@ -853,7 +853,11 @@ def test_idle_stop_releases_private_network_and_wake_recreates_agent_phase(monke
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(manager, "_inspect_network", inspect_network)
-    monkeypatch.setattr(manager, "_container_network_aliases", lambda cid, _net: endpoints.get(cid))
+    monkeypatch.setattr(
+        manager,
+        "_network_aliases_for",
+        lambda ids, _net: {cid: endpoints[cid] for cid in ids if endpoints.get(cid)},
+    )
     monkeypatch.setattr(manager, "inspect", lambda _name: current)
     monkeypatch.setattr(manager, "_require", lambda _spec: current)
     monkeypatch.setattr(manager, "_ensure_phase_network", lambda *_args: expected)
@@ -964,7 +968,11 @@ def test_agent_transition_removes_the_no_longer_reachable_setup_bridge(monkeypat
         manager, "_ensure_phase_network", lambda _spec, phase: agent if phase == "agent" else setup
     )
     monkeypatch.setattr(manager, "_inspect_network", inspect_network)
-    monkeypatch.setattr(manager, "_container_network_aliases", lambda cid, _net: endpoints.get(cid))
+    monkeypatch.setattr(
+        manager,
+        "_network_aliases_for",
+        lambda ids, _net: {cid: endpoints[cid] for cid in ids if endpoints.get(cid)},
+    )
     monkeypatch.setattr(manager, "inspect", lambda _name: current)
     monkeypatch.setattr(manager, "_require", lambda _spec: current)
     monkeypatch.setattr(manager, "_run", run)
@@ -1048,7 +1056,11 @@ def test_broker_startup_prunes_a_phase_network_left_before_container_create(monk
         raise AssertionError(argv)
 
     monkeypatch.setattr(manager, "_inspect_network", inspect_network)
-    monkeypatch.setattr(manager, "_container_network_aliases", lambda cid, _net: endpoints.get(cid))
+    monkeypatch.setattr(
+        manager,
+        "_network_aliases_for",
+        lambda ids, _net: {cid: endpoints[cid] for cid in ids if endpoints.get(cid)},
+    )
     monkeypatch.setattr(manager, "_run", run)
 
     manager.prune_orphan_networks([])
@@ -1106,8 +1118,8 @@ def test_ownerless_prune_pins_the_old_id_across_a_same_name_replacement(monkeypa
     monkeypatch.setattr(manager, "_inspect_network", inspect_network)
     monkeypatch.setattr(
         manager,
-        "_container_network_aliases",
-        lambda _container, _network: {"package-proxy"},
+        "_network_aliases_for",
+        lambda ids, _network: {cid: {"package-proxy"} for cid in ids},
     )
     monkeypatch.setattr(manager, "_run", run)
 
@@ -1168,7 +1180,13 @@ def test_ownerless_prune_restores_relays_after_a_late_sandbox_attach(monkeypatch
         raise AssertionError(argv)
 
     monkeypatch.setattr(manager, "_inspect_network", lambda _name: network())
-    monkeypatch.setattr(manager, "_container_network_aliases", aliases)
+    monkeypatch.setattr(
+        manager,
+        "_network_aliases_for",
+        lambda ids, network: {
+            cid: found for cid in ids if (found := aliases(cid, network)) is not None
+        },
+    )
     monkeypatch.setattr(
         manager,
         "_service_owners",
@@ -1490,7 +1508,13 @@ def test_stale_prune_restores_relays_when_a_sandbox_attaches_before_remove(
 
     monkeypatch.setattr(manager, "_inspect_network", lambda _name: network())
     monkeypatch.setattr(manager, "inspect", inspect)
-    monkeypatch.setattr(manager, "_container_network_aliases", aliases)
+    monkeypatch.setattr(
+        manager,
+        "_network_aliases_for",
+        lambda ids, network: {
+            cid: found for cid in ids if (found := aliases(cid, network)) is not None
+        },
+    )
     monkeypatch.setattr(
         manager,
         "_service_owners",
@@ -2474,3 +2498,96 @@ def test_spec_rejects_invalid_identity_or_stop_budget(field, value, message):
 
     with pytest.raises(ValueError, match=message):
         ChatSandboxSpec(**kwargs)
+
+
+def test_backplane_peers_are_inspected_in_one_call(monkeypatch):
+    """One `docker inspect` for the whole backplane, not one per container.
+
+    Every reconcile resolves the trusted service aliases, and it used to fork a
+    process per container on the egress backplane — so a reconcile's cost grew
+    with the size of the backplane for no reason. Measured on the deployment
+    host: twelve milliseconds per `container inspect`, and seventeen for seven
+    ids in a single call.
+    """
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="unused", egress=_isolated_policy())
+    )
+    base = manager.backend.network_for_phase("agent")
+    peers = {"gw": "agent-gateway", "mcp": "agent-mcp", "other-a": "x", "other-b": "y"}
+
+    monkeypatch.setattr(
+        manager,
+        "_inspect_network",
+        lambda name: {"Name": name, "Containers": {cid: {} for cid in peers}},
+    )
+
+    calls: list[list[str]] = []
+
+    def run(argv, **_kwargs):
+        calls.append(list(argv))
+        assert argv[1:3] == ["container", "inspect"]
+        requested = argv[3:]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "Id": cid,
+                        "Name": f"/{cid}",
+                        "State": {"Running": True},
+                        "Config": {"Hostname": cid},
+                        "NetworkSettings": {"Networks": {base: {"Aliases": [peers[cid]]}}},
+                    }
+                    for cid in requested
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(manager, "_run", run)
+
+    owners = manager._service_owners(base, ("agent-gateway", "agent-mcp"))
+
+    assert owners == {"gw": ["agent-gateway"], "mcp": ["agent-mcp"]}
+    assert len(calls) == 1, f"one call for four peers, got {len(calls)}"
+    assert sorted(calls[0][3:]) == ["gw", "mcp", "other-a", "other-b"]
+
+
+def test_a_peer_that_vanished_mid_reconcile_is_simply_absent(monkeypatch):
+    """Docker exits non-zero when one id is missing but still answers for the rest.
+
+    Compose replacement can remove an endpoint between the network inspection
+    and this one. The batched call must read that partial answer rather than
+    discard it on the exit code — the exact-one check below is what turns the
+    race into a retryable failure.
+    """
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="unused", egress=_isolated_policy())
+    )
+    base = manager.backend.network_for_phase("agent")
+
+    monkeypatch.setattr(
+        manager,
+        "_inspect_network",
+        lambda name: {"Name": name, "Containers": {"gw": {}, "gone": {}}},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_run",
+        lambda argv, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout=json.dumps(
+                [
+                    {
+                        "Id": "gw",
+                        "Name": "/gw",
+                        "State": {"Running": True},
+                        "NetworkSettings": {"Networks": {base: {"Aliases": ["agent-gateway"]}}},
+                    }
+                ]
+            ),
+            stderr="Error: No such container: gone",
+        ),
+    )
+
+    assert manager._service_owners(base, ("agent-gateway",)) == {"gw": ["agent-gateway"]}
