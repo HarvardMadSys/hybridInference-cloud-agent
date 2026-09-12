@@ -15,6 +15,7 @@ import Link from 'next/link';
 import toast from 'react-hot-toast';
 
 import { Markdown } from '@/components/ui/Markdown';
+import { basePath } from '@/config/env';
 import { useT } from '@/components/providers';
 import {
   cancelAgentJob,
@@ -1359,10 +1360,11 @@ export function JobDetail({
         // carried no level and now shows one differs, so it is sent.
         ...(effort && effort !== job.reasoningEffort ? { reasoning_effort: effort } : {}),
       });
-      // This is the next turn of the same transcript, not a new page for the
-      // reader. Next scrolls on navigation by default, which jumps the task
-      // region back to the top and makes every follow-up look like a reload.
-      router.push(`/${child.id}`, { scroll: false });
+      // A router.push remounts the dynamic [jobId] segment even with
+      // scroll:false and a stable JobDetail key. Native history updates Next's
+      // usePathname without replacing the page, preserving the conversation
+      // while useAgentJob loads the next turn. Reload and Back keep real URLs.
+      window.history.pushState(null, '', `${basePath}/${encodeURIComponent(child.id)}`);
       // The reader asked for this turn, so following its output is what they
       // asked for — the one place besides "back to bottom" that resumes it.
       scroll.followLatest();
@@ -1448,6 +1450,12 @@ export function JobDetail({
   const currentTurn = describeCurrentTurn(job, { attemptNo, currentAttemptNo });
   const threadMessages = currentTurn.messages;
   const visibleEvents = currentTurn.events;
+  const continuingConversation =
+    job.state === 'running' &&
+    currentTurn.displayNo > 1 &&
+    selectedAttemptIsCurrent &&
+    visibleEvents.length === 0 &&
+    !job.liveNote;
   const currentRewindAnchor = job.historyTurns
     ? [...job.historyTurns].reverse().find((turn) => turn.forkable)?.jobId
     : undefined;
@@ -1876,6 +1884,15 @@ export function JobDetail({
                         <div className="flex items-center gap-2.5 py-3 text-[13px] text-gray-500 dark:text-gray-400">
                           <span className="h-2 w-2 animate-pulse rounded-full bg-gray-400 dark:bg-gray-600" />
                           Waiting to start
+                        </div>
+                      ) : null}
+                      {continuingConversation ? (
+                        <div
+                          role="status"
+                          className="flex items-center gap-2.5 py-3 text-[13px] text-gray-500 dark:text-gray-400"
+                        >
+                          <span className="h-2 w-2 animate-pulse rounded-full bg-gray-400 dark:bg-gray-600" />
+                          Continuing conversation…
                         </div>
                       ) : null}
                     </div>

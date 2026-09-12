@@ -57,6 +57,66 @@ function event(
 }
 
 describe('useAgentJob live turn rows', () => {
+  it('keeps the previous transcript while loading a follow-up without mixing their streams', async () => {
+    const first = {
+      id: 'live-job',
+      state: 'running',
+      current_attempt_id: 10,
+      thread_id: 'live-thread',
+      turn_no: 1,
+      task_prompt: 'First question',
+      runtime: 'codex',
+      model: 'test',
+      title_source: 'generated',
+    } as AgentJobApi;
+    const next: AgentJobApi = {
+      ...first,
+      id: 'next-job',
+      turn_no: 2,
+      state: 'queued',
+      current_attempt_id: null,
+    };
+    const answer = event(1, 'message', { text: 'First answer' });
+    const firstThread = {
+      thread_id: first.thread_id,
+      jobs: [first],
+      messages: [],
+    } as unknown as AgentThreadApi;
+    let resolveNext!: (job: AgentJobApi) => void;
+    vi.mocked(getAgentJob).mockImplementation((id) =>
+      id === first.id ? Promise.resolve(first) : new Promise((resolve) => (resolveNext = resolve)),
+    );
+    vi.mocked(getAgentJobThread).mockImplementation(async (id) =>
+      id === first.id ? firstThread : { ...firstThread, jobs: [first, next] },
+    );
+    vi.mocked(listAllAgentThreadEvents).mockResolvedValue([answer]);
+    vi.mocked(streamAgentJob).mockResolvedValue(undefined);
+
+    const { result, rerender } = renderHook(({ id }) => useAgentJob(id), {
+      initialProps: { id: first.id },
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const oldStream = vi.mocked(streamAgentJob).mock.calls[0][1];
+    expect(result.current.events).toEqual([answer]);
+
+    rerender({ id: next.id });
+    expect(result.current.loading).toBe(true);
+    expect(result.current.job?.id).toBe(first.id);
+    expect(result.current.events).toEqual([answer]);
+    expect(oldStream.signal?.aborted).toBe(true);
+    expect(streamAgentJob).toHaveBeenCalledTimes(1);
+
+    await act(async () => resolveNext(next));
+    expect(result.current.job?.id).toBe(next.id);
+    expect(result.current.events).toEqual([answer]);
+    expect(streamAgentJob).toHaveBeenCalledTimes(2);
+    const newStream = vi.mocked(streamAgentJob).mock.calls[1][1];
+    act(() => newStream.onEvent(event(2, 'lifecycle', { phase: 'started' }, 11)));
+    expect(result.current.job?.state).toBe('running');
+    expect(result.current.events.at(-1)).toMatchObject({ job_id: next.id, turn_no: 2 });
+    expect(result.current.threadJobs[0]).toEqual(first);
+  });
+
   it('refreshes shared activity while the selected follow-up waits and hands off to its stream', async () => {
     vi.useFakeTimers();
     const initial = {

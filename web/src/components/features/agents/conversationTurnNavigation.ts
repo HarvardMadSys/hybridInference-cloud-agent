@@ -225,6 +225,29 @@ function visibleForAttempt(event: AgentEvent, attemptNo: number): boolean {
   return event.attemptNo === undefined || attemptNo === 0 || event.attemptNo === attemptNo;
 }
 
+// Retained-session bookkeeping is useful in Trajectory, but a follow-up in
+// Chat should read as a continuation. Keep the original job events intact:
+// workspace controls still need their readiness and finalization phases.
+const FOLLOW_UP_INTERNAL_PHASES = new Set([
+  'started',
+  'init',
+  'system',
+  'checked_out',
+  'workspace_reused',
+  'context_restored',
+  'setup',
+  'workspace_preparing',
+  'workspace_ready',
+  'workspace_finalizing',
+]);
+
+function chatEvents(events: AgentEvent[], turnNo: number): AgentEvent[] {
+  if (turnNo <= 1) return events;
+  return events.filter(
+    (event) => event.kind !== 'lifecycle' || !FOLLOW_UP_INTERNAL_PHASES.has(event.text),
+  );
+}
+
 /** Tool rows a rendered event list contains. */
 function toolCallsIn(events: readonly AgentEvent[]): number {
   return events.filter((event) => event.kind === 'tool_use').length;
@@ -257,7 +280,7 @@ function historyTurnDescription(
     turnNo: turn.turnNo,
     ...(turn.state === undefined ? {} : { state: turn.state }),
     messages: turn.messages,
-    events: turn.events,
+    events: chatEvents(turn.events, displayNo),
     fallbackResponses,
     promptCard: null,
     forkable: turn.forkable,
@@ -303,7 +326,10 @@ export function describeCurrentTurn(
   options: ConversationTurnOptions = {},
 ): ConversationTurnDescription {
   const attemptNo = options.attemptNo ?? 0;
-  const events = job.events.filter((event) => visibleForAttempt(event, attemptNo));
+  const events = chatEvents(
+    job.events.filter((event) => visibleForAttempt(event, attemptNo)),
+    job.turnNo ?? (job.historyTurns?.length ?? 0) + 1,
+  );
 
   if (job.historyTurns === undefined) {
     // Fixture, list and standalone shape: the job carries one flat message list

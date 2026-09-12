@@ -4,13 +4,16 @@ import Link from 'next/link';
 import { useEffect } from 'react';
 import { useAuth } from '@/components/providers';
 import { markConversationRead } from '@/components/features/agents/useConversationReadState';
-import { useParams } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import { JobDetail } from '@/components/features/agents/JobDetail';
 import { useAgentJob } from '@/components/features/agents/useAgentJobs';
 
 export default function AgentJobPage() {
-  const params = useParams<{ jobId: string }>();
-  const jobId = params?.jobId ?? '';
+  // Follow-ups update browser history within this mounted conversation. Next
+  // synchronizes usePathname with that URL; useParams still describes the
+  // original route segment until a full router navigation happens.
+  const pathname = usePathname();
+  const jobId = pathname?.split('/').filter(Boolean).at(-1) ?? '';
   const { state } = useAuth();
   const userId = state.user?.id;
   return <AgentJobContent key={userId ?? 'signed-out'} jobId={jobId} userId={userId} />;
@@ -26,12 +29,8 @@ function AgentJobContent({ jobId, userId }: { jobId: string; userId?: string }) 
     );
   }, [job, jobId, loading, error, userId]);
 
-  // Only the first load blanks the page. Sending a follow-up navigates to a
-  // new turn of the same conversation, and replacing everything with a
-  // centred "Loading…" for that round trip is why sending felt like a page
-  // refresh — the thread the reader was in the middle of vanished and came
-  // back. The hook keeps the previous job until the next one arrives, so
-  // there is something to show throughout.
+  // Keep the conversation visible while fetching its next turn. This also
+  // requires keeping the route mounted when submitting a follow-up.
   if (loading && !job) {
     return (
       <div className="flex h-full items-center justify-center">
