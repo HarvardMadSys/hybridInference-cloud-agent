@@ -955,15 +955,6 @@ jobs:
           enable-cache: true
           prune-cache: false
 
-      - name: Start it, and assert what only starting shows
-        run: |
-          set -euo pipefail
-          uv run --with-editable . python deploy/release/smoke.py \
-            ${{ matrix.artifact.smoke_args }} \
-            --image "${IMAGE_TAG}" \
-            --suffix "${SUFFIX}" \
-            --revision "${GITHUB_SHA}"
-
       - name: All five CLIs retain MCP through approval, resume and fork
         if: matrix.artifact.name == 'sandbox'
         timeout-minutes: 10
@@ -991,6 +982,16 @@ jobs:
           MCP_TEST_HOST=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
           export TEST_DB_PORT MCP_TEST_HOST
           uv run pytest -q -m external tests/external/test_resident_mcp_parity.py
+
+      # The smoke harness removes its image, so run it after the CLI matrix.
+      - name: Start it, and assert what only starting shows
+        run: |
+          set -euo pipefail
+          uv run --with-editable . python deploy/release/smoke.py \
+            ${{ matrix.artifact.smoke_args }} \
+            --image "${IMAGE_TAG}" \
+            --suffix "${SUFFIX}" \
+            --revision "${GITHUB_SHA}"
 
       # The harness removes what it started; this is the backstop for the paths
       # where it never got that far. Hosted runners are discarded, these are

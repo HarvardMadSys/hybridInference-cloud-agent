@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { McpSessionPanel } from './McpSessionPanel';
 import type { McpBindingApi, McpConnectionApi, McpInvocationApi } from '@/lib/api/mcp';
@@ -136,10 +136,87 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.resetAllMocks();
 });
 
 describe('McpSessionPanel', () => {
+  it('follows an approved call to its final outcome without reviving stale approvals', async () => {
+    vi.useFakeTimers();
+    mockedBindings.mockResolvedValue({ bindings: [] });
+    mockedInvocations.mockResolvedValue({ invocations: [invocation] });
+    mockedDecide.mockResolvedValue({ ...invocation, status: 'approved' });
+    await act(async () => {
+      render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
+    });
+
+    let finishPoll!: (value: { invocations: McpInvocationApi[] }) => void;
+    mockedInvocations.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishPoll = resolve;
+        }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    });
+    expect(screen.getByText('search · approved')).toBeInTheDocument();
+    await act(async () => {
+      finishPoll({ invocations: [invocation] });
+    });
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
+
+    mockedInvocations.mockResolvedValue({
+      invocations: [
+        {
+          ...invocation,
+          status: 'outcome_unknown',
+          guidance: 'Check the service before retrying.',
+        },
+      ],
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(screen.getByText('search · outcome_unknown')).toBeInTheDocument();
+    expect(screen.getByText('Check the service before retrying.')).toBeInTheDocument();
+    expect(mockedInvocations).toHaveBeenCalledWith({ jobId: 'job-1' });
+    expect(mockedInvocations).toHaveBeenCalledWith({ jobId: 'job-1', pendingOnly: true });
+  });
+
+  it('keeps older pending approvals visible even when recent history is full', async () => {
+    mockedBindings.mockResolvedValue({ bindings: [] });
+    const history = Array.from({ length: 50 }, (_, index) => ({
+      ...invocation,
+      id: 100 + index,
+      capability_name: `finished_${index}`,
+      status: 'completed',
+    }));
+    mockedInvocations.mockImplementation(({ pendingOnly }) =>
+      Promise.resolve({
+        invocations: pendingOnly ? [invocation] : history,
+      }),
+    );
+    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
+    expect(await screen.findByText('Team wiki wants to call search')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument();
+  });
+
+  it('clears the previous conversation while the next conversation loads', async () => {
+    mockedBindings.mockResolvedValue({ bindings: [binding] });
+    mockedInvocations.mockResolvedValue({ invocations: [invocation] });
+    const { rerender } = render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
+    await screen.findByText('Team wiki wants to call search');
+
+    mockedBindings.mockImplementation(() => new Promise(() => {}));
+    rerender(<McpSessionPanel jobId="job-2" threadId="thread-2" active />);
+    expect(screen.queryByText('Team wiki wants to call search')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save selection' })).not.toBeInTheDocument();
+  });
+
   it('groups capabilities and asks the user to choose on a pending selection', async () => {
     mockedBindings.mockResolvedValue({ bindings: [binding, unavailable] });
     mockedInvocations.mockResolvedValue({ invocations: [] });

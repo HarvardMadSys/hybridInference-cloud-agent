@@ -14,6 +14,7 @@ import {
   type McpCapabilityKind,
   type McpConnectionApi,
   type McpInvocationApi,
+  type McpInvocationStatus,
   type McpPolicy,
 } from '@/lib/api/mcp';
 
@@ -88,6 +89,52 @@ function draftSelections(bindings: McpBindingApi[]): Record<number, Selection> {
 function formatArguments(invocation: McpInvocationApi): string {
   if (!invocation.arguments) return 'The arguments are not readable on this deployment.';
   return JSON.stringify(invocation.arguments, null, 2);
+}
+
+const INVOCATION_PROGRESS: Record<McpInvocationStatus, number> = {
+  pending: 0,
+  approved: 1,
+  dispatching: 2,
+  denied: 3,
+  expired: 3,
+  completed: 3,
+  failed: 3,
+  outcome_unknown: 3,
+};
+
+/** A poll started before a decision must not put its approval button back. */
+function mergeInvocations(
+  current: McpInvocationApi[],
+  incoming: McpInvocationApi[],
+  snapshot = false,
+) {
+  const calls = new Map(
+    current.filter((call) => !snapshot || call.status !== 'pending').map((call) => [call.id, call]),
+  );
+  for (const call of incoming) {
+    const previous = calls.get(call.id);
+    if (!previous || INVOCATION_PROGRESS[call.status] >= INVOCATION_PROGRESS[previous.status]) {
+      calls.set(call.id, call);
+    }
+  }
+  const sorted = [...calls.values()].sort((a, b) => b.id - a.id);
+  return [
+    ...sorted.filter((call) => call.status === 'pending'),
+    ...sorted.filter((call) => call.status !== 'pending').slice(0, 50),
+  ];
+}
+
+async function readInvocations(jobId: string): Promise<McpInvocationApi[]> {
+  // History is bounded by the API. Fetch pending calls separately so newer
+  // completed calls cannot hide an older approval that still blocks the agent.
+  const [recent, pending] = await Promise.all([
+    listMcpInvocations({ jobId }),
+    listMcpInvocations({ jobId, pendingOnly: true }),
+  ]);
+  return [
+    ...recent.invocations.filter((call) => call.status !== 'pending'),
+    ...pending.invocations,
+  ];
 }
 
 function PolicyControl({
@@ -185,20 +232,24 @@ function CapabilityList({
  * not already have is attached by adding its capabilities to the same draft
  * and saving once.
  */
-export function McpSessionPanel({
-  jobId,
-  threadId,
-  active,
-}: {
+interface McpSessionPanelProps {
   jobId: string;
   threadId: string;
   active: boolean;
-}) {
+}
+
+export function McpSessionPanel(props: McpSessionPanelProps) {
+  // Reset both drafts and in-flight decision state before another job renders.
+  return <McpSessionPanelContent key={`${props.threadId}:${props.jobId}`} {...props} />;
+}
+
+function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProps) {
   const [bindings, setBindings] = useState<McpBindingApi[]>([]);
   const [connections, setConnections] = useState<McpConnectionApi[]>([]);
   const [selections, setSelections] = useState<Record<number, Selection>>({});
-  const [pending, setPending] = useState<McpInvocationApi[]>([]);
-  const [decided, setDecided] = useState<McpInvocationApi[]>([]);
+  const [invocations, setInvocations] = useState<McpInvocationApi[]>([]);
+  const pending = invocations.filter((call) => call.status === 'pending');
+  const decided = invocations.filter((call) => call.status !== 'pending');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [attaching, setAttaching] = useState<number | null>(null);
@@ -213,12 +264,12 @@ export function McpSessionPanel({
     try {
       const [bindingResponse, invocationResponse, connectionResponse] = await Promise.all([
         getMcpThreadBindings(threadId),
-        listMcpInvocations({ jobId, pendingOnly: true }),
+        readInvocations(jobId),
         listMcpConnections(),
       ]);
       setBindings(bindingResponse.bindings);
       setSelections(draftSelections(bindingResponse.bindings));
-      setPending(invocationResponse.invocations);
+      setInvocations((current) => mergeInvocations(current, invocationResponse, true));
       setConnections(connectionResponse.connections);
       setLoaded(true);
     } catch (cause: unknown) {
@@ -238,15 +289,28 @@ export function McpSessionPanel({
   // for exactly as long as the call is waiting.
   useEffect(() => {
     if (!active) return;
-    const timer = setInterval(() => {
-      listMcpInvocations({ jobId, pendingOnly: true })
-        .then((response) => setPending(response.invocations))
-        .catch(() => {
-          // A background refresh that fails leaves the last good queue on
-          // screen; the next one reports the failure through the main load.
-        });
-    }, 3000);
-    return () => clearInterval(timer);
+    let disposed = false;
+    let loading = false;
+    const refresh = async () => {
+      if (loading) return;
+      loading = true;
+      try {
+        // Follow approved calls through dispatch and completion as well.
+        const response = await readInvocations(jobId);
+        if (!disposed) {
+          setInvocations((current) => mergeInvocations(current, response, true));
+        }
+      } catch {
+        // Keep the last known state through transient polling failures.
+      } finally {
+        loading = false;
+      }
+    };
+    const timer = setInterval(refresh, 3000);
+    return () => {
+      disposed = true;
+      clearInterval(timer);
+    };
   }, [active, jobId]);
 
   function setPolicy(
@@ -332,7 +396,9 @@ export function McpSessionPanel({
       const response = await replaceMcpThreadBindings(threadId, payload);
       setBindings(response.bindings);
       setSelections(draftSelections(response.bindings));
-      setNotice('Selection saved. It applies to the next tool call in this conversation.');
+      setNotice(
+        'Selection saved. Restrictions apply immediately. Newly enabled tools are available when you send your next message.',
+      );
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : 'Could not save the selection.');
     } finally {
@@ -345,8 +411,7 @@ export function McpSessionPanel({
     setError(null);
     try {
       const result = await decideMcpInvocation(invocation.id, approve);
-      setPending((current) => current.filter((item) => item.id !== invocation.id));
-      setDecided((current) => [result, ...current.filter((item) => item.id !== result.id)]);
+      setInvocations((current) => mergeInvocations(current, [result]));
     } catch (cause: unknown) {
       // A lost race (the call expired or another tab decided it) is reported
       // where the card was, and the next refresh shows what actually happened.
@@ -381,7 +446,7 @@ export function McpSessionPanel({
             id="mcp-approvals"
             className="text-[11px] font-semibold uppercase tracking-[0.08em] text-gray-400 dark:text-gray-500"
           >
-            Waiting for your approval
+            Tool approvals
           </h3>
           {pending.map((invocation) => (
             <div

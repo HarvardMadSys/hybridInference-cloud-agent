@@ -3,6 +3,7 @@
 Run with MCP_TEST_SANDBOX_IMAGE and TEST_DB_* set. Only the model and the user's
 MCP server are synthetic; adapters, native sessions, approval and storage ship.
 Docker Desktop uses host.docker.internal; Linux may set MCP_TEST_HOST instead.
+MCP_TEST_APPROVAL_DELAY can hold the first decision beyond native CLI timeouts.
 """
 
 from __future__ import annotations
@@ -561,7 +562,9 @@ async def test_resident_mcp_call_followup_resume_and_fork(
                     count = len(
                         [call for call in upstream.mcp_calls if call["method"] == "tools/call"]
                     )
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(
+                        float(os.getenv("MCP_TEST_APPROVAL_DELAY", "0.1")) if not decisions else 0.1
+                    )
                     assert (
                         len([call for call in upstream.mcp_calls if call["method"] == "tools/call"])
                         == count
