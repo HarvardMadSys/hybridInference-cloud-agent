@@ -401,11 +401,14 @@ class TestTheMergedCatalogue:
         store.snapshots = {7: _snapshot(7, "c"), 8: _snapshot(8, "b__c")}
 
         listing = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
-        assert "a__b__c" in _tool_names(listing)
+        assert len(set(_tool_names(listing))) == 2
+        name = next(
+            item["name"] for item in _result(listing)["tools"] if item["description"] == "c on 7"
+        )
 
         call = await client.post(
             _HOST_URL,
-            json=_rpc("tools/call", name="a__b__c", arguments={}),
+            json=_rpc("tools/call", name=name, arguments={}),
             headers=_auth(),
         )
         assert call.status_code == 200
@@ -888,3 +891,64 @@ class TestResourcesAndPrompts:
             )
         assert "prompts/list" in response.json()["error"]["message"]
         assert host.prompts == []
+
+
+@pytest.mark.parametrize("kind", ["tool", "prompt"])
+@pytest.mark.parametrize("change", ["reorder", "disable"])
+async def test_a_cached_name_cannot_move_to_another_connection(client, store, host, kind, change):
+    """A separator collision cannot redirect a cached call after catalogue changes."""
+    tools = kind == "tool"
+    store.bindings = [
+        _binding(7, "a__b", rules={"c": {"policy": "allow"}}, prompt_rules={"c": "allow"}),
+        _binding(8, "a", rules={"b__c": {"policy": "allow"}}, prompt_rules={"b__c": "allow"}),
+    ]
+    store.snapshots = {
+        7: _snapshot(7, "c", prompts=("c",)),
+        8: _snapshot(8, "b__c", prompts=("b__c",)),
+    }
+    listing = "tools/list" if tools else "prompts/list"
+    method = "tools/call" if tools else "prompts/get"
+    first = await client.post(_HOST_URL, json=_rpc(listing), headers=_auth())
+    entries = _result(first)["tools" if tools else "prompts"]
+    cached_name = next(item["name"] for item in entries if item["description"] == "c on 7")
+    if change == "reorder":
+        store.bindings.reverse()
+    else:
+        store.bindings[0]["enabled"] = False
+    response = await client.post(
+        _HOST_URL, json=_rpc(method, name=cached_name, arguments={}), headers=_auth()
+    )
+    if change == "disable":
+        assert "error" in response.json()
+        assert host.opened == []
+    else:
+        assert "result" in response.json()
+        assert host.opened[-1]["connection"].connection_id == "7"
+        assert (host.called if tools else host.prompts)[-1]["name"] == "c"
+
+
+@pytest.mark.parametrize("names", [("a.b", "a/b"), ("x" * 70 + "a", "x" * 70 + "b")])
+async def test_disabling_a_tool_does_not_reassign_its_cached_name(client, store, host, names):
+    """Another tool cannot inherit a name that collided after sanitizing or shortening."""
+    first, second = names
+    store.bindings = [_binding(7, "github", rules={name: {"policy": "allow"} for name in names})]
+    store.snapshots = {7: _snapshot(7, *names)}
+    listing = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
+    cached_name = next(
+        item["name"]
+        for item in _result(listing)["tools"]
+        if item["description"].endswith(f"{first} on 7")
+    )
+    store.bindings[0]["rules"][first]["policy"] = "deny"
+    response = await client.post(
+        _HOST_URL, json=_rpc("tools/call", name=cached_name, arguments={}), headers=_auth()
+    )
+    assert "error" in response.json()
+    assert host.called == []
+    listing = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
+    allowed_name = _result(listing)["tools"][0]["name"]
+    response = await client.post(
+        _HOST_URL, json=_rpc("tools/call", name=allowed_name, arguments={}), headers=_auth()
+    )
+    assert "result" in response.json()
+    assert host.called[-1]["name"] == second

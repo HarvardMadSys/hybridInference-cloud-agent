@@ -128,8 +128,9 @@ class _Recorder:
     different interface as a request with an empty body.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, tool_name: str = _TOOL) -> None:
         """Start with empty transcripts."""
+        self.tool_name = tool_name
         self.mcp_calls: list[dict[str, Any]] = []
         self.model_requests: list[dict[str, Any]] = []
         self.tool_results: list[str] = []
@@ -168,7 +169,7 @@ class _Recorder:
             result = {
                 "tools": [
                     {
-                        "name": _TOOL,
+                        "name": self.tool_name,
                         "description": "Fetch one issue",
                         "inputSchema": {
                             "type": "object",
@@ -401,7 +402,14 @@ async def test_a_tool_call_travels_the_whole_chain(pi_install: pathlib.Path) -> 
     assert _TOOL_TEXT in " ".join(upstream.tool_results), upstream.tool_results
 
 
-async def _seed(pool: Any, *, upstream_url: str, runtime: str = "pi", policy: str = "allow") -> str:
+async def _seed(
+    pool: Any,
+    *,
+    upstream_url: str,
+    runtime: str = "pi",
+    policy: str = "allow",
+    tool_name: str = _TOOL,
+) -> str:
     """One connection, one bound session, one live attempt, one MCP token."""
     store = Storage(pool)
     async with pool.acquire() as conn:
@@ -434,7 +442,7 @@ async def _seed(pool: Any, *, upstream_url: str, runtime: str = "pi", policy: st
         server_version="1",
         tools=[
             {
-                "name": _TOOL,
+                "name": tool_name,
                 "description": "Fetch one issue",
                 "input_schema": {"type": "object", "properties": {}},
                 "annotations": {},
@@ -464,7 +472,7 @@ async def _seed(pool: Any, *, upstream_url: str, runtime: str = "pi", policy: st
                 "authorization_epoch": 1,
                 "capability_revision": 2,
                 "policy_revision": 1,
-                "rules": {_TOOL: {"policy": policy, "fingerprint": ""}},
+                "rules": {tool_name: {"policy": policy, "fingerprint": ""}},
                 "resource_rules": {},
                 "prompt_rules": {},
             }

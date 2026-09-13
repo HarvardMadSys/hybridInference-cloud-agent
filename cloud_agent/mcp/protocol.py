@@ -26,6 +26,8 @@ only ever a handle.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -95,7 +97,10 @@ MAX_PAGES = 64
 #: outside is replaced rather than rejected, so a server with a dotted tool
 #: name is still usable.
 _NAME_SAFE = re.compile(r"[^A-Za-z0-9_-]")
-MAX_PRESENTED_NAME = 64
+# The merged endpoint is named "session" by every adapter. Reserve the longest
+# native prefix (Claude/Codex) so a bridge need not truncate the stable digest.
+MAX_PRESENTED_NAME = 64 - len("mcp__session__")
+_HASH_NAMESPACE = "mcp_h"
 NAMESPACE_SEPARATOR = "__"
 
 
@@ -622,33 +627,28 @@ def sanitize_name(raw: str) -> str:
     return cleaned or "tool"
 
 
-def presented_name(alias: str, capability: str, *, taken: Iterable[str] = ()) -> str:
-    """Build the name a CLI sees for one capability on one connection.
+def presented_name(alias: str, capability: str) -> str:
+    """Build a stable CLI name from the complete alias and upstream name.
 
-    Namespaced by the binding's alias, not by the connection's label: an alias
-    is stable for the life of the binding, while a label is text the owner can
-    edit, and a rename that changed every tool name would look to a model like
-    the tools had disappeared.
+    Ordinary short names retain ``alias__tool``. Any lossy normalization,
+    truncation or ambiguous alias gets a digest of the original pair, even if
+    it is currently the only tool. A numeric suffix based on catalogue order
+    would let a cached name reach a different tool after a sibling disappears.
     """
-    prefix = sanitize_name(alias)
-    suffix = sanitize_name(capability)
-    budget = MAX_PRESENTED_NAME - len(prefix) - len(NAMESPACE_SEPARATOR)
-    if budget < 1:
-        prefix = prefix[: MAX_PRESENTED_NAME - len(NAMESPACE_SEPARATOR) - 1]
-        budget = 1
-    candidate = f"{prefix}{NAMESPACE_SEPARATOR}{suffix[:budget]}"
-    existing = set(taken)
-    if candidate not in existing:
+    candidate = f"{sanitize_name(alias)}{NAMESPACE_SEPARATOR}{sanitize_name(capability)}"
+    if (
+        candidate == f"{alias}{NAMESPACE_SEPARATOR}{capability}"
+        and NAMESPACE_SEPARATOR not in alias
+        and alias != _HASH_NAMESPACE
+        and len(candidate) <= MAX_PRESENTED_NAME
+    ):
         return candidate
-    # A collision is real -- two tools can sanitize to one name -- so it is
-    # resolved deterministically rather than by dropping one of them.
-    for index in range(1, 1000):
-        suffix_text = f"_{index}"
-        trimmed = candidate[: MAX_PRESENTED_NAME - len(suffix_text)]
-        numbered = f"{trimmed}{suffix_text}"
-        if numbered not in existing:
-            return numbered
-    raise ProtocolError(f"cannot build a unique name for {capability!r}")
+    digest = hashlib.sha256(json.dumps([alias, capability]).encode()).hexdigest()[:32]
+    # Reserve a namespace that survives native CLI normalization. A leading
+    # underscore alone is not sufficient: pi strips it before registering tools.
+    prefix = f"{_HASH_NAMESPACE}{NAMESPACE_SEPARATOR}"
+    budget = MAX_PRESENTED_NAME - len(prefix) - len(digest) - len(NAMESPACE_SEPARATOR)
+    return f"{prefix}{candidate[:budget]}{NAMESPACE_SEPARATOR}{digest}"
 
 
 def build_namespace(
@@ -663,7 +663,7 @@ def build_namespace(
     """
     mapping: dict[str, str] = {}
     for capability in capabilities:
-        name = presented_name(alias, capability.name, taken=mapping)
+        name = presented_name(alias, capability.name)
         mapping[name] = capability.name
     return mapping
 

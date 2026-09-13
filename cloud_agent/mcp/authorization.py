@@ -11,11 +11,10 @@ fix them:
 
 1. **Is this connection usable at all?** Disabled, failed, or owned by someone
    else means no call, whatever the binding says.
-2. **Is the binding still fenced?** A connection whose URL, auth or target was
-   edited after the session was approved is a different server; the binding is
-   refused until its owner approves the new one.
-3. **Is the capability in scope?** A name the owner did not enable is denied,
-   including a tool the server added after they last looked.
+2. **Is the capability in scope?** Unknown or unselected capabilities are
+   denied, including a tool the server added after the owner last looked.
+3. **Is the binding still fenced?** A connection whose URL, auth or target was
+   edited after the session was approved needs the owner's approval again.
 4. **Has the capability changed?** A rule approved against a different schema or
    description no longer describes this tool, so it goes back to the owner.
 5. **What did the owner say?** ``allow`` dispatches, ``confirm`` is held,
@@ -159,6 +158,31 @@ def decide(
         )
     if not binding.enabled:
         return _deny("not_bound", name, "that MCP connection is not enabled for this session", kind)
+
+    if capability is None:
+        return _deny(
+            "capability_unknown",
+            name,
+            f"the server no longer offers {name!r}",
+            kind,
+        )
+
+    rule = binding.rule_for(kind, name)
+    # A changed connection may require re-approval only for capabilities the
+    # session actually selected. Check refusals first so a stale fence cannot
+    # resurrect a denied, unknown or newly advertised capability.
+    if rule is None and not binding.selection_pending:
+        return _deny(
+            "capability_not_enabled",
+            name,
+            f"{name!r} is not enabled for this session",
+            kind,
+        )
+    if rule is not None and rule.policy is ToolPolicy.DENY:
+        return _deny(
+            "capability_not_enabled", name, f"{name!r} is turned off for this session", kind
+        )
+
     if not binding.fenced_by(connection):
         # The target, its credential or its catalogue moved after this session
         # was approved. Nothing here says the new target is unsafe; it says the
@@ -175,40 +199,17 @@ def decide(
             policy_revision=binding.policy_revision,
         )
 
-    if capability is None:
-        return _deny(
-            "capability_unknown",
-            name,
-            f"the server no longer offers {name!r}",
-            kind,
-        )
-
-    rule = binding.rule_for(kind, name)
     if rule is None:
-        if binding.selection_pending:
-            # Migrated from the old provider-name list: the owner has never
-            # chosen capabilities here, so nothing is pre-approved and nothing
-            # is refused either. Each call asks once, in the owner's terms.
-            return AuthorizationDecision(
-                outcome="confirm",
-                code="needs_confirmation",
-                capability_name=name,
-                kind=kind,
-                message=(
-                    "this session predates per-connection choices; confirm what "
-                    f"{name!r} may do for it"
-                ),
-                policy_revision=binding.policy_revision,
-            )
-        return _deny(
-            "capability_not_enabled",
-            name,
-            f"{name!r} is not enabled for this session",
-            kind,
-        )
-    if rule.policy is ToolPolicy.DENY:
-        return _deny(
-            "capability_not_enabled", name, f"{name!r} is turned off for this session", kind
+        # Migrated sessions have not made a capability selection yet.
+        return AuthorizationDecision(
+            outcome="confirm",
+            code="needs_confirmation",
+            capability_name=name,
+            kind=kind,
+            message=(
+                f"this session predates per-connection choices; confirm what {name!r} may do for it"
+            ),
+            policy_revision=binding.policy_revision,
         )
 
     current = capability.fingerprint()

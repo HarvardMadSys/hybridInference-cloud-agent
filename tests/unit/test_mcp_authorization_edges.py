@@ -507,3 +507,32 @@ class TestWhatTheOwnerIsTold:
             status=invocations.InvocationStatus.EXPIRED,
         )
         assert "expired" in invocations.recovery_note(invocation)
+
+
+@pytest.mark.parametrize("kind", list(CapabilityKind))
+@pytest.mark.parametrize(
+    "revision", ["config_revision", "authorization_epoch", "capability_revision"]
+)
+@pytest.mark.parametrize("scope", ["denied", "unselected", "unknown"])
+def test_a_stale_binding_never_prompts_for_an_out_of_scope_capability(kind, revision, scope):
+    """Connection changes must not turn a refusal into a one-call approval."""
+    connection = _connection(**{revision: 2})
+    old = _connection()
+    policy = ToolPolicy.DENY if scope == "denied" else ToolPolicy.ALLOW
+    rules = {} if scope == "unselected" else {"search": policy}
+    binding = _binding(
+        old,
+        rules={name: ToolRule(name=name, policy=value) for name, value in rules.items()},
+        resource_rules=rules,
+        prompt_rules=rules,
+    )
+    decision = _decide(
+        connection,
+        binding,
+        kind=kind,
+        capability=None if scope == "unknown" else Capability(kind=kind, name="search"),
+    )
+    assert decision.refused
+    assert decision.code == (
+        "capability_unknown" if scope == "unknown" else "capability_not_enabled"
+    )

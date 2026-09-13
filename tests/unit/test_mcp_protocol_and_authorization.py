@@ -271,12 +271,16 @@ class TestProtocol:
 
     def test_a_presented_name_is_namespaced_and_safe(self) -> None:
         """A CLI's tool-name grammar is narrower than MCP's."""
-        assert protocol.presented_name("docs", "git.hub/search") == "docs__git_hub_search"
+        name = protocol.presented_name("docs", "git.hub/search")
+        assert name.startswith("mcp_h__docs__git_")
+        assert len(name) <= protocol.MAX_PRESENTED_NAME
+        assert all(character.isalnum() or character in "_-" for character in name)
+        assert name != protocol.presented_name("docs", "git_hub_search")
 
     def test_two_tools_that_sanitize_alike_get_distinct_names(self) -> None:
         """A collision is resolved rather than one tool being dropped."""
-        first = protocol.presented_name("s", "a.b", taken=[])
-        second = protocol.presented_name("s", "a/b", taken=[first])
+        first = protocol.presented_name("s", "a.b")
+        second = protocol.presented_name("s", "a/b")
         assert first != second
 
     def test_an_input_required_result_is_recognized(self) -> None:

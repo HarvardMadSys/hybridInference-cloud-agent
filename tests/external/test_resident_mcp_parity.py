@@ -25,6 +25,7 @@ import httpx
 import pytest
 import uvicorn
 
+from cloud_agent.mcp.protocol import presented_name
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_MCP, mint_worker_token, parse_worker_token
 from cloud_agent_host.chat_sandbox import ChatSandboxManager
@@ -56,8 +57,9 @@ _ROOT = pathlib.Path(__file__).resolve().parents[2]
 class Gateway(_Recorder):
     """Speak both OpenAI dialects and record the actual tool schemas."""
 
-    def __init__(self, transcript: pathlib.Path) -> None:
-        super().__init__()
+    def __init__(self, transcript: pathlib.Path, *, tool_name: str) -> None:
+        super().__init__(tool_name=tool_name)
+        self.presented = presented_name("github", tool_name)
         self.transcript = transcript
         self.call_number = 0
         self.upstream_authorizations: list[str] = []
@@ -88,7 +90,7 @@ class Gateway(_Recorder):
             names = [
                 (tool.get("function") or {}).get("name", "") for tool in request.get("tools", [])
             ]
-            selected = next((name for name in names if name.endswith("github__get_issue")), "")
+            selected = next((name for name in names if name.endswith(self.presented)), "")
             self.model_requests.append({"tools": names})
             messages = request.get("messages", [])
             last_user = max(
@@ -157,7 +159,7 @@ class Gateway(_Recorder):
                 (
                     tool.get("name")
                     for tool in tools
-                    if tool.get("name", "").endswith("github__get_issue")
+                    if tool.get("name", "").endswith(self.presented)
                 ),
                 None,
             )
@@ -173,7 +175,7 @@ class Gateway(_Recorder):
                 selected = next(
                     tool["name"]
                     for tool in namespace["tools"]
-                    if tool["name"].endswith("github__get_issue")
+                    if tool["name"].endswith(self.presented)
                 )
             assert selected, tools
             item = {
@@ -239,7 +241,7 @@ class Gateway(_Recorder):
         self.tool_results.extend(str(block.get("content")) for block in results)
         names = [tool.get("name", "") for tool in request.get("tools", [])]
         self.model_requests.append({"tools": names})
-        selected = next((name for name in names if name.endswith("github__get_issue")), "")
+        selected = next((name for name in names if name.endswith(self.presented)), "")
         self.call_number += 1
         tool_call = bool(names and not results)
         if tool_call:
@@ -512,9 +514,20 @@ for directory in (".kilo", ".kilocode"):
 
 
 @pytest.mark.parametrize("runtime", ["codex", "kilo", "opencode", "pi", "claude-code"])
-@pytest.mark.parametrize("policy", ["allow", "confirm"])
+@pytest.mark.parametrize(
+    "policy,tool_name",
+    [
+        pytest.param("allow", "get_issue", id="allow"),
+        pytest.param("confirm", "get_issue", id="confirm"),
+        pytest.param("confirm", "get.issue/" + "details" * 10, id="confirm-normalized-name"),
+    ],
+)
 async def test_resident_mcp_call_followup_resume_and_fork(
-    runtime: str, policy: str, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    runtime: str,
+    policy: str,
+    tool_name: str,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Each native path calls the same real relay, with no manual retry."""
     image = os.getenv("MCP_TEST_SANDBOX_IMAGE")
@@ -532,7 +545,7 @@ async def test_resident_mcp_call_followup_resume_and_fork(
         "AGENT_MCP_ALLOW_PLAIN_HTTP": "1",
     }.items():
         monkeypatch.setenv(name, value)
-    upstream = Gateway(tmp_path / "model.jsonl")
+    upstream = Gateway(tmp_path / "model.jsonl", tool_name=tool_name)
     upstream_port, model_port = upstream.start()
     relay_port = _free_port()
     from cloud_agent.app import create_mcp_app
@@ -550,6 +563,7 @@ async def test_resident_mcp_call_followup_resume_and_fork(
             upstream_url=f"http://127.0.0.1:{upstream_port}/mcp",
             runtime=runtime,
             policy=policy,
+            tool_name=tool_name,
         )
         claims = parse_worker_token(token)
         store = Storage(pool)
@@ -675,7 +689,7 @@ async def test_resident_mcp_call_followup_resume_and_fork(
         calls = [call for call in upstream.mcp_calls if call["method"] == "tools/call"]
         assert len(calls) == expected_calls, (calls, upstream.tool_results)
         assert all(
-            call["params"] == {"name": "get_issue", "arguments": {"number": 7}} for call in calls
+            call["params"] == {"name": tool_name, "arguments": {"number": 7}} for call in calls
         )
         assert _TOOL_TEXT in " ".join(upstream.tool_results)
         assert _RESOURCE_TEXT in " ".join(upstream.tool_results)

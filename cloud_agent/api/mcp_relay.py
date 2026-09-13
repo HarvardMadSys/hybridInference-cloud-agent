@@ -906,12 +906,6 @@ async def _stream_sse(
 # authorization path is *shared* rather than reimplemented: the merged route is
 # a second door onto the same decision function, never a second decision.
 
-#: The tool-name separator. Two underscores, because one appears inside real
-#: tool names (``get_issue``) and the split has to be unambiguous -- which is
-#: also why calls are routed by looking the presented name up in the catalogue
-#: rather than by splitting the string at all.
-_HOST_SEPARATOR = "__"
-
 
 def _host() -> McpHost:
     """The process-wide protocol host, built once against the deployment policy."""
@@ -976,7 +970,7 @@ async def _host_catalogue(
             key = (
                 capability.name
                 if kind in (CapabilityKind.RESOURCE, CapabilityKind.RESOURCE_TEMPLATE)
-                else protocol.presented_name(alias, capability.name, taken=catalogue)
+                else protocol.presented_name(alias, capability.name)
             )
             catalogue.setdefault(key, (authorized, capability))
     return catalogue
@@ -1065,8 +1059,7 @@ async def _host_initialize(payload: dict[str, Any], identity: dict[str, Any]) ->
         },
         "serverInfo": {"name": "hybridinference-cloud-agent", "version": "1"},
         "instructions": (
-            "Tools are named <connection>"
-            f"{_HOST_SEPARATOR}<tool>. This session's connections: "
+            "Use the exact tool names returned by tools/list. This session's connections: "
             + (", ".join(alias for alias in aliases if alias) or "none")
         ),
     }

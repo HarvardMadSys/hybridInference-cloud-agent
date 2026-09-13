@@ -821,3 +821,27 @@ async def test_mcp_still_requires_its_own_token(client):
     """Always available still requires an authenticated, live attempt."""
     response = await client.post(f"/v1/agent/mcp/{_ALIAS}", json=_rpc("tools/list"))
     assert response.status_code == 401
+
+
+@pytest.mark.parametrize("scope", ["denied", "unselected", "unknown"])
+async def test_a_changed_connection_cannot_prompt_for_an_out_of_scope_tool(
+    monkeypatch, store, upstream, scope
+):
+    """The direct route must reject before creating or consuming any approval."""
+    store.connection["authorization_epoch"] += 1
+    if scope == "unknown":
+        name = "not_discovered"
+    else:
+        name = "get_issue"
+        store.bindings[0]["rules"] = {name: {"policy": "deny"}} if scope == "denied" else {}
+    async with _relay(monkeypatch, store, upstream) as api:
+        response = await api.post(
+            f"/v1/agent/mcp/{_ALIAS}",
+            json=_rpc("tools/call", name=name),
+            headers=_auth(),
+        )
+    assert response.status_code == 200
+    assert "error" in response.json()
+    assert upstream.requests == []
+    assert store.created_invocations == []
+    assert store.looked_up == []
