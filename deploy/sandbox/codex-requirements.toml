@@ -1,5 +1,6 @@
 # Codex merges project .codex/config.toml after user config. An explicitly
 # present, empty requirements allowlist disables every MCP server regardless
-# of which config layer declared it. Keep this empty until the Codex adapter has
-# a verified isolated-relay configuration that cannot merge repository config.
+# of which config layer declared it. Before a Codex MCP launch, the trusted
+# host atomically admits the exact deployment relay under the name `session`.
+# This root-owned file never contains a member credential.
 [mcp_servers]

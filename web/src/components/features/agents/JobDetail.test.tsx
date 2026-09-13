@@ -31,6 +31,7 @@ import {
 } from '@/lib/api/agents';
 
 import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
+import { decideMcpInvocation, listMcpInvocations, type McpInvocationApi } from '@/lib/api/mcp';
 
 import { JobDetail, WORKSPACE_WIDTH_STORAGE_KEY } from './JobDetail';
 import type { AgentJob } from './types';
@@ -39,6 +40,14 @@ const navigation = vi.hoisted(() => ({ push: vi.fn() }));
 
 vi.mock('next/navigation', () => ({
   useRouter: () => navigation,
+}));
+
+vi.mock('@/lib/api/mcp', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/mcp')>()),
+  listMcpInvocations: vi.fn().mockResolvedValue({ invocations: [] }),
+  decideMcpInvocation: vi.fn(),
+  getMcpThreadBindings: vi.fn().mockResolvedValue({ bindings: [] }),
+  listMcpConnections: vi.fn().mockResolvedValue({ connections: [] }),
 }));
 
 vi.mock('@/lib/api/agents', () => ({
@@ -183,6 +192,37 @@ const HISTORY = [
 ];
 
 describe('JobDetail', () => {
+  it('opens the pending tool decision from the conversation and approves it', async () => {
+    const invocation: McpInvocationApi = {
+      id: 11,
+      job_id: 'ajob_1',
+      thread_id: 'thread-1',
+      connection_id: 3,
+      connection_label: 'Issue tracker',
+      capability_name: 'get_issue',
+      status: 'pending',
+      arguments_digest: 'digest',
+      arguments: { number: 7 },
+      created_at: null,
+      expires_at: null,
+      decided_at: null,
+      result_summary: null,
+      guidance: '',
+    };
+    vi.mocked(listMcpInvocations).mockResolvedValue({ invocations: [invocation] });
+    vi.mocked(decideMcpInvocation).mockImplementation(async () => {
+      const approved = { ...invocation, status: 'approved' as const };
+      vi.mocked(listMcpInvocations).mockResolvedValue({ invocations: [approved] });
+      return approved;
+    });
+    render(<JobDetail job={makeJob()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Review tools' }));
+    expect(await screen.findByText('Issue tracker wants to call get_issue')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(decideMcpInvocation).toHaveBeenCalledWith(11, true));
+    expect(await screen.findByText('get_issue · approved')).toBeVisible();
+    expect(followUpAgentJob).not.toHaveBeenCalled();
+  });
   it.each([undefined, 'previous-job'])(
     'uses the same queue message with parent %s',
     async (parentJobId) => {
@@ -193,6 +233,7 @@ describe('JobDetail', () => {
   );
 
   beforeEach(() => {
+    vi.mocked(listMcpInvocations).mockReset().mockResolvedValue({ invocations: [] });
     navigation.push.mockReset();
     vi.mocked(cancelAgentJob).mockReset();
     vi.mocked(followUpAgentJob).mockReset();

@@ -2001,6 +2001,36 @@ class ChatSandboxManager:
                     + installed.stderr.decode("utf-8", "replace")[:300]
                 )
 
+    def ensure_codex_mcp_policy(self, spec: ChatSandboxSpec, base_url: str) -> None:
+        """Allow only this deployment's relay before starting a Codex member."""
+        from cloud_agent_host.codex_mcp import INSTALL_POLICY, relay_endpoint
+
+        endpoint = relay_endpoint(base_url)
+        result = self.exec_capture(
+            spec,
+            ["/usr/bin/python3", "-I", "-c", INSTALL_POLICY, endpoint],
+            workdir="/",
+            timeout_s=20,
+            user_uid=0,
+            user_gid=0,
+        )
+        if result.returncode != 0:
+            raise SandboxError("could not install the isolated Codex MCP relay policy")
+
+    def ensure_kilo_mcp_runtime(self, spec: ChatSandboxSpec, version: str) -> None:
+        """Bring retained Kilo members onto the deployment's isolated runtime."""
+        from cloud_agent_host.kilo_mcp import ensure_kilo_runtime
+
+        with self._member_reaper_lock:
+            ensure_kilo_runtime(self, spec, version)
+
+    def ensure_mcp_helpers(self, spec: ChatSandboxSpec, runtime: str) -> None:
+        """Keep existing conversations on the same adapters as new conversations."""
+        from cloud_agent_host.mcp_helpers import install_mcp_helpers
+
+        with self._member_reaper_lock:
+            install_mcp_helpers(self, spec, runtime)
+
     def reap_member_processes(
         self,
         spec: ChatSandboxSpec,

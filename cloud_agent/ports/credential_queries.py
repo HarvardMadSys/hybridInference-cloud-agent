@@ -20,13 +20,23 @@ class CredentialQueries(Protocol):
     ) -> dict[str, Any] | None:
         """Resolve Agent-owned job metadata for the MCP relay's live fence.
 
-        Return the job's owner, model and MCP server scope only while its
+        Return the job's owner, model and MCP binding scope only while its
         current attempt has a live lease and the job is running or publishing.
         The relay uses that owner to resolve stored MCP connections and checks
-        the admitted server scope before forwarding a request.
+        the admitted binding before forwarding a request.
 
         Only Agent job and attempt tables participate. Gateway account roles
         and status do not belong to this database. Inference authorization
         uses Gateway-issued grants separately from this MCP lookup.
+
+        The bindings are read fresh on every call rather than carried on the
+        job, so narrowing a session takes effect on its next tool call instead
+        of at its next turn.
+
+        Disabled bindings are filtered out here rather than refused later. A
+        binding turned off with no capabilities selected would otherwise be
+        handed to the runner as a server whose every call fails, and the model
+        would spend its budget discovering that one tool at a time instead of
+        being offered nothing at all.
         """
         ...

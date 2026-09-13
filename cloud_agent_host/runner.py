@@ -269,10 +269,11 @@ class ClaimedJob:
     clone_token: str | None = None
     parent_job_id: str | None = None
     turn_no: int = 1
-    # MCP servers this job was granted. Names only: the runner learns nothing
-    # about where they actually are, because the sandbox reaches them through
-    # this service's MCP-only relay rather than directly.
-    mcp_servers: list[str] = field(default_factory=list)
+    # MCP connection aliases this job was granted. Aliases only: the runner
+    # learns nothing about where they actually are or how they authenticate,
+    # because the sandbox reaches them through this service's MCP-only relay
+    # rather than directly.
+    mcp_bindings: list[str] = field(default_factory=list)
     # The CLI version the control plane stamped on this attempt, resolved from
     # the thread's pin, the deployment's selection, or this host's default.
     # ``None`` from a control plane that predates selection — the image's
@@ -308,7 +309,7 @@ class ClaimedJob:
             mcp_token=body.get("mcp_token") or "",
             mcp_base_url=body.get("mcp_base_url") or "",
             clone_token=body.get("clone_token") or None,
-            mcp_servers=list(body.get("mcp_servers") or []),
+            mcp_bindings=list(body.get("mcp_bindings") or []),
             runtime_version=body.get("runtime_version") or None,
             thread_sandbox=(
                 dict(body["thread_sandbox"])
@@ -1832,13 +1833,13 @@ def _run_shared_live_attempt(
             reasoning_effort=job.reasoning_effort,
             gateway_base_url=gateway_base_url,
             credential=None,
-            mcp_server_ids=tuple(job.mcp_servers),
+            mcp_server_ids=tuple(job.mcp_bindings),
             # The MCP relay token is attempt-fenced. It is process-fixed only
             # when this turn actually exposes MCP endpoints; carrying an
             # otherwise-unused fresh token here would restart every ordinary
             # no-MCP chat and falsely erase HOT continuity.
-            mcp_base_url=job.mcp_base_url if job.mcp_servers else "",
-            mcp_credential=job.mcp_token if job.mcp_servers else "",
+            mcp_base_url=job.mcp_base_url if job.mcp_bindings else "",
+            mcp_credential=job.mcp_token if job.mcp_bindings else "",
             slot_id=slot_id,
             residency_generation=int(running.get("residency_generation") or 0),
         )

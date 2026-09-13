@@ -54,7 +54,16 @@ for version in "${wanted[@]}"; do
     fi
 
     prefix="${root}/${version}"
-    npm install -g --prefix "${prefix}" "${package}@${version}"
+    if [ "${runtime_id}" = kilo ]; then
+        # Every selectable Kilo version must carry the reviewed isolation fix.
+        # Refuse an unreviewed extra version at build time, before advertising it.
+        test "${version}" = 7.4.17
+        mkdir -p "${prefix}"
+        cp -a /opt/kilo/. "${prefix}/"
+        ln -sf kilo "${prefix}/bin/kilocode"
+    else
+        npm install -g --prefix "${prefix}" "${package}@${version}"
+    fi
 
     got="$("${prefix}/bin/${binary}" --version 2>&1 | tail -1)"
     case "${got}" in

@@ -964,6 +964,34 @@ jobs:
             --suffix "${SUFFIX}" \
             --revision "${GITHUB_SHA}"
 
+      - name: All five CLIs retain MCP through approval, resume and fork
+        if: matrix.artifact.name == 'sandbox'
+        timeout-minutes: 10
+        env:
+          MCP_TEST_SANDBOX_IMAGE: ${{ env.IMAGE_TAG }}
+          MCP_TEST_RUN_LABEL: ${{ env.SUFFIX }}
+          TEST_DB_HOST: 127.0.0.1
+          TEST_DB_NAME: hybridinference_test_mcp
+          TEST_DB_USER: postgres
+          TEST_DB_PASSWORD: mcp-conformance-only
+        run: |
+          set -euo pipefail
+          database="mcp-db-${SUFFIX}"
+          trap 'docker rm -f "${database}" >/dev/null 2>&1 || true' EXIT
+          docker run -d --name "${database}" \
+            --label "io.hybridinference.smoke.run=${SUFFIX}" \
+            -e POSTGRES_DB="${TEST_DB_NAME}" -e POSTGRES_PASSWORD="${TEST_DB_PASSWORD}" \
+            -p 127.0.0.1::5432 postgres:16-alpine
+          for attempt in $(seq 1 30); do
+            if docker exec "${database}" pg_isready -U postgres >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec "${database}" pg_isready -U postgres
+          TEST_DB_PORT=$(docker port "${database}" 5432/tcp | awk -F: '{print $NF}')
+          MCP_TEST_HOST=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
+          export TEST_DB_PORT MCP_TEST_HOST
+          uv run pytest -q -m external tests/external/test_resident_mcp_parity.py
+
       # The harness removes what it started; this is the backstop for the paths
       # where it never got that far. Hosted runners are discarded, these are
       # not: without it the machine accumulates a container and an image per

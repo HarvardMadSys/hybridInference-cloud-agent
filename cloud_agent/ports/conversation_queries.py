@@ -89,3 +89,7 @@ class ConversationQueries(Protocol):
         Row-only requests skip the full-history aggregate and return null counts.
         """
         ...
+
+    async def get_thread(self, thread_id: str) -> dict[str, Any] | None:
+        """Read a visible thread for the owner's MCP selection surface."""
+        ...

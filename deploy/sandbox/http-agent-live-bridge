@@ -243,6 +243,16 @@ class Bridge:
                 raise BridgeError("server did not return a native session id")
             self.session_id = str(created["id"])
 
+        endpoints = json.loads(os.environ.get("AGENT_MCP_SERVERS") or "{}")
+        if endpoints:
+            statuses = self.request("GET", "/mcp", timeout=35)
+            if not isinstance(statuses, dict) or any(
+                not isinstance(statuses.get(name), dict)
+                or statuses[name].get("status") != "connected"
+                for name in endpoints
+            ):
+                raise BridgeError(f"{self.runtime} could not initialize the session MCP relay")
+
         threading.Thread(target=self._watch_child, daemon=True).start()
         threading.Thread(target=self._events, daemon=True).start()
         self.emit(

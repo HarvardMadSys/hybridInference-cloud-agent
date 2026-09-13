@@ -177,10 +177,12 @@ async def test_access_returns_the_current_permission_decision() -> None:
 # refusing a response with no list. Both went with the method: the gateway no
 # longer serves `/internal/mcp-registry`.
 #
-# What they guarded is covered more strictly where the registry now lives.
-# `test_mcp_registry_and_proxy.py` refuses a malformed entry rather than
-# dropping it (`test_invalid_server_names_are_refused`, `_stdio_servers_`,
-# `_plaintext_endpoints_`, `_reserved_headers_`), and an absent file means no
-# servers (`test_missing_file_means_no_servers`) — checked case by case rather
+# What they guarded is covered more strictly where MCP now lives, and by
+# different code rather than a moved copy: there is no deployment registry and
+# no in-code provider catalogue any more, so a malformed *entry* is refused by
+# `tests/unit/test_mcp_connection_config.py` (address syntax, header
+# injection, an unpinned package) and by
+# `tests/unit/test_mcp_connections_api.py` (an unknown transport, a loopback
+# target, a stdio connection with nothing to run). Checked case by case rather
 # than assumed, because "the other file covers it" is how coverage disappears
-# during a move.
+# during a rewrite.

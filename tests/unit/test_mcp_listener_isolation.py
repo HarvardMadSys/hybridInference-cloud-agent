@@ -88,6 +88,25 @@ def test_the_relay_itself_is_actually_there(mcp_paths: set[str]) -> None:
     assert relay, "the listener serves no relay routes at all"
 
 
+def _relay_paths(paths: set[str]) -> set[str]:
+    """The relay's own routes, told apart from the management surface by shape.
+
+    Both live under the same prefix, and they must not: the relay's routes are
+    ``/<alias>`` — one path parameter — while connection management, OAuth
+    callbacks and invocation decisions are fixed literals. Deriving the
+    difference from the route table rather than listing paths here is what
+    keeps this honest when either surface grows.
+    """
+    prefix = _MCP_PREFIX + "/"
+    return {
+        path
+        for path in paths
+        if path.startswith(prefix)
+        and "/" not in path[len(prefix) :]
+        and path[len(prefix) :].startswith("{")
+    }
+
+
 def test_the_two_applications_agree_on_the_relay(
     mcp_paths: set[str], control_plane_paths: set[str]
 ) -> None:
@@ -96,10 +115,26 @@ def test_the_two_applications_agree_on_the_relay(
     The main application keeps serving it — a co-located deployment has no
     tunnel and reaches the relay on the ordinary port — so the two must not
     drift into two implementations with one set of tests.
+
+    Only the relay is compared. The management surface is deliberately on the
+    control plane alone, which the test below states as its own property rather
+    than as an absence here.
     """
-    relay_here = {p for p in mcp_paths if p.startswith(_MCP_PREFIX)}
-    relay_there = {p for p in control_plane_paths if p.startswith(_MCP_PREFIX)}
-    assert relay_here == relay_there
+    assert _relay_paths(mcp_paths) == _relay_paths(control_plane_paths)
+    assert _relay_paths(mcp_paths), "sanity: the relay must have routes of its own"
+
+
+def test_connection_management_is_not_reachable_from_a_sandbox(mcp_paths: set[str]) -> None:
+    """Adding a connection or approving a call is owner work, not sandbox work.
+
+    The relay listener exists so that a sandbox reaches one surface and nothing
+    else. An approval endpoint there would let the least trusted component in
+    the system decide what it is allowed to do.
+    """
+    prefix = _MCP_PREFIX + "/"
+    relay = _relay_paths(mcp_paths)
+    management = {path for path in mcp_paths if path.startswith(prefix) and path not in relay}
+    assert not management, f"the sandbox listener serves management routes: {sorted(management)}"
 
 
 def test_the_sandbox_tunnel_lands_on_the_relay_listener() -> None:

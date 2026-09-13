@@ -57,11 +57,7 @@ def job_row_to_dict(row: Any) -> dict[str, Any]:
         "detail": row["detail"],
         "metadata": load_json(row["metadata"]),
         "fork_source_job_id": row["fork_source_job_id"],
-        # Resolved once, at creation, against the deployment registry — not
-        # re-read per attempt. A job runs with the tool surface it was created
-        # with, so removing a server from the registry stops new jobs from
-        # asking for it without changing what a running one was promised.
-        "mcp_servers": list(row["mcp_servers"] or []),
+        "mcp_bindings": load_json(row.get("mcp_bindings")) or [],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "pinned_at": row.get("pinned_at"),

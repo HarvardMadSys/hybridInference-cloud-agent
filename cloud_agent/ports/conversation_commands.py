@@ -28,7 +28,7 @@ class ConversationCommands(Protocol):
         base_sha: str | None = None,
         setup_script: str | None = None,
         metadata: dict[str, Any] | None = None,
-        mcp_servers: list[str] | None = None,
+        mcp_bindings: list[dict[str, Any]] | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any]:

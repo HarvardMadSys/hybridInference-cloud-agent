@@ -13,7 +13,11 @@ import hashlib
 import json
 from datetime import datetime
 
-from cloud_agent.storage._sql.jobs import QUALIFIED_JOB_COLUMNS
+from cloud_agent.storage._sql.jobs import (
+    MCP_BINDING_COLUMNS,
+    MCP_BINDING_JOIN,
+    QUALIFIED_JOB_COLUMNS,
+)
 
 
 def session_query(*, filter_repo: bool = False) -> str:
@@ -21,7 +25,7 @@ def session_query(*, filter_repo: bool = False) -> str:
     repo_filter = "AND ($5::text IS NULL OR t.repo = $5)" if filter_repo else ""
     return f"""
 WITH latest AS (
-    SELECT {QUALIFIED_JOB_COLUMNS}, t.id AS session_id, t.title AS session_title, t.title_source,
+    SELECT {QUALIFIED_JOB_COLUMNS}, {MCP_BINDING_COLUMNS}, t.id AS session_id, t.title AS session_title, t.title_source,
            t.archived_at, t.pinned_at, COALESCE(t.archived_at, j.created_at) AS sort_at,
            CASE
                WHEN j.state = 'queued' THEN 'queued'
@@ -37,6 +41,7 @@ WITH latest AS (
         ORDER BY latest_job.turn_no DESC, latest_job.id DESC
         LIMIT 1
     ) j
+    {MCP_BINDING_JOIN}
     WHERE t.user_id = $1 AND t.deleted_at IS NULL
       AND (($2 AND t.archived_at IS NOT NULL) OR (NOT $2 AND t.archived_at IS NULL))
       AND ($3::text IS NULL OR STRPOS(LOWER(t.title), LOWER($3)) > 0)
