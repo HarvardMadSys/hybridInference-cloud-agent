@@ -138,14 +138,13 @@ class _Recorder:
 
     def start(self) -> tuple[int, int]:
         """Serve both ends on free ports and return ``(mcp, model)``."""
-        mcp_port, model_port = _free_port(), _free_port()
         self._servers = [
-            ThreadingHTTPServer(("127.0.0.1", mcp_port), _handler(self._on_mcp)),
-            ThreadingHTTPServer(("127.0.0.1", model_port), _handler(self._on_model)),
+            ThreadingHTTPServer(("127.0.0.1", 0), _handler(self._on_mcp)),
+            ThreadingHTTPServer(("127.0.0.1", 0), _handler(self._on_model)),
         ]
         for server in self._servers:
             threading.Thread(target=server.serve_forever, daemon=True).start()
-        return mcp_port, model_port
+        return self._servers[0].server_port, self._servers[1].server_port
 
     def stop(self) -> None:
         """Stop both servers."""

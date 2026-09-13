@@ -69,14 +69,15 @@ class Gateway(_Recorder):
         super()._on_mcp(handler, body)
 
     def start(self) -> tuple[int, int]:
-        ports = (_free_port(), _free_port())
+        # Bind port zero directly: probing and releasing a free port first
+        # lets another listener (or the next probe) claim it before we bind.
         self._servers = [
-            ThreadingHTTPServer(("0.0.0.0", port), _handler(callback))
-            for port, callback in zip(ports, (self._on_mcp, self._on_model), strict=True)
+            ThreadingHTTPServer(("0.0.0.0", 0), _handler(callback))
+            for callback in (self._on_mcp, self._on_model)
         ]
         for server in self._servers:
             threading.Thread(target=server.serve_forever, daemon=True).start()
-        return ports
+        return self._servers[0].server_port, self._servers[1].server_port
 
     def _on_model(self, handler: Any, body: bytes) -> None:
         request = _decode(body)
