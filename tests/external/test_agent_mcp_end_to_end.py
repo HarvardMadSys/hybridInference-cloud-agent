@@ -61,6 +61,7 @@ _OWNER = "e2e-owner"
 _ALIAS = "github"
 _TOOL = "get_issue"
 _TOOL_TEXT = "issue 7: a bug"
+_RESOURCE_TEXT = "embedded issue context"
 _UPSTREAM_SECRET = "upstream-secret-token"
 _MCP_TOKEN_SECRET = "e2e-signing-secret-32-bytes-long"
 _ENCRYPTION_KEY = "e2e-encryption-key"
@@ -177,7 +178,20 @@ class _Recorder:
                 ]
             }
         elif method == "tools/call":
-            result = {"content": [{"type": "text", "text": _TOOL_TEXT}]}
+            result = {
+                "content": [
+                    {"type": "text", "text": _TOOL_TEXT},
+                    {
+                        "type": "resource",
+                        "resource": {
+                            "uri": "issue://7",
+                            "text": _RESOURCE_TEXT,
+                            "mimeType": "text/plain",
+                        },
+                    },
+                    {"type": "resource_link", "uri": "issue://7", "name": "Issue 7"},
+                ]
+            }
         else:
             # What a server that predates the stateless revision answers with,
             # and what makes the host fall back to the handshake.

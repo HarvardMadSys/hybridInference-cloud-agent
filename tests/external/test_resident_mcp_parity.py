@@ -37,6 +37,7 @@ from cloud_agent_host.sandbox import _PopenProcess
 from tests.external.test_agent_mcp_end_to_end import (
     _ENCRYPTION_KEY,
     _MCP_TOKEN_SECRET,
+    _RESOURCE_TEXT,
     _TOOL_TEXT,
     _db_config,
     _decode,
@@ -677,6 +678,7 @@ async def test_resident_mcp_call_followup_resume_and_fork(
             call["params"] == {"name": "get_issue", "arguments": {"number": 7}} for call in calls
         )
         assert _TOOL_TEXT in " ".join(upstream.tool_results)
+        assert _RESOURCE_TEXT in " ".join(upstream.tool_results)
         assert set(upstream.upstream_authorizations) == {"Bearer upstream-secret-token"}
         model_transcript = upstream.transcript.read_text()
         assert token not in model_transcript

@@ -30,17 +30,20 @@ This module is that surface. It owns:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import hashlib
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
+from weakref import WeakValueDictionary
 
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import protocol
+from cloud_agent.mcp.jsonrpc import JsonRpcError
 from cloud_agent.mcp.models import (
     CapabilitySnapshot,
     ExecutionLocation,
@@ -103,17 +106,25 @@ class ContentBlock:
     uri: str = ""
     #: Set when the block was shortened, so a model is told rather than misled.
     truncated: bool = False
+    resource: dict[str, Any] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         """Render for the runtime."""
-        payload: dict[str, Any] = {"type": self.type}
-        if self.text:
+        payload: dict[str, Any] = {**self.metadata, "type": self.type}
+        if self.type == "text":
             payload["text"] = self.text
-        if self.data:
+        if self.type in {"image", "audio"}:
             payload["data"] = self.data
-        if self.mime_type:
             payload["mimeType"] = self.mime_type
-        if self.uri:
+        if self.type == "resource":
+            payload["resource"] = dict(self.resource or {})
+        if self.type == "resource_link":
+            payload["uri"] = self.uri
+            payload.setdefault("name", self.uri)
+        if self.mime_type and self.type != "resource":
+            payload["mimeType"] = self.mime_type
+        if self.uri and self.type != "resource":
             payload["uri"] = self.uri
         if self.truncated:
             payload["truncated"] = True
@@ -177,6 +188,21 @@ class SessionKey:
         job, _, attempt = self.member.partition(":")
         return job, attempt
 
+    def supersedes(self, other: SessionKey) -> bool:
+        """Whether this key replaces an older attempt or lease of the same job."""
+        if self.connection_id != other.connection_id:
+            return False
+        if self.member == other.member:
+            return self.owner_lease_generation > other.owner_lease_generation
+        job, attempt = self.job_attempt
+        other_job, other_attempt = other.job_attempt
+        return (
+            job == other_job
+            and attempt.isdecimal()
+            and other_attempt.isdecimal()
+            and int(attempt) > int(other_attempt)
+        )
+
 
 @dataclass
 class Session:
@@ -192,14 +218,29 @@ class Session:
     #: Server requests that arrived with no handler, kept so a caller can see
     #: them rather than have them silently dropped.
     pending_questions: list[dict[str, Any]] = field(default_factory=list)
+    _active_operations: int = field(default=0, init=False, repr=False)
+    _retired: bool = field(default=False, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
 
     @property
     def protocol_version(self) -> str:
         """The revision this session agreed."""
         return self.handshake.protocol_version
 
+    @property
+    def reusable(self) -> bool:
+        """Whether a later call can still use this transport."""
+        return (
+            not self._closed
+            and not self._retired
+            and (self.stream_task is None or not self.stream_task.done())
+        )
+
     async def aclose(self) -> None:
         """End the session, best effort."""
+        if self._closed:
+            return
+        self._closed = True
         terminator = getattr(self.transport, "terminate", None)
         if terminator is not None:
             # Closing is best effort: a session that already ended upstream is
@@ -213,6 +254,33 @@ class Session:
                 await closer()
         if self.stream_task is not None:
             self.stream_task.cancel()
+
+    async def retire(self) -> None:
+        """Stop reuse after rotation while letting already dispatched calls finish."""
+        self._retired = True
+        if not self._active_operations:
+            await self.aclose()
+
+    @contextlib.asynccontextmanager
+    async def using(self) -> AsyncIterator[None]:
+        """Keep the transport alive and expose upstream failures as host errors."""
+        if self._closed or self._retired:
+            raise HostError("the upstream session was replaced; start a new request")
+        self._active_operations += 1
+        try:
+            yield
+        except TransportError as exc:
+            self._retired = True
+            raise HostError(str(exc), kind=exc.kind) from exc
+        except protocol.ProtocolError as exc:
+            self._retired = True
+            raise HostError(str(exc), kind="protocol_incompatible") from exc
+        except JsonRpcError as exc:
+            raise HostError(str(exc), kind="protocol_incompatible") from exc
+        finally:
+            self._active_operations -= 1
+            if self._retired and not self._active_operations:
+                await self.aclose()
 
 
 @dataclass(frozen=True)
@@ -295,6 +363,19 @@ class McpHost:
         #: silently handed the old transport. Kept beside the sessions rather
         #: than on them because it is the *caller's* state, not the protocol's.
         self._opened_with: dict[str, SessionFingerprint] = {}
+        self._session_locks: WeakValueDictionary[tuple[str, str], asyncio.Lock] = (
+            WeakValueDictionary()
+        )
+
+    def _session_lock(self, key: SessionKey) -> asyncio.Lock:
+        """Serialize lifecycle changes for one member, without blocking other members."""
+        job, attempt = key.job_attempt
+        identity = (key.connection_id, job if attempt.isdecimal() else key.member)
+        lock = self._session_locks.get(identity)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[identity] = lock
+        return lock
 
     def session(self, key: SessionKey) -> Session | None:
         """The live session for one member, if any."""
@@ -303,6 +384,7 @@ class McpHost:
     def forget(self, key: SessionKey) -> None:
         """Drop a session record without closing it, for a superseded owner."""
         self._sessions.pop(key.handle(), None)
+        self._opened_with.pop(key.handle(), None)
 
     async def open(
         self,
@@ -311,6 +393,13 @@ class McpHost:
         secret: str | None,
         key: SessionKey,
     ) -> Session:
+        """Open one cached session, sharing a concurrent first connection attempt."""
+        async with self._session_lock(key):
+            return await self._open(connection, secret=secret, key=key)
+
+    async def _open(
+        self, connection: McpConnection, *, secret: str | None, key: SessionKey
+    ) -> Session:
         """Open a protocol session, replacing any session with the same key.
 
         A replacement is deliberate rather than a reuse: the key includes the
@@ -318,6 +407,8 @@ class McpHost:
         the old session to be reaped. Reusing it would let a worker whose lease
         expired keep driving a connection the platform has already reassigned.
         """
+        if any(session.key.supersedes(key) for session in self._sessions.values()):
+            raise HostError("this MCP attempt has already been superseded")
         existing = self._sessions.get(key.handle())
         if existing is not None and self._still_describes(existing, connection, secret):
             return existing
@@ -329,15 +420,31 @@ class McpHost:
             # sends the old credential to the old address under the old bound,
             # none of which the caller asked for.
             del self._sessions[key.handle()]
-            await existing.aclose()
-        await self.reap_superseded(key)
+            previous = self._opened_with.pop(key.handle(), None)
+            if (
+                previous is not None
+                and previous.config_revision == connection.config_revision
+                and previous.authorization_epoch == connection.authorization_epoch
+            ):
+                await existing.retire()
+            else:
+                # A new target or revoked authorization must close the old
+                # session; only routine credential refresh drains in-flight calls.
+                await existing.aclose()
+        await self._reap_superseded(key)
         transport, handshake, stream_task = await self._connect(connection, secret=secret)
         session = Session(
             key=key, transport=transport, handshake=handshake, stream_task=stream_task
         )
         self._sessions[key.handle()] = session
         self._opened_with[key.handle()] = SessionFingerprint.of(connection, secret=secret)
-        await self._record(connection, session)
+        try:
+            await self._record(connection, session)
+        except BaseException:
+            self._sessions.pop(key.handle(), None)
+            self._opened_with.pop(key.handle(), None)
+            await session.aclose()
+            raise
         return session
 
     def _still_describes(
@@ -354,12 +461,19 @@ class McpHost:
         move ``credential_version``, so the two fields that would have caught it
         are the ones that have to be compared.
         """
+        if not session.reusable:
+            return False
         recorded = self._opened_with.get(session.key.handle())
         if recorded is None:
             return False
         return recorded == SessionFingerprint.of(connection, secret=secret)
 
     async def reap_superseded(self, key: SessionKey) -> int:
+        """Close older owners after any concurrent connection attempt settles."""
+        async with self._session_lock(key):
+            return await self._reap_superseded(key)
+
+    async def _reap_superseded(self, key: SessionKey) -> int:
         """Close what this member held under an older owner, and forget it.
 
         The design's "rebuild the protocol session when the owner is superseded"
@@ -373,11 +487,7 @@ class McpHost:
         """
         closed = 0
         for handle, session in list(self._sessions.items()):
-            if (
-                session.key.connection_id == key.connection_id
-                and session.key.member == key.member
-                and session.key.owner_lease_generation < key.owner_lease_generation
-            ):
+            if key.supersedes(session.key):
                 del self._sessions[handle]
                 self._opened_with.pop(handle, None)
                 await session.aclose()
@@ -394,6 +504,11 @@ class McpHost:
 
     async def close(self, key: SessionKey) -> bool:
         """Close one session and remove its record."""
+        async with self._session_lock(key):
+            return await self._close(key)
+
+    async def _close(self, key: SessionKey) -> bool:
+        """Close a session while holding its lifecycle lock."""
         session = self._sessions.pop(key.handle(), None)
         self._opened_with.pop(key.handle(), None)
         if session is not None:
@@ -469,6 +584,8 @@ class McpHost:
             return transport, handshake, None
         except TransportError as exc:
             raise HostError(str(exc), kind=exc.kind) from exc
+        except (JsonRpcError, protocol.ProtocolError) as exc:
+            raise HostError(str(exc), kind="protocol_incompatible") from exc
 
     async def discover(
         self,
@@ -480,17 +597,37 @@ class McpHost:
     ) -> tuple[Session, CapabilitySnapshot]:
         """Open a session if needed and read everything the server offers."""
         session = await self.open(connection, secret=secret, key=key)
-        snapshot = await protocol.discover(
-            session.transport,
-            session.handshake,
-            connection_id=connection.connection_id,
-            config_revision=connection.config_revision,
-            capability_revision=capability_revision,
-        )
+        async with session.using():
+            snapshot = await protocol.discover(
+                session.transport,
+                session.handshake,
+                connection_id=connection.connection_id,
+                config_revision=connection.config_revision,
+                capability_revision=capability_revision,
+            )
         session.snapshot = snapshot
         return session, snapshot
 
     async def call_tool(
+        self,
+        session: Session,
+        *,
+        name: str,
+        arguments: Mapping[str, Any] | None = None,
+        input_responses: Mapping[str, Any] | None = None,
+        request_state: str | None = None,
+    ) -> ToolResult:
+        """Call a tool without closing its transport during concurrent credential rotation."""
+        async with session.using():
+            return await self._call_tool(
+                session,
+                name=name,
+                arguments=arguments,
+                input_responses=input_responses,
+                request_state=request_state,
+            )
+
+    async def _call_tool(
         self,
         session: Session,
         *,
@@ -557,38 +694,21 @@ class McpHost:
 
     async def read_resource(self, session: Session, *, uri: str) -> dict[str, Any]:
         """Read one resource, bounded and honestly rendered."""
-        result = await session.transport.request(protocol.RESOURCES_READ, {"uri": uri})
+        async with session.using():
+            result = await session.transport.request(protocol.RESOURCES_READ, {"uri": uri})
         if protocol.input_required(result):
             raise HostError(
                 "this resource needs input from the user before it can be read",
                 kind="protocol_incompatible",
             )
         contents = result.get("contents") if isinstance(result, Mapping) else None
-        if not isinstance(contents, list) or not contents:
+        if not isinstance(contents, list):
             raise HostError("the server returned no content for that resource")
-        blocks: list[ContentBlock] = []
-        unsupported: list[str] = []
-        for item in contents[: self._limits.max_content_blocks]:
-            if not isinstance(item, Mapping):
-                continue
-            if isinstance(item.get("text"), str):
-                blocks.append(self._bounded_text(item["text"], uri=str(item.get("uri") or uri)))
-            elif isinstance(item.get("blob"), str):
-                blocks.append(
-                    ContentBlock(
-                        type="resource",
-                        data=str(item["blob"]),
-                        mime_type=str(item.get("mimeType") or ""),
-                        uri=str(item.get("uri") or uri),
-                        truncated=self._oversized(str(item["blob"])),
-                    )
-                )
-            else:
-                unsupported.append(str(item.get("mimeType") or "unknown"))
         return {
-            "uri": uri,
-            "content": [block.as_dict() for block in blocks],
-            "unsupportedContent": unsupported,
+            "contents": [
+                self._render_resource(item, fallback_uri=uri)
+                for item in contents[: self._limits.max_content_blocks]
+            ],
         }
 
     async def get_prompt(
@@ -598,23 +718,29 @@ class McpHost:
         params: dict[str, Any] = {"name": name}
         if arguments:
             params["arguments"] = dict(arguments)
-        result = await session.transport.request(protocol.PROMPTS_GET, params)
+        async with session.using():
+            result = await session.transport.request(protocol.PROMPTS_GET, params)
         if not isinstance(result, Mapping):
             raise HostError("the server's prompt reply is not an object")
         messages = result.get("messages")
+        if not isinstance(messages, list):
+            raise HostError("the server's prompt reply does not contain messages")
         rendered: list[dict[str, Any]] = []
-        for message in messages if isinstance(messages, list) else []:
-            if not isinstance(message, Mapping):
-                continue
+        for message in messages[: self._limits.max_content_blocks]:
+            if not isinstance(message, Mapping) or message.get("role") not in {"user", "assistant"}:
+                raise HostError("the server returned an invalid prompt message")
+            content = self._render_content(message.get("content"))
+            if content is None:
+                raise HostError("the server returned unsupported prompt content")
             rendered.append(
                 {
-                    "role": str(message.get("role") or "user"),
-                    "content": self._render_content(message.get("content")),
+                    "role": message["role"],
+                    "content": content.as_dict(),
                 }
             )
         return {
             "description": str(result.get("description") or ""),
-            "messages": rendered[: self._limits.max_content_blocks],
+            "messages": rendered,
         }
 
     def render_result(self, result: Any) -> ToolResult:
@@ -636,6 +762,8 @@ class McpHost:
                 continue
             blocks.append(block)
         structured = result.get("structuredContent")
+        if structured is not None and self._oversized(json.dumps(structured, ensure_ascii=False)):
+            raise HostError("the server returned structured content larger than the platform limit")
         return ToolResult(
             content=tuple(blocks),
             structured=structured,
@@ -653,38 +781,73 @@ class McpHost:
         if block_type not in _RENDERABLE_BLOCKS:
             return None
         if block_type == "text":
-            return self._bounded_text(str(item.get("text") or ""))
+            block = self._bounded_text(str(item.get("text") or ""))
+            return ContentBlock(
+                type="text",
+                text=block.text,
+                truncated=block.truncated,
+                metadata=self._content_metadata(item),
+            )
         if block_type in ("image", "audio"):
             data = str(item.get("data") or "")
+            if self._oversized(data):
+                raise HostError("the server returned binary content larger than the platform limit")
             return ContentBlock(
                 type=block_type,
                 data=data,
                 mime_type=str(item.get("mimeType") or ""),
-                truncated=self._oversized(data),
+                metadata=self._content_metadata(item),
             )
         if block_type == "resource_link":
             return ContentBlock(
                 type=block_type,
                 uri=str(item.get("uri") or ""),
                 mime_type=str(item.get("mimeType") or ""),
+                metadata={
+                    key: item[key]
+                    for key in (
+                        "name",
+                        "title",
+                        "description",
+                        "size",
+                        "icons",
+                        "annotations",
+                        "_meta",
+                    )
+                    if key in item
+                },
             )
         resource = item.get("resource")
         if isinstance(resource, Mapping):
-            if isinstance(resource.get("text"), str):
-                return ContentBlock(
-                    type="resource",
-                    text=str(resource["text"])[: self._limits.max_content_bytes],
-                    mime_type=str(resource.get("mimeType") or ""),
-                    uri=str(resource.get("uri") or ""),
-                    truncated=self._oversized(str(resource["text"])),
-                )
             return ContentBlock(
                 type="resource",
-                data=str(resource.get("blob") or ""),
-                mime_type=str(resource.get("mimeType") or ""),
-                uri=str(resource.get("uri") or ""),
+                resource=self._render_resource(resource),
+                metadata=self._content_metadata(item),
             )
         return None
+
+    @staticmethod
+    def _content_metadata(item: Mapping[str, Any]) -> dict[str, Any]:
+        """Preserve MCP annotations and metadata alongside the normalized content."""
+        return {key: item[key] for key in ("annotations", "_meta") if key in item}
+
+    def _render_resource(self, item: Any, *, fallback_uri: str = "") -> dict[str, Any]:
+        """Preserve the resource envelope expected by native MCP clients."""
+        if not isinstance(item, Mapping):
+            raise HostError("the server returned invalid resource content")
+        resource = dict(item)
+        resource["uri"] = str(item.get("uri") or fallback_uri)
+        if isinstance(item.get("text"), str):
+            bounded = self._bounded_text(item["text"])
+            resource["text"] = bounded.text
+            if bounded.truncated:
+                resource["truncated"] = True
+        elif isinstance(item.get("blob"), str):
+            if self._oversized(item["blob"]):
+                raise HostError("the server returned binary content larger than the platform limit")
+        else:
+            raise HostError("the server returned resource content without text or a blob")
+        return resource
 
     def _bounded_text(self, text: str, *, uri: str = "") -> ContentBlock:
         """Truncate text at the block bound, saying so when it did."""

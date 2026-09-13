@@ -11,7 +11,11 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import mcp_relay
 from cloud_agent.api.deps import get_storage
+from cloud_agent.mcp.host import McpHost
+from cloud_agent.mcp.jsonrpc import JsonRpcError
+from cloud_agent.mcp.protocol import Handshake, ProtocolError
 from cloud_agent.mcp.registry import mcp_cipher
+from cloud_agent.mcp.transports import TransportError
 from tests.servers.test_mcp_relay_host import (
     FakeStore,
     StubHost,
@@ -126,3 +130,46 @@ async def test_cancelled_caller_leaves_no_approval_to_reuse(client, waiting_stor
     assert waiting_store.created_invocations[0]["status"] == "expired"
     assert waiting_store.claimed == []
     assert upstream.called == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TransportError("upstream timed out"),
+        JsonRpcError(-32603, "upstream failed"),
+        ProtocolError("malformed upstream reply"),
+    ],
+)
+async def test_upstream_failure_finishes_approval_and_returns_a_protocol_error(
+    client,
+    waiting_store,
+    monkeypatch,
+    failure,
+):
+    calls = []
+
+    class BrokenTransport:
+        async def request(self, method, params):
+            calls.append(method)
+            raise failure
+
+    async def connect(connection, *, secret):
+        return BrokenTransport(), Handshake(protocol_version="2025-11-25"), None
+
+    actual_host = McpHost()
+    monkeypatch.setattr(actual_host, "_connect", connect)
+    monkeypatch.setattr(mcp_relay, "_HOST_INSTANCE", actual_host)
+    task = await _pending_call(client, waiting_store)
+    invocation = waiting_store.created_invocations[0]
+    waiting_store.approved = {**invocation, "status": "approved"}
+    response = await asyncio.wait_for(task, timeout=3)
+    assert response.status_code == 200
+    assert response.json()["error"]["message"] == str(failure)
+    assert calls == ["tools/call"]
+    assert waiting_store.finished == [
+        {
+            "invocation_id": invocation["id"],
+            "dispatch_generation": 1,
+            "status": "outcome_unknown",
+        }
+    ]
