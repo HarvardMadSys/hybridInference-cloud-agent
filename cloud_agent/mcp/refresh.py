@@ -37,6 +37,7 @@ restore the credential they removed.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -101,8 +102,8 @@ class RefreshOutcome:
     """What a refresh attempt did, whether or not it was the one that ran."""
 
     refreshed: bool
-    #: True when another worker held the claim. Not an error: the caller should
-    #: re-read the row and use whatever is there now.
+    #: True when another worker held the claim. The caller must re-read the row
+    #: and wait for that worker if the current access token is already expired.
     contended: bool = False
     expires_at: datetime | None = None
 
@@ -179,9 +180,8 @@ async def refresh_credential(
     if claimed is None:
         # Somebody else is doing it, or the connection moved. Reporting rather
         # than retrying: a second call with a rotating refresh token would
-        # invalidate theirs. The credential this caller read is near expiry,
-        # not past it -- that is what the margin above buys -- so the caller
-        # re-reads the row and uses what it finds there.
+        # invalidate theirs. The caller re-reads the row, using a still-valid
+        # credential immediately or waiting for this lease holder if expired.
         return RefreshOutcome(refreshed=False, contended=True)
 
     try:
@@ -321,18 +321,40 @@ async def ensure_fresh(
         return row
     outcome = await refresh_credential(store, row=row, policy=policy)
     if outcome.contended:
-        # Another instance holds the lease. Re-read rather than wait: whatever is
-        # there now is at least as fresh as what this caller held, and the row
-        # this caller read was inside the refresh *margin* -- near expiry, not
-        # past it -- so the credential it already has is still usable for the
-        # call that is about to be made. Blocking on the lease would trade that
-        # for a wait as long as the lease itself.
-        refreshed = await store.get_mcp_connection(connection_id=int(row["id"]))
-        return refreshed or row
+        return await _after_contended_refresh(store, connection_id=int(row["id"]))
     if not outcome.refreshed:
         return row
     refreshed = await store.get_mcp_connection(connection_id=int(row["id"]))
     return refreshed or row
+
+
+async def _after_contended_refresh(
+    store: McpConnectionRepository, *, connection_id: int
+) -> Mapping[str, Any]:
+    """Wait only when the current credential is already expired.
+
+    A still-valid token can be used immediately. An expired one must wait for
+    the live lease holder's result, without replaying its refresh token. A lost
+    or exhausted lease yields a clear refusal instead of sending an expired
+    credential upstream. Waiting holds no transaction and is cancellable.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + REFRESH_LEASE_SECONDS
+    while True:
+        current = await store.get_mcp_connection(connection_id=connection_id)
+        if (
+            current is None
+            or current.get("deleted_at") is not None
+            or current.get("status") == "disabled"
+        ):
+            raise RefreshRefused("this connection was disconnected or disabled")
+        if not _expiry_is_near(current, margin_seconds=0):
+            return current
+        lease = current.get("refresh_lease_expires_at")
+        remaining = deadline - loop.time()
+        if not lease or _expiry_is_near({"expires_at": lease}, margin_seconds=0) or remaining <= 0:
+            raise RefreshRefused("the connection's credential expired before refresh completed")
+        await asyncio.sleep(min(1.0, remaining))
 
 
 def _build_request(row: Mapping[str, Any], *, cipher: SourceControlCipher) -> oauth.TokenRequest:

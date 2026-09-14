@@ -157,6 +157,19 @@ connections also skip refresh. The merged catalogue continues listing and callin
 healthy connections; the API regressions assert that the inactive connection
 never enters refresh or reaches its upstream server.
 
+Merged catalogues read stored discovery snapshots without contacting OAuth
+endpoints. A tool call, prompt fetch or resource read refreshes only its selected
+connection, so a slow issuer cannot block healthy connections. After that wait,
+dispatch rechecks the current attempt lease, binding, policy and connection
+revisions. Revocation or rebinding during refresh refuses the operation. A failed
+connection returns an MCP error while the merged endpoint remains usable.
+
+When another worker holds the refresh lease, a still-valid access token remains
+usable immediately. An already-expired token waits only for that holder's result,
+bounded by the refresh lease. An absent or exhausted lease produces a refusal;
+the waiter never submits a second refresh or releases another worker's lease.
+Cancellation propagates without dispatching an upstream operation.
+
 ## Approval and native-session continuity
 
 Confirmation keeps the original MCP request open. The conversation shows a
@@ -173,7 +186,12 @@ under the child's own fence. No dispatched external write is automatically retri
 
 ## Recorded validation (2026-09-13)
 
-- `make check`: 3,743 tests passed, plus formatting, lint and mypy.
+- `make check`: 3,782 tests passed, plus formatting, lint and mypy.
+- Refresh/relay/approval regression suite: 173 passed. Cases cover an issuer
+  that never responds without blocking another connection, authority changes
+  during refresh across tools, resources, prompts and direct routes, pending
+  approval invalidation, current-credential dispatch, expired access tokens
+  during refresh contention and cancellation without releasing another lease.
 - PostgreSQL tier: 407 tests passed.
 - Web: 1,298 tests passed; type-check, ESLint and changed-file Prettier checks passed.
 - Built Linux arm64 sandbox: five pinned CLIs, each with `allow` and `confirm`.

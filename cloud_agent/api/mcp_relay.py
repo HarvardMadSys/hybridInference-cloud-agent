@@ -275,6 +275,8 @@ async def _resolve_binding(
     identity: dict[str, Any],
     alias: str,
     store: _McpRelayStorage,
+    *,
+    refresh_credentials: bool = True,
 ) -> Authorized:
     """Resolve one binding alias into the server this job may reach."""
     job_id = identity["job_id"]
@@ -343,7 +345,8 @@ async def _resolve_binding(
     try:
         # Before the credential is read, so a token that aged out during a long
         # job is renewed instead of being sent and refused.
-        connection_row = dict(await ensure_fresh(store.mcp, row=connection_row))
+        if refresh_credentials:
+            connection_row = dict(await ensure_fresh(store.mcp, row=connection_row))
     except RefreshRefused as exc:
         logger.warning(
             "agent_mcp_refresh_refused",
@@ -414,7 +417,84 @@ async def _authorize(
         raise _refused(
             503, "invalid_request_error", "MCP is unavailable without a configured database."
         )
-    return await _resolve_binding(identity, alias, store)
+    return await _resolve_live_binding(
+        identity,
+        alias,
+        store,
+        attempt_id=_attempt_id_of(authorization),
+        lease_generation=_lease_of(authorization),
+    )
+
+
+async def _resolve_live_binding(
+    identity: dict[str, Any],
+    alias: str,
+    store: _McpRelayStorage,
+    *,
+    attempt_id: int | None,
+    lease_generation: int,
+) -> Authorized:
+    """Refresh only the selected connection, then recheck its live authority.
+
+    OAuth can spend seconds on the network. The binding and attempt read before
+    that wait cannot authorize dispatch after the user changes or revokes them.
+    The second resolution reads current rows without another network refresh.
+    """
+    previous = await _resolve_binding(identity, alias, store)
+    current_identity = (
+        await store.credential_queries.resolve_model_credential(
+            job_id=previous.job_id, attempt_id=attempt_id, lease_generation=lease_generation
+        )
+        if attempt_id is not None
+        else None
+    )
+    if current_identity is None:
+        raise _refused(401, "permission_error", "This MCP session is no longer authorized.")
+    current = await _resolve_binding(current_identity, alias, store, refresh_credentials=False)
+    if (
+        current.connection_id != previous.connection_id
+        or current.binding != previous.binding
+        or current.connection.config_revision != previous.connection.config_revision
+        or current.connection.authorization_epoch != previous.connection.authorization_epoch
+        or current.connection.capability_revision != previous.connection.capability_revision
+    ):
+        raise _refused(
+            403, "permission_error", "MCP authorization changed while refreshing credentials."
+        )
+    return current
+
+
+async def _refresh_catalogue_entry(
+    entry: tuple[Authorized, Any], authorization: str | None, store: _McpRelayStorage
+) -> tuple[Authorized, Any]:
+    """Refresh the chosen tool or prompt and use its current capability record."""
+    previous, capability = entry
+    current = await _authorize(previous.alias, authorization, store)
+    if current.connection_id != previous.connection_id:
+        raise _refused(403, "permission_error", "The selected MCP connection changed.")
+    latest = (
+        next(
+            (
+                item
+                for item in current.snapshot.of_kind(capability.kind)
+                if item.name == capability.name
+            ),
+            None,
+        )
+        if current.snapshot is not None
+        else None
+    )
+    if latest is None:
+        raise _refused(403, "permission_error", "This MCP capability is no longer available.")
+    return current, latest
+
+
+def _binding_error(request_id: Any, exc: HTTPException) -> dict[str, Any]:
+    """Return a selected-connection failure without taking down the merged endpoint."""
+    detail = exc.detail
+    if isinstance(detail, dict) and isinstance(detail.get("error"), dict):
+        detail = detail["error"].get("message")
+    return _error_reply(request_id, str(detail or "This MCP connection is unavailable."))
 
 
 async def _decide_call(
@@ -559,7 +639,13 @@ async def _wait_for_approval(
             if identity is None:
                 break
             try:
-                current = await _resolve_binding(identity, authorized.alias, store)
+                current = await _resolve_live_binding(
+                    identity,
+                    authorized.alias,
+                    store,
+                    attempt_id=attempt_id,
+                    lease_generation=int(fence["lease_generation"] or 0),
+                )
             except HTTPException:
                 break
             if (
@@ -979,7 +1065,9 @@ async def _host_catalogue(
         if not alias:
             continue
         try:
-            authorized = await _resolve_binding(identity, alias, store)
+            # Discovery snapshots are local. Listing or routing one connection
+            # must never contact another connection's OAuth endpoint.
+            authorized = await _resolve_binding(identity, alias, store, refresh_credentials=False)
         except HTTPException as exc:
             logger.warning(
                 "agent_mcp_host_binding_unavailable",
@@ -1296,12 +1384,14 @@ async def _host_fetch(
                 raise ResourceResolutionError(
                     "That resource connection is not bound to this session."
                 )
-            authorized = await _resolve_binding(identity, str(binding.get("alias") or ""), store)
+            authorized = await _authorize(str(binding.get("alias") or ""), authorization, store)
+            if str(authorized.connection_id) != connection_id:
+                raise ResourceResolutionError("The selected resource connection changed.")
             capability = resource_capability(authorized.snapshot, authorized.binding, original_uri)
         except ResourceResolutionError as exc:
             return _error_reply(request_id, str(exc))
-        except HTTPException:
-            return _error_reply(request_id, "That resource connection is unavailable.")
+        except HTTPException as exc:
+            return _binding_error(request_id, exc)
         if capability is None:
             return _error_reply(
                 request_id, "That URI is not in this session's resource catalogue or templates."
@@ -1316,7 +1406,10 @@ async def _host_fetch(
                 request_id,
                 f"{key!r} is not one of this session's prompts. Call prompts/list for the current set.",
             )
-        authorized, capability = entry
+        try:
+            authorized, capability = await _refresh_catalogue_entry(entry, authorization, store)
+        except HTTPException as exc:
+            return _binding_error(request_id, exc)
     held = await _decide_call(
         authorized,
         store,
@@ -1389,7 +1482,10 @@ async def _host_call(
             request_id,
             f"{name!r} is not one of this session's tools. Call tools/list for the current set.",
         )
-    authorized, capability = entry
+    try:
+        authorized, capability = await _refresh_catalogue_entry(entry, authorization, store)
+    except HTTPException as exc:
+        return _binding_error(request_id, exc)
     held = await _decide_call(
         authorized,
         store,

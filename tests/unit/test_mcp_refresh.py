@@ -636,3 +636,86 @@ class TestEnsureFresh:
             row=_row(credential_version=8),  # type: ignore[arg-type]
         )
         assert row["credential_version"] == 9
+
+    @pytest.mark.asyncio
+    async def test_an_expired_token_waits_for_the_existing_refresher(self, monkeypatch):
+        import asyncio
+
+        store = FakeStore(
+            _row(
+                expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                refresh_lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+            )
+        )
+        store.leased.add(0)
+        read = asyncio.Event()
+        original = store.get_mcp_connection
+
+        async def get(**kwargs):
+            read.set()
+            return await original(**kwargs)
+
+        monkeypatch.setattr(store, "get_mcp_connection", get)
+        task = asyncio.create_task(refresh.ensure_fresh(store, row=dict(store.row)))
+        await asyncio.wait_for(read.wait(), 1)
+        assert not task.done()
+        store.row.update(
+            access_token_ciphertext=mcp_cipher(_KEY).encrypt("fresh-access"),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            credential_version=5,
+            refresh_lease_expires_at=None,
+        )
+        row = await asyncio.wait_for(task, 2)
+        assert mcp_cipher(_KEY).decrypt(row["access_token_ciphertext"]) == "fresh-access"
+        assert store.claims == 1
+        assert store.writes == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "change", ["no-lease", "expired-lease", "timeout", "disabled", "deleted"]
+    )
+    async def test_an_expired_contended_token_is_never_returned(self, monkeypatch, change):
+        store = FakeStore(
+            _row(
+                credential_version=5,
+                expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+            )
+        )
+        if change == "expired-lease":
+            store.row["refresh_lease_expires_at"] = datetime.now(timezone.utc) - timedelta(
+                seconds=1
+            )
+        elif change == "timeout":
+            monkeypatch.setattr(refresh, "REFRESH_LEASE_SECONDS", 0.01)
+            store.row["refresh_lease_expires_at"] = datetime.now(timezone.utc) + timedelta(
+                seconds=60
+            )
+        elif change == "disabled":
+            store.row["status"] = "disabled"
+        elif change == "deleted":
+            store.row["deleted_at"] = datetime.now(timezone.utc)
+        with pytest.raises(refresh.RefreshRefused):
+            await refresh.ensure_fresh(store, row={**store.row, "credential_version": 4})
+        assert store.claims == 1
+        assert store.writes == []
+
+    @pytest.mark.asyncio
+    async def test_cancelling_a_refresh_wait_does_not_release_another_workers_lease(self):
+        import asyncio
+
+        store = FakeStore(
+            _row(
+                expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                refresh_lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+            )
+        )
+        store.leased.add(0)
+        task = asyncio.create_task(refresh.ensure_fresh(store, row=dict(store.row)))
+        await asyncio.sleep(0)
+        assert not task.done()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert store.leased == {0}
+        assert store.released == []
+        assert store.claims == 1
