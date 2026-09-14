@@ -698,8 +698,36 @@ async def test_resident_mcp_call_followup_resume_and_fork(
         model_transcript = upstream.transcript.read_text()
         assert token not in model_transcript
         assert "upstream-secret-token" not in model_transcript
+        # Also exercise the resource protocol with the same member's current
+        # token, through the actual relay, protocol host, upstream and DB.
+        async with httpx.AsyncClient(timeout=20) as resource_client:
+            endpoint = f"http://127.0.0.1:{relay_port}/v1/agent/mcp"
+            headers = {"Authorization": f"Bearer {current_token}"}
+            listed = await resource_client.post(
+                endpoint,
+                headers=headers,
+                json={"jsonrpc": "2.0", "id": 91, "method": "resources/templates/list"},
+            )
+            template = listed.json()["result"]["resourceTemplates"][0]["uriTemplate"]
+            uri = template.replace("{path}", "README%20notes.md")
+            read = await resource_client.post(
+                endpoint,
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 92,
+                    "method": "resources/read",
+                    "params": {"uri": uri},
+                },
+            )
+            assert read.json()["result"]["contents"] == [
+                {"uri": uri, "text": "template resource body", "mimeType": "text/plain"}
+            ]
+        reads = [call for call in upstream.mcp_calls if call["method"] == "resources/read"]
+        assert len(reads) == 1
+        assert reads[0]["params"] == {"uri": "repo://files/README%20notes.md"}
         if policy == "confirm":
-            assert len(decisions) == expected_calls
+            assert len(decisions) == expected_calls + 1
             rows = await store.mcp.list_mcp_invocations(job_id=claims["job_id"])
             assert {row["status"] for row in rows} == {"completed"}
     finally:

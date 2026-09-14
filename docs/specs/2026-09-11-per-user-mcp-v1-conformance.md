@@ -26,7 +26,7 @@ production deployment acceptance or third-party OAuth interoperability.
 | Auth: none / static / OAuth | Done | `mcp/net_policy.py`, `mcp/oauth.py`, `mcp/refresh.py` | — |
 | Auth: stdio env or secret reference | **Stored only** | `secret://NAME` recorded in the launch spec, ciphertexts in `set_mcp_launch_spec` | `launch.resolve_env` is never called: nothing resolves a reference into a process environment, because nothing starts one |
 | Multiple instances per service | Done | no `UNIQUE(user_id, server)`; `test_the_same_service_twice_is_two_connections` | — |
-| Dynamic tools / resources / prompts | Done | `protocol.discover`, `_host_listing`, `_host_fetch`; the merged endpoint's handshake advertises all three families, which is what makes a client ask |
+| Dynamic tools / resources / resource templates / prompts | Done | `protocol.discover`, `_host_listing`, `_host_fetch`; `resources.resource_capability` resolves expanded template URIs under the selected resource policy | — |
 | All five coding agents | **Supported** | `runtimes_supporting_mcp()`; every adapter uses the same merged endpoint and approval policy | — |
 | Optional capabilities reported as native / bridge / unsupported | Done | `protocol.support_states`, stored in the snapshot | — |
 
@@ -46,7 +46,7 @@ production deployment acceptance or third-party OAuth interoperability.
 | tools / resources / prompts native first, controlled adaptation otherwise | Done | the merged host serves all three; the pi bridge is the controlled adaptation for a CLI with no MCP client |
 | Types, binary / media and size limits presented truthfully | Done | `host.ContentBlock` carries `truncated` and names `unsupportedContent` rather than returning an empty result |
 | Correlate by request id, method and context — including cancel and progress | **Partial** | the transports correlate replies by id and tolerate progress frames before the answer. On the merged endpoint a `notifications/cancelled` and an upstream progress notification are both dropped: the surface is request/response, so a cancel that arrives on a later HTTP request has nothing to reach |
-| External URI is the server's own resource identifier | Done | `resources/list` publishes the upstream URIs; routing is a lookup in the catalogue |
+| Upstream resource identifiers preserved; merged resource identity includes its connection | Done | Lists and protocol resource results use `mcp-resource://<connection-id>/<original-uri>`; reads strip only that prefix and send the original URI unchanged to its owning connection |
 | Opaque session / event handles bound to connection, revisions, epoch, member, attempt, owner lease generation | Done | the handle is `mcp1.<digest>` over connection, member and lease generation, and `McpHost` records every session it opens in `agent_mcp_transport_sessions` with those columns. The row is a *record*, not the session — a socket cannot be handed back by a table — and what it buys is finding a session from elsewhere |
 | Rebuild the protocol session when the owner is superseded, without resending dispatched work | Done | the key includes the lease generation, so a takeover produces a new session; `McpHost.reap_superseded` closes the superseded one, deletes its record and clears any record another instance left under that member. The map no longer grows for the lifetime of the process |
 | Bounded request, frame, cumulative response and events | Done | `jsonrpc.MAX_MESSAGE_BYTES`, `sse.MAX_EVENT_BYTES`, `transports.MAX_RESPONSE_BYTES` |
@@ -115,10 +115,36 @@ uv run pytest -q -m dbtest  # needs a disposable PostgreSQL database
 MCP_TEST_SANDBOX_IMAGE=<built-image> uv run pytest -q -m external tests/external/test_resident_mcp_parity.py
 ```
 
-The external test is the one that crosses every seam at once: a real relay
-listener, a real database, and the pinned pi driving the merged endpoint against
-a stub upstream. It skips rather than fails without Postgres, npm or the
-network.
+The external parity test crosses the runtime boundaries: a real relay listener,
+a real database, and all five pinned CLIs driving the merged endpoint against
+synthetic model and MCP endpoints. Each case also reads an expanded resource
+template through the relay using the member's current token. That resource
+request is made by the test's protocol client, not by the native CLI. The suite
+requires the built sandbox image and a disposable PostgreSQL database.
+
+## Resource identity and templates
+
+The merged endpoint qualifies every static resource and resource template with
+its connection ID. The prefix remains stable when bindings are reordered, and
+two connections can expose the same original URI without one hiding the other.
+Read results, resource links and embedded resources in tool or prompt results
+use the same prefix. URI percent encoding is preserved byte for byte when
+forwarding to the upstream server. The per-connection route keeps original URIs.
+
+An exact static resource uses its own rule. Otherwise the concrete URI must
+match a discovered template selected for this session. An explicitly denied
+matching template refuses the request, and multiple selected matches return an
+ambiguity error instead of guessing a policy. Confirmation records both the
+concrete upstream URI and MCP method, so approving one resource read cannot
+approve a different URI or a subscription. Dispatch rechecks the current
+connection, policy and attempt fence.
+
+`mcp/resource_templates.py` matches RFC 6570 expansions with bounded template,
+URI, expression, cache and compiled-pattern sizes. RE2 avoids backtracking on
+server-supplied templates. `tests/unit/test_mcp_resource_templates.py` checks
+operators, encoded boundaries, invalid inputs and adversarial patterns;
+`tests/servers/test_mcp_resource_routes.py` checks routing and authorization
+through the API, including pending approval invalidation.
 
 ## Approval and native-session continuity
 
@@ -136,15 +162,24 @@ under the child's own fence. No dispatched external write is automatically retri
 
 ## Recorded validation (2026-09-13)
 
-- `make check`: 3,479 tests passed, plus formatting, lint and mypy.
+- `make check`: 3,618 tests passed, plus formatting, lint and mypy.
 - PostgreSQL tier: 407 tests passed.
-- Web: 1,295 tests passed; type-check, ESLint and changed-file Prettier checks passed.
+- Web: 1,298 tests passed; type-check, ESLint and changed-file Prettier checks passed.
 - Built Linux arm64 sandbox: five pinned CLIs, each with `allow` and `confirm`.
-  All ten cases passed. Across 44 calls the suite checks tool results, approval
-  without a second prompt, live follow-up, native resume, native Fork, token
-  rotation and refusal of superseded tokens. Codex exec and Kilo run are checked
+  All fifteen cases passed, including long normalized tool names. Across 66
+  tool calls the suite checks results, approval without a second prompt, live
+  follow-up, native resume, native Fork, token rotation and refusal of superseded
+  tokens. Codex exec and Kilo run are checked
   alongside the resident app-server/serve paths. Kilo's reviewed build is also
   installed through the retained-container upgrade path under dropped capabilities.
+- All fifteen cases also read an expanded resource template using the member's
+  current credentials, with confirmation and invocation completion checked for
+  `confirm` cases. These additional resource reads use the test protocol client.
+- Resource/template/relay regression suite: 146 passed. The template matcher
+  also accepted all 383 nonempty expansions in the public
+  [URI Template test corpus](https://github.com/uri-templates/uritemplate-test)
+  (`spec-examples`, `spec-examples-by-section`, and `extended-tests`). Empty
+  expansions are refused because resource reads require a nonempty URI.
 - Repository-supplied MCP files do not execute their injected command; Kilo's
   resolved configuration contains only the selected platform relay.
 

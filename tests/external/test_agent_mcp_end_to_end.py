@@ -161,7 +161,7 @@ class _Recorder:
         if method == "initialize":
             result: Any = {
                 "protocolVersion": "2025-11-25",
-                "capabilities": {"tools": {}},
+                "capabilities": {"tools": {}, "resources": {}},
                 "serverInfo": {"name": "e2e-fake", "version": "1"},
             }
         elif method == "tools/list":
@@ -174,6 +174,16 @@ class _Recorder:
                             "type": "object",
                             "properties": {"number": {"type": "integer"}},
                         },
+                    }
+                ]
+            }
+        elif method == "resources/read":
+            result = {
+                "contents": [
+                    {
+                        "uri": request["params"]["uri"],
+                        "text": "template resource body",
+                        "mimeType": "text/plain",
                     }
                 ]
             }
@@ -448,7 +458,13 @@ async def _seed(
             }
         ],
         resources=[],
-        resource_templates=[],
+        resource_templates=[
+            {
+                "name": "repo://files/{path}",
+                "description": "Repository files",
+                "input_schema": {"mimeType": "text/plain"},
+            }
+        ],
         prompts=[],
         support={},
     )
@@ -472,7 +488,7 @@ async def _seed(
                 "capability_revision": 2,
                 "policy_revision": 1,
                 "rules": {tool_name: {"policy": policy, "fingerprint": ""}},
-                "resource_rules": {},
+                "resource_rules": {"repo://files/{path}": policy},
                 "prompt_rules": {},
             }
         ],

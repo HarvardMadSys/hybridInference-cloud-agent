@@ -50,7 +50,7 @@ from cloud_agent.mcp import protocol
 from cloud_agent.mcp.authorization import decide, visible_capabilities
 from cloud_agent.mcp.host import HostError, McpHost, SessionKey, arguments_digest
 from cloud_agent.mcp.invocations import deadline_for
-from cloud_agent.mcp.jsonrpc import INTERNAL_ERROR, INVALID_REQUEST, PARSE_ERROR
+from cloud_agent.mcp.jsonrpc import INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, PARSE_ERROR
 from cloud_agent.mcp.models import CapabilityKind, McpServer
 from cloud_agent.mcp.net_policy import policy_from_environment
 from cloud_agent.mcp.refresh import RefreshRefused, ensure_fresh
@@ -59,6 +59,13 @@ from cloud_agent.mcp.registry import (
     invocation_cipher,
     resolve_connection,
     server_for,
+)
+from cloud_agent.mcp.resources import (
+    ResourceResolutionError,
+    resource_capability,
+    resource_uri,
+    scope_resource_result,
+    split_resource_uri,
 )
 from cloud_agent.mcp.transports import TransportError, guard_target
 from cloud_agent.mcp_proxy import (
@@ -668,11 +675,22 @@ async def _capability_decision(
             ),
             None,
         )
+        arguments = params.get("arguments") if isinstance(params, dict) else None
+        if kind is CapabilityKind.RESOURCE:
+            if not isinstance(params, dict) or not isinstance(params.get(key), str) or not name:
+                return _error_reply(payload.get("id"), f"{method} needs a uri", INVALID_PARAMS)
+            try:
+                capability = resource_capability(authorized.snapshot, authorized.binding, name)
+            except ResourceResolutionError as exc:
+                return _error_reply(payload.get("id"), str(exc))
+            arguments = {"uri": name, "method": method}
+            if capability is not None:
+                kind, name = capability.kind, capability.name
         held = await _decide_call(
             authorized,
             store,
             name=name,
-            arguments=params.get("arguments") if isinstance(params, dict) else None,
+            arguments=arguments,
             capability=capability,
             attempt_id=attempt_id,
             lease_generation=lease_generation,
@@ -962,13 +980,10 @@ async def _host_catalogue(
             continue
         available = authorized.snapshot.of_kind(kind) if authorized.snapshot else ()
         for capability in visible_capabilities(authorized.binding, available, kind):
-            # A resource keeps its own URI as its key: the design treats an
-            # external URI as that server's identifier for the resource, so
-            # renaming it would invent an identifier the server never issued.
-            # Everything else is namespaced by the alias, because a bare name is
-            # ambiguous the moment two connections offer one.
+            # Connection-qualified URIs keep resource identity stable when
+            # other connections advertise the same upstream URI or template.
             key = (
-                capability.name
+                resource_uri(authorized.connection_id, capability.name)
                 if kind in (CapabilityKind.RESOURCE, CapabilityKind.RESOURCE_TEMPLATE)
                 else protocol.presented_name(alias, capability.name)
             )
@@ -976,10 +991,11 @@ async def _host_catalogue(
     return catalogue
 
 
-def _resource_entry(capability: Any) -> dict[str, Any]:
+def _resource_entry(capability: Any, uri: str) -> dict[str, Any]:
     """Render one resource the way a client reads it."""
     schema = capability.input_schema if isinstance(capability.input_schema, dict) else {}
-    entry: dict[str, Any] = {"uri": capability.name, "name": capability.name}
+    uri_field = "uriTemplate" if capability.kind is CapabilityKind.RESOURCE_TEMPLATE else "uri"
+    entry: dict[str, Any] = {uri_field: uri, "name": capability.name}
     if capability.description:
         entry["description"] = capability.description
     if schema.get("mimeType"):
@@ -1193,7 +1209,11 @@ async def _host_listing(
         catalogue = await _host_catalogue(identity, store, CapabilityKind.RESOURCE)
         return _result_reply(
             request_id,
-            {"resources": [_resource_entry(capability) for _, capability in catalogue.values()]},
+            {
+                "resources": [
+                    _resource_entry(capability, uri) for uri, (_, capability) in catalogue.items()
+                ]
+            },
             stateless=stateless,
         )
     if method == protocol.RESOURCES_TEMPLATES_LIST:
@@ -1202,16 +1222,7 @@ async def _host_listing(
             request_id,
             {
                 "resourceTemplates": [
-                    {
-                        "uriTemplate": capability.name,
-                        "name": capability.name,
-                        **(
-                            {"description": capability.description}
-                            if capability.description
-                            else {}
-                        ),
-                    }
-                    for _, capability in catalogue.values()
+                    _resource_entry(capability, uri) for uri, (_, capability) in catalogue.items()
                 ]
             },
             stateless=stateless,
@@ -1250,26 +1261,56 @@ async def _host_fetch(
     params = payload.get("params")
     settings = params if isinstance(params, dict) else {}
     reading = method == protocol.RESOURCES_READ
-    kind = CapabilityKind.RESOURCE if reading else CapabilityKind.PROMPT
-    key = str(settings.get("uri") if reading else settings.get("name") or "")
-    if not key:
-        return _error_reply(request_id, f"{method} needs a {'uri' if reading else 'name'}")
-
-    catalogue = await _host_catalogue(identity, store, kind)
-    entry = catalogue.get(key)
-    if entry is None:
-        listing = "resources/list" if reading else "prompts/list"
+    key = settings.get("uri" if reading else "name")
+    if not isinstance(key, str) or not key:
         return _error_reply(
-            request_id,
-            f"{key!r} is not one of this session's "
-            f"{'resources' if reading else 'prompts'}. Call {listing} for the current set.",
+            request_id, f"{method} needs a {'uri' if reading else 'name'}", INVALID_PARAMS
         )
-    authorized, capability = entry
+
+    original_uri = ""
+    if reading:
+        try:
+            connection_id, original_uri = split_resource_uri(key)
+            binding = next(
+                (
+                    row
+                    for row in identity.get("mcp_bindings") or []
+                    if str(row.get("connection_id")) == connection_id
+                ),
+                None,
+            )
+            if binding is None:
+                raise ResourceResolutionError(
+                    "That resource connection is not bound to this session."
+                )
+            authorized = await _resolve_binding(identity, str(binding.get("alias") or ""), store)
+            capability = resource_capability(authorized.snapshot, authorized.binding, original_uri)
+        except ResourceResolutionError as exc:
+            return _error_reply(request_id, str(exc))
+        except HTTPException:
+            return _error_reply(request_id, "That resource connection is unavailable.")
+        if capability is None:
+            return _error_reply(
+                request_id, "That URI is not in this session's resource catalogue or templates."
+            )
+        kind = capability.kind
+    else:
+        kind = CapabilityKind.PROMPT
+        catalogue = await _host_catalogue(identity, store, kind)
+        entry = catalogue.get(key)
+        if entry is None:
+            return _error_reply(
+                request_id,
+                f"{key!r} is not one of this session's prompts. Call prompts/list for the current set.",
+            )
+        authorized, capability = entry
     held = await _decide_call(
         authorized,
         store,
         name=capability.name,
-        arguments=settings.get("arguments") if not reading else None,
+        arguments=settings.get("arguments")
+        if not reading
+        else {"uri": original_uri, "method": method},
         capability=capability,
         attempt_id=_attempt_id_of(authorization),
         lease_generation=_lease_of(authorization),
@@ -1283,7 +1324,7 @@ async def _host_fetch(
     try:
         session = await _host_session(authorized, authorization)
         if reading:
-            result = await _host().read_resource(session, uri=capability.name)
+            result = await _host().read_resource(session, uri=original_uri)
         else:
             arguments = settings.get("arguments")
             result = await _host().get_prompt(
@@ -1309,7 +1350,9 @@ async def _host_fetch(
         )
         return _error_reply(request_id, str(exc), INTERNAL_ERROR)
     await _finish_dispatches(authorized, store, status="completed")
-    return _result_reply(request_id, result, stateless=stateless)
+    return _result_reply(
+        request_id, scope_resource_result(result, authorized.connection_id), stateless=stateless
+    )
 
 
 async def _host_call(
@@ -1378,7 +1421,11 @@ async def _host_call(
     await _finish_dispatches(
         authorized, store, status="failed" if outcome.is_error else "completed"
     )
-    return _result_reply(request_id, outcome.as_dict(), stateless=stateless)
+    return _result_reply(
+        request_id,
+        scope_resource_result(outcome.as_dict(), authorized.connection_id),
+        stateless=stateless,
+    )
 
 
 @router.post("")

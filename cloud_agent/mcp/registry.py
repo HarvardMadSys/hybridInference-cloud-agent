@@ -487,6 +487,11 @@ def server_for(
         if snapshot
         else ()
     )
+    templates = (
+        visible_capabilities(binding, snapshot.resource_templates, CapabilityKind.RESOURCE_TEMPLATE)
+        if snapshot
+        else ()
+    )
     prompts = (
         visible_capabilities(
             binding, snapshot.of_kind(CapabilityKind.PROMPT), CapabilityKind.PROMPT
@@ -507,7 +512,7 @@ def server_for(
         transport=connection.config.transport,
         headers=headers,
         tools=frozenset(capability.name for capability in allowed),
-        resources=frozenset(capability.name for capability in resources),
+        resources=frozenset(capability.name for capability in [*resources, *templates]),
         prompts=frozenset(capability.name for capability in prompts),
         description=connection.label,
         request_timeout_s=connection.request_timeout_s,

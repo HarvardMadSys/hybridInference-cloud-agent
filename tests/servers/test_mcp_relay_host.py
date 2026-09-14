@@ -297,11 +297,14 @@ class StubHost:
 
     async def read_resource(self, session: Session, *, uri: str) -> dict[str, Any]:
         self.read.append({"uri": uri})
-        return {"uri": uri, "content": [{"type": "text", "text": "resource body"}]}
+        return {"contents": [{"uri": uri, "text": "resource body"}]}
 
     async def get_prompt(self, session: Session, **kwargs: Any) -> dict[str, Any]:
         self.prompts.append(kwargs)
-        return {"description": "a prompt", "messages": [{"role": "user", "content": "hello"}]}
+        return {
+            "description": "a prompt",
+            "messages": [{"role": "user", "content": {"type": "text", "text": "hello"}}],
+        }
 
 
 @pytest.fixture()
@@ -815,18 +818,15 @@ class TestResourcesAndPrompts:
         )
 
     async def test_only_enabled_resources_are_listed(self, host: StubHost) -> None:
-        """And they keep the URI the server issued for them.
-
-        The design treats an external URI as that server's own identifier for
-        the resource, so a presented name for one would invent an identifier the
-        server never had.
-        """
+        """Only enabled resources receive connection-scoped public URIs."""
         app = FastAPI()
         app.include_router(agent_mcp_router.router)
         app.dependency_overrides[get_storage] = lambda: self._store()
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
             response = await api.post(_HOST_URL, json=_rpc("resources/list"), headers=_auth())
-        assert [entry["uri"] for entry in _result(response)["resources"]] == ["repo://notes"]
+        assert [entry["uri"] for entry in _result(response)["resources"]] == [
+            "mcp-resource://7/repo://notes"
+        ]
 
     async def test_a_resource_outside_the_scope_is_not_readable(self, host: StubHost) -> None:
         """Refused without dialling: the scope is checked before the call."""
@@ -836,7 +836,7 @@ class TestResourcesAndPrompts:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
             response = await api.post(
                 _HOST_URL,
-                json=_rpc("resources/read", uri="repo://secrets"),
+                json=_rpc("resources/read", uri="mcp-resource://7/repo://secrets"),
                 headers=_auth(),
             )
         assert "error" in response.json(), response.json()
@@ -850,9 +850,11 @@ class TestResourcesAndPrompts:
         app.dependency_overrides[get_storage] = lambda: self._store()
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
             response = await api.post(
-                _HOST_URL, json=_rpc("resources/read", uri="repo://notes"), headers=_auth()
+                _HOST_URL,
+                json=_rpc("resources/read", uri="mcp-resource://7/repo://notes"),
+                headers=_auth(),
             )
-        assert _result(response)["content"][0]["text"] == "resource body"
+        assert _result(response)["contents"][0]["text"] == "resource body"
         assert host.read == [{"uri": "repo://notes"}]
         assert host.opened[-1]["connection"].connection_id == "7"
 
@@ -876,7 +878,7 @@ class TestResourcesAndPrompts:
                 headers=_auth(),
             )
         assert [entry["name"] for entry in _result(listed)["prompts"]] == ["github__summarize"]
-        assert _result(fetched)["messages"][0]["content"] == "hello"
+        assert _result(fetched)["messages"][0]["content"] == {"type": "text", "text": "hello"}
         assert host.prompts[-1]["name"] == "summarize"
         assert host.prompts[-1]["arguments"] == {"style": "tldr"}
 
