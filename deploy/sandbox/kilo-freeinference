@@ -93,7 +93,10 @@ def mcp_servers() -> dict[str, object]:
             "url": str(url),
             "enabled": True,
             "timeout": 1_560_000,
-            "headers": {"Authorization": "Bearer " + _ENV_REFERENCE},
+            # Use a fresh relay socket for each request. The pinned Bun client
+            # can race the relay's idle close when it reuses a pooled socket;
+            # retrying a failed tool request could duplicate an external write.
+            "headers": {"Authorization": "Bearer " + _ENV_REFERENCE, "Connection": "close"},
             # The relay speaks MCP with a job token, not OAuth. Left on, the CLI
             # would probe this platform for authorization-server metadata and
             # fail the server as unauthenticated before the first call.

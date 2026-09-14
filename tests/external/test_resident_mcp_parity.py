@@ -551,8 +551,16 @@ async def test_resident_mcp_call_followup_resume_and_fork(
     relay_port = _free_port()
     from cloud_agent.app import create_mcp_app
 
+    relay_app = create_mcp_app()
+    request_connections = []
+
+    async def traced_relay(scope, receive, send):
+        if scope["type"] == "http" and scope["method"] == "POST":
+            request_connections.append(tuple(scope["client"]))
+        await relay_app(scope, receive, send)
+
     server = uvicorn.Server(
-        uvicorn.Config(create_mcp_app(), host="0.0.0.0", port=relay_port, log_level="warning")
+        uvicorn.Config(traced_relay, host="0.0.0.0", port=relay_port, log_level="warning")
     )
     serving = asyncio.create_task(server.serve())
     container = ""
@@ -698,6 +706,12 @@ async def test_resident_mcp_call_followup_resume_and_fork(
         model_transcript = upstream.transcript.read_text()
         assert token not in model_transcript
         assert "upstream-secret-token" not in model_transcript
+        if runtime == "kilo":
+            # Kilo's Bun HTTP pool can race a relay's idle socket closure.
+            # Check actual TCP connections, not just the generated config:
+            # each protocol request must use a fresh connection, with no
+            # application retry that could repeat a dispatched tool write.
+            assert len(request_connections) == len(set(request_connections)), request_connections
         # Also exercise the resource protocol with the same member's current
         # token, through the actual relay, protocol host, upstream and DB.
         async with httpx.AsyncClient(timeout=20) as resource_client:

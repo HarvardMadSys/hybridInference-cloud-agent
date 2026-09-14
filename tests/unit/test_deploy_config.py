@@ -1407,10 +1407,8 @@ def test_kilo_wrapper_writes_config_sets_offline_flags_and_execs(tmp_path):
 #: One entry per wrapper that can publish the platform's MCP relay, with the
 #: environment variable its CLI reads the merged config from.
 #:
-#: Kilo is here even though its adapter refuses MCP today: the wrapper's merge
-#: is the same reviewed code, and leaving it untested would mean the next
-#: attempt at that runtime starts from an unverified half. What the adapter
-#: refuses, and why, is pinned in ``test_agent_runtimes``.
+#: Both adapters publish the same authenticated relay and exclude project
+#: configuration, including Kilo's reviewed legacy-loader patch.
 _MCP_WRAPPERS = (
     ("opencode", _OPENCODE_WRAPPER, "OPENCODE", "OPENCODE_GATEWAY_MODEL", "OPENCODE_CONFIG"),
     ("kilo", _KILO_WRAPPER, "KILO", "KILO_GATEWAY_MODEL", "KILO_CONFIG"),
@@ -1496,7 +1494,10 @@ def test_the_wrapper_declares_the_relay_and_references_the_token(
             "type": "remote",
             "url": "http://agent-mcp:8000/v1/agent/mcp/github",
             "enabled": True,
-            "headers": {"Authorization": "Bearer {env:AGENT_MCP_TOKEN}"},
+            "headers": {
+                "Authorization": "Bearer {env:AGENT_MCP_TOKEN}",
+                **({"Connection": "close"} if name == "kilo" else {}),
+            },
             # Without this the CLI probes the platform for an authorization
             # server and marks the connection unauthenticated before the first
             # call; the relay speaks MCP with a job token, not OAuth.

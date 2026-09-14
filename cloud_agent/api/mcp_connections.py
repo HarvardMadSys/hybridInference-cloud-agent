@@ -870,32 +870,44 @@ async def _diagnose(
 ) -> TestResult:
     """Run one staged diagnostic and optionally record its outcome."""
     job_store = _require_store(store)
-    row = await job_store.mcp.get_mcp_connection(
+    loaded_row = await job_store.mcp.get_mcp_connection(
         connection_id=connection_id, user_id=user["user_id"]
     )
-    if row is None:
+    if loaded_row is None:
         raise _not_found("no such MCP connection")
+    row = loaded_row
+
+    async def record_status(
+        status: str,
+        error_kind: str,
+        error_detail: str | None = None,
+        *,
+        capability_revision: int | None = None,
+    ) -> None:
+        """Publish a diagnosis only while its connection and catalogue still match."""
+        if record and not await job_store.mcp.set_mcp_connection_status(
+            connection_id=connection_id,
+            status=status,
+            error_kind=error_kind,
+            error_detail=error_detail,
+            expected_config_revision=int(row["config_revision"]),
+            expected_authorization_epoch=int(row["authorization_epoch"]),
+            expected_capability_revision=(
+                int(row["capability_revision"])
+                if capability_revision is None
+                else capability_revision
+            ),
+        ):
+            raise _conflict("this connection changed during testing; reload and test again")
 
     try:
         row = dict(await ensure_fresh(job_store.mcp, row=row, policy=_policy()))
     except RefreshRefused as exc:
-        if record:
-            await job_store.mcp.set_mcp_connection_status(
-                connection_id=connection_id,
-                status=ConnectionStatus.ERROR.value,
-                error_kind=exc.kind,
-                error_detail=str(exc),
-            )
+        await record_status(ConnectionStatus.ERROR.value, exc.kind, str(exc))
         return TestResult(ok=False, error_kind=exc.kind, message=str(exc))
     resolved = await resolve_connection(job_store.mcp, row=row, load_snapshot=False)
     if not resolved.usable:
-        if record:
-            await job_store.mcp.set_mcp_connection_status(
-                connection_id=connection_id,
-                status=ConnectionStatus.ERROR.value,
-                error_kind=resolved.error_kind.value,
-                error_detail=resolved.error,
-            )
+        await record_status(ConnectionStatus.ERROR.value, resolved.error_kind.value, resolved.error)
         return TestResult(
             ok=False,
             error_kind=resolved.error_kind.value,
@@ -913,18 +925,16 @@ async def _diagnose(
         )
     except (HostError, McpRegistryError, SourceControlError) as exc:
         kind = getattr(exc, "kind", ConnectionErrorKind.UNREACHABLE.value)
-        if record:
-            await job_store.mcp.set_mcp_connection_status(
-                connection_id=connection_id,
-                status=ConnectionStatus.ERROR.value,
-                error_kind=kind,
-                error_detail=str(exc),
-            )
+        await record_status(ConnectionStatus.ERROR.value, kind, str(exc))
         return TestResult(ok=False, error_kind=kind, message=str(exc))
+    finally:
+        await mcp_host.aclose()
 
     revision = await job_store.mcp.save_mcp_capabilities(
         connection_id=connection_id,
         config_revision=resolved.connection.config_revision,
+        expected_authorization_epoch=resolved.connection.authorization_epoch,
+        expected_capability_revision=resolved.connection.capability_revision,
         protocol_version=snapshot.protocol_version,
         server_name=snapshot.server_name,
         server_version=snapshot.server_version,
@@ -934,13 +944,11 @@ async def _diagnose(
         prompts=[_capability_payload(item) for item in snapshot.prompts],
         support=dict(snapshot.support),
     )
-    del revision
-    if record:
-        await job_store.mcp.set_mcp_connection_status(
-            connection_id=connection_id,
-            status=ConnectionStatus.ACTIVE.value,
-            error_kind=ConnectionErrorKind.NONE.value,
-        )
+    if not revision:
+        raise _conflict("this connection changed during testing; reload and test again")
+    await record_status(
+        ConnectionStatus.ACTIVE.value, ConnectionErrorKind.NONE.value, capability_revision=revision
+    )
     return TestResult(
         ok=True,
         protocol_version=snapshot.protocol_version,

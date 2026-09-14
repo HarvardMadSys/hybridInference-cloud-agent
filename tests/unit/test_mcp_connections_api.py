@@ -150,8 +150,12 @@ class FakeStore(AllCapabilities):
 
     async def set_mcp_connection_status(self, **kwargs: Any) -> bool:
         row = self.connections.get(kwargs["connection_id"])
-        if row is None:
+        if row is None or row["deleted_at"] is not None:
             return False
+        for version in ("config_revision", "authorization_epoch", "capability_revision"):
+            expected = kwargs.get(f"expected_{version}")
+            if expected is not None and row[version] != expected:
+                return False
         row["status"] = kwargs["status"]
         row["error_kind"] = kwargs.get("error_kind", "none")
         row["error_detail"] = kwargs.get("error_detail")
@@ -309,6 +313,12 @@ class FakeStore(AllCapabilities):
 
     async def save_mcp_capabilities(self, **kwargs: Any) -> int:
         row = self.connections[kwargs["connection_id"]]
+        if row["deleted_at"] is not None or row["config_revision"] != kwargs["config_revision"]:
+            return 0
+        for version in ("authorization_epoch", "capability_revision"):
+            expected = kwargs.get(f"expected_{version}")
+            if expected is not None and row[version] != expected:
+                return 0
         row["capability_revision"] += 1
         self.capabilities[kwargs["connection_id"]] = {
             "connection_id": kwargs["connection_id"],

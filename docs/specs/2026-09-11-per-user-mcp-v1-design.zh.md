@@ -1,7 +1,7 @@
 # Cloud Agent 通用 MCP 接入设计
 
 - 日期：2026-09-11。
-- 状态：设计提案；通用接入尚未实现或完成真实部署验收。
+- 状态：原始设计提案；当前实现与验证范围见[实现对照记录](2026-09-11-per-user-mcp-v1-conformance.md)，真实部署验收仍待完成。
 - 实现仓库：`HarvardMadSys/hybridInference-cloud-agent`。
 - 调研代码基线：`b7a24c610a1185b0b288dce32eabd8fe487d710f`。
 - 已明确的产品目标：**平台全部 coding agent 共用通用 MCP 能力；用户可以添加自己的 MCP 服务，接入不以品牌白名单为前提。**

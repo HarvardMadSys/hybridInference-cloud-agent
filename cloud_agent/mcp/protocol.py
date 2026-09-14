@@ -311,13 +311,11 @@ def client_capabilities() -> dict[str, Any]:
 
     Declared honestly and narrowly: a capability listed here is one a handler
     exists for, because declaring ``sampling`` without one turns a server's
-    legitimate request into a hang. ``elicitation`` is declared in its
-    form-only shape: the platform never accepts a URL-mode elicitation, which
-    would ask the user to visit an arbitrary address chosen by a server.
+    legitimate request into a hang. Roots are answered with an empty authorized
+    set. Elicitation needs a user interaction handler and is not advertised.
     """
     return {
         "roots": {"listChanged": False},
-        "elicitation": {"form": {}},
     }
 
 
@@ -448,10 +446,9 @@ def support_states(capabilities: Mapping[str, Any]) -> dict[str, Any]:
         offered = isinstance(declared, Mapping) and (not child or child in declared)
         if not offered:
             continue
-        # Elicitation in form mode is bridged; sampling needs a model call that
-        # is authorized out of band, so it is reported as unsupported rather
-        # than half-implemented.
-        if name in ("elicitation", "roots"):
+        # Only roots has a handler. Elicitation forms and model sampling need
+        # user interaction and authorization paths this host does not provide.
+        if name == "roots":
             states[name] = "platform-bridge"
         else:
             states[name] = "unsupported"

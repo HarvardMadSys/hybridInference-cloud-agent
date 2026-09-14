@@ -306,6 +306,9 @@ class PostgresMcpConnectionRepository:
         status: str,
         error_kind: str = "none",
         error_detail: str | None = None,
+        expected_config_revision: int | None = None,
+        expected_authorization_epoch: int | None = None,
+        expected_capability_revision: int | None = None,
     ) -> bool:
         """Record what the last test or discovery found."""
         async with self._pool.acquire() as conn:
@@ -315,12 +318,18 @@ class PostgresMcpConnectionRepository:
                     status = $2, error_kind = $3, error_detail = $4,
                     last_checked_at = NOW(), updated_at = NOW()
                 WHERE id = $1 AND deleted_at IS NULL
+                  AND ($5::bigint IS NULL OR config_revision = $5)
+                  AND ($6::bigint IS NULL OR authorization_epoch = $6)
+                  AND ($7::bigint IS NULL OR capability_revision = $7)
                 RETURNING id
                 """,
                 connection_id,
                 status,
                 error_kind,
                 error_detail,
+                expected_config_revision,
+                expected_authorization_epoch,
+                expected_capability_revision,
             )
         return updated is not None
 
@@ -585,6 +594,8 @@ class PostgresMcpConnectionRepository:
         prompts: list[dict[str, Any]],
         support: dict[str, Any],
         partial: bool = False,
+        expected_authorization_epoch: int | None = None,
+        expected_capability_revision: int | None = None,
     ) -> int:
         """Store a discovery result and return the new capability revision.
 
@@ -601,9 +612,15 @@ class PostgresMcpConnectionRepository:
                 UPDATE agent_mcp_connections
                 SET capability_revision = capability_revision + 1, updated_at = NOW()
                 WHERE id = $1 AND deleted_at IS NULL
+                  AND config_revision = $2
+                  AND ($3::bigint IS NULL OR authorization_epoch = $3)
+                  AND ($4::bigint IS NULL OR capability_revision = $4)
                 RETURNING capability_revision
                 """,
                 connection_id,
+                config_revision,
+                expected_authorization_epoch,
+                expected_capability_revision,
             )
             if revision is None:
                 return 0

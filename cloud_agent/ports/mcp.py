@@ -95,6 +95,9 @@ class McpConnectionRepository(Protocol):
         status: str,
         error_kind: str = "none",
         error_detail: str | None = None,
+        expected_config_revision: int | None = None,
+        expected_authorization_epoch: int | None = None,
+        expected_capability_revision: int | None = None,
     ) -> bool:
         """Record what the last test or discovery found."""
         ...
@@ -245,6 +248,8 @@ class McpConnectionRepository(Protocol):
         prompts: list[dict[str, Any]],
         support: dict[str, Any],
         partial: bool = False,
+        expected_authorization_epoch: int | None = None,
+        expected_capability_revision: int | None = None,
     ) -> int:
         """Store a discovery result and return the new capability revision.
 

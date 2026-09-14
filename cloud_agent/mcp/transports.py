@@ -62,6 +62,7 @@ from cloud_agent.mcp.net_policy import (
 )
 from cloud_agent.mcp.oauth import MetadataFetcher
 from cloud_agent.mcp.protocol import (
+    ROOTS_LIST,
     Handshake,
     discover_server,
     initialize,
@@ -291,6 +292,8 @@ class _HttpCore:
             return None
         handler = self.on_server_request
         if handler is None:
+            if message.method == ROOTS_LIST:
+                return encode_result(message.raw_id, {"roots": []})
             return encode_error(
                 message.raw_id,
                 JsonRpcError(-32601, f"this platform does not handle {message.method!r}"),

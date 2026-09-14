@@ -263,11 +263,12 @@ with `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` under an MCP-specific domain
 separator. What the server offers is discovered and stored as a capability
 snapshot; templates only prefill a form.
 
-The relay, the connection API, the discovery path and the tool-call path are
-implemented and tested. The coding-agent adapters are not all done, and the
-list below is a statement about the adapters rather than about the feature.
+The relay, connection API, discovery path and all five coding-agent adapters
+are implemented and tested for remote MCP. The remaining stdio and optional
+protocol capabilities are described below and in the
+[conformance record](specs/2026-09-11-per-user-mcp-v1-conformance.md).
 
-Five things about this that look like details and are not:
+The relay follows these rules:
 
 - **Nothing is reachable by name.** A URL path segment is a *binding alias* —
   a name one conversation gave one connection — and a token names a job, so the
@@ -278,10 +279,11 @@ Five things about this that look like details and are not:
   the server adds after the session was configured, and a policy whose tool
   description or schema changed goes back to the owner rather than being
   treated as an aged approval.
-- **`confirm` holds the call rather than guessing.** The relay records a
-  pending invocation and answers with a protocol error the model can read; the
-  retry that matches an approval consumes it exactly once, through a single
-  conditional `UPDATE` that only one dispatcher can win.
+- **`confirm` holds the original call.** The relay records a pending invocation
+  and waits for the owner's decision in the conversation's Tools panel. Approval
+  dispatches that request once under the current attempt and permission fence;
+  the CLI receives the result without asking the model to retry. Denial, expiry
+  or changed authorization prevents dispatch.
 - **Credentials are per user and fail closed.** A missing encryption key,
   unreadable ciphertext, expired connection with no refresh, or disconnected
   connection removes that server from the owner's reachable set and says why on
@@ -302,20 +304,19 @@ Five things about this that look like details and are not:
   and the per-connection route is left for a client that wants exactly one
   connection's protocol passed through untouched — which no runtime asks for,
   because a legacy SSE server cannot initialize through a pipe at all. Both
-  routes call the
-  same `decide`, so an approval granted on the Integrations page is consumed by
-  whichever surface the retry arrives on, and neither is a way around the other.
+  routes call the same `decide`, so an approval in the conversation's Tools panel releases the
+  held request under the same policy on either surface.
   Routing on the merged surface is a lookup in the catalogue built from the
   bindings, never a split on the separator: an alias may itself contain `__`, so
-  `a__b` plus tool `c` and `a` plus tool `b__c` present the same string, and
-  only the map can tell them apart. The same endpoint serves resources and
-  prompts, resolved through that one catalogue and decided by the same function
+  ambiguous or long names receive a stable bounded suffix. The same endpoint
+  serves resources and prompts, resolved through that one catalogue and decided by the same function
   as a tool call — the design gives them their own *scopes* so that they are not
   a way round tool authorization, and a separate code path is exactly how they
   would become one. A tool and a prompt are namespaced by alias because a bare
-  name is ambiguous the moment two connections offer one; a resource keeps its
-  own URI, because the design treats an external URI as that server's identifier
-  for it and a presented name would invent one the server never issued. A connection that cannot be resolved is
+  name is ambiguous the moment two connections offer one. A resource uses
+  `mcp-resource://<connection-id>/<original-uri>` at the merged endpoint so equal
+  upstream URIs remain distinct. Reads remove only that prefix and preserve the
+  upstream URI, including its percent encoding. A connection that cannot be resolved is
   skipped with a log rather than failing the listing — losing every other tool
   is a worse outcome than the failure that caused it — while the per-connection
   route still refuses loudly for the server that is actually broken.
@@ -411,20 +412,17 @@ family a CLI belongs to.
 |---|---|---|---|
 | `claude-code` | 2.1.220 | `--mcp-config` with the platform's servers | `--strict-mcp-config`, verified against the CLI: without it a committed `.mcp.json` is loaded alongside ours with no approval step |
 | `opencode` | 1.18.9 | the reviewed `opencode-freeinference` wrapper merges the relay endpoints into the `OPENCODE_CONFIG` it writes | the wrapper exports `OPENCODE_DISABLE_PROJECT_CONFIG`, which covers both `opencode.json` and `.opencode/` |
-| `kilo` | 7.4.17 | not wired | `KILO_DISABLE_PROJECT_CONFIG` covers the project `kilo.json` and the project `.kilo`/`.kilocode` directories — **but not the fork's legacy migrator**, which reads `<project>/.kilo/mcp.json` and `<project>/.kilocode/mcp.json` unconditionally. A committed file would hand the agent tools the repository chose, so the runtime refuses the feature rather than promising a bound it does not have |
-| `codex` | 0.145.0 | not wired | `/etc/codex/requirements.toml` is the layer applied after every other one, and its MCP allowlist matches a server by name **and exact identity**: the pinned binary's only matchers are `RawMcpServerUrlIdentity { url }` and `RawMcpServerCommandIdentity { command }`, with no prefix or regex form. The file is baked into the image and would have to name the deployment's exact relay URL, which is a runtime value. Kept empty, which disables every MCP server regardless of layer — the fail-closed P0 policy. Declaring the server is *not* the problem: `-c 'mcp_servers.agent_mcp={url=..., bearer_token_env_var=...}'` works and `codex mcp list` shows it enabled with Bearer-token auth |
+| `kilo` | 7.4.17 | the reviewed wrapper configures the authenticated merged relay for run and serve; the live bridge verifies connection before reporting ready | the pinned build patches the legacy MCP loader to honor `KILO_DISABLE_PROJECT_CONFIG`, covering `.kilo/mcp.json` and `.kilocode/mcp.json` alongside the regular project configuration |
+| `codex` | 0.145.0 | exec and app-server share the merged relay URL and token environment reference; app-server verifies MCP startup | trusted guest-root bootstrap atomically installs the deployment's exact relay URL as the sole server identity in `/etc/codex/requirements.toml` before launch; repository and user configuration cannot expand that system allowlist |
 | `pi` | 0.73.1 | the reviewed `pi-mcp-bridge.ts` shipped at `/usr/local/libexec/`, loaded with an explicit `-e` | `--no-extensions` disables every other extension source — the project's `.pi/extensions/`, the global directory, and anything a settings file names — so the explicit path is the only way in. Verified against the pinned binary: a repository's own extension does not load, the relay's tools are registered as `<alias>__<tool>`, and a call reaches the upstream |
 
 A job naming connections on a runtime that has not declared them is refused at
 creation rather than run with the tools silently missing.
 
-**What would unblock the two that remain.** Kilo needs a way to stop the
-legacy migrator — either a supported switch, or a deployment that mounts the
-workspace without `.kilo/mcp.json` reachable. Codex needs the image — or a
-config mounted over `/etc/codex/` — built per deployment with that deployment's
-relay address, because its allowlist matches an exact URL identity. The merged
-relay endpoint at `/v1/agent/mcp` supplies the other half: one fixed server
-name, which is what makes a single allowlist entry possible at all.
+Retained containers receive the reviewed Kilo executable and adapter files
+before launch. Codex's system policy is installed from the trusted deployment
+address without a per-deployment image build. All five adapters use the single
+`session` entry at `/v1/agent/mcp`; no feature switch or preview tier is required.
 
 **The credential is referenced, not embedded, and the syntax is not portable.**
 Claude Code expands `${AGENT_MCP_TOKEN}`; the OpenCode family substitutes

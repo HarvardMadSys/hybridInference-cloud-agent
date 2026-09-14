@@ -916,6 +916,80 @@ async def test_saving_capabilities_moves_the_revision_it_is_fenced_against(
 # -- the 0007 migration ------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "changed", ["config_revision", "authorization_epoch", "capability_revision"]
+)
+async def test_late_discovery_and_status_cannot_overwrite_changed_connection(store, pool, changed):
+    """The discovery fence and status fence each refuse a newer connection state."""
+    row = await _connect(store, _OWNER)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE agent_mcp_connections SET {changed} = {changed} + 1, status = 'draft' WHERE id = $1",
+            row["id"],
+        )
+    revision = await store.mcp.save_mcp_capabilities(
+        connection_id=row["id"],
+        config_revision=row["config_revision"],
+        expected_authorization_epoch=row["authorization_epoch"],
+        expected_capability_revision=row["capability_revision"],
+        protocol_version="2025-11-25",
+        server_name="old-server",
+        server_version="1",
+        tools=[{"name": "old-tool"}],
+        resources=[],
+        resource_templates=[],
+        prompts=[],
+        support={},
+    )
+    assert revision == 0
+    assert await store.mcp.get_mcp_capabilities(connection_id=row["id"]) is None
+    for status in ("active", "error"):
+        assert not await store.mcp.set_mcp_connection_status(
+            connection_id=row["id"],
+            status=status,
+            expected_config_revision=row["config_revision"],
+            expected_authorization_epoch=row["authorization_epoch"],
+            expected_capability_revision=row["capability_revision"],
+        )
+    current = await store.mcp.get_mcp_connection(connection_id=row["id"])
+    assert current["status"] == "draft"
+    assert current[changed] == row[changed] + 1
+
+
+async def test_concurrent_diagnostics_publish_one_consistent_catalogue(store):
+    """A late discovery cannot replace a result already stored under the same fence."""
+    row = await _connect(store, _OWNER)
+
+    async def save(name):
+        return await store.mcp.save_mcp_capabilities(
+            connection_id=row["id"],
+            config_revision=row["config_revision"],
+            expected_authorization_epoch=row["authorization_epoch"],
+            expected_capability_revision=row["capability_revision"],
+            protocol_version="2025-11-25",
+            server_name=name,
+            server_version="1",
+            tools=[{"name": name}],
+            resources=[],
+            resource_templates=[],
+            prompts=[],
+            support={},
+        )
+
+    revisions = await asyncio.gather(save("first"), save("second"))
+    assert sorted(revisions) == [0, row["capability_revision"] + 1]
+    snapshot = await store.mcp.get_mcp_capabilities(connection_id=row["id"])
+    assert snapshot["server_name"] == ("first" if revisions[0] else "second")
+    assert [tool["name"] for tool in snapshot["tools"]] == [snapshot["server_name"]]
+    assert await store.mcp.set_mcp_connection_status(
+        connection_id=row["id"],
+        status="active",
+        expected_config_revision=row["config_revision"],
+        expected_authorization_epoch=row["authorization_epoch"],
+        expected_capability_revision=snapshot["capability_revision"],
+    )
+
+
 async def test_an_edit_is_conditional_on_the_revision_that_was_read(
     store: Storage,
 ) -> None:

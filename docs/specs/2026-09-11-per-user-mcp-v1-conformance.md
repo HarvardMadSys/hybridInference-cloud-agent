@@ -15,6 +15,28 @@ The external conformance tests run the built sandbox image, real CLIs, relay
 and PostgreSQL against synthetic model and MCP endpoints. They do not establish
 production deployment acceptance or third-party OAuth interoperability.
 
+## Codex/Kilo delivery scope
+
+This PR enables Codex and Kilo on the same remote MCP path already used by the
+other coding agents. The broader generic MCP design remains the reference for
+stdio execution and optional capabilities that are still unimplemented.
+
+| Accepted goal | Current implementation and evidence |
+| --- | --- |
+| Both CLIs directly supported | Codex 0.145.0 and Kilo 7.4.17 advertise `mcp=True`; the runtime API lists all five; no feature switch or preview tier |
+| Reuse the same connection and permissions | All adapters target the `session` merged endpoint; catalogue, deny/confirm/allow decisions and current-attempt checks are shared |
+| Approval continues the original request | The Tools panel resolves held invocations; the real five-CLI matrix covers allow, confirm and normalized names without manual retry |
+| Follow-up, resume, fork and token rotation | The real CLI matrix verifies each native path and rejects the superseded member token |
+| Existing deployments and retained sessions | Trusted runtime preparation installs Codex policy, reviewed adapter files and the patched Kilo executable before launch |
+| Repository configuration cannot add MCP servers | Codex system policy and Kilo's patched legacy loader are exercised against injected repository configuration |
+| Normal deployment | Apply migrations before starting matching control-plane, runner and sandbox releases; the CI sandbox cell exercises the built image |
+
+The merged protocol endpoint supports resources and prompts, but the recorded
+resource-read checks use a protocol client; they do not establish native UI or
+resource/prompt invocation parity for every CLI. stdio execution, elicitation,
+sampling, subscriptions, tasks and MCP Apps remain outside this CLI-enablement
+delivery. The detailed tables below describe those limits.
+
 ## Compatibility dimensions (design §2)
 
 | Dimension | State | Evidence | Missing |
@@ -47,8 +69,8 @@ production deployment acceptance or third-party OAuth interoperability.
 | Types, binary / media and size limits presented truthfully | Done | `host.ContentBlock` carries `truncated` and names `unsupportedContent` rather than returning an empty result |
 | Correlate by request id, method and context — including cancel and progress | **Partial** | the transports correlate replies by id and tolerate progress frames before the answer. On the merged endpoint a `notifications/cancelled` and an upstream progress notification are both dropped: the surface is request/response, so a cancel that arrives on a later HTTP request has nothing to reach |
 | Upstream resource identifiers preserved; merged resource identity includes its connection | Done | Lists and protocol resource results use `mcp-resource://<connection-id>/<original-uri>`; reads strip only that prefix and send the original URI unchanged to its owning connection |
-| Opaque session / event handles bound to connection, revisions, epoch, member, attempt, owner lease generation | Done | the handle is `mcp1.<digest>` over connection, member and lease generation, and `McpHost` records every session it opens in `agent_mcp_transport_sessions` with those columns. The row is a *record*, not the session — a socket cannot be handed back by a table — and what it buys is finding a session from elsewhere |
-| Rebuild the protocol session when the owner is superseded, without resending dispatched work | Done | the key includes the lease generation, so a takeover produces a new session; `McpHost.reap_superseded` closes the superseded one, deletes its record and clears any record another instance left under that member. The map no longer grows for the lifetime of the process |
+| Opaque session / event handles bound to connection, revisions, epoch, member, attempt, owner lease generation | Partial | live session keys include connection, member and lease generation; reuse also compares configuration, authorization and credential fingerprints. The optional `agent_mcp_transport_sessions` repository exists, but the production merged host is constructed without that store. Durable cross-process session ownership and event replay are not implemented |
+| Rebuild the protocol session when the owner is superseded, without resending dispatched work | Done for process-local sessions | a new attempt or lease receives a new key; superseded sessions close without replay. Listener maintenance also reclaims finished jobs and removed connections against the live database fence |
 | Bounded request, frame, cumulative response and events | Done | `jsonrpc.MAX_MESSAGE_BYTES`, `sse.MAX_EVENT_BYTES`, `transports.MAX_RESPONSE_BYTES` |
 | SSE handles LF / CRLF and fragmentation, and closes on overflow | Done | `mcp/sse.py`; 6 cases |
 | Separate finite timeouts for execution, confirmation and subscription | Done | a held call has the four-clock contract in `mcp/invocations.py`, and execution takes a per-connection `request_timeout_s` (5-900s) that both the relay's client and the host's transport honour. Unset means the 120-second default, which is what every existing row got from the migration |
@@ -59,7 +81,7 @@ production deployment acceptance or third-party OAuth interoperability.
 | --- | --- | --- |
 | Elicitation | **Not implemented** | the host answers a server that asks with a protocol error rather than inventing consent; there is no user form |
 | Sampling | **Not implemented** | refused with a diagnosis; no model authorization path |
-| Roots | Partial | answered with the empty set: the platform exposes no workspace root, which is the conservative reading of "only roots the user authorized" |
+| Roots | Empty authorized set | legacy/Streamable HTTP server requests and modern input continuations both receive an empty list; no workspace path is exposed |
 | Subscriptions / Tasks / MCP Apps | **Not implemented**, reported | `support_states` marks them `unsupported` so a client is told rather than left to hang |
 
 ## §4–§7, §8.3, §9
@@ -106,6 +128,8 @@ or namespace several connections.
    rather than accepting the notification silently.
 4. **Deployment acceptance**: a staging run, a real OAuth round trip, and
    interoperation with two real third-party servers and one real stdio server.
+5. **Durable protocol sessions**: cross-process ownership and event replay;
+   the shipping merged host's live transports are process-local.
 
 ## How to check this document
 
@@ -203,6 +227,21 @@ handshake, invalid endpoint announcement and cancellation, while leaving borrowe
 clients open. Listener shutdown closes the remaining host sessions and refuses
 connections that finish opening after shutdown starts.
 
+Connection tests close their diagnostic host on success, error and cancellation.
+Discovery snapshots and status updates compare the configuration, authorization
+and capability revisions they observed; a changed connection or a newer result
+returns a conflict instead of overwriting the current catalogue or status.
+Optional capability negotiation advertises only roots. Elicitation is reported
+as unsupported until there is a user interaction handler.
+
+A real Kilo confirm run exposed an intermittent socket-close failure on its
+first tool request; only four of the five expected calls reached the upstream.
+The wrapper now requests `Connection: close` on the relay hop, avoiding reuse of
+idle sockets without replaying a tool call. The Kilo scenarios verify distinct
+TCP connections for protocol requests as well as exact upstream invocation counts.
+This uses Bun's documented
+[per-request connection-pooling control](https://bun.sh/docs/runtime/networking/fetch).
+
 ## Approval and native-session continuity
 
 Confirmation keeps the original MCP request open. The conversation shows a
@@ -219,7 +258,16 @@ under the child's own fence. No dispatched external write is automatically retri
 
 ## Recorded validation (2026-09-13)
 
-- `make check`: 3,838 tests passed, plus formatting, lint and mypy.
+- Diagnostic/protocol regression suite: 159 passed, including 16 new cases
+  covering diagnostic cleanup, stale success and failure results, optional
+  capability declarations and roots responses over both HTTP transports.
+- MCP PostgreSQL suite: 50 passed, including four new cases for changed
+  connection versions and competing diagnostic snapshots.
+- `make check`: 3,854 tests passed, plus formatting, lint and mypy.
+- Real Kilo after the socket-reuse fix: all three allow/confirm/name-normalization
+  cases passed, including fresh TCP connections, exact invocation counts,
+  approval continuation, follow-up, resume and fork. Wrapper/deployment unit
+  coverage: 88 passed.
 - Session lifecycle/transport/relay regression suite: 111 passed, including 29
   new ownership, cancellation and maintenance cases. These cover completed jobs,
   live forks, disconnected connections, failed or slow authority lookups,
@@ -229,9 +277,10 @@ under the child's own fence. No dispatched external write is automatically retri
   during refresh across tools, resources, prompts and direct routes, pending
   approval invalidation, current-credential dispatch, expired access tokens
   during refresh contention and cancellation without releasing another lease.
-- PostgreSQL tier: 419 tests passed, including 46 MCP store regressions for
+- PostgreSQL tier: 423 tests passed, including 50 MCP store regressions for
   permission changes, reattachment, unchanged approvals, concurrent saves and
-  upgrading the policy revision allocator above historical approval versions.
+  upgrading the policy revision allocator above historical approval versions,
+  diagnostic version fences and concurrent discovery results.
 - Web: 1,302 tests passed; type-check, ESLint and changed-file Prettier checks passed.
   The 13 session-panel cases include duplicate-name repair and selection controls
   during pending operations. New-conversation API cases also cover resource-only
