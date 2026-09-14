@@ -73,6 +73,9 @@ class McpConnectionRepository(Protocol):
         were approved against the previous target. A label edit moves neither:
         renaming a connection is not a reason to make every session re-approve
         the tools it already has.
+
+        Target changes reset diagnosis and remove the old discovery and pending
+        OAuth flows in the same transaction as the edit.
         """
         ...
 
@@ -98,6 +101,7 @@ class McpConnectionRepository(Protocol):
         expected_config_revision: int | None = None,
         expected_authorization_epoch: int | None = None,
         expected_capability_revision: int | None = None,
+        expected_credential_version: int | None = None,
     ) -> bool:
         """Record what the last test or discovery found."""
         ...
@@ -126,6 +130,7 @@ class McpConnectionRepository(Protocol):
         expected_oauth_generation: int | None = None,
         expected_config_revision: int | None = None,
         expected_refresh_generation: int | None = None,
+        reset_status: bool = False,
     ) -> bool:
         """Write a credential, conditional on the state the flow started in.
 
@@ -164,6 +169,9 @@ class McpConnectionRepository(Protocol):
         the credential may be a different account and every approval made
         against the old one has to be re-made. A normal refresh keeps the epoch
         and only moves the credential version.
+
+        ``reset_status`` publishes a new authorization's draft state with its
+        credential, so a later discovery cannot be overwritten by the callback.
         """
         ...
 
@@ -250,6 +258,7 @@ class McpConnectionRepository(Protocol):
         partial: bool = False,
         expected_authorization_epoch: int | None = None,
         expected_capability_revision: int | None = None,
+        expected_credential_version: int | None = None,
     ) -> int:
         """Store a discovery result and return the new capability revision.
 

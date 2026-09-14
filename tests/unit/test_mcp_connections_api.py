@@ -135,7 +135,18 @@ class FakeStore(AllCapabilities):
                 row[key] = kwargs[key]
         if kwargs.get("launch_spec") is not None:
             row["launch_spec"] = kwargs["launch_spec"]
-        row["config_revision"] += 1
+        if any(
+            kwargs.get(key) is not None
+            for key in ("transport", "location", "url", "launch_spec", "auth_kind", "auth_config")
+        ):
+            row["config_revision"] += 1
+            row["authorization_epoch"] += 1
+            row.update(status="draft", error_kind="none", error_detail=None)
+            self.capabilities.pop(kwargs["connection_id"], None)
+            if self.oauth_flow and str(self.oauth_flow["connection_id"]) == str(
+                kwargs["connection_id"]
+            ):
+                self.oauth_flow = None
         return self._row(kwargs["connection_id"])
 
     async def disconnect_mcp_connection(self, *, connection_id: int, user_id: str) -> bool:
@@ -152,7 +163,12 @@ class FakeStore(AllCapabilities):
         row = self.connections.get(kwargs["connection_id"])
         if row is None or row["deleted_at"] is not None:
             return False
-        for version in ("config_revision", "authorization_epoch", "capability_revision"):
+        for version in (
+            "config_revision",
+            "authorization_epoch",
+            "capability_revision",
+            "credential_version",
+        ):
             expected = kwargs.get(f"expected_{version}")
             if expected is not None and row[version] != expected:
                 return False
@@ -188,6 +204,8 @@ class FakeStore(AllCapabilities):
         if kwargs.get("bump_epoch"):
             row["authorization_epoch"] += 1
         row["credential_version"] += 1
+        if kwargs.get("reset_status"):
+            row.update(status="draft", error_kind="none", error_detail=None, last_checked_at=None)
         return True
 
     async def consume_mcp_oauth_flow(self, *, state_hash: str) -> dict[str, Any] | None:
@@ -315,7 +333,7 @@ class FakeStore(AllCapabilities):
         row = self.connections[kwargs["connection_id"]]
         if row["deleted_at"] is not None or row["config_revision"] != kwargs["config_revision"]:
             return 0
-        for version in ("authorization_epoch", "capability_revision"):
+        for version in ("authorization_epoch", "capability_revision", "credential_version"):
             expected = kwargs.get(f"expected_{version}")
             if expected is not None and row[version] != expected:
                 return 0
@@ -628,6 +646,39 @@ class TestConnectionManagement:
             )
         assert response.status_code == 409
 
+    async def test_edit_cannot_erase_a_discovery_of_the_new_target(self, monkeypatch):
+        """A second request can discover the edited target before PATCH returns."""
+        store = FakeStore()
+        connection_id = _seed(store)
+        update = store.update_mcp_connection
+
+        async def update_then_discover(**kwargs):
+            row = await update(**kwargs)
+            await store.save_mcp_capabilities(
+                connection_id=connection_id,
+                config_revision=row["config_revision"],
+                protocol_version="2025-11-25",
+                server_name="new-target",
+                server_version="1",
+                tools=[],
+                resources=[],
+                resource_templates=[],
+                prompts=[],
+                support={},
+            )
+            return row
+
+        monkeypatch.setattr(store, "update_mcp_connection", update_then_discover)
+        await mcp_connections.update_connection(
+            connection_id=connection_id,
+            body=mcp_connections.UpdateConnectionRequest(
+                expected_config_revision=1, url="https://new.example.com/mcp"
+            ),
+            user={"user_id": _OWNER},
+            store=store,
+        )
+        assert store.capabilities[connection_id]["server_name"] == "new-target"
+
     def test_a_secret_write_is_fenced_by_the_epoch_the_caller_read(self) -> None:
         """A write that started before a reconnect must not land on the new one."""
         store = FakeStore()
@@ -806,6 +857,25 @@ class TestTheDynamicClientIdentity:
         assert request.client.client_id == "review-confidential-client"
         assert request.client.client_secret == "dynamic-secret"
         assert request.client.auth_method == "client_secret_basic"
+
+    async def test_callback_cannot_overwrite_a_test_of_its_new_credential(self, monkeypatch):
+        """Discovery can finish after the token commit but before callback return."""
+        store = FakeStore()
+        connection_id = _seed(store, auth_kind="oauth", oauth_generation=1)
+        store.oauth_flow = self._flow(
+            connection_id=connection_id, client_id="client", secret_ciphertext=None
+        )
+        write_credential = store.set_mcp_credential
+
+        async def write_then_test(**kwargs):
+            written = await write_credential(**kwargs)
+            assert written
+            await store.set_mcp_connection_status(connection_id=connection_id, status="active")
+            return written
+
+        monkeypatch.setattr(store, "set_mcp_credential", write_then_test)
+        assert "mcp_authorized=1" in await self._complete(store, connection_id, monkeypatch)
+        assert store.connections[connection_id]["status"] == "active"
 
 
 class TestImport:

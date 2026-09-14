@@ -917,21 +917,30 @@ async def test_saving_capabilities_moves_the_revision_it_is_fenced_against(
 
 
 @pytest.mark.parametrize(
-    "changed", ["config_revision", "authorization_epoch", "capability_revision"]
+    "changed",
+    ["config_revision", "authorization_epoch", "capability_revision", "credential_version"],
 )
 async def test_late_discovery_and_status_cannot_overwrite_changed_connection(store, pool, changed):
     """The discovery fence and status fence each refuse a newer connection state."""
     row = await _connect(store, _OWNER)
-    async with pool.acquire() as conn:
-        await conn.execute(
-            f"UPDATE agent_mcp_connections SET {changed} = {changed} + 1, status = 'draft' WHERE id = $1",
-            row["id"],
+    if changed == "credential_version":
+        assert await store.mcp.set_mcp_credential(
+            connection_id=row["id"],
+            expected_authorization_epoch=row["authorization_epoch"],
+            access_token_ciphertext="rotated-ciphertext",
         )
+    else:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                f"UPDATE agent_mcp_connections SET {changed} = {changed} + 1, status = 'draft' WHERE id = $1",
+                row["id"],
+            )
     revision = await store.mcp.save_mcp_capabilities(
         connection_id=row["id"],
         config_revision=row["config_revision"],
         expected_authorization_epoch=row["authorization_epoch"],
         expected_capability_revision=row["capability_revision"],
+        expected_credential_version=row["credential_version"],
         protocol_version="2025-11-25",
         server_name="old-server",
         server_version="1",
@@ -950,10 +959,102 @@ async def test_late_discovery_and_status_cannot_overwrite_changed_connection(sto
             expected_config_revision=row["config_revision"],
             expected_authorization_epoch=row["authorization_epoch"],
             expected_capability_revision=row["capability_revision"],
+            expected_credential_version=row["credential_version"],
         )
     current = await store.mcp.get_mcp_connection(connection_id=row["id"])
     assert current["status"] == "draft"
     assert current[changed] == row[changed] + 1
+
+
+@pytest.mark.parametrize("operation", ["refresh", "reauthorize", "stale_reauthorize"])
+async def test_credential_and_authorization_status_share_one_fence(store, operation):
+    row = await _connect(store, _OWNER, auth_kind="oauth")
+    await store.mcp.set_mcp_connection_status(
+        connection_id=row["id"],
+        status="error",
+        error_kind="needs_authorization",
+        error_detail="old credential expired",
+    )
+    before = await store.mcp.get_mcp_connection(connection_id=row["id"])
+    written = await store.mcp.set_mcp_credential(
+        connection_id=row["id"],
+        expected_authorization_epoch=row["authorization_epoch"],
+        expected_oauth_generation=row["oauth_generation"] + (operation == "stale_reauthorize"),
+        access_token_ciphertext="new-ciphertext",
+        reset_status=operation != "refresh",
+    )
+    assert written is (operation != "stale_reauthorize")
+    current = await store.mcp.get_mcp_connection(connection_id=row["id"])
+    assert current["credential_version"] == row["credential_version"] + written
+    if operation == "reauthorize":
+        assert current["status"] == "draft"
+        assert current["error_kind"] == "none"
+        assert current["error_detail"] is None
+        assert current["last_checked_at"] is None
+    else:
+        for key in ("status", "error_kind", "error_detail", "last_checked_at"):
+            assert current[key] == before[key]
+
+
+@pytest.mark.parametrize("operation", ["rename", "move", "change_auth", "stale_move"])
+async def test_target_edit_invalidates_only_its_previous_discovery_and_flow(store, operation):
+    row = await _connect(store, _OWNER, auth_kind="oauth")
+    await store.mcp.save_mcp_capabilities(
+        connection_id=row["id"],
+        config_revision=row["config_revision"],
+        protocol_version="2025-11-25",
+        server_name="previous",
+        server_version="1",
+        tools=[],
+        resources=[],
+        resource_templates=[],
+        prompts=[],
+        support={},
+    )
+    await store.mcp.set_mcp_connection_status(connection_id=row["id"], status="active")
+    await store.mcp.create_mcp_oauth_flow(
+        state_hash="before-edit",
+        user_id=_OWNER,
+        connection_id=row["id"],
+        config_revision=row["config_revision"],
+        authorization_epoch=row["authorization_epoch"],
+        oauth_generation=row["oauth_generation"] + 1,
+        code_verifier_ciphertext="ciphertext-verifier",
+        client_id="client",
+        client_secret_ciphertext=None,
+        client_auth_method="none",
+        registration="dcr",
+        issuer="https://issuer.example.com",
+        resource=_URL,
+        redirect_uri="https://app.example.com/callback",
+        scopes=["read"],
+        authorization_endpoint="https://issuer.example.com/authorize",
+        token_endpoint="https://issuer.example.com/token",
+        revocation_endpoint=None,
+        registration_endpoint=None,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    changes = {
+        "rename": {"label": "New label"},
+        "move": {"url": "https://new.example.com/mcp"},
+        "change_auth": {"auth_kind": "none"},
+        "stale_move": {"url": "https://new.example.com/mcp"},
+    }[operation]
+    updated = await store.mcp.update_mcp_connection(
+        connection_id=row["id"],
+        user_id=_OWNER,
+        expected_config_revision=row["config_revision"] + (operation == "stale_move"),
+        **changes,
+    )
+    assert (updated is None) is (operation == "stale_move")
+    current = await store.mcp.get_mcp_connection(connection_id=row["id"])
+    snapshot = await store.mcp.get_mcp_capabilities(connection_id=row["id"])
+    flow = await store.mcp.consume_mcp_oauth_flow(state_hash="before-edit")
+    invalidated = operation in ("move", "change_auth")
+    assert current["status"] == ("draft" if invalidated else "active")
+    assert current["config_revision"] == row["config_revision"] + invalidated
+    assert (snapshot is None) is invalidated
+    assert (flow is None) is invalidated
 
 
 async def test_concurrent_diagnostics_publish_one_consistent_catalogue(store):

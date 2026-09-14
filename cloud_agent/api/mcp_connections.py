@@ -730,10 +730,6 @@ async def update_connection(
     )
     if updated is None:
         raise _conflict("this connection changed since you loaded it; reload and try again")
-    if url is not None or body.launch is not None or auth_kind is not None:
-        # The target moved, so the old snapshot describes a different server.
-        await job_store.mcp.delete_mcp_capabilities(connection_id=connection_id)
-        await job_store.mcp.delete_mcp_oauth_flows(connection_id=connection_id)
     logger.info(
         "agent_mcp_connection_updated",
         extra={"event": "agent_mcp_connection_updated", "connection_id": connection_id},
@@ -892,6 +888,7 @@ async def _diagnose(
             error_detail=error_detail,
             expected_config_revision=int(row["config_revision"]),
             expected_authorization_epoch=int(row["authorization_epoch"]),
+            expected_credential_version=int(row["credential_version"]),
             expected_capability_revision=(
                 int(row["capability_revision"])
                 if capability_revision is None
@@ -935,6 +932,7 @@ async def _diagnose(
         config_revision=resolved.connection.config_revision,
         expected_authorization_epoch=resolved.connection.authorization_epoch,
         expected_capability_revision=resolved.connection.capability_revision,
+        expected_credential_version=resolved.connection.credential_version,
         protocol_version=snapshot.protocol_version,
         server_name=snapshot.server_name,
         server_version=snapshot.server_version,
@@ -1332,6 +1330,7 @@ async def oauth_callback(
         # this response is not: it is what the connection renews with, and the
         # store keeps it.
         clear_refresh=True,
+        reset_status=True,
         # Re-checked here rather than only before the exchange. The token
         # request took real time, and a newer flow may have completed inside it:
         # the epoch would not catch that, because re-authorizing the same
@@ -1347,9 +1346,6 @@ async def oauth_callback(
         return _callback_redirect(
             provider, ok=False, message="the connection changed during authorization"
         )
-    await job_store.mcp.set_mcp_connection_status(
-        connection_id=int(flow["connection_id"]), status=ConnectionStatus.DRAFT.value
-    )
     logger.info(
         "agent_mcp_authorized",
         extra={"event": "agent_mcp_authorized", "connection_id": flow["connection_id"]},

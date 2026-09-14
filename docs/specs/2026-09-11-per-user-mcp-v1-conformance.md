@@ -228,9 +228,15 @@ clients open. Listener shutdown closes the remaining host sessions and refuses
 connections that finish opening after shutdown starts.
 
 Connection tests close their diagnostic host on success, error and cancellation.
-Discovery snapshots and status updates compare the configuration, authorization
-and capability revisions they observed; a changed connection or a newer result
-returns a conflict instead of overwriting the current catalogue or status.
+Discovery snapshots and status updates compare the configuration, authorization,
+capability and credential versions they observed; a changed connection, rotated
+token or newer result returns a conflict instead of overwriting the current
+catalogue or status. A diagnostic that refreshes its own token publishes against
+the refreshed version. OAuth callbacks commit their draft status with the new
+credential, so they cannot reset a subsequent successful test. Target edits
+invalidate the old catalogue and pending OAuth flows in the same transaction as
+the configuration change, before new-target discovery or authorization can
+publish. Renames preserve the tested state and catalogue.
 Optional capability negotiation advertises only roots. Elicitation is reported
 as unsupported until there is a user interaction handler.
 
@@ -258,12 +264,16 @@ under the child's own fence. No dispatched external write is automatically retri
 
 ## Recorded validation (2026-09-13)
 
+- Credential/connection lifecycle regression suite: 103 passed, with seven new
+  unit cases for token rotation before and after discovery, a losing refresh,
+  successful preflight refresh, late OAuth completion and discovery after an edit.
 - Diagnostic/protocol regression suite: 159 passed, including 16 new cases
   covering diagnostic cleanup, stale success and failure results, optional
   capability declarations and roots responses over both HTTP transports.
-- MCP PostgreSQL suite: 50 passed, including four new cases for changed
-  connection versions and competing diagnostic snapshots.
-- `make check`: 3,854 tests passed, plus formatting, lint and mypy.
+- MCP PostgreSQL suite: 58 passed, including eight additional cases for credential
+  rotation, fenced authorization status and target-edit invalidation, alongside
+  changed connection versions and competing diagnostic snapshots.
+- `make check`: 3,861 tests passed, plus formatting, lint and mypy.
 - Real Kilo after the socket-reuse fix: all three allow/confirm/name-normalization
   cases passed, including fresh TCP connections, exact invocation counts,
   approval continuation, follow-up, resume and fork. Wrapper/deployment unit
@@ -277,10 +287,11 @@ under the child's own fence. No dispatched external write is automatically retri
   during refresh across tools, resources, prompts and direct routes, pending
   approval invalidation, current-credential dispatch, expired access tokens
   during refresh contention and cancellation without releasing another lease.
-- PostgreSQL tier: 423 tests passed, including 50 MCP store regressions for
+- PostgreSQL tier: 431 tests passed, including 58 MCP store regressions for
   permission changes, reattachment, unchanged approvals, concurrent saves and
   upgrading the policy revision allocator above historical approval versions,
-  diagnostic version fences and concurrent discovery results.
+  diagnostic version fences, concurrent discovery results, credential rotation,
+  atomic authorization status and target-edit invalidation.
 - Web: 1,302 tests passed; type-check, ESLint and changed-file Prettier checks passed.
   The 13 session-panel cases include duplicate-name repair and selection controls
   during pending operations. New-conversation API cases also cover resource-only

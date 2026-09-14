@@ -215,12 +215,15 @@ class PostgresMcpConnectionRepository:
         were approved against the previous target. A label edit moves neither:
         renaming a connection is not a reason to make every session re-approve
         the tools it already has.
+
+        Target changes reset diagnosis and remove the old discovery and pending
+        OAuth flows in the same transaction as the edit.
         """
         security_relevant = any(
             value is not None
             for value in (transport, location, url, launch_spec, auth_kind, auth_config)
         )
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 f"""
                 UPDATE agent_mcp_connections SET
@@ -255,11 +258,23 @@ class PostgresMcpConnectionRepository:
                 auth_config is not None,
                 json.dumps(auth_config) if auth_config is not None else None,
                 account_label,
-                reset_status,
+                reset_status or security_relevant,
                 security_relevant,
                 expected_config_revision,
                 request_timeout_s,
             )
+            if row is not None and security_relevant:
+                # Keep the connection row locked until old-target state is gone.
+                # New discovery and authorization both lock this row to publish,
+                # so neither can be deleted by cleanup after the edit commits.
+                await conn.execute(
+                    "DELETE FROM agent_mcp_capabilities WHERE connection_id = $1",
+                    connection_id,
+                )
+                await conn.execute(
+                    "DELETE FROM agent_mcp_oauth_flows WHERE connection_id = $1 AND consumed_at IS NULL",
+                    connection_id,
+                )
         return self._mcp_connection(row) if row is not None else None
 
     async def disconnect_mcp_connection(self, *, connection_id: int, user_id: str) -> bool:
@@ -309,6 +324,7 @@ class PostgresMcpConnectionRepository:
         expected_config_revision: int | None = None,
         expected_authorization_epoch: int | None = None,
         expected_capability_revision: int | None = None,
+        expected_credential_version: int | None = None,
     ) -> bool:
         """Record what the last test or discovery found."""
         async with self._pool.acquire() as conn:
@@ -321,6 +337,7 @@ class PostgresMcpConnectionRepository:
                   AND ($5::bigint IS NULL OR config_revision = $5)
                   AND ($6::bigint IS NULL OR authorization_epoch = $6)
                   AND ($7::bigint IS NULL OR capability_revision = $7)
+                  AND ($8::bigint IS NULL OR credential_version = $8)
                 RETURNING id
                 """,
                 connection_id,
@@ -330,6 +347,7 @@ class PostgresMcpConnectionRepository:
                 expected_config_revision,
                 expected_authorization_epoch,
                 expected_capability_revision,
+                expected_credential_version,
             )
         return updated is not None
 
@@ -357,6 +375,7 @@ class PostgresMcpConnectionRepository:
         expected_oauth_generation: int | None = None,
         expected_config_revision: int | None = None,
         expected_refresh_generation: int | None = None,
+        reset_status: bool = False,
     ) -> bool:
         """Write a credential, conditional on the state the flow started in.
 
@@ -395,6 +414,9 @@ class PostgresMcpConnectionRepository:
         the credential may be a different account and every approval made
         against the old one has to be re-made. A normal refresh keeps the epoch
         and only moves the credential version.
+
+        ``reset_status`` publishes a new authorization's draft state with its
+        credential, so a later discovery cannot be overwritten by the callback.
         """
         async with self._pool.acquire() as conn:
             updated = await conn.fetchval(
@@ -422,6 +444,10 @@ class PostgresMcpConnectionRepository:
                     refresh_lease_expires_at = CASE
                         WHEN $21::bigint IS NULL THEN refresh_lease_expires_at
                         ELSE NULL END,
+                    status = CASE WHEN $22::boolean THEN 'draft' ELSE status END,
+                    error_kind = CASE WHEN $22::boolean THEN 'none' ELSE error_kind END,
+                    error_detail = CASE WHEN $22::boolean THEN NULL ELSE error_detail END,
+                    last_checked_at = CASE WHEN $22::boolean THEN NULL ELSE last_checked_at END,
                     updated_at = NOW()
                 WHERE id = $1 AND authorization_epoch = $2 AND deleted_at IS NULL
                   AND oauth_generation = COALESCE($19::bigint, oauth_generation)
@@ -451,6 +477,7 @@ class PostgresMcpConnectionRepository:
                 expected_oauth_generation,
                 expected_config_revision,
                 expected_refresh_generation,
+                reset_status,
             )
         return updated is not None
 
@@ -596,6 +623,7 @@ class PostgresMcpConnectionRepository:
         partial: bool = False,
         expected_authorization_epoch: int | None = None,
         expected_capability_revision: int | None = None,
+        expected_credential_version: int | None = None,
     ) -> int:
         """Store a discovery result and return the new capability revision.
 
@@ -615,12 +643,14 @@ class PostgresMcpConnectionRepository:
                   AND config_revision = $2
                   AND ($3::bigint IS NULL OR authorization_epoch = $3)
                   AND ($4::bigint IS NULL OR capability_revision = $4)
+                  AND ($5::bigint IS NULL OR credential_version = $5)
                 RETURNING capability_revision
                 """,
                 connection_id,
                 config_revision,
                 expected_authorization_epoch,
                 expected_capability_revision,
+                expected_credential_version,
             )
             if revision is None:
                 return 0
