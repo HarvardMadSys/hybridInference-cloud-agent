@@ -28,6 +28,7 @@ import secrets
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
@@ -1350,7 +1351,7 @@ async def oauth_callback(
         "agent_mcp_authorized",
         extra={"event": "agent_mcp_authorized", "connection_id": flow["connection_id"]},
     )
-    return _callback_redirect(provider, ok=True, message="")
+    return _callback_redirect(str(flow["connection_id"]), ok=True, message="")
 
 
 async def _post_form(request: oauth.TokenRequest, *, policy: EgressPolicy) -> Mapping[str, Any]:
@@ -1414,14 +1415,13 @@ def _callback_url(base_url: str, connection_id: int) -> str:
 
 def _callback_redirect(provider: str, *, ok: bool, message: str) -> Response:
     """Send the browser back to the app with a result it can display."""
-    base = _public_base_url()
-    query = f"mcp_authorized={'1' if ok else '0'}"
+    # The registered callback belongs to the API; the result belongs to the web
+    # app, whose origin and mount path may differ (for example /agents/api vs /agents).
+    base = os.environ.get("AGENT_WEB_BASE_URL", "").strip().rstrip("/")
+    result = {"mcp_authorized": "1" if ok else "0", "mcp_connection": provider}
     if message:
-        from urllib.parse import quote
-
-        query += f"&mcp_message={quote(message)}"
-    target = f"{base}/settings/integrations?{query}" if base else f"/settings/integrations?{query}"
-    del provider
+        result["mcp_message"] = message
+    target = f"{base}/integrations?{urlencode(result)}"
     return RedirectResponse(url=target, status_code=302)
 
 

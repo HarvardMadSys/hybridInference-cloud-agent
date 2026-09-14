@@ -228,6 +228,9 @@ clients open. Listener shutdown closes the remaining host sessions and refuses
 connections that finish opening after shutdown starts.
 
 Connection tests close their diagnostic host on success, error and cancellation.
+OAuth returns to the existing `/integrations` page using the configured web
+base, independently of the registered API callback base. The page shows failure
+details or, after verifying a stored credential, success and the next Test step.
 Discovery snapshots and status updates compare the configuration, authorization,
 capability and credential versions they observed; a changed connection, rotated
 token or newer result returns a conflict instead of overwriting the current
@@ -264,6 +267,9 @@ under the child's own fence. No dispatched external write is automatically retri
 
 ## Recorded validation (2026-09-13)
 
+- Connection API suite: 57 passed, including six OAuth-return cases for success
+  and failure under root, prefixed and separate API/web origins. MCP page/API
+  interaction suite: 48 passed, including authorization feedback and Test continuation.
 - Credential/connection lifecycle regression suite: 103 passed, with seven new
   unit cases for token rotation before and after discovery, a losing refresh,
   successful preflight refresh, late OAuth completion and discovery after an edit.
@@ -273,7 +279,7 @@ under the child's own fence. No dispatched external write is automatically retri
 - MCP PostgreSQL suite: 58 passed, including eight additional cases for credential
   rotation, fenced authorization status and target-edit invalidation, alongside
   changed connection versions and competing diagnostic snapshots.
-- `make check`: 3,861 tests passed, plus formatting, lint and mypy.
+- `make check`: 3,867 tests passed, plus formatting, lint and mypy.
 - Real Kilo after the socket-reuse fix: all three allow/confirm/name-normalization
   cases passed, including fresh TCP connections, exact invocation counts,
   approval continuation, follow-up, resume and fork. Wrapper/deployment unit
@@ -292,7 +298,7 @@ under the child's own fence. No dispatched external write is automatically retri
   upgrading the policy revision allocator above historical approval versions,
   diagnostic version fences, concurrent discovery results, credential rotation,
   atomic authorization status and target-edit invalidation.
-- Web: 1,302 tests passed; type-check, ESLint and changed-file Prettier checks passed.
+- Web: 1,305 tests passed; type-check, ESLint and changed-file Prettier checks passed.
   The 13 session-panel cases include duplicate-name repair and selection controls
   during pending operations. New-conversation API cases also cover resource-only
   and prompt-only permissions, including denial and invalid policy values.

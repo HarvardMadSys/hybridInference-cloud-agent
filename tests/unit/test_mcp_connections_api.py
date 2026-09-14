@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi import FastAPI
@@ -748,6 +749,23 @@ class TestTheDynamicClientIdentity:
     """
 
     _STATE = "the-authorization-state"
+
+    @pytest.mark.parametrize(
+        "web_base", ["https://agents.example.com", "https://example.com/agents/", ""]
+    )
+    @pytest.mark.parametrize("ok", [True, False])
+    def test_callback_returns_to_the_web_integrations_page(self, monkeypatch, web_base, ok):
+        monkeypatch.setenv("AGENT_WEB_BASE_URL", web_base)
+        monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", "https://api.example.com/agents/api")
+        message = "authorization denied & retry allowed" if not ok else ""
+        response = mcp_connections._callback_redirect("3", ok=ok, message=message)
+        target = response.headers["location"]
+        assert target.split("?")[0] == f"{web_base.rstrip('/')}/integrations"
+        query = parse_qs(urlsplit(target).query)
+        assert query["mcp_authorized"] == ["1" if ok else "0"]
+        assert query["mcp_connection"] == ["3"]
+        if not ok:
+            assert query["mcp_message"] == [message]
 
     def _flow(
         self,

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { disconnectAgentIntegration, getAgentIntegrations } from '@/lib/api/agents';
 import type { AgentIntegrationProvider, AgentIntegrationProviderApi } from '@/lib/api/agents';
-import { McpConnectionsSection } from './mcp/McpConnectionsSection';
+import { McpConnectionsSection, type McpAuthorizationResult } from './mcp/McpConnectionsSection';
 
 const PROVIDERS: AgentIntegrationProvider[] = ['github', 'gitlab'];
 
@@ -176,8 +176,10 @@ function ProviderActions({
 
 export function IntegrationsView({
   connectedProvider,
+  mcpAuthorization,
 }: {
   connectedProvider?: AgentIntegrationProvider | null;
+  mcpAuthorization?: McpAuthorizationResult;
 }) {
   const [providers, setProviders] = useState<AgentIntegrationProviderApi[]>([]);
   const [loading, setLoading] = useState(true);
@@ -342,7 +344,7 @@ export function IntegrationsView({
               </p>
             </div>
           </div>
-          <McpConnectionsSection />
+          <McpConnectionsSection authorizationResult={mcpAuthorization} />
         </div>
       </div>
     </section>

@@ -263,6 +263,13 @@ with `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` under an MCP-specific domain
 separator. What the server offers is discovered and stored as a capability
 snapshot; templates only prefill a form.
 
+MCP OAuth uses `AGENT_MCP_PUBLIC_BASE_URL` for the public API callback and
+`AGENT_WEB_BASE_URL` for the browser's return to `/integrations`. For a shared
+hostname deployment these can be `https://example.com/agents/api` and
+`https://example.com/agents` respectively. The page reports the authorization
+result, verifies a stored credential before showing success, and directs the
+user to Test to discover the connection's tools.
+
 The relay, connection API, discovery path and all five coding-agent adapters
 are implemented and tested for remote MCP. The remaining stdio and optional
 protocol capabilities are described below and in the

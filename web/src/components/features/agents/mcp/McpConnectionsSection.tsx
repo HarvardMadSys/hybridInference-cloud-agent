@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { McpAddDialog } from './McpAddDialog';
 import {
   authorizeMcpConnection,
@@ -86,6 +86,13 @@ export function capabilitySummary(counts: CapabilityCounts): string {
   return parts.length ? parts.join(' · ') : 'Nothing discovered yet';
 }
 
+/** The browser return from an MCP authorization handled by the control plane. */
+export interface McpAuthorizationResult {
+  ok: boolean;
+  connectionId: string | null;
+  message: string | null;
+}
+
 function StatusPill({ status }: { status: McpConnectionStatus }) {
   const pill = STATUS_PILL[status];
   return (
@@ -102,7 +109,11 @@ function StatusPill({ status }: { status: McpConnectionStatus }) {
  * Integrations view also tracks source-control providers, and a single error
  * banner for both would report a failing GitHub call as a failing MCP server.
  */
-export function McpConnectionsSection() {
+export function McpConnectionsSection({
+  authorizationResult,
+}: {
+  authorizationResult?: McpAuthorizationResult;
+}) {
   const [data, setData] = useState<McpConnectionsApi | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -112,18 +123,37 @@ export function McpConnectionsSection() {
   /** The connection whose authorize call asked for a client id. */
   const [clientIdFor, setClientIdFor] = useState<{ id: number; message: string } | null>(null);
   const [clientId, setClientId] = useState('');
+  const authorizationNoticeChecked = useRef(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      setData(await listMcpConnections());
+      const response = await listMcpConnections();
+      setData(response);
+      if (authorizationResult && !authorizationNoticeChecked.current) {
+        authorizationNoticeChecked.current = true;
+        if (authorizationResult.ok) {
+          const connection = response.connections.find(
+            (item) => String(item.id) === authorizationResult.connectionId && item.has_credential,
+          );
+          if (connection) {
+            setNotice(`${connection.label} authorized. Run a test to discover what it offers.`);
+          }
+        } else {
+          setError(
+            authorizationResult.message
+              ? `MCP authorization did not complete: ${authorizationResult.message}`
+              : 'MCP authorization did not complete. Try authorizing the connection again.',
+          );
+        }
+      }
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : 'Could not load MCP connections.');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [authorizationResult]);
 
   useEffect(() => {
     void load();
