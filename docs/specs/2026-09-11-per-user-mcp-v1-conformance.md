@@ -187,6 +187,22 @@ retain their outcomes. Concurrent saves cannot combine two different selections.
 The Tools editor locks selection controls during refresh, attachment and saving,
 including when the panel is reopened before an operation completes.
 
+Both listeners periodically reclaim process-local upstream sessions after a job
+ends or its connection is removed, disabled or deleted. Each maintenance pass
+uses the current attempt fence and selection, limits concurrent database lookups,
+and preserves sessions when an authority lookup fails or times out. A stale
+cleanup result cannot close a replacement opened while the lookup was pending.
+Live forked jobs retain their independent sessions. The MCP-only listener runs
+this maintenance without running the control plane's grant reaper or publisher.
+Overdue pending and approved invocations also expire during maintenance.
+
+Session shutdown separately bounds graceful upstream termination and local
+cleanup; cancellation of the caller cannot skip the latter. Transports release
+their own HTTP clients and legacy SSE readers on successful close, failed
+handshake, invalid endpoint announcement and cancellation, while leaving borrowed
+clients open. Listener shutdown closes the remaining host sessions and refuses
+connections that finish opening after shutdown starts.
+
 ## Approval and native-session continuity
 
 Confirmation keeps the original MCP request open. The conversation shows a
@@ -203,7 +219,11 @@ under the child's own fence. No dispatched external write is automatically retri
 
 ## Recorded validation (2026-09-13)
 
-- `make check`: 3,809 tests passed, plus formatting, lint and mypy.
+- `make check`: 3,838 tests passed, plus formatting, lint and mypy.
+- Session lifecycle/transport/relay regression suite: 111 passed, including 29
+  new ownership, cancellation and maintenance cases. These cover completed jobs,
+  live forks, disconnected connections, failed or slow authority lookups,
+  concurrent replacement, bounded cleanup concurrency and listener shutdown.
 - Refresh/relay/approval regression suite: 173 passed. Cases cover an issuer
   that never responds without blocking another connection, authority changes
   during refresh across tools, resources, prompts and direct routes, pending

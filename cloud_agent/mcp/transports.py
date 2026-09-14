@@ -31,6 +31,7 @@ What both share with the rest of the package:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
@@ -206,10 +207,13 @@ class _HttpCore:
         self,
         config: RemoteTransportConfig,
         client: httpx.AsyncClient,
+        *,
+        owns_client: bool = False,
     ) -> None:
         """Hold one client for the life of the transport."""
         self._config = config
         self._client = client
+        self._owns_client = owns_client
         self._session_id = config.session_id
         self._protocol_version = config.protocol_version
         # ``modern`` until a probe says otherwise: the current revision is the
@@ -217,6 +221,11 @@ class _HttpCore:
         # fallback rather than the default.
         self._era = "modern"
         self.on_server_request: RequestHandler | None = None
+
+    async def aclose(self) -> None:
+        """Release the HTTP pool only when this transport created it."""
+        if self._owns_client:
+            await self._client.aclose()
 
     @property
     def session_id(self) -> str | None:
@@ -404,9 +413,15 @@ async def guard_target(
 class StreamableHttpTransport(_HttpCore):
     """One MCP connection over Streamable HTTP."""
 
-    def __init__(self, config: RemoteTransportConfig, client: httpx.AsyncClient) -> None:
+    def __init__(
+        self,
+        config: RemoteTransportConfig,
+        client: httpx.AsyncClient,
+        *,
+        owns_client: bool = False,
+    ) -> None:
         """Build a transport; :func:`connect_streamable` establishes a session."""
-        super().__init__(config, client)
+        super().__init__(config, client, owns_client=owns_client)
         self._next_id = 0
 
     def _new_id(self) -> str:
@@ -561,9 +576,10 @@ class LegacySseTransport(_HttpCore):
         client: httpx.AsyncClient,
         *,
         message_url: str | None = None,
+        owns_client: bool = False,
     ) -> None:
         """Build a transport, optionally already knowing where requests go."""
-        super().__init__(config, client)
+        super().__init__(config, client, owns_client=owns_client)
         self._message_url = message_url
         self._announcement: asyncio.Future[str] | None = None
         self._next_id = 0
@@ -718,6 +734,10 @@ class LegacySseTransport(_HttpCore):
             # that is already gone. Releasing them is not the same as answering
             # them, which is why the flag is set before they wake.
             self._ended = True
+            if self._announcement is not None and not self._announcement.done():
+                self._announcement.set_exception(
+                    TransportError("the server's stream ended before announcing a message endpoint")
+                )
             for waiter in list(self._waiters.values()):
                 waiter.set()
             await response.aclose()
@@ -757,15 +777,16 @@ class LegacySseTransport(_HttpCore):
             return
 
     async def aclose(self) -> None:
-        """Stop the background reader."""
+        """Stop the background reader and release the owned HTTP pool."""
         task = self._stream_task
         self._stream_task = None
-        if task is not None and not task.done():
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                return
+        try:
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+        finally:
+            await super().aclose()
 
 
 @dataclass(frozen=True)
@@ -815,7 +836,7 @@ async def connect_streamable(
     """
     owned = client is None
     http = client or build_client(config)
-    transport = StreamableHttpTransport(config, http)
+    transport = StreamableHttpTransport(config, http, owns_client=owned)
     transport.set_era("modern")
     transport.set_protocol_version(config.protocol_version or PREFERRED_PROTOCOL_VERSION)
     try:
@@ -888,6 +909,7 @@ async def connect_legacy_sse(
     else.
     """
     http = client or build_client(config)
+    transport = LegacySseTransport(config, http, owns_client=client is None)
     try:
         stream_request = http.build_request(
             "GET",
@@ -898,35 +920,26 @@ async def connect_legacy_sse(
             },
         )
         response = await http.send(stream_request, stream=True)
-    except httpx.HTTPError as exc:
-        await http.aclose()
-        raise TransportError(f"the server could not be reached: {exc}") from exc
-
-    # The stream is read exactly once, by the transport, because httpx will not
-    # hand the same response body to a second reader -- and because reading it
-    # here and again there is how the bytes between the two passes go missing.
-    transport = LegacySseTransport(config, http)
-    stream_task = asyncio.create_task(transport.consume(response))
-    transport.attach_stream(stream_task)
-    try:
-        async with asyncio.timeout(config.connect_timeout * 3):
-            announced = await transport.announcement()
-    except TimeoutError as exc:
-        await transport.aclose()
-        await http.aclose()
-        raise TransportError(
-            "the server never announced a message endpoint on its stream",
-            kind="protocol_incompatible",
-        ) from exc
-
-    # Validated before anything is sent to it: the announcement is precisely
-    # where a server can point this connection's credential somewhere else.
-    transport.announced(_resolve_message_url(config, announced))
-    try:
+        # One reader owns the response from here through every failure path.
+        stream_task = asyncio.create_task(transport.consume(response))
+        transport.attach_stream(stream_task)
+        try:
+            async with asyncio.timeout(config.connect_timeout * 3):
+                announced = await transport.announcement()
+        except TimeoutError as exc:
+            raise TransportError(
+                "the server never announced a message endpoint on its stream",
+                kind="protocol_incompatible",
+            ) from exc
+        # Validation must be inside the cleanup boundary too: an off-origin
+        # announcement must not leave its reader and credential pool alive.
+        transport.announced(_resolve_message_url(config, announced))
         handshake = await initialize(transport)
+    except httpx.HTTPError as exc:
+        await transport.aclose()
+        raise TransportError(f"the server could not be reached: {exc}") from exc
     except BaseException:
         await transport.aclose()
-        await http.aclose()
         raise
     transport.set_protocol_version(handshake.protocol_version)
     return transport, handshake, stream_task

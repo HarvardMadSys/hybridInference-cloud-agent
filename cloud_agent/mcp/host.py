@@ -36,7 +36,7 @@ import contextlib
 import hashlib
 import json
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 from weakref import WeakValueDictionary
@@ -66,6 +66,9 @@ logger = get_logger(__name__)
 #: job that dies of context exhaustion three calls later.
 MAX_CONTENT_BYTES = 512 * 1024
 MAX_CONTENT_BLOCKS = 64
+SESSION_CLOSE_TIMEOUT_S = 2.0
+SESSION_CHECK_TIMEOUT_S = 5.0
+_CLEANUP_CONCURRENCY = 8
 
 #: Content types the platform can carry through unchanged.
 _RENDERABLE_BLOCKS = frozenset({"text", "image", "audio", "resource_link", "resource"})
@@ -221,6 +224,7 @@ class Session:
     _active_operations: int = field(default=0, init=False, repr=False)
     _retired: bool = field(default=False, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
+    _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
     @property
     def protocol_version(self) -> str:
@@ -237,23 +241,32 @@ class Session:
         )
 
     async def aclose(self) -> None:
-        """End the session, best effort."""
-        if self._closed:
-            return
+        """Finish bounded cleanup even when the disconnecting caller is cancelled."""
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = asyncio.create_task(self._cleanup())
+        try:
+            await asyncio.shield(self._close_task)
+        except asyncio.CancelledError:
+            await asyncio.shield(self._close_task)
+            raise
+
+    async def _cleanup(self) -> None:
+        """Bound graceful termination separately from releasing local resources."""
         self._closed = True
-        terminator = getattr(self.transport, "terminate", None)
-        if terminator is not None:
-            # Closing is best effort: a session that already ended upstream is
-            # a normal outcome, and failing the caller's disconnect over it
-            # would leave work half done for no benefit.
-            with contextlib.suppress(Exception):
-                await terminator()
-        closer = getattr(self.transport, "aclose", None)
-        if closer is not None:
-            with contextlib.suppress(Exception):
-                await closer()
-        if self.stream_task is not None:
-            self.stream_task.cancel()
+        try:
+            for method in ("terminate", "aclose"):
+                operation = getattr(self.transport, method, None)
+                if operation is not None:
+                    with contextlib.suppress(Exception, asyncio.CancelledError):
+                        async with asyncio.timeout(SESSION_CLOSE_TIMEOUT_S):
+                            await operation()
+        finally:
+            if self.stream_task is not None:
+                self.stream_task.cancel()
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    async with asyncio.timeout(SESSION_CLOSE_TIMEOUT_S):
+                        await self.stream_task
 
     async def retire(self) -> None:
         """Stop reuse after rotation while letting already dispatched calls finish."""
@@ -358,6 +371,7 @@ class McpHost:
         self._limits = limits or HostLimits()
         self._store = store
         self._sessions: dict[str, Session] = {}
+        self._closed = False
         #: What each live session was opened with, so a caller that arrives with
         #: a rotated token, a changed timeout or a repointed connection is not
         #: silently handed the old transport. Kept beside the sessions rather
@@ -407,6 +421,8 @@ class McpHost:
         the old session to be reaped. Reusing it would let a worker whose lease
         expired keep driving a connection the platform has already reassigned.
         """
+        if self._closed:
+            raise HostError("the MCP host is shutting down")
         if any(session.key.supersedes(key) for session in self._sessions.values()):
             raise HostError("this MCP attempt has already been superseded")
         existing = self._sessions.get(key.handle())
@@ -436,6 +452,9 @@ class McpHost:
         session = Session(
             key=key, transport=transport, handshake=handshake, stream_task=stream_task
         )
+        if self._closed:
+            await session.aclose()
+            raise HostError("the MCP host is shutting down")
         self._sessions[key.handle()] = session
         self._opened_with[key.handle()] = SessionFingerprint.of(connection, secret=secret)
         try:
@@ -506,6 +525,47 @@ class McpHost:
         """Close one session and remove its record."""
         async with self._session_lock(key):
             return await self._close(key)
+
+    async def reap_inactive(self, is_live: Callable[[SessionKey], Awaitable[bool]]) -> int:
+        """Release ended members without closing a concurrently replaced session."""
+
+        async def reap(session: Session) -> int:
+            try:
+                async with asyncio.timeout(SESSION_CHECK_TIMEOUT_S):
+                    live = await is_live(session.key)
+                if live and session.reusable:
+                    return 0
+                async with asyncio.timeout(SESSION_CHECK_TIMEOUT_S):
+                    async with self._session_lock(session.key):
+                        if self.session(session.key) is not session:
+                            return 0
+                        await self._close(session.key)
+                return 1
+            except Exception:
+                # A failed authority lookup is not evidence of revocation.
+                logger.warning("agent_mcp_session_reap_failed", exc_info=True)
+                return 0
+
+        sessions = list(self._sessions.values())
+        closed = 0
+        for offset in range(0, len(sessions), _CLEANUP_CONCURRENCY):
+            closed += sum(
+                await asyncio.gather(
+                    *(reap(session) for session in sessions[offset : offset + _CLEANUP_CONCURRENCY])
+                )
+            )
+        return closed
+
+    async def aclose(self) -> None:
+        """Stop accepting sessions and release every remaining upstream socket."""
+        self._closed = True
+        sessions = list(self._sessions.values())
+        self._sessions.clear()
+        self._opened_with.clear()
+        for offset in range(0, len(sessions), _CLEANUP_CONCURRENCY):
+            await asyncio.gather(
+                *(session.aclose() for session in sessions[offset : offset + _CLEANUP_CONCURRENCY])
+            )
 
     async def _close(self, key: SessionKey) -> bool:
         """Close a session while holding its lifecycle lock."""
