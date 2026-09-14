@@ -104,6 +104,31 @@ MEMBER_TMPFS_ROOT = "/run/agent-members"
 #: record an operator gets of a partially capable guest.
 logger = logging.getLogger(__name__)
 
+#: How many times the guest observer probe may be tried before a host is
+#: refused. Three, because the probe is a race against a guest that has just
+#: booted and the cost of asking again is one throwaway sandbox, while the cost
+#: of a false refusal is the whole host advertising no deployment.
+GUEST_OBSERVER_PROBE_ATTEMPTS = 3
+#: Long enough for the observer's poll loop, its ring drain and its first status
+#: publication to get clear of whatever was still starting behind them.
+GUEST_OBSERVER_PROBE_RETRY_S = 2.0
+
+
+class _ObserverProbeRace(SandboxError):
+    """A probe failure that a second attempt may not reproduce.
+
+    Raised only by the stages that read back from a running guest observer --
+    opening the cursor and closing it again. Everything else the probe checks
+    is a property of the image, the kernel or the exec sandbox, and answers
+    identically however many times it is asked; those keep raising
+    ``SandboxError`` so a genuinely incapable host is refused at once instead of
+    three times.
+
+    It is a ``SandboxError`` so that callers which already handle a failed
+    preflight are unaffected by the distinction.
+    """
+
+
 MEMBER_UID_BASE = 11001
 MEMBER_UID_LIMIT = 128
 MEMBER_REAPER_TARGET = "/usr/local/bin/member-process-reaper"
@@ -2735,9 +2760,45 @@ class ChatSandboxManager:
         return self._run(command, timeout=timeout_s)
 
     def probe_guest_observer(self) -> None:
-        """Exercise retained exec isolation and real eBPF delivery before claiming."""
+        """Exercise retained exec isolation and real eBPF delivery before claiming.
+
+        The observation stages are retried because they race a guest that is
+        still starting. Everything before them is a property of the image and
+        the kernel: it answers the same way every time, so it is raised on the
+        first attempt rather than being asked three times on a host that is
+        genuinely missing a capability.
+
+        A rollout hangs on the answer. `cmd_up` invalidates this host's
+        shared-live marker and drains the runners that were serving before it
+        runs this, and completes the marker only once every replica passes, so
+        a probe that fails leaves the host advertising no deployment at all --
+        and a runner that advertises no deployment does not poll. One lost race
+        in a freshly booted microVM took staging off the air for 29.6 hours on
+        2026-09-13, because nothing retried and nothing else deployed until the
+        next day.
+        """
         if self.backend.runtime != KATA_RUNTIME:
             return
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                self._probe_guest_observer_once()
+                return
+            except _ObserverProbeRace as exc:
+                if attempts >= GUEST_OBSERVER_PROBE_ATTEMPTS:
+                    raise SandboxError(
+                        f"{exc} (after {attempts} attempts on a fresh sandbox each time)"
+                    ) from exc
+                logger.warning(
+                    "Kata observer probe lost a race with its own guest; retrying: %s",
+                    exc,
+                    extra={"event": "guest_observer_probe_retry", "attempt": attempts},
+                )
+                time.sleep(GUEST_OBSERVER_PROBE_RETRY_S)
+
+    def _probe_guest_observer_once(self) -> None:
+        """One probe, on a sandbox of its own that is removed however it ends."""
         token = secrets.token_hex(12)
         spec = ChatSandboxSpec(
             thread_id=f"athr_preflight_{token}",
@@ -2823,7 +2884,14 @@ class ChatSandboxManager:
                 raise SandboxError("Kata tool marker self-test failed")
             cursor = self.begin_guest_observation(spec, user_uid=self.backend.uid)
             if not cursor.available:
-                raise SandboxError("Kata tool marker transport observer is unavailable")
+                # `begin` folds every reason into an unavailable cursor, so
+                # without its detail this reads the same whether the observer
+                # died, answered a version this host rejects, or had simply not
+                # published its first status yet.
+                raise _ObserverProbeRace(
+                    "Kata tool marker transport observer is unavailable: "
+                    + (cursor.detail or "no detail reported")
+                )
             for phase in ("pre", "post"):
                 sent = self.exec_capture(
                     spec,
@@ -2839,10 +2907,24 @@ class ChatSandboxManager:
                 if sent.returncode != 0:
                     raise SandboxError("Kata tool marker transport helper failed")
             observation = self.finish_guest_observation(spec, cursor)
-            if not observation.complete or [
-                (phase, tool_id) for _, phase, tool_id in observation.tool_marks
-            ] != [("pre", "preflight"), ("post", "preflight")]:
-                raise SandboxError("Kata observer did not receive trusted tool boundaries")
+            delivered = [(phase, tool_id) for _, phase, tool_id in observation.tool_marks]
+            if not observation.complete or delivered != [
+                ("pre", "preflight"),
+                ("post", "preflight"),
+            ]:
+                # Two different failures wore one sentence here, which is why
+                # the 2026-09-13 rollout could not be diagnosed from its logs:
+                # an incomplete slice means the journal could not be read back,
+                # while a complete slice with the wrong marks means the
+                # boundaries themselves never arrived.
+                raise _ObserverProbeRace(
+                    "Kata observer did not receive trusted tool boundaries: "
+                    f"complete={observation.complete} "
+                    f"lost_events={observation.lost_events} "
+                    f"truncated={observation.truncated} "
+                    f"marks={delivered!r} "
+                    + (f"detail={observation.detail}" if observation.detail else "")
+                )
         finally:
             self._run(
                 [self.backend.docker_binary, "rm", "--force", spec.container_name], timeout=30
