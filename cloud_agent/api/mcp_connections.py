@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import secrets
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -43,10 +42,10 @@ from cloud_agent.api.routes import require_agent_owner
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import config_import, launch, oauth
 from cloud_agent.mcp.authorization import binding_from_selection
+from cloud_agent.mcp.binding_aliases import binding_aliases
 from cloud_agent.mcp.host import HostError, McpHost, SessionKey
 from cloud_agent.mcp.launch import LaunchPlanError, ManagedLaunchPolicy, build_launch_plan
 from cloud_agent.mcp.models import (
-    ALIAS_PATTERN,
     AuthKind,
     CapabilityKind,
     ConnectionErrorKind,
@@ -1456,6 +1455,7 @@ async def replace_thread_bindings(
     job_store = _require_store(store)
     await _require_thread(job_store, thread_id=thread_id, user_id=user["user_id"])
     prepared: list[dict[str, Any]] = []
+    aliases: list[tuple[int, str | None, str]] = []
     for index, item in enumerate(body.bindings):
         row = await job_store.mcp.get_mcp_connection(
             connection_id=item.connection_id, user_id=user["user_id"]
@@ -1478,7 +1478,7 @@ async def replace_thread_bindings(
         binding = binding_from_selection(
             thread_id=thread_id,
             connection=connection,
-            alias=_checked_alias(item.alias, fallback=_default_alias(row, index)),
+            alias=item.alias or _default_alias(row, index),
             rules=rules,
             resources={name: _parse_policy(value) for name, value in item.resources.items()},
             prompts={name: _parse_policy(value) for name, value in item.prompts.items()},
@@ -1501,6 +1501,12 @@ async def replace_thread_bindings(
                 "prompt_rules": {k: v.value for k, v in binding.prompt_rules.items()},
             }
         )
+        aliases.append((item.connection_id, item.alias, _default_alias(row, index)))
+    try:
+        for binding_row, alias in zip(prepared, binding_aliases(aliases), strict=True):
+            binding_row["alias"] = alias
+    except ValueError as exc:
+        raise _bad_request(str(exc)) from exc
     await job_store.mcp.replace_mcp_bindings(thread_id=thread_id, bindings=prepared)
     logger.info(
         "agent_mcp_bindings_replaced",
@@ -1991,24 +1997,6 @@ def _parse_auth_kind(value: str) -> AuthKind:
     except ValueError as exc:
         allowed = ", ".join(item.value for item in AuthKind)
         raise _bad_request(f"unknown auth kind {value!r}; use one of: {allowed}") from exc
-
-
-def _checked_alias(alias: str | None, *, fallback: str) -> str:
-    """Validate a binding alias, or derive one that is valid by construction.
-
-    The alias is a URL path segment on the relay and a prefix on every tool
-    name the connection contributes, so a value outside the grammar produces
-    either a 404 the agent reads as a broken server or a tool name the model
-    cannot call. Checked here rather than at first use, because the user can
-    still be told which value was wrong.
-    """
-    candidate = (alias or fallback).strip()
-    if not re.fullmatch(ALIAS_PATTERN, candidate):
-        raise _bad_request(
-            f"{candidate!r} is not a usable alias: use letters, digits, underscore and "
-            "hyphen, starting with a letter or digit, up to 40 characters"
-        )
-    return candidate
 
 
 def _parse_policy(value: str) -> ToolPolicy:

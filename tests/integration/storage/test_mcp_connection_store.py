@@ -166,6 +166,7 @@ async def _invocation(
     connection: dict[str, Any],
     *,
     expires_in: timedelta = timedelta(minutes=10),
+    policy_revision: int = 1,
 ) -> dict[str, Any]:
     """One held call, pending and undecided."""
     return await store.mcp.create_mcp_invocation(
@@ -180,7 +181,7 @@ async def _invocation(
         config_revision=int(connection["config_revision"]),
         authorization_epoch=int(connection["authorization_epoch"]),
         capability_revision=int(connection["capability_revision"]),
-        policy_revision=1,
+        policy_revision=policy_revision,
         expires_at=datetime.now(timezone.utc) + expires_in,
     )
 
@@ -703,6 +704,160 @@ async def test_replacing_a_threads_bindings_is_wholesale(store: Storage) -> None
     )
     remaining = await store.mcp.list_mcp_bindings(thread_id=str(job["thread_id"]))
     assert [row["alias"] for row in remaining] == ["deepwiki"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "tool",
+        "resource",
+        "prompt",
+        "alias",
+        "enabled",
+        "config_revision",
+        "authorization_epoch",
+        "capability_revision",
+        "remove",
+    ],
+)
+async def test_replacing_permissions_invalidates_old_approvals(store: Storage, change) -> None:
+    """Changing or reattaching a binding cannot revive an earlier approval."""
+    job = await _create_job(store)
+    connection = await _connect(store, _OWNER)
+    thread_id = str(job["thread_id"])
+    selection = {
+        "connection_id": connection["id"],
+        "alias": "github",
+        "enabled": True,
+        "config_revision": connection["config_revision"],
+        "authorization_epoch": connection["authorization_epoch"],
+        "capability_revision": connection["capability_revision"],
+        "policy_revision": 1,
+        "rules": {"get_issue": {"policy": "confirm", "fingerprint": "abc"}},
+        "resource_rules": {"docs": "allow"},
+        "prompt_rules": {},
+    }
+    await store.mcp.replace_mcp_bindings(thread_id=thread_id, bindings=[selection])
+    original = (await store.mcp.list_mcp_bindings(thread_id=thread_id))[0]
+    invocation = await store.mcp.create_mcp_invocation(
+        job_id=str(job["id"]),
+        attempt_id=None,
+        lease_generation=0,
+        thread_id=thread_id,
+        connection_id=connection["id"],
+        capability_name="get_issue",
+        arguments_digest="digest",
+        arguments_ciphertext=None,
+        config_revision=connection["config_revision"],
+        authorization_epoch=connection["authorization_epoch"],
+        capability_revision=connection["capability_revision"],
+        policy_revision=original["policy_revision"],
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    await store.mcp.decide_mcp_invocation(
+        invocation_id=invocation["id"], approve=True, decided_by=_OWNER
+    )
+    pending = await _invocation(store, job, connection, policy_revision=original["policy_revision"])
+    dispatched = await _invocation(
+        store, job, connection, policy_revision=original["policy_revision"]
+    )
+    await store.mcp.decide_mcp_invocation(
+        invocation_id=dispatched["id"], approve=True, decided_by=_OWNER
+    )
+    assert await store.mcp.claim_mcp_invocation(invocation_id=dispatched["id"]) is not None
+    if change == "remove":
+        await store.mcp.replace_mcp_bindings(thread_id=thread_id, bindings=[])
+    elif change == "tool":
+        selection["rules"] = {"get_issue": {"policy": "deny", "fingerprint": "abc"}}
+    elif change == "resource":
+        selection["resource_rules"] = {"docs": "deny"}
+    elif change == "prompt":
+        selection["prompt_rules"] = {"summary": "confirm"}
+    elif change == "alias":
+        selection["alias"] = "other"
+    elif change == "enabled":
+        selection["enabled"] = False
+    else:
+        selection[change] += 1
+    await store.mcp.replace_mcp_bindings(thread_id=thread_id, bindings=[selection])
+    changed = (await store.mcp.list_mcp_bindings(thread_id=thread_id))[0]
+    assert await store.mcp.claim_mcp_invocation(invocation_id=invocation["id"]) is None
+    assert (await store.mcp.get_mcp_invocation(invocation_id=invocation["id"]))[
+        "status"
+    ] == "expired"
+    assert changed["policy_revision"] > original["policy_revision"]
+    assert (await store.mcp.get_mcp_invocation(invocation_id=pending["id"]))["status"] == "expired"
+    assert (await store.mcp.get_mcp_invocation(invocation_id=dispatched["id"]))[
+        "status"
+    ] == "dispatching"
+
+
+def _permission_binding(connection, alias):
+    """A selection with a tool held for approval."""
+    return {
+        "connection_id": connection["id"],
+        "alias": alias,
+        "enabled": True,
+        "config_revision": connection["config_revision"],
+        "authorization_epoch": connection["authorization_epoch"],
+        "capability_revision": connection["capability_revision"],
+        "rules": {"get_issue": {"policy": "confirm", "fingerprint": "abc"}},
+        "resource_rules": {},
+        "prompt_rules": {},
+    }
+
+
+async def test_unchanged_permissions_keep_their_approvals_and_revision(store: Storage):
+    """Saving another connection must not interrupt this connection's held call."""
+    job = await _create_job(store)
+    first, second = await _connect(store, _OWNER), await _connect(store, _OWNER)
+    thread_id = str(job["thread_id"])
+    selections = [_permission_binding(first, "first"), _permission_binding(second, "second")]
+    await store.mcp.replace_mcp_bindings(thread_id=thread_id, bindings=selections)
+    original = await store.mcp.list_mcp_bindings(thread_id=thread_id)
+    invocation = await _invocation(
+        store, job, first, policy_revision=original[0]["policy_revision"]
+    )
+    await store.mcp.replace_mcp_bindings(thread_id=thread_id, bindings=selections)
+    unchanged = await store.mcp.list_mcp_bindings(thread_id=thread_id)
+    assert [row["policy_revision"] for row in unchanged] == [
+        row["policy_revision"] for row in original
+    ]
+    selections[1]["enabled"] = False
+    await store.mcp.replace_mcp_bindings(thread_id=thread_id, bindings=selections)
+    changed = await store.mcp.list_mcp_bindings(thread_id=thread_id)
+    assert changed[0]["policy_revision"] == original[0]["policy_revision"]
+    assert changed[1]["policy_revision"] > original[1]["policy_revision"]
+    assert (await store.mcp.get_mcp_invocation(invocation_id=invocation["id"]))[
+        "status"
+    ] == "pending"
+
+
+async def test_concurrent_replacements_cannot_merge_two_distinct_selections(store: Storage):
+    """The thread lock also serializes writes when there are no bindings yet."""
+    job = await _create_job(store)
+    first, second = await _connect(store, _OWNER), await _connect(store, _OWNER)
+    thread_id = str(job["thread_id"])
+    await asyncio.gather(
+        *[
+            store.mcp.replace_mcp_bindings(
+                thread_id=thread_id, bindings=[_permission_binding(row, alias)]
+            )
+            for row, alias in [(first, "first"), (second, "second")]
+        ]
+    )
+    assert len(await store.mcp.list_mcp_bindings(thread_id=thread_id)) == 1
+
+
+async def test_policy_sequence_migration_starts_above_previous_approval_revisions(store, pool):
+    """Removing bindings cannot hide the largest historical approval revision."""
+    job = await _create_job(store)
+    connection = await _connect(store, _OWNER)
+    await _invocation(store, job, connection, policy_revision=5000)
+    downgrade_to(_db_config(), "0009_mcp_refresh_lease")
+    apply_migrations(_db_config())
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT nextval('agent_mcp_policy_revision_seq')") > 5000
 
 
 async def test_saving_capabilities_moves_the_revision_it_is_fenced_against(

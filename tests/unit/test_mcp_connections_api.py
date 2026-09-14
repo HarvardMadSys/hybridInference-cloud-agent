@@ -868,6 +868,30 @@ class TestImport:
 class TestBindings:
     """A session's capability selection."""
 
+    @pytest.mark.parametrize("duplicate", ["alias", "connection"])
+    def test_duplicate_binding_identities_are_rejected_without_writing(self, duplicate) -> None:
+        store = FakeStore()
+        first, second = _seed(store), _seed(store)
+        self._with_capabilities(store, first)
+        self._with_capabilities(store, second)
+        store.threads["thread-1"] = {"id": "thread-1", "user_id": _OWNER}
+        with _client(store) as client:
+            response = client.put(
+                "/v1/agent/mcp/threads/thread-1/bindings",
+                json={
+                    "bindings": [
+                        {"connection_id": first, "alias": "docs", "tools": {"search": "allow"}},
+                        {
+                            "connection_id": second if duplicate == "alias" else first,
+                            "alias": "docs" if duplicate == "alias" else "other",
+                            "tools": {"search": "allow"},
+                        },
+                    ]
+                },
+            )
+        assert response.status_code == 400
+        assert "thread-1" not in store.bindings
+
     def _with_capabilities(self, store: FakeStore, connection_id: int) -> None:
         """Seed a discovery result with one tool and one prompt."""
         store.capabilities[connection_id] = {

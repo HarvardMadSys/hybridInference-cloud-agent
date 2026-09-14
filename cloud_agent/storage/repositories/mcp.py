@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.storage._sql.mcp import mcp_binding_row
 from cloud_agent.storage._sql.rows import load_json as _load_json
 
 if TYPE_CHECKING:
@@ -793,6 +794,54 @@ class PostgresMcpConnectionRepository:
         connection from the dialog did not remove its tools from the session.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            # Serialize replacements even when the old selection is empty.
+            await conn.fetchval("SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE", thread_id)
+            previous = {
+                int(row["connection_id"]): mcp_binding_row(row)
+                for row in await conn.fetch(
+                    "SELECT * FROM agent_mcp_thread_bindings WHERE thread_id = $1 FOR UPDATE",
+                    thread_id,
+                )
+            }
+            revisions: dict[int, int] = {}
+            changed = set(previous) - {int(binding["connection_id"]) for binding in bindings}
+            for binding in bindings:
+                connection_id = int(binding["connection_id"])
+                old = previous.get(connection_id)
+                unchanged = (
+                    old is not None
+                    and not old["selection_pending"]
+                    and all(
+                        old[key] == binding.get(key, default)
+                        for key, default in (
+                            ("alias", ""),
+                            ("enabled", True),
+                            ("config_revision", 1),
+                            ("authorization_epoch", 1),
+                            ("capability_revision", 1),
+                            ("rules", {}),
+                            ("resource_rules", {}),
+                            ("prompt_rules", {}),
+                        )
+                    )
+                )
+                revisions[connection_id] = (
+                    int(old["policy_revision"])
+                    if unchanged and old is not None
+                    else int(await conn.fetchval("SELECT nextval('agent_mcp_policy_revision_seq')"))
+                )
+                if not unchanged:
+                    changed.add(connection_id)
+            if changed:
+                # Revocation is visible to both the waiting relay and the UI.
+                # A call already dispatching keeps its outcome; it is never replayed.
+                await conn.execute(
+                    "UPDATE agent_mcp_invocations SET status = 'expired' "
+                    "WHERE thread_id = $1 AND connection_id = ANY($2::bigint[]) "
+                    "AND status IN ('pending', 'approved')",
+                    thread_id,
+                    list(changed),
+                )
             await conn.execute(
                 "DELETE FROM agent_mcp_thread_bindings WHERE thread_id = $1", thread_id
             )
@@ -812,7 +861,7 @@ class PostgresMcpConnectionRepository:
                     int(binding["config_revision"]),
                     int(binding["authorization_epoch"]),
                     int(binding["capability_revision"]),
-                    int(binding.get("policy_revision", 1)),
+                    revisions[int(binding["connection_id"])],
                     json.dumps(binding.get("rules") or {}),
                     json.dumps(binding.get("resource_rules") or {}),
                     json.dumps(binding.get("prompt_rules") or {}),
@@ -824,7 +873,7 @@ class PostgresMcpConnectionRepository:
             revision = await conn.fetchval(
                 """
                 UPDATE agent_mcp_thread_bindings
-                SET policy_revision = policy_revision + 1, updated_at = NOW()
+                SET policy_revision = nextval('agent_mcp_policy_revision_seq'), updated_at = NOW()
                 WHERE thread_id = $1 AND connection_id = $2
                 RETURNING policy_revision
                 """,

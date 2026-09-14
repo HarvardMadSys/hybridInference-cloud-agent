@@ -280,10 +280,14 @@ async def _resolve_binding(
 ) -> Authorized:
     """Resolve one binding alias into the server this job may reach."""
     job_id = identity["job_id"]
-    binding_row = next(
-        (item for item in identity.get("mcp_bindings") or [] if item.get("alias") == alias),
-        None,
-    )
+    matching = [item for item in identity.get("mcp_bindings") or [] if item.get("alias") == alias]
+    if len(matching) > 1:
+        raise _refused(
+            403,
+            "permission_error",
+            f"More than one MCP connection uses alias {alias!r}. Save a unique selection in Tools.",
+        )
+    binding_row = matching[0] if matching else None
     if binding_row is None:
         # The session's own bindings, not a catalogue. A token is scoped to the
         # job it was minted for, and a job reaches exactly the connections its

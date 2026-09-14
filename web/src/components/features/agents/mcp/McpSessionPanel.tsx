@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   decideMcpInvocation,
   getMcpConnectionCapabilities,
@@ -83,6 +83,36 @@ function draftSelections(bindings: McpBindingApi[]): Record<number, Selection> {
   return Object.fromEntries(
     bindings.map((binding) => [binding.connection_id, draftSelection(binding)]),
   );
+}
+
+/** Keep connection prefixes distinct without renaming any existing unique prefix. */
+function nextBindingAlias(preferred: string, connectionId: number, reserved: Set<string>): string {
+  const base = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(preferred)
+    ? preferred
+    : `mcp${connectionId}`;
+  let alias = base;
+  let counter = 1;
+  while (reserved.has(alias)) {
+    const suffix = `-${connectionId}${counter > 1 ? `-${counter}` : ''}`;
+    alias = base.slice(0, 40 - suffix.length) + suffix;
+    counter += 1;
+  }
+  return alias;
+}
+
+/** Existing ambiguous selections can be repaired by saving from this panel. */
+function uniqueBindingAliases(bindings: McpBindingApi[]): McpBindingApi[] {
+  const reserved = new Set(bindings.map((binding) => binding.alias));
+  const seen = new Set<string>();
+  return bindings.map((binding) => {
+    if (!seen.has(binding.alias)) {
+      seen.add(binding.alias);
+      return binding;
+    }
+    const alias = nextBindingAlias(binding.alias, binding.connection_id, reserved);
+    reserved.add(alias);
+    return { ...binding, alias };
+  });
 }
 
 /** A short, human phrase for a held call's arguments. */
@@ -257,8 +287,11 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const selectionOperation = useRef(false);
 
   const load = useCallback(async () => {
+    if (selectionOperation.current) return;
+    selectionOperation.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -267,14 +300,25 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
         readInvocations(jobId),
         listMcpConnections(),
       ]);
-      setBindings(bindingResponse.bindings);
-      setSelections(draftSelections(bindingResponse.bindings));
+      const uniqueBindings = uniqueBindingAliases(bindingResponse.bindings);
+      setBindings(uniqueBindings);
+      setSelections(draftSelections(uniqueBindings));
+      if (
+        uniqueBindings.some(
+          (binding, index) => binding.alias !== bindingResponse.bindings[index].alias,
+        )
+      ) {
+        setNotice(
+          'Duplicate connection aliases were adjusted. Save the selection to apply these names.',
+        );
+      }
       setInvocations((current) => mergeInvocations(current, invocationResponse, true));
       setConnections(connectionResponse.connections);
       setLoaded(true);
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : 'Could not load MCP settings.');
     } finally {
+      selectionOperation.current = false;
       setLoading(false);
     }
   }, [jobId, threadId]);
@@ -319,6 +363,7 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
     name: string,
     policy: McpPolicy,
   ) {
+    if (selectionOperation.current) return;
     setSelections((current) => {
       const selection = current[connectionId];
       if (!selection) return current;
@@ -340,6 +385,8 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
    * same as letting this session call it.
    */
   async function attach(connection: McpConnectionApi) {
+    if (selectionOperation.current) return;
+    selectionOperation.current = true;
     setAttaching(connection.id);
     setError(null);
     setNotice(null);
@@ -348,7 +395,11 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
       const draft: McpBindingApi = {
         connection_id: connection.id,
         connection_label: connection.label,
-        alias: connection.template ?? `mcp${connection.id}`,
+        alias: nextBindingAlias(
+          connection.template ?? `mcp${connection.id}`,
+          connection.id,
+          new Set(bindings.map((binding) => binding.alias)),
+        ),
         enabled: false,
         selection_pending: false,
         available: connection.status !== 'disabled' && connection.status !== 'error',
@@ -368,11 +419,14 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : 'Could not read that connection.');
     } finally {
+      selectionOperation.current = false;
       setAttaching(null);
     }
   }
 
   async function save() {
+    if (selectionOperation.current) return;
+    selectionOperation.current = true;
     setSaving(true);
     setError(null);
     setNotice(null);
@@ -402,6 +456,7 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : 'Could not save the selection.');
     } finally {
+      selectionOperation.current = false;
       setSaving(false);
     }
   }
@@ -503,7 +558,11 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
         </section>
       ) : null}
 
-      <section aria-labelledby="mcp-selection" className="mt-6">
+      <fieldset
+        aria-labelledby="mcp-selection"
+        className="mt-6 min-w-0"
+        disabled={loading || saving || attaching !== null}
+      >
         <div className="flex items-center justify-between gap-3">
           <h3
             id="mcp-selection"
@@ -620,7 +679,7 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
             {saving ? 'Saving…' : 'Save selection'}
           </button>
         ) : null}
-      </section>
+      </fieldset>
     </div>
   );
 }

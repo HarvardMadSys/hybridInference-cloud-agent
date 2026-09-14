@@ -984,3 +984,26 @@ async def test_inactive_connection_never_refreshes_or_delays_healthy_tools(
         assert "result" in response.json()
     assert refreshed == [8, 8]
     assert host.called[-1]["name"] == "search"
+
+
+@pytest.mark.parametrize("surface", ["tool", "resource", "prompt", "direct"])
+async def test_legacy_duplicate_aliases_cannot_route_to_the_first_connection(
+    client, store, host, surface
+):
+    store.bindings.append(_binding(9, "github"))
+    request = {
+        "tool": _rpc("tools/call", name="github__get_issue"),
+        "resource": _rpc("resources/read", uri="mcp-resource://7/repo://notes"),
+        "prompt": _rpc("prompts/get", name="github__summary"),
+        "direct": _rpc("tools/call", name="get_issue"),
+    }[surface]
+    listed = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
+    assert _tool_names(listed) == ["docs__search"]
+    response = await client.post(
+        f"{_HOST_URL}/github" if surface == "direct" else _HOST_URL,
+        json=request,
+        headers=_auth(),
+    )
+    assert response.status_code == 403 or "error" in response.json()
+    assert host.opened == []
+    assert host.called == []

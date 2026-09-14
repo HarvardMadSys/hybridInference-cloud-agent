@@ -1266,6 +1266,9 @@ the revisions stacked on this one; the window covers them as well.)
   session authorized against a different one. It follows `0007_attempt_turn_resources`,
   so the chain stays linear; `0009_mcp_refresh_lease`
   follows it with the lease that fences a credential refresh between workers.
+  `0010_mcp_policy_revisions` adds the permission revision allocator, so saving
+  or reattaching a connection cannot reuse an old approval's policy version.
+  Apply it before starting the updated control plane and MCP relay.
 
 The runner holds no database connection — its heartbeats are HTTP calls to the
 control plane — so stopping the control plane, the MCP relay and the web tier

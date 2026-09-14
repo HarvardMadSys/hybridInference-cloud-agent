@@ -3,7 +3,7 @@
 - Updated: 2026-09-13.
 - Baseline: PR #207's generic MCP foundation, integrated with the current
   capability-based storage architecture on `dev`. Migration order:
-  `0007_attempt_turn_resources → 0008_generic_mcp_connections → 0009_mcp_refresh_lease`.
+  `0007_attempt_turn_resources → 0008_generic_mcp_connections → 0009_mcp_refresh_lease → 0010_mcp_policy_revisions`.
 - Design: [`2026-09-11-per-user-mcp-v1-design.zh.md`](2026-09-11-per-user-mcp-v1-design.zh.md).
 
 This is an audit, not a plan. It states, dimension by dimension, what the code
@@ -170,6 +170,23 @@ bounded by the refresh lease. An absent or exhausted lease produces a refusal;
 the waiter never submits a second refresh or releases another worker's lease.
 Cancellation propagates without dispatching an upstream operation.
 
+Each connection has a unique alias within a conversation. Creation and selection
+APIs reject duplicate explicit aliases and repeated connection IDs; generated
+aliases reserve explicit names before choosing a bounded suffix. The Tools panel
+also avoids duplicate names and offers a corrected selection for previously
+stored duplicates. Until saved, ambiguous legacy aliases refuse dispatch instead
+of selecting the first connection. Other connections remain usable.
+New conversations also enable resource-only and prompt-only selections, validate
+their policies, and leave a selection disabled when every capability is denied.
+
+Saving a selection locks the conversation's binding set in one transaction.
+Changed and reattached connections receive a fresh database-allocated policy
+revision, and their pending or approved invocations expire immediately. Unchanged
+connections retain their revisions and approvals; already dispatching calls
+retain their outcomes. Concurrent saves cannot combine two different selections.
+The Tools editor locks selection controls during refresh, attachment and saving,
+including when the panel is reopened before an operation completes.
+
 ## Approval and native-session continuity
 
 Confirmation keeps the original MCP request open. The conversation shows a
@@ -186,14 +203,19 @@ under the child's own fence. No dispatched external write is automatically retri
 
 ## Recorded validation (2026-09-13)
 
-- `make check`: 3,782 tests passed, plus formatting, lint and mypy.
+- `make check`: 3,809 tests passed, plus formatting, lint and mypy.
 - Refresh/relay/approval regression suite: 173 passed. Cases cover an issuer
   that never responds without blocking another connection, authority changes
   during refresh across tools, resources, prompts and direct routes, pending
   approval invalidation, current-credential dispatch, expired access tokens
   during refresh contention and cancellation without releasing another lease.
-- PostgreSQL tier: 407 tests passed.
-- Web: 1,298 tests passed; type-check, ESLint and changed-file Prettier checks passed.
+- PostgreSQL tier: 419 tests passed, including 46 MCP store regressions for
+  permission changes, reattachment, unchanged approvals, concurrent saves and
+  upgrading the policy revision allocator above historical approval versions.
+- Web: 1,302 tests passed; type-check, ESLint and changed-file Prettier checks passed.
+  The 13 session-panel cases include duplicate-name repair and selection controls
+  during pending operations. New-conversation API cases also cover resource-only
+  and prompt-only permissions, including denial and invalid policy values.
 - Built Linux arm64 sandbox: five pinned CLIs, each with `allow` and `confirm`.
   All fifteen cases passed, including long normalized tool names. Across 66
   tool calls the suite checks results, approval without a second prompt, live

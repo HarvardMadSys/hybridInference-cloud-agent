@@ -4865,6 +4865,54 @@ async def test_a_selection_is_stamped_against_the_snapshot_it_was_chosen_from(
     assert len(rule["fingerprint"]) == 64
 
 
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_new_jobs_cannot_store_ambiguous_mcp_aliases(client, store, explicit):
+    first = store.connect_mcp(user_id=_OWNER, tools=("get_issue",))
+    second = store.connect_mcp(user_id=_OWNER, tools=("get_issue",))
+    selections = [_binding(first["id"]), _binding(second["id"])]
+    for selection in selections:
+        selection["alias"] = "github" if explicit else None
+    created = await client.post("/v1/agent/jobs", json=_job_body(mcp_bindings=selections))
+    if explicit:
+        assert created.status_code == 400
+        assert "more than one connection" in created.text
+    else:
+        assert created.status_code == 201, created.text
+        aliases = [binding["alias"] for binding in created.json()["mcp_bindings"]]
+        assert len(aliases) == len(set(aliases)) == 2
+
+
+@pytest.mark.parametrize("surface", ["resources", "prompts"])
+@pytest.mark.parametrize("policy", ["allow", "confirm", "deny", "invalid"])
+async def test_new_jobs_honor_mcp_resource_and_prompt_only_selections(
+    client, store, surface, policy
+):
+    connection = store.connect_mcp(user_id=_OWNER)
+    store.mcp_capabilities[connection["id"]][surface] = [{"name": "docs"}]
+    created = await client.post(
+        "/v1/agent/jobs",
+        json=_job_body(
+            mcp_bindings=[
+                {
+                    "connection_id": connection["id"],
+                    "tools": {},
+                    surface: {"docs": policy},
+                }
+            ]
+        ),
+    )
+    if policy == "invalid":
+        assert created.status_code == 400
+        assert store.mcp_bindings == {}
+    else:
+        assert created.status_code == 201, created.text
+        binding = store.mcp_bindings[created.json()["thread_id"]][0]
+        assert binding["enabled"] is (policy != "deny")
+        assert binding["resource_rules" if surface == "resources" else "prompt_rules"] == {
+            "docs": policy
+        }
+
+
 async def test_naming_a_connection_the_caller_does_not_own_is_refused_at_creation(
     client: AsyncClient, store: FakeStorage
 ):

@@ -73,6 +73,7 @@ from cloud_agent.github_app import AppNotInstalled, GitHubAppError
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.identity import SESSION_COOKIE
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.mcp.binding_aliases import binding_aliases
 from cloud_agent.mcp.models import ALIAS_PATTERN, ToolPolicy
 from cloud_agent.mcp.registry import resolve_connection, resolve_for_thread
 from cloud_agent.schemas import (
@@ -1259,6 +1260,7 @@ async def _resolve_mcp_bindings(
             },
         )
     prepared: list[dict[str, Any]] = []
+    aliases: list[tuple[int, str | None, str]] = []
     for entry in requested:
         connection_id = int(getattr(entry, "connection_id", 0) or 0)
         row = await store.get_mcp_connection(connection_id=connection_id, user_id=user_id)
@@ -1330,28 +1332,50 @@ async def _resolve_mcp_bindings(
                 "policy": parsed.value,
                 "fingerprint": capability.fingerprint() if capability else "",
             }
+        try:
+            other_rules = {
+                kind: {
+                    str(name): ToolPolicy(str(policy)).value
+                    for name, policy in (getattr(entry, kind, None) or {}).items()
+                }
+                for kind in ("resources", "prompts")
+            }
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "type": "invalid_request",
+                        "message": "Unknown MCP capability policy; use deny, confirm or allow.",
+                    }
+                },
+            ) from exc
+        has_selection = any(rule["policy"] != "deny" for rule in rules.values()) or any(
+            policy != "deny" for policies in other_rules.values() for policy in policies.values()
+        )
         prepared.append(
             {
                 "connection_id": connection_id,
-                "alias": _checked_alias(
-                    getattr(entry, "alias", None), fallback=_binding_alias(row)
-                ),
-                "enabled": bool(getattr(entry, "enabled", True)) and bool(rules),
+                "alias": "",
+                "enabled": bool(getattr(entry, "enabled", True)) and has_selection,
                 "config_revision": resolved.connection.config_revision,
                 "authorization_epoch": resolved.connection.authorization_epoch,
                 "capability_revision": resolved.connection.capability_revision,
                 "policy_revision": 1,
                 "rules": rules,
-                "resource_rules": {
-                    str(name): str(policy)
-                    for name, policy in (getattr(entry, "resources", None) or {}).items()
-                },
-                "prompt_rules": {
-                    str(name): str(policy)
-                    for name, policy in (getattr(entry, "prompts", None) or {}).items()
-                },
+                "resource_rules": other_rules["resources"],
+                "prompt_rules": other_rules["prompts"],
             }
         )
+        aliases.append((connection_id, getattr(entry, "alias", None), _binding_alias(row)))
+    try:
+        for binding, alias in zip(prepared, binding_aliases(aliases), strict=True):
+            binding["alias"] = alias
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"type": "invalid_request", "message": str(exc)}},
+        ) from exc
     return prepared
 
 
@@ -1367,26 +1391,6 @@ def _binding_alias(row: dict[str, Any]) -> str:
     if template and re.fullmatch(ALIAS_PATTERN, template):
         return template
     return f"mcp{row['id']}"
-
-
-def _checked_alias(alias: str | None, *, fallback: str) -> str:
-    """Validate an explicit alias, or use one that is valid by construction."""
-    candidate = (alias or fallback).strip()
-    if not re.fullmatch(ALIAS_PATTERN, candidate):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": {
-                    "type": "invalid_request",
-                    "message": (
-                        f"{candidate!r} is not a usable MCP alias: use letters, digits, "
-                        "underscore and hyphen, starting with a letter or digit, up to "
-                        "40 characters."
-                    ),
-                }
-            },
-        )
-    return candidate
 
 
 def _require_registered_runtime(runtime: str) -> None:
