@@ -241,3 +241,39 @@ async def test_resource_operation_is_part_of_the_approval_identity(client, store
     assert len(looked_up) == 2
     assert looked_up[0]["capability_name"] == looked_up[1]["capability_name"] == _TEMPLATE
     assert looked_up[0]["arguments_digest"] != looked_up[1]["arguments_digest"]
+
+
+async def test_indeterminate_denied_template_cannot_fall_through_to_an_allow_rule(
+    client, store, monkeypatch
+):
+    from cloud_agent.mcp import resource_template_values
+
+    denied = "repo://files/{a}{b}{a}{b}"
+    store.snapshots[7]["resource_templates"].append({"name": denied})
+    store.bindings[0]["resource_rules"][denied] = "deny"
+    monkeypatch.setattr(resource_template_values, "MAX_MATCH_STEPS", 10)
+    response = await _read(client, "mcp-resource://7/repo://files/different")
+    assert "too ambiguous" in response.json()["error"]["message"]
+    assert client[1].opened == []
+
+
+async def test_repeated_variable_denial_cannot_fall_through_to_a_broader_template(client, store):
+    allowed = "repo://files/{+path}"
+    denied = "repo://files/{+part}/{+part}"
+    store.snapshots[7]["resource_templates"] = [{"name": allowed}, {"name": denied}]
+    store.bindings[0]["resource_rules"] = {allowed: "allow", denied: "deny"}
+    response = await _read(client, "mcp-resource://7/repo://files/a/b/a/b")
+    assert "error" in response.json()
+    assert client[1].opened == []
+
+
+async def test_unselected_ambiguous_template_does_not_break_an_allowed_read(
+    client, store, monkeypatch
+):
+    from cloud_agent.mcp import resource_template_values
+
+    store.snapshots[7]["resource_templates"].append({"name": "repo://files/{a}{b}{a}{b}"})
+    monkeypatch.setattr(resource_template_values, "MAX_MATCH_STEPS", 10)
+    response = await _read(client, "mcp-resource://7/repo://files/different")
+    assert "result" in response.json()
+    assert client[1].read == [{"uri": "repo://files/different"}]

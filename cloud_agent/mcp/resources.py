@@ -11,6 +11,7 @@ from cloud_agent.mcp.models import (
     ThreadBinding,
     ToolPolicy,
 )
+from cloud_agent.mcp.resource_template_values import TemplateMatchLimit
 from cloud_agent.mcp.resource_templates import MAX_RESOURCE_URI_LENGTH, matches_resource_template
 
 _PREFIX = "mcp-resource://"
@@ -51,9 +52,18 @@ def resource_capability(
     exact = next((item for item in snapshot.resources if item.name == uri), None)
     if exact is not None:
         return exact
-    matching = [
-        item for item in snapshot.resource_templates if matches_resource_template(item.name, uri)
-    ]
+    try:
+        matching = [
+            item
+            for item in snapshot.resource_templates
+            if (
+                binding.rule_for(CapabilityKind.RESOURCE_TEMPLATE, item.name) is not None
+                or binding.selection_pending
+            )
+            and matches_resource_template(item.name, uri)
+        ]
+    except TemplateMatchLimit as exc:
+        raise ResourceResolutionError(str(exc)) from exc
     denied = [item for item in matching if binding.resource_rules.get(item.name) is ToolPolicy.DENY]
     if denied:
         return denied[0]

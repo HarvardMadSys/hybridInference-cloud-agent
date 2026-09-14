@@ -463,7 +463,12 @@ async def _seed(
                 "name": "repo://files/{path}",
                 "description": "Repository files",
                 "input_schema": {"mimeType": "text/plain"},
-            }
+            },
+            {
+                "name": "repo://mirrors/{+path}/again/{+path}",
+                "description": "Repeated repository paths",
+                "input_schema": {"mimeType": "text/plain"},
+            },
         ],
         prompts=[],
         support={},
@@ -488,7 +493,10 @@ async def _seed(
                 "capability_revision": 2,
                 "policy_revision": 1,
                 "rules": {tool_name: {"policy": policy, "fingerprint": ""}},
-                "resource_rules": {"repo://files/{path}": policy},
+                "resource_rules": {
+                    "repo://files/{path}": policy,
+                    "repo://mirrors/{+path}/again/{+path}": policy,
+                },
                 "prompt_rules": {},
             }
         ],

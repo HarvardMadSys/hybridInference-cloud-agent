@@ -511,6 +511,41 @@ async def test_a_disabled_binding_refuses_every_call(monkeypatch, store, upstrea
     assert upstream.requests == []
 
 
+@pytest.mark.parametrize(
+    "method", ["initialize", "ping", "tools/list", "notifications/initialized"]
+)
+async def test_disabled_binding_never_refreshes_or_forwards_housekeeping(
+    monkeypatch, store, upstream, method
+):
+    from unittest.mock import AsyncMock
+
+    store.bindings = [_binding(enabled=False)]
+    refresh = AsyncMock(side_effect=AssertionError("disabled binding refreshed"))
+    monkeypatch.setattr(agent_mcp_router, "ensure_fresh", refresh)
+    async with _relay(monkeypatch, store, upstream) as api:
+        response = await api.post(f"/v1/agent/mcp/{_ALIAS}", json=_rpc(method), headers=_auth())
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == -32601
+    refresh.assert_not_awaited()
+    assert upstream.requests == []
+
+
+@pytest.mark.parametrize("method", ["GET", "DELETE"])
+async def test_disabled_binding_never_opens_or_closes_an_upstream_stream(
+    monkeypatch, store, upstream, method
+):
+    from unittest.mock import AsyncMock
+
+    store.bindings = [_binding(enabled=False)]
+    refresh = AsyncMock(side_effect=AssertionError("disabled binding refreshed"))
+    monkeypatch.setattr(agent_mcp_router, "ensure_fresh", refresh)
+    async with _relay(monkeypatch, store, upstream) as api:
+        response = await api.request(method, f"/v1/agent/mcp/{_ALIAS}", headers=_auth())
+    assert response.status_code == 403
+    refresh.assert_not_awaited()
+    assert upstream.requests == []
+
+
 async def test_a_dead_fence_stops_reaching_tools(store, client, upstream):
     """Cancelling a job revokes its tools exactly as it revokes inference."""
     store.live = False

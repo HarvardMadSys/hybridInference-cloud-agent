@@ -708,26 +708,35 @@ async def test_resident_mcp_call_followup_resume_and_fork(
                 headers=headers,
                 json={"jsonrpc": "2.0", "id": 91, "method": "resources/templates/list"},
             )
-            template = listed.json()["result"]["resourceTemplates"][0]["uriTemplate"]
-            uri = template.replace("{path}", "README%20notes.md")
-            read = await resource_client.post(
-                endpoint,
-                headers=headers,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 92,
-                    "method": "resources/read",
-                    "params": {"uri": uri},
-                },
-            )
-            assert read.json()["result"]["contents"] == [
-                {"uri": uri, "text": "template resource body", "mimeType": "text/plain"}
-            ]
+            templates = listed.json()["result"]["resourceTemplates"]
+            assert len(templates) == 2
+            for index, template in enumerate(templates):
+                uri = (
+                    template["uriTemplate"]
+                    .replace("{path}", "README%20notes.md")
+                    .replace("{+path}", "folder/README%20notes.md")
+                )
+                read = await resource_client.post(
+                    endpoint,
+                    headers=headers,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 92 + index,
+                        "method": "resources/read",
+                        "params": {"uri": uri},
+                    },
+                )
+                assert read.json()["result"]["contents"] == [
+                    {"uri": uri, "text": "template resource body", "mimeType": "text/plain"}
+                ]
         reads = [call for call in upstream.mcp_calls if call["method"] == "resources/read"]
-        assert len(reads) == 1
+        assert len(reads) == 2
         assert reads[0]["params"] == {"uri": "repo://files/README%20notes.md"}
+        assert reads[1]["params"] == {
+            "uri": "repo://mirrors/folder/README%20notes.md/again/folder/README%20notes.md"
+        }
         if policy == "confirm":
-            assert len(decisions) == expected_calls + 1
+            assert len(decisions) == expected_calls + 2
             rows = await store.mcp.list_mcp_invocations(job_id=claims["job_id"])
             assert {row["status"] for row in rows} == {"completed"}
     finally:

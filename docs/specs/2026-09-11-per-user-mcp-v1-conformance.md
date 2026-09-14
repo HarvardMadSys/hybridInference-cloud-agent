@@ -141,10 +141,21 @@ connection, policy and attempt fence.
 
 `mcp/resource_templates.py` matches RFC 6570 expansions with bounded template,
 URI, expression, cache and compiled-pattern sizes. RE2 avoids backtracking on
-server-supplied templates. `tests/unit/test_mcp_resource_templates.py` checks
+the lexical check. A bounded variable search then uses `uritemplate` to verify
+that one consistent assignment recreates the entire URI, including repeated
+variables, scalar prefixes, lists, maps and omitted variables. Ambiguous searches
+stop after 16,384 steps and refuse authorization instead of falling through to
+another template's rule. Unselected templates do not enter this search.
+`tests/unit/test_mcp_resource_templates.py` checks
 operators, encoded boundaries, invalid inputs and adversarial patterns;
 `tests/servers/test_mcp_resource_routes.py` checks routing and authorization
 through the API, including pending approval invalidation.
+
+Disabled session bindings are refused before loading or refreshing credentials,
+including direct-route handshakes and stream operations. Disabled or disconnected
+connections also skip refresh. The merged catalogue continues listing and calling
+healthy connections; the API regressions assert that the inactive connection
+never enters refresh or reaches its upstream server.
 
 ## Approval and native-session continuity
 
@@ -162,7 +173,7 @@ under the child's own fence. No dispatched external write is automatically retri
 
 ## Recorded validation (2026-09-13)
 
-- `make check`: 3,618 tests passed, plus formatting, lint and mypy.
+- `make check`: 3,743 tests passed, plus formatting, lint and mypy.
 - PostgreSQL tier: 407 tests passed.
 - Web: 1,298 tests passed; type-check, ESLint and changed-file Prettier checks passed.
 - Built Linux arm64 sandbox: five pinned CLIs, each with `allow` and `confirm`.
@@ -173,9 +184,11 @@ under the child's own fence. No dispatched external write is automatically retri
   alongside the resident app-server/serve paths. Kilo's reviewed build is also
   installed through the retained-container upgrade path under dropped capabilities.
 - All fifteen cases also read an expanded resource template using the member's
-  current credentials, with confirmation and invocation completion checked for
-  `confirm` cases. These additional resource reads use the test protocol client.
-- Resource/template/relay regression suite: 146 passed. The template matcher
+  current credentials, covering both an ordinary template and a repeated
+  reserved-path variable: 30 resource reads in total. Confirmation and invocation
+  completion are checked for `confirm` cases. These additional resource reads
+  use the test protocol client.
+- Resource/template/relay regression suite: 271 passed. The template matcher
   also accepted all 383 nonempty expansions in the public
   [URI Template test corpus](https://github.com/uri-templates/uritemplate-test)
   (`spec-examples`, `spec-examples-by-section`, and `extended-tests`). Empty

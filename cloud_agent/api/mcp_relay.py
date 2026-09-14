@@ -158,6 +158,14 @@ class Authorized:
     dispatches: list[tuple[int, int]] = field(default_factory=list, compare=False)
 
 
+class _BindingDisabled(HTTPException):
+    """A session selection stops all connection work before credentials are read."""
+
+    def __init__(self) -> None:
+        """Refuse transport access for an explicitly disabled selection."""
+        super().__init__(403, "this MCP connection is not enabled for this session")
+
+
 def _error_reply(request_id: Any, message: str, code: int = METHOD_NOT_FOUND) -> dict[str, Any]:
     """Build a JSON-RPC error reply for one request id.
 
@@ -298,11 +306,16 @@ async def _resolve_binding(
     ):
         raise _refused(404, "not_found", f"No MCP connection named {alias!r} is bound here.")
 
+    if not binding_row.get("enabled", True):
+        raise _BindingDisabled()
+
     connection_row = await store.mcp.get_mcp_connection(
         connection_id=int(binding_row["connection_id"])
     )
     if connection_row is None:
         raise _refused(503, "server_error", f"The {alias!r} MCP connection no longer exists.")
+    if connection_row.get("status") == "disabled" or connection_row.get("deleted_at") is not None:
+        raise _refused(503, "server_error", f"The {alias!r} MCP connection is not usable.")
     if str(connection_row.get("transport")) == "stdio":
         # A local process needs a worker or a connector to run it, and neither
         # is this listener. Refused here rather than forwarded to an address
@@ -1478,7 +1491,17 @@ async def mcp_post(
     store: _McpRelayStorage | None = Depends(get_storage),
 ) -> Any:
     """Relay one MCP request, refusing tools the session's selection does not cover."""
-    authorized = await _authorize(server_name, authorization, store)
+    try:
+        authorized = await _authorize(server_name, authorization, store)
+    except _BindingDisabled as exc:
+        # Keep the existing JSON-RPC refusal for disabled selections, including
+        # housekeeping requests, without resolving or refreshing credentials.
+        try:
+            payload = json.loads(await request.body())
+        except ValueError:
+            payload = None
+        request_id = payload.get("id") if isinstance(payload, dict) else None
+        return JSONResponse(_error_reply(request_id, str(exc.detail)))
     assert store is not None
     body = await request.body()
 

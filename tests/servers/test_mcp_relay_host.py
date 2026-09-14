@@ -954,3 +954,31 @@ async def test_disabling_a_tool_does_not_reassign_its_cached_name(client, store,
     )
     assert "result" in response.json()
     assert host.called[-1]["name"] == second
+
+
+@pytest.mark.parametrize("state", ["binding-disabled", "connection-disabled", "disconnected"])
+async def test_inactive_connection_never_refreshes_or_delays_healthy_tools(
+    client, store, host, monkeypatch, state
+):
+    if state == "binding-disabled":
+        store.bindings[0]["enabled"] = False
+    elif state == "connection-disabled":
+        store.connections[7]["status"] = "disabled"
+    else:
+        store.connections[7]["deleted_at"] = "disconnected"
+    refreshed = []
+
+    async def refresh(repository, *, row):
+        refreshed.append(row["id"])
+        assert row["id"] == 8, "inactive connection must not enter refresh"
+        return row
+
+    monkeypatch.setattr(agent_mcp_router, "ensure_fresh", refresh)
+    listed = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
+    assert _tool_names(listed) == ["docs__search"]
+    response = await client.post(
+        _HOST_URL, json=_rpc("tools/call", name="docs__search", arguments={}), headers=_auth()
+    )
+    assert "result" in response.json()
+    assert refreshed == [8, 8]
+    assert host.called[-1]["name"] == "search"
