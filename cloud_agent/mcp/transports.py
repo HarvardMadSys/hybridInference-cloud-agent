@@ -1231,34 +1231,40 @@ class HttpMetadataFetcher(MetadataFetcher):
             raise TransportError(str(exc), kind=exc.kind) from exc
         owned = self.client is None
         client = self.client or httpx.AsyncClient(
-            timeout=httpx.Timeout(self.timeout), follow_redirects=False
+            timeout=httpx.Timeout(self.timeout),
+            follow_redirects=False,
+            transport=pinned_transport(),
         )
         try:
-            response = await client.get(
+            request = client.build_request(
+                "GET",
                 endpoint.url,
                 headers={"accept": "application/json", **dict(headers or {})},
             )
-            if response.status_code >= 400:
-                raise TransportError(
-                    f"{endpoint.origin} answered {response.status_code} for its metadata",
-                    kind="unreachable",
-                    status=response.status_code,
-                )
-            payload = await response.aread()
+            response = await client.send(request, stream=True)
+            try:
+                if response.status_code >= 400:
+                    raise TransportError(
+                        f"{endpoint.origin} answered {response.status_code} for its metadata",
+                        kind="unreachable",
+                        status=response.status_code,
+                    )
+                payload = await read_bounded(response)
+                response_headers = dict(response.headers.items())
+            finally:
+                await response.aclose()
         except httpx.HTTPError as exc:
             raise TransportError(f"{endpoint.origin} could not be reached: {exc}") from exc
         finally:
             if owned:
                 await client.aclose()
-        if len(payload) > MAX_RESPONSE_BYTES:
-            raise TransportError("that metadata document is larger than the platform will read")
         try:
             document = json.loads(payload or b"{}")
         except (json.JSONDecodeError, ValueError) as exc:
             raise TransportError(f"that metadata document is not JSON: {exc}") from exc
         if not isinstance(document, Mapping):
             raise TransportError("that metadata document is not a JSON object")
-        return document, dict(response.headers.items())
+        return document, response_headers
 
 
 async def iter_sse(response: httpx.Response) -> AsyncIterator[Any]:

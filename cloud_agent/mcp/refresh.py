@@ -38,6 +38,7 @@ restore the credential they removed.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -49,7 +50,12 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import oauth
 from cloud_agent.mcp.models import AuthKind, ConnectionErrorKind
 from cloud_agent.mcp.net_policy import EgressPolicy
-from cloud_agent.mcp.transports import HttpMetadataFetcher, TransportError, pinned_transport
+from cloud_agent.mcp.transports import (
+    HttpMetadataFetcher,
+    TransportError,
+    pinned_transport,
+    read_bounded,
+)
 from cloud_agent.source_control import SourceControlCipher, SourceControlError
 
 if TYPE_CHECKING:
@@ -464,7 +470,7 @@ _NAMED_REFUSALS = frozenset(
 )
 
 
-def _named_refusal(response: httpx.Response) -> str:
+def _named_refusal(status: int, payload: bytes) -> str:
     """The OAuth error code an error response names, or an empty string.
 
     **A status code is not a refusal.** A ``502`` or ``504`` is produced by
@@ -477,10 +483,10 @@ def _named_refusal(response: httpx.Response) -> str:
     A 5xx therefore never names a refusal, whatever its body says, and neither
     does a 4xx whose body is not the token endpoint's own error document.
     """
-    if response.status_code >= 500:
+    if status >= 500:
         return ""
     try:
-        document = response.json()
+        document = json.loads(payload or b"{}")
     except ValueError:
         return ""
     if not isinstance(document, Mapping):
@@ -535,9 +541,27 @@ async def _post(
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(20.0), follow_redirects=False, transport=pinned_transport()
         ) as client:
-            response = await client.post(
-                endpoint.url, data=request.form(), headers=request.headers()
+            response = await client.send(
+                client.build_request(
+                    "POST", endpoint.url, data=request.form(), headers=request.headers()
+                ),
+                stream=True,
             )
+            try:
+                status = response.status_code
+                try:
+                    payload = await read_bounded(response)
+                except TransportError as exc:
+                    # A body the platform refused to read is still a body the
+                    # issuer finished sending, so the exchange may have
+                    # completed -- the same reading as an unreadable 2xx.
+                    raise RefreshRefused(
+                        str(exc),
+                        kind=ConnectionErrorKind.PROTOCOL_INCOMPATIBLE.value,
+                        uncertain=True,
+                    ) from exc
+            finally:
+                await response.aclose()
     except _NOT_SENT_ERRORS as exc:
         raise RefreshRefused(
             f"the token endpoint could not be reached: {exc}",
@@ -552,11 +576,10 @@ async def _post(
             uncertain=True,
         ) from exc
 
-    if response.status_code >= 400:
-        refusal = _named_refusal(response)
+    if status >= 400:
+        refusal = _named_refusal(status, payload)
         raise RefreshRefused(
-            f"the token endpoint answered {response.status_code}"
-            + (f" ({refusal})" if refusal else ""),
+            f"the token endpoint answered {status}" + (f" ({refusal})" if refusal else ""),
             kind=ConnectionErrorKind.NEEDS_AUTHORIZATION.value,
             # Released only for a refusal the authorization server itself named.
             # Everything else -- a 5xx, which a gateway in front of the issuer
@@ -567,7 +590,7 @@ async def _post(
             uncertain=not refusal,
         )
     try:
-        document = response.json()
+        document = json.loads(payload or b"{}")
     except ValueError as exc:
         # A 2xx we cannot read. The exchange may well have completed, so this is
         # treated like a timeout rather than like a refusal.
