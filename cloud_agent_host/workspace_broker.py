@@ -221,29 +221,20 @@ class SharedSandboxIdentityRequest(BaseModel):
     members: list[SharedSandboxMemberRequest] = Field(..., min_length=1, max_length=128)
 
 
-class ProfilingContext(BaseModel):
-    """The measurement selection the caller is profiling this path under.
-
-    A broker sees one call at a time and cannot know which attempt it belongs
-    to, so it cannot decide for itself whether an operation was selected. The
-    caller states it, and the broker still validates it against its own switch,
-    its own run descriptor and the inherited deadline before recording.
-    """
-
-    run_id: str = Field(..., min_length=1, max_length=128)
-    measurement_id: str = Field(..., min_length=1, max_length=128)
-    operation: str = Field(..., min_length=1, max_length=128)
-    # Absolute wall clock: two processes share no monotonic clock.
-    expires_at: float
-
-
 class SharedSandboxAcquireRequest(SharedSandboxIdentityRequest):
     """Lease one member while preserving sibling concurrency."""
 
     owner: str = Field(..., min_length=1, max_length=256)
     activation_generation: int = Field(..., ge=1)
     has_settled_context: bool = False
-    profiling: ProfilingContext | None = None
+    #: The measurement selection the caller is profiling this path under.
+    #: Deliberately unvalidated: a broker sees one call at a time and cannot
+    #: know which attempt it belongs to, so the caller states the selection and
+    #: `operation_profiling.start_stage_recording` decides whether to honour
+    #: it. Typing or bounding this field would let a malformed *measurement*
+    #: setting reject a sandbox request with 422 before the supervisor ever saw
+    #: it, and measurement configuration must never fail the business call.
+    profiling: Any = None
 
 
 class SharedResidentLaunchConfig(BaseModel):
@@ -269,7 +260,8 @@ class SharedResidentLaunchRequest(SharedLeaseRequest):
     """Lease fence plus resident launch configuration."""
 
     launch: SharedResidentLaunchConfig
-    profiling: ProfilingContext | None = None
+    #: See ``SharedSandboxAcquireRequest.profiling``.
+    profiling: dict[str, Any] | None = None
 
 
 class SharedTurnRequest(SharedLeaseRequest):
@@ -1444,7 +1436,7 @@ def create_app(
                 has_settled_context=body.has_settled_context,
                 manifest=shared_manifest(body.members),
                 expected_container_id=body.expected_container_id,
-                profiling=body.profiling.model_dump() if body.profiling else None,
+                profiling=body.profiling,
             )
         except (SandboxError, ValueError) as exc:
             raise supervisor_error(exc) from exc
@@ -1488,7 +1480,7 @@ def create_app(
                 thread_id,
                 body.token,
                 resident_launch(thread_id, body.launch),
-                profiling=body.profiling.model_dump() if body.profiling else None,
+                profiling=body.profiling,
             )
         except (DriverError, SandboxError, ValueError) as exc:
             raise supervisor_error(exc) from exc

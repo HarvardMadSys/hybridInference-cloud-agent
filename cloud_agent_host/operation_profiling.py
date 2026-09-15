@@ -91,6 +91,12 @@ MAX_SPANS = 128
 #: environment variables, command lines and raw error text in a record.
 MAX_ATTRIBUTE_CHARS = 200
 
+#: Longest run id a descriptor may declare. The run id is a top-level record
+#: field rather than a bounded attribute, so it is capped where the descriptor
+#: is read -- long before any request carries it across a process boundary.
+#: Violating it disables profiling instead of failing a startup.
+MAX_RUN_ID_CHARS = 128
+
 #: How many finished records may wait for the export thread before the sink
 #: starts dropping. Reaching this means the sink cannot keep up with the
 #: experiment, which is reported with the drops rather than hidden.
@@ -214,10 +220,14 @@ class Measurement:
     remote_stages: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     #: Producers that contributed to this record, beyond the runner itself.
     producers: set[str] = field(default_factory=set)
-    #: Producers this record asked for. A path whose broker was not collecting
-    #: is incomplete, not merely quiet, and the record says which producer is
-    #: missing rather than presenting a partial timeline as a whole one.
-    expected_producers: set[str] = field(default_factory=set)
+    #: (producer, local stage) fragments this path asked for. Completeness is
+    #: judged per fragment, not per producer: an acquire that answered while
+    #: the resident call's timing never arrived is a partial timeline, and
+    #: "some broker data arrived" must not pass for all of it.
+    expected_fragments: set[tuple[str, str]] = field(default_factory=set)
+    #: Set when any interval in this record ended at a deadline rather than
+    #: when its work finished -- locally or in another process.
+    truncated: bool = False
     #: Set once the run's deadline passed with collecting still open.
     expired: bool = False
     #: The budget slot is held from selection and returned by `discard`.
@@ -325,6 +335,8 @@ def parse_run(raw: str) -> ProfilingRun:
     run_id = str(body.get("run_id") or "").strip()
     if not run_id:
         raise ValueError("run descriptor has no run_id")
+    if len(run_id) > MAX_RUN_ID_CHARS:
+        raise ValueError(f"run_id is longer than {MAX_RUN_ID_CHARS} characters")
 
     raw_operations = body.get("operations")
     if not isinstance(raw_operations, list):
@@ -526,6 +538,7 @@ def _clamp_to_deadline(measurement: Measurement, end_us: int) -> tuple[int, bool
     if not measurement.past_deadline():
         return end_us, False
     measurement.expired = True
+    measurement.truncated = True
     return min(end_us, max(0, measurement.deadline_offset_us())), True
 
 
@@ -702,11 +715,15 @@ def _context_deadline(context: Mapping[str, Any]) -> float | None:
     return time.monotonic() + remaining
 
 
-def expect_producer(measurement: Measurement | None, producer: str) -> None:
-    """Record that this path asked a producer for its fragment."""
+def expect_fragment(measurement: Measurement | None, producer: str, stage: str) -> None:
+    """Record that this path asked a producer for one call's fragment.
+
+    Register the expectation before making the call, so a call that never
+    returned still counts as a fragment this record owed and did not get.
+    """
     if measurement is None or measurement.finished:
         return
-    measurement.expected_producers.add(producer)
+    measurement.expected_fragments.add((producer, stage))
 
 
 def substage(observer: StageObserver | None, name: str) -> AbstractContextManager[None]:
@@ -736,14 +753,17 @@ def _bounded_remote_stages(stages: Any, source: str) -> list[dict[str, Any]]:
             duration = int(item.get("duration_us"))
         except (TypeError, ValueError):
             continue
-        entries.append(
-            {
-                "stage": name[:MAX_ATTRIBUTE_CHARS],
-                "duration_us": max(0, duration),
-                "outcome": str(item.get("outcome") or "ok")[:MAX_ATTRIBUTE_CHARS],
-                "source": source,
-            }
-        )
+        entry: dict[str, Any] = {
+            "stage": name[:MAX_ATTRIBUTE_CHARS],
+            "duration_us": max(0, duration),
+            "outcome": str(item.get("outcome") or "ok")[:MAX_ATTRIBUTE_CHARS],
+            "source": source,
+        }
+        if item.get("truncated"):
+            # A producer that stopped at its own deadline must not look like a
+            # producer that finished, so the flag survives the boundary.
+            entry["truncated"] = True
+        entries.append(entry)
     return entries[:MAX_REMOTE_STAGES]
 
 
@@ -766,6 +786,8 @@ def attach_remote_stages(
         return False
     measurement.remote_stages.setdefault(stage_name, []).extend(entries)
     measurement.producers.add(source)
+    if any(entry.get("truncated") for entry in entries):
+        measurement.truncated = True
     return True
 
 
@@ -870,7 +892,15 @@ def to_record(
     # A producer this path asked for and did not hear from is missing coverage,
     # not a quiet timeline. The design's `measurement_complete` covers both the
     # boundaries collected and the producer fragments that were required.
-    missing = sorted(measurement.expected_producers - measurement.producers)
+    answered = {
+        (source, stage)
+        for stage, entries in measurement.remote_stages.items()
+        for source in {str(entry.get("source") or "") for entry in entries}
+    }
+    missing_fragments = sorted(
+        f"{producer}:{stage}" for producer, stage in measurement.expected_fragments - answered
+    )
+    missing_producers = sorted({item.split(":", 1)[0] for item in missing_fragments})
     record: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "measurement_id": measurement.measurement_id,
@@ -889,7 +919,8 @@ def to_record(
             outcome != "incomplete"
             and measurement.dropped_spans == 0
             and not measurement.expired
-            and not missing
+            and not measurement.truncated
+            and not missing_fragments
         ),
         "dropped_spans": measurement.dropped_spans,
         # Completion order is not timeline order: a nested span closes first.
@@ -905,8 +936,11 @@ def to_record(
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "facts": measurement.facts,
     }
-    if missing:
-        record["missing_producers"] = missing
+    if measurement.truncated:
+        record["truncated"] = True
+    if missing_fragments:
+        record["missing_fragments"] = missing_fragments
+        record["missing_producers"] = missing_producers
     if failure_stage is not None:
         record["failure_stage"] = failure_stage
     return record
@@ -930,6 +964,10 @@ class _Exporter:
 
     def __init__(self, *, maxsize: int = SINK_QUEUE_MAX) -> None:
         self.dropped = 0
+        #: A process that cannot start the thread can still serve traffic. It
+        #: keeps running with the measurement dropped rather than failing the
+        #: startup that asked for it.
+        self.disabled = False
         self._queue: queue.Queue[tuple[str, str | None] | None] = queue.Queue(maxsize=maxsize)
         self._lock = threading.Lock()
         self._pending = 0
@@ -939,13 +977,29 @@ class _Exporter:
         self._thread = threading.Thread(
             target=self._run, name="operation-profile-sink", daemon=True
         )
-        self._thread.start()
+        try:
+            self._thread.start()
+        except Exception as exc:
+            # A thread limit, a fork in a bad state, a sandbox refusing
+            # clone(): none of that is a reason to fail the business call this
+            # measurement exists to observe, and this runs while a prompt has
+            # already been sent.
+            self.disabled = True
+            self._closing = True
+            logger.warning(
+                "operation profiling could not start its exporter (%s); "
+                "measurements will be dropped",
+                exc,
+            )
+            return
         atexit.register(self._flush_before_exit)
 
     def offer(self, line: str, sink: str | None) -> None:
         """Queue one record. Never blocks and never raises."""
         with self._lock:
             if self._closing:
+                if self.disabled:
+                    self.dropped += 1
                 return
             # Counted before the item is visible, so the drain thread can never
             # observe a decrement it did not earn.
@@ -988,6 +1042,8 @@ class _Exporter:
 
     def flush(self, timeout: float = 2.0) -> None:
         """Wait until queued records are published, or the timeout expires."""
+        if self.disabled:
+            return
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             with self._lock:
@@ -1000,6 +1056,8 @@ class _Exporter:
         with self._lock:
             self._closing = True
         self.flush(timeout)
+        if self.disabled:
+            return
         with contextlib.suppress(queue.Full):
             self._queue.put_nowait(None)
         self._thread.join(timeout=timeout)
@@ -1019,7 +1077,13 @@ _EXPORTER: _Exporter | None = None
 
 
 def _exporter() -> _Exporter:
-    """Return the process exporter, starting it on the first record."""
+    """Return the process exporter, starting it on the first record.
+
+    A process that cannot start the thread gets one permanently disabled
+    exporter rather than an exception per record: retrying a thread start on
+    every measurement would be its own cost, and the point is that the business
+    path never learns this failed.
+    """
     global _EXPORTER
     with _EXPORT_LOCK:
         if _EXPORTER is None:
@@ -1056,8 +1120,12 @@ def _emit(record: dict[str, Any]) -> None:
         logger.warning("operation profiling could not serialize a measurement")
         return
     sink = (os.environ.get(ENV_PROFILING_SINK) or "").strip() or None
-    # Never on the attempt thread: see _Exporter.
-    _exporter().offer(line, sink)
+    # Never on the attempt thread: see _Exporter. A measurement that cannot be
+    # exported is dropped; it is never allowed to fail the work it observed.
+    try:
+        _exporter().offer(line, sink)
+    except Exception as exc:  # pragma: no cover - guarded in _Exporter too
+        logger.warning("operation profiling could not publish a measurement (%s)", exc)
 
 
 def finish(
@@ -1129,6 +1197,7 @@ __all__ = [
     "ENV_PROFILING_RUN",
     "ENV_PROFILING_SINK",
     "MAX_REMOTE_STAGES",
+    "MAX_RUN_ID_CHARS",
     "MAX_SPANS",
     "PRODUCER_INSTANCE_ID",
     "SCHEMA_VERSION",
@@ -1143,7 +1212,7 @@ __all__ = [
     "bind",
     "close_sink",
     "discard",
-    "expect_producer",
+    "expect_fragment",
     "finish",
     "flush_sink",
     "mark",

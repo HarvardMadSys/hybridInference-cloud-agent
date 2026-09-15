@@ -402,17 +402,30 @@ operation、以及**绝对墙钟**截止时间——两个进程没有共同的�
 过期停止后，broker 不会继续测量；过期、错 run、非选中 operation 一律拒绝，而容器动作
 照常上报。
 
-记录用 `producers` 列出实际贡献者，并用 `missing_producers` 标出**被请求但没回应**的
-生产者。`measurement_complete` 要求边界齐全、未被截断、且没有缺失的生产者——
-broker 没开时记录是 `producers=["runner"]`、`missing_producers=["broker"]`、
-`measurement_complete=false`，属于**局部覆盖**而不是静默缺失。
+**测量配置不能让业务请求失败。** 该字段在 HTTP 模型上刻意不做类型与长度校验：任何
+畸形内容都只在 `start_stage_recording` 里被判为“不记录”，绝不以 422 拒绝一次 acquire。
+`run_id` 的长度上限在**读取 descriptor 时**统一执行（`MAX_RUN_ID_CHARS`），超限表现为
+profiling 关闭并记一条 warning，而不是每次启动失败。
+
+记录用 `producers` 列出实际贡献者。完整性按**调用片段**判断，而不是按生产者：
+runner 每次向 broker 发起调用（acquire、resident）前登记一个
+`(producer, stage)` 期望，只有该次调用真的带回了非空计时才算满足。因此“acquire 有数据、
+resident 计时缺失”是 `missing_fragments=["broker:resident_start"]`、`measurement_complete=false`，
+而不是因为收到过任意一段 broker 数据就算完整。broker 没开时则是
+`missing_fragments=["broker:supervisor_acquire", "broker:resident_start"]`。
+
+**截断状态跨进程保留。** broker 在自己的截止点截断的子阶段带 `truncated=true` 回到
+runner，并置根记录 `truncated=true`；`measurement_complete` 要求边界齐全、**未被截断**、
+且没有缺失片段。一个被截断的区间是下界而不是真实耗时，所以不能算完整样本。
 
 三条开销与边界约束按 §0 的要求落实：
 
 - **发布不占 attempt 线程，日志也一样。** 日志行与 JSONL 写入同走一条有界队列，由一条
   仅在开启且产生记录后才启动的后台线程处理；队列满时丢弃并计数。日志不是例外：一个
   阻塞的 handler（慢 socket、写满的盘、同步 shipper）和慢文件系统一样，会把延迟算进
-  被测量的启动时间里。
+  被测量的启动时间里。exporter 线程**启动失败**（线程上限、fork 状态异常、沙箱拒绝
+  clone）不向业务抛异常：该进程改用永久禁用的 exporter，丢弃并计数测量，启动照常继续
+  ——这段代码执行时 prompt 往往已经发出。
 - **预算在确认选中后才消耗。** `start_operation` 只是预留名额，`discard()` 归还未选中
   的名额（空 claim、目标不匹配、claim 抛异常），`finish()` 才提交。否则一次空轮询就能
   吃掉 `max_operations: 1` 的实验。

@@ -928,11 +928,12 @@ def test_a_missing_producer_makes_the_record_incomplete(monkeypatch, caplog):
     profiling.mark(measurement, "supervisor_acquire")
     profiling.mark(measurement, "sandbox_running")
 
-    profiling.expect_producer(measurement, "broker")
+    profiling.expect_fragment(measurement, "broker", "supervisor_acquire")
     profiling.finish(measurement, outcome="dispatched")
 
     record = _records(caplog)[0]
     assert record["producers"] == ["runner"]
+    assert record["missing_fragments"] == ["broker:supervisor_acquire"]
     assert record["missing_producers"] == ["broker"]
     assert record["measurement_complete"] is False
 
@@ -945,7 +946,7 @@ def test_an_answered_producer_completes_the_record(monkeypatch, caplog):
     profiling.mark(measurement, "supervisor_acquire")
     profiling.mark(measurement, "sandbox_running")
 
-    profiling.expect_producer(measurement, "broker")
+    profiling.expect_fragment(measurement, "broker", "supervisor_acquire")
     profiling.attach_remote_stages(
         measurement,
         "supervisor_acquire",
@@ -986,3 +987,139 @@ def test_measurement_context_carries_the_selection_and_a_wall_clock_expiry(monke
     assert profiling.measurement_context(None) is None
     profiling.finish(measurement, outcome="dispatched")
     assert profiling.measurement_context(measurement) is None
+
+
+def test_one_answered_fragment_does_not_cover_a_missing_one(monkeypatch, caplog):
+    """Completeness is per fragment, not per producer.
+
+    Regression: an acquire that answered made the record complete even though
+    the resident call's timing never arrived.
+    """
+    _enable(monkeypatch)
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    profiling.mark(measurement, "supervisor_acquire")
+    profiling.mark(measurement, "sandbox_running")
+    profiling.mark(measurement, "resident_start")
+    profiling.mark(measurement, "prompt_admission")
+
+    profiling.expect_fragment(measurement, "broker", "supervisor_acquire")
+    profiling.expect_fragment(measurement, "broker", "resident_start")
+    profiling.attach_remote_stages(
+        measurement,
+        "supervisor_acquire",
+        [{"name": "container_start", "duration_us": 10}],
+        source="broker",
+    )
+    profiling.finish(measurement, outcome="dispatched")
+
+    record = _records(caplog)[0]
+    assert record["producers"] == ["runner", "broker"]
+    assert record["missing_fragments"] == ["broker:resident_start"]
+    assert record["missing_producers"] == ["broker"]
+    assert record["measurement_complete"] is False
+
+
+def test_a_truncated_remote_fragment_is_not_a_complete_record(monkeypatch, caplog):
+    """The producer's truncation has to survive the process boundary.
+
+    Regression: the broker stopped at its deadline, the runner dropped the
+    flag, and the record still claimed completeness.
+    """
+    _enable(monkeypatch)
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    profiling.mark(measurement, "supervisor_acquire")
+    profiling.mark(measurement, "sandbox_running")
+
+    profiling.expect_fragment(measurement, "broker", "supervisor_acquire")
+    assert profiling.attach_remote_stages(
+        measurement,
+        "supervisor_acquire",
+        [{"name": "container_start", "duration_us": 2_000_000, "truncated": True}],
+        source="broker",
+    )
+    profiling.finish(measurement, outcome="dispatched")
+
+    record = _records(caplog)[0]
+    child = record["stages"][0]["children"][0]
+    assert child["truncated"] is True
+    assert record["truncated"] is True
+    assert record["measurement_complete"] is False
+    # The fragment arrived, so nothing is attributed to a missing producer.
+    assert "missing_fragments" not in record
+
+
+def test_a_truncated_local_span_is_not_a_complete_record(monkeypatch, caplog, clock):
+    """The local equivalent, for the same reason: a floor is not a duration."""
+    _enable(monkeypatch, expires_at=_expiry(minutes=1))
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    assert measurement is not None
+
+    with profiling.span(measurement, "claim"):
+        clock.advance(120 * 1_000_000)
+    profiling.finish(measurement, outcome="dispatched")
+
+    record = _records(caplog)[0]
+    assert record["truncated"] is True
+    assert record["measurement_complete"] is False
+
+
+def test_an_over_long_run_id_disables_profiling_instead_of_failing_a_startup(monkeypatch, caplog):
+    """A measurement setting must never be able to reject a sandbox request.
+
+    Regression: the descriptor accepted a 129 character run id while the broker
+    request model capped it at 128, so the same acquire returned 422 once the
+    runner attached its selection.
+    """
+    monkeypatch.setenv(profiling.ENV_PROFILING_ENABLED, "true")
+    monkeypatch.setenv(
+        profiling.ENV_PROFILING_RUN,
+        json.dumps(
+            {
+                "run_id": "r" * (profiling.MAX_RUN_ID_CHARS + 1),
+                "operations": ["attempt.startup"],
+                "expires_at": _expiry(),
+                "max_operations": 5,
+            }
+        ),
+    )
+    profiling.reset_cache()
+
+    assert profiling.active_run() is None
+    assert profiling.start_operation(operation="attempt.startup") is None
+    assert "continuing without profiling" in caplog.text
+
+
+def test_a_run_id_at_the_limit_is_accepted(monkeypatch):
+    """The bound is inclusive, so the rule is a limit and not an off-by-one."""
+    _enable(monkeypatch, run_id="r" * profiling.MAX_RUN_ID_CHARS)
+
+    assert profiling.active_run() is not None
+
+
+def test_an_exporter_that_cannot_start_drops_measurements_without_failing(monkeypatch, caplog):
+    """A process that cannot start a thread still serves traffic.
+
+    Regression: `Thread.start()` raising propagated out of `finish()`, at a
+    point where the prompt had already been sent.
+    """
+    _enable(monkeypatch)
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    profiling.close_sink()
+
+    def refuse(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(profiling.threading.Thread, "start", refuse)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    profiling.mark(measurement, "validate")
+
+    profiling.finish(measurement, outcome="dispatched")  # must not raise
+    profiling.flush_sink()  # must not hang or raise
+
+    assert profiling._EXPORTER is not None
+    assert profiling._EXPORTER.disabled is True
+    assert profiling._EXPORTER.dropped == 1
+    assert "could not start its exporter" in caplog.text

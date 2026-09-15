@@ -1192,6 +1192,7 @@ def test_a_failed_prompt_handoff_is_a_failure_stage_with_a_duration(monkeypatch,
         configure=configure,
         measurement=measurement,
         lease_stages=[{"name": "phase_network", "duration_us": 120}],
+        resident_stages=[{"name": "cli_spawn", "duration_us": 240}],
     )
 
     assert result == 2
@@ -1373,3 +1374,81 @@ def test_the_runner_offers_the_broker_nothing_when_it_is_not_profiling(monkeypat
 
     assert supervisor.acquire_shared.call_args.kwargs["profiling"] is None
     assert supervisor.ensure_shared_resident.call_args.kwargs["profiling"] is None
+
+
+def test_an_acquire_fragment_does_not_cover_a_missing_resident_fragment(monkeypatch, tmp_path):
+    """Every call this attempt made to the broker owes a fragment.
+
+    Regression: the acquire answered, the resident call's timing never
+    arrived, and the record was still reported complete.
+    """
+    _configure_host(monkeypatch)
+    sink = tmp_path / "startup.jsonl"
+    _enable_profiling(monkeypatch)
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    measurement = _profiled_measurement()
+    assert measurement is not None
+
+    def configure(_control, _supervisor, _finish):
+        def stream(**kwargs):
+            operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+
+    result, *_ = _run_shared_boundary_case(
+        monkeypatch,
+        code=0,
+        frame={"kind": "result", "status": "completed", "exit_code": 0},
+        runtime_id="claude-code",
+        configure=configure,
+        measurement=measurement,
+        container_action="start",
+        resident_action="resume",
+        lease_stages=[{"name": "container_start", "duration_us": 690_000}],
+        resident_stages=[],
+    )
+
+    assert result == 0
+    operation_profiling.flush_sink()
+    record = json.loads(sink.read_text().splitlines()[0])
+    assert record["producers"] == ["runner", "broker"]
+    assert record["missing_fragments"] == ["broker:resident_start"]
+    assert record["measurement_complete"] is False
+
+
+def test_a_truncated_broker_fragment_makes_the_record_partial(monkeypatch, tmp_path):
+    """The broker's own truncation must survive the boundary."""
+    _configure_host(monkeypatch)
+    sink = tmp_path / "startup.jsonl"
+    _enable_profiling(monkeypatch)
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    measurement = _profiled_measurement()
+    assert measurement is not None
+
+    def configure(_control, _supervisor, _finish):
+        def stream(**kwargs):
+            operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+
+    result, *_ = _run_shared_boundary_case(
+        monkeypatch,
+        code=0,
+        frame={"kind": "result", "status": "completed", "exit_code": 0},
+        runtime_id="claude-code",
+        configure=configure,
+        measurement=measurement,
+        container_action="start",
+        resident_action="resume",
+        lease_stages=[{"name": "container_start", "duration_us": 2_000_000, "truncated": True}],
+        resident_stages=[{"name": "cli_spawn", "duration_us": 240}],
+    )
+
+    assert result == 0
+    operation_profiling.flush_sink()
+    record = json.loads(sink.read_text().splitlines()[0])
+    assert record["truncated"] is True
+    assert record["measurement_complete"] is False
+    assert "missing_fragments" not in record

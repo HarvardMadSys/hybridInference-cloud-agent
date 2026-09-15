@@ -1749,6 +1749,7 @@ def _run_shared_live_attempt(
     try:
         supervisor = _session_supervisor_from_env()
         try:
+            operation_profiling.expect_fragment(measurement, "broker", "supervisor_acquire")
             lease = supervisor.acquire_shared(
                 spec,
                 thread_id=job.thread_id,
@@ -1764,9 +1765,6 @@ def _run_shared_live_attempt(
             raise
         lease_token = str(lease["token"])
         container_action = str(lease.get("container_action") or "unknown")
-        # This path asked the broker for its fragment, so a broker that did not
-        # answer leaves the record incomplete rather than quietly partial.
-        operation_profiling.expect_producer(measurement, "broker")
         # Sub-stages the broker measured inside this call. They are durations,
         # not offsets, so they hang off the stage they happened in rather than
         # being placed on this process's timeline.
@@ -1921,6 +1919,7 @@ def _run_shared_live_attempt(
         resident_descriptor: dict[str, Any] | None = None
         if lease.get("resident_state") == "live":
             try:
+                operation_profiling.expect_fragment(measurement, "broker", "resident_start")
                 resident_descriptor = supervisor.ensure_shared_resident(
                     job.thread_id,
                     token=lease_token,
@@ -1949,6 +1948,7 @@ def _run_shared_live_attempt(
                 credential=credential,
                 residency_generation=int(residency["generation"]),
             )
+            operation_profiling.expect_fragment(measurement, "broker", "resident_start")
             resident_descriptor = supervisor.ensure_shared_resident(
                 job.thread_id,
                 token=lease_token,

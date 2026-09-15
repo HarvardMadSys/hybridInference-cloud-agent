@@ -17,6 +17,7 @@ from cloud_agent_host.guest_observer import GuestObservation, GuestProcess
 from cloud_agent_host.sandbox import ProcessBackend, SandboxError, TerminalProcess
 from cloud_agent_host.shared_session_supervisor import (
     SharedSessionDescriptor,
+    SharedSessionLease,
     SharedTurnTelemetry,
 )
 from cloud_agent_host.workspace_broker import (
@@ -170,6 +171,35 @@ class _SharedSupervisor:
         self.threads.update(member.thread_id for member in members)
         return []
 
+    def acquire(
+        self,
+        spec,
+        *,
+        thread_id,
+        owner,
+        activation_generation,
+        has_settled_context,
+        manifest,
+        expected_container_id=None,
+        profiling=None,
+    ):
+        self.calls.append(("acquire", thread_id, profiling))
+        return SharedSessionLease(
+            thread_id=thread_id,
+            origin_thread_id=spec.thread_id,
+            sandbox_id=spec.sandbox_id,
+            container_id="container-shared",
+            container_name=spec.container_name,
+            token="lease",
+            activation_generation=activation_generation,
+            process_generation=1,
+            context_status="live",
+            resident_state="live",
+            resident_slot_id=0,
+            container_action="reuse",
+            stages=[],
+        )
+
     def operation_opened(self, thread_id: str):
         self.calls.append(("operation_opened", thread_id))
         return "operation-token", _descriptor(thread_id)
@@ -300,6 +330,68 @@ async def test_legacy_lifecycle_and_host_workspace_routes_do_not_exist():
         "chat_sandbox_status",
     ):
         assert not hasattr(WorkspaceBrokerClient, method)
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_profiling_context_never_rejects_a_sandbox_request():
+    """Measurement settings must not be able to fail a startup.
+
+    Regression: the descriptor accepted a 129 character run id while this
+    request model capped it at 128, so the same acquire answered 200 without a
+    selection and 422 with one -- before the supervisor was reached.
+    """
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    identity = _identity()
+    live = {
+        "run_id": "run-1",
+        "measurement_id": "msm_x",
+        "operation": "attempt.startup",
+        "expires_at": time.time() + 60,
+    }
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        plain = await client.post(
+            "/shared-sandboxes/athr_source/acquire",
+            headers=headers,
+            json={**identity, "owner": "attempt:1", "activation_generation": 4},
+        )
+        selected = await client.post(
+            "/shared-sandboxes/athr_source/acquire",
+            headers=headers,
+            json={
+                **identity,
+                "owner": "attempt:1",
+                "activation_generation": 4,
+                "profiling": live,
+            },
+        )
+        # Deliberately unusable selections: all of them must still lease.
+        for broken in (
+            {**live, "run_id": "r" * 200},
+            {**live, "run_id": None, "expires_at": "soon"},
+            {**live, "measurement_id": 17, "operation": ["not", "a", "string"]},
+            "not even an object",
+            {},
+        ):
+            rejected = await client.post(
+                "/shared-sandboxes/athr_source/acquire",
+                headers=headers,
+                json={
+                    **identity,
+                    "owner": "attempt:1",
+                    "activation_generation": 4,
+                    "profiling": broken,
+                },
+            )
+            assert rejected.status_code == 200, broken
+
+    assert plain.status_code == 200
+    assert selected.status_code == 200
+    acquired = [call for call in supervisor.calls if call[0] == "acquire"]
+    assert acquired[0][2] is None
+    assert acquired[1][2] == live
 
 
 @pytest.mark.asyncio
