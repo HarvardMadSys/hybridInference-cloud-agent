@@ -94,6 +94,47 @@ _FORWARDED_RESPONSE_HEADERS = ("content-type", SESSION_ID_HEADER, PROTOCOL_VERSI
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
+async def read_bounded(response: httpx.Response) -> bytes:
+    """Read a reply under :data:`MAX_RESPONSE_BYTES`, then release it.
+
+    The limit has to be applied while the bytes arrive. ``await
+    response.aread()`` -- and every non-streaming ``client.post`` that reads on
+    the caller's behalf -- buffers whatever the server sends first and lets a
+    caller object afterwards, which is a limit on what the platform *keeps*
+    rather than on what it *allocates*. A server that is asked for a tool
+    result, or that simply answers maliciously, chooses the size.
+
+    Every caller issues its request with ``stream=True`` so this is the only
+    place a body is read, and closes the response on both the success and the
+    overflow path rather than returning a socket to the pool still unread.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        try:
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if total > MAX_RESPONSE_BYTES:
+                    raise TransportError(
+                        "this server sent more data than the platform will read for one request",
+                        kind="protocol_incompatible",
+                    )
+                chunks.append(chunk)
+        except httpx.HTTPError as exc:
+            # A failure *while reading* is the same class of event as one while
+            # sending, and it has to arrive as one: a raw ``ReadTimeout``
+            # escaping here skips every caller's diagnosis and leaves whatever
+            # they were recording -- an approved call's outcome, above all --
+            # without a terminal state.
+            raise TransportError(
+                f"the server stopped answering while it was replying: {exc}",
+                kind="unreachable",
+            ) from exc
+    finally:
+        await response.aclose()
+    return b"".join(chunks)
+
+
 class TransportError(RuntimeError):
     """Raised when a transport cannot carry a request, with a diagnosis kind."""
 
@@ -327,42 +368,63 @@ class _HttpCore:
         results: list[Any] = []
         found: Any = None
         total = 0
-        async for chunk in response.aiter_bytes():
-            total += len(chunk)
-            if total > MAX_RESPONSE_BYTES:
-                raise TransportError(
-                    "this server sent more data than the platform will read for one request",
-                    kind="protocol_incompatible",
-                )
-            for event in decoder.feed(chunk):
-                if not event.data:
-                    continue
-                try:
-                    payload = event.json()
-                except SseError:
-                    continue
-                messages = payload if isinstance(payload, list) else [payload]
-                for raw in messages:
-                    if not isinstance(raw, Mapping):
+        try:
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if total > MAX_RESPONSE_BYTES:
+                    raise TransportError(
+                        "this server sent more data than the platform will read for one request",
+                        kind="protocol_incompatible",
+                    )
+                for event in decoder.feed(chunk):
+                    if not event.data:
                         continue
-                    message = decode(json.dumps(raw))[0]
-                    if message.is_response:
-                        if expect_key is not None and message.key == expect_key:
-                            found = message
-                        else:
+                    try:
+                        payload = event.json()
+                    except SseError:
+                        continue
+                    messages = payload if isinstance(payload, list) else [payload]
+                    for raw in messages:
+                        if not isinstance(raw, Mapping):
+                            continue
+                        message = decode(json.dumps(raw))[0]
+                        if message.is_response:
+                            if expect_key is not None and message.key == expect_key:
+                                found = message
+                            else:
+                                results.append(message)
+                            continue
+                        if self.stateless:
+                            # The revision forbids a server from sending requests
+                            # of its own; it answers with ``InputRequiredResult``
+                            # instead. Answering here would be inventing a
+                            # mechanism this server does not have, so the message
+                            # is passed to the caller as-is.
                             results.append(message)
-                        continue
-                    if self.stateless:
-                        # The revision forbids a server from sending requests
-                        # of its own; it answers with ``InputRequiredResult``
-                        # instead. Answering here would be inventing a
-                        # mechanism this server does not have, so the message
-                        # is passed to the caller as-is.
-                        results.append(message)
-                        continue
-                    reply = await self._answer_server_request(message)
-                    if reply is not None and poster is not None:
-                        await poster(reply)
+                            continue
+                        reply = await self._answer_server_request(message)
+                        if reply is not None and poster is not None:
+                            # The answer is a request of its own, so its reply is
+                            # one more body that has to be read and released.
+                            # Dropping it hands a streaming response back to the
+                            # pool while it still holds its connection, which a
+                            # server that asks a question per call turns into a
+                            # leak of one connection per call.
+                            answered = await poster(reply)
+                            if answered is not None:
+                                try:
+                                    await read_bounded(answered)
+                                finally:
+                                    await answered.aclose()
+        except httpx.HTTPError as exc:
+            # Same conversion as :func:`read_bounded`: a transport failure while
+            # reading must reach the caller as the error it already handles, or
+            # the record it was keeping -- an approved call's outcome, above all
+            # -- never gets a terminal state.
+            raise TransportError(
+                f"the server stopped answering while it was replying: {exc}",
+                kind="unreachable",
+            ) from exc
         for event in decoder.close():
             if event.data:
                 try:
@@ -459,36 +521,39 @@ class StreamableHttpTransport(_HttpCore):
             return await self._post(payload, method=method, params=request_params)
 
         response = await post(body)
-        await self._raise_for_status(response, method)
-        self._capture(response)
-        content_type = response.headers.get("content-type", "")
-        if content_type.startswith("text/event-stream"):
-            messages = await self._drain_sse(response, expect_key=id_key(request_id), poster=post)
+        try:
+            await self._raise_for_status(response, method)
+            self._capture(response)
+            content_type = response.headers.get("content-type", "")
+            if content_type.startswith("text/event-stream"):
+                messages = await self._drain_sse(
+                    response, expect_key=id_key(request_id), poster=post
+                )
+                for message in messages:
+                    if message.key == id_key(request_id):
+                        return message.result()
+                raise TransportError(
+                    f"the server did not answer {method!r} on the stream it opened",
+                    kind="protocol_incompatible",
+                )
+            payload = await read_bounded(response)
+            if response.status_code == 202:
+                # Accepted, with no body: the only valid shape for a notification.
+                return None
+            messages = decode(payload)
             for message in messages:
-                if message.key == id_key(request_id):
+                if message.is_response and message.key == id_key(request_id):
                     return message.result()
+            if not messages:
+                raise TransportError(
+                    f"the server sent no reply to {method!r}", kind="protocol_incompatible"
+                )
             raise TransportError(
-                f"the server did not answer {method!r} on the stream it opened",
+                f"the server's reply to {method!r} did not carry that request's id",
                 kind="protocol_incompatible",
             )
-        payload = await response.aread()
-        if len(payload) > MAX_RESPONSE_BYTES:
-            raise TransportError("this server's reply is larger than the platform will read")
-        if response.status_code == 202:
-            # Accepted, with no body: the only valid shape for a notification.
-            return None
-        messages = decode(payload)
-        for message in messages:
-            if message.is_response and message.key == id_key(request_id):
-                return message.result()
-        if not messages:
-            raise TransportError(
-                f"the server sent no reply to {method!r}", kind="protocol_incompatible"
-            )
-        raise TransportError(
-            f"the server's reply to {method!r} did not carry that request's id",
-            kind="protocol_incompatible",
-        )
+        finally:
+            await response.aclose()
 
     async def notify(self, method: str, params: Mapping[str, Any] | None = None) -> None:
         """Send one notification, which expects no reply.
@@ -501,9 +566,12 @@ class StreamableHttpTransport(_HttpCore):
         response = await self._post(
             encode_notification(method, request_params), method=method, params=request_params
         )
-        await self._raise_for_status(response, method)
-        self._capture(response)
-        await response.aread()
+        try:
+            await self._raise_for_status(response, method)
+            self._capture(response)
+            await read_bounded(response)
+        finally:
+            await response.aclose()
 
     async def _post(
         self,
@@ -518,12 +586,16 @@ class StreamableHttpTransport(_HttpCore):
         headers = build_headers(config, body=True)
         if self.stateless and method:
             headers.update(request_headers(method, params))
+        request = self._client.build_request(
+            "POST", config.endpoint.url, content=payload, headers=headers
+        )
         try:
-            return await self._client.post(
-                config.endpoint.url,
-                content=payload,
-                headers=headers,
-            )
+            # Streamed, deliberately. A reply that is read on the caller's
+            # behalf is a reply the server can hold open waiting for an answer
+            # to a request of its own -- the client waiting for the body, the
+            # server waiting for the client -- and it is one whose size nothing
+            # here has seen until it is already in memory.
+            return await self._client.send(request, stream=True)
         except httpx.HTTPError as exc:
             raise TransportError(f"the server could not be reached: {exc}") from exc
 
@@ -547,7 +619,7 @@ class StreamableHttpTransport(_HttpCore):
             # thing that distinguishes a modern server refusing a version from
             # a legacy server that has never heard of the request.
             try:
-                payload = await response.aread()
+                payload = await read_bounded(response)
             except httpx.HTTPError:
                 payload = b""
             raise TransportError(
@@ -574,9 +646,14 @@ class StreamableHttpTransport(_HttpCore):
         config = self._config_with_state()
         try:
             await self._guard(config.endpoint.url)
-            await self._client.delete(
-                config.endpoint.url, headers=build_headers(config, body=False)
+            request = self._client.build_request(
+                "DELETE", config.endpoint.url, headers=build_headers(config, body=False)
             )
+            response = await self._client.send(request, stream=True)
+            try:
+                await read_bounded(response)
+            finally:
+                await response.aclose()
         except (httpx.HTTPError, TransportError):
             # Best effort: a session that has already timed out upstream is a
             # normal outcome, and failing the caller's disconnect over it would
@@ -669,35 +746,42 @@ class LegacySseTransport(_HttpCore):
         message_url = self._message_url or await self.announcement()
         await self._guard(message_url)
         try:
-            response = await self._client.post(
-                message_url,
-                content=encode_request(request_id, method, params),
-                headers=build_headers(config, body=True),
+            response = await self._client.send(
+                self._client.build_request(
+                    "POST",
+                    message_url,
+                    content=encode_request(request_id, method, params),
+                    headers=build_headers(config, body=True),
+                ),
+                stream=True,
             )
         except httpx.HTTPError as exc:
             raise TransportError(f"the server could not be reached: {exc}") from exc
-        if response.status_code in (401, 403):
-            raise TransportError(
-                "the server rejected this connection's credential; reconnect it",
-                kind="needs_authorization",
-                status=response.status_code,
-            )
-        if response.status_code >= 400:
-            # The body is read here, unlike on the success path, because era
-            # detection and the caller's diagnosis both need it: it is the only
-            # thing that distinguishes a modern server refusing a version from
-            # a legacy server that has never heard of the request.
-            try:
-                payload = await response.aread()
-            except httpx.HTTPError:
-                payload = b""
-            raise TransportError(
-                f"the server answered {response.status_code} to {method!r}",
-                kind="protocol_incompatible",
-                status=response.status_code,
-                payload=payload,
-            )
-        await response.aread()
+        try:
+            if response.status_code in (401, 403):
+                raise TransportError(
+                    "the server rejected this connection's credential; reconnect it",
+                    kind="needs_authorization",
+                    status=response.status_code,
+                )
+            if response.status_code >= 400:
+                # The body is read here, unlike on the success path, because era
+                # detection and the caller's diagnosis both need it: it is the only
+                # thing that distinguishes a modern server refusing a version from
+                # a legacy server that has never heard of the request.
+                try:
+                    payload = await read_bounded(response)
+                except httpx.HTTPError:
+                    payload = b""
+                raise TransportError(
+                    f"the server answered {response.status_code} to {method!r}",
+                    kind="protocol_incompatible",
+                    status=response.status_code,
+                    payload=payload,
+                )
+            await read_bounded(response)
+        finally:
+            await response.aclose()
         try:
             async with asyncio.timeout(config.request_timeout):
                 await waiter.wait()
@@ -729,14 +813,21 @@ class LegacySseTransport(_HttpCore):
         message_url = self._message_url or await self.announcement()
         await self._guard(message_url)
         try:
-            response = await self._client.post(
-                message_url,
-                content=encode_notification(method, params),
-                headers=build_headers(config, body=True),
+            response = await self._client.send(
+                self._client.build_request(
+                    "POST",
+                    message_url,
+                    content=encode_notification(method, params),
+                    headers=build_headers(config, body=True),
+                ),
+                stream=True,
             )
         except httpx.HTTPError as exc:
             raise TransportError(f"the server could not be reached: {exc}") from exc
-        await response.aread()
+        try:
+            await read_bounded(response)
+        finally:
+            await response.aclose()
 
     async def consume(self, response: httpx.Response) -> None:
         """Read the GET stream until it ends, routing everything that arrives."""
@@ -788,11 +879,17 @@ class LegacySseTransport(_HttpCore):
         config = self._config_with_state()
         try:
             message_url = self._message_url or await self.announcement()
-            response = await self._client.post(
-                message_url, content=payload, headers=build_headers(config, body=True)
+            response = await self._client.send(
+                self._client.build_request(
+                    "POST", message_url, content=payload, headers=build_headers(config, body=True)
+                ),
+                stream=True,
             )
-            await response.aread()
-        except httpx.HTTPError:
+            try:
+                await read_bounded(response)
+            finally:
+                await response.aclose()
+        except (httpx.HTTPError, TransportError):
             return
 
     async def aclose(self) -> None:

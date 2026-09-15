@@ -29,11 +29,16 @@ import json
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpcore
 import httpx
 import pytest
+
+from cloud_agent.mcp import transports
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 from cloud_agent.mcp.jsonrpc import JsonRpcError
 from cloud_agent.mcp.models import AuthKind, AuthProfile, HeaderAuth
@@ -406,6 +411,124 @@ class TestHandshake:
         await client.aclose()
 
 
+class _CountingStream(httpx.AsyncByteStream):
+    """A body that records how much of itself the platform was willing to read."""
+
+    def __init__(self, chunk: bytes, count: int) -> None:
+        self._chunk = chunk
+        self._count = count
+        self.pulled = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for _ in range(self._count):
+            self.pulled += 1
+            yield self._chunk
+
+    async def aclose(self) -> None:
+        """Nothing to release; the bytes are in memory already."""
+
+
+class _HeldOpenStream(httpx.AsyncByteStream):
+    """An SSE body whose second half waits for the client to answer the first."""
+
+    def __init__(self, opening: bytes, closing: bytes, released: asyncio.Event) -> None:
+        self._opening = opening
+        self._closing = closing
+        self._released = released
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield self._opening
+        await self._released.wait()
+        yield self._closing
+
+    async def aclose(self) -> None:
+        """Nothing to release; the frames are in memory already."""
+
+
+def _frame(payload: Any) -> bytes:
+    """One SSE frame, framed the way the decoder expects."""
+    return b"data: " + json.dumps(payload).encode() + b"\n\n"
+
+
+class TestWhatTheTransportIsWillingToRead:
+    """The limit has to bound allocation, and the stream has to stay interactive.
+
+    Both come from the same mistake: a reply read on the caller's behalf. A
+    server that answers with a body nothing bounds chooses how much this
+    process allocates, and a server that asks a question mid-stream waits for
+    an answer the caller never gets to send, because it is still waiting for
+    the body to finish.
+    """
+
+    async def test_an_oversized_reply_is_refused_while_it_is_still_arriving(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stopping at the cap, not at the end and then comparing lengths."""
+        monkeypatch.setattr(transports, "MAX_RESPONSE_BYTES", 1024)
+        stream = _CountingStream(b"x" * 256, 64)
+        client = _client(
+            lambda request: httpx.Response(
+                200, headers={"content-type": "application/json"}, stream=stream
+            )
+        )
+        transport = StreamableHttpTransport(_config(), client, owns_client=True)
+        with pytest.raises(TransportError):
+            await transport.request("tools/list")
+        assert stream.pulled < 64, "the whole body was read before the limit applied"
+        await client.aclose()
+
+    async def test_a_server_request_is_answered_before_the_stream_finishes(self) -> None:
+        """The deadlock: the client waits for the body, the server for the answer."""
+        released = asyncio.Event()
+        answers: list[bytes] = []
+
+        class _AnswerStream(httpx.AsyncByteStream):
+            """The 202's body, which records that it was released."""
+
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def __aiter__(self) -> AsyncIterator[bytes]:
+                yield b""
+
+            async def aclose(self) -> None:
+                self.closed = True
+
+        answer_stream = _AnswerStream()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            message = json.loads(request.content or b"{}")
+            if "method" not in message:
+                # The client's answer to the server's own request.
+                answers.append(request.content)
+                released.set()
+                return httpx.Response(202, stream=answer_stream)
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=_HeldOpenStream(
+                    _frame({"jsonrpc": "2.0", "id": 77, "method": "roots/list"}),
+                    _frame({"jsonrpc": "2.0", "id": message.get("id"), "result": {"ok": True}}),
+                    released,
+                ),
+            )
+
+        client = _client(handler)
+        transport = StreamableHttpTransport(_config(), client, owns_client=True)
+        # The handshake era is the one where a server may ask a question
+        # mid-reply; the stateless revision forbids it and answers with an
+        # input-required result instead of expecting an answer.
+        transport.set_era("handshake")
+        result = await asyncio.wait_for(transport.request("tools/list"), timeout=5)
+        assert result == {"ok": True}
+        assert answers, "the server's request was never answered"
+        # The answer's own reply is a body like any other: leaving it unread
+        # hands a live connection back to the pool on every question the
+        # server asks.
+        assert answer_stream.closed, "the answer's response was never released"
+        await client.aclose()
+
+
 class TestAddressPinning:
     """The dial goes where the check went, not to a second resolver answer.
 
@@ -608,6 +731,32 @@ class TestAddressPinning:
             await connect_legacy_sse(_config(policy=EgressPolicy()), client=client)
         await client.aclose()
 
+    async def test_a_read_timeout_arrives_as_a_transport_error(self) -> None:
+        """A failure while reading is the class of event callers already handle.
+
+        Left as the raw ``httpx`` error it skips every handler on the way up --
+        including the one that gives an approved call a terminal state.
+        """
+
+        class _Stalling(httpx.AsyncByteStream):
+            async def __aiter__(self) -> AsyncIterator[bytes]:
+                yield b'{"jsonrpc": "2.0", '
+                raise httpx.ReadTimeout("the server stopped talking")
+
+            async def aclose(self) -> None:
+                """Nothing to release."""
+
+        client = _client(
+            lambda request: httpx.Response(
+                200, headers={"content-type": "application/json"}, stream=_Stalling()
+            )
+        )
+        transport = StreamableHttpTransport(_config(), client, owns_client=True)
+        with pytest.raises(TransportError) as raised:
+            await transport.request("tools/list")
+        assert raised.value.kind == "unreachable"
+        await client.aclose()
+
     async def test_the_addresses_tried_share_one_connect_budget(self) -> None:
         """Three addresses are not three timeouts.
 
@@ -691,6 +840,44 @@ class TestAddressPinning:
 
         await _PinnedNetworkBackend(_Inner()).connect_tcp("xn--fa-hia.example", 443)
         assert dialled == ["198.51.100.4"]
+
+    async def test_terminating_a_session_checks_the_address_and_the_body(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The DELETE is the dial most likely to arrive without a pin.
+
+        Sessions are closed by whichever task notices they are superseded, not
+        by the one that opened them, so the check has to run in that task --
+        and its reply is a body like any other.
+        """
+        from cloud_agent.mcp import transports as transports_module
+
+        dialled: list[str] = []
+        body = _CountingStream(b"x" * 256, 64)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            dialled.append(request.method)
+            return httpx.Response(200, headers={"content-type": "application/json"}, stream=body)
+
+        client = _client(handler)
+        # The default policy refuses loopback, so nothing may be sent: the
+        # check has to come before the DELETE, not after it.
+        refused = StreamableHttpTransport(
+            _config(session_id="sess-1", policy=EgressPolicy()), client, owns_client=True
+        )
+        refused.set_era("handshake")
+        await refused.terminate()
+        assert dialled == [], "an unchecked target was dialled"
+
+        monkeypatch.setattr(transports_module, "MAX_RESPONSE_BYTES", 1024)
+        checked = StreamableHttpTransport(_config(session_id="sess-1"), client, owns_client=True)
+        checked.set_era("handshake")
+        await checked.terminate()
+        assert dialled == ["DELETE"]
+        # The reply is bounded like every other body: the DELETE is best-effort,
+        # which is a reason to stop reading, not a reason to read it all.
+        assert body.pulled < 64, "the DELETE's reply was read before the limit applied"
+        await client.aclose()
 
     async def test_the_resolver_is_asked_for_the_name_that_will_be_dialled(
         self, monkeypatch: pytest.MonkeyPatch
