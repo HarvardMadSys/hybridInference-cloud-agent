@@ -389,14 +389,20 @@ class TestOAuth:
         assert "resource=https%3A%2F%2Fmcp.example.com%2Fmcp" in flow.authorization_url()
         assert flow.token_request("code").data["resource"] == "https://mcp.example.com/mcp"
 
-    def test_a_rotated_refresh_token_that_did_not_arrive_is_an_error(self) -> None:
-        """Keeping the old one would look fine until the next refresh."""
-        with pytest.raises(oauth.OAuthError):
-            oauth.apply_refresh(
-                {"refresh_token": "old", "issuer": "i", "resource": "r"},
-                oauth.TokenSet(access_token="new"),
-                rotates=True,
-            )
+    def test_a_rotated_refresh_token_that_did_not_arrive_keeps_the_stored_one(self) -> None:
+        """RFC 6749 §6 lets an issuer rotate on one refresh and omit on the next.
+
+        An omission means "keep using the one you have". Refusing it here -- on
+        the inference that an issuer that rotated once must rotate every time --
+        reconnects a working connection, and an issuer that really did
+        invalidate the stored token says so at the next refresh.
+        """
+        merged = oauth.apply_refresh(
+            {"refresh_token": "old", "issuer": "i", "resource": "r"},
+            oauth.TokenSet(access_token="new"),
+            rotates=True,
+        )
+        assert merged["refresh_token"] == "old"
 
     def test_a_non_rotating_issuer_keeps_the_refresh_token(self) -> None:
         """Omitting one there means "keep using the old one"."""

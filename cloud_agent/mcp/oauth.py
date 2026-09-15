@@ -622,26 +622,30 @@ def apply_refresh(
     for an issuer that does it means the response is incomplete -- keeping the
     old token there would look like it worked until the next refresh, so the
     connection is reported as needing re-authorization instead.
+
+    Whether the issuer rotates is therefore a fact about what it has *done*,
+    not about whether it sent something -- and it is not a promise about the
+    next response either. RFC 6749 §6 lets an issuer issue a new refresh token
+    on one refresh and omit the field on another; the omission means "keep
+    using the one you have", not "the one you have is dead". So the flag
+    records the observation an omission cannot undo (a *different* token came
+    back at least once) and nothing is refused because a field is missing: an
+    issuer that really did invalidate the stored token says so at the next
+    refresh, where `invalid_grant` is a refusal the owner can act on. Inferring
+    it from an omission instead reconnects working connections.
     """
     merged: dict[str, Any] = {
         "access_token": response.access_token,
         "expires_at": response.expires_at,
     }
+    rotated = bool(response.refresh_token) and response.refresh_token != previous.get(
+        "refresh_token"
+    )
     if response.refresh_token:
         merged["refresh_token"] = response.refresh_token
-        merged["refresh_rotates"] = rotates or True
-    elif previous.get("refresh_token") and not rotates:
-        merged["refresh_token"] = previous["refresh_token"]
-        merged["refresh_rotates"] = False
-    elif previous.get("refresh_token") and rotates:
-        raise OAuthError(
-            "the authorization server rotates refresh tokens but did not send a new one; "
-            "reconnect this server",
-            kind="needs_authorization",
-        )
     else:
-        merged["refresh_token"] = None
-        merged["refresh_rotates"] = False
+        merged["refresh_token"] = previous.get("refresh_token")
+    merged["refresh_rotates"] = rotates or rotated
     if response.scopes:
         merged["scopes"] = list(response.scopes)
     merged["issuer"] = previous.get("issuer")

@@ -300,6 +300,40 @@ class TestTokenResponses:
         assert merged["refresh_token"] == "newer"
         assert merged["refresh_rotates"] is True
 
+    def test_a_non_rotating_issuer_that_echoes_its_token_is_not_marked_rotating(self) -> None:
+        """Sending a refresh token is not evidence that the issuer rotates.
+
+        RFC 6749 §6 lets an issuer that never invalidates the old token send
+        the same one back, and lets any issuer omit the field on a later
+        refresh. Recording rotation from the mere presence of the field turns
+        that ordinary omission into a forced reconnection.
+        """
+        merged = oauth.apply_refresh(
+            {"refresh_token": "same", "issuer": _ISSUER, "resource": _RESOURCE},
+            oauth.TokenSet(access_token="new", refresh_token="same"),
+            rotates=False,
+        )
+        assert merged["refresh_rotates"] is False
+
+    def test_an_issuer_that_never_rotates_survives_a_refresh_that_omits_the_token(self) -> None:
+        """The sequence the flag exists to get right, for the issuer that does not rotate.
+
+        A token that came back unchanged must not make the *next* response,
+        which omits the field, look like a rotating issuer losing one.
+        """
+        first = oauth.apply_refresh(
+            {"refresh_token": "same", "issuer": _ISSUER, "resource": _RESOURCE},
+            oauth.TokenSet(access_token="a2", refresh_token="same"),
+            rotates=False,
+        )
+        second = oauth.apply_refresh(
+            first,
+            oauth.TokenSet(access_token="a3"),
+            rotates=bool(first["refresh_rotates"]),
+        )
+        assert second["refresh_token"] == "same"
+        assert second["refresh_rotates"] is False
+
     def test_a_refresh_keeps_the_issuer_and_resource_it_was_made_against(self) -> None:
         """Otherwise a later refresh would be sent to wherever discovery now
         points, rather than to the server that issued the token."""

@@ -408,22 +408,28 @@ class TestRefresh:
         assert store.writes[0]["refresh_token_ciphertext"]
 
     @pytest.mark.asyncio
-    async def test_a_rotating_issuer_that_sent_nothing_is_refused(self, monkeypatch) -> None:
-        """Keeping the old token would look fine until the next refresh."""
+    async def test_an_issuer_that_rotates_once_keeps_the_stored_token_when_none_arrives(
+        self, monkeypatch
+    ) -> None:
+        """An omission is "keep the one you have", not "it is dead".
+
+        RFC 6749 §6 lets an issuer rotate on one refresh and omit the field on
+        another, so an omission carries no information about the stored token.
+        Refusing here reconnected a working connection; an issuer that really
+        did invalidate it refuses the next refresh by name, which is an answer
+        the owner can act on.
+        """
         store = FakeStore(_row(refresh_rotates=True))
         _patch_token_response(monkeypatch, {"access_token": "new"})
-        with pytest.raises(refresh.RefreshRefused) as raised:
-            await refresh.refresh_credential(
-                store,
-                row=store.row,
-                policy=EgressPolicy(),  # type: ignore[arg-type]
-            )
-        assert store.writes == []
-        # The exchange is the shape of one that *did* happen -- which is when the
-        # old refresh token stops working -- so the next attempt waits out the
-        # lease rather than replaying it.
-        assert raised.value.uncertain
-        assert store.leased == {1}
+        outcome = await refresh.refresh_credential(
+            store,
+            row=store.row,
+            policy=EgressPolicy(),  # type: ignore[arg-type]
+        )
+        assert outcome.refreshed is True
+        assert store.writes[0]["refresh_rotates"] is True
+        # The stored token is kept, so the write still carries one.
+        assert store.writes[0]["refresh_token_ciphertext"]
 
     @pytest.mark.asyncio
     async def test_a_disconnect_during_a_refresh_is_not_undone(self, monkeypatch) -> None:

@@ -850,6 +850,27 @@ class TestTheDynamicClientIdentity:
         assert request.client.client_id == "review-dynamic-client"
         assert request.client.auth_method == "none"
 
+    async def test_an_authorization_that_returned_a_refresh_token_is_not_marked_rotating(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Whether the issuer rotates is learned from a refresh, not assumed here.
+
+        Assuming it from the presence of a refresh token made every issuer look
+        like a rotating one, so the first refresh response that omitted the
+        field -- which RFC 6749 §6 allows -- was reported as a lost rotation and
+        forced the owner to reconnect a working connection.
+        """
+        store = FakeStore()
+        connection_id = _seed(store, auth_kind="oauth", auth_config={}, oauth_generation=1)
+        store.oauth_flow = self._flow(
+            connection_id=connection_id,
+            client_id="review-dynamic-client",
+            secret_ciphertext=None,
+        )
+        assert "mcp_authorized=1" in await self._complete(store, connection_id, monkeypatch)
+
+        assert store.credential_writes[-1]["refresh_rotates"] is False
+
     async def test_a_registered_secret_travels_with_the_identity(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

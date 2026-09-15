@@ -1302,7 +1302,14 @@ async def oauth_callback(
         scopes=list(tokens.scopes) or list(flow.get("scopes") or []),
         issuer=metadata.issuer,
         resource=str(flow["resource"]),
-        refresh_rotates=bool(tokens.refresh_token),
+        # Whether this issuer rotates refresh tokens is not knowable here.
+        # Being handed one at authorization time says nothing about whether the
+        # *next* refresh invalidates it -- RFC 6749 §6 lets a non-rotating
+        # issuer send one, and lets any issuer omit it -- so the fact is
+        # recorded where it can be observed, in ``oauth.apply_refresh``, when a
+        # refresh returns a different token. Claiming rotation now would turn
+        # that ordinary omission into a forced reconnection.
+        refresh_rotates=False,
         client_auth_method=identity.auth_method,
         registration=identity.registration,
         # The client this authorization actually used, written with the
