@@ -1555,8 +1555,14 @@ def _classify_startup_path(container_action: str, resident_action: str) -> str:
         return "new_group"
     if container_action == "start":
         return "resume_stopped"
+    # Anything else -- including a resident action the broker did not report --
+    # does not identify a path, and guessing one would poison the comparison
+    # the four paths exist for.
     if container_action == "reuse":
-        return "reuse_live" if resident_action == "reuse" else "resume_running"
+        if resident_action == "reuse":
+            return "reuse_live"
+        if resident_action in {"new", "resume"}:
+            return "resume_running"
     return "unknown"
 
 
@@ -1751,12 +1757,16 @@ def _run_shared_live_attempt(
                 has_settled_context=has_context,
                 members=manifest,
                 expected_container_id=reservation.get("container_id"),
+                profiling=operation_profiling.measurement_context(measurement),
             )
         except SessionSupervisorError as exc:
             context_invalid = has_context and exc.status_code == 410
             raise
         lease_token = str(lease["token"])
         container_action = str(lease.get("container_action") or "unknown")
+        # This path asked the broker for its fragment, so a broker that did not
+        # answer leaves the record incomplete rather than quietly partial.
+        operation_profiling.expect_producer(measurement, "broker")
         # Sub-stages the broker measured inside this call. They are durations,
         # not offsets, so they hang off the stage they happened in rather than
         # being placed on this process's timeline.
@@ -1915,6 +1925,7 @@ def _run_shared_live_attempt(
                     job.thread_id,
                     token=lease_token,
                     launch=launch,
+                    profiling=operation_profiling.measurement_context(measurement),
                 )
             except SessionSupervisorError:
                 # A process-fixed model/MCP setting changed, the process died,
@@ -1942,6 +1953,7 @@ def _run_shared_live_attempt(
                 job.thread_id,
                 token=lease_token,
                 launch=launch,
+                profiling=operation_profiling.measurement_context(measurement),
             )
         context_status = str(resident_descriptor.get("context_status") or context_status)
         if context_status not in {"new", "live", "restored"}:

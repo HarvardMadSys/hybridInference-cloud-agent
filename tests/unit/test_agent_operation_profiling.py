@@ -36,6 +36,15 @@ class _FakeClock:
         """Return the frozen monotonic value in seconds."""
         return self.now_ns / 1_000_000_000
 
+    def sleep(self, seconds: float) -> None:
+        """Yield to the export thread and move the clock like a real sleep."""
+        time.sleep(0.001)
+        self.now_ns += int(seconds * 1_000_000_000)
+
+    def time(self) -> float:
+        """Return the real wall clock: only the monotonic clock is faked."""
+        return time.time()
+
 
 @pytest.fixture(autouse=True)
 def _clean_profiling_state(monkeypatch):
@@ -77,7 +86,12 @@ def _enable(monkeypatch, **overrides) -> dict:
 
 
 def _records(caplog) -> list[dict]:
-    """Return every emitted record captured from the log."""
+    """Return every emitted record captured from the log.
+
+    Publishing is asynchronous -- the log line and the sink write both leave
+    the attempt thread -- so reading the log means draining the exporter first.
+    """
+    profiling.flush_sink()
     found = []
     for record in caplog.records:
         message = record.getMessage()
@@ -431,44 +445,72 @@ def test_record_reaches_the_log_and_the_jsonl_sink(monkeypatch, caplog, tmp_path
     assert written[0]["measurement_complete"] is True
 
 
-def test_the_sink_write_leaves_the_attempt_thread(monkeypatch, caplog, tmp_path):
-    """Export runs on its own thread, so disk latency stays out of the sample.
+def test_publishing_leaves_the_attempt_thread(monkeypatch, caplog, tmp_path):
+    """Logging and the sink write both run elsewhere, so neither can stall startup.
 
-    Regression: the record was written synchronously while the sandbox was
-    still starting, which put a slow filesystem inside the measurement it was
-    supposed to explain.
+    Regression: the log line stayed on the attempt thread, so a blocking log
+    handler was charged to the startup the profile exists to explain.
     """
     sink = tmp_path / "profile.jsonl"
     _enable(monkeypatch)
     monkeypatch.setenv(profiling.ENV_PROFILING_SINK, str(sink))
     caplog.set_level(logging.INFO, logger=profiling.__name__)
-    writers: list[threading.Thread] = []
-    real_write = profiling._SinkWriter._write
+    publishers: list[threading.Thread] = []
+    real_publish = profiling._Exporter._publish
 
-    def recording_write(self, line):
-        writers.append(threading.current_thread())
-        real_write(self, line)
+    def recording_publish(self, line, path):
+        publishers.append(threading.current_thread())
+        real_publish(self, line, path)
 
-    monkeypatch.setattr(profiling._SinkWriter, "_write", recording_write)
+    monkeypatch.setattr(profiling._Exporter, "_publish", recording_publish)
     measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
 
     profiling.mark(measurement, "validate")
     profiling.finish(measurement, outcome="dispatched")
     profiling.flush_sink()
 
-    assert writers, "the record was never exported"
-    assert writers[0] is not threading.current_thread()
-    assert writers[0].name == "operation-profile-sink"
+    assert publishers, "the record was never published"
+    assert publishers[0] is not threading.current_thread()
+    assert publishers[0].name == "operation-profile-sink"
     assert json.loads(sink.read_text().splitlines()[0])["measurement_id"]
 
 
-def test_profiling_off_never_starts_the_export_thread(monkeypatch, caplog):
+def test_a_blocking_log_handler_does_not_stall_the_attempt(monkeypatch, caplog):
+    """The attempt thread never waits on a log handler, however slow."""
+    _enable(monkeypatch)
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    release = threading.Event()
+    entered = threading.Event()
+
+    class BlockingHandler(logging.Handler):
+        def emit(self, record):
+            entered.set()
+            release.wait(5)
+
+    blocker = BlockingHandler()
+    profiling_logger = logging.getLogger(profiling.__name__)
+    profiling_logger.addHandler(blocker)
+    try:
+        measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+        profiling.mark(measurement, "validate")
+        started = time.monotonic()
+        profiling.finish(measurement, outcome="dispatched")
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        profiling_logger.removeHandler(blocker)
+        profiling.flush_sink()
+
+    assert elapsed < 0.05, f"finish() waited {elapsed:.3f}s on a blocked handler"
+
+
+def test_profiling_off_never_starts_the_exporter(monkeypatch, caplog):
     """The default deployment pays for none of this, thread or file."""
     assert profiling.start_operation(operation="attempt.startup") is None
     profiling.flush_sink()
     profiling.close_sink()
 
-    assert profiling._SINK is None
+    assert profiling._EXPORTER is None
 
 
 def test_a_full_queue_drops_records_instead_of_blocking(monkeypatch, tmp_path, caplog):
@@ -477,20 +519,20 @@ def test_a_full_queue_drops_records_instead_of_blocking(monkeypatch, tmp_path, c
     release = threading.Event()
     entered = threading.Event()
 
-    def stalled_write(self, line):
+    def stalled_write(self, line, sink):
         entered.set()
         release.wait(5)
 
-    monkeypatch.setattr(profiling._SinkWriter, "_write", stalled_write)
-    writer = profiling._SinkWriter(str(tmp_path / "profile.jsonl"), maxsize=4)
+    monkeypatch.setattr(profiling._Exporter, "_publish", stalled_write)
+    writer = profiling._Exporter(maxsize=4)
     try:
-        writer.offer('{"warm":true}')
+        writer.offer('{"warm":true}', None)
         # Wait until the writer thread holds that line and is parked in the
         # write, so the queue is provably empty and the count is deterministic.
         assert entered.wait(5)
         started = time.monotonic()
         for index in range(14):
-            writer.offer(f'{{"n":{index}}}')
+            writer.offer(f'{{"n":{index}}}', None)
         elapsed = time.monotonic() - started
     finally:
         release.set()
@@ -761,11 +803,16 @@ def test_a_substage_observer_records_against_the_current_stage(monkeypatch, capl
 
 def test_a_stage_recorder_collects_durations_without_a_measurement(monkeypatch):
     """The broker's recorder is the same protocol without a local timeline."""
-    recorder = profiling.start_stage_recording()
-    assert recorder is None, "an off process must not record anything"
+    live = {
+        "run_id": "run-1",
+        "measurement_id": "msm_x",
+        "operation": "attempt.startup",
+        "expires_at": time.time() + 60,
+    }
+    assert profiling.start_stage_recording(live) is None, "an off process records nothing"
 
     _enable(monkeypatch)
-    recorder = profiling.start_stage_recording()
+    recorder = profiling.start_stage_recording(live)
     assert recorder is not None
     with profiling.substage(recorder, "container_create"):
         pass
@@ -775,3 +822,167 @@ def test_a_stage_recorder_collects_durations_without_a_measurement(monkeypatch):
     assert [item["name"] for item in recorder.stages] == ["container_create", "container_start"]
     assert recorder.names() == ["container_create", "container_start"]
     assert [item["outcome"] for item in recorder.stages] == ["ok", "error"]
+
+
+def test_a_recorder_inherits_the_callers_selection(monkeypatch, clock):
+    """The broker does not decide for itself whether an attempt was selected."""
+    _enable(monkeypatch, run_id="run-1")
+    live = {
+        "run_id": "run-1",
+        "measurement_id": "msm_x",
+        "operation": "attempt.startup",
+        "expires_at": time.time() + 60,
+    }
+
+    assert profiling.start_stage_recording(live) is not None
+    # A different run, an operation this run does not select, and a selection
+    # that has already lapsed are all refused.
+    assert profiling.start_stage_recording({**live, "run_id": "other"}) is None
+    assert profiling.start_stage_recording({**live, "operation": "terminal.open"}) is None
+    assert profiling.start_stage_recording({**live, "expires_at": time.time() - 1}) is None
+    assert profiling.start_stage_recording({**live, "expires_at": "soon"}) is None
+    assert profiling.start_stage_recording({**live, "expires_at": None}) is None
+    assert profiling.start_stage_recording("not a mapping") is None
+    # No inherited selection means "not selected", never "record anyway".
+    assert profiling.start_stage_recording(None) is None
+    assert profiling.start_stage_recording({}) is None
+    assert profiling.start_stage_recording(live) is not None
+
+
+def test_a_recorder_stops_at_the_deadline_it_inherited(monkeypatch, clock):
+    """A broker must not measure past the experiment the runner stopped."""
+    _enable(monkeypatch)
+    recorder = profiling.start_stage_recording(
+        {
+            "run_id": "run-1",
+            "measurement_id": "msm_x",
+            "operation": "attempt.startup",
+            "expires_at": time.time() + 1,
+        }
+    )
+    assert recorder is not None
+
+    with profiling.substage(recorder, "early"):
+        clock.advance(1_000)
+    clock.advance(2 * 1_000_000)  # past the inherited deadline
+
+    with profiling.substage(recorder, "late"):
+        clock.advance(5_000)
+
+    assert recorder.names() == ["early"]
+    assert recorder.expired() is True
+
+
+def test_a_substage_that_crosses_the_deadline_is_truncated(monkeypatch, caplog, clock):
+    """Children end where the root ends, so the record is internally consistent.
+
+    Regression: the root record was truncated at the deadline while the stage
+    inside it kept its full two minutes, so a reader saw a child longer than
+    its parent.
+    """
+    _enable(monkeypatch, expires_at=_expiry(minutes=1))
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    assert measurement is not None
+    profiling.mark(measurement, "agent_network")
+    observer = profiling.stage_observer(measurement)
+
+    with profiling.substage(observer, "bootstrap_guest_stop"):
+        clock.advance(120 * 1_000_000)  # the deadline lands inside this stage
+    # A sub-stage that only starts after the deadline is not recorded at all.
+    with profiling.substage(observer, "bootstrap_guest_start"):
+        clock.advance(1_000)
+    profiling.finish(measurement, outcome="dispatched")
+
+    record = _records(caplog)[0]
+    network = next(item for item in record["stages"] if item["stage"] == "agent_network")
+    assert [item["stage"] for item in network["children"]] == ["bootstrap_guest_stop"]
+    child = network["children"][0]
+    assert child["truncated"] is True
+    assert child["duration_us"] <= record["duration_us"]
+    assert network["duration_us"] <= record["duration_us"]
+    assert record["measurement_complete"] is False
+
+
+def test_a_span_that_crosses_the_deadline_is_truncated(monkeypatch, caplog, clock):
+    """The same rule for a plain span."""
+    _enable(monkeypatch, expires_at=_expiry(minutes=1))
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    assert measurement is not None
+
+    with profiling.span(measurement, "claim"):
+        clock.advance(120 * 1_000_000)
+    profiling.finish(measurement, outcome="dispatched")
+
+    record = _records(caplog)[0]
+    assert record["spans"][0]["truncated"] is True
+    assert record["spans"][0]["duration_us"] <= record["duration_us"]
+
+
+def test_a_missing_producer_makes_the_record_incomplete(monkeypatch, caplog):
+    """A path that asked for a fragment and did not get one is not complete."""
+    _enable(monkeypatch)
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    profiling.mark(measurement, "supervisor_acquire")
+    profiling.mark(measurement, "sandbox_running")
+
+    profiling.expect_producer(measurement, "broker")
+    profiling.finish(measurement, outcome="dispatched")
+
+    record = _records(caplog)[0]
+    assert record["producers"] == ["runner"]
+    assert record["missing_producers"] == ["broker"]
+    assert record["measurement_complete"] is False
+
+
+def test_an_answered_producer_completes_the_record(monkeypatch, caplog):
+    """The same path, with the broker answering, is complete."""
+    _enable(monkeypatch)
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    profiling.mark(measurement, "supervisor_acquire")
+    profiling.mark(measurement, "sandbox_running")
+
+    profiling.expect_producer(measurement, "broker")
+    profiling.attach_remote_stages(
+        measurement,
+        "supervisor_acquire",
+        [{"name": "container_start", "duration_us": 1}],
+        source="broker",
+    )
+    profiling.finish(measurement, outcome="dispatched")
+
+    record = _records(caplog)[0]
+    assert record["producers"] == ["runner", "broker"]
+    assert "missing_producers" not in record
+    assert record["measurement_complete"] is True
+
+
+def test_an_expired_measurement_offers_no_selection_to_inherit(monkeypatch, clock):
+    """A lapsed measurement must not hand the broker something to record under."""
+    _enable(monkeypatch, expires_at=_expiry(minutes=1))
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    assert measurement is not None
+
+    clock.advance(120 * 1_000_000)
+
+    assert profiling.measurement_context(measurement) is None
+
+
+def test_measurement_context_carries_the_selection_and_a_wall_clock_expiry(monkeypatch, clock):
+    """Two processes share no monotonic clock, so the deadline travels absolute."""
+    _enable(monkeypatch)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    assert measurement is not None
+
+    context = profiling.measurement_context(measurement)
+
+    assert context["run_id"] == "run-1"
+    assert context["operation"] == "attempt.startup"
+    assert context["measurement_id"] == measurement.measurement_id
+    assert context["expires_at"] > time.time()
+    assert profiling.measurement_context(None) is None
+    profiling.finish(measurement, outcome="dispatched")
+    assert profiling.measurement_context(measurement) is None

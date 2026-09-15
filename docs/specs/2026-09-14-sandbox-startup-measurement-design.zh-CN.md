@@ -381,7 +381,8 @@ benchmark 报告至少包含：环境 manifest、实验顺序、全部 attempt I
 动作由真正执行它的代码上报，不是事后从容器状态推断：先停后启的容器和从未停过的容器
 在跑起来之后完全一样。`create` 优先于紧随其后的 `start`，否则“这次付了创建代价”会被
 记成“这次发现它是停的”。动作**不依赖开关**——它是事实不是测量，所以即使 broker 没开
-profiling，runner 仍能正确分类路径。
+profiling，runner 仍能正确分类路径。反过来，动作缺失时不猜：`reuse` + 未上报的
+resident 动作返回 `unknown`，而不是默认成 `resume_running`。
 
 **关键内部阶段。** 跨进程的时长以 duration 形式挂在它所属的本地阶段下：
 
@@ -392,14 +393,26 @@ profiling，runner 仍能正确分类路径。
   `service_hosts_sync`。
 
 子阶段带 `source`，不带 `start_offset_us`：另一个进程的单调时钟与本进程不可比，
-给它一个本地偏移会显得精确但毫无意义。记录用 `producers` 列出实际贡献者，
-broker 未开启时只显示 `["runner"]`，属于**局部覆盖**而不是静默缺失。
+给它一个本地偏移会显得精确但毫无意义。
+
+**broker 继承本次选择，不自行决定。** broker 一次只看得到一个调用，不知道它属于哪个
+attempt，所以无法自己判断该操作是否被选中。runner 把选中的测量上下文（run id、
+operation、以及**绝对墙钟**截止时间——两个进程没有共同的单调时钟）随请求发出，broker
+再用自己的开关、自己的 run descriptor 和继承的截止时间校验后才记录。因此 runner 已因
+过期停止后，broker 不会继续测量；过期、错 run、非选中 operation 一律拒绝，而容器动作
+照常上报。
+
+记录用 `producers` 列出实际贡献者，并用 `missing_producers` 标出**被请求但没回应**的
+生产者。`measurement_complete` 要求边界齐全、未被截断、且没有缺失的生产者——
+broker 没开时记录是 `producers=["runner"]`、`missing_producers=["broker"]`、
+`measurement_complete=false`，属于**局部覆盖**而不是静默缺失。
 
 三条开销与边界约束按 §0 的要求落实：
 
-- **导出不占 attempt 线程。** JSONL 走有界队列，由一条仅在开启且产生记录后才启动的
-  后台线程落盘；队列满时丢弃并计数。记录产生于沙盒启动过程中，同步写盘会把磁盘延迟
-  算进被测量的启动时间里。
+- **发布不占 attempt 线程，日志也一样。** 日志行与 JSONL 写入同走一条有界队列，由一条
+  仅在开启且产生记录后才启动的后台线程处理；队列满时丢弃并计数。日志不是例外：一个
+  阻塞的 handler（慢 socket、写满的盘、同步 shipper）和慢文件系统一样，会把延迟算进
+  被测量的启动时间里。
 - **预算在确认选中后才消耗。** `start_operation` 只是预留名额，`discard()` 归还未选中
   的名额（空 claim、目标不匹配、claim 抛异常），`finish()` 才提交。否则一次空轮询就能
   吃掉 `max_operations: 1` 的实验。
@@ -407,34 +420,42 @@ broker 未开启时只显示 `["runner"]`，属于**局部覆盖**而不是静�
   未知字段在读取 descriptor 时就拒绝；`bind()` 要求每个配置字段都存在且相等，**缺失值
   算不匹配**（`sandbox_id=None` 不会通过 `sandbox_id=wanted`），且带 target 的 run 不会
   上报一次从未绑定过的测量。
-- **到期即停止采集。** 截止时间在采集过程中生效：到期后不再记录 mark/span/attribute，
-  记录在截止点收尾而不是在发现时刻收尾，并标 `measurement_complete=false` 与
-  `profiling_stopped=expired`；已采到的部分照常保留。
+- **到期即停止采集，且截断一致。** 截止时间在采集过程中生效：到期后不再记录
+  mark/span/attribute；**跨过截止点的 span 与子阶段同样在截止点截断**并标
+  `truncated=true`，不会出现子区间比父区间还长的记录。根记录在截止点收尾而不是在发现
+  时刻收尾，并标 `measurement_complete=false` 与 `profiling_stopped=expired`；
+  已采到的部分照常保留。
 
 ### 9.2 自身开销实测
 
 `scripts/bench_startup_profiling_overhead.py` 用真实的调用序列（1×`start_operation`、
-1×`span`、12×`mark`、8 个 attribute、1×`finish`）对比四个 cohort，n=20000/档，
+1×`span`、12×`mark`、8 个 attribute、1×`finish`）对比五个 cohort，n=20000/档，
 CPython 3.12.13 / macOS arm64：
 
 | cohort | p50 | p95 | 相对 `bare` 的均值 |
 | --- | --- | --- | --- |
-| `bare`（无埋点） | 0.375 | 0.417 | — |
-| `off`（开关关闭） | 0.750 | 0.833 | **+0.36 µs** |
-| `on`（开启、无 sink） | 20.96 | 22.46 | **+20.5 µs** |
-| `onsink`（开启 + JSONL） | 25.33 | 28.29 | **+25.1 µs** |
+| `bare`（无埋点） | 0.334 | 0.416 | — |
+| `off`（开关关闭） | 0.709 | 0.917 | **+0.39 µs** |
+| `on`（开启、无 sink） | 25.08 | 29.46 | **+25.8 µs** |
+| `onsink`（开启 + JSONL） | 23.92 | 29.04 | **+24.5 µs** |
+| `onlog`（开启 + 每记录 1 ms 的 handler） | 26.29 | 29.46 | **+26.0 µs** |
 
 结论与边界：
 
-- **关闭不是字面意义的零开销**，而是约 18 次 no-op 调用 ≈ 0.36 µs/attempt；且
+- **关闭不是字面意义的零开销**，而是约 18 次 no-op 调用 ≈ 0.4 µs/attempt；且
   `runner.py` 把唯一一次多属性 `set_attributes` 放在 `if measurement is not None:` 里，
   实际关闭路径比 `off` cohort 还略低。相对真实启动（§8 中为毫秒到秒级）可忽略，
   但不声称“绝对零成本”。
 - **开启后约 +25 µs/attempt**，主要来自构造记录与 `json.dumps`，不是取时钟或打点。
   远低于 §9 验收建议的“P95 增量不超过 10 ms 或基线 1%（取较大者）”。
+- **日志 handler 不再落在 attempt 线程上。** `onlog` 用每记录 1 ms 的 handler，
+  与 `on` 的差值在噪声内（p50 +1.2 µs、p95 +0.001 µs，重复运行符号会翻转）；
+  若格式化仍同步，仅这一项就会给每次 attempt 加上 ≥1000 µs。
 - 本基准测的是**埋点自身的开销**，不是端到端启动：没有 claim、容器、supervisor、
-  CLI 或网络。合成速率（约 40k 记录/秒）下的丢弃计数不适用于真实启动——一次启动只
-  产生一条记录。
+  CLI 或网络。合成速率（约 40k 记录/秒）下 exporter 会丢弃大部分记录，这是预期且有计数
+  的；真实启动一次只产生一条记录。
+- **broker 侧尚未纳入本基准**：它只增加若干次单调时钟读取与字典追加，但随请求继承选择
+  与截止时间校验的路径没有实测数字，属于待补。
 
 与目标形态的差距，后续切片补齐：
 

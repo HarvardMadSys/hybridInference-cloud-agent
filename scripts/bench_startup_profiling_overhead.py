@@ -45,6 +45,15 @@ Every cohort runs that same sequence, and each attempt is timed end to end with
     temporary JSONL file.  Records are enqueued to the exporter thread, never
     written on the attempt thread.
 
+``onlog``
+    Same as ``on``, plus a deliberately slow ``INFO`` handler attached to the
+    ``cloud_agent_host.operation_profiling`` logger for the duration of the
+    measurement (``--log-delay-ms``, default 1.0).  One record per attempt at
+    that delay would cost a millisecond *on whichever thread formats it* --
+    roughly 40x the ~25 us attempt being measured -- so if any part of the log
+    path still ran on the attempt thread the effect would be impossible to miss.
+    The comparison that matters is ``onlog`` vs ``on``.
+
 What this does and does not measure
 -----------------------------------
 
@@ -54,6 +63,14 @@ sink enqueue.  It is **not** an end-to-end sandbox startup benchmark.  There is
 no claim, no container, no supervisor, no agent CLI and no network here, so the
 numbers say what fraction of a startup the instrumentation adds, never how long
 a startup takes.
+
+The ``onlog`` cohort is why ``_Exporter`` exists.  Both destinations -- the log
+line and the JSONL sink write -- go through the one bounded queue drained by the
+exporter thread, so a handler that blocks on a socket, a full disk or a
+synchronous shipper is paid there and not on the path a user waits on.  Attaching
+such a handler and measuring ``onlog - on`` is the direct test of that claim: a
+synchronous handler would show up as ``--log-delay-ms`` per attempt, one that
+runs on the exporter thread should show up as nothing at all.
 
 Deliberate limits, all of which make ``on``/``onsink`` mildly conservative:
 
@@ -66,10 +83,14 @@ Deliberate limits, all of which make ``on``/``onsink`` mildly conservative:
   than the ``off`` cohort here, which calls every entry point unconditionally.
 * ``bind`` -- one further profiler call that only the enabled path makes -- is
   not modeled, so ``on`` and ``onsink`` are a slight undercount.
-* Logging is left at the interpreter default.  ``_emit`` builds and serializes
-  the record either way, but with no handler configured at ``INFO`` the log line
-  is never formatted or written, so a deployment that logs at ``INFO`` adds the
-  cost of one line per attempt on top of these numbers.
+* ``bare``, ``off``, ``on`` and ``onsink`` run with **no** handler attached, so
+  they measure the record building and the enqueue, not the formatting.  Only
+  ``onlog`` formats a line, and it does so through the queue.
+* ``onlog`` proves the log path runs and that the attempt thread does not pay
+  for it; it is not a logging-throughput benchmark.  At a synthetic ~25 us per
+  attempt the exporter queue overflows and drops most records, so the handler
+  receives a sample -- enough to show the line was really produced, not a count
+  of every attempt.  Drops are counted and never block the caller.
 * Each measured sample includes two ``perf_counter_ns`` calls, present in every
   cohort.
 * Cohorts run in sequence in one process, so CPU drift is not separated from
@@ -79,6 +100,7 @@ Examples::
 
     python scripts/bench_startup_profiling_overhead.py --iterations 20000
     python scripts/bench_startup_profiling_overhead.py --mode nosink
+    python scripts/bench_startup_profiling_overhead.py --mode log --log-delay-ms 5
     python scripts/bench_startup_profiling_overhead.py --json /tmp/profiling.json
 """
 
@@ -86,6 +108,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import platform
 import statistics
@@ -159,12 +182,14 @@ POST_CLAIM_ATTRIBUTES: tuple[tuple[str, object], ...] = (
 )
 
 #: Which cohorts each ``--mode`` selects.  ``bare`` is in every mode because
-#: every delta in the report is relative to it.
+#: every delta in the report is relative to it.  ``log`` also carries ``on``,
+#: because the number that answers the claim is ``onlog - on``.
 MODE_COHORTS: dict[str, tuple[str, ...]] = {
-    "all": ("bare", "off", "on", "onsink"),
+    "all": ("bare", "off", "on", "onsink", "onlog"),
     "off": ("bare", "off"),
     "on": ("bare", "on", "onsink"),
     "nosink": ("bare", "on"),
+    "log": ("bare", "on", "onlog"),
 }
 
 COHORT_DESCRIPTIONS: dict[str, str] = {
@@ -172,6 +197,7 @@ COHORT_DESCRIPTIONS: dict[str, str] = {
     "off": "real calls, profiling disabled",
     "on": "profiling enabled, no sink",
     "onsink": "profiling enabled, JSONL sink configured",
+    "onlog": "profiling enabled, slow logging handler attached",
 }
 
 #: Headroom over ``warmup + iterations`` so a run can never quietly run out of
@@ -258,7 +284,94 @@ ATTEMPTS = {
     "off": instrumented_attempt,
     "on": instrumented_attempt,
     "onsink": instrumented_attempt,
+    "onlog": instrumented_attempt,
 }
+
+#: Mirrors the prefix ``_Exporter._publish`` logs each record with.  The line
+#: arrives here already formatted, which is what a real handler would pay for.
+PROFILE_LOG_PREFIX = "agent_operation_profile "
+
+
+class SlowCountingHandler(logging.Handler):
+    """A deliberately slow ``INFO`` handler that counts what it was given.
+
+    The per-record delay stands in for the handler this design protects
+    against: a socket that blocks, a disk that is full, a synchronous shipper.
+    It is charged inside :meth:`emit`, which is the work the logging framework
+    would otherwise be doing on the calling thread.
+
+    ``logging.Handler.handle`` holds this handler's lock across ``emit``, so the
+    counters need no lock of their own.
+    """
+
+    def __init__(self, logger_name: str, delay_seconds: float) -> None:
+        super().__init__(level=logging.INFO)
+        self._logger_name = logger_name
+        self._delay_seconds = max(0.0, delay_seconds)
+        #: Profile lines that actually reached this handler.
+        self.profile_records = 0
+        #: Anything else the logger emitted (warnings).  Expected to stay 0.
+        self.other_records = 0
+        #: Bytes of formatted profile text, so "produced" is not just a count.
+        self.formatted_bytes = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Format the record, charge the synthetic delay, and count it."""
+        message = self.format(record)
+        # Counted before the delay: the record is in hand either way, and the
+        # delay is the cost, not a filter.
+        if record.name == self._logger_name and message.startswith(PROFILE_LOG_PREFIX):
+            self.profile_records += 1
+            self.formatted_bytes += len(message.encode("utf-8"))
+        else:
+            self.other_records += 1
+        if self._delay_seconds:
+            time.sleep(self._delay_seconds)
+
+
+class LogProbe:
+    """Attaches :class:`SlowCountingHandler` to the profiler's logger.
+
+    A handler alone would not be enough.  The profiler's logger inherits its
+    effective level from the root logger, which is ``WARNING`` by default, so
+    ``logger.info`` would be dropped before any handler saw it and ``onlog``
+    would silently measure an empty log path -- fast for the wrong reason.  The
+    level is therefore raised for the cohort and restored on detach.
+    """
+
+    def __init__(self, delay_ms: float) -> None:
+        self.delay_ms = delay_ms
+        self._logger = logging.getLogger(operation_profiling.__name__)
+        self._previous_level = self._logger.level
+        self.handler = SlowCountingHandler(self._logger.name, delay_ms / 1000.0)
+        self._logger.addHandler(self.handler)
+        self._logger.setLevel(logging.INFO)
+
+    def detach(self, expected: int) -> dict[str, object]:
+        """Remove the handler, restore the level, and report what it received.
+
+        Call :func:`operation_profiling.flush_sink` first, so the exporter has
+        drained and the count is what the handler really received rather than
+        what was merely queued.
+        """
+        self._logger.removeHandler(self.handler)
+        self._logger.setLevel(self._previous_level)
+        received = self.handler.profile_records
+        return {
+            "logger": self._logger.name,
+            "handler": "SlowCountingHandler",
+            "handler_level": "INFO",
+            "per_record_delay_ms": self.delay_ms,
+            "synchronous_cost_us_per_attempt": round(self.delay_ms * 1000.0, 3),
+            "records_expected": expected,
+            "records_received": received,
+            "records_dropped": max(0, expected - received),
+            "other_records_received": self.handler.other_records,
+            "formatted_bytes": self.handler.formatted_bytes,
+            "bytes_per_received_record": (
+                round(self.handler.formatted_bytes / received, 1) if received else 0.0
+            ),
+        }
 
 
 class Sample:
@@ -312,7 +425,7 @@ def install_environment(cohort: str, sink: Path | None, max_operations: int) -> 
     """Point the profiler at this cohort's configuration and drop its cache."""
     for name in (ENV_PROFILING_ENABLED, ENV_PROFILING_RUN, ENV_PROFILING_SINK):
         os.environ.pop(name, None)
-    if cohort in {"on", "onsink"}:
+    if cohort in {"on", "onsink", "onlog"}:
         os.environ[ENV_PROFILING_ENABLED] = "1"
         os.environ[ENV_PROFILING_RUN] = run_descriptor(max_operations)
     if cohort == "onsink":
@@ -337,7 +450,7 @@ def verify_selected(cohort: str) -> None:
     turn the ``on`` and ``onsink`` cohorts into a second measurement of ``off``
     and the table would look perfectly reasonable.
     """
-    if cohort not in {"on", "onsink"}:
+    if cohort not in {"on", "onsink", "onlog"}:
         return
     probe = operation_profiling.start_operation(
         operation=STARTUP_OPERATION,
@@ -392,24 +505,78 @@ def drain_sink(path: Path, expected: int) -> dict[str, object]:
     }
 
 
+def cohort_delta(sample: Sample, base: Sample) -> dict[str, float]:
+    """Return one cohort's per-attempt cost over another, in microseconds."""
+    base_mean = base.mean_us()
+    return {
+        "p50_us": round(sample.percentile_us(0.50) - base.percentile_us(0.50), 3),
+        "p90_us": round(sample.percentile_us(0.90) - base.percentile_us(0.90), 3),
+        "p95_us": round(sample.percentile_us(0.95) - base.percentile_us(0.95), 3),
+        "mean_us": round(sample.mean_us() - base_mean, 3),
+        "mean_ratio": round(sample.mean_us() / base_mean, 3) if base_mean else 0.0,
+    }
+
+
 def deltas(samples: dict[str, Sample], baseline: str = "bare") -> dict[str, dict[str, float]]:
     """Return each cohort's cost over the baseline, in microseconds."""
-    if baseline not in samples:
+    base = samples.get(baseline)
+    if base is None:
         return {}
-    base = samples[baseline]
-    rows: dict[str, dict[str, float]] = {}
-    for name, sample in samples.items():
-        if name == baseline:
-            continue
-        base_mean = base.mean_us()
-        rows[name] = {
-            "p50_us": round(sample.percentile_us(0.50) - base.percentile_us(0.50), 3),
-            "p90_us": round(sample.percentile_us(0.90) - base.percentile_us(0.90), 3),
-            "p95_us": round(sample.percentile_us(0.95) - base.percentile_us(0.95), 3),
-            "mean_us": round(sample.mean_us() - base_mean, 3),
-            "mean_ratio": round(sample.mean_us() / base_mean, 3) if base_mean else 0.0,
-        }
-    return rows
+    return {
+        name: cohort_delta(sample, base) for name, sample in samples.items() if name != baseline
+    }
+
+
+#: Tolerance for calling ``onlog`` and ``on`` the same measurement.  A handler
+#: running synchronously at the configured delay would add
+#: ``delay_ms * 1000`` us per attempt; 10% of the enabled attempt (or 1 us,
+#: whichever is larger) sits far below that, so a separated verdict here means
+#: something real and not scheduler noise.
+VERDICT_TOLERANCE_FRACTION = 0.10
+VERDICT_TOLERANCE_MIN_US = 1.0
+
+
+def onlog_comparison(samples: dict[str, Sample], delay_ms: float) -> dict[str, object] | None:
+    """Test the claim that a blocking log handler does not delay the attempt thread."""
+    on = samples.get("on")
+    onlog = samples.get("onlog")
+    if on is None or onlog is None:
+        return None
+    delta = cohort_delta(onlog, on)
+    tolerance_us = max(VERDICT_TOLERANCE_MIN_US, VERDICT_TOLERANCE_FRACTION * on.mean_us())
+    indistinguishable = (
+        abs(delta["mean_us"]) <= tolerance_us and abs(delta["p50_us"]) <= tolerance_us
+    )
+    synchronous_us = delay_ms * 1000.0
+    if indistinguishable:
+        detail = (
+            "`onlog - on` is inside the tolerance: the attempt thread did not pay for the "
+            "handler, because the record is serialized on the attempt thread but formatted "
+            "and logged on the exporter thread"
+        )
+    else:
+        detail = (
+            "`onlog - on` is outside the tolerance. The further it sits from zero and the "
+            "closer to the configured delay, the more it looks like the log line is being "
+            "formatted on the attempt thread again -- which is the claim this cohort tests"
+        )
+    return {
+        "claim": (
+            "a blocking log handler no longer delays the attempt thread: the log line and "
+            "the sink write are both published by the _Exporter thread"
+        ),
+        "test": (
+            "compare `onlog` against `on`; the cohorts are identical except that `onlog` "
+            "has a slow INFO handler attached to cloud_agent_host.operation_profiling"
+        ),
+        "handler_per_record_delay_ms": delay_ms,
+        "synchronous_cost_per_attempt_us": round(synchronous_us, 3),
+        "synchronous_cost_per_10k_operations_s": round(synchronous_us * 10_000 / 1e6, 3),
+        "delta_onlog_minus_on_us": delta,
+        "tolerance_us": round(tolerance_us, 3),
+        "verdict": "indistinguishable" if indistinguishable else "separated",
+        "verdict_detail": detail,
+    }
 
 
 def build_payload(
@@ -420,6 +587,8 @@ def build_payload(
     warmup: int,
     budget: int,
     sink: dict[str, object] | None,
+    log_handler: dict[str, object] | None,
+    log_delay_ms: float,
 ) -> dict[str, object]:
     """Assemble the machine-readable report, caveats included."""
     return {
@@ -434,8 +603,16 @@ def build_payload(
             "runner.py guards its own behind `if measurement is not None`, so the "
             "shipped disabled path is cheaper than the `off` cohort",
             "bind() is not modeled, so `on` and `onsink` undercount by one call",
-            "logging is left unconfigured: the record is built and serialized either "
-            "way, but no INFO handler formats or writes the log line",
+            "logging is left unconfigured for `bare`, `off`, `on` and `onsink`: the "
+            "record is built and serialized either way, but no INFO handler formats or "
+            "writes the log line in those cohorts",
+            "`onlog` is the only cohort with a handler attached, and it is deliberately "
+            "slow (see log_handler): it exists to show that the log line is published "
+            "on the exporter thread, and the comparison that carries the claim is "
+            "`onlog` vs `on`, not `onlog` vs `bare`",
+            "at this synthetic ~25 us per attempt the bounded exporter queue drops most "
+            "records, so the slow handler receives a sample rather than every line. "
+            "Drops never block the attempt thread, so the `onlog` timings stand",
             "each sample includes two perf_counter_ns calls, in every cohort",
             "cohorts run in sequence in one process; CPU drift is not separated "
             "from the cohort effect",
@@ -464,6 +641,9 @@ def build_payload(
         "baseline": "bare",
         "cohorts": {name: sample.as_dict() for name, sample in samples.items()},
         "deltas_vs_bare_us": deltas(samples),
+        "log_delay_ms": log_delay_ms,
+        "log_handler": log_handler,
+        "onlog_vs_on": onlog_comparison(samples, log_delay_ms),
         "sink": sink,
         "raw_samples_ns": {name: sample.values_ns for name, sample in samples.items()},
     }
@@ -505,7 +685,7 @@ def report(payload: dict[str, object]) -> None:
                 f"{name:<8} {row['p50_us']:>9.3f} {row['p90_us']:>9.3f} {row['p95_us']:>9.3f} "
                 f"{row['mean_us']:>9.3f} {row['mean_ratio']:>9.2f}x"
             )
-        for label in ("on", "onsink"):
+        for label in ("on", "onsink", "onlog"):
             if label in rows:
                 print(
                     f"  (`{label}` adds {rows[label]['mean_us']:.1f} us of attempt-thread CPU"
@@ -513,6 +693,45 @@ def report(payload: dict[str, object]) -> None:
                     " 10,000-operation run)"
                 )
                 break
+
+    log = payload["log_handler"]
+    comparison = payload["onlog_vs_on"]
+    if isinstance(log, dict) and isinstance(comparison, dict):
+        delta = comparison["delta_onlog_minus_on_us"]
+        print(
+            f"\nslow log handler ({log['per_record_delay_ms']:.3f} ms/record attached to "
+            f"{log['logger']}): received {log['records_received']} of "
+            f"{log['records_expected']} records, {log['records_dropped']} dropped, "
+            f"{log['formatted_bytes'] / 1024:.0f} KiB formatted"
+        )
+        print(
+            "  a handler formatted synchronously on the attempt thread would add "
+            f"at least ~{comparison['synchronous_cost_per_attempt_us']:.0f} us per attempt "
+            f"({comparison['synchronous_cost_per_10k_operations_s']:.1f} s across a "
+            "10,000-operation run)"
+        )
+        print("  `onlog` vs `on` -- the cohort that carries the claim:")
+        print(
+            f"    onlog - on: p50 {delta['p50_us']:+.3f} us   p90 {delta['p90_us']:+.3f} us   "
+            f"p95 {delta['p95_us']:+.3f} us   mean {delta['mean_us']:+.3f} us   "
+            f"({delta['mean_ratio']:.2f}x)"
+        )
+        print(
+            f"    tolerance {comparison['tolerance_us']:.2f} us -> "
+            f"{comparison['verdict']}: {comparison['verdict_detail']}"
+        )
+        if log["records_dropped"]:
+            print(
+                "    (the dropped records are bounded-queue drops: at ~40,000 attempts/s the\n"
+                "    exporter drains one record per handler delay and the rest are discarded.\n"
+                "    Drops never block the attempt thread, which is exactly why `onlog` is\n"
+                "    indistinguishable from `on`.)"
+            )
+        if log["other_records_received"]:
+            print(
+                f"    note: the handler also saw {log['other_records_received']} non-profile "
+                "record(s) from the same logger"
+            )
 
     sink = payload["sink"]
     if isinstance(sink, dict):
@@ -540,7 +759,14 @@ def report(payload: dict[str, object]) -> None:
         "`bare` reads no clock and calls nothing, so it is a floor, not a profiler.\n"
         "runner.py guards its one six-attribute call behind `if measurement is not\n"
         "None:`, which makes the real disabled path cheaper than the `off` cohort;\n"
-        "bind() is not modeled, which slightly undercounts `on` and `onsink`."
+        "bind() is not modeled, which slightly undercounts `on` and `onsink`.\n"
+        "`onlog` is the cohort that tests the logging claim: both destinations, the log\n"
+        "line and the JSONL sink write, are published by the one bounded queue drained\n"
+        "by the `_Exporter` thread, so a blocking handler is paid there and `onlog - on`\n"
+        "should be indistinguishable from zero.  At this synthetic rate the queue drops\n"
+        "most records -- the handler receives a sample, which is enough to prove the line\n"
+        "was really produced, not a count of every attempt.  Drops are counted, and they\n"
+        "never block the attempt thread."
     )
 
 
@@ -566,13 +792,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=("all", "off", "on", "nosink"),
+        choices=("all", "off", "on", "nosink", "log"),
         default="all",
         help=(
-            "cohort selection: 'all' is bare+off+on+onsink, 'off' is bare+off, "
+            "cohort selection: 'all' is bare+off+on+onsink+onlog, 'off' is bare+off, "
             "'on' is bare+on+onsink, 'nosink' is bare+on (profiling enabled, no "
-            "sink configured). 'bare' is always measured because every delta is "
-            "relative to it (default: all)"
+            "sink configured), 'log' is bare+on+onlog (the slow-handler comparison). "
+            "'bare' is always measured because every delta is relative to it "
+            "(default: all)"
+        ),
+    )
+    parser.add_argument(
+        "--log-delay-ms",
+        type=float,
+        default=1.0,
+        help=(
+            "per-record delay of the deliberately slow INFO handler the onlog cohort "
+            "attaches to the profiler's logger; it is charged inside the handler's "
+            "emit(), i.e. on whichever thread does the logging (default: 1.0)"
         ),
     )
     parser.add_argument(
@@ -591,19 +828,37 @@ def main(argv: list[str] | None = None) -> int:
     if args.warmup < 0:
         print("--warmup must not be negative", file=sys.stderr)
         return 2
+    if args.log_delay_ms < 0:
+        print("--log-delay-ms must not be negative", file=sys.stderr)
+        return 2
 
     cohorts = MODE_COHORTS[args.mode]
     budget = args.warmup + args.iterations + BUDGET_SLACK
     samples: dict[str, Sample] = {}
     sink_meta: dict[str, object] | None = None
+    log_meta: dict[str, object] | None = None
 
     with tempfile.TemporaryDirectory(prefix="startup-profiling-bench-") as directory:
         sink_path = Path(directory) / "operation-profiling.jsonl"
         try:
             for cohort in cohorts:
+                # The handler is attached after install_environment(), which
+                # stops the previous cohort's exporter: the shutdown warning
+                # that logs is not a profile record and should not be counted.
                 install_environment(cohort, sink_path, budget)
-                values = timed(ATTEMPTS[cohort], args.iterations, args.warmup)
-                verify_selected(cohort)
+                probe = LogProbe(args.log_delay_ms) if cohort == "onlog" else None
+                try:
+                    values = timed(ATTEMPTS[cohort], args.iterations, args.warmup)
+                    verify_selected(cohort)
+                    if probe is not None:
+                        # Drain before counting, or the handler would be
+                        # credited only with what was published mid-run and the
+                        # "records received" number would understate the log
+                        # path for a reason that has nothing to do with logging.
+                        operation_profiling.flush_sink()
+                finally:
+                    if probe is not None:
+                        log_meta = probe.detach(args.warmup + args.iterations)
                 samples[cohort] = Sample(cohort, COHORT_DESCRIPTIONS[cohort], values)
                 if cohort == "onsink":
                     sink_meta = drain_sink(sink_path, args.warmup + args.iterations)
@@ -617,6 +872,8 @@ def main(argv: list[str] | None = None) -> int:
         warmup=args.warmup,
         budget=budget,
         sink=sink_meta,
+        log_handler=log_meta,
+        log_delay_ms=args.log_delay_ms,
     )
     report(payload)
     if args.json:

@@ -6,6 +6,7 @@ import json
 import logging
 import pathlib
 import re
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -902,6 +903,8 @@ def test_startup_measurement_records_every_runner_stage(monkeypatch, caplog, tmp
         measurement=measurement,
         container_action="reuse",
         resident_action="reuse",
+        lease_stages=[{"name": "phase_network", "duration_us": 120}],
+        resident_stages=[{"name": "cli_spawn", "duration_us": 240}],
     )
 
     assert result == 0
@@ -909,6 +912,7 @@ def test_startup_measurement_records_every_runner_stage(monkeypatch, caplog, tmp
     record = json.loads(sink.read_text().splitlines()[0])
     assert record["startup_outcome"] == "dispatched"
     assert record["measurement_complete"] is True
+    assert record["producers"] == ["runner", "broker"]
     assert [stage["stage"] for stage in record["stages"]] == [
         "validate",
         "reserve",
@@ -945,6 +949,9 @@ def test_startup_measurement_records_every_runner_stage(monkeypatch, caplog, tmp
         # Actions that do not identify a path stay unknown rather than guessed.
         ("unknown", "reuse", "unknown"),
         ("start", "unknown", "resume_stopped"),
+        # A running container with no reported resident action says nothing
+        # about how the CLI got there, so it does not become a resume.
+        ("reuse", "unknown", "unknown"),
     ],
 )
 def test_startup_path_comes_from_the_actions_the_supervisor_reported(
@@ -1076,6 +1083,10 @@ def test_a_broker_that_is_not_profiling_leaves_the_record_partial(monkeypatch, t
     operation_profiling.flush_sink()
     record = json.loads(sink.read_text().splitlines()[0])
     assert record["producers"] == ["runner"]
+    # The broker was asked for its fragment and did not answer, so the record
+    # is partial rather than a quiet but complete timeline.
+    assert record["missing_producers"] == ["broker"]
+    assert record["measurement_complete"] is False
     acquire = next(item for item in record["stages"] if item["stage"] == "supervisor_acquire")
     assert "children" not in acquire
 
@@ -1102,6 +1113,7 @@ def test_startup_measurement_reports_the_stage_a_pre_dispatch_failure_stopped_at
         runtime_id="claude-code",
         configure=configure,
         measurement=measurement,
+        lease_stages=[{"name": "phase_network", "duration_us": 120}],
     )
 
     assert result == 2
@@ -1179,6 +1191,7 @@ def test_a_failed_prompt_handoff_is_a_failure_stage_with_a_duration(monkeypatch,
         runtime_id="claude-code",
         configure=configure,
         measurement=measurement,
+        lease_stages=[{"name": "phase_network", "duration_us": 120}],
     )
 
     assert result == 2
@@ -1304,3 +1317,59 @@ def test_profiling_off_adds_no_record_and_no_measurement(monkeypatch, caplog, tm
     assert dispatched[0]["measurement"] is None
     assert not sink.exists()
     assert "agent_operation_profile" not in caplog.text
+
+
+def test_the_runner_hands_its_selection_to_the_broker(monkeypatch, tmp_path):
+    """The broker serves one call at a time; only the runner knows the attempt."""
+    _configure_host(monkeypatch)
+    _enable_profiling(monkeypatch)
+    measurement = _profiled_measurement()
+    assert measurement is not None
+
+    def configure(_control, _supervisor, _finish):
+        def stream(**kwargs):
+            operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+
+    _result, _control, supervisor, _finish = _run_shared_boundary_case(
+        monkeypatch,
+        code=0,
+        frame={"kind": "result", "status": "completed", "exit_code": 0},
+        runtime_id="claude-code",
+        configure=configure,
+        measurement=measurement,
+        container_action="reuse",
+        resident_action="reuse",
+    )
+
+    acquire_context = supervisor.acquire_shared.call_args.kwargs["profiling"]
+    resident_context = supervisor.ensure_shared_resident.call_args.kwargs["profiling"]
+    assert acquire_context["run_id"] == "runner-stages-1"
+    assert acquire_context["operation"] == runner_mod.STARTUP_OPERATION
+    assert acquire_context["expires_at"] > time.time()
+    assert resident_context["run_id"] == "runner-stages-1"
+
+
+def test_the_runner_offers_the_broker_nothing_when_it_is_not_profiling(monkeypatch):
+    """No selection means the broker has nothing to inherit."""
+    _configure_host(monkeypatch)
+    operation_profiling.reset_cache()
+
+    def configure(_control, _supervisor, _finish):
+        def stream(**_kwargs):
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+
+    _result, _control, supervisor, _finish = _run_shared_boundary_case(
+        monkeypatch,
+        code=0,
+        frame={"kind": "result", "status": "completed", "exit_code": 0},
+        runtime_id="claude-code",
+        configure=configure,
+    )
+
+    assert supervisor.acquire_shared.call_args.kwargs["profiling"] is None
+    assert supervisor.ensure_shared_resident.call_args.kwargs["profiling"] is None

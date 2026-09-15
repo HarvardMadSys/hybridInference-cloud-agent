@@ -22,10 +22,11 @@ business path untouched and logs one warning:
 
 Three costs are bounded on purpose, because this measures a path users wait on:
 
-* **The export never runs on the attempt thread.** Records reach
-  ``AGENT_OPERATION_PROFILING_SINK`` through a bounded queue drained by one
-  background thread, so a slow filesystem cannot be mistaken for slow startup.
-  A queue that fills drops records and counts the drops.
+* **Nothing is published on the attempt thread.** Both the log line and the
+  ``AGENT_OPERATION_PROFILING_SINK`` write go through one bounded queue drained
+  by a background thread, so neither a slow filesystem nor a blocking log
+  handler can be mistaken for slow startup. A queue that fills drops records
+  and counts the drops.
 * **The operation budget is refunded, not spent, when nothing was selected.**
   A claim that returned no job, or an attempt outside the run's target, gives
   its reserved slot back, so a small experiment is not consumed by polling.
@@ -60,13 +61,14 @@ import socket
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +155,9 @@ class _SpanRecord:
     parent_span_id: str | None = None
     duration_us: int | None = None
     outcome: str = "ok"
+    #: The run's deadline landed inside this interval, so its duration is a
+    #: floor rather than the time the work really took.
+    truncated: bool = False
     attributes: dict[str, Any] = field(default_factory=dict)
 
     def to_payload(self) -> dict[str, Any]:
@@ -168,6 +173,8 @@ class _SpanRecord:
             payload["parent_span_id"] = self.parent_span_id
         if self.duration_us is not None:
             payload["duration_us"] = self.duration_us
+        if self.truncated:
+            payload["truncated"] = True
         if self.attributes:
             payload["attributes"] = self.attributes
         return payload
@@ -207,6 +214,10 @@ class Measurement:
     remote_stages: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     #: Producers that contributed to this record, beyond the runner itself.
     producers: set[str] = field(default_factory=set)
+    #: Producers this record asked for. A path whose broker was not collecting
+    #: is incomplete, not merely quiet, and the record says which producer is
+    #: missing rather than presenting a partial timeline as a whole one.
+    expected_producers: set[str] = field(default_factory=set)
     #: Set once the run's deadline passed with collecting still open.
     expired: bool = False
     #: The budget slot is held from selection and returned by `discard`.
@@ -510,6 +521,14 @@ class StageObserver(Protocol):
         ...
 
 
+def _clamp_to_deadline(measurement: Measurement, end_us: int) -> tuple[int, bool]:
+    """Return an interval end that never runs past the run's deadline."""
+    if not measurement.past_deadline():
+        return end_us, False
+    measurement.expired = True
+    return min(end_us, max(0, measurement.deadline_offset_us())), True
+
+
 @dataclass
 class StageRecorder:
     """Collects sub-stage durations, for reporting back over a process boundary.
@@ -518,12 +537,24 @@ class StageRecorder:
     process cannot be placed on the runner's monotonic timeline, so it is
     reported as a duration attributed to its producer instead of as an offset
     that would look precise and mean nothing.
+
+    The recorder inherits the selected measurement's deadline, so a run that
+    lapses mid-call stops collecting here too rather than measuring past the
+    experiment.
     """
 
+    deadline_mono: float = float("inf")
     stages: list[dict[str, Any]] = field(default_factory=list)
+    truncated: int = 0
+
+    def expired(self) -> bool:
+        """Return whether the inherited experiment has lapsed."""
+        return time.monotonic() > self.deadline_mono
 
     def stage(self, name: str) -> AbstractContextManager[None]:
         """Time one sub-stage onto this recorder."""
+        if self.expired():
+            return _NULL_SPAN
         return _recorded_stage(self, name)
 
     def names(self) -> list[str]:
@@ -536,19 +567,26 @@ def _recorded_stage(recorder: StageRecorder, name: str) -> Iterator[None]:
     """Record one sub-stage duration, closing it on success and failure alike."""
     started = time.monotonic_ns()
     outcome = "ok"
+    truncate = False
     try:
         yield
     except BaseException:
         outcome = "error"
         raise
     finally:
-        recorder.stages.append(
-            {
-                "name": name,
-                "duration_us": max(0, (time.monotonic_ns() - started) // 1000),
-                "outcome": outcome,
-            }
-        )
+        end = time.monotonic_ns()
+        if recorder.expired():
+            end = min(end, int(recorder.deadline_mono * 1_000_000_000))
+            truncate = True
+            recorder.truncated += 1
+        entry: dict[str, Any] = {
+            "name": name,
+            "duration_us": max(0, (end - started) // 1000),
+            "outcome": outcome,
+        }
+        if truncate:
+            entry["truncated"] = True
+        recorder.stages.append(entry)
 
 
 @dataclass
@@ -568,7 +606,7 @@ def _observed_stage(measurement: Measurement, name: str) -> Iterator[None]:
     if not _recording(measurement):
         yield
         return
-    started = time.monotonic_ns()
+    started = measurement.offset_us()
     # The stage the runner last marked is the one this work belongs to.
     parent = measurement.marks[-1][0] if measurement.marks else "startup"
     outcome = "ok"
@@ -578,14 +616,17 @@ def _observed_stage(measurement: Measurement, name: str) -> Iterator[None]:
         outcome = "error"
         raise
     finally:
-        measurement.remote_stages.setdefault(parent, []).append(
-            {
-                "stage": name,
-                "duration_us": max(0, (time.monotonic_ns() - started) // 1000),
-                "outcome": outcome,
-                "source": "runner",
-            }
-        )
+        end = measurement.offset_us()
+        end, truncate = _clamp_to_deadline(measurement, end)
+        entry: dict[str, Any] = {
+            "stage": name,
+            "duration_us": max(0, end - started),
+            "outcome": outcome,
+            "source": "runner",
+        }
+        if truncate:
+            entry["truncated"] = True
+        measurement.remote_stages.setdefault(parent, []).append(entry)
 
 
 def stage_observer(measurement: Measurement | None) -> StageObserver | None:
@@ -595,15 +636,77 @@ def stage_observer(measurement: Measurement | None) -> StageObserver | None:
     return _MeasurementObserver(measurement)
 
 
-def start_stage_recording() -> StageRecorder | None:
-    """Return a recorder when this process is part of a live experiment.
+def measurement_context(measurement: Measurement | None) -> dict[str, Any] | None:
+    """Return the selection a downstream producer needs to inherit.
 
-    The broker and the runner are separate processes with separate switches, so
-    a run needs both enabled for a complete timeline. When only the runner is
-    enabled the record still lands, and the missing producer is visible in
-    ``producers`` rather than silently absent.
+    The runner decides whether an operation is selected; a broker cannot make
+    that decision for itself, because it sees one call at a time and does not
+    know which attempt it belongs to. So the selected measurement travels with
+    the request: run id, operation, and an absolute wall-clock expiry, since
+    two processes share no monotonic clock.
     """
-    return StageRecorder() if _load().run is not None else None
+    if measurement is None or measurement.finished or measurement.past_deadline():
+        return None
+    return {
+        "run_id": measurement.run_id,
+        "measurement_id": measurement.measurement_id,
+        "operation": measurement.operation,
+        "expires_at": time.time() + max(0.0, measurement.deadline_mono - time.monotonic()),
+    }
+
+
+def start_stage_recording(context: Any) -> StageRecorder | None:
+    """Return a recorder when this process should record for that selection.
+
+    Recording requires an inherited selection, never just a local switch. A
+    broker sees one call at a time and cannot tell which attempt it belongs to,
+    so on its own it cannot know whether the operation was selected -- and a
+    broker that kept measuring after the runner stopped would report time the
+    experiment was not collecting for. ``None`` therefore means "not selected"
+    and records nothing.
+
+    Beyond the local switch, the inherited selection must agree with this
+    process on the run id and on the operation being one this run selects, and
+    its deadline must not already have passed.
+
+    The inherited deadline can only ever shorten the local one -- the recorder
+    takes the earlier of the two -- so a caller cannot extend an experiment
+    past what this process was configured to run.
+    """
+    run = _load().run
+    if run is None or not isinstance(context, Mapping):
+        return None
+    if str(context.get("run_id") or "") != run.run_id:
+        return None
+    operation = str(context.get("operation") or "")
+    if operation and operation not in run.operations:
+        return None
+    inherited = _context_deadline(context)
+    if inherited is None:
+        return None
+    deadline = min(run.deadline_mono, inherited)
+    if time.monotonic() > deadline:
+        return None
+    return StageRecorder(deadline_mono=deadline)
+
+
+def _context_deadline(context: Mapping[str, Any]) -> float | None:
+    """Convert a caller's wall-clock expiry into this process's monotonic one."""
+    try:
+        expires_at = float(context.get("expires_at"))
+    except (TypeError, ValueError):
+        return None
+    remaining = expires_at - time.time()
+    if remaining <= 0:
+        return None
+    return time.monotonic() + remaining
+
+
+def expect_producer(measurement: Measurement | None, producer: str) -> None:
+    """Record that this path asked a producer for its fragment."""
+    if measurement is None or measurement.finished:
+        return
+    measurement.expected_producers.add(producer)
 
 
 def substage(observer: StageObserver | None, name: str) -> AbstractContextManager[None]:
@@ -717,7 +820,9 @@ def _timed_span(measurement: Measurement, name: str) -> Iterator[None]:
         raise
     finally:
         measurement.stack.pop()
-        record.duration_us = max(0, measurement.offset_us() - record.start_offset_us)
+        end, truncate = _clamp_to_deadline(measurement, measurement.offset_us())
+        record.duration_us = max(0, end - record.start_offset_us)
+        record.truncated = truncate
         if len(measurement.spans) < MAX_SPANS:
             measurement.spans.append(record)
         else:  # pragma: no cover - guarded by the ceiling in span()
@@ -762,6 +867,10 @@ def to_record(
     ended = measurement.ended_offset_us
     if ended is None:
         ended = measurement.offset_us()
+    # A producer this path asked for and did not hear from is missing coverage,
+    # not a quiet timeline. The design's `measurement_complete` covers both the
+    # boundaries collected and the producer fragments that were required.
+    missing = sorted(measurement.expected_producers - measurement.producers)
     record: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "measurement_id": measurement.measurement_id,
@@ -777,7 +886,10 @@ def to_record(
         "startup_outcome": outcome,
         "duration_us": ended,
         "measurement_complete": (
-            outcome != "incomplete" and measurement.dropped_spans == 0 and not measurement.expired
+            outcome != "incomplete"
+            and measurement.dropped_spans == 0
+            and not measurement.expired
+            and not missing
         ),
         "dropped_spans": measurement.dropped_spans,
         # Completion order is not timeline order: a nested span closes first.
@@ -793,26 +905,32 @@ def to_record(
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "facts": measurement.facts,
     }
+    if missing:
+        record["missing_producers"] = missing
     if failure_stage is not None:
         record["failure_stage"] = failure_stage
     return record
 
 
-class _SinkWriter:
-    """Append records to a JSONL file from a bounded background queue.
+class _Exporter:
+    """Publish records from a bounded background queue.
 
-    The record is produced while the sandbox is starting, so writing the file
-    on the attempt thread would put disk latency inside the measurement and let
-    a stalled filesystem look like slow startup. Records are queued instead and
-    drained by one daemon thread, which starts only once a live run has a
-    record to export. The queue is bounded: a sink that cannot keep up drops
-    records and counts them, rather than growing without limit or blocking.
+    Both destinations move off the attempt thread, not just the file. The
+    record is produced while the sandbox is starting, so anything synchronous
+    here -- a JSONL write, or a log handler that blocks on a slow socket, a
+    full disk or a synchronous shipper -- is charged to the startup latency the
+    profile exists to explain. Logging is not exempt just because it is the
+    established path.
+
+    One daemon thread drains the queue, and it starts only once a live run has
+    a record to export. The queue is bounded: an exporter that cannot keep up
+    drops records and counts them rather than growing without limit or
+    blocking the caller.
     """
 
-    def __init__(self, path: str, *, maxsize: int = SINK_QUEUE_MAX) -> None:
-        self.path = path
+    def __init__(self, *, maxsize: int = SINK_QUEUE_MAX) -> None:
         self.dropped = 0
-        self._queue: queue.Queue[str | None] = queue.Queue(maxsize=maxsize)
+        self._queue: queue.Queue[tuple[str, str | None] | None] = queue.Queue(maxsize=maxsize)
         self._lock = threading.Lock()
         self._pending = 0
         self._closing = False
@@ -824,7 +942,7 @@ class _SinkWriter:
         self._thread.start()
         atexit.register(self._flush_before_exit)
 
-    def offer(self, line: str) -> None:
+    def offer(self, line: str, sink: str | None) -> None:
         """Queue one record. Never blocks and never raises."""
         with self._lock:
             if self._closing:
@@ -833,7 +951,7 @@ class _SinkWriter:
             # observe a decrement it did not earn.
             self._pending += 1
         try:
-            self._queue.put_nowait(line)
+            self._queue.put_nowait((line, sink))
         except queue.Full:
             with self._lock:
                 self._pending -= 1
@@ -841,30 +959,35 @@ class _SinkWriter:
 
     def _run(self) -> None:
         while True:
-            line = self._queue.get()
+            item = self._queue.get()
             try:
-                if line is None:
+                if item is None:
                     return
-                self._write(line)
+                line, sink = item
+                self._publish(line, sink)
             finally:
                 with self._lock:
                     self._pending -= 1
 
-    def _write(self, line: str) -> None:
+    def _publish(self, line: str, sink: str | None) -> None:
+        """Log one record and, when configured, append it to the sink."""
+        logger.info("agent_operation_profile %s", line)
+        if not sink:
+            return
         try:
-            with open(self.path, "a", encoding="utf-8") as handle:
+            with open(sink, "a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
         except OSError as exc:
-            # One warning per writer: a broken path would otherwise log on
+            # One warning per exporter: a broken path would otherwise log on
             # every record for the length of the experiment.
             with self._lock:
                 first = not self._warned
                 self._warned = True
             if first:
-                logger.warning("operation profiling sink %s is unavailable (%s)", self.path, exc)
+                logger.warning("operation profiling sink %s is unavailable (%s)", sink, exc)
 
     def flush(self, timeout: float = 2.0) -> None:
-        """Wait until queued records are written, or the timeout expires."""
+        """Wait until queued records are published, or the timeout expires."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             with self._lock:
@@ -873,7 +996,7 @@ class _SinkWriter:
             time.sleep(0.005)
 
     def close(self, timeout: float = 2.0) -> None:
-        """Drain, stop the writer thread, and report anything it dropped."""
+        """Drain, stop the exporter thread, and report anything it dropped."""
         with self._lock:
             self._closing = True
         self.flush(timeout)
@@ -884,57 +1007,57 @@ class _SinkWriter:
             report, self._drops_reported = self.dropped > 0 and not self._drops_reported, True
             dropped = self.dropped
         if report:
-            logger.warning("operation profiling sink dropped %d record(s)", dropped)
+            logger.warning("operation profiling exporter dropped %d record(s)", dropped)
 
     def _flush_before_exit(self) -> None:
         """Best-effort drain at interpreter shutdown, bounded by the timeout."""
         self.close(timeout=2.0)
 
 
-_SINK_LOCK = threading.Lock()
-_SINK: _SinkWriter | None = None
+_EXPORT_LOCK = threading.Lock()
+_EXPORTER: _Exporter | None = None
 
 
-def _sink_for(path: str) -> _SinkWriter:
-    """Return the writer for a path, starting one on the first record."""
-    global _SINK
-    with _SINK_LOCK:
-        if _SINK is None or _SINK.path != path:
-            previous, _SINK = _SINK, _SinkWriter(path)
-            if previous is not None:
-                previous.close()
-        return _SINK
+def _exporter() -> _Exporter:
+    """Return the process exporter, starting it on the first record."""
+    global _EXPORTER
+    with _EXPORT_LOCK:
+        if _EXPORTER is None:
+            _EXPORTER = _Exporter()
+        return _EXPORTER
 
 
 def flush_sink(timeout: float = 2.0) -> None:
-    """Wait for queued records to reach the sink."""
-    with _SINK_LOCK:
-        writer = _SINK
-    if writer is not None:
-        writer.flush(timeout)
+    """Wait for queued records to be logged and written."""
+    with _EXPORT_LOCK:
+        exporter = _EXPORTER
+    if exporter is not None:
+        exporter.flush(timeout)
 
 
 def close_sink(timeout: float = 2.0) -> None:
     """Flush and stop the export thread, if one was ever started."""
-    global _SINK
-    with _SINK_LOCK:
-        writer, _SINK = _SINK, None
-    if writer is not None:
-        writer.close(timeout)
+    global _EXPORTER
+    with _EXPORT_LOCK:
+        exporter, _EXPORTER = _EXPORTER, None
+    if exporter is not None:
+        exporter.close(timeout)
 
 
 def _emit(record: dict[str, Any]) -> None:
-    """Log one finished record and hand it to the export thread."""
+    """Hand one finished record to the export thread.
+
+    Nothing here touches a destination: logging blocks just as a file write
+    does, and both would otherwise land inside the startup being measured.
+    """
     try:
         line = json.dumps(record, separators=(",", ":"), default=str)
     except (TypeError, ValueError):  # pragma: no cover - facts are bounded already
         logger.warning("operation profiling could not serialize a measurement")
         return
-    logger.info("agent_operation_profile %s", line)
-    sink = (os.environ.get(ENV_PROFILING_SINK) or "").strip()
-    if sink:
-        # Never on the attempt thread: see _SinkWriter.
-        _sink_for(sink).offer(line)
+    sink = (os.environ.get(ENV_PROFILING_SINK) or "").strip() or None
+    # Never on the attempt thread: see _Exporter.
+    _exporter().offer(line, sink)
 
 
 def finish(
@@ -1020,9 +1143,11 @@ __all__ = [
     "bind",
     "close_sink",
     "discard",
+    "expect_producer",
     "finish",
     "flush_sink",
     "mark",
+    "measurement_context",
     "parse_run",
     "reason",
     "reset_cache",

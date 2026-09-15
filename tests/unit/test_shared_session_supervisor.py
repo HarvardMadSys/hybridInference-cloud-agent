@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import time
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -2291,6 +2292,12 @@ def test_broker_sub_stages_are_reported_when_this_process_is_profiling(monkeypat
         activation_generation=1,
         has_settled_context=True,
         manifest=_members(),
+        profiling={
+            "run_id": "broker-stages-1",
+            "measurement_id": "msm_x",
+            "operation": "attempt.startup",
+            "expires_at": time.time() + 60,
+        },
     )
 
     names = [item["name"] for item in lease.stages]
@@ -2299,3 +2306,103 @@ def test_broker_sub_stages_are_reported_when_this_process_is_profiling(monkeypat
     # Only durations travel: the caller's timeline cannot place them.
     assert all("start_offset_us" not in item for item in lease.stages)
     assert lease.container_action == "create"
+
+
+def _enable_broker_profiling(monkeypatch) -> None:
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
+    monkeypatch.setenv(
+        operation_profiling.ENV_PROFILING_RUN,
+        json.dumps(
+            {
+                "run_id": "broker-context-1",
+                "operations": ["attempt.startup"],
+                "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(),
+                "max_operations": 10,
+            }
+        ),
+    )
+    operation_profiling.reset_cache()
+
+
+def test_a_lapsed_selection_stops_the_broker_recording(monkeypatch):
+    """A run that already expired must not collect container sub-stages.
+
+    Regression: the broker checked only that its cached run existed, so it
+    kept measuring after the runner had stopped.
+    """
+    _enable_broker_profiling(monkeypatch)
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        profiling={
+            "run_id": "broker-context-1",
+            "measurement_id": "msm_gone",
+            "operation": "attempt.startup",
+            "expires_at": time.time() - 1,
+        },
+    )
+
+    assert lease.stages == []
+    # The action is a fact, so it survives the lapsed measurement.
+    assert lease.container_action == "create"
+
+
+def test_a_selection_for_another_run_is_refused(monkeypatch):
+    """The broker honours only the run configured here."""
+    _enable_broker_profiling(monkeypatch)
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        profiling={
+            "run_id": "some-other-run",
+            "measurement_id": "msm_x",
+            "operation": "attempt.startup",
+            "expires_at": time.time() + 60,
+        },
+    )
+
+    assert lease.stages == []
+
+
+def test_a_live_selection_records_container_sub_stages(monkeypatch):
+    """With a matching, unexpired selection the broker reports its work."""
+    _enable_broker_profiling(monkeypatch)
+    manager = _Manager()
+
+    def timed_start(spec, *, network_phase=None, facts=None, observer=None):
+        with operation_profiling.substage(observer, "container_start"):
+            return _Manager.start(manager, spec, network_phase=network_phase, facts=facts)
+
+    monkeypatch.setattr(manager, "start", timed_start)
+    supervisor = SharedChatSessionSupervisor(manager)
+
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        profiling={
+            "run_id": "broker-context-1",
+            "measurement_id": "msm_x",
+            "operation": "attempt.startup",
+            "expires_at": time.time() + 60,
+        },
+    )
+
+    assert [item["name"] for item in lease.stages] == ["container_start"]

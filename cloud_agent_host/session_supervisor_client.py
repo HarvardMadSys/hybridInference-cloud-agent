@@ -127,6 +127,7 @@ class SessionSupervisorClient:
         has_settled_context: bool,
         members: list[dict[str, Any]],
         expected_container_id: str | None = None,
+        profiling: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Lease one member without excluding turns on sibling members."""
         return self._shared_request(
@@ -149,6 +150,7 @@ class SessionSupervisorClient:
                 "owner": owner,
                 "activation_generation": activation_generation,
                 "has_settled_context": has_settled_context,
+                "profiling": profiling,
             },
         )
 
@@ -158,13 +160,14 @@ class SessionSupervisorClient:
         *,
         token: str,
         launch: ResidentLaunch,
+        profiling: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Open or reuse one member's supervisor-owned live process."""
         return self._shared_request(
             "POST",
             thread_id,
             "resident",
-            payload={"token": token, "launch": asdict(launch)},
+            payload={"token": token, "launch": asdict(launch), "profiling": profiling},
         )
 
     def start_shared_turn(

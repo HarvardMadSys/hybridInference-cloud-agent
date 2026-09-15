@@ -595,13 +595,15 @@ class SharedChatSessionSupervisor:
         has_settled_context: bool,
         manifest: list[SharedMemberManifest],
         expected_container_id: str | None = None,
+        profiling: dict[str, Any] | None = None,
     ) -> SharedSessionLease:
         """Start one group if needed and lease only the addressed member."""
         # Container actions are always reported: they are a couple of string
         # assignments, and the runner needs them whenever it is profiling.
-        # Durations are collected only when this process is part of a run.
+        # Durations are collected only for a selection this process can honour:
+        # its own switch, its own run, and the caller's inherited deadline.
         facts = SandboxActionFacts()
-        recorder = start_stage_recording()
+        recorder = start_stage_recording(profiling)
         self.register_manifest(
             spec,
             manifest,
@@ -664,11 +666,12 @@ class SharedChatSessionSupervisor:
         thread_id: str,
         token: str,
         launch: ResidentLaunch,
+        profiling: dict[str, Any] | None = None,
     ) -> SharedSessionDescriptor:
         """Open or reuse the member transport after workspace preparation."""
         # Only durations are gated: the member's action is reported either way,
         # because the runner needs it to classify the startup path.
-        recorder = start_stage_recording()
+        recorder = start_stage_recording(profiling)
         with self._lock:
             group, member = self._leased_member(thread_id, token)
             self._require_mutation_admission(group)
