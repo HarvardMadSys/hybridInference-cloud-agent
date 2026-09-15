@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -1422,3 +1423,98 @@ class TestCapabilitySelectionSemantics:
             ToolPolicy.ALLOW,
         }
         assert CapabilityKind.TOOL.value == "tool"
+
+
+class _CountingBody(httpx.AsyncByteStream):
+    """A reply body that records how much of itself was read."""
+
+    def __init__(self, chunk: bytes, count: int) -> None:
+        self._chunk = chunk
+        self._count = count
+        self.pulled = 0
+
+    async def __aiter__(self) -> Any:
+        for _ in range(self._count):
+            self.pulled += 1
+            yield self._chunk
+
+    async def aclose(self) -> None:
+        """Nothing to release; the bytes are in memory already."""
+
+
+def _answer_with(monkeypatch: pytest.MonkeyPatch, stream: Any) -> None:
+    """Make the next ``httpx.AsyncClient`` answer with ``stream`` as its body."""
+    import httpx
+
+    real_client = httpx.AsyncClient
+
+    def factory(**kwargs: Any) -> Any:
+        kwargs.pop("transport", None)
+        return real_client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200, headers={"content-type": "application/json"}, stream=stream
+                )
+            ),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+
+
+class TestTheOAuthPostsAreBounded:
+    """The two posts whose replies this service reads and keeps itself.
+
+    Registration returns a client secret and the token endpoint returns the
+    access and refresh tokens. Both are served by the authorization server --
+    the one input in the OAuth path the user did not choose -- so the size of
+    the body has to be decided here, while it arrives, rather than after it is
+    already in memory.
+    """
+
+    async def test_a_registration_reply_is_refused_while_it_is_still_arriving(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi import HTTPException
+
+        from cloud_agent.mcp import transports as transports_module
+        from cloud_agent.mcp.net_policy import EgressPolicy
+
+        monkeypatch.setattr(transports_module, "MAX_RESPONSE_BYTES", 1024)
+        stream = _CountingBody(b"x" * 256, 64)
+        _answer_with(monkeypatch, stream)
+
+        with pytest.raises(HTTPException):
+            await mcp_connections._post_json(
+                None,
+                "https://127.0.0.1:9/register",
+                {"client_name": "cloud-agent"},
+                policy=EgressPolicy(allow_private=True),
+            )
+        assert stream.pulled < 64, "the whole registration reply was read before the limit applied"
+
+    async def test_a_token_reply_is_refused_while_it_is_still_arriving(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cloud_agent.mcp import transports as transports_module
+        from cloud_agent.mcp.net_policy import EgressPolicy
+        from cloud_agent.mcp.transports import TransportError
+
+        monkeypatch.setattr(transports_module, "MAX_RESPONSE_BYTES", 1024)
+        stream = _CountingBody(b"x" * 256, 64)
+        _answer_with(monkeypatch, stream)
+
+        class _Request:
+            """The parts of a token request ``_post_form`` reads."""
+
+            url = "https://127.0.0.1:9/token"
+
+            def form(self) -> dict[str, str]:
+                return {"grant_type": "authorization_code", "code": "the-code"}
+
+            def headers(self) -> dict[str, str]:
+                return {"content-type": "application/x-www-form-urlencoded"}
+
+        with pytest.raises(TransportError):
+            await mcp_connections._post_form(_Request(), policy=EgressPolicy(allow_private=True))
+        assert stream.pulled < 64, "the whole token reply was read before the limit applied"

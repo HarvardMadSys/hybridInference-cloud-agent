@@ -23,6 +23,7 @@ somebody else made.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import secrets
 from collections.abc import Mapping
@@ -1161,7 +1162,7 @@ async def _post_json(
     import httpx
 
     from cloud_agent.mcp.net_policy import EndpointRejected, check_addresses, validate_endpoint
-    from cloud_agent.mcp.transports import pinned_transport
+    from cloud_agent.mcp.transports import TransportError, pinned_transport, read_bounded
 
     try:
         endpoint = validate_endpoint(url, policy)
@@ -1175,17 +1176,30 @@ async def _post_json(
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(15.0), follow_redirects=False, transport=pinned_transport()
         ) as client:
-            response = await client.post(
-                endpoint.url, json=dict(body), headers={"accept": "application/json"}
+            # Streamed, so the size limit is applied while the body arrives
+            # rather than to a body the registration server already chose the
+            # size of. Registration is the one request here whose *response*
+            # contains a client secret.
+            response = await client.send(
+                client.build_request(
+                    "POST",
+                    endpoint.url,
+                    json=dict(body),
+                    headers={"accept": "application/json"},
+                ),
+                stream=True,
             )
-    except httpx.HTTPError as exc:
+            try:
+                status = response.status_code
+                payload = await read_bounded(response)
+            finally:
+                await response.aclose()
+    except (httpx.HTTPError, TransportError) as exc:
         raise _bad_request(f"the authorization server could not be reached: {exc}") from exc
-    if response.status_code >= 400:
-        raise _bad_request(
-            f"the authorization server answered {response.status_code} to registration"
-        )
+    if status >= 400:
+        raise _bad_request(f"the authorization server answered {status} to registration")
     try:
-        document = response.json()
+        document = json.loads(payload or b"{}")
     except ValueError as exc:
         raise _bad_request("the registration response is not JSON") from exc
     if not isinstance(document, Mapping):
@@ -1383,7 +1397,7 @@ async def _post_form(request: oauth.TokenRequest, *, policy: EgressPolicy) -> Ma
     import httpx
 
     from cloud_agent.mcp.net_policy import EndpointRejected, check_addresses, validate_endpoint
-    from cloud_agent.mcp.transports import TransportError, pinned_transport
+    from cloud_agent.mcp.transports import TransportError, pinned_transport, read_bounded
 
     try:
         endpoint = validate_endpoint(request.url, policy)
@@ -1397,22 +1411,31 @@ async def _post_form(request: oauth.TokenRequest, *, policy: EgressPolicy) -> Ma
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(20.0), follow_redirects=False, transport=pinned_transport()
         ) as client:
-            response = await client.post(
-                endpoint.url, data=request.form(), headers=request.headers()
+            # Streamed for the same reason as everywhere else on this path: a
+            # token response is a body a server chooses the size of, and this
+            # one carries the access and refresh tokens.
+            response = await client.send(
+                client.build_request(
+                    "POST", endpoint.url, data=request.form(), headers=request.headers()
+                ),
+                stream=True,
             )
-    except httpx.HTTPError as exc:
+            try:
+                status = response.status_code
+                payload = await read_bounded(response)
+            finally:
+                await response.aclose()
+    except (httpx.HTTPError, TransportError) as exc:
         # Normalized here rather than left to escape: this is the second HTTP
         # client in the OAuth path, and the fetcher above already made this
         # conversion. A raw transport error would leave the browser at a 500
         # with no diagnosis, which is a worse version of the failure the caller
         # already knows how to report.
         raise TransportError(f"the token endpoint could not be reached: {exc}") from exc
-    if response.status_code >= 400:
-        raise TransportError(
-            f"the token endpoint answered {response.status_code}", kind="needs_authorization"
-        )
+    if status >= 400:
+        raise TransportError(f"the token endpoint answered {status}", kind="needs_authorization")
     try:
-        document = response.json()
+        document = json.loads(payload or b"{}")
     except ValueError as exc:
         raise TransportError("the token response is not JSON") from exc
     if not isinstance(document, Mapping):
