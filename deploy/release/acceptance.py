@@ -105,11 +105,40 @@ class AcceptanceFailure(Exception):
     """The release did not deploy, or what came up is not what it named."""
 
 
+#: Every port this process has handed out. Held because the kernel will offer
+#: the same number again the moment the probe socket closes, and two acceptance
+#: stacks on one machine that publish the same port is the accident
+#: `test_two_acceptances_on_one_machine_do_not_share_a_port` exists to catch.
+_HANDED_OUT_PORTS: set[int] = set()
+
+#: Bounded so that an exhausted or misbehaving ephemeral range reports a failure
+#: rather than spinning. The range is tens of thousands of ports wide and a
+#: process here asks for a handful of them.
+_FREE_PORT_ATTEMPTS = 100
+
+
 def free_port() -> int:
-    """A port nothing is listening on, for a stack that shares a machine."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
+    """A port nothing is listening on, and one this process has not used.
+
+    Both halves are load-bearing. "Nothing is listening" is what the kernel
+    answers; "not used" is what the caller needs, and it does not follow from
+    the first — the probe socket is closed before this returns, which releases
+    the port, and the kernel is free to offer the same number to the very next
+    call. On 2026-09-15 it did: six calls returned 58361, 60585, 50619, 33503,
+    33503, 45119, and the acceptance that requires two stacks on one machine not
+    to publish the same port failed on the duplicate.
+    """
+    for _ in range(_FREE_PORT_ATTEMPTS):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = int(probe.getsockname()[1])
+        if port not in _HANDED_OUT_PORTS:
+            _HANDED_OUT_PORTS.add(port)
+            return port
+    raise AcceptanceFailure(
+        f"no port outside the {len(_HANDED_OUT_PORTS)} this process already holds "
+        f"was free in {_FREE_PORT_ATTEMPTS} attempts"
+    )
 
 
 def required_variables(compose: Path) -> set[str]:

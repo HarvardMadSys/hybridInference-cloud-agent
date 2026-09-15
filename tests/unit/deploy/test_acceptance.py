@@ -113,6 +113,55 @@ def test_two_acceptances_on_one_machine_do_not_share_a_port() -> None:
     assert first["COMPOSE_PROJECT"] == "one" and second["COMPOSE_PROJECT"] == "two"
 
 
+class _ProbeSocket:
+    """Stands in for `socket.socket()`: reports the port the kernel is told to."""
+
+    def __init__(self, port: int) -> None:
+        self._port = port
+
+    def bind(self, _address: tuple[str, int]) -> None:
+        return None
+
+    def getsockname(self) -> tuple[str, int]:
+        return ("127.0.0.1", self._port)
+
+    def __enter__(self) -> _ProbeSocket:
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+
+def _offered(monkeypatch: pytest.MonkeyPatch, ports: list[int], held: set[int]) -> None:
+    """Make `free_port` see exactly these ports, and start from exactly `held`."""
+    offered = iter(ports)
+    monkeypatch.setattr(ac, "_HANDED_OUT_PORTS", held)
+    monkeypatch.setattr(ac.socket, "socket", lambda: _ProbeSocket(next(offered)))
+
+
+def test_free_port_skips_a_port_it_has_already_handed_out(monkeypatch) -> None:
+    """The kernel offers the port straight back once the probe socket closes.
+
+    This is the 2026-09-15 CI failure made reproducible. Six calls returned
+    58361, 60585, 50619, 33503, 33503, 45119; the duplicate failed
+    `test_two_acceptances_on_one_machine_do_not_share_a_port` above, on a commit
+    that changed nothing in this file. Asking the kernel to repeat itself is not
+    something a test can do, so the repetition is supplied — and the assertion
+    above is left exactly as it was, because it was right.
+    """
+    _offered(monkeypatch, [33503, 33503, 45119], held=set())
+
+    assert [ac.free_port(), ac.free_port()] == [33503, 45119]
+
+
+def test_free_port_reports_an_exhausted_search_instead_of_spinning(monkeypatch) -> None:
+    """A range with nothing left to give is a failure, not a hang."""
+    _offered(monkeypatch, [33503] * ac._FREE_PORT_ATTEMPTS, held={33503})
+
+    with pytest.raises(ac.AcceptanceFailure, match="was free in"):
+        ac.free_port()
+
+
 def test_an_unknown_variant_is_refused() -> None:
     with pytest.raises(ac.AcceptanceFailure, match="unknown variant"):
         ac.synthetic_environment(COMPOSE, "console", "p")
