@@ -977,6 +977,20 @@ async def _proxy(
                     },
                 )
             chunks.append(chunk)
+    except httpx.HTTPError as exc:
+        # A server that stops answering mid-body is the same event as one that
+        # never answered, and it has to leave as the same 502: an unconverted
+        # transport error becomes a 500 whose message says nothing, and the
+        # caller cannot tell it from this service breaking.
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": {
+                    "type": "server_error",
+                    "message": f"The {server.name!r} MCP server stopped answering.",
+                }
+            },
+        ) from exc
     finally:
         await upstream.aclose()
         await client.aclose()

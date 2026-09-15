@@ -880,3 +880,35 @@ async def test_a_changed_connection_cannot_prompt_for_an_out_of_scope_tool(
     assert upstream.requests == []
     assert store.created_invocations == []
     assert store.looked_up == []
+
+
+class _StallingBody(httpx.AsyncByteStream):
+    """An upstream reply that dies after its first chunk."""
+
+    async def __aiter__(self) -> Any:
+        yield b'{"jsonrpc":"2.0","id":1,'
+        raise httpx.ReadTimeout("the upstream stopped answering")
+
+    async def aclose(self) -> None:
+        """Nothing to release."""
+
+
+async def test_an_upstream_that_stops_answering_is_a_bad_gateway(monkeypatch, store) -> None:
+    """A mid-body failure is the same event as no answer, and leaves as one.
+
+    Unconverted it becomes a 500 whose body says nothing, which the caller
+    cannot tell from this service breaking -- and the handler that records an
+    approved call's outcome never runs.
+    """
+    upstream = Upstream()
+    upstream.handler = lambda request: httpx.Response(  # type: ignore[method-assign]
+        200, headers={"content-type": "application/json"}, stream=_StallingBody()
+    )
+
+    async with _relay(monkeypatch, store, upstream) as api:
+        response = await api.post(
+            f"/v1/agent/mcp/{_ALIAS}", json=_rpc("initialize"), headers=_auth()
+        )
+
+    assert response.status_code == 502
+    assert "MCP server stopped answering" in response.text
