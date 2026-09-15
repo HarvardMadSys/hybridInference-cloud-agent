@@ -1,7 +1,7 @@
 # 沙盒启动时间测量设计
 
-日期：2026-09-14。状态：**PR-1 切片已实现**（开关、run descriptor、runner 侧启动阶段计时、
-attempt 关联、JSONL 导出），CP 存储、Admin 读面和 benchmark 报告仍未实现。
+日期：2026-09-14。状态：**已实现开关、run descriptor、分阶段计时、四条启动路径分类、
+关键内部阶段与自身开销基准**；CP 存储、Admin 读面和端到端 benchmark 报告仍未实现。
 代码依据：本地 checkout `01cfbae`；本文描述该版本的实际路径，不代表线上耗时。
 
 实现现状见 [§9 实施顺序与验收](#9-实施顺序与验收)：本文的字段语义、时钟与失败处理
@@ -121,6 +121,7 @@ daemon/containerd/Kata 内部边界；第一版不把一个 `docker start` 时�
 ## 4. 必须分开比较的启动路径
 
 实际执行完后由动作分类，不能只靠 claim 时的 `context_status` 猜测。
+**2026-09-14 已实现**：动作由 supervisor 在 lease/descriptor 中上报（§9.1）。
 
 | `startup_path` | 定义 |
 | --- | --- |
@@ -349,7 +350,7 @@ benchmark 报告至少包含：环境 manifest、实验顺序、全部 attempt I
 3. **Admin 读面**：启动摘要、路径过滤、可展开时间线、趋势及慢样本跳转。
    展示有明确起止时间的实验，常驻监测和告警不属初版；网页访问不刷新 Gateway 或重做测量。
 
-### 9.1 已交付的切片（PR-1，runner 侧）
+### 9.1 已交付的切片
 
 `cloud_agent_host/operation_profiling.py` 实现开关、run descriptor 和纯计时 collector；
 `runner.run_once()` 在 claim 前开始一次 `attempt.startup` 测量，`_run_shared_live_attempt()`
@@ -362,8 +363,37 @@ benchmark 报告至少包含：环境 manifest、实验顺序、全部 attempt I
   以及 `dispatched`/`failed`/`cancelled`/`lease_lost`/`incomplete` 结果。记录含
   `duration_us` 总耗时；最后一个阶段由 `finish()` 的收尾边界关闭，所以**失败或仍在
   进行的那一段也有时长**，不会只剩一个没有耗时的 milestone。
-- attempt/job/thread/sandbox/runtime 关联，`context_status`、`resident_action`、
-  `workspace_action` 和可证明的 `startup_path`；结构化日志加可选 JSONL。
+- attempt/job/thread/sandbox/runtime 关联，`context_status`、`workspace_action`；
+  结构化日志加可选 JSONL。
+
+**四条启动路径按实际动作分类。** supervisor 在 lease 里返回本次 activation 对容器的
+动作（`create`/`start`/`reuse`/`unknown`）和 member CLI 的动作
+（`new`/`resume`/`reuse`/`unknown`），runner 据此得出 `startup_path`：
+
+| container_action | resident_action | `startup_path` |
+| --- | --- | --- |
+| `create` | 任意 | `new_group` |
+| `start` | 任意 | `resume_stopped` |
+| `reuse` | `reuse` | `reuse_live` |
+| `reuse` | `new` / `resume` | `resume_running` |
+| 其他 | 其他 | `unknown` |
+
+动作由真正执行它的代码上报，不是事后从容器状态推断：先停后启的容器和从未停过的容器
+在跑起来之后完全一样。`create` 优先于紧随其后的 `start`，否则“这次付了创建代价”会被
+记成“这次发现它是停的”。动作**不依赖开关**——它是事实不是测量，所以即使 broker 没开
+profiling，runner 仍能正确分类路径。
+
+**关键内部阶段。** 跨进程的时长以 duration 形式挂在它所属的本地阶段下：
+
+- broker 侧经 lease/descriptor 返回：`container_create`、`container_start`、
+  `phase_network`、`service_hosts_sync`、`cli_spawn`。
+- runner 侧直接记入测量：`agent_network` 阶段的 `network_ensure`、
+  `bootstrap_guest_stop`、`network_attach_detach`、`bootstrap_guest_start`、
+  `service_hosts_sync`。
+
+子阶段带 `source`，不带 `start_offset_us`：另一个进程的单调时钟与本进程不可比，
+给它一个本地偏移会显得精确但毫无意义。记录用 `producers` 列出实际贡献者，
+broker 未开启时只显示 `["runner"]`，属于**局部覆盖**而不是静默缺失。
 
 三条开销与边界约束按 §0 的要求落实：
 
@@ -381,19 +411,40 @@ benchmark 报告至少包含：环境 manifest、实验顺序、全部 attempt I
   记录在截止点收尾而不是在发现时刻收尾，并标 `measurement_complete=false` 与
   `profiling_stopped=expired`；已采到的部分照常保留。
 
+### 9.2 自身开销实测
+
+`scripts/bench_startup_profiling_overhead.py` 用真实的调用序列（1×`start_operation`、
+1×`span`、12×`mark`、8 个 attribute、1×`finish`）对比四个 cohort，n=20000/档，
+CPython 3.12.13 / macOS arm64：
+
+| cohort | p50 | p95 | 相对 `bare` 的均值 |
+| --- | --- | --- | --- |
+| `bare`（无埋点） | 0.375 | 0.417 | — |
+| `off`（开关关闭） | 0.750 | 0.833 | **+0.36 µs** |
+| `on`（开启、无 sink） | 20.96 | 22.46 | **+20.5 µs** |
+| `onsink`（开启 + JSONL） | 25.33 | 28.29 | **+25.1 µs** |
+
+结论与边界：
+
+- **关闭不是字面意义的零开销**，而是约 18 次 no-op 调用 ≈ 0.36 µs/attempt；且
+  `runner.py` 把唯一一次多属性 `set_attributes` 放在 `if measurement is not None:` 里，
+  实际关闭路径比 `off` cohort 还略低。相对真实启动（§8 中为毫秒到秒级）可忽略，
+  但不声称“绝对零成本”。
+- **开启后约 +25 µs/attempt**，主要来自构造记录与 `json.dumps`，不是取时钟或打点。
+  远低于 §9 验收建议的“P95 增量不超过 10 ms 或基线 1%（取较大者）”。
+- 本基准测的是**埋点自身的开销**，不是端到端启动：没有 claim、容器、supervisor、
+  CLI 或网络。合成速率（约 40k 记录/秒）下的丢弃计数不适用于真实启动——一次启动只
+  产生一条记录。
+
 与目标形态的差距，后续切片补齐：
 
 - **选择发生在 runner，不在 CP。** 因此 `max_operations` 是单进程预算，不是跨 replica 配额；
-  服务重启不续期这一条由 run descriptor 的绝对 `expires_at` 保证。
+  服务重启不续期这一条由 run descriptor 的绝对 `expires_at` 保证。broker 侧只校验开关与
+  有效期，不参与名额分配。
 - **没有 CP 持久化、启动摘要 endpoint 和 Admin 读面**，数据目前是日志与 JSONL。
-- **`resume_stopped` 与 `resume_running` 还不能区分**：容器的 start/reuse 动作在 supervisor
-  内部，lease 未返回该事实，所以 `startup_path` 只给出 `new_group`、`reuse_live` 或
-  `unknown`，不猜测。
-- **阶段名来自 runner 现有边界**：`container_create`、`bootstrap_guest_stop/start`、
-  `setup_script`、`cli_spawn`、`prompt_ack` 等子阶段仍在 broker/supervisor/driver 内部，
-  尚未拆到本层。
-- **没有 post-dispatch 片段**（首输出、`prompt_ack`），也没有 `readiness_source` 的
-  runtime 差异。
+- **仍有阶段在更内层**：`setup_script` 的脚本内部分解、`readiness_source` 的 runtime
+  差异（Claude 的 process-alive 与 Codex 的 protocol ack），以及 `prompt_ack`。
+- **没有 post-dispatch 片段**（首输出）。
 
 计时正确性的验收使用可控时钟和固定延迟 fake，性能结论使用真实运行：
 

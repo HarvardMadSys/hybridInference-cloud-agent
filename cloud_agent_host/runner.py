@@ -1542,6 +1542,24 @@ def _stream_shared_agent_turn(
         stream.close()
 
 
+def _classify_startup_path(container_action: str, resident_action: str) -> str:
+    """Name the startup path from the actions the supervisor actually took.
+
+    The four paths differ by what was done, not by how long it took, and the
+    container's state afterwards cannot tell them apart: a stop followed by a
+    start and a container that never stopped both end up running. So this reads
+    the supervisor's report rather than inferring from the timeline, and says
+    ``unknown`` when the actions do not identify a path instead of guessing.
+    """
+    if container_action == "create":
+        return "new_group"
+    if container_action == "start":
+        return "resume_stopped"
+    if container_action == "reuse":
+        return "reuse_live" if resident_action == "reuse" else "resume_running"
+    return "unknown"
+
+
 def _stage(measurement: operation_profiling.Measurement | None, name: str) -> str:
     """Record a stage boundary and return the name.
 
@@ -1738,6 +1756,13 @@ def _run_shared_live_attempt(
             context_invalid = has_context and exc.status_code == 410
             raise
         lease_token = str(lease["token"])
+        container_action = str(lease.get("container_action") or "unknown")
+        # Sub-stages the broker measured inside this call. They are durations,
+        # not offsets, so they hang off the stage they happened in rather than
+        # being placed on this process's timeline.
+        operation_profiling.attach_remote_stages(
+            measurement, "supervisor_acquire", lease.get("stages"), source="broker"
+        )
         if int(lease["activation_generation"]) != activation_generation:
             raise SandboxError("shared supervisor returned the wrong activation generation")
         if reservation.get("container_id") not in {None, lease.get("container_id")}:
@@ -1849,10 +1874,15 @@ def _run_shared_live_attempt(
             return 2
 
         stage = _stage(measurement, "agent_network")
+        # This manager runs in the runner's own process, so its sub-stages are
+        # timed directly onto the measurement. On the warm path the Kata guest
+        # restart never happens, and a timeline without those stages is the
+        # answer rather than a gap.
+        network_observer = operation_profiling.stage_observer(measurement)
         if has_context:
-            manager.require_network_phase(spec, "agent")
+            manager.require_network_phase(spec, "agent", observer=network_observer)
         else:
-            manager.transition_to_agent_network(spec)
+            manager.transition_to_agent_network(spec, observer=network_observer)
         stage = _stage(measurement, "terminal_resume")
         control.resume_terminals()
         terminals_suspended = False
@@ -1879,7 +1909,6 @@ def _run_shared_live_attempt(
         )
         stage = _stage(measurement, "resident_start")
         resident_descriptor: dict[str, Any] | None = None
-        resident_reused = False
         if lease.get("resident_state") == "live":
             try:
                 resident_descriptor = supervisor.ensure_shared_resident(
@@ -1887,7 +1916,6 @@ def _run_shared_live_attempt(
                     token=lease_token,
                     launch=launch,
                 )
-                resident_reused = True
             except SessionSupervisorError:
                 # A process-fixed model/MCP setting changed, the process died,
                 # or this broker restarted. Rotate only this member's grant and
@@ -1921,22 +1949,17 @@ def _run_shared_live_attempt(
                 f"shared supervisor returned invalid resident context {context_status!r}"
             )
         process_generation = int(resident_descriptor["process_generation"])
+        resident_action = str(resident_descriptor.get("resident_action") or "unknown")
+        operation_profiling.attach_remote_stages(
+            measurement, "resident_start", resident_descriptor.get("stages"), source="broker"
+        )
         if measurement is not None:
-            # The startup path, as far as the runner can prove it. Telling a
-            # stopped container from a running one needs the supervisor's
-            # container action, which this slice does not carry yet, so the two
-            # resume paths stay `unknown` here rather than guessed.
             operation_profiling.set_attributes(
                 measurement,
                 context_status=context_status,
-                resident_action=(
-                    "reuse" if resident_reused else ("new" if not has_context else "resume")
-                ),
-                startup_path=(
-                    "new_group"
-                    if not has_context
-                    else ("reuse_live" if resident_reused else "unknown")
-                ),
+                container_action=container_action,
+                resident_action=resident_action,
+                startup_path=_classify_startup_path(container_action, resident_action),
                 process_generation=process_generation,
                 container_id=str(lease["container_id"]),
                 workspace_action=(

@@ -631,3 +631,147 @@ def test_expiry_stops_new_operations_without_touching_the_rest(monkeypatch, cloc
     assert profiling.start_operation(operation="attempt.startup") is not None
     clock.advance(120 * 1_000_000)
     assert profiling.start_operation(operation="attempt.startup", host="host-a") is None
+
+
+def test_remote_stages_hang_off_the_stage_they_belong_to(monkeypatch, caplog, clock):
+    """Another producer's durations are attached, attributed and bounded."""
+    _enable(monkeypatch)
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+
+    profiling.mark(measurement, "supervisor_acquire")
+    clock.advance(900_000)
+    profiling.mark(measurement, "sandbox_running")
+    clock.advance(1_000)
+    attached = profiling.attach_remote_stages(
+        measurement,
+        "supervisor_acquire",
+        [
+            {"name": "container_start", "duration_us": 690_000, "outcome": "ok"},
+            {"name": "service_hosts_sync", "duration_us": 1_200},
+        ],
+        source="broker",
+    )
+    profiling.finish(measurement, outcome="dispatched")
+
+    record = _records(caplog)[0]
+    acquire = next(item for item in record["stages"] if item["stage"] == "supervisor_acquire")
+    other = next(item for item in record["stages"] if item["stage"] == "sandbox_running")
+    assert attached is True
+    assert acquire["children"] == [
+        {"stage": "container_start", "duration_us": 690_000, "outcome": "ok", "source": "broker"},
+        {"stage": "service_hosts_sync", "duration_us": 1_200, "outcome": "ok", "source": "broker"},
+    ]
+    # Durations from another clock domain are never given a local offset.
+    assert all("start_offset_us" not in child for child in acquire["children"])
+    assert "children" not in other
+    assert record["producers"] == ["runner", "broker"]
+
+
+def test_remote_stages_are_bounded_and_untrusted(monkeypatch, caplog):
+    """The list crosses a process boundary, so malformed entries are dropped."""
+    _enable(monkeypatch)
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    profiling.mark(measurement, "supervisor_acquire")
+    profiling.mark(measurement, "sandbox_running")
+    garbage = [
+        {"name": "container_start", "duration_us": 5},
+        {"name": "", "duration_us": 5},
+        {"duration_us": 5},
+        {"name": "no_duration"},
+        {"name": "bad_duration", "duration_us": "soon"},
+        "not a mapping",
+        {"name": "negative", "duration_us": -9},
+    ]
+    garbage.extend(
+        {"name": f"flood_{index}", "duration_us": 1}
+        for index in range(profiling.MAX_REMOTE_STAGES * 2)
+    )
+
+    assert profiling.attach_remote_stages(
+        measurement, "supervisor_acquire", garbage, source="broker"
+    )
+    profiling.finish(measurement, outcome="dispatched")
+
+    children = _records(caplog)[0]["stages"][0]["children"]
+    names = [child["stage"] for child in children]
+    assert "container_start" in names
+    assert "" not in names and "no_duration" not in names and "bad_duration" not in names
+    # A negative duration is a clock artefact, never a reported value.
+    assert all(child["duration_us"] >= 0 for child in children)
+    assert len(children) <= profiling.MAX_REMOTE_STAGES
+
+
+def test_a_clean_flood_is_truncated_at_the_ceiling(monkeypatch, caplog):
+    """The ceiling bounds the record, not just the parse."""
+    _enable(monkeypatch)
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    profiling.mark(measurement, "supervisor_acquire")
+    profiling.mark(measurement, "sandbox_running")
+    flood = [
+        {"name": f"step_{index}", "duration_us": 1}
+        for index in range(profiling.MAX_REMOTE_STAGES * 3)
+    ]
+
+    assert profiling.attach_remote_stages(measurement, "supervisor_acquire", flood, source="broker")
+    profiling.finish(measurement, outcome="dispatched")
+
+    children = _records(caplog)[0]["stages"][0]["children"]
+    assert len(children) == profiling.MAX_REMOTE_STAGES
+
+
+def test_remote_stages_need_a_stage_to_attach_to(monkeypatch, caplog):
+    """An empty or malformed report is not a partial timeline, it is nothing."""
+    _enable(monkeypatch)
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+
+    assert profiling.attach_remote_stages(measurement, "x", [], source="broker") is False
+    assert profiling.attach_remote_stages(measurement, "x", None, source="broker") is False
+    assert profiling.attach_remote_stages(measurement, "x", "oops", source="broker") is False
+    assert profiling.attach_remote_stages(None, "x", [{"name": "a"}], source="broker") is False
+    assert measurement.producers == set()
+
+
+def test_a_substage_observer_records_against_the_current_stage(monkeypatch, caplog, clock):
+    """An in-process caller times its own sub-stages without the profiler API."""
+    _enable(monkeypatch)
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    profiling.mark(measurement, "agent_network")
+    observer = profiling.stage_observer(measurement)
+
+    with profiling.substage(observer, "bootstrap_guest_stop"):
+        clock.advance(400)
+    with profiling.substage(observer, "bootstrap_guest_start"):
+        clock.advance(600)
+    profiling.finish(measurement, outcome="dispatched")
+
+    network = next(
+        item for item in _records(caplog)[0]["stages"] if item["stage"] == "agent_network"
+    )
+    assert [(child["stage"], child["duration_us"]) for child in network["children"]] == [
+        ("bootstrap_guest_stop", 400),
+        ("bootstrap_guest_start", 600),
+    ]
+    assert all(child["source"] == "runner" for child in network["children"])
+
+
+def test_a_stage_recorder_collects_durations_without_a_measurement(monkeypatch):
+    """The broker's recorder is the same protocol without a local timeline."""
+    recorder = profiling.start_stage_recording()
+    assert recorder is None, "an off process must not record anything"
+
+    _enable(monkeypatch)
+    recorder = profiling.start_stage_recording()
+    assert recorder is not None
+    with profiling.substage(recorder, "container_create"):
+        pass
+    with pytest.raises(RuntimeError), profiling.substage(recorder, "container_start"):
+        raise RuntimeError("docker refused")
+
+    assert [item["name"] for item in recorder.stages] == ["container_create", "container_start"]
+    assert recorder.names() == ["container_create", "container_start"]
+    assert [item["outcome"] for item in recorder.stages] == ["ok", "error"]

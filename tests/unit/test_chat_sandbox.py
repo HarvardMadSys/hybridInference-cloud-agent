@@ -30,6 +30,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     ChatSandboxStatus,
     RetainedChatBackend,
+    SandboxActionFacts,
     _RetainedTerminalProcess,
 )
 from cloud_agent_host.egress import EgressPolicy, EgressTier
@@ -2674,3 +2675,26 @@ def test_a_live_network_this_chat_does_not_own_is_still_an_ownership_violation()
 
     with pytest.raises(SandboxError, match="unknown egress network"):
         manager._release_sandbox_networks(spec, inspection)
+
+
+class TestSandboxActionFacts:
+    """The container action is what classifies the startup path."""
+
+    def test_create_outranks_the_start_that_follows_it(self):
+        facts = SandboxActionFacts()
+
+        facts.note("create")
+        facts.note("reuse")
+
+        assert facts.container_action == "create"
+
+    def test_a_later_action_overwrites_an_earlier_weaker_one(self):
+        facts = SandboxActionFacts()
+
+        facts.note("reuse")
+        facts.note("start")
+
+        assert facts.container_action == "start"
+
+    def test_an_untouched_activation_reports_unknown(self):
+        assert SandboxActionFacts().container_action == "unknown"

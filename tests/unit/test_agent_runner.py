@@ -423,6 +423,10 @@ def _run_shared_boundary_case(
     observed_session_id="native-existing",
     configure=None,
     measurement=None,
+    container_action="unknown",
+    resident_action="unknown",
+    lease_stages=None,
+    resident_stages=None,
 ):
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
@@ -452,10 +456,15 @@ def _run_shared_boundary_case(
         "activation_generation": 3,
         "context_status": "live",
         "resident_state": "live",
+        # What the broker reports it did to the container.
+        "container_action": container_action,
+        "stages": list(lease_stages or []),
     }
     supervisor.ensure_shared_resident.return_value = {
         "context_status": "live",
         "process_generation": 1,
+        "resident_action": resident_action,
+        "stages": list(resident_stages or []),
     }
     supervisor.settle_shared.return_value = {"native_session_id": observed_session_id}
     monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
@@ -891,6 +900,8 @@ def test_startup_measurement_records_every_runner_stage(monkeypatch, caplog, tmp
         runtime_id="claude-code",
         configure=configure,
         measurement=measurement,
+        container_action="reuse",
+        resident_action="reuse",
     )
 
     assert result == 0
@@ -914,9 +925,159 @@ def test_startup_measurement_records_every_runner_stage(monkeypatch, caplog, tmp
     ]
     assert all(stage["duration_us"] >= 0 for stage in record["stages"])
     assert record["facts"]["startup_path"] == "reuse_live"
-    assert record["facts"]["resident_action"] == "reuse"
     assert record["facts"]["context_status"] == "live"
     assert record["facts"]["workspace_action"] == "reuse"
+
+
+@pytest.mark.parametrize(
+    ("container_action", "resident_action", "expected"),
+    [
+        # The container was created by this activation.
+        ("create", "new", "new_group"),
+        ("create", "resume", "new_group"),
+        # It existed, was stopped, and this activation started it.
+        ("start", "resume", "resume_stopped"),
+        # It was running; only the member's CLI was reopened.
+        ("reuse", "resume", "resume_running"),
+        ("reuse", "new", "resume_running"),
+        # Both the container and the compatible CLI were reused.
+        ("reuse", "reuse", "reuse_live"),
+        # Actions that do not identify a path stay unknown rather than guessed.
+        ("unknown", "reuse", "unknown"),
+        ("start", "unknown", "resume_stopped"),
+    ],
+)
+def test_startup_path_comes_from_the_actions_the_supervisor_reported(
+    monkeypatch, tmp_path, container_action, resident_action, expected
+):
+    """The four paths differ by what was done, not by how long it took.
+
+    A stop followed by a start and a container that never stopped both end up
+    running, so the container's state after the fact cannot classify them.
+    """
+    _configure_host(monkeypatch)
+    sink = tmp_path / "startup.jsonl"
+    _enable_profiling(monkeypatch)
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    measurement = _profiled_measurement()
+    assert measurement is not None
+
+    def configure(_control, _supervisor, _finish):
+        def stream(**kwargs):
+            operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+
+    result, _control, _supervisor, _finish = _run_shared_boundary_case(
+        monkeypatch,
+        code=0,
+        frame={"kind": "result", "status": "completed", "exit_code": 0},
+        runtime_id="claude-code",
+        configure=configure,
+        measurement=measurement,
+        container_action=container_action,
+        resident_action=resident_action,
+    )
+
+    assert result == 0
+    operation_profiling.flush_sink()
+    record = json.loads(sink.read_text().splitlines()[0])
+    assert record["facts"]["startup_path"] == expected
+    assert record["facts"]["container_action"] == container_action
+    assert record["facts"]["resident_action"] == resident_action
+
+
+def test_broker_sub_stages_hang_off_the_stage_they_happened_in(monkeypatch, tmp_path):
+    """Durations from the broker are attached, attributed and not placed.
+
+    The broker has its own monotonic clock, so its sub-stages carry a duration
+    and a producer but no offset on the runner's timeline.
+    """
+    _configure_host(monkeypatch)
+    sink = tmp_path / "startup.jsonl"
+    _enable_profiling(monkeypatch)
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    measurement = _profiled_measurement()
+    assert measurement is not None
+
+    def configure(_control, _supervisor, _finish):
+        def stream(**kwargs):
+            operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+
+    result, *_ = _run_shared_boundary_case(
+        monkeypatch,
+        code=0,
+        frame={"kind": "result", "status": "completed", "exit_code": 0},
+        runtime_id="claude-code",
+        configure=configure,
+        measurement=measurement,
+        container_action="start",
+        resident_action="resume",
+        lease_stages=[
+            {"name": "container_start", "duration_us": 690_000, "outcome": "ok"},
+            {"name": "service_hosts_sync", "duration_us": 1_200, "outcome": "ok"},
+        ],
+        resident_stages=[{"name": "cli_spawn", "duration_us": 240_000, "outcome": "ok"}],
+    )
+
+    assert result == 0
+    operation_profiling.flush_sink()
+    record = json.loads(sink.read_text().splitlines()[0])
+    acquire = next(item for item in record["stages"] if item["stage"] == "supervisor_acquire")
+    resident = next(item for item in record["stages"] if item["stage"] == "resident_start")
+    assert acquire["children"] == [
+        {"stage": "container_start", "duration_us": 690_000, "outcome": "ok", "source": "broker"},
+        {"stage": "service_hosts_sync", "duration_us": 1_200, "outcome": "ok", "source": "broker"},
+    ]
+    assert resident["children"] == [
+        {"stage": "cli_spawn", "duration_us": 240_000, "outcome": "ok", "source": "broker"}
+    ]
+    # The broker contributed, and the record says so.
+    assert record["producers"] == ["runner", "broker"]
+    # Every child is attributable, and no child pretends to a timeline offset.
+    for child in acquire["children"] + resident["children"]:
+        assert "start_offset_us" not in child
+        assert child["source"] == "broker"
+
+
+def test_a_broker_that_is_not_profiling_leaves_the_record_partial(monkeypatch, tmp_path):
+    """A missing producer is visible, not silently absent."""
+    _configure_host(monkeypatch)
+    sink = tmp_path / "startup.jsonl"
+    _enable_profiling(monkeypatch)
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    measurement = _profiled_measurement()
+    assert measurement is not None
+
+    def configure(_control, _supervisor, _finish):
+        def stream(**kwargs):
+            operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+
+    _run_shared_boundary_case(
+        monkeypatch,
+        code=0,
+        frame={"kind": "result", "status": "completed", "exit_code": 0},
+        runtime_id="claude-code",
+        configure=configure,
+        measurement=measurement,
+        container_action="reuse",
+        resident_action="reuse",
+        lease_stages=[],
+        resident_stages=[],
+    )
+
+    operation_profiling.flush_sink()
+    record = json.loads(sink.read_text().splitlines()[0])
+    assert record["producers"] == ["runner"]
+    acquire = next(item for item in record["stages"] if item["stage"] == "supervisor_acquire")
+    assert "children" not in acquire
 
 
 def test_startup_measurement_reports_the_stage_a_pre_dispatch_failure_stopped_at(

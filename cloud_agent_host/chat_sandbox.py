@@ -49,6 +49,7 @@ from cloud_agent_host.guest_observer import (
     GuestObserverCursor,
     GuestObserverRuntimeError,
 )
+from cloud_agent_host.operation_profiling import StageObserver, substage
 from cloud_agent_host.sandbox import (
     KATA_RUNTIME,
     ContainerBackend,
@@ -256,6 +257,32 @@ class ChatSandboxInspection:
     networks: tuple[str, ...]
     network_ids: tuple[tuple[str, str], ...] = ()
     sandbox_runtime: str = ""
+
+
+@dataclass
+class SandboxActionFacts:
+    """What one activation actually did to the container.
+
+    Startup classification needs the action, not a guess from timing: a stop
+    followed by a start is a different path from a container that never
+    stopped, and the container's state after the fact cannot tell them apart.
+    A ``group`` in the supervisor's memory can predate this attempt, so the
+    answer has to come from the call that performed the work.
+
+    ``create`` outranks the start that necessarily follows it, because an
+    attempt that paid for the container should not be reported as one that
+    found it stopped. Every other action is overwritten by the next one, so
+    adopting a container that already existed still lets ``start`` report
+    whether it had to run ``docker start``.
+    """
+
+    container_action: str = "unknown"
+
+    def note(self, action: str) -> None:
+        """Record what this activation did, keeping the strongest fact."""
+        if self.container_action == "create":
+            return
+        self.container_action = action
 
 
 class ChatSandboxManager:
@@ -1487,15 +1514,22 @@ class ChatSandboxManager:
         *,
         image: str | None = None,
         network_phase: Literal["setup", "agent"] = "setup",
+        facts: SandboxActionFacts | None = None,
+        observer: StageObserver | None = None,
     ) -> ChatSandboxInspection:
         """Create one chat container idempotently, never replacing an existing one."""
-        self._ensure_phase_network(spec, network_phase)
+        with substage(observer, "network_ensure"):
+            self._ensure_phase_network(spec, network_phase)
         existing = self.inspect(spec.container_name)
         if existing is not None:
+            # Idempotent adoption, not a creation. No action is noted here:
+            # the start() that follows knows whether this attempt had to run
+            # `docker start`, and that is what classifies the path.
             self._verify_identity(existing, spec)
             return self._require_phase_network(spec, existing, network_phase)
         command = self.build_create_command(spec, image=image, network_phase=network_phase)
-        created = self._run(command, timeout=120)
+        with substage(observer, "container_create"):
+            created = self._run(command, timeout=120)
         if created.returncode != 0:
             # A racing replica may have won after our inspect.  Only accept the
             # resulting container after checking every ownership label.
@@ -1504,8 +1538,12 @@ class ChatSandboxManager:
                 raise SandboxError(
                     "chat sandbox could not be created: " + created.stderr.strip()[:300]
                 )
+            # The other replica paid for the creation, so this attempt did
+            # not create the container. `start` reports what it did with it.
             self._verify_identity(raced, spec)
             return self._require_phase_network(spec, raced, network_phase)
+        if facts is not None:
+            facts.note("created")
         inspected = self.inspect(spec.container_name)
         if inspected is None:
             raise SandboxError("Docker created the chat sandbox but it cannot be inspected")
@@ -1658,22 +1696,33 @@ class ChatSandboxManager:
         spec: ChatSandboxSpec,
         *,
         network_phase: Literal["setup", "agent"] | None = None,
+        facts: SandboxActionFacts | None = None,
+        observer: StageObserver | None = None,
     ) -> ChatSandboxInspection:
         """Start the exact stopped container and verify it reached RUNNING."""
         current = self._require(spec)
-        current = self._ensure_current_phase_network(
-            spec,
-            current,
-            preferred_phase=network_phase,
-        )
+        with substage(observer, "phase_network"):
+            current = self._ensure_current_phase_network(
+                spec,
+                current,
+                preferred_phase=network_phase,
+            )
         if current.running:
-            self._sync_kata_service_hosts(spec, current)
+            if facts is not None:
+                facts.note("reuse")
+            with substage(observer, "service_hosts_sync"):
+                self._sync_kata_service_hosts(spec, current)
             return current
         if current.status is ChatSandboxStatus.PAUSED:
             raise SandboxError("a paused chat sandbox is not a valid stopped activation")
         if current.status is ChatSandboxStatus.DEAD:
             raise SandboxError("a dead chat sandbox cannot be resumed")
-        result = self._run([self.backend.docker_binary, "start", current.container_id], timeout=120)
+        with substage(observer, "container_start"):
+            result = self._run(
+                [self.backend.docker_binary, "start", current.container_id], timeout=120
+            )
+        if facts is not None:
+            facts.note("start")
         if result.returncode != 0:
             raise SandboxError("chat sandbox could not be started: " + result.stderr.strip()[:300])
         started = self._require(spec)
@@ -1681,7 +1730,8 @@ class ChatSandboxManager:
             raise SandboxError(
                 f"chat sandbox started into unexpected state {started.status.value!r}"
             )
-        self._sync_kata_service_hosts(spec, started)
+        with substage(observer, "service_hosts_sync"):
+            self._sync_kata_service_hosts(spec, started)
         return started
 
     def stop(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
@@ -1713,9 +1763,12 @@ class ChatSandboxManager:
             )
         return self._release_sandbox_networks(spec, stopped)
 
-    def require_network_phase(self, spec: ChatSandboxSpec, phase: str) -> None:
+    def require_network_phase(
+        self, spec: ChatSandboxSpec, phase: str, *, observer: StageObserver | None = None
+    ) -> None:
         """Prove this container is attached to exactly the requested network."""
-        self._ensure_phase_network(spec, phase)
+        with substage(observer, "network_ensure"):
+            self._ensure_phase_network(spec, phase)
         expected = self.network_for_phase(spec, phase)
         current = self._require(spec)
         if set(current.networks) != {expected}:
@@ -1723,12 +1776,20 @@ class ChatSandboxManager:
                 f"retained chat network is {list(current.networks)!r}, not "
                 f"the required {phase} network {expected!r}"
             )
-        self._sync_kata_service_hosts(spec, current)
+        with substage(observer, "service_hosts_sync"):
+            self._sync_kata_service_hosts(spec, current)
 
-    def transition_to_agent_network(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
+    def transition_to_agent_network(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        facts: SandboxActionFacts | None = None,
+        observer: StageObserver | None = None,
+    ) -> ChatSandboxInspection:
         """Irreversibly replace setup egress with the agent-only network."""
-        self._ensure_phase_network(spec, "setup")
-        self._ensure_phase_network(spec, "agent")
+        with substage(observer, "network_ensure"):
+            self._ensure_phase_network(spec, "setup")
+            self._ensure_phase_network(spec, "agent")
         setup_network = self.network_for_phase(spec, "setup")
         agent_network = self.network_for_phase(spec, "agent")
         current = self._require(spec)
@@ -1737,12 +1798,14 @@ class ChatSandboxManager:
                 raise SandboxError(
                     "retained chat has an unexpected network set before agent transition"
                 )
-            self._sync_kata_service_hosts(spec, current)
+            with substage(observer, "service_hosts_sync"):
+                self._sync_kata_service_hosts(spec, current)
             return current
         if set(current.networks) == {agent_network}:
             if setup_network != self.backend.network_for_phase("setup"):
                 self._release_owned_network(setup_network, spec, "setup")
-            self._sync_kata_service_hosts(spec, current)
+            with substage(observer, "service_hosts_sync"):
+                self._sync_kata_service_hosts(spec, current)
             return current
         if set(current.networks) not in ({setup_network}, {setup_network, agent_network}):
             raise SandboxError(
@@ -1756,32 +1819,34 @@ class ChatSandboxManager:
             # is launched. Preserve the writable layer and boot on agent egress.
             if current.sandbox_runtime != KATA_RUNTIME:
                 raise SandboxError("Kata bootstrap transition requires an inspected Kata container")
-            stopped = self._run(
-                [
-                    self.backend.docker_binary,
-                    "stop",
-                    "--time",
-                    str(spec.stop_timeout_s),
-                    current.container_id,
-                ],
-                timeout=spec.stop_timeout_s + 30,
-            )
+            with substage(observer, "bootstrap_guest_stop"):
+                stopped = self._run(
+                    [
+                        self.backend.docker_binary,
+                        "stop",
+                        "--time",
+                        str(spec.stop_timeout_s),
+                        current.container_id,
+                    ],
+                    timeout=spec.stop_timeout_s + 30,
+                )
             current = self._require(spec)
             if stopped.returncode != 0 or current.running:
                 raise SandboxError(
                     "Kata guest could not stop before the bootstrap network transition"
                 )
         if agent_network not in current.networks:
-            connected = self._run(
-                [
-                    self.backend.docker_binary,
-                    "network",
-                    "connect",
-                    agent_network,
-                    current.container_id,
-                ],
-                timeout=30,
-            )
+            with substage(observer, "network_attach_detach"):
+                connected = self._run(
+                    [
+                        self.backend.docker_binary,
+                        "network",
+                        "connect",
+                        agent_network,
+                        current.container_id,
+                    ],
+                    timeout=30,
+                )
             if connected.returncode != 0:
                 refreshed = self._require(spec)
                 if agent_network not in refreshed.networks:
@@ -1789,15 +1854,20 @@ class ChatSandboxManager:
                         "retained chat could not attach agent egress: "
                         + connected.stderr.strip()[:300]
                     )
-        self._disconnect_endpoint(setup_network, current.container_id)
+        with substage(observer, "network_attach_detach"):
+            self._disconnect_endpoint(setup_network, current.container_id)
         transitioned = self._require(spec)
         if set(transitioned.networks) != {agent_network}:
             raise SandboxError("retained chat agent egress transition was not exact")
         if setup_network != self.backend.network_for_phase("setup"):
             self._release_owned_network(setup_network, spec, "setup")
         if restart_guest:
-            return self.start(spec, network_phase="agent")
-        self._sync_kata_service_hosts(spec, transitioned)
+            # The second start is the guest reboot the transition needs, not a
+            # cold activation: `facts` therefore keeps whatever the earlier
+            # container-level action already was.
+            return self.start(spec, network_phase="agent", facts=facts, observer=observer)
+        with substage(observer, "service_hosts_sync"):
+            self._sync_kata_service_hosts(spec, transitioned)
         return transitioned
 
     def build_exec_command(

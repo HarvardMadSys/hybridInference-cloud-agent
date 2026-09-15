@@ -63,7 +63,7 @@ import uuid
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -98,6 +98,10 @@ SINK_QUEUE_MAX = 256
 #: is rejected outright: an unknown filter would silently never match, and a
 #: run that measures nothing is worse than a run that refuses to start.
 TARGET_KEYS = frozenset({"host", "job_id", "thread_id", "sandbox_id"})
+
+#: Sub-stages another producer may contribute to one local stage. Bounded
+#: because the list crosses a process boundary and is not trusted.
+MAX_REMOTE_STAGES = 32
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
@@ -197,6 +201,12 @@ class Measurement:
     #: Whether the authoritative target check ran. A scoped run refuses to
     #: report a measurement that never proved it matched.
     bound: bool = False
+    #: Sub-stage durations reported by another producer, keyed by the local
+    #: stage they belong to. They carry no offset because a different process
+    #: has a different monotonic clock domain; only durations travel.
+    remote_stages: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    #: Producers that contributed to this record, beyond the runner itself.
+    producers: set[str] = field(default_factory=set)
     #: Set once the run's deadline passed with collecting still open.
     expired: bool = False
     #: The budget slot is held from selection and returned by `discard`.
@@ -486,6 +496,176 @@ def _bounded(value: Any) -> Any:
     return str(value)[:MAX_ATTRIBUTE_CHARS]
 
 
+class StageObserver(Protocol):
+    """Times named sub-stages for a caller that cannot report its own timings.
+
+    The sandbox manager uses this to expose the work inside one of its calls --
+    the container create or start, the guest restart of the agent-network
+    transition -- without knowing whether the caller is a runner recording into
+    a measurement or a supervisor collecting durations to return over HTTP.
+    """
+
+    def stage(self, name: str) -> AbstractContextManager[None]:
+        """Time one sub-stage."""
+        ...
+
+
+@dataclass
+class StageRecorder:
+    """Collects sub-stage durations, for reporting back over a process boundary.
+
+    Only durations cross the boundary. A sub-stage measured in the broker
+    process cannot be placed on the runner's monotonic timeline, so it is
+    reported as a duration attributed to its producer instead of as an offset
+    that would look precise and mean nothing.
+    """
+
+    stages: list[dict[str, Any]] = field(default_factory=list)
+
+    def stage(self, name: str) -> AbstractContextManager[None]:
+        """Time one sub-stage onto this recorder."""
+        return _recorded_stage(self, name)
+
+    def names(self) -> list[str]:
+        """Return the stage names recorded so far, in order."""
+        return [str(item["name"]) for item in self.stages]
+
+
+@contextmanager
+def _recorded_stage(recorder: StageRecorder, name: str) -> Iterator[None]:
+    """Record one sub-stage duration, closing it on success and failure alike."""
+    started = time.monotonic_ns()
+    outcome = "ok"
+    try:
+        yield
+    except BaseException:
+        outcome = "error"
+        raise
+    finally:
+        recorder.stages.append(
+            {
+                "name": name,
+                "duration_us": max(0, (time.monotonic_ns() - started) // 1000),
+                "outcome": outcome,
+            }
+        )
+
+
+@dataclass
+class _MeasurementObserver:
+    """Records sub-stages as children of the measurement's current stage."""
+
+    measurement: Measurement
+
+    def stage(self, name: str) -> AbstractContextManager[None]:
+        """Time one sub-stage onto the measurement's current stage."""
+        return _observed_stage(self.measurement, name)
+
+
+@contextmanager
+def _observed_stage(measurement: Measurement, name: str) -> Iterator[None]:
+    """Attach one in-process sub-stage to the stage currently open."""
+    if not _recording(measurement):
+        yield
+        return
+    started = time.monotonic_ns()
+    # The stage the runner last marked is the one this work belongs to.
+    parent = measurement.marks[-1][0] if measurement.marks else "startup"
+    outcome = "ok"
+    try:
+        yield
+    except BaseException:
+        outcome = "error"
+        raise
+    finally:
+        measurement.remote_stages.setdefault(parent, []).append(
+            {
+                "stage": name,
+                "duration_us": max(0, (time.monotonic_ns() - started) // 1000),
+                "outcome": outcome,
+                "source": "runner",
+            }
+        )
+
+
+def stage_observer(measurement: Measurement | None) -> StageObserver | None:
+    """Return an observer that records sub-stages onto a live measurement."""
+    if measurement is None or measurement.finished:
+        return None
+    return _MeasurementObserver(measurement)
+
+
+def start_stage_recording() -> StageRecorder | None:
+    """Return a recorder when this process is part of a live experiment.
+
+    The broker and the runner are separate processes with separate switches, so
+    a run needs both enabled for a complete timeline. When only the runner is
+    enabled the record still lands, and the missing producer is visible in
+    ``producers`` rather than silently absent.
+    """
+    return StageRecorder() if _load().run is not None else None
+
+
+def substage(observer: StageObserver | None, name: str) -> AbstractContextManager[None]:
+    """Return an observer's sub-stage context, or a shared no-op."""
+    if observer is None:
+        return _NULL_SPAN
+    return observer.stage(name)
+
+
+def _bounded_remote_stages(stages: Any, source: str) -> list[dict[str, Any]]:
+    """Return the reportable sub-stages from an untrusted list.
+
+    The input is sliced to bound the work and the result to bound the record: a
+    list padded with malformed entries must not exceed the ceiling by having
+    them rejected one at a time.
+    """
+    if not isinstance(stages, list):
+        return []
+    entries: list[dict[str, Any]] = []
+    for item in stages[:MAX_REMOTE_STAGES]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("stage") or "").strip()
+        if not name:
+            continue
+        try:
+            duration = int(item.get("duration_us"))
+        except (TypeError, ValueError):
+            continue
+        entries.append(
+            {
+                "stage": name[:MAX_ATTRIBUTE_CHARS],
+                "duration_us": max(0, duration),
+                "outcome": str(item.get("outcome") or "ok")[:MAX_ATTRIBUTE_CHARS],
+                "source": source,
+            }
+        )
+    return entries[:MAX_REMOTE_STAGES]
+
+
+def attach_remote_stages(
+    measurement: Measurement | None,
+    stage_name: str,
+    stages: Any,
+    *,
+    source: str,
+) -> bool:
+    """Attach durations another producer measured to one local stage.
+
+    Returns whether anything was attached, so a caller can report a partial
+    timeline instead of claiming a producer that never contributed.
+    """
+    if measurement is None or not _recording(measurement):
+        return False
+    entries = _bounded_remote_stages(stages, source)
+    if not entries:
+        return False
+    measurement.remote_stages.setdefault(stage_name, []).extend(entries)
+    measurement.producers.add(source)
+    return True
+
+
 def set_attributes(measurement: Measurement | None, **values: Any) -> None:
     """Attach bounded attributes to a measurement."""
     if measurement is None or not _recording(measurement):
@@ -557,14 +737,19 @@ def _stages(measurement: Measurement) -> list[dict[str, Any]]:
     if ended is None:
         ended = measurement.offset_us()
     following = [offset for _, offset in measurement.marks[1:]] + [ended]
-    return [
-        {
+    stages: list[dict[str, Any]] = []
+    for (name, start), stop in zip(measurement.marks, following, strict=False):
+        entry: dict[str, Any] = {
             "stage": name,
             "start_offset_us": start,
             "duration_us": max(0, stop - start),
         }
-        for (name, start), stop in zip(measurement.marks, following, strict=False)
-    ]
+        children = measurement.remote_stages.get(name)
+        if children:
+            # Durations from another producer, not offsets on this timeline.
+            entry["children"] = children
+        stages.append(entry)
+    return stages
 
 
 def to_record(
@@ -585,6 +770,10 @@ def to_record(
         "producer": "runner",
         "producer_instance_id": PRODUCER_INSTANCE_ID,
         "clock_domain_id": CLOCK_DOMAIN_ID,
+        # Who actually contributed to this record. A run needs the broker's
+        # switch as well as the runner's for the container sub-stages, and a
+        # missing producer is reported here rather than silently absent.
+        "producers": ["runner", *sorted(measurement.producers)],
         "startup_outcome": outcome,
         "duration_us": ended,
         "measurement_complete": (
@@ -816,6 +1005,7 @@ __all__ = [
     "ENV_PROFILING_ENABLED",
     "ENV_PROFILING_RUN",
     "ENV_PROFILING_SINK",
+    "MAX_REMOTE_STAGES",
     "MAX_SPANS",
     "PRODUCER_INSTANCE_ID",
     "SCHEMA_VERSION",
@@ -823,7 +1013,10 @@ __all__ = [
     "TARGET_KEYS",
     "Measurement",
     "ProfilingRun",
+    "StageObserver",
+    "StageRecorder",
     "active_run",
+    "attach_remote_stages",
     "bind",
     "close_sink",
     "discard",
@@ -835,6 +1028,9 @@ __all__ = [
     "reset_cache",
     "set_attributes",
     "span",
+    "stage_observer",
     "start_operation",
+    "start_stage_recording",
+    "substage",
     "to_record",
 ]

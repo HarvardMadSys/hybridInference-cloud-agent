@@ -31,11 +31,14 @@
 不要求先开发设置页面或完整的动态控制平台。主开关变更若需要重启，必须在实验准备
 阶段完成，不能把重启后的冷缓存当成开关本身的开销。
 
-实现的边界：选择发生在 runner 根操作处，所以 `max_operations` 目前是**单进程**预算，
+实现的边界：supervisor 会上报本次 activation 对容器与 CLI 的实际动作（不依赖开关），
+跨进程的内部时长以 duration 形式挂在所属阶段下，记录用 `producers` 标明实际贡献者。
+选择发生在 runner 根操作处，所以 `max_operations` 目前是**单进程**预算，
 不是清单要求的跨 replica 统一分配；名额在确认选中 attempt 后才消耗，未选中的
 （空 claim、目标不匹配、claim 失败）会归还。产出写入结构化日志，并在配置
 `AGENT_OPERATION_PROFILING_SINK` 时经**有界队列与后台线程**追加 JSONL，尚无 CP
 持久化与 Admin 读面。目标过滤要求每个配置字段都匹配，未知字段直接拒绝该 run。
+broker 侧需要同样打开开关才会贡献内部阶段，否则记录只显示 `["runner"]`。
 截止时间由 run descriptor 的绝对 `expires_at` 在首次读取时转成单调期限，服务重启
 不会续期；到期后停止采集，记录在截止点收尾并标 partial（`measurement_complete=false`、
 `profiling_stopped=expired`），已采部分保留。
