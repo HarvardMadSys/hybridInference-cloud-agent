@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 
 import httpx
 
+from cloud_agent_host import operation_profiling
 from cloud_agent_host.chat_sandbox import (
     CHAT_WORKDIR,
     ChatSandboxManager,
@@ -107,6 +108,11 @@ _POLL_INTERVAL_S = 0.5
 # report. The broker client itself has the same 180 second request ceiling.
 _SHARED_TURN_INTERRUPT_DRAIN_S = 180.0
 _GIT_TIMEOUT_S = 300.0
+
+#: The root profiling operation covering one attempt's startup chain, from the
+#: claim request to the moment the prompt is handed to the resident CLI. It is
+#: the name an experiment lists in its run descriptor's `operations`.
+STARTUP_OPERATION = "attempt.startup"
 
 logger = get_logger(__name__)
 
@@ -1396,15 +1402,23 @@ def _stream_shared_agent_turn(
     heart: Heartbeater,
     lease_token: str,
     timeout_s: float,
+    measurement: operation_profiling.Measurement | None = None,
 ) -> tuple[int, str, list[str], dict[str, Any] | None]:
-    """Relay exactly one broker-framed member turn under its attempt fence."""
-    stream = supervisor.start_shared_turn(
-        job.thread_id,
-        token=lease_token,
-        prompt=job.task_prompt,
-        model=job.model,
-        reasoning_effort=job.reasoning_effort,
-    )
+    """Relay exactly one broker-framed member turn under its attempt fence.
+
+    Handing the prompt to the supervisor closes the startup measurement:
+    everything after that point is model execution, which the design keeps in a
+    separate post-dispatch fragment.
+    """
+    with operation_profiling.span(measurement, "prompt_dispatch"):
+        stream = supervisor.start_shared_turn(
+            job.thread_id,
+            token=lease_token,
+            prompt=job.task_prompt,
+            model=job.model,
+            reasoning_effort=job.reasoning_effort,
+        )
+    operation_profiling.finish(measurement, outcome="dispatched")
     frames: queue.Queue[dict[str, Any] | None] = queue.Queue()
 
     def pump() -> None:
@@ -1527,6 +1541,17 @@ def _stream_shared_agent_turn(
         stream.close()
 
 
+def _stage(measurement: operation_profiling.Measurement | None, name: str) -> str:
+    """Record a stage boundary and return the name.
+
+    The runner already tracks its phase in ``stage`` for failure reporting, so
+    the timeline costs one call per transition and needs no restructuring.
+    Consecutive marks become the record's per-stage durations.
+    """
+    operation_profiling.mark(measurement, name)
+    return name
+
+
 def _run_shared_live_attempt(
     *,
     runtime: AgentRuntime,
@@ -1538,8 +1563,15 @@ def _run_shared_live_attempt(
     gateway_base_url: str,
     agent_timeout_s: float,
     finish_attempt: Any,
+    measurement: operation_profiling.Measurement | None = None,
 ) -> int:
-    """Deliver one chat turn to its supervisor-owned resident CLI member."""
+    """Deliver one chat turn to its supervisor-owned resident CLI member.
+
+    ``measurement`` is the opt-in startup timing for this attempt. It is
+    ``None`` unless an experiment selected it, and every call on it is a no-op
+    in that case, so the delivery path is unchanged when profiling is off.
+    """
+    operation_profiling.mark(measurement, "validate")
     if not isinstance(backend, ContainerBackend):
         finish_attempt("failed", "shared live chats require the container or kata backend")
         return 2
@@ -1602,6 +1634,7 @@ def _run_shared_live_attempt(
             finish_attempt("failed", "shared chat container identity does not match its labels")
             return 2
 
+    operation_profiling.mark(measurement, "reserve")
     try:
         reservation = control.reserve_chat_sandbox(
             {
@@ -1650,7 +1683,7 @@ def _run_shared_live_attempt(
     terminals_suspended = False
     context_invalid = False
     failure_detail: str | None = None
-    stage = "supervisor_acquire"
+    stage = _stage(measurement, "supervisor_acquire")
     context_status = "restored" if has_context else "new"
     idle_timeout_s = _chat_idle_timeout_s()
 
@@ -1711,7 +1744,7 @@ def _run_shared_live_attempt(
         context_status = str(lease.get("context_status") or context_status)
         if context_status not in {"new", "live", "restored"}:
             raise SandboxError(f"shared supervisor returned invalid context {context_status!r}")
-        stage = "sandbox_running"
+        stage = _stage(measurement, "sandbox_running")
         running = control.mark_chat_sandbox_running(
             sandbox_generation=spec.generation,
             activation_generation=activation_generation,
@@ -1735,18 +1768,19 @@ def _run_shared_live_attempt(
                 },
             )
         )
-        stage = "terminal_suspend"
+        stage = _stage(measurement, "terminal_suspend")
         control.suspend_terminals("workspace_preparing")
         terminals_suspended = True
 
+        imported_base: str | None = None
         if not has_context:
-            stage = "workspace_reset"
+            stage = _stage(measurement, "workspace_reset")
             manager.reset_unsettled_state(spec)
-            stage = "checkout"
+            stage = _stage(measurement, "checkout")
             base_sha = _prepare_retained_checkout(job=job, manager=manager, spec=spec)
             reused_workspace = False
             if job.setup_script:
-                stage = "setup"
+                stage = _stage(measurement, "setup")
                 setup = run_setup(
                     script=job.setup_script,
                     workdir=CHAT_WORKDIR,
@@ -1763,10 +1797,10 @@ def _run_shared_live_attempt(
                     abandon_before_finish(lost=False, detail=failure_detail)
                     finish_attempt("failed", failure_detail, base_sha=base_sha)
                     return 1
-            stage = "workspace_permissions"
+            stage = _stage(measurement, "workspace_permissions")
             manager.prepare_shared_workspace(spec)
         else:
-            stage = "native_workspace_resume"
+            stage = _stage(measurement, "native_workspace_resume")
             if not native_session_id:
                 context_invalid = True
                 raise SandboxError("shared chat has no native Agent CLI session locator")
@@ -1800,7 +1834,7 @@ def _run_shared_live_attempt(
             )
         )
 
-        stage = "runtime_preflight"
+        stage = _stage(measurement, "runtime_preflight")
         version_problem = runtime_version_unavailable(job, retained)
         if version_problem is not None:
             failure_detail = version_problem
@@ -1813,12 +1847,12 @@ def _run_shared_live_attempt(
             finish_attempt("failed", failure_detail, base_sha=base_sha)
             return 2
 
-        stage = "agent_network"
+        stage = _stage(measurement, "agent_network")
         if has_context:
             manager.require_network_phase(spec, "agent")
         else:
             manager.transition_to_agent_network(spec)
-        stage = "terminal_resume"
+        stage = _stage(measurement, "terminal_resume")
         control.resume_terminals()
         terminals_suspended = False
 
@@ -1842,8 +1876,9 @@ def _run_shared_live_attempt(
             slot_id=slot_id,
             residency_generation=int(running.get("residency_generation") or 0),
         )
-        stage = "resident_start"
+        stage = _stage(measurement, "resident_start")
         resident_descriptor: dict[str, Any] | None = None
+        resident_reused = False
         if lease.get("resident_state") == "live":
             try:
                 resident_descriptor = supervisor.ensure_shared_resident(
@@ -1851,6 +1886,7 @@ def _run_shared_live_attempt(
                     token=lease_token,
                     launch=launch,
                 )
+                resident_reused = True
             except SessionSupervisorError:
                 # A process-fixed model/MCP setting changed, the process died,
                 # or this broker restarted. Rotate only this member's grant and
@@ -1884,6 +1920,28 @@ def _run_shared_live_attempt(
                 f"shared supervisor returned invalid resident context {context_status!r}"
             )
         process_generation = int(resident_descriptor["process_generation"])
+        if measurement is not None:
+            # The startup path, as far as the runner can prove it. Telling a
+            # stopped container from a running one needs the supervisor's
+            # container action, which this slice does not carry yet, so the two
+            # resume paths stay `unknown` here rather than guessed.
+            operation_profiling.set_attributes(
+                measurement,
+                context_status=context_status,
+                resident_action=(
+                    "reuse" if resident_reused else ("new" if not has_context else "resume")
+                ),
+                startup_path=(
+                    "new_group"
+                    if not has_context
+                    else ("reuse_live" if resident_reused else "unknown")
+                ),
+                process_generation=process_generation,
+                container_id=str(lease["container_id"]),
+                workspace_action=(
+                    "prepare" if not has_context else ("base_import" if imported_base else "reuse")
+                ),
+            )
         control.record_chat_process(
             sandbox_generation=spec.generation,
             activation_generation=activation_generation,
@@ -1896,7 +1954,7 @@ def _run_shared_live_attempt(
         else:
             control.report_context_status("new")
 
-        stage = "prompt_admission"
+        stage = _stage(measurement, "prompt_admission")
         _retry_lifecycle_receipt(
             "prompt_admission_retry",
             job.job_id,
@@ -1908,7 +1966,7 @@ def _run_shared_live_attempt(
         turn_admitted = True
         result_frame: dict[str, Any] | None = None
         try:
-            stage = "turn_stream"
+            stage = _stage(measurement, "turn_stream")
             exit_code, tail, tool_errors, result_frame = _stream_shared_agent_turn(
                 supervisor=supervisor,
                 job=job,
@@ -1916,6 +1974,7 @@ def _run_shared_live_attempt(
                 heart=heart,
                 lease_token=lease_token,
                 timeout_s=agent_timeout_s,
+                measurement=measurement,
             )
         finally:
             # Container totals include concurrent siblings and cannot be
@@ -1983,7 +2042,7 @@ def _run_shared_live_attempt(
                 )
             )
 
-        stage = "settlement"
+        stage = _stage(measurement, "settlement")
         local_settle = _retry_lifecycle_receipt(
             "supervisor_settlement_retry",
             job.job_id,
@@ -2044,6 +2103,7 @@ def _run_shared_live_attempt(
         return 0
     except LeaseLost:
         failure_detail = "attempt lease lost during shared live execution"
+        operation_profiling.finish(measurement, outcome="lease_lost", failure_stage=stage)
         return 3
     except (DriverError, SandboxError, SessionSupervisorError, WorktreeError) as exc:
         failure_detail = str(exc)
@@ -2058,6 +2118,14 @@ def _run_shared_live_attempt(
         report_failure()
         return 2
     finally:
+        # Any path that stopped before the prompt handoff still reports one
+        # record naming the stage it stopped at, instead of a silently missing
+        # sample. After a successful dispatch this is a no-op.
+        operation_profiling.finish(
+            measurement,
+            outcome="failed" if failure_detail else "incomplete",
+            failure_stage=stage,
+        )
         if not settled and not abandoned:
             abandon_before_finish(lost=turn_admitted or context_invalid, detail=failure_detail)
         if supervisor is not None:
@@ -2088,16 +2156,40 @@ def run_once(
         backend = build_backend_from_env()
         backend.preflight()
 
-    job = claim(
-        base_url=base_url,
-        host_credential=host_credential,
+    # Opt-in timing for the startup chain. `None` unless an experiment selects
+    # this operation, and every helper below is a no-op on `None`.
+    measurement = operation_profiling.start_operation(
+        operation=STARTUP_OPERATION,
+        host=host,
         worker_id=worker_id,
-        lease_ttl=lease_ttl,
-        attestation=_claim_attestation(backend),
     )
+    with operation_profiling.span(measurement, "claim"):
+        attestation = _claim_attestation(backend)
+        job = claim(
+            base_url=base_url,
+            host_credential=host_credential,
+            worker_id=worker_id,
+            lease_ttl=lease_ttl,
+            attestation=attestation,
+        )
     if job is None:
+        # Nothing was claimed, so there is no startup to measure.
+        operation_profiling.discard(measurement)
         print("no queued agent job; nothing to do")
         return 0
+    # Target filters on job/thread/sandbox can only be applied now. A
+    # measurement that falls out of scope emits nothing.
+    if measurement is not None and not operation_profiling.bind(
+        measurement,
+        attempt_id=job.attempt_id,
+        job_id=job.job_id,
+        thread_id=job.thread_id,
+        sandbox_id=str((job.thread_sandbox or {}).get("sandbox_id") or "") or None,
+        runtime=job.runtime,
+        execution_profile=job.execution_profile,
+    ):
+        operation_profiling.discard(measurement)
+        measurement = None
 
     print(f"claimed {job.job_id} attempt {job.attempt_no} runtime={job.runtime}")
     logger.info(
@@ -2125,6 +2217,7 @@ def run_once(
     try:
         runtime = get_runtime(job.runtime)
     except KeyError as exc:
+        operation_profiling.finish(measurement, outcome="failed", failure_stage="runtime_lookup")
         finish_attempt("failed", str(exc))
         control.close()
         return 2
@@ -2141,6 +2234,7 @@ def run_once(
             gateway_base_url=gateway_url,
             agent_timeout_s=agent_timeout_s,
             finish_attempt=finish_attempt,
+            measurement=measurement,
         )
     except LeaseLost as exc:
         _log_control_failure("attempt_dispatch_fenced", job.job_id, exc)
@@ -2157,6 +2251,9 @@ def run_once(
             _log_control_failure("finish", job.job_id, finish_exc)
         return 2
     finally:
+        # A claimed attempt whose validation rejected it before the shared
+        # handler started still closes its measurement, marked incomplete.
+        operation_profiling.finish(measurement, outcome="incomplete", failure_stage="preflight")
         heart.stop()
         control.close()
 

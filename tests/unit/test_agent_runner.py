@@ -2,19 +2,31 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import pathlib
 import re
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import httpx
 import pytest
 
-from cloud_agent_host import runner as runner_mod
+from cloud_agent_host import operation_profiling, runner as runner_mod
 from cloud_agent_host.runner import ClaimedJob, LeaseLost
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError
+
+
+@pytest.fixture(autouse=True)
+def _reset_profiling_cache():
+    """Keep the profiler's process-wide cache from leaking between tests."""
+    operation_profiling.reset_cache()
+    yield
+    operation_profiling.reset_cache()
+
 
 _JOB = ClaimedJob(
     job_id="ajob_1",
@@ -404,7 +416,13 @@ def test_historical_one_to_one_sandbox_fails_closed():
 
 
 def _run_shared_boundary_case(
-    monkeypatch, code, frame, runtime_id, observed_session_id="native-existing", configure=None
+    monkeypatch,
+    code,
+    frame,
+    runtime_id,
+    observed_session_id="native-existing",
+    configure=None,
+    measurement=None,
 ):
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
@@ -462,6 +480,7 @@ def _run_shared_boundary_case(
         gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
+        measurement=measurement,
     )
 
     return result, control, supervisor, finish
@@ -823,3 +842,196 @@ class TestTheHelperPinsMatchTheImage:
             f"{helper_id} is attested but the sandbox image publishes no label for it"
         )
         assert labels[helper_id] == runner_mod.SHARED_SANDBOX_HELPER_PINS[helper_id]
+
+
+def _enable_profiling(monkeypatch, **overrides):
+    """Turn startup profiling on with a run that selects only this operation."""
+    run = {
+        "run_id": "runner-stages-1",
+        "operations": [runner_mod.STARTUP_OPERATION],
+        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+        "max_operations": 5,
+    }
+    run.update(overrides)
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_RUN, json.dumps(run))
+    operation_profiling.reset_cache()
+
+
+def _profiled_measurement():
+    """Return a live measurement wired to the runner's startup operation."""
+    return operation_profiling.start_operation(
+        operation=runner_mod.STARTUP_OPERATION, host="host-a", worker_id="runner-1"
+    )
+
+
+def test_startup_measurement_records_every_runner_stage(monkeypatch, caplog, tmp_path):
+    """One selected attempt reports its stages, its path, and its dispatch."""
+    _configure_host(monkeypatch)
+    sink = tmp_path / "startup.jsonl"
+    _enable_profiling(monkeypatch)
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    caplog.set_level(logging.INFO, logger=operation_profiling.__name__)
+    measurement = _profiled_measurement()
+    assert measurement is not None
+
+    def configure(_control, _supervisor, _finish):
+        # Stand in for the supervisor round trip, but keep the boundary the
+        # real helper owns: the prompt handoff is what closes the measurement.
+        def stream(**kwargs):
+            operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+
+    result, _control, _supervisor, _finish = _run_shared_boundary_case(
+        monkeypatch,
+        code=0,
+        frame={"kind": "result", "status": "completed", "exit_code": 0},
+        runtime_id="claude-code",
+        configure=configure,
+        measurement=measurement,
+    )
+
+    assert result == 0
+    record = json.loads(sink.read_text().splitlines()[0])
+    assert record["startup_outcome"] == "dispatched"
+    assert record["measurement_complete"] is True
+    assert [stage["stage"] for stage in record["stages"]] == [
+        "validate",
+        "reserve",
+        "supervisor_acquire",
+        "sandbox_running",
+        "terminal_suspend",
+        "native_workspace_resume",
+        "runtime_preflight",
+        "agent_network",
+        "terminal_resume",
+        "resident_start",
+        "prompt_admission",
+    ]
+    assert all(stage["duration_us"] >= 0 for stage in record["stages"])
+    assert record["facts"]["startup_path"] == "reuse_live"
+    assert record["facts"]["resident_action"] == "reuse"
+    assert record["facts"]["context_status"] == "live"
+    assert record["facts"]["workspace_action"] == "reuse"
+
+
+def test_startup_measurement_reports_the_stage_a_pre_dispatch_failure_stopped_at(
+    monkeypatch, caplog, tmp_path
+):
+    """A failure before dispatch is one record naming the stage, not a gap."""
+    _configure_host(monkeypatch)
+    sink = tmp_path / "startup.jsonl"
+    _enable_profiling(monkeypatch)
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    caplog.set_level(logging.INFO, logger=operation_profiling.__name__)
+    measurement = _profiled_measurement()
+    assert measurement is not None
+
+    def configure(control, _supervisor, _finish):
+        control.suspend_terminals.side_effect = SandboxError("terminal suspend failed")
+
+    result, _control, _supervisor, _finish = _run_shared_boundary_case(
+        monkeypatch,
+        code=0,
+        frame={"kind": "result", "status": "completed", "exit_code": 0},
+        runtime_id="claude-code",
+        configure=configure,
+        measurement=measurement,
+    )
+
+    assert result == 2
+    record = json.loads(sink.read_text().splitlines()[0])
+    assert record["startup_outcome"] == "failed"
+    assert record["failure_stage"] == "terminal_suspend"
+    assert record["measurement_complete"] is True
+    assert [stage["stage"] for stage in record["stages"]][-1] == "sandbox_running"
+
+
+def test_stream_helper_closes_the_measurement_at_the_prompt_handoff(monkeypatch, tmp_path):
+    """The real stream helper, not a stub, owns the dispatch boundary."""
+    _configure_host(monkeypatch)
+    sink = tmp_path / "startup.jsonl"
+    _enable_profiling(monkeypatch)
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    measurement = _profiled_measurement()
+    assert measurement is not None
+    started: list[dict] = []
+
+    class _Stream:
+        def frames(self):
+            yield {"kind": "result", "status": "completed", "exit_code": 0}
+
+        def close(self):
+            return None
+
+    def start_shared_turn(_thread_id, **kwargs):
+        started.append(kwargs)
+        return _Stream()
+
+    code, _tail, _errors, _frame = runner_mod._stream_shared_agent_turn(
+        supervisor=SimpleNamespace(start_shared_turn=start_shared_turn),
+        job=_JOB,
+        control=SimpleNamespace(append_event=lambda _event: None),
+        heart=SimpleNamespace(lease_lost=False, cancel_requested=False),
+        lease_token="lease",
+        timeout_s=5,
+        measurement=measurement,
+    )
+
+    assert code == 0
+    assert started[0]["prompt"] == _JOB.task_prompt
+    record = json.loads(sink.read_text().splitlines()[0])
+    assert record["startup_outcome"] == "dispatched"
+    assert record["spans"][0]["name"] == "prompt_dispatch"
+
+
+def test_profiling_off_adds_no_record_and_no_measurement(monkeypatch, caplog, tmp_path):
+    """The default deployment must not pay for, or emit, any of this."""
+    _configure_host(monkeypatch)
+    sink = tmp_path / "startup.jsonl"
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    operation_profiling.reset_cache()
+    caplog.set_level(logging.INFO, logger=operation_profiling.__name__)
+    dispatched: list[dict] = []
+
+    class Control:
+        job_id = ""
+
+        def __getattr__(self, _name):
+            return lambda *_args, **_kwargs: None
+
+    class Heart:
+        lease_lost = False
+        cancel_requested = False
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(runner_mod, "claim", lambda **_kwargs: _JOB)
+    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_args, **_kwargs: Control())
+    monkeypatch.setattr(runner_mod, "Heartbeater", lambda *_args, **_kwargs: Heart())
+    monkeypatch.setattr(
+        runner_mod, "_run_shared_live_attempt", lambda **kwargs: dispatched.append(kwargs) or 0
+    )
+
+    backend = ContainerBackend(image="img")
+    monkeypatch.setattr(backend, "version_stamp", _stamp)
+    assert (
+        runner_mod.run_once(
+            base_url="http://control",
+            host_credential="host-credential",
+            worker_id="runner-1",
+            backend=backend,
+            host="host-a",
+        )
+        == 0
+    )
+
+    assert dispatched[0]["measurement"] is None
+    assert not sink.exists()
+    assert "agent_operation_profile" not in caplog.text
