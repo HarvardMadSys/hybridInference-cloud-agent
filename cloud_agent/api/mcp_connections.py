@@ -1195,11 +1195,18 @@ async def _post_json(
 
 
 async def _resolve(host: str, port: int) -> list[str]:
-    """Resolve a host to its addresses, for the egress check."""
+    """Resolve a host to its addresses, for the egress check.
+
+    Under the spelling the connection layer dials rather than the one that was
+    typed: ``getaddrinfo`` applies the 2003 IDNA codec, so a unicode label
+    resolves as a different domain from the one httpx connects to.
+    """
     import asyncio
 
+    from cloud_agent.mcp.net_policy import dial_host
+
     loop = asyncio.get_running_loop()
-    infos = await loop.getaddrinfo(host, port, type=0)
+    infos = await loop.getaddrinfo(dial_host(host), port, type=0)
     return [str(info[4][0]) for info in infos]
 
 

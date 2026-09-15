@@ -47,6 +47,7 @@ from cloud_agent.mcp.transports import (
     build_headers,
     connect_legacy_sse,
     connect_streamable,
+    guard_target,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -492,12 +493,20 @@ class TestAddressPinning:
         from cloud_agent.mcp.net_policy import (
             UncheckedTarget,
             check_addresses,
+            dial_spellings,
             pinned_addresses,
         )
         from cloud_agent.mcp.transports import _PinnedNetworkBackend
 
         check_addresses("mcp.example.com", ["198.51.100.7"], EgressPolicy(allow_private=True))
         assert pinned_addresses("mcp.example.com") == ("198.51.100.7",)
+        # The dialler asks in the encoded spelling, so the pin has to be found
+        # under both: a miss is a second lookup, which is the bug.
+        check_addresses("münchen.example", ["198.51.100.9"], EgressPolicy(allow_private=True))
+        assert len(dial_spellings("münchen.example")) == 2
+        for spelling in dial_spellings("münchen.example"):
+            assert pinned_addresses(spelling) == ("198.51.100.9",)
+
         dialled: list[tuple[str, int]] = []
         unreachable = {"::1"}
 
@@ -537,6 +546,55 @@ class TestAddressPinning:
             await backend.connect_tcp("never-checked.example.com", 443)
         assert dialled == [("198.51.100.7", 443), ("::1", 443), ("198.51.100.8", 443)]
 
+    async def test_a_unicode_name_is_dialled_at_the_address_checked_for_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The check spells the name one way and the dialler another.
+
+        A host with a non-ASCII label is validated as the text the user typed
+        and dialled after httpcore has encoded it, so a pin recorded under only
+        one of the two spellings is never found -- and a pin that is never found
+        is a second lookup, which is the whole attack.
+        """
+        from cloud_agent.mcp.transports import _PinnedNetworkBackend
+
+        real_getaddrinfo = socket.getaddrinfo
+
+        def fake_getaddrinfo(host: str, port: Any, *args: Any, **kwargs: Any) -> Any:
+            if host not in ("münchen.test", "xn--mnchen-3ya.test"):
+                return real_getaddrinfo(host, port, *args, **kwargs)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+        monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+        await guard_target("https://münchen.test:9/mcp", EgressPolicy(allow_private=True))
+
+        dialled: list[str] = []
+
+        class _Inner(httpcore.AsyncNetworkBackend):
+            async def connect_tcp(
+                self,
+                host: str,
+                port: int,
+                timeout: float | None = None,
+                local_address: str | None = None,
+                socket_options: Any = None,
+            ) -> Any:
+                dialled.append(host)
+                return None
+
+            async def connect_unix_socket(
+                self, path: str, timeout: float | None = None, socket_options: Any = None
+            ) -> Any:
+                return None
+
+            async def sleep(self, seconds: float) -> None:
+                """Nothing to wait for."""
+
+        backend = _PinnedNetworkBackend(_Inner())
+        # What httpcore asks for, which is the encoded spelling.
+        await backend.connect_tcp("xn--mnchen-3ya.test", 9)
+        assert dialled == ["127.0.0.1"]
+
     async def test_the_legacy_stream_is_checked_before_it_is_opened(self) -> None:
         """The GET is the first socket this connection opens.
 
@@ -548,3 +606,109 @@ class TestAddressPinning:
             # The default policy refuses loopback; nothing may be sent.
             await connect_legacy_sse(_config(policy=EgressPolicy()), client=client)
         await client.aclose()
+
+    async def test_the_fass_name_is_pinned_under_the_spelling_that_is_dialled(self) -> None:
+        """``str.encode("idna")`` is not what this stack dials.
+
+        It is the 2003 encoding: it maps ``faß.example`` to ``fass.example``
+        while httpx and anyio apply the 2008/UTS-46 rule and send
+        ``xn--fa-hia.example``. A pin under the wrong spelling is never found,
+        which is the same failure as having no pin at all.
+        """
+        from cloud_agent.mcp.net_policy import check_addresses, dial_spellings, pinned_addresses
+        from cloud_agent.mcp.transports import _PinnedNetworkBackend
+
+        check_addresses("faß.example", ["198.51.100.4"], EgressPolicy(allow_private=True))
+        assert "xn--fa-hia.example" in dial_spellings("faß.example")
+        assert pinned_addresses("xn--fa-hia.example") == ("198.51.100.4",)
+
+        dialled: list[str] = []
+
+        class _Inner(httpcore.AsyncNetworkBackend):
+            async def connect_tcp(
+                self,
+                host: str,
+                port: int,
+                timeout: float | None = None,
+                local_address: str | None = None,
+                socket_options: Any = None,
+            ) -> Any:
+                dialled.append(host)
+                return None
+
+            async def connect_unix_socket(
+                self, path: str, timeout: float | None = None, socket_options: Any = None
+            ) -> Any:
+                return None
+
+            async def sleep(self, seconds: float) -> None:
+                """Nothing to wait for."""
+
+        await _PinnedNetworkBackend(_Inner()).connect_tcp("xn--fa-hia.example", 443)
+        assert dialled == ["198.51.100.4"]
+
+    async def test_the_resolver_is_asked_for_the_name_that_will_be_dialled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Resolve, check and dial have to name one host.
+
+        ``socket.getaddrinfo`` applies the 2003 IDNA codec, so looking up the
+        typed spelling of ``faß.example`` asks about ``fass.example`` -- a
+        different domain -- and the connection then dials
+        ``xn--fa-hia.example``. The addresses that passed the check would
+        belong to a host nobody connects to.
+        """
+        served: list[int] = []
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("content-length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                served.append(int(self.server.server_address[1]))
+                payload = json.dumps(
+                    {"jsonrpc": "2.0", "id": body.get("id"), "result": {"ok": True}}
+                ).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args: Any) -> None:
+                """Keep the test output to the test's own assertions."""
+
+        import socketserver
+
+        class _Server(socketserver.ThreadingMixIn, HTTPServer):
+            daemon_threads = True
+
+        server = _Server(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+
+        asked: list[str] = []
+        real_getaddrinfo = socket.getaddrinfo
+
+        def fake_getaddrinfo(host: str, port: Any, *args: Any, **kwargs: Any) -> Any:
+            if host == "xn--fa-hia.example":
+                asked.append(host)
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+            if host in ("faß.example", "fass.example"):
+                asked.append(host)
+                raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+            return real_getaddrinfo(host, port, *args, **kwargs)
+
+        monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+        config = _config(
+            endpoint=normalize_url(f"http://faß.example:{server.server_port}/mcp"),
+            policy=EgressPolicy(allow_private=True, allow_plain_http=True),
+        )
+        client = build_client(config)
+        transport = StreamableHttpTransport(config, client, owns_client=True)
+        try:
+            assert await transport.request("tools/list") == {"ok": True}
+        finally:
+            await client.aclose()
+            server.shutdown()
+            server.server_close()
+        assert asked == ["xn--fa-hia.example"], f"the resolver was asked about {asked}"
+        assert served == [server.server_port]

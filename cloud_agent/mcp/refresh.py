@@ -506,12 +506,17 @@ async def _post(
     del fetcher  # Reserved for a caller that wants to inject a client.
     import asyncio
 
-    from cloud_agent.mcp.net_policy import EndpointRejected, check_addresses, validate_endpoint
+    from cloud_agent.mcp.net_policy import (
+        EndpointRejected,
+        check_addresses,
+        dial_host,
+        validate_endpoint,
+    )
 
     try:
         endpoint = validate_endpoint(request.url, policy)
         loop = asyncio.get_running_loop()
-        infos = await loop.getaddrinfo(endpoint.host, endpoint.port, type=0)
+        infos = await loop.getaddrinfo(dial_host(endpoint.host), endpoint.port, type=0)
         check_addresses(endpoint.host, {str(info[4][0]) for info in infos}, policy)
     except EndpointRejected as exc:
         # Refused by policy, or not a URL a request can be built for. Nothing

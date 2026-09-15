@@ -59,6 +59,7 @@ from cloud_agent.mcp.net_policy import (
     NormalizedEndpoint,
     UncheckedTarget,
     check_addresses,
+    dial_host,
     pinned_addresses,
     sanitize_headers,
     validate_endpoint,
@@ -406,7 +407,11 @@ async def guard_target(
         )
     try:
         loop = asyncio.get_running_loop()
-        infos = await loop.getaddrinfo(endpoint.host, endpoint.port, type=0)
+        # Resolved under the name that will be dialled, not the one typed:
+        # ``getaddrinfo`` uses the 2003 IDNA codec, so a unicode label would be
+        # looked up as a different domain from the one the connection uses.
+        host = dial_host(endpoint.host)
+        infos = await loop.getaddrinfo(host, endpoint.port, type=0)
         addresses = {str(info[4][0]) for info in infos}
         check_addresses(endpoint.host, addresses, policy)
     except EndpointRejected as exc:
@@ -1108,7 +1113,11 @@ class HttpMetadataFetcher(MetadataFetcher):
         endpoint = validate_endpoint(url, policy)
         try:
             loop = asyncio.get_running_loop()
-            infos = await loop.getaddrinfo(endpoint.host, endpoint.port, type=0)
+            # The dialler's spelling again: a metadata document lives on the
+            # same name the endpoint does, and resolving a different one would
+            # check addresses that nothing connects to.
+            host = dial_host(endpoint.host)
+            infos = await loop.getaddrinfo(host, endpoint.port, type=0)
             check_addresses(endpoint.host, {str(info[4][0]) for info in infos}, policy)
         except EndpointRejected as exc:
             raise TransportError(str(exc), kind=exc.kind) from exc

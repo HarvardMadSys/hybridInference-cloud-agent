@@ -284,6 +284,67 @@ def check_addresses(
     return resolved
 
 
+def dial_spellings(host: str) -> tuple[str, ...]:
+    """Every spelling of ``host`` a dialler might ask for.
+
+    The checked spelling is the one in the URL; the dialled one is what the
+    connection layer builds from it, which is the UTS-46 form for a host with a
+    non-ASCII label. Both are recorded so the lookup cannot miss on the
+    difference -- and a lookup that misses is indistinguishable, at the socket,
+    from a name nothing checked.
+    """
+    candidate = host.strip().strip(".").lower()
+    if not candidate:
+        return ()
+    if _as_address(candidate) is not None:
+        return (candidate,)
+    encoded = _encoded_host(candidate)
+    if encoded is None or encoded == candidate:
+        return (candidate,)
+    return (candidate, encoded)
+
+
+def _encoded_host(host: str) -> str | None:
+    """The form the connection layer dials, which is what the pin is found under.
+
+    **Not** ``str.encode("idna")``. That is the 2003 encoding, and it is not
+    what this stack uses: it maps ``faß.example`` to ``fass.example`` while
+    httpx and anyio both apply the 2008/UTS-46 rule and dial
+    ``xn--fa-hia.example``. A pin recorded under the wrong spelling is never
+    found, and a pin that is never found is the lookup this exists to remove --
+    so the spelling is asked of httpx, the component that builds the
+    connection, rather than derived here a second way.
+    """
+    import httpx
+
+    try:
+        return httpx.URL(f"https://{host}/").raw_host.decode("ascii").lower()
+    except Exception:
+        return None
+
+
+def dial_host(host: str) -> str:
+    """The host to hand the resolver, which is the one that will be dialled.
+
+    ``socket.getaddrinfo`` applies the **2003** IDNA codec to a non-ASCII name,
+    and the connection layer applies UTS-46: asking for ``faß.example`` resolves
+    ``fass.example`` and then dials ``xn--fa-hia.example``, so the addresses
+    that pass the check belong to a domain nobody connects to. The whole chain
+    -- resolve, check, dial -- has to name one host, and the one it has to name
+    is the dialler's.
+    """
+    spellings = dial_spellings(host)
+    return spellings[-1] if spellings else host
+
+
+def _as_address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """``host`` as an IP address, or ``None`` when it is a name."""
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        return None
+
+
 def _pin(host: str, addresses: tuple[str, ...]) -> None:
     """Record every address the next dial for ``host`` in this task may use.
 
@@ -295,7 +356,8 @@ def _pin(host: str, addresses: tuple[str, ...]) -> None:
     if not addresses:
         return
     current = dict(_ACTIVE_PINS.get() or {})
-    current[host.strip().strip(".").lower()] = tuple(addresses)
+    for spelling in dial_spellings(host):
+        current[spelling] = tuple(addresses)
     _ACTIVE_PINS.set(current)
 
 
@@ -307,7 +369,10 @@ def pinned_addresses(host: str) -> tuple[str, ...]:
     new: the pin only ever narrows where a checked name may land.
     """
     pins = _ACTIVE_PINS.get() or {}
-    return pins.get(host.strip().strip(".").lower(), ())
+    for spelling in dial_spellings(host):
+        if spelling in pins:
+            return pins[spelling]
+    return ()
 
 
 def validate_endpoint(raw: str, policy: EgressPolicy) -> NormalizedEndpoint:
@@ -458,6 +523,8 @@ __all__ = [
     "NormalizedEndpoint",
     "UncheckedTarget",
     "check_addresses",
+    "dial_host",
+    "dial_spellings",
     "normalize_url",
     "parse_header_pairs",
     "pinned_addresses",
