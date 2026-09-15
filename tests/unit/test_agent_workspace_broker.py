@@ -171,6 +171,10 @@ class _SharedSupervisor:
         self.threads.update(member.thread_id for member in members)
         return []
 
+    def ensure_resident(self, thread_id, token, launch, profiling=None):
+        self.calls.append(("resident", thread_id, profiling))
+        return _descriptor(thread_id)
+
     def acquire(
         self,
         spec,
@@ -224,6 +228,20 @@ class _SharedSupervisor:
     def capture_snapshot(self, thread_id: str, *, capture):
         self.calls.append(("snapshot", thread_id))
         return {"patch": "diff --git a/a.txt b/a.txt\n"}
+
+
+def _launch() -> dict[str, object]:
+    """The minimum resident launch the broker's request model accepts."""
+    return {
+        "runtime_id": "claude-code",
+        "runtime_version": "2.1.220",
+        "native_session_id": "native-source",
+        "model": "glm-5.1",
+        "gateway_base_url": "http://gateway",
+        "credential": "grant",
+        "slot_id": 0,
+        "residency_generation": 1,
+    }
 
 
 def _identity() -> dict[str, object]:
@@ -367,7 +385,18 @@ async def test_an_invalid_profiling_context_never_rejects_a_sandbox_request():
                 "profiling": live,
             },
         )
-        # Deliberately unusable selections: all of them must still lease.
+        plain_resident = await client.post(
+            "/shared-sandboxes/athr_source/resident",
+            headers=headers,
+            json={"token": "lease", "launch": _launch()},
+        )
+        selected_resident = await client.post(
+            "/shared-sandboxes/athr_source/resident",
+            headers=headers,
+            json={"token": "lease", "launch": _launch(), "profiling": live},
+        )
+        # Deliberately unusable selections on BOTH endpoints: a measurement
+        # setting must never be able to reject the sandbox request carrying it.
         for broken in (
             {**live, "run_id": "r" * 200},
             {**live, "run_id": None, "expires_at": "soon"},
@@ -385,13 +414,24 @@ async def test_an_invalid_profiling_context_never_rejects_a_sandbox_request():
                     "profiling": broken,
                 },
             )
-            assert rejected.status_code == 200, broken
+            assert rejected.status_code == 200, ("acquire", broken)
+            rejected_resident = await client.post(
+                "/shared-sandboxes/athr_source/resident",
+                headers=headers,
+                json={"token": "lease", "launch": _launch(), "profiling": broken},
+            )
+            assert rejected_resident.status_code == 200, ("resident", broken)
 
     assert plain.status_code == 200
     assert selected.status_code == 200
+    assert plain_resident.status_code == 200
+    assert selected_resident.status_code == 200
     acquired = [call for call in supervisor.calls if call[0] == "acquire"]
+    residents = [call for call in supervisor.calls if call[0] == "resident"]
     assert acquired[0][2] is None
     assert acquired[1][2] == live
+    assert residents[0][2] is None
+    assert residents[1][2] == live
 
 
 @pytest.mark.asyncio

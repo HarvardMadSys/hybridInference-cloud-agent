@@ -19,6 +19,7 @@ from cloud_agent_host import operation_profiling, runner as runner_mod
 from cloud_agent_host.runner import ClaimedJob, LeaseLost
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError
+from cloud_agent_host.session_supervisor_client import SessionSupervisorError
 
 
 @pytest.fixture(autouse=True)
@@ -428,6 +429,7 @@ def _run_shared_boundary_case(
     resident_action="unknown",
     lease_stages=None,
     resident_stages=None,
+    broker_records=True,
 ):
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
@@ -451,22 +453,37 @@ def _run_shared_boundary_case(
     }
     control.mark_chat_sandbox_running.return_value = {}
     supervisor = Mock()
-    supervisor.acquire_shared.return_value = {
-        "token": "lease",
-        "container_id": "same-container",
-        "activation_generation": 3,
-        "context_status": "live",
-        "resident_state": "live",
-        # What the broker reports it did to the container.
-        "container_action": container_action,
-        "stages": list(lease_stages or []),
-    }
-    supervisor.ensure_shared_resident.return_value = {
-        "context_status": "live",
-        "process_generation": 1,
-        "resident_action": resident_action,
-        "stages": list(resident_stages or []),
-    }
+
+    def acquire_shared(_thread_id, **kwargs):
+        context = kwargs.get("profiling") or {}
+        return {
+            "token": "lease",
+            "container_id": "same-container",
+            "activation_generation": 3,
+            "context_status": "live",
+            "resident_state": "live",
+            # What the broker reports it did to the container.
+            "container_action": container_action,
+            "stages": list(lease_stages or []),
+            # Echoed like the real broker: which call this answers, and whether
+            # this process collected for it at all.
+            "profiling_call_id": context.get("call_id"),
+            "profiling_recorded": broker_records,
+        }
+
+    def ensure_shared_resident(_thread_id, **kwargs):
+        context = kwargs.get("profiling") or {}
+        return {
+            "context_status": "live",
+            "process_generation": 1,
+            "resident_action": resident_action,
+            "stages": list(resident_stages or []),
+            "profiling_call_id": context.get("call_id"),
+            "profiling_recorded": broker_records,
+        }
+
+    supervisor.acquire_shared.side_effect = acquire_shared
+    supervisor.ensure_shared_resident.side_effect = ensure_shared_resident
     supervisor.settle_shared.return_value = {"native_session_id": observed_session_id}
     monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
     monkeypatch.setattr(
@@ -1037,11 +1054,29 @@ def test_broker_sub_stages_hang_off_the_stage_they_happened_in(monkeypatch, tmp_
     acquire = next(item for item in record["stages"] if item["stage"] == "supervisor_acquire")
     resident = next(item for item in record["stages"] if item["stage"] == "resident_start")
     assert acquire["children"] == [
-        {"stage": "container_start", "duration_us": 690_000, "outcome": "ok", "source": "broker"},
-        {"stage": "service_hosts_sync", "duration_us": 1_200, "outcome": "ok", "source": "broker"},
+        {
+            "stage": "container_start",
+            "duration_us": 690_000,
+            "outcome": "ok",
+            "source": "broker",
+            "call_id": "c1",
+        },
+        {
+            "stage": "service_hosts_sync",
+            "duration_us": 1_200,
+            "outcome": "ok",
+            "source": "broker",
+            "call_id": "c1",
+        },
     ]
     assert resident["children"] == [
-        {"stage": "cli_spawn", "duration_us": 240_000, "outcome": "ok", "source": "broker"}
+        {
+            "stage": "cli_spawn",
+            "duration_us": 240_000,
+            "outcome": "ok",
+            "source": "broker",
+            "call_id": "c2",
+        }
     ]
     # The broker contributed, and the record says so.
     assert record["producers"] == ["runner", "broker"]
@@ -1078,6 +1113,7 @@ def test_a_broker_that_is_not_profiling_leaves_the_record_partial(monkeypatch, t
         resident_action="reuse",
         lease_stages=[],
         resident_stages=[],
+        broker_records=False,
     )
 
     operation_profiling.flush_sink()
@@ -1086,6 +1122,10 @@ def test_a_broker_that_is_not_profiling_leaves_the_record_partial(monkeypatch, t
     # The broker was asked for its fragment and did not answer, so the record
     # is partial rather than a quiet but complete timeline.
     assert record["missing_producers"] == ["broker"]
+    assert record["missing_fragments"] == [
+        "broker:c1:supervisor_acquire",
+        "broker:c2:resident_start",
+    ]
     assert record["measurement_complete"] is False
     acquire = next(item for item in record["stages"] if item["stage"] == "supervisor_acquire")
     assert "children" not in acquire
@@ -1407,13 +1447,16 @@ def test_an_acquire_fragment_does_not_cover_a_missing_resident_fragment(monkeypa
         resident_action="resume",
         lease_stages=[{"name": "container_start", "duration_us": 690_000}],
         resident_stages=[],
+        broker_records=False,
     )
 
     assert result == 0
     operation_profiling.flush_sink()
     record = json.loads(sink.read_text().splitlines()[0])
-    assert record["producers"] == ["runner", "broker"]
-    assert record["missing_fragments"] == ["broker:resident_start"]
+    assert record["missing_fragments"] == [
+        "broker:c1:supervisor_acquire",
+        "broker:c2:resident_start",
+    ]
     assert record["measurement_complete"] is False
 
 
@@ -1452,3 +1495,114 @@ def test_a_truncated_broker_fragment_makes_the_record_partial(monkeypatch, tmp_p
     assert record["truncated"] is True
     assert record["measurement_complete"] is False
     assert "missing_fragments" not in record
+
+
+def test_a_reuse_that_does_no_timed_work_is_a_complete_fragment(monkeypatch, tmp_path):
+    """An answered call with no stages is a skip, not a missing measurement.
+
+    Regression: the supervisor's reuse path legitimately runs no `cli_spawn`
+    and answers with no stages, which the previous rule read as "never heard
+    from the broker" and marked every normal reuse incomplete.
+    """
+    _configure_host(monkeypatch)
+    sink = tmp_path / "startup.jsonl"
+    _enable_profiling(monkeypatch)
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    measurement = _profiled_measurement()
+    assert measurement is not None
+
+    def configure(_control, _supervisor, _finish):
+        def stream(**kwargs):
+            operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+
+    result, *_ = _run_shared_boundary_case(
+        monkeypatch,
+        code=0,
+        frame={"kind": "result", "status": "completed", "exit_code": 0},
+        runtime_id="claude-code",
+        configure=configure,
+        measurement=measurement,
+        container_action="reuse",
+        resident_action="reuse",
+        # The broker answered both calls; neither had timed work to report.
+        lease_stages=[],
+        resident_stages=[],
+    )
+
+    assert result == 0
+    operation_profiling.flush_sink()
+    record = json.loads(sink.read_text().splitlines()[0])
+    assert record["facts"]["startup_path"] == "reuse_live"
+    assert "missing_fragments" not in record
+    assert record["measurement_complete"] is True
+
+
+def test_a_retried_call_is_a_second_fragment_that_must_also_answer(monkeypatch, tmp_path):
+    """Two attempts at the same stage are two fragments, not one.
+
+    Regression: expectations were a set keyed by stage, so a failed resident
+    call was erased by its successful retry and the record claimed completeness
+    while the first call had never been accounted for.
+    """
+    _configure_host(monkeypatch)
+    sink = tmp_path / "startup.jsonl"
+    _enable_profiling(monkeypatch)
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    measurement = _profiled_measurement()
+    assert measurement is not None
+    attempts: list[str] = []
+
+    def configure(control, supervisor, _finish):
+        def stream(**kwargs):
+            operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        # The retry rotates the residency grant before reopening the process.
+        control.establish_shared_residency.return_value = {
+            "credential": "grant-2",
+            "generation": 2,
+            "model": _JOB.model,
+        }
+
+        def flaky(_thread_id, **kwargs):
+            context = kwargs.get("profiling") or {}
+            attempts.append(context.get("call_id"))
+            if len(attempts) == 1:
+                # The first attempt never answered.
+                raise SessionSupervisorError(503, "broker restarted mid-call")
+            return {
+                "context_status": "live",
+                "process_generation": 2,
+                "resident_action": "resume",
+                "stages": [{"name": "cli_spawn", "duration_us": 240}],
+                "profiling_call_id": context.get("call_id"),
+                "profiling_recorded": True,
+            }
+
+        supervisor.ensure_shared_resident.side_effect = flaky
+
+    result, *_ = _run_shared_boundary_case(
+        monkeypatch,
+        code=0,
+        frame={"kind": "result", "status": "completed", "exit_code": 0},
+        runtime_id="claude-code",
+        configure=configure,
+        measurement=measurement,
+        container_action="reuse",
+        resident_action="resume",
+        lease_stages=[{"name": "phase_network", "duration_us": 120}],
+    )
+
+    assert result == 0
+    assert attempts == ["c2", "c3"], "each attempt must carry its own call id"
+    operation_profiling.flush_sink()
+    record = json.loads(sink.read_text().splitlines()[0])
+    assert record["missing_fragments"] == ["broker:c2:resident_start"]
+    assert record["measurement_complete"] is False
+    # The retry's timing is still reported.
+    resident = next(item for item in record["stages"] if item["stage"] == "resident_start")
+    assert [child["call_id"] for child in resident["children"]] == ["c3"]

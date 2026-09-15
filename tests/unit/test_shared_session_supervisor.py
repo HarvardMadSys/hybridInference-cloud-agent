@@ -2296,10 +2296,14 @@ def test_broker_sub_stages_are_reported_when_this_process_is_profiling(monkeypat
             "run_id": "broker-stages-1",
             "measurement_id": "msm_x",
             "operation": "attempt.startup",
+            "call_id": "c7",
             "expires_at": time.time() + 60,
         },
     )
 
+    # The answer says which call it belongs to and that this process collected.
+    assert lease.profiling_call_id == "c7"
+    assert lease.profiling_recorded is True
     names = [item["name"] for item in lease.stages]
     assert names == ["container_create", "container_start"]
     assert all(item["duration_us"] >= 0 for item in lease.stages)
@@ -2350,6 +2354,9 @@ def test_a_lapsed_selection_stops_the_broker_recording(monkeypatch):
     )
 
     assert lease.stages == []
+    # A refusal is still an answer about collection: it says this process did
+    # not record, which is what makes the caller's fragment missing.
+    assert lease.profiling_recorded is False
     # The action is a fact, so it survives the lapsed measurement.
     assert lease.container_action == "create"
 
@@ -2401,8 +2408,68 @@ def test_a_live_selection_records_container_sub_stages(monkeypatch):
             "run_id": "broker-context-1",
             "measurement_id": "msm_x",
             "operation": "attempt.startup",
+            "call_id": "c9",
             "expires_at": time.time() + 60,
         },
     )
 
     assert [item["name"] for item in lease.stages] == ["container_start"]
+    assert lease.profiling_call_id == "c9"
+    assert lease.profiling_recorded is True
+
+
+def test_a_reuse_with_no_stages_still_reports_that_it_collected(monkeypatch):
+    """An empty stage list is a completed collection, not a missing one.
+
+    Regression: the reuse path runs no `cli_spawn`, so it answers with no
+    stages, and the caller read that as never having heard from the broker.
+    """
+    _enable_broker_profiling(monkeypatch)
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    live = {
+        "run_id": "broker-context-1",
+        "measurement_id": "msm_x",
+        "operation": "attempt.startup",
+        "call_id": "c1",
+        "expires_at": time.time() + 60,
+    }
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        profiling=live,
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+        profiling=live,
+    )
+    supervisor.settle("athr_source", lease.token, job_id="ajob_source", context_status="live")
+
+    second = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=True,
+        manifest=_members(),
+        profiling={**live, "call_id": "c2"},
+    )
+    descriptor = supervisor.ensure_resident(
+        "athr_source",
+        second.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+        profiling={**live, "call_id": "c2"},
+    )
+
+    assert descriptor.resident_action == "reuse"
+    assert descriptor.stages == []
+    assert descriptor.profiling_call_id == "c2"
+    # The member's work was skipped on purpose and that is a complete answer.
+    assert descriptor.profiling_recorded is True

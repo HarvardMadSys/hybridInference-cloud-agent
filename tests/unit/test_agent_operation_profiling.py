@@ -928,12 +928,12 @@ def test_a_missing_producer_makes_the_record_incomplete(monkeypatch, caplog):
     profiling.mark(measurement, "supervisor_acquire")
     profiling.mark(measurement, "sandbox_running")
 
-    profiling.expect_fragment(measurement, "broker", "supervisor_acquire")
+    assert profiling.expect_fragment(measurement, "broker", "supervisor_acquire") == "c1"
     profiling.finish(measurement, outcome="dispatched")
 
     record = _records(caplog)[0]
     assert record["producers"] == ["runner"]
-    assert record["missing_fragments"] == ["broker:supervisor_acquire"]
+    assert record["missing_fragments"] == ["broker:c1:supervisor_acquire"]
     assert record["missing_producers"] == ["broker"]
     assert record["measurement_complete"] is False
 
@@ -946,12 +946,17 @@ def test_an_answered_producer_completes_the_record(monkeypatch, caplog):
     profiling.mark(measurement, "supervisor_acquire")
     profiling.mark(measurement, "sandbox_running")
 
-    profiling.expect_fragment(measurement, "broker", "supervisor_acquire")
-    profiling.attach_remote_stages(
+    call = profiling.expect_fragment(measurement, "broker", "supervisor_acquire")
+    assert profiling.record_fragment(
         measurement,
-        "supervisor_acquire",
-        [{"name": "container_start", "duration_us": 1}],
-        source="broker",
+        producer="broker",
+        call_id=call,
+        stage="supervisor_acquire",
+        response={
+            "profiling_call_id": call,
+            "profiling_recorded": True,
+            "stages": [{"name": "container_start", "duration_us": 1}],
+        },
     )
     profiling.finish(measurement, outcome="dispatched")
 
@@ -1003,19 +1008,24 @@ def test_one_answered_fragment_does_not_cover_a_missing_one(monkeypatch, caplog)
     profiling.mark(measurement, "resident_start")
     profiling.mark(measurement, "prompt_admission")
 
-    profiling.expect_fragment(measurement, "broker", "supervisor_acquire")
+    acquire = profiling.expect_fragment(measurement, "broker", "supervisor_acquire")
     profiling.expect_fragment(measurement, "broker", "resident_start")
-    profiling.attach_remote_stages(
+    profiling.record_fragment(
         measurement,
-        "supervisor_acquire",
-        [{"name": "container_start", "duration_us": 10}],
-        source="broker",
+        producer="broker",
+        call_id=acquire,
+        stage="supervisor_acquire",
+        response={
+            "profiling_call_id": acquire,
+            "profiling_recorded": True,
+            "stages": [{"name": "container_start", "duration_us": 10}],
+        },
     )
     profiling.finish(measurement, outcome="dispatched")
 
     record = _records(caplog)[0]
     assert record["producers"] == ["runner", "broker"]
-    assert record["missing_fragments"] == ["broker:resident_start"]
+    assert record["missing_fragments"] == ["broker:c2:resident_start"]
     assert record["missing_producers"] == ["broker"]
     assert record["measurement_complete"] is False
 
@@ -1032,12 +1042,17 @@ def test_a_truncated_remote_fragment_is_not_a_complete_record(monkeypatch, caplo
     profiling.mark(measurement, "supervisor_acquire")
     profiling.mark(measurement, "sandbox_running")
 
-    profiling.expect_fragment(measurement, "broker", "supervisor_acquire")
-    assert profiling.attach_remote_stages(
+    call = profiling.expect_fragment(measurement, "broker", "supervisor_acquire")
+    assert profiling.record_fragment(
         measurement,
-        "supervisor_acquire",
-        [{"name": "container_start", "duration_us": 2_000_000, "truncated": True}],
-        source="broker",
+        producer="broker",
+        call_id=call,
+        stage="supervisor_acquire",
+        response={
+            "profiling_call_id": call,
+            "profiling_recorded": True,
+            "stages": [{"name": "container_start", "duration_us": 2_000_000, "truncated": True}],
+        },
     )
     profiling.finish(measurement, outcome="dispatched")
 
@@ -1123,3 +1138,62 @@ def test_an_exporter_that_cannot_start_drops_measurements_without_failing(monkey
     assert profiling._EXPORTER.disabled is True
     assert profiling._EXPORTER.dropped == 1
     assert "could not start its exporter" in caplog.text
+
+
+def test_an_answer_with_no_stages_is_a_complete_fragment(monkeypatch, caplog):
+    """A call that legitimately did no timed work still answered.
+
+    Regression: an empty stage list was read as "never heard from the broker",
+    which marked every normal CLI reuse incomplete.
+    """
+    _enable(monkeypatch)
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    profiling.mark(measurement, "resident_start")
+
+    call = profiling.expect_fragment(measurement, "broker", "resident_start")
+    assert profiling.record_fragment(
+        measurement,
+        producer="broker",
+        call_id=call,
+        stage="resident_start",
+        response={"profiling_call_id": call, "profiling_recorded": True, "stages": []},
+    )
+    profiling.finish(measurement, outcome="dispatched")
+
+    record = _records(caplog)[0]
+    assert "missing_fragments" not in record
+    assert record["measurement_complete"] is True
+    resident = next(item for item in record["stages"] if item["stage"] == "resident_start")
+    assert "children" not in resident
+
+
+def test_a_response_for_another_call_is_not_an_answer(monkeypatch, caplog):
+    """The echo is what binds an answer to a call, so it cannot be skipped."""
+    _enable(monkeypatch)
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    profiling.mark(measurement, "resident_start")
+
+    call = profiling.expect_fragment(measurement, "broker", "resident_start")
+    for response in (
+        {"profiling_recorded": True, "stages": [{"name": "cli_spawn", "duration_us": 1}]},
+        {"profiling_call_id": "c99", "profiling_recorded": True, "stages": []},
+        {"profiling_call_id": call, "profiling_recorded": False, "stages": []},
+        "not a mapping",
+    ):
+        assert (
+            profiling.record_fragment(
+                measurement,
+                producer="broker",
+                call_id=call,
+                stage="resident_start",
+                response=response,
+            )
+            is False
+        )
+    profiling.finish(measurement, outcome="dispatched")
+
+    record = _records(caplog)[0]
+    assert record["missing_fragments"] == ["broker:c1:resident_start"]
+    assert record["measurement_complete"] is False

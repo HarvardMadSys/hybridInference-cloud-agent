@@ -405,14 +405,23 @@ operation、以及**绝对墙钟**截止时间——两个进程没有共同的�
 **测量配置不能让业务请求失败。** 该字段在 HTTP 模型上刻意不做类型与长度校验：任何
 畸形内容都只在 `start_stage_recording` 里被判为“不记录”，绝不以 422 拒绝一次 acquire。
 `run_id` 的长度上限在**读取 descriptor 时**统一执行（`MAX_RUN_ID_CHARS`），超限表现为
-profiling 关闭并记一条 warning，而不是每次启动失败。
+profiling 关闭并记一条 warning，而不是每次启动失败。acquire 与 resident 两个接口
+一致，畸形上下文测试覆盖两者。
 
-记录用 `producers` 列出实际贡献者。完整性按**调用片段**判断，而不是按生产者：
-runner 每次向 broker 发起调用（acquire、resident）前登记一个
-`(producer, stage)` 期望，只有该次调用真的带回了非空计时才算满足。因此“acquire 有数据、
-resident 计时缺失”是 `missing_fragments=["broker:resident_start"]`、`measurement_complete=false`，
-而不是因为收到过任意一段 broker 数据就算完整。broker 没开时则是
-`missing_fragments=["broker:supervisor_acquire", "broker:resident_start"]`。
+记录用 `producers` 列出实际贡献者。**片段 = 一次调用**，协议要同时表达三件事：
+
+| 问题 | 字段 |
+| --- | --- |
+| 这是哪次调用 | 请求与响应各带 `call_id`；runner 在调用前铸造并登记期望 |
+| 是否完成采集 | 响应带 `profiling_recorded`——独立于 `stages` 是否为空 |
+| 是否正常跳过 | `profiling_recorded=true` 且 `stages=[]` 即“本次无需执行该阶段” |
+
+因此完整性按 **call id** 判断，而不是按阶段名或生产者：重试是**第二个片段**，必须各自
+交代，不能用后一次成功掩盖前一次；而正常复用 CLI 时 `cli_spawn` 本就不存在，
+`resident_action=reuse` + `stages=[]` + `profiling_recorded=true` 是**完整**片段，
+不是缺失。`missing_fragments` 形如 `["broker:c2:resident_start"]`，
+`measurement_complete=false`；broker 没开时两个调用都缺席。子阶段也带 `call_id`，
+所以展开重试时能看出哪段属于哪次尝试。
 
 **截断状态跨进程保留。** broker 在自己的截止点截断的子阶段带 `truncated=true` 回到
 runner，并置根记录 `truncated=true`；`measurement_complete` 要求边界齐全、**未被截断**、

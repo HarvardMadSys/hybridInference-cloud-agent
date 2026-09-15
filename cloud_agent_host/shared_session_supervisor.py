@@ -49,6 +49,7 @@ from cloud_agent_host.member_resources import (
 )
 from cloud_agent_host.operation_profiling import (
     StageRecorder,
+    context_call_id,
     start_stage_recording,
     substage,
 )
@@ -127,6 +128,13 @@ class SharedSessionLease:
     #: experiment. Durations only: another process's monotonic offsets would
     #: not be comparable with the caller's.
     stages: list[dict[str, Any]] = field(default_factory=list)
+    #: Which caller call this answers, echoed back so a retry is a second
+    #: fragment rather than a replacement for the first.
+    profiling_call_id: str | None = None
+    #: Whether this process finished collecting for that call. Distinct from
+    #: `stages` being empty: a reuse that legitimately did no timed work still
+    #: collected, and reporting it as missing made every reuse incomplete.
+    profiling_recorded: bool = False
 
 
 @dataclass(frozen=True)
@@ -162,6 +170,9 @@ class SharedSessionDescriptor:
     #: Sub-stage durations measured in this process, if it is part of an
     #: experiment. See :class:`SharedSessionLease`.
     stages: list[dict[str, Any]] = field(default_factory=list)
+    #: See :class:`SharedSessionLease`.
+    profiling_call_id: str | None = None
+    profiling_recorded: bool = False
 
 
 @dataclass(frozen=True)
@@ -604,6 +615,7 @@ class SharedChatSessionSupervisor:
         # its own switch, its own run, and the caller's inherited deadline.
         facts = SandboxActionFacts()
         recorder = start_stage_recording(profiling)
+        call_id = context_call_id(profiling)
         self.register_manifest(
             spec,
             manifest,
@@ -622,7 +634,9 @@ class SharedChatSessionSupervisor:
                 self._condition.wait(timeout=min(remaining, 0.5))
             if member.lease_token is not None:
                 if member.lease_owner == owner:
-                    return self._lease(group, member, facts=facts, recorder=recorder)
+                    return self._lease(
+                        group, member, facts=facts, recorder=recorder, call_id=call_id
+                    )
                 raise SessionBusy(f"chat {thread_id!r} already has an active turn")
             if member.current_turn is not None:
                 raise SessionBusy(f"chat {thread_id!r} already has a running turn")
@@ -659,7 +673,7 @@ class SharedChatSessionSupervisor:
             group.idle_deadline = None
 
         with self._lock:
-            return self._lease(group, member, facts=facts, recorder=recorder)
+            return self._lease(group, member, facts=facts, recorder=recorder, call_id=call_id)
 
     def ensure_resident(
         self,
@@ -672,6 +686,7 @@ class SharedChatSessionSupervisor:
         # Only durations are gated: the member's action is reported either way,
         # because the runner needs it to classify the startup path.
         recorder = start_stage_recording(profiling)
+        call_id = context_call_id(profiling)
         with self._lock:
             group, member = self._leased_member(thread_id, token)
             self._require_mutation_admission(group)
@@ -685,6 +700,8 @@ class SharedChatSessionSupervisor:
                 member,
                 resident_action=resident_action,
                 stages=recorder.stages if recorder is not None else [],
+                call_id=call_id,
+                recorded=recorder is not None,
             )
 
     def start_turn(
@@ -2274,6 +2291,7 @@ class SharedChatSessionSupervisor:
         *,
         facts: SandboxActionFacts | None = None,
         recorder: StageRecorder | None = None,
+        call_id: str | None = None,
     ) -> SharedSessionLease:
         """Build the caller's receipt, including what this call did to the container."""
         assert member.lease_token is not None
@@ -2291,6 +2309,8 @@ class SharedChatSessionSupervisor:
             resident_slot_id=member.resident_slot_id,
             container_action=facts.container_action if facts is not None else "unknown",
             stages=list(recorder.stages) if recorder is not None else [],
+            profiling_call_id=call_id,
+            profiling_recorded=recorder is not None,
         )
 
     def _descriptors(self, group: _Group) -> list[SharedSessionDescriptor]:
@@ -2303,6 +2323,8 @@ class SharedChatSessionSupervisor:
         *,
         resident_action: str = "unknown",
         stages: list[dict[str, Any]] | None = None,
+        call_id: str | None = None,
+        recorded: bool = False,
     ) -> SharedSessionDescriptor:
         return SharedSessionDescriptor(
             thread_id=member.thread_id,
@@ -2333,6 +2355,8 @@ class SharedChatSessionSupervisor:
             context_status=member.context_status,
             resident_action=resident_action,
             stages=list(stages) if stages else [],
+            profiling_call_id=call_id,
+            profiling_recorded=recorded,
         )
 
     @staticmethod

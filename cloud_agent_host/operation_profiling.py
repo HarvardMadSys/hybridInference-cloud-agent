@@ -220,11 +220,18 @@ class Measurement:
     remote_stages: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     #: Producers that contributed to this record, beyond the runner itself.
     producers: set[str] = field(default_factory=set)
-    #: (producer, local stage) fragments this path asked for. Completeness is
-    #: judged per fragment, not per producer: an acquire that answered while
-    #: the resident call's timing never arrived is a partial timeline, and
-    #: "some broker data arrived" must not pass for all of it.
-    expected_fragments: set[tuple[str, str]] = field(default_factory=set)
+    #: (producer, call id, local stage) fragments this path asked for. Keyed by
+    #: call rather than by stage so a retry is a second fragment that must be
+    #: accounted for, and so an unanswered call cannot be hidden by a later one
+    #: to the same stage.
+    expected_fragments: set[tuple[str, str, str]] = field(default_factory=set)
+    #: (producer, call id) answers this path received. An answer says the
+    #: producer finished collecting for that call -- which is not the same as
+    #: having timed something: a legitimately skipped stage answers with no
+    #: stages at all, and that is a complete fragment, not a missing one.
+    answered_fragments: set[tuple[str, str]] = field(default_factory=set)
+    #: Mints the call ids that make retries distinct fragments.
+    call_counter: int = 0
     #: Set when any interval in this record ended at a deadline rather than
     #: when its work finished -- locally or in another process.
     truncated: bool = False
@@ -512,6 +519,45 @@ def bind(measurement: Measurement | None, **facts: Any) -> bool:
     return measurement.selected
 
 
+def record_fragment(
+    measurement: Measurement | None,
+    *,
+    producer: str,
+    call_id: str | None,
+    stage: str,
+    response: Any,
+) -> bool:
+    """Record one call's answer and mark that fragment answered.
+
+    An answer is what the producer reports about *collecting*, not about how
+    much it collected. A reuse that legitimately does no timed work answers
+    with no stages and that fragment is complete; a producer that was not
+    collecting answers with nothing and that fragment is missing. Conflating
+    the two made every normal reuse look incomplete.
+
+    Returns whether the fragment was answered.
+    """
+    if measurement is None or not _recording(measurement) or not call_id:
+        return False
+    if not isinstance(response, Mapping):
+        return False
+    echoed = str(response.get("profiling_call_id") or "")
+    if echoed != call_id:
+        # A response that cannot be matched to the call is not an answer.
+        return False
+    if not response.get("profiling_recorded"):
+        return False
+    measurement.answered_fragments.add((producer, call_id))
+    attach_remote_stages(
+        measurement,
+        stage,
+        response.get("stages"),
+        source=producer,
+        call_id=call_id,
+    )
+    return True
+
+
 def _bounded(value: Any) -> Any:
     """Return an attribute value the record may store."""
     if value is None or isinstance(value, (bool, int, float)):
@@ -649,7 +695,9 @@ def stage_observer(measurement: Measurement | None) -> StageObserver | None:
     return _MeasurementObserver(measurement)
 
 
-def measurement_context(measurement: Measurement | None) -> dict[str, Any] | None:
+def measurement_context(
+    measurement: Measurement | None, call_id: str | None = None
+) -> dict[str, Any] | None:
     """Return the selection a downstream producer needs to inherit.
 
     The runner decides whether an operation is selected; a broker cannot make
@@ -664,6 +712,7 @@ def measurement_context(measurement: Measurement | None) -> dict[str, Any] | Non
         "run_id": measurement.run_id,
         "measurement_id": measurement.measurement_id,
         "operation": measurement.operation,
+        "call_id": call_id or "",
         "expires_at": time.time() + max(0.0, measurement.deadline_mono - time.monotonic()),
     }
 
@@ -715,15 +764,29 @@ def _context_deadline(context: Mapping[str, Any]) -> float | None:
     return time.monotonic() + remaining
 
 
-def expect_fragment(measurement: Measurement | None, producer: str, stage: str) -> None:
-    """Record that this path asked a producer for one call's fragment.
+def expect_fragment(measurement: Measurement | None, producer: str, stage: str) -> str | None:
+    """Register one call's fragment and return the id that identifies it.
 
-    Register the expectation before making the call, so a call that never
-    returned still counts as a fragment this record owed and did not get.
+    Register before making the call, so a call that never returned still counts
+    as a fragment this record owed and did not get. The returned id travels
+    with the request and comes back with the answer, which is what keeps two
+    attempts at the same stage -- a failed resident call and its retry --
+    separately accountable.
     """
     if measurement is None or measurement.finished:
-        return
-    measurement.expected_fragments.add((producer, stage))
+        return None
+    measurement.call_counter += 1
+    call_id = f"c{measurement.call_counter}"
+    measurement.expected_fragments.add((producer, call_id, stage))
+    return call_id
+
+
+def context_call_id(context: Any) -> str | None:
+    """Return the call id a request carried, if it carried one."""
+    if not isinstance(context, Mapping):
+        return None
+    value = str(context.get("call_id") or "").strip()
+    return value or None
 
 
 def substage(observer: StageObserver | None, name: str) -> AbstractContextManager[None]:
@@ -733,7 +796,9 @@ def substage(observer: StageObserver | None, name: str) -> AbstractContextManage
     return observer.stage(name)
 
 
-def _bounded_remote_stages(stages: Any, source: str) -> list[dict[str, Any]]:
+def _bounded_remote_stages(
+    stages: Any, source: str, call_id: str | None = None
+) -> list[dict[str, Any]]:
     """Return the reportable sub-stages from an untrusted list.
 
     The input is sliced to bound the work and the result to bound the record: a
@@ -759,6 +824,8 @@ def _bounded_remote_stages(stages: Any, source: str) -> list[dict[str, Any]]:
             "outcome": str(item.get("outcome") or "ok")[:MAX_ATTRIBUTE_CHARS],
             "source": source,
         }
+        if call_id:
+            entry["call_id"] = call_id
         if item.get("truncated"):
             # A producer that stopped at its own deadline must not look like a
             # producer that finished, so the flag survives the boundary.
@@ -773,6 +840,7 @@ def attach_remote_stages(
     stages: Any,
     *,
     source: str,
+    call_id: str | None = None,
 ) -> bool:
     """Attach durations another producer measured to one local stage.
 
@@ -781,7 +849,7 @@ def attach_remote_stages(
     """
     if measurement is None or not _recording(measurement):
         return False
-    entries = _bounded_remote_stages(stages, source)
+    entries = _bounded_remote_stages(stages, source, call_id)
     if not entries:
         return False
     measurement.remote_stages.setdefault(stage_name, []).extend(entries)
@@ -889,16 +957,12 @@ def to_record(
     ended = measurement.ended_offset_us
     if ended is None:
         ended = measurement.offset_us()
-    # A producer this path asked for and did not hear from is missing coverage,
-    # not a quiet timeline. The design's `measurement_complete` covers both the
-    # boundaries collected and the producer fragments that were required.
-    answered = {
-        (source, stage)
-        for stage, entries in measurement.remote_stages.items()
-        for source in {str(entry.get("source") or "") for entry in entries}
-    }
+    # Completeness is judged per answered call, not by how much a producer
+    # sent: a call that legitimately did no timed work still answered.
     missing_fragments = sorted(
-        f"{producer}:{stage}" for producer, stage in measurement.expected_fragments - answered
+        f"{producer}:{call_id}:{stage}"
+        for producer, call_id, stage in measurement.expected_fragments
+        if (producer, call_id) not in measurement.answered_fragments
     )
     missing_producers = sorted({item.split(":", 1)[0] for item in missing_fragments})
     record: dict[str, Any] = {
@@ -1211,6 +1275,7 @@ __all__ = [
     "attach_remote_stages",
     "bind",
     "close_sink",
+    "context_call_id",
     "discard",
     "expect_fragment",
     "finish",
@@ -1219,6 +1284,7 @@ __all__ = [
     "measurement_context",
     "parse_run",
     "reason",
+    "record_fragment",
     "reset_cache",
     "set_attributes",
     "span",

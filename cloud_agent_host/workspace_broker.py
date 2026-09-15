@@ -260,8 +260,9 @@ class SharedResidentLaunchRequest(SharedLeaseRequest):
     """Lease fence plus resident launch configuration."""
 
     launch: SharedResidentLaunchConfig
-    #: See ``SharedSandboxAcquireRequest.profiling``.
-    profiling: dict[str, Any] | None = None
+    #: See ``SharedSandboxAcquireRequest.profiling``. Deliberately unvalidated
+    #: here too, so a malformed selection cannot reject a resident request.
+    profiling: Any = None
 
 
 class SharedTurnRequest(SharedLeaseRequest):

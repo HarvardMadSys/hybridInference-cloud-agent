@@ -1749,7 +1749,9 @@ def _run_shared_live_attempt(
     try:
         supervisor = _session_supervisor_from_env()
         try:
-            operation_profiling.expect_fragment(measurement, "broker", "supervisor_acquire")
+            acquire_call = operation_profiling.expect_fragment(
+                measurement, "broker", "supervisor_acquire"
+            )
             lease = supervisor.acquire_shared(
                 spec,
                 thread_id=job.thread_id,
@@ -1758,18 +1760,22 @@ def _run_shared_live_attempt(
                 has_settled_context=has_context,
                 members=manifest,
                 expected_container_id=reservation.get("container_id"),
-                profiling=operation_profiling.measurement_context(measurement),
+                profiling=operation_profiling.measurement_context(measurement, acquire_call),
             )
         except SessionSupervisorError as exc:
             context_invalid = has_context and exc.status_code == 410
             raise
         lease_token = str(lease["token"])
         container_action = str(lease.get("container_action") or "unknown")
-        # Sub-stages the broker measured inside this call. They are durations,
+        # One answer for one call. Sub-stages the broker measured are durations,
         # not offsets, so they hang off the stage they happened in rather than
         # being placed on this process's timeline.
-        operation_profiling.attach_remote_stages(
-            measurement, "supervisor_acquire", lease.get("stages"), source="broker"
+        operation_profiling.record_fragment(
+            measurement,
+            producer="broker",
+            call_id=acquire_call,
+            stage="supervisor_acquire",
+            response=lease,
         )
         if int(lease["activation_generation"]) != activation_generation:
             raise SandboxError("shared supervisor returned the wrong activation generation")
@@ -1919,12 +1925,14 @@ def _run_shared_live_attempt(
         resident_descriptor: dict[str, Any] | None = None
         if lease.get("resident_state") == "live":
             try:
-                operation_profiling.expect_fragment(measurement, "broker", "resident_start")
+                resident_call = operation_profiling.expect_fragment(
+                    measurement, "broker", "resident_start"
+                )
                 resident_descriptor = supervisor.ensure_shared_resident(
                     job.thread_id,
                     token=lease_token,
                     launch=launch,
-                    profiling=operation_profiling.measurement_context(measurement),
+                    profiling=operation_profiling.measurement_context(measurement, resident_call),
                 )
             except SessionSupervisorError:
                 # A process-fixed model/MCP setting changed, the process died,
@@ -1948,12 +1956,14 @@ def _run_shared_live_attempt(
                 credential=credential,
                 residency_generation=int(residency["generation"]),
             )
-            operation_profiling.expect_fragment(measurement, "broker", "resident_start")
+            resident_call = operation_profiling.expect_fragment(
+                measurement, "broker", "resident_start"
+            )
             resident_descriptor = supervisor.ensure_shared_resident(
                 job.thread_id,
                 token=lease_token,
                 launch=launch,
-                profiling=operation_profiling.measurement_context(measurement),
+                profiling=operation_profiling.measurement_context(measurement, resident_call),
             )
         context_status = str(resident_descriptor.get("context_status") or context_status)
         if context_status not in {"new", "live", "restored"}:
@@ -1962,8 +1972,12 @@ def _run_shared_live_attempt(
             )
         process_generation = int(resident_descriptor["process_generation"])
         resident_action = str(resident_descriptor.get("resident_action") or "unknown")
-        operation_profiling.attach_remote_stages(
-            measurement, "resident_start", resident_descriptor.get("stages"), source="broker"
+        operation_profiling.record_fragment(
+            measurement,
+            producer="broker",
+            call_id=resident_call,
+            stage="resident_start",
+            response=resident_descriptor,
         )
         if measurement is not None:
             operation_profiling.set_attributes(
