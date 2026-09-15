@@ -25,8 +25,12 @@ The transport is mocked; everything above it is the code that ships.
 from __future__ import annotations
 
 import json
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
+import httpcore
 import httpx
 import pytest
 
@@ -39,7 +43,9 @@ from cloud_agent.mcp.transports import (
     RemoteTransportConfig,
     StreamableHttpTransport,
     TransportError,
+    build_client,
     build_headers,
+    connect_legacy_sse,
     connect_streamable,
 )
 
@@ -395,4 +401,150 @@ class TestHandshake:
             await connect_streamable(
                 _config(policy=EgressPolicy(allow_private=True)), client=client
             )
+        await client.aclose()
+
+
+class TestAddressPinning:
+    """The dial goes where the check went, not to a second resolver answer.
+
+    A resolve-then-check is only a check if the connection is made to what was
+    checked. A name that answered with a public address the first time can
+    answer the second lookup with a loopback one, and the platform would have
+    validated one server while talking to another.
+    """
+
+    async def test_a_checked_name_is_dialled_at_the_address_it_was_checked_at(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A name is looked up to check it, and then dialled at what was checked.
+
+        The dial must not perform a lookup of its own: that second answer is
+        the one a rebinding name gets to choose, and it is an answer no policy
+        here has seen. So the resolver is made to answer for the name in a way
+        the real one cannot -- ``rebind.test`` does not exist -- and the checked
+        answer is a literal loopback address. A dial that looks the name up
+        again fails outright; a dial that pins reaches the server that passed
+        the check, which is the only one that may be reached.
+        """
+        served: list[int] = []
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("content-length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                served.append(int(self.server.server_address[1]))
+                payload = json.dumps(
+                    {"jsonrpc": "2.0", "id": body.get("id"), "result": {"ok": True}}
+                ).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args: Any) -> None:
+                """Keep the test output to the test's own assertions."""
+
+        import socketserver
+
+        class _Server(socketserver.ThreadingMixIn, HTTPServer):
+            daemon_threads = True
+
+        checked = _Server(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=checked.serve_forever, daemon=True).start()
+
+        lookups = {"n": 0}
+        real_getaddrinfo = socket.getaddrinfo
+
+        def fake_getaddrinfo(host: str, port: Any, *args: Any, **kwargs: Any) -> Any:
+            if host != "rebind.test":
+                return real_getaddrinfo(host, port, *args, **kwargs)
+            lookups["n"] += 1
+            return [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    6,
+                    "",
+                    ("127.0.0.1", checked.server_port),
+                )
+            ]
+
+        monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+        config = _config(
+            endpoint=normalize_url(f"http://rebind.test:{checked.server_port}/mcp"),
+            policy=EgressPolicy(allow_private=True, allow_plain_http=True),
+        )
+        client = build_client(config)
+        transport = StreamableHttpTransport(config, client, owns_client=True)
+        try:
+            assert await transport.request("tools/list") == {"ok": True}
+        finally:
+            await client.aclose()
+            checked.shutdown()
+            checked.server_close()
+        assert lookups["n"] == 1, "the dial resolved the name again"
+        assert served == [checked.server_port], "the request did not reach the checked server"
+
+    async def test_the_backend_dials_the_pinned_address(self) -> None:
+        """The mechanism, without a socket: a checked name keeps its answer."""
+        from cloud_agent.mcp.net_policy import (
+            UncheckedTarget,
+            check_addresses,
+            pinned_addresses,
+        )
+        from cloud_agent.mcp.transports import _PinnedNetworkBackend
+
+        check_addresses("mcp.example.com", ["198.51.100.7"], EgressPolicy(allow_private=True))
+        assert pinned_addresses("mcp.example.com") == ("198.51.100.7",)
+        dialled: list[tuple[str, int]] = []
+        unreachable = {"::1"}
+
+        class _Inner(httpcore.AsyncNetworkBackend):
+            async def connect_tcp(
+                self,
+                host: str,
+                port: int,
+                timeout: float | None = None,
+                local_address: str | None = None,
+                socket_options: Any = None,
+            ) -> Any:
+                dialled.append((host, port))
+                if host in unreachable:
+                    raise OSError("no route to host")
+                return None
+
+            async def connect_unix_socket(
+                self, path: str, timeout: float | None = None, socket_options: Any = None
+            ) -> Any:
+                return None
+
+            async def sleep(self, seconds: float) -> None:
+                """Nothing to wait for."""
+
+        backend = _PinnedNetworkBackend(_Inner())
+        await backend.connect_tcp("mcp.example.com", 443)
+        # A dual-stack name whose first address has no route still has the
+        # second one, and the same check approved it.
+        check_addresses("dual.example", ["::1", "198.51.100.8"], EgressPolicy(allow_private=True))
+        await backend.connect_tcp("dual.example", 443)
+        assert dialled == [("198.51.100.7", 443), ("::1", 443), ("198.51.100.8", 443)]
+        # A name nothing checked is refused rather than resolved: a fallback to
+        # the resolver is the lookup the pin exists to remove, and doing it
+        # quietly at the socket is indistinguishable from never checking.
+        with pytest.raises(UncheckedTarget):
+            await backend.connect_tcp("never-checked.example.com", 443)
+        assert dialled == [("198.51.100.7", 443), ("::1", 443), ("198.51.100.8", 443)]
+
+    async def test_the_legacy_stream_is_checked_before_it_is_opened(self) -> None:
+        """The GET is the first socket this connection opens.
+
+        A check that runs on the requests *after* it would run after the dial,
+        which is why the legacy path has to validate the endpoint itself.
+        """
+        client = _client(lambda request: pytest.fail("a target no policy allowed was dialled"))
+        with pytest.raises(TransportError):
+            # The default policy refuses loopback; nothing may be sent.
+            await connect_legacy_sse(_config(policy=EgressPolicy()), client=client)
         await client.aclose()

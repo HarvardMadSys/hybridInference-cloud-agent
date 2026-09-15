@@ -67,7 +67,7 @@ from cloud_agent.mcp.resources import (
     scope_resource_result,
     split_resource_uri,
 )
-from cloud_agent.mcp.transports import TransportError, guard_target
+from cloud_agent.mcp.transports import TransportError, guard_target, pinned_transport
 from cloud_agent.mcp_proxy import (
     MAX_BUFFERED_RESPONSE_BYTES,
     METHOD_NOT_FOUND,
@@ -861,6 +861,7 @@ def build_upstream_client(request_timeout_s: float | None = None) -> httpx.Async
             request_timeout_s or _DEFAULT_UPSTREAM_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S
         ),
         follow_redirects=False,
+        transport=pinned_transport(),
     )
 
 

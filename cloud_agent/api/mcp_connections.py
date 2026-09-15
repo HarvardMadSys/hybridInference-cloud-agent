@@ -1161,6 +1161,7 @@ async def _post_json(
     import httpx
 
     from cloud_agent.mcp.net_policy import EndpointRejected, check_addresses, validate_endpoint
+    from cloud_agent.mcp.transports import pinned_transport
 
     try:
         endpoint = validate_endpoint(url, policy)
@@ -1171,7 +1172,9 @@ async def _post_json(
     except OSError as exc:
         raise _bad_request(f"that address could not be resolved: {exc}") from exc
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0), follow_redirects=False) as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(15.0), follow_redirects=False, transport=pinned_transport()
+        ) as client:
             response = await client.post(
                 endpoint.url, json=dict(body), headers={"accept": "application/json"}
             )
@@ -1373,7 +1376,7 @@ async def _post_form(request: oauth.TokenRequest, *, policy: EgressPolicy) -> Ma
     import httpx
 
     from cloud_agent.mcp.net_policy import EndpointRejected, check_addresses, validate_endpoint
-    from cloud_agent.mcp.transports import TransportError
+    from cloud_agent.mcp.transports import TransportError, pinned_transport
 
     try:
         endpoint = validate_endpoint(request.url, policy)
@@ -1384,7 +1387,9 @@ async def _post_form(request: oauth.TokenRequest, *, policy: EgressPolicy) -> Ma
         raise TransportError(f"the token endpoint could not be resolved: {exc}") from exc
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0), follow_redirects=False) as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(20.0), follow_redirects=False, transport=pinned_transport()
+        ) as client:
             response = await client.post(
                 endpoint.url, data=request.form(), headers=request.headers()
             )

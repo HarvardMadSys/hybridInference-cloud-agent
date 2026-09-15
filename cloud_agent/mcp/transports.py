@@ -37,6 +37,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpcore
 import httpx
 
 from cloud_agent.mcp.jsonrpc import (
@@ -56,7 +57,9 @@ from cloud_agent.mcp.net_policy import (
     EgressPolicy,
     EndpointRejected,
     NormalizedEndpoint,
+    UncheckedTarget,
     check_addresses,
+    pinned_addresses,
     sanitize_headers,
     validate_endpoint,
 )
@@ -553,15 +556,22 @@ class StreamableHttpTransport(_HttpCore):
 
         A stateless-era server issues none and answers DELETE with 405, so this
         is a no-op there rather than a request that is expected to fail.
+
+        The DELETE is a dial of its own and is checked like one. It is also the
+        dial most likely to arrive without a pin: sessions are closed by
+        whatever task notices they are superseded, which is not the task that
+        opened them -- so the check runs here, in this task, rather than being
+        inherited from the call that created the session.
         """
         if not self._session_id or self.stateless:
             return
         config = self._config_with_state()
         try:
+            await self._guard(config.endpoint.url)
             await self._client.delete(
                 config.endpoint.url, headers=build_headers(config, body=False)
             )
-        except httpx.HTTPError:
+        except (httpx.HTTPError, TransportError):
             # Best effort: a session that has already timed out upstream is a
             # normal outcome, and failing the caller's disconnect over it would
             # leave a credential in place for a connection it wanted gone.
@@ -811,7 +821,104 @@ def build_client(config: RemoteTransportConfig) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         timeout=httpx.Timeout(config.request_timeout, connect=config.connect_timeout),
         follow_redirects=False,
+        transport=pinned_transport(),
     )
+
+
+def pinned_transport(**kwargs: Any) -> httpx.AsyncHTTPTransport:
+    """An HTTP transport whose pool dials the address the policy checked.
+
+    The check and the dial are two lookups, and a rebinding name answers them
+    differently: the first says the public address the policy allows, the
+    second the private one it does not. Pinning removes the second lookup, so
+    what was validated is what is connected to. The TLS handshake still names
+    the original host -- httpcore keeps the origin, not the dialled address, as
+    the server name -- so the certificate is verified against the name the
+    owner approved.
+
+    httpx builds the connection pool itself and has no hook for its network
+    backend, so the backend is replaced on the pool it built. Missing internals
+    raise rather than quietly dialling by name: a pin that silently stops being
+    applied is exactly the failure this exists to prevent.
+
+    Passing an explicit transport also takes ``HTTP_PROXY`` and friends out of
+    upstream MCP traffic, which is the intended reading of the egress policy: a
+    proxy is a second destination that nothing here validated.
+    """
+    transport = httpx.AsyncHTTPTransport(**kwargs)
+    pool = getattr(transport, "_pool", None)
+    backend = getattr(pool, "_network_backend", None)
+    if pool is None or backend is None:
+        raise RuntimeError("httpx no longer exposes the connection pool this address pin needs")
+    pool._network_backend = _PinnedNetworkBackend(backend)
+    return transport
+
+
+class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
+    """Dial a checked name at its checked address.
+
+    Everything the platform dials goes through one of these, because every
+    client it builds is built by :func:`pinned_transport`. A name this task
+    never checked has no pin and is dialled by name, which is what the code did
+    before this existed -- the pin only ever narrows where a checked name lands.
+    """
+
+    def __init__(self, inner: httpcore.AsyncNetworkBackend) -> None:
+        """Wrap the backend that would otherwise resolve the name again."""
+        self._inner = inner
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Any = None,
+    ) -> Any:
+        """Open a TCP stream to one of the addresses this task validated.
+
+        Every address the check saw is tried, in the order the resolver gave
+        them, and the next one is used when a connection fails: a dual-stack
+        name whose IPv6 route is missing still has its IPv4 address, which the
+        same check approved. Falling back is not a widening -- the alternatives
+        were validated together -- and stopping at the first address would
+        turn a working connection into an unreachable one.
+
+        """
+        pinned = pinned_addresses(host)
+        if not pinned:
+            raise UncheckedTarget(
+                f"{host} was not checked before it was dialled, so it will not be dialled"
+            )
+        failure: Exception | None = None
+        for address in pinned:
+            try:
+                return await self._inner.connect_tcp(
+                    address,
+                    port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except Exception as exc:
+                failure = exc
+        assert failure is not None
+        raise failure
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Any = None,
+    ) -> Any:
+        """Open a unix socket; nothing here resolves, so nothing is pinned."""
+        return await self._inner.connect_unix_socket(
+            path, timeout=timeout, socket_options=socket_options
+        )
+
+    async def sleep(self, seconds: float) -> None:
+        """Delegate a retry backoff to the wrapped backend."""
+        await self._inner.sleep(seconds)
 
 
 async def connect_streamable(
@@ -914,6 +1021,11 @@ async def connect_legacy_sse(
     http = client or build_client(config)
     transport = LegacySseTransport(config, http, owns_client=client is None)
     try:
+        # The first thing this connection does is open a socket, so the
+        # address check belongs here rather than only on the requests that
+        # follow: a legacy server is reached by this GET before any request
+        # exists, and a check that arrives later would arrive after the dial.
+        await guard_target(config.endpoint.url, config.policy)
         stream_request = http.build_request(
             "GET",
             config.endpoint.url,
@@ -922,7 +1034,10 @@ async def connect_legacy_sse(
                 "accept": "text/event-stream",
             },
         )
-        response = await http.send(stream_request, stream=True)
+        try:
+            response = await http.send(stream_request, stream=True)
+        except httpx.HTTPError as exc:
+            raise TransportError(f"the server could not be reached: {exc}") from exc
         # One reader owns the response from here through every failure path.
         stream_task = asyncio.create_task(transport.consume(response))
         transport.attach_stream(stream_task)

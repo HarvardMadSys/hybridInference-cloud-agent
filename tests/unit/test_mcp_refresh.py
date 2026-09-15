@@ -168,6 +168,9 @@ def _client_that_fails(monkeypatch: pytest.MonkeyPatch, error: Exception) -> Non
         def handler(request: Any) -> Any:
             raise error
 
+        # The production call pins the transport it dials with; this fake
+        # supplies the transport it wants the failure to come from instead.
+        kwargs.pop("transport", None)
         return real_client(transport=httpx.MockTransport(handler), **kwargs)
 
     monkeypatch.setattr(httpx, "AsyncClient", factory)
@@ -183,6 +186,8 @@ def _client_that_answers(monkeypatch: pytest.MonkeyPatch, *, status_code: int, t
         def handler(request: Any) -> Any:
             return httpx.Response(status_code, text=text)
 
+        # Same as above: the fake's transport replaces the pinned one.
+        kwargs.pop("transport", None)
         return real_client(transport=httpx.MockTransport(handler), **kwargs)
 
     monkeypatch.setattr(httpx, "AsyncClient", factory)

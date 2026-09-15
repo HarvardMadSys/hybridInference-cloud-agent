@@ -26,9 +26,24 @@ from __future__ import annotations
 
 import ipaddress
 from collections.abc import Iterable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
+
+#: The addresses each name was validated at in the current task, for the dial
+#: that follows the check. A context variable rather than a module-level map:
+#: two jobs may reach the same hostname through different connections, and a
+#: pin recorded by one request must not become another request's destination.
+#:
+#: Keyed by every spelling the dialler might use. A name is validated as the
+#: text the user typed and dialled after ``httpcore`` has encoded it, so a host
+#: with a non-ASCII label arrives at the connection as its IDNA form -- and a
+#: pin stored under the other spelling is a pin that is never found, which
+#: silently restores the lookup this exists to remove.
+_ACTIVE_PINS: ContextVar[Mapping[str, tuple[str, ...]] | None] = ContextVar(
+    "mcp_dial_pins", default=None
+)
 
 #: Headers a user may not set on their own connection. The list is about
 #: control, not secrecy: each of these either re-targets the request, strips
@@ -90,6 +105,17 @@ ALLOWED_SCHEMES = frozenset({"https"})
 #: the clear. A deployment may allow it for a connector bridge on a private
 #: network, which is a deliberate, reviewable choice.
 ALLOWED_SCHEMES_INSECURE = frozenset({"https", "http"})
+
+
+class UncheckedTarget(OSError):
+    """A name nothing in this task validated was about to be dialled.
+
+    Raised instead of dialling by name. A miss is what a rebinding name is
+    trying to cause, and a fallback to the resolver turns "the check did not
+    cover this" into "the check did not happen" -- silently, at the socket,
+    which is exactly the failure the pin exists to prevent. Loud here means a
+    missing guard is a bug that shows up in the first test that dials.
+    """
 
 
 class EndpointRejected(ValueError):
@@ -227,9 +253,18 @@ def check_addresses(
     public and one private address is a rebinding attempt whether or not that
     was the intent, and accepting it because the resolver happened to return
     the public one first is a race the attacker wins by answering twice.
+
+    The checked answer is also *recorded* for the dial that follows, because a
+    check the connection does not have to honour is decoration: the second
+    lookup is the one a rebinding name answers differently. What is recorded is
+    the first validated address, and it is recorded for this task only -- two
+    requests may reach one hostname through different connections, and one
+    request's answer must not become another's destination.
     """
     if host.lower() in policy.allowed_hosts:
-        return tuple(addresses)
+        resolved = tuple(addresses)
+        _pin(host, resolved)
+        return resolved
     resolved = tuple(addresses)
     if not resolved:
         raise EndpointRejected(f"{host} did not resolve to any address", kind="unreachable")
@@ -245,7 +280,34 @@ def check_addresses(
         reason = _blocked_reason(address, policy)
         if reason is not None:
             raise EndpointRejected(reason)
+    _pin(host, resolved)
     return resolved
+
+
+def _pin(host: str, addresses: tuple[str, ...]) -> None:
+    """Record every address the next dial for ``host`` in this task may use.
+
+    All of them, not the first: a dual-stack name whose IPv6 route is missing
+    has to be able to fall back to the IPv4 address that was checked in the
+    same answer. Both are already validated, so trying the next one is not a
+    widening -- it is what the check covered.
+    """
+    if not addresses:
+        return
+    current = dict(_ACTIVE_PINS.get() or {})
+    current[host.strip().strip(".").lower()] = tuple(addresses)
+    _ACTIVE_PINS.set(current)
+
+
+def pinned_addresses(host: str) -> tuple[str, ...]:
+    """The addresses ``host`` was validated at in this task, if it was.
+
+    Empty means nothing here has checked that name, so a caller that dials by
+    name is doing what it did before this pin existed rather than something
+    new: the pin only ever narrows where a checked name may land.
+    """
+    pins = _ACTIVE_PINS.get() or {}
+    return pins.get(host.strip().strip(".").lower(), ())
 
 
 def validate_endpoint(raw: str, policy: EgressPolicy) -> NormalizedEndpoint:
@@ -394,9 +456,11 @@ __all__ = [
     "EgressPolicy",
     "EndpointRejected",
     "NormalizedEndpoint",
+    "UncheckedTarget",
     "check_addresses",
     "normalize_url",
     "parse_header_pairs",
+    "pinned_addresses",
     "policy_from_environment",
     "resource_covers",
     "sanitize_headers",

@@ -49,7 +49,7 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import oauth
 from cloud_agent.mcp.models import AuthKind, ConnectionErrorKind
 from cloud_agent.mcp.net_policy import EgressPolicy
-from cloud_agent.mcp.transports import HttpMetadataFetcher, TransportError
+from cloud_agent.mcp.transports import HttpMetadataFetcher, TransportError, pinned_transport
 from cloud_agent.source_control import SourceControlCipher, SourceControlError
 
 if TYPE_CHECKING:
@@ -527,7 +527,9 @@ async def _post(
         ) from exc
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0), follow_redirects=False) as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(20.0), follow_redirects=False, transport=pinned_transport()
+        ) as client:
             response = await client.post(
                 endpoint.url, data=request.form(), headers=request.headers()
             )
