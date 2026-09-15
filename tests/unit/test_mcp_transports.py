@@ -24,6 +24,7 @@ The transport is mocked; everything above it is the code that ships.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import socket
 import threading
@@ -606,6 +607,50 @@ class TestAddressPinning:
             # The default policy refuses loopback; nothing may be sent.
             await connect_legacy_sse(_config(policy=EgressPolicy()), client=client)
         await client.aclose()
+
+    async def test_the_addresses_tried_share_one_connect_budget(self) -> None:
+        """Three addresses are not three timeouts.
+
+        Each attempt taking the whole budget turns a 40ms connect into 120ms,
+        which the caller did not ask for and cannot see.
+        """
+        from cloud_agent.mcp.net_policy import check_addresses
+        from cloud_agent.mcp.transports import _PinnedNetworkBackend
+
+        seen: list[float | None] = []
+
+        class _Burning(httpcore.AsyncNetworkBackend):
+            async def connect_tcp(
+                self,
+                host: str,
+                port: int,
+                timeout: float | None = None,
+                local_address: str | None = None,
+                socket_options: Any = None,
+            ) -> Any:
+                seen.append(timeout)
+                await asyncio.sleep(timeout or 0)
+                raise OSError("no route to host")
+
+            async def connect_unix_socket(
+                self, path: str, timeout: float | None = None, socket_options: Any = None
+            ) -> Any:
+                return None
+
+            async def sleep(self, seconds: float) -> None:
+                """Nothing to wait for."""
+
+        check_addresses(
+            "budget.example",
+            ["198.51.100.1", "198.51.100.2", "198.51.100.3"],
+            EgressPolicy(allow_private=True),
+        )
+        backend = _PinnedNetworkBackend(_Burning())
+        with pytest.raises(OSError):
+            await backend.connect_tcp("budget.example", 443, timeout=0.05)
+        # The first attempt spends the budget; the rest are not given a fresh
+        # one, so they are not made at all.
+        assert len(seen) == 1, f"each address got its own timeout: {seen}"
 
     async def test_the_fass_name_is_pinned_under_the_spelling_that_is_dialled(self) -> None:
         """``str.encode("idna")`` is not what this stack dials.

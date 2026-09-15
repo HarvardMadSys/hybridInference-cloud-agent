@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -889,25 +890,35 @@ class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
         were validated together -- and stopping at the first address would
         turn a working connection into an unreachable one.
 
+        The attempts share one connect budget rather than each taking the whole
+        timeout: three addresses at forty milliseconds is a hundred and twenty
+        milliseconds of waiting, which is three times what the caller asked
+        for. A name nothing checked is refused instead of dialled, because a
+        fallback to the resolver is precisely the lookup this removes.
         """
         pinned = pinned_addresses(host)
         if not pinned:
             raise UncheckedTarget(
                 f"{host} was not checked before it was dialled, so it will not be dialled"
             )
+        deadline = None if timeout is None else time.monotonic() + timeout
         failure: Exception | None = None
         for address in pinned:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                break
             try:
                 return await self._inner.connect_tcp(
                     address,
                     port,
-                    timeout=timeout,
+                    timeout=remaining,
                     local_address=local_address,
                     socket_options=socket_options,
                 )
             except Exception as exc:
                 failure = exc
-        assert failure is not None
+        if failure is None:
+            raise UncheckedTarget(f"{host} could not be reached within its connect budget")
         raise failure
 
     async def connect_unix_socket(
