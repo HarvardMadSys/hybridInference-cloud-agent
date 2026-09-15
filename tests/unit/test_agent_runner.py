@@ -894,6 +894,7 @@ def test_startup_measurement_records_every_runner_stage(monkeypatch, caplog, tmp
     )
 
     assert result == 0
+    operation_profiling.flush_sink()
     record = json.loads(sink.read_text().splitlines()[0])
     assert record["startup_outcome"] == "dispatched"
     assert record["measurement_complete"] is True
@@ -909,6 +910,7 @@ def test_startup_measurement_records_every_runner_stage(monkeypatch, caplog, tmp
         "terminal_resume",
         "resident_start",
         "prompt_admission",
+        "prompt_dispatch",
     ]
     assert all(stage["duration_us"] >= 0 for stage in record["stages"])
     assert record["facts"]["startup_path"] == "reuse_live"
@@ -942,15 +944,21 @@ def test_startup_measurement_reports_the_stage_a_pre_dispatch_failure_stopped_at
     )
 
     assert result == 2
+    operation_profiling.flush_sink()
     record = json.loads(sink.read_text().splitlines()[0])
     assert record["startup_outcome"] == "failed"
     assert record["failure_stage"] == "terminal_suspend"
     assert record["measurement_complete"] is True
-    assert [stage["stage"] for stage in record["stages"]][-1] == "sandbox_running"
+    assert record["duration_us"] >= 0
+    # The stage that failed is the last one and it has a duration. Without the
+    # closing boundary the slow stage -- the one worth profiling -- had none.
+    failing = record["stages"][-1]
+    assert failing["stage"] == "terminal_suspend"
+    assert failing["duration_us"] >= 0
 
 
 def test_stream_helper_closes_the_measurement_at_the_prompt_handoff(monkeypatch, tmp_path):
-    """The real stream helper, not a stub, owns the dispatch boundary."""
+    """The real stream helper, not a stub, closes the startup measurement."""
     _configure_host(monkeypatch)
     sink = tmp_path / "startup.jsonl"
     _enable_profiling(monkeypatch)
@@ -982,9 +990,109 @@ def test_stream_helper_closes_the_measurement_at_the_prompt_handoff(monkeypatch,
 
     assert code == 0
     assert started[0]["prompt"] == _JOB.task_prompt
+    operation_profiling.flush_sink()
     record = json.loads(sink.read_text().splitlines()[0])
     assert record["startup_outcome"] == "dispatched"
-    assert record["spans"][0]["name"] == "prompt_dispatch"
+    assert measurement.finished is True
+
+
+def test_a_failed_prompt_handoff_is_a_failure_stage_with_a_duration(monkeypatch, tmp_path):
+    """A dispatch that raises reports `turn_stream`, not a dispatched sample."""
+    _configure_host(monkeypatch)
+    sink = tmp_path / "startup.jsonl"
+    _enable_profiling(monkeypatch)
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    measurement = _profiled_measurement()
+    assert measurement is not None
+
+    def configure(_control, _supervisor, _finish):
+        def stream(**_kwargs):
+            raise SandboxError("the supervisor refused the prompt")
+
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+
+    result, _control, _supervisor, _finish = _run_shared_boundary_case(
+        monkeypatch,
+        code=0,
+        frame={"kind": "result", "status": "completed", "exit_code": 0},
+        runtime_id="claude-code",
+        configure=configure,
+        measurement=measurement,
+    )
+
+    assert result == 2
+    operation_profiling.flush_sink()
+    record = json.loads(sink.read_text().splitlines()[0])
+    assert record["startup_outcome"] == "failed"
+    assert record["failure_stage"] == "turn_stream"
+    # The handoff stage is closed even though the call never returned.
+    assert record["stages"][-1]["stage"] == "prompt_dispatch"
+    assert record["stages"][-1]["duration_us"] >= 0
+    assert record["measurement_complete"] is True
+
+
+def test_a_poll_with_no_job_does_not_spend_the_only_profiling_slot(monkeypatch, tmp_path):
+    """An empty claim must leave a one-operation experiment able to measure.
+
+    Regression: the budget was consumed when the measurement was created, so a
+    single empty claim -- the normal result of polling an idle queue -- used up
+    a `max_operations: 1` run before it measured anything.
+    """
+    _configure_host(monkeypatch)
+    sink = tmp_path / "startup.jsonl"
+    _enable_profiling(monkeypatch, max_operations=1)
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+
+    class Control:
+        job_id = ""
+
+        def __getattr__(self, _name):
+            return lambda *_args, **_kwargs: None
+
+    class Heart:
+        lease_lost = False
+        cancel_requested = False
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+    backend = ContainerBackend(image="img")
+    monkeypatch.setattr(backend, "version_stamp", _stamp)
+    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_args, **_kwargs: Control())
+    monkeypatch.setattr(runner_mod, "Heartbeater", lambda *_args, **_kwargs: Heart())
+    monkeypatch.setattr(
+        runner_mod,
+        "_run_shared_live_attempt",
+        lambda **kwargs: 0 if kwargs["measurement"] is not None else 7,
+    )
+    monkeypatch.setattr(runner_mod, "claim", lambda **_kwargs: None)
+
+    assert (
+        runner_mod.run_once(
+            base_url="http://control",
+            host_credential="host-credential",
+            worker_id="runner-1",
+            backend=backend,
+            host="host-a",
+        )
+        == 0
+    )
+
+    # The queue is empty, so the run still has its only slot for a real attempt.
+    monkeypatch.setattr(runner_mod, "claim", lambda **_kwargs: _JOB)
+    assert (
+        runner_mod.run_once(
+            base_url="http://control",
+            host_credential="host-credential",
+            worker_id="runner-1",
+            backend=backend,
+            host="host-a",
+        )
+        == 0
+    ), "the claimed attempt was not measured"
 
 
 def test_profiling_off_adds_no_record_and_no_measurement(monkeypatch, caplog, tmp_path):

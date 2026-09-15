@@ -359,9 +359,27 @@ benchmark 报告至少包含：环境 manifest、实验顺序、全部 attempt I
 - `AGENT_OPERATION_PROFILING_ENABLED`、`AGENT_OPERATION_PROFILING_RUN`、
   `AGENT_OPERATION_PROFILING_SINK` 三个变量（见 [ENVIRONMENT.md](../../ENVIRONMENT.md)）。
 - 单调时钟跨度、父子 span、阶段时长（由相邻打点推导）、失败阶段、`dropped_spans` 上限，
-  以及 `dispatched`/`failed`/`cancelled`/`lease_lost`/`incomplete` 结果。
+  以及 `dispatched`/`failed`/`cancelled`/`lease_lost`/`incomplete` 结果。记录含
+  `duration_us` 总耗时；最后一个阶段由 `finish()` 的收尾边界关闭，所以**失败或仍在
+  进行的那一段也有时长**，不会只剩一个没有耗时的 milestone。
 - attempt/job/thread/sandbox/runtime 关联，`context_status`、`resident_action`、
   `workspace_action` 和可证明的 `startup_path`；结构化日志加可选 JSONL。
+
+三条开销与边界约束按 §0 的要求落实：
+
+- **导出不占 attempt 线程。** JSONL 走有界队列，由一条仅在开启且产生记录后才启动的
+  后台线程落盘；队列满时丢弃并计数。记录产生于沙盒启动过程中，同步写盘会把磁盘延迟
+  算进被测量的启动时间里。
+- **预算在确认选中后才消耗。** `start_operation` 只是预留名额，`discard()` 归还未选中
+  的名额（空 claim、目标不匹配、claim 抛异常），`finish()` 才提交。否则一次空轮询就能
+  吃掉 `max_operations: 1` 的实验。
+- **目标过滤要求全部匹配。** `target` 只接受 `host`/`job_id`/`thread_id`/`sandbox_id`，
+  未知字段在读取 descriptor 时就拒绝；`bind()` 要求每个配置字段都存在且相等，**缺失值
+  算不匹配**（`sandbox_id=None` 不会通过 `sandbox_id=wanted`），且带 target 的 run 不会
+  上报一次从未绑定过的测量。
+- **到期即停止采集。** 截止时间在采集过程中生效：到期后不再记录 mark/span/attribute，
+  记录在截止点收尾而不是在发现时刻收尾，并标 `measurement_complete=false` 与
+  `profiling_stopped=expired`；已采到的部分照常保留。
 
 与目标形态的差距，后续切片补齐：
 

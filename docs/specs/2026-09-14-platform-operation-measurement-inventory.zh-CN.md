@@ -32,10 +32,13 @@
 阶段完成，不能把重启后的冷缓存当成开关本身的开销。
 
 实现的边界：选择发生在 runner 根操作处，所以 `max_operations` 目前是**单进程**预算，
-不是清单要求的跨 replica 统一分配；产出写入结构化日志，并在配置
-`AGENT_OPERATION_PROFILING_SINK` 时追加 JSONL，尚无 CP 持久化与 Admin 读面。
+不是清单要求的跨 replica 统一分配；名额在确认选中 attempt 后才消耗，未选中的
+（空 claim、目标不匹配、claim 失败）会归还。产出写入结构化日志，并在配置
+`AGENT_OPERATION_PROFILING_SINK` 时经**有界队列与后台线程**追加 JSONL，尚无 CP
+持久化与 Admin 读面。目标过滤要求每个配置字段都匹配，未知字段直接拒绝该 run。
 截止时间由 run descriptor 的绝对 `expires_at` 在首次读取时转成单调期限，服务重启
-不会续期。
+不会续期；到期后停止采集，记录在截止点收尾并标 partial（`measurement_complete=false`、
+`profiling_stopped=expired`），已采部分保留。
 
 一个 profiling run 的设计示例（不是可直接执行的现有命令）：
 

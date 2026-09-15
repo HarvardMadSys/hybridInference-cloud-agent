@@ -1408,16 +1408,17 @@ def _stream_shared_agent_turn(
 
     Handing the prompt to the supervisor closes the startup measurement:
     everything after that point is model execution, which the design keeps in a
-    separate post-dispatch fragment.
+    separate post-dispatch fragment. The caller marks the ``prompt_dispatch``
+    boundary immediately before this call, so the handoff is one stage in the
+    startup timeline rather than a stage of its own after it.
     """
-    with operation_profiling.span(measurement, "prompt_dispatch"):
-        stream = supervisor.start_shared_turn(
-            job.thread_id,
-            token=lease_token,
-            prompt=job.task_prompt,
-            model=job.model,
-            reasoning_effort=job.reasoning_effort,
-        )
+    stream = supervisor.start_shared_turn(
+        job.thread_id,
+        token=lease_token,
+        prompt=job.task_prompt,
+        model=job.model,
+        reasoning_effort=job.reasoning_effort,
+    )
     operation_profiling.finish(measurement, outcome="dispatched")
     frames: queue.Queue[dict[str, Any] | None] = queue.Queue()
 
@@ -1966,7 +1967,11 @@ def _run_shared_live_attempt(
         turn_admitted = True
         result_frame: dict[str, Any] | None = None
         try:
-            stage = _stage(measurement, "turn_stream")
+            stage = "turn_stream"
+            # The prompt handoff is the last startup stage. `stage` stays a
+            # plain string because a failure inside the turn is an execution
+            # failure, not a startup stage.
+            operation_profiling.mark(measurement, "prompt_dispatch")
             exit_code, tail, tool_errors, result_frame = _stream_shared_agent_turn(
                 supervisor=supervisor,
                 job=job,
@@ -2163,15 +2168,21 @@ def run_once(
         host=host,
         worker_id=worker_id,
     )
-    with operation_profiling.span(measurement, "claim"):
-        attestation = _claim_attestation(backend)
-        job = claim(
-            base_url=base_url,
-            host_credential=host_credential,
-            worker_id=worker_id,
-            lease_ttl=lease_ttl,
-            attestation=attestation,
-        )
+    try:
+        with operation_profiling.span(measurement, "claim"):
+            attestation = _claim_attestation(backend)
+            job = claim(
+                base_url=base_url,
+                host_credential=host_credential,
+                worker_id=worker_id,
+                lease_ttl=lease_ttl,
+                attestation=attestation,
+            )
+    except BaseException:
+        # A claim that never returned allocated no attempt, so there is nothing
+        # to report and the run must not spend a slot on a failed poll.
+        operation_profiling.discard(measurement)
+        raise
     if job is None:
         # Nothing was claimed, so there is no startup to measure.
         operation_profiling.discard(measurement)
