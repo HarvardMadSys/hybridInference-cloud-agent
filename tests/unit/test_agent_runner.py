@@ -430,6 +430,7 @@ def _run_shared_boundary_case(
     lease_stages=None,
     resident_stages=None,
     broker_records=True,
+    broker_truncated=False,
 ):
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
@@ -469,6 +470,7 @@ def _run_shared_boundary_case(
             # this process collected for it at all.
             "profiling_call_id": context.get("call_id"),
             "profiling_recorded": broker_records,
+            "profiling_truncated": broker_truncated,
         }
 
     def ensure_shared_resident(_thread_id, **kwargs):
@@ -480,6 +482,7 @@ def _run_shared_boundary_case(
             "stages": list(resident_stages or []),
             "profiling_call_id": context.get("call_id"),
             "profiling_recorded": broker_records,
+            "profiling_truncated": broker_truncated,
         }
 
     supervisor.acquire_shared.side_effect = acquire_shared
@@ -1606,3 +1609,54 @@ def test_a_retried_call_is_a_second_fragment_that_must_also_answer(monkeypatch, 
     # The retry's timing is still reported.
     resident = next(item for item in record["stages"] if item["stage"] == "resident_start")
     assert [child["call_id"] for child in resident["children"]] == ["c3"]
+
+
+def test_a_broker_cut_short_by_its_own_deadline_keeps_the_record_incomplete(monkeypatch, tmp_path):
+    """A collection that stopped at the broker's deadline is not complete.
+
+    Regression, end to end: the runner's deadline had ten minutes left while
+    the broker's had one second, the member-lock wait spent it, and the CLI
+    start was never timed. The answer was `stages: []` with
+    `profiling_recorded: true`, which the runner read as "collected, nothing to
+    time" and reported `measurement_complete: true`.
+    """
+    _configure_host(monkeypatch)
+    sink = tmp_path / "startup.jsonl"
+    _enable_profiling(monkeypatch)
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    measurement = _profiled_measurement()
+    assert measurement is not None
+
+    def configure(_control, _supervisor, _finish):
+        def stream(**kwargs):
+            operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+
+    result, *_ = _run_shared_boundary_case(
+        monkeypatch,
+        code=0,
+        frame={"kind": "result", "status": "completed", "exit_code": 0},
+        runtime_id="claude-code",
+        configure=configure,
+        measurement=measurement,
+        container_action="reuse",
+        resident_action="resume",
+        # The acquire got its stages out; the resident call ran out of time.
+        lease_stages=[{"name": "phase_network", "duration_us": 120}],
+        resident_stages=[],
+        broker_truncated=True,
+    )
+
+    assert result == 0
+    operation_profiling.flush_sink()
+    record = json.loads(sink.read_text().splitlines()[0])
+    # Both calls answered, so nothing is "missing" -- the record is partial.
+    assert "missing_fragments" not in record
+    assert record["truncated"] is True
+    assert record["truncated_fragments"] == ["broker:c1", "broker:c2"]
+    assert record["measurement_complete"] is False
+    # What the broker did manage to measure is still reported.
+    acquire = next(item for item in record["stages"] if item["stage"] == "supervisor_acquire")
+    assert [child["stage"] for child in acquire["children"]] == ["phase_network"]

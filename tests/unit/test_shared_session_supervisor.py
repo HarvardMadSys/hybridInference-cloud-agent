@@ -75,7 +75,10 @@ class _Manager:
         observer: Any = None,
     ) -> ChatSandboxInspection:
         created = spec.container_name not in self.items
-        inspection = self.items.setdefault(spec.container_name, self._inspection(spec))
+        # Instrumented like the real manager, so a test can exercise the stage
+        # path rather than only the action path.
+        with operation_profiling.substage(observer, "container_create"):
+            inspection = self.items.setdefault(spec.container_name, self._inspection(spec))
         if created and facts is not None:
             # Mirrors the real manager: only a container this call actually
             # made is reported as created.
@@ -106,16 +109,18 @@ class _Manager:
         self.start_phases.append(network_phase)
         current = self.items[spec.container_name]
         if not current.running:
-            current = replace(
-                current,
-                running=True,
-                status=ChatSandboxStatus.RUNNING,
-            )
-            self.items[spec.container_name] = current
+            with operation_profiling.substage(observer, "container_start"):
+                current = replace(
+                    current,
+                    running=True,
+                    status=ChatSandboxStatus.RUNNING,
+                )
+                self.items[spec.container_name] = current
             if facts is not None:
                 facts.note("start")
         elif facts is not None:
-            facts.note("reuse")
+            with operation_profiling.substage(observer, "service_hosts_sync"):
+                facts.note("reuse")
         return current
 
     def stop(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
@@ -2272,17 +2277,6 @@ def test_broker_sub_stages_are_reported_when_this_process_is_profiling(monkeypat
     )
     operation_profiling.reset_cache()
     manager = _Manager()
-
-    def timed_create(spec, *, facts=None, observer=None):
-        with operation_profiling.substage(observer, "container_create"):
-            return _Manager.create(manager, spec, facts=facts, observer=observer)
-
-    def timed_start(spec, *, network_phase=None, facts=None, observer=None):
-        with operation_profiling.substage(observer, "container_start"):
-            return _Manager.start(manager, spec, network_phase=network_phase, facts=facts)
-
-    monkeypatch.setattr(manager, "create", timed_create)
-    monkeypatch.setattr(manager, "start", timed_start)
     supervisor = SharedChatSessionSupervisor(manager)
 
     lease = supervisor.acquire(
@@ -2304,8 +2298,10 @@ def test_broker_sub_stages_are_reported_when_this_process_is_profiling(monkeypat
     # The answer says which call it belongs to and that this process collected.
     assert lease.profiling_call_id == "c7"
     assert lease.profiling_recorded is True
+    # The fake manager is instrumented like the real one: the container was
+    # created here and then found already running.
     names = [item["name"] for item in lease.stages]
-    assert names == ["container_create", "container_start"]
+    assert names == ["container_create", "service_hosts_sync"]
     assert all(item["duration_us"] >= 0 for item in lease.stages)
     # Only durations travel: the caller's timeline cannot place them.
     assert all("start_offset_us" not in item for item in lease.stages)
@@ -2389,12 +2385,6 @@ def test_a_live_selection_records_container_sub_stages(monkeypatch):
     """With a matching, unexpired selection the broker reports its work."""
     _enable_broker_profiling(monkeypatch)
     manager = _Manager()
-
-    def timed_start(spec, *, network_phase=None, facts=None, observer=None):
-        with operation_profiling.substage(observer, "container_start"):
-            return _Manager.start(manager, spec, network_phase=network_phase, facts=facts)
-
-    monkeypatch.setattr(manager, "start", timed_start)
     supervisor = SharedChatSessionSupervisor(manager)
 
     lease = supervisor.acquire(
@@ -2413,9 +2403,14 @@ def test_a_live_selection_records_container_sub_stages(monkeypatch):
         },
     )
 
-    assert [item["name"] for item in lease.stages] == ["container_start"]
+    assert [item["name"] for item in lease.stages] == [
+        "container_create",
+        "service_hosts_sync",
+    ]
+    assert all(item["duration_us"] >= 0 for item in lease.stages)
     assert lease.profiling_call_id == "c9"
     assert lease.profiling_recorded is True
+    assert lease.profiling_truncated is False
 
 
 def test_a_reuse_with_no_stages_still_reports_that_it_collected(monkeypatch):
@@ -2473,3 +2468,55 @@ def test_a_reuse_with_no_stages_still_reports_that_it_collected(monkeypatch):
     assert descriptor.profiling_call_id == "c2"
     # The member's work was skipped on purpose and that is a complete answer.
     assert descriptor.profiling_recorded is True
+
+
+def test_a_collection_cut_short_by_the_deadline_says_so(monkeypatch):
+    """An empty answer is only "nothing to time" when collection finished.
+
+    Regression, at the response the runner actually reads: the broker's local
+    deadline lapsed while it waited for the member lock, the CLI start was
+    never timed, and the lease still reported a completed collection.
+    """
+    _enable_broker_profiling(monkeypatch)
+    live = {
+        "run_id": "broker-context-1",
+        "measurement_id": "msm_x",
+        "operation": "attempt.startup",
+        "call_id": "c1",
+        "expires_at": time.time() + 600,
+    }
+    real_recorder = operation_profiling.start_stage_recording
+
+    def lapsed(context):
+        """A recorder that already missed its own (shorter) deadline."""
+        recorder = real_recorder(context)
+        if recorder is not None:
+            recorder.deadline_mono = time.monotonic() - 1
+        return recorder
+
+    monkeypatch.setattr("cloud_agent_host.shared_session_supervisor.start_stage_recording", lapsed)
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=_TransportFactory())
+
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        profiling=live,
+    )
+    descriptor = supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+        profiling={**live, "call_id": "c2"},
+    )
+
+    for answer in (lease, descriptor):
+        # The recorder existed and the call answered...
+        assert answer.profiling_recorded is True
+        # ...but every stage was skipped, so nothing was measured at all.
+        assert answer.stages == []
+        assert answer.profiling_truncated is True

@@ -135,6 +135,11 @@ class SharedSessionLease:
     #: `stages` being empty: a reuse that legitimately did no timed work still
     #: collected, and reporting it as missing made every reuse incomplete.
     profiling_recorded: bool = False
+    #: Whether that collection was cut short by this process's own deadline.
+    #: An empty `stages` means "collected and nothing to time" only when this
+    #: is false -- otherwise it means the stages were skipped and never
+    #: measured, which must not pass for a complete fragment.
+    profiling_truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -173,6 +178,7 @@ class SharedSessionDescriptor:
     #: See :class:`SharedSessionLease`.
     profiling_call_id: str | None = None
     profiling_recorded: bool = False
+    profiling_truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -702,6 +708,7 @@ class SharedChatSessionSupervisor:
                 stages=recorder.stages if recorder is not None else [],
                 call_id=call_id,
                 recorded=recorder is not None,
+                truncated=recorder is not None and recorder.stopped_early(),
             )
 
     def start_turn(
@@ -2311,6 +2318,7 @@ class SharedChatSessionSupervisor:
             stages=list(recorder.stages) if recorder is not None else [],
             profiling_call_id=call_id,
             profiling_recorded=recorder is not None,
+            profiling_truncated=recorder is not None and recorder.stopped_early(),
         )
 
     def _descriptors(self, group: _Group) -> list[SharedSessionDescriptor]:
@@ -2325,6 +2333,7 @@ class SharedChatSessionSupervisor:
         stages: list[dict[str, Any]] | None = None,
         call_id: str | None = None,
         recorded: bool = False,
+        truncated: bool = False,
     ) -> SharedSessionDescriptor:
         return SharedSessionDescriptor(
             thread_id=member.thread_id,
@@ -2357,6 +2366,7 @@ class SharedChatSessionSupervisor:
             stages=list(stages) if stages else [],
             profiling_call_id=call_id,
             profiling_recorded=recorded,
+            profiling_truncated=truncated,
         )
 
     @staticmethod

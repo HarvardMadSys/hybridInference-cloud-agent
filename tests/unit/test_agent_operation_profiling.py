@@ -1197,3 +1197,98 @@ def test_a_response_for_another_call_is_not_an_answer(monkeypatch, caplog):
     record = _records(caplog)[0]
     assert record["missing_fragments"] == ["broker:c1:resident_start"]
     assert record["measurement_complete"] is False
+
+
+def test_a_recorder_that_lapses_mid_call_reports_that_it_stopped(monkeypatch, clock):
+    """A skipped stage leaves no trace, so the recorder has to say so itself.
+
+    Regression: `profiling_recorded` only meant "a recorder existed". When the
+    broker's deadline passed while it waited for the member lock, every later
+    `substage` was skipped silently and the answer looked like a call that had
+    nothing to time.
+    """
+    _enable(monkeypatch)
+    recorder = profiling.start_stage_recording(
+        {
+            "run_id": "run-1",
+            "measurement_id": "msm_x",
+            "operation": "attempt.startup",
+            "call_id": "c1",
+            "expires_at": time.time() + 1,
+        }
+    )
+    assert recorder is not None
+    assert recorder.stopped_early() is False
+
+    with profiling.substage(recorder, "container_start"):
+        clock.advance(500)
+    clock.advance(2 * 1_000_000)  # the deadline passes while the lock is held
+
+    with profiling.substage(recorder, "cli_spawn"):
+        clock.advance(500)
+
+    assert [item["name"] for item in recorder.stages] == ["container_start"]
+    assert recorder.skipped == 1
+    assert recorder.stopped_early() is True
+
+
+def test_a_truncated_but_unanswered_call_keeps_the_stages_it_measured(monkeypatch, caplog, clock):
+    """The answer arrived, collection stopped early, and both facts are kept."""
+    _enable(monkeypatch)
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    profiling.mark(measurement, "resident_start")
+
+    call = profiling.expect_fragment(measurement, "broker", "resident_start")
+    assert profiling.record_fragment(
+        measurement,
+        producer="broker",
+        call_id=call,
+        stage="resident_start",
+        response={
+            "profiling_call_id": call,
+            "profiling_recorded": True,
+            # Collected, but the deadline cut it short: no stages came back at
+            # all, which is not the same as a stage that had nothing to do.
+            "profiling_truncated": True,
+            "stages": [],
+        },
+    )
+    profiling.finish(measurement, outcome="dispatched")
+
+    record = _records(caplog)[0]
+    assert record["truncated"] is True
+    assert record["truncated_fragments"] == ["broker:c1"]
+    # Answered, so it is not a missing fragment; it is a partial one.
+    assert "missing_fragments" not in record
+    assert record["measurement_complete"] is False
+
+
+def test_a_truncated_answer_still_contributes_the_stages_it_measured(monkeypatch, caplog):
+    """Partial data is reported, not discarded, when the producer stopped early."""
+    _enable(monkeypatch)
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    profiling.mark(measurement, "supervisor_acquire")
+    profiling.mark(measurement, "sandbox_running")
+
+    call = profiling.expect_fragment(measurement, "broker", "supervisor_acquire")
+    profiling.record_fragment(
+        measurement,
+        producer="broker",
+        call_id=call,
+        stage="supervisor_acquire",
+        response={
+            "profiling_call_id": call,
+            "profiling_recorded": True,
+            "profiling_truncated": True,
+            "stages": [{"name": "container_start", "duration_us": 900}],
+        },
+    )
+    profiling.finish(measurement, outcome="dispatched")
+
+    record = _records(caplog)[0]
+    children = record["stages"][0]["children"]
+    assert [child["stage"] for child in children] == ["container_start"]
+    assert record["truncated_fragments"] == ["broker:c1"]
+    assert record["measurement_complete"] is False

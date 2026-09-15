@@ -235,6 +235,10 @@ class Measurement:
     #: Set when any interval in this record ended at a deadline rather than
     #: when its work finished -- locally or in another process.
     truncated: bool = False
+    #: (producer, call id) fragments that answered but were cut short by their
+    #: own deadline, so the record can name what it is missing rather than
+    #: only being short.
+    truncated_fragments: set[tuple[str, str]] = field(default_factory=set)
     #: Set once the run's deadline passed with collecting still open.
     expired: bool = False
     #: The budget slot is held from selection and returned by `discard`.
@@ -548,6 +552,12 @@ def record_fragment(
     if not response.get("profiling_recorded"):
         return False
     measurement.answered_fragments.add((producer, call_id))
+    if response.get("profiling_truncated"):
+        # The call answered, but collection stopped at this producer's own
+        # deadline: the fragment is present and still a floor, not a duration.
+        # Everything it did manage to measure is kept.
+        measurement.truncated = True
+        measurement.truncated_fragments.add((producer, call_id))
     attach_remote_stages(
         measurement,
         stage,
@@ -604,15 +614,26 @@ class StageRecorder:
 
     deadline_mono: float = float("inf")
     stages: list[dict[str, Any]] = field(default_factory=list)
+    #: Sub-stages that were clamped at the deadline.
     truncated: int = 0
+    #: Sub-stages that never started because the deadline had already passed.
+    #: Counted separately because a skipped stage leaves no trace at all, and
+    #: an empty `stages` would otherwise be indistinguishable from a call that
+    #: legitimately had no timed work.
+    skipped: int = 0
 
     def expired(self) -> bool:
         """Return whether the inherited experiment has lapsed."""
         return time.monotonic() > self.deadline_mono
 
+    def stopped_early(self) -> bool:
+        """Return whether the deadline cut this collection short."""
+        return self.skipped > 0 or self.truncated > 0
+
     def stage(self, name: str) -> AbstractContextManager[None]:
         """Time one sub-stage onto this recorder."""
         if self.expired():
+            self.skipped += 1
             return _NULL_SPAN
         return _recorded_stage(self, name)
 
@@ -1002,6 +1023,10 @@ def to_record(
     }
     if measurement.truncated:
         record["truncated"] = True
+    if measurement.truncated_fragments:
+        record["truncated_fragments"] = sorted(
+            f"{producer}:{call_id}" for producer, call_id in measurement.truncated_fragments
+        )
     if missing_fragments:
         record["missing_fragments"] = missing_fragments
         record["missing_producers"] = missing_producers

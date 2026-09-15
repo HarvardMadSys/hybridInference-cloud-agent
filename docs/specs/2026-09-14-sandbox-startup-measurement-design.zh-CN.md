@@ -413,8 +413,8 @@ profiling 关闭并记一条 warning，而不是每次启动失败。acquire 与
 | 问题 | 字段 |
 | --- | --- |
 | 这是哪次调用 | 请求与响应各带 `call_id`；runner 在调用前铸造并登记期望 |
-| 是否完成采集 | 响应带 `profiling_recorded`——独立于 `stages` 是否为空 |
-| 是否正常跳过 | `profiling_recorded=true` 且 `stages=[]` 即“本次无需执行该阶段” |
+| 是否完成采集 | 响应带 `profiling_recorded`（建过 recorder）与 `profiling_truncated`（因自身截止时间提前停止） |
+| 是否正常跳过 | `profiling_recorded=true`、`profiling_truncated=false` 且 `stages=[]`，才是“本次无需执行该阶段” |
 
 因此完整性按 **call id** 判断，而不是按阶段名或生产者：重试是**第二个片段**，必须各自
 交代，不能用后一次成功掩盖前一次；而正常复用 CLI 时 `cli_spawn` 本就不存在，
@@ -422,6 +422,13 @@ profiling 关闭并记一条 warning，而不是每次启动失败。acquire 与
 不是缺失。`missing_fragments` 形如 `["broker:c2:resident_start"]`，
 `measurement_complete=false`；broker 没开时两个调用都缺席。子阶段也带 `call_id`，
 所以展开重试时能看出哪段属于哪次尝试。
+
+**空 `stages` 有两种含义，必须区分。** broker 的本地期限可能比 runner 的短：等待成员锁
+就把期限耗光，之后每个子阶段都被跳过，`stages=[]` 且没有任何截断痕迹。因此 recorder
+分别统计“被截止点截断”和“因已过期而根本没开始”，响应带 `profiling_truncated`。
+此时片段**已应答但被截断**：它测到的阶段照常保留，根记录标 `truncated=true` 与
+`truncated_fragments=["broker:c2"]`，`measurement_complete=false`——既不算缺失，也
+不算完整。
 
 **截断状态跨进程保留。** broker 在自己的截止点截断的子阶段带 `truncated=true` 回到
 runner，并置根记录 `truncated=true`；`measurement_complete` 要求边界齐全、**未被截断**、
