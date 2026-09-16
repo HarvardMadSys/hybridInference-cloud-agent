@@ -487,18 +487,37 @@ complete_shared_live_marker() {
 # project covers. This section runs that comparison per replica and writes the
 # result to a file the runner reads every sampling round.
 #
-# **Nothing here is fatal.** A page that cannot say how full a disk is must not
-# be able to stop the work that fills it, so every failure below is a warning
-# and an `unverified` entry. The one exception is the verdict file itself,
+# **Nothing here is fatal, and nothing here may hang.** A page that cannot say
+# how full a disk is must not be able to stop the work that fills it, and a
+# rollout waiting forever on a `docker exec` has stopped it just as effectively
+# as a failed check. Every probe call therefore runs under `timeout`, and the
+# attestation as a whole under a budget: when either runs out, the affected
+# replicas are left with no entry — which the runner reads as `unverified` —
+# and the deployment continues. The one exception is the verdict file itself,
 # which is a bind-mount source: without it the runner containers cannot start
 # at all, and failing there names the problem instead of letting Compose's own
 # error do it.
+#
+# The honest limit: no budget can bound a process stuck in uninterruptible I/O,
+# so a `df` against a dead mount can still outlive its `timeout`. The per-call
+# bound is what covers the ordinary failure — a wedged `docker exec` — and the
+# total is what keeps the sum of those bounds inside the rollout's fence.
 
 # The diagnostic band's floor. Occupancy moves between the two reads — builds
 # and cleanup interleave, and nothing pauses the world for monitoring — so
 # `used` and `available` are compared within a tolerance and only as a
 # diagnosis. `size` does not move under writes, and it is the actual test.
 STORAGE_DIAGNOSTIC_FLOOR_BYTES=$((1024 * 1024 * 1024))
+
+# Budgets. Each call here is local — a Python start-up in a sibling container,
+# or `df` on a path — and returns in well under a second when it works, so
+# these are orders of magnitude above the normal case. They exist for the case
+# that does not work: a stuck `docker exec`, a `df` blocked on a dead mount.
+# The total is deliberately far inside the control plane's readiness fence
+# (120s on staging, `SHARED_READY_TIMEOUT`), because a host that publishes its
+# marker after that fence expired has failed a deployment over a metric.
+STORAGE_CALL_TIMEOUT_S=8
+STORAGE_ATTEST_BUDGET_S=30
 
 storage_verdict_file() {
   # Beside .shared-live-ready and .deployed-sha, for the same reason: the
@@ -553,9 +572,17 @@ storage_df_size() {
   # Bytes of the filesystem containing a path, as GNU df reports it. `-B1`
   # with `--output=size` prints one exact integer: no human rounding, and no
   # dependence on the terminal's idea of a block. Prints nothing when df
-  # cannot answer, so the caller can tell "no answer" from a real zero.
+  # cannot answer — including when it ran out of its budget — so the caller
+  # can tell "no answer" from a real zero.
+  #
+  # `timeout` is required rather than optional here: this runs inside the
+  # rollout, and an unbounded `df` is how a monitoring check becomes a hung
+  # deployment. The caller proves the binary exists before calling.
   local value
-  value="$(df -B1 --output=size "$1" 2>/dev/null | tail -n1 | tr -d '[:space:]' || true)"
+  value="$(
+    timeout "$STORAGE_CALL_TIMEOUT_S" df -B1 --output=size "$1" 2>/dev/null \
+      | tail -n1 | tr -d '[:space:]' || true
+  )"
   if [[ ! "$value" =~ ^[0-9]+$ ]]; then
     return 0
   fi
@@ -614,7 +641,11 @@ storage_usage_agrees() {
   # between the two reads because builds and cleanup interleave, so requiring
   # equality would fail on any busy host. A monotonic assumption is not
   # available either — nothing here pauses the world for monitoring.
-  local id="$1" mount_root="$2" size="$3" attempt tolerance
+  #
+  # Both calls are bounded, and the whole loop stops at the caller's deadline
+  # instead of retrying into it: three attempts plus their pauses is the most
+  # this can add to a rollout.
+  local id="$1" mount_root="$2" size="$3" deadline="${4:-$SECONDS}" attempt tolerance
   local container_used container_avail host_used host_avail delta_used delta_avail
   local note="the reading could not be taken" container_line host_line
   tolerance=$(( size / 100 ))
@@ -622,26 +653,41 @@ storage_usage_agrees() {
     tolerance="$STORAGE_DIAGNOSTIC_FLOOR_BYTES"
   fi
   for attempt in 1 2 3; do
+    if (( SECONDS >= deadline )); then
+      note="the attestation ran out of its budget before the occupancy could be compared"
+      break
+    fi
+    # An unused reading prints nothing rather than zeroes: a timed-out or
+    # unparsable document must not look like a filesystem with nothing on it,
+    # which is a reading the comparison below would happily accept.
     container_line="$(
-      docker exec "$id" python -m cloud_agent_host.host_capacity describe 2>/dev/null \
+      timeout "$STORAGE_CALL_TIMEOUT_S" docker exec "$id" \
+        python -m cloud_agent_host.host_capacity describe 2>/dev/null \
         | python3 -c 'import json, sys
 try:
     reading = json.load(sys.stdin)
 except ValueError:
     reading = {}
-print(
-    int(reading.get("total_bytes") or 0) - int(reading.get("free_bytes") or 0),
-    int(reading.get("available_bytes") or 0),
-)' || true
+size = reading.get("total_bytes")
+free = reading.get("free_bytes")
+available = reading.get("available_bytes")
+if not all(isinstance(value, int) and not isinstance(value, bool)
+           for value in (size, free, available)):
+    raise SystemExit(0)
+print(size - free, available)' || true
     )"
-    host_line="$(df -B1 --output=used,avail "$mount_root" 2>/dev/null | tail -n1 || true)"
+    host_line="$(
+      timeout "$STORAGE_CALL_TIMEOUT_S" df -B1 --output=used,avail "$mount_root" 2>/dev/null \
+        | tail -n1 || true
+    )"
+    # Cleared first: `read` leaves its targets alone at EOF, so a second
+    # attempt would otherwise compare the previous attempt's numbers.
+    container_used=""; container_avail=""; host_used=""; host_avail=""
     read -r container_used container_avail <<<"$container_line" || true
     read -r host_used host_avail <<<"$host_line" || true
-    container_used="${container_used:-0}"
-    container_avail="${container_avail:-0}"
-    host_used="${host_used:-0}"
-    host_avail="${host_avail:-0}"
-    if [[ ! "$container_used" =~ ^[0-9]+$ || ! "$container_avail" =~ ^[0-9]+$ \
+    if [[ -z "$container_used" || -z "$container_avail" || -z "$host_used" || -z "$host_avail" ]]; then
+      note="a reading did not arrive within ${STORAGE_CALL_TIMEOUT_S}s (the probe or df was cut short)"
+    elif [[ ! "$container_used" =~ ^[0-9]+$ || ! "$container_avail" =~ ^[0-9]+$ \
        || ! "$host_used" =~ ^[0-9]+$ || ! "$host_avail" =~ ^[0-9]+$ ]]; then
       note="one of the two readings was not numeric"
     else
@@ -673,12 +719,16 @@ append_storage_entry() {
 verify_storage_probe() {
   # Attest every replica's storage reading and write the verdict document.
   #
-  # Takes the attestation directory and the runner ids from
-  # check_shared_live_stack, which has already proven the replicas are alive —
-  # a verdict about a container that is not running would be about nothing.
-  local attest_dir="$1" runner_ids="$2"
+  # Takes the attestation directory, the runner ids and the rollout's readiness
+  # deadline from check_shared_live_stack, which has already proven the
+  # replicas are alive — a verdict about a container that is not running would
+  # be about nothing. The deadline caps this function's own budget: whatever
+  # time the readiness probes have already spent is time the attestation does
+  # not get back, and a marker published after that fence expired fails the
+  # rollout it was supposed to be protecting.
+  local attest_dir="$1" runner_ids="$2" deadline="${3:-$SECONDS}"
   local entries_file verdict_file id index storage_rc ok reason upperdir fstype
-  local total upper_size root_size host_fstype note verdict
+  local total upper_size root_size host_fstype note verdict storage_deadline
   local -a ids=() pids=()
 
   if [[ "$(storage_probe_name)" == "off" ]]; then
@@ -689,6 +739,23 @@ verify_storage_probe() {
     warn "no runner replica is available to attest storage against"
     return 0
   fi
+  # `timeout` is what makes the per-call bound real, and every call below is
+  # local work with no business outliving a few seconds. Without it this host
+  # gets no storage measurement at all, rather than an unbounded `docker exec`
+  # in the rollout path: "no number" is the right answer when the only way to
+  # get one is to risk holding a deployment open.
+  if ! command -v timeout >/dev/null 2>&1; then
+    warn "coreutils 'timeout' is not on PATH; skipping storage attestation rather than risking an unbounded probe call"
+    return 0
+  fi
+  storage_deadline=$((SECONDS + STORAGE_ATTEST_BUDGET_S))
+  if (( deadline > SECONDS && deadline < storage_deadline )); then
+    # A rollout already short of its own fence gives storage what is left
+    # rather than a fresh thirty seconds. A manual `check` has no fence to
+    # speak of — its deadline is now — so it keeps the full budget, which is
+    # what lets `check` refresh the verdict without a redeploy.
+    storage_deadline="$deadline"
+  fi
 
   # Asked in parallel and through the same command the runner samples with: a
   # shell re-implementation could agree with itself while both differ from
@@ -696,7 +763,8 @@ verify_storage_probe() {
   for id in $runner_ids; do
     (
       storage_rc=0
-      docker exec "$id" python -m cloud_agent_host.host_capacity describe \
+      timeout "$STORAGE_CALL_TIMEOUT_S" docker exec "$id" \
+        python -m cloud_agent_host.host_capacity describe \
         >"${attest_dir}/${id}.storage.json" 2>"${attest_dir}/${id}.storage.stderr" \
         || storage_rc=$?
       printf '%s' "${storage_rc}" >"${attest_dir}/${id}.storage.status"
@@ -712,7 +780,18 @@ verify_storage_probe() {
   : >"$entries_file"
   for index in "${!ids[@]}"; do
     id="${ids[index]}"
-    if [[ "$(cat "${attest_dir}/${id}.storage.status" 2>/dev/null || true)" != "0" ]]; then
+    if (( SECONDS >= storage_deadline )); then
+      # No entry for the replicas that were not reached: the runner draws the
+      # same conclusion from an absent entry, which is `unverified`.
+      warn "the storage attestation ran out of its budget; the remaining replicas keep reporting unverified"
+      break
+    fi
+    storage_rc="$(cat "${attest_dir}/${id}.storage.status" 2>/dev/null || true)"
+    if [[ "$storage_rc" == "124" ]]; then
+      warn "runner $id did not answer the storage probe description within ${STORAGE_CALL_TIMEOUT_S}s; leaving its storage unverified"
+      continue
+    fi
+    if [[ "$storage_rc" != "0" ]]; then
       warn "runner $id could not run the storage probe description; leaving its storage unverified"
       continue
     fi
@@ -736,11 +815,17 @@ verify_storage_probe() {
     # directory's project returns the quota from both, so the two would agree
     # while neither describes the disk.
     root_size=""
-    mount_root="$(findmnt -n -o TARGET -T "$upperdir" 2>/dev/null | head -n1 || true)"
+    mount_root="$(
+      timeout "$STORAGE_CALL_TIMEOUT_S" findmnt -n -o TARGET -T "$upperdir" 2>/dev/null \
+        | head -n1 || true
+    )"
     # The filesystem type recorded in the verdict is the *host's*, not the
     # container's: inside the container `/` is an overlay, and the entry is
     # meant to name the filesystem the writable layers actually live on.
-    host_fstype="$(findmnt -n -o FSTYPE -T "$upperdir" 2>/dev/null | head -n1 || true)"
+    host_fstype="$(
+      timeout "$STORAGE_CALL_TIMEOUT_S" findmnt -n -o FSTYPE -T "$upperdir" 2>/dev/null \
+        | head -n1 || true
+    )"
     if [[ -z "$host_fstype" ]]; then
       host_fstype="$fstype"
     fi
@@ -783,7 +868,7 @@ verify_storage_probe() {
       warn "runner $id: the container and the host disagree on the filesystem's size; treating the topology as unsupported"
       continue
     fi
-    if note="$(storage_usage_agrees "$id" "$mount_root" "$root_size")"; then
+    if note="$(storage_usage_agrees "$id" "$mount_root" "$root_size" "$storage_deadline")"; then
       append_storage_entry "$upperdir" "verified" "$mount_root" "$host_fstype" "$root_size" "" "$entries_file"
       log "runner $id: storage verified against ${mount_root} (${fstype}, ${root_size} B)"
     else
@@ -1039,7 +1124,7 @@ check_shared_live_stack() {
   # it uses is cleaned up. Deliberately not part of the fatal set above: see the
   # section comment — a metric that cannot be established is not a reason to
   # keep a working host out of the pool.
-  verify_storage_probe "$ATTEST_DIR" "$runner_ids"
+  verify_storage_probe "$ATTEST_DIR" "$runner_ids" "$deadline"
   cleanup_attest_dir
 
   # Capability attestation proves the runner is configured to dial the broker;

@@ -39,6 +39,7 @@ def _host(
     candidate_exit: int = 0,
     storage_json: str | None = None,
     storage_exit: int = 0,
+    storage_hang: bool = False,
 ) -> dict[str, str]:
     app_dir = tmp_path / "app"
     app_dir.mkdir()
@@ -73,7 +74,12 @@ def _host(
     # command is a second `docker exec`, and a fake that answered it by default
     # would make every deployment test exercise the attestation path.
     storage_case = ""
-    if storage_json is not None:
+    if storage_hang:
+        # `exec` so the hang *is* this process: a killed `sleep` child would
+        # leave the pipe into the parser open, and the test would measure that
+        # instead of the bound.
+        storage_case = "  exec*'host_capacity describe'*) exec sleep 300 ;;\n"
+    elif storage_json is not None:
         storage_case = (
             "  exec*'host_capacity describe'*) printf '%s' '"
             + storage_json
@@ -957,6 +963,55 @@ def storage_document(
     )
 
 
+def _write_fake_timeout(tmp_path: Path) -> None:
+    """A stand-in for coreutils' `timeout`, which this test machine lacks.
+
+    It runs the command and kills it at the budget, records the budget the
+    deployment script asked for beside itself, and takes a `timeout.cap`
+    override so a test can reach the bound without waiting eight seconds. What
+    is under test is the script's use of a bound — that it asks for one, and
+    that it keeps going when one expires — not coreutils' implementation.
+    """
+    _write_executable(
+        tmp_path / "bin/timeout",
+        "#!/bin/sh\n"
+        'budget="$1"\n'
+        "shift\n"
+        'printf \'%s\\n\' "$budget" >>"$(dirname "$0")/timeout.log"\n'
+        'cap="$(dirname "$0")/timeout.cap"\n'
+        'if [ -f "$cap" ]; then budget="$(cat "$cap")"; fi\n'
+        '"$@" &\n'
+        "child=$!\n"
+        # Polled in hundredths. The loop's first check usually finds the child
+        # alive because the fork has not been reaped yet, so the tick is the
+        # floor on every wrapped call — and every wrapped call in every test
+        # would pay a coarser one.
+        "budget_hundredths=$((budget * 100))\n"
+        "elapsed=0\n"
+        'while kill -0 "$child" 2>/dev/null; do\n'
+        '  if [ "$elapsed" -ge "$budget_hundredths" ]; then\n'
+        '    kill -9 "$child" 2>/dev/null\n'
+        '    wait "$child" 2>/dev/null\n'
+        "    exit 124\n"
+        "  fi\n"
+        "  sleep 0.01\n"
+        "  elapsed=$((elapsed + 1))\n"
+        "done\n"
+        "status=0\n"
+        'wait "$child" || status=$?\n'
+        'exit "$status"\n',
+    )
+
+
+def _cap_fake_timeout(tmp_path: Path, seconds: int) -> None:
+    """Shorten the fake `timeout`'s budget so a bounded call is cheap to test."""
+    (tmp_path / "bin/timeout.cap").write_text(str(seconds))
+
+
+def _budgets_the_script_asked_for(tmp_path: Path) -> set[str]:
+    return set((tmp_path / "bin/timeout.log").read_text().split())
+
+
 def _add_storage_host_tools(
     tmp_path: Path,
     *,
@@ -997,6 +1052,7 @@ def _add_storage_host_tools(
         "  *) exit 1 ;;\n"
         "esac\n",
     )
+    _write_fake_timeout(tmp_path)
     _write_executable(
         tmp_path / "bin/findmnt",
         "#!/bin/sh\n"
@@ -1023,6 +1079,7 @@ def _storage_host(
     *,
     describe: str | None = None,
     storage_exit: int = 0,
+    storage_hang: bool = False,
     capability: str = "shared-sandbox-v1,native-fork-at-anchor-v1",
     probe: str | None = None,
     findmnt_fails: bool = False,
@@ -1036,6 +1093,7 @@ def _storage_host(
         capability=capability,
         storage_json=storage_document() if describe is None else describe,
         storage_exit=storage_exit,
+        storage_hang=storage_hang,
     )
     env["AGENT_DEPLOYMENT_SHA"] = "target-sha"
     _add_storage_host_tools(
@@ -1226,3 +1284,90 @@ def test_the_verdict_marker_is_prepared_before_the_containers_start() -> None:
 
     assert up.index("prepare_storage_verdict") < up.index("compose up -d")
     assert up.index("prepare_shared_live_marker") < up.index("prepare_storage_verdict")
+
+
+# ── Storage attestation: it must not be able to hold a rollout open ────
+
+
+def test_a_hung_storage_probe_cannot_delay_or_fail_a_rollout(tmp_path: Path) -> None:
+    """A probe that never answers must cost a gap, not a deployment.
+
+    The readiness fence is what a rollout promises the control plane, and the
+    storage attestation runs inside it. A `docker exec` with no bound turns
+    that promise into a hang: the marker is never published, the control job
+    times out, and a metric has failed a deployment it was only supposed to
+    describe.
+    """
+    env = _storage_host(tmp_path, storage_hang=True)
+    _add_required_host_paths(env, tmp_path)
+    # The process's own signal, tested with the fake `timeout`: the fence never
+    # gets the chance to expire.
+    _cap_fake_timeout(tmp_path, 3)
+    with (Path(env["APP_DIR"]) / ".env").open("a") as dotenv:
+        dotenv.write("SHARED_READY_TIMEOUT=2\n")
+
+    result = _run(env, "up")
+
+    assert result.returncode == 0, result.stderr
+    assert "done." in result.stdout
+    # The rollout published its readiness marker, which is the thing a hang
+    # would have prevented.
+    assert (Path(env["APP_DIR"]) / ".shared-live-ready").read_text().strip() == "target-sha"
+    # And no number was published for a filesystem nobody managed to measure.
+    assert _verdict(env)["entries"] == {}
+    assert "ran out of its budget" in result.stderr
+    # Every call the attestation made was bounded, at the script's own budget.
+    assert _budgets_the_script_asked_for(tmp_path) == {"8"}
+
+
+def test_a_hung_storage_probe_is_bounded_on_a_manual_check(tmp_path: Path) -> None:
+    """`check` has no rollout fence to borrow, so the per-call bound is it."""
+    env = _storage_host(tmp_path, storage_hang=True)
+    _cap_fake_timeout(tmp_path, 1)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert _verdict(env)["entries"] == {}
+    assert "did not answer the storage probe description within 8s" in result.stderr
+    assert _budgets_the_script_asked_for(tmp_path) == {"8"}
+
+
+def test_a_storage_attestation_that_cannot_be_bounded_does_not_run() -> None:
+    """Without coreutils `timeout` there is no bound, so there is no attestation.
+
+    Structural on purpose: every host this script supports carries coreutils,
+    which is exactly why the branch cannot be reached by running it here — and
+    why the guard has to be checked rather than assumed. It must also come
+    before the first probe call, or an unbounded call happens anyway.
+    """
+    script = SANDBOX_HOST.read_text()
+    verify = script[
+        script.index("verify_storage_probe() {") : script.index("probe_sandbox_relay() {")
+    ]
+    guard = verify.index("command -v timeout")
+    first_call = verify.index('timeout "$STORAGE_CALL_TIMEOUT_S" docker exec')
+
+    assert guard < first_call
+    assert "return 0" in verify[guard:first_call]
+
+
+def test_the_storage_budget_is_capped_by_the_rollout_fence() -> None:
+    """Storage gets what is left of the fence, not a fresh budget beside it."""
+    script = SANDBOX_HOST.read_text()
+    verify = script[
+        script.index("verify_storage_probe() {") : script.index("probe_sandbox_relay() {")
+    ]
+
+    assert "storage_deadline=$((SECONDS + STORAGE_ATTEST_BUDGET_S))" in verify
+    assert "deadline > SECONDS && deadline < storage_deadline" in verify
+    # Consulted before each replica and before each tolerance attempt, so the
+    # budget ends the loop rather than being noticed after it.
+    assert "SECONDS >= storage_deadline" in verify
+    assert (
+        "SECONDS >= deadline"
+        in script[
+            script.index("storage_usage_agrees() {") : script.index("append_storage_entry() {")
+        ]
+    )
+    assert 'verify_storage_probe "$ATTEST_DIR" "$runner_ids" "$deadline"' in script
