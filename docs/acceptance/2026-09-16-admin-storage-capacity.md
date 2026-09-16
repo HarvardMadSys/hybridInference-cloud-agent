@@ -1,6 +1,70 @@
 # PR #265 存储容量真机验收
 
-## 结论
+## 修复后结论（a2e2e36）
+
+**部署权限阻塞已修复，核心真机验收通过。** 被测代码为 `a2e2e3645ff6cf7ac3f52219243f3750167a1437`。实际非 root 部署用户在 containerd image store 下签发了三个 `verified` 条目，runner → 心跳 → admin API → Servers 页面均收到正常容量；XFS 配额反例仍被拒绝。
+
+- [修复版本的 staging 部署](https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/35096345780)：控制面和 runner 两端成功，`.deployed-sha` 均匹配被测提交。
+- `/var/lib/containerd` 仍为 `root:root`、0700。部署侧使用实际 runner 的不可变镜像启动一次性 helper，只挂两个非递归、只读目录；无额外 capability、网络、宿主 PID 或 Docker socket。helper 核对已打开目录的 mount ID、设备号、文件系统根和类型，再读取容量。
+- 原生宿主路径可读时仍走原有 `findmnt` / `df` 分支。helper 复用部署总预算，内部另有 1–5 秒闹钟；真实 PID 1 阻塞实验在 1 秒后以 124 退出，容器自动清理。
+- `env -u CODEX_VERSION make check`：**4051 passed**；修复提交的 [CI](https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/35096231521) **15 success / 1 skipped**（Candidate on real Kata）。
+
+### 实际 staging 的正向链路
+
+三份 verdict 都指向宿主 ext4 的 `/`，`size_bytes=1966736678912`。静止夹取对照在第一次尝试即逐项相等：
+
+| 位置                       |     total (B) |     used (B) | available (B) |
+| -------------------------- | ------------: | -----------: | ------------: |
+| 宿主 `df /`，之前          | 1966736678912 | 684150255616 | 1182606172160 |
+| 实际 runner `statvfs("/")` | 1966736678912 | 684150255616 | 1182606172160 |
+| 宿主 `df /`，之后          | 1966736678912 | 684150255616 | 1182606172160 |
+
+12:41:26 UTC，真实 HTTP `GET /admin/agent/runner-hosts` 返回 200。在线 host 的字段摘录：
+
+```json
+{
+  "storage_total_bytes": 1966736678912,
+  "storage_free_bytes": 1282586693632,
+  "storage_available_bytes": 1182606442496,
+  "storage_used_bytes": 684149985280,
+  "storage_used_percent": 36.64912974720953,
+  "storage_source": "linux_overlay_root_statvfs",
+  "storage_target": "/",
+  "storage_missing_reason": null,
+  "freshness": "fresh"
+}
+```
+
+页面显示 **37% · 0.6 / 1.8 TiB；1.1 TiB available**，0 running / 25 stopped。页面 tooltip 的可访问文本确认了挂载点 `/`、source、`used / (used + available)` 与保留块说明。CPU、内存、历史曲线和 retained inventory 正常。
+
+![修复后 staging 的 Storage 数字与 retained inventory](assets/2026-09-16-pr265-storage-verified.png)
+
+**沙箱同盘确认。** 只读查询已停止的 retained sandbox `29129c928de5…` 的 containerd overlayfs snapshot；其 upperdir 是 `…/snapshots/36367/fs`。对该目录运行同一只读容量 helper，已打开目录的设备号、文件系统根与 ext4 `/` 的预期一致，挂载根与 upperdir 总量均为 `1966736678912 B`。该沙箱全程保持 exited；没有启动、修改其内容或挂载其完整容器根。
+
+**降级与恢复。** 将宿主 verdict 的 entries 原地清空，等待新采样后，页面显示 Storage not verified，CPU、内存和 25 个 stopped inventory 继续更新。以原部署用户执行 `sandbox_host.sh check` 成功，三个副本重新签发 verified，随后页面恢复正常数字。这里测试的是原地清空条目，未把它当作宿主 unlink 文件的测试。
+
+### 用实际部署镜像复验新 helper
+
+从上述 staging 实际构建镜像导出，再导入独立 XFS 实验 daemon；镜像 OCI manifest 为 `1dd846b5e4d55edd8c74eaeba765636e5e3384ad2594624b65880fb09eca174b`，config 为 `7a3b963953b89c46d34ec584e9304d242220b87be2434aa00dedb11d486bd9c0`。两个程序与被测提交逐字节一致：
+
+```text
+host_capacity.py       d724c54fe4fe56ddc1450e24421b5a452a501027ee5e8ff118e4337379c8d24c
+storage_attestation.py ee3799b71b1014154a6134907c85bfe06929b8e3ff68a2efaeaf9fb99b5e19f3
+```
+
+attestation harness 原样使用提交中的存储函数，以 uid 65534 运行，不能遍历 root-owned data-root；因此实际走新 helper，而不是只验证原生 root 路径。没有替换 Docker、文件系统读数或 verdict。
+
+- **A：真实 XFS project quota。** 容器和 upperdir 均报 `10737418240 B`，挂载根报 `33939488768 B`；verdict 为 unsupported / project quota，交给运行时后 `sample()` 返回 `{"reason":"unsupported"}`。
+- **C：独立 loop-backed XFS、无配额。** verdict 为 verified，target 为 `/lab/disk`。运行时 sample、`df upperdir` 与 `df /lab/disk` 的 total / used / available 均为 `33939488768 / 1088942080 / 32850546688 B`。
+- **B：vfs 非 overlay。** 本轮没有重跑；下文首次验收的真实 B 仍适用，运行时探针文件 SHA-256 未变。helper 只在 overlay 描述成功后进入。
+
+### 范围与清理
+
+此次关闭的是部署权限问题，并补齐正常容量、同盘确认、TiB 展示及原地清空 verdict 后的恢复。未强制构造 staging 的 `off`、样本过期或宿主 unlink verdict 场景，也未把 XFS loop-backed 正例称为第二块物理盘或 containerd 独立磁盘的验收。没有宣称设计第 9 节全部演练已完成。
+
+临时容器、嵌套 daemon、XFS 挂载与 loop 设备均清理；staging 已[恢复原 dev 提交](https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/35097683056) `6669a88308e19fd655899dbf7fe5c67846325326`。生产栈和宿主目录权限未改，PR 未合并。原始输出、实验脚本、实际 HTTP 字段、部署日志和补充截图保存在执行机器的 `pr265-storage-fix-20260916` 目录。
+
+## 首次验收结论（f425811，修复前）
 
 **验收未通过，暂不合并。** `overlay_root` 的配额反例、非 overlay 反例及独立文件系统正例均已在真实 Linux 内核和 Docker 上跑通；但 staging 的实际部署用户无法遍历 containerd 的快照目录，三个 runner 的部署验证都得到 `unverified`，页面始终显示 **Storage not verified**。正常容量从 staging runner 到页面的验收仍待修复后完成。
 

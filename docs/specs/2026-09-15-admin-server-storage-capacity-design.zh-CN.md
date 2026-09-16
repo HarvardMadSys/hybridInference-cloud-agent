@@ -242,7 +242,7 @@ df -B1 --output=size,used,avail,target "$upperdir"
 
 **2026-09-16 真机验收更新：** [完整验收记录](../acceptance/2026-09-16-admin-storage-capacity.md)。在真实 Linux / Docker 的隔离环境中，XFS project quota 反例 A、vfs 反例 B、独立 loop-backed XFS 文件系统正例 C 均通过；A 中容器和 `df upperdir` 都返回 `10737418240 B`，挂载根返回 `33939488768 B`，验证正确拒绝配额读数。C 中容器、upperdir 和挂载根三个数逐项相等，target 指向 `/lab/disk/docker`，不是外层根文件系统。
 
-**整体验收仍未通过。** PR 提交 `f425811` 在 staging 的真实部署成功，但非 root 部署用户不能遍历 root-owned、0700 的 `/var/lib/containerd`。三个副本都无法定位 upperdir 的挂载，判为 `unverified`；页面显示 Storage not verified，CPU、内存和 inventory 正常。合并前需修复 attestation 的执行权限路径，再补齐真实 staging 的同盘确认、正向数字与 tooltip 验收。此次没有修改宿主目录权限；配额已在 XFS 上实测，不代表 ext4 或所有生产拓扑均已验证。
+**修复后核心验收通过（`a2e2e36`）。** 首次 `f425811` 因非 root 部署用户无法遍历 0700 的 containerd 快照目录而只能显示 unverified。新增受控 helper 后，三个 staging 副本均 verified，宿主 `df` 与实际 runner 三个数逐项相等，admin API 和页面显示正常 TiB 容量；已停止 retained sandbox 的 upperdir 也确认与 runner 同盘。新 helper 以非 root 调用者、实际 staging 镜像重跑 XFS A / C，仍正确拒绝配额、接受独立文件系统。原地清空 verdict 条目后的局部降级及 `check` 恢复也已实测。目录权限未改；完整数值、截图及尚未强制构造的场景见验收记录，不代表所有生产拓扑均已验证。
 
 ## 6. 采样与故障边界
 
@@ -345,3 +345,5 @@ Staging 验收：页面、admin API 和宿主 `df <挂载根>` 在同一时段�
 **2026-09-16 真机验收。** 上述“实验和截图未完成”是各轮修订当时的状态。现已完成第 5 节所述 XFS 配额反例 A、vfs 反例 B、独立 loop-backed XFS 正例 C，并取得真实 staging 的 unverified 页面截图；结果见[验收记录](../acceptance/2026-09-16-admin-storage-capacity.md)。验收发现非 root 部署用户无法遍历 containerd 快照目录，正向容量展示因此未通过，合并仍需等待权限路径修复及 staging 复验。
 
 **2026-09-16 验收问题修复。** 为非 root 部署用户增加上述一次性 metadata helper，并对实际 bind 的文件系统身份进行核对。原先直接读取宿主路径的分支保留；权限修复后的正向 staging 验收结果另行记录，不覆写首次验收失败的历史。
+
+**2026-09-16 修复后复验。** `a2e2e36` 已完成实际部署、三个 runner 的 verified、页面和 HTTP 正向读数、已停止 retained sandbox 同盘确认、新 helper 下的 XFS A / C 以及清空 verdict 条目后的 `check` 恢复；详见[最新验收记录](../acceptance/2026-09-16-admin-storage-capacity.md)。权限阻塞关闭。staging 的 off、过期和宿主 unlink verdict 未在本轮强制构造，不把原地清空文件内容等同于删除 bind source。
