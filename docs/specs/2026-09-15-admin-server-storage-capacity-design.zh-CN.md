@@ -153,7 +153,7 @@ runner 的 upper 目录和沙箱的可写层由同一个 driver 放在同一个�
 
 ### 4.3 部署验证与状态传递
 
-**为什么不能拿 `df upperdir` 对照。** daemon 默认的 `overlay2.size` 或容器的 `--storage-opt size=` 通过 ext4／XFS 的 project quota 实现（[dockerd 配置](https://docs.docker.com/reference/cli/dockerd/#overlay2size)）。XFS 对受 project quota 约束的目录，`statfs` 返回该项目的限额而非磁盘（[XFS 实现](https://github.com/torvalds/linux/blob/master/fs/xfs/xfs_qm_bhv.c#L56)），ext4 的 `ext4_statfs_project` 同理；GNU `df` 收到目录参数时就对该路径查询（[GNU df 实现](https://github.com/coreutils/coreutils/blob/master/src/df.c#L1319)）。于是磁盘 1 TiB、配额 10 GiB 时，容器 `/` 和宿主 `df upperdir` 都读到 10 GiB，设备号也相同，对照形同虚设。
+**为什么不能拿 `df upperdir` 对照。** Docker 的 `overlay2.size` 或容器的 `--storage-opt size=` 要求 backing filesystem 为启用 pquota 的 XFS，通过 project quota 实现（[dockerd 配置](https://docs.docker.com/reference/cli/dockerd/#overlay2size)）。XFS 对受 project quota 约束的目录，`statfs` 返回该项目的限额而非磁盘（[XFS 实现](https://github.com/torvalds/linux/blob/master/fs/xfs/xfs_qm_bhv.c#L56)），ext4 的 `ext4_statfs_project` 同理；GNU `df` 收到目录参数时就对该路径查询（[GNU df 实现](https://github.com/coreutils/coreutils/blob/master/src/df.c#L1319)）。于是磁盘 1 TiB、配额 10 GiB 时，容器 `/` 和宿主 `df upperdir` 都读到 10 GiB，设备号也相同，对照形同虚设。
 
 **对照对象是挂载根。** 宿主用 `findmnt -T <upperdir>` 找到包含 upperdir 的文件系统及其挂载根；挂载根不在任何容器目录的 project 之内，`df <挂载根>` 才是磁盘本身。同一文件系统上，`df upperdir` 与 `df <挂载根>` 的 `size` 不等，就是配额生效的直接证据。
 
@@ -226,13 +226,15 @@ df -B1 --output=size,used,avail,target "$upperdir"
 
 **沙箱同盘确认。** 任选一个 retained sandbox 容器，取其 upperdir（overlay2 用 `docker inspect` 的 `GraphDriver.Data.UpperDir`；containerd 模式按 snapshotter 路径），`findmnt -T` 必须给出同一个挂载根。这证明 runner 的读数就是沙箱可写层的盘。
 
-**反例 A，配额，必须真正跑通。** 在 backing filesystem 为带 `pquota` 的 XFS（或带 `prjquota` 的 ext4）的主机上，用 runner 镜像起一个 `--storage-opt size=10G` 的测试容器。预期：容器 `statvfs` 的 `total` 为 10 GiB；宿主 `df upperdir` 同样为 10 GiB，这正是 4.3 描述的漏检；宿主 `df mount_root` 为磁盘容量；attestation 第 3、4 步记 `unsupported`。三组数都写回本文。
+**反例 A，配额，必须真正跑通。** 在 backing filesystem 为带 `pquota`／`prjquota` 的 XFS 的主机上，用 runner 镜像起一个 `--storage-opt size=10G` 的测试容器。预期：容器 `statvfs` 的 `total` 为 10 GiB；宿主 `df upperdir` 同样为 10 GiB，这正是 4.3 描述的漏检；宿主 `df mount_root` 为磁盘容量；attestation 第 3、4 步记 `unsupported`。三组数都写回本文。
 
 **反例 B，非 overlay 根。** 用 `vfs` driver 的测试 daemon 或 `--rootfs` 启动探针，预期 4.2 报 `unsupported`。
 
 **正例 C，分盘。** data-root 或 containerd snapshotter 在独立磁盘上，预期 `findmnt -T upperdir` 指向该盘，验证通过，`target` 是该盘的挂载根而不是 `/`。
 
-**截至本文：已核对内核源码、GNU df 与仓库链路；以上实验仍未在目标主机运行。** 实现按“先实现、实验留 TODO”的决定先行落地（见文末实现记录），`external` 验收项保持未完成：正例 C 与反例 A／B 的结果必须回填本文，且**反例 A 未跑通之前，不得把 `overlay_root` 当作已在生产主机验证过的探针**——代码里“验证不通过就不出数”的机制正是为这段空白准备的。
+**2026-09-16 真机验收更新：** [完整验收记录](../acceptance/2026-09-16-admin-storage-capacity.md)。在真实 Linux / Docker 的隔离环境中，XFS project quota 反例 A、vfs 反例 B、独立 loop-backed XFS 文件系统正例 C 均通过；A 中容器和 `df upperdir` 都返回 `10737418240 B`，挂载根返回 `33939488768 B`，验证正确拒绝配额读数。C 中容器、upperdir 和挂载根三个数逐项相等，target 指向 `/lab/disk/docker`，不是外层根文件系统。
+
+**整体验收仍未通过。** PR 提交 `f425811` 在 staging 的真实部署成功，但非 root 部署用户不能遍历 root-owned、0700 的 `/var/lib/containerd`。三个副本都无法定位 upperdir 的挂载，判为 `unverified`；页面显示 Storage not verified，CPU、内存和 inventory 正常。合并前需修复 attestation 的执行权限路径，再补齐真实 staging 的同盘确认、正向数字与 tooltip 验收。此次没有修改宿主目录权限；配额已在 XFS 上实测，不代表 ext4 或所有生产拓扑均已验证。
 
 ## 6. 采样与故障边界
 
@@ -331,3 +333,5 @@ Staging 验收：页面、admin API 和宿主 `df <挂载根>` 在同一时段�
 诚实边界收窄为一条：处于不可中断 I/O 的进程任何信号都杀不掉，`timeout` 自己会一直等它——这是本脚本无法设界的情形。其余（卡住的 `docker exec`、忽略 SIGTERM 的探针、仍响应信号的死挂载 `df`）都在界内。
 
 **2026-09-16 第三轮修订（缺测分类）。** 复核 `57e76af` 后原 P1 关闭，另发现一处误判：`df <upperdir>` 被超时切断（或因预算耗尽被跳过）时返回空值，代码随即把这个空值与有效的挂载根 `size` 比较——二者"不相等"，于是记成 `unsupported` +"which is a project quota"。这是在**没有任何人建立该事实**的情况下声称宿主配置了配额，恰好违反本指标存在的理由。现在空值单独成一支：记 `unverified`，缺测原因写明 `df could not size ...`；只有两个**有效**数值不相等时才进入配额判定。测试用只在 upperdir 上挂起的 `df` 复现，并保留一条"真实配额仍记 `unsupported`"的用例，防止新分支吞掉对照本身要抓的情形。
+
+**2026-09-16 真机验收。** 上述“实验和截图未完成”是各轮修订当时的状态。现已完成第 5 节所述 XFS 配额反例 A、vfs 反例 B、独立 loop-backed XFS 正例 C，并取得真实 staging 的 unverified 页面截图；结果见[验收记录](../acceptance/2026-09-16-admin-storage-capacity.md)。验收发现非 root 部署用户无法遍历 containerd 快照目录，正向容量展示因此未通过，合并仍需等待权限路径修复及 staging 复验。
