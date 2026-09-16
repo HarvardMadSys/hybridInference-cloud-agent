@@ -834,8 +834,138 @@ async def test_an_unmetered_host_keeps_claiming(store, hosts: PostgresHostPoolRe
     assert (await hosts.get_host(host="runner-a"))["slots_used"] == 3
 
 
-async def test_a_draining_host_receives_no_new_claims(store, hosts: PostgresHostPoolRepository):
+async def test_a_requested_size_below_the_reported_count_caps_claims_at_once(
+    store, hosts: PostgresHostPoolRepository
+):
+    """The claim honours the lower of what the host reports and what was asked for."""
+    await _enrol(store, "runner-a", slots_total=3, hosts=hosts)
+    assert await hosts.set_host_slots_desired(host="runner-a", slots=2) == "ok"
+    for _ in range(3):
+        await _create_job(store)
+
+    claims = [
+        await _claim(store, worker_id=f"w{n}", lease_ttl_seconds=60, host="runner-a")
+        for n in range(3)
+    ]
+
+    assert [claim is not None for claim in claims] == [True, True, False]
+    host = await hosts.get_host(host="runner-a")
+    assert host["slots_used"] == 2
+    # The report is untouched: the request sits beside it, not over it.
+    assert (host["slots_total"], host["slots_desired"]) == (3, 2)
+
+
+async def test_a_requested_size_above_the_reported_count_admits_nothing_extra(
+    store, hosts: PostgresHostPoolRepository
+):
+    """Until the host has grown into the request, the executors it reports bound it."""
+    await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
+    assert await hosts.set_host_slots_desired(host="runner-a", slots=4) == "ok"
+    for _ in range(4):
+        await _create_job(store)
+
+    claims = [
+        await _claim(store, worker_id=f"w{n}", lease_ttl_seconds=60, host="runner-a")
+        for n in range(3)
+    ]
+    assert [claim is not None for claim in claims] == [True, True, False]
+
+    # The host's next heartbeat reports the executors it spawned.
+    await hosts.record_host_heartbeat(host="runner-a", slots_total=4)
+
+    assert await _claim(store, worker_id="w3", lease_ttl_seconds=60, host="runner-a") is not None
+    assert await _claim(store, worker_id="w4", lease_ttl_seconds=60, host="runner-a") is not None
+    assert await _claim(store, worker_id="w5", lease_ttl_seconds=60, host="runner-a") is None
+
+
+async def test_clearing_the_request_hands_back_the_reported_capacity(
+    store, hosts: PostgresHostPoolRepository
+):
+    await _enrol(store, "runner-a", slots_total=3, hosts=hosts)
+    await hosts.set_host_slots_desired(host="runner-a", slots=2)
+    for _ in range(3):
+        await _create_job(store)
+    for n in range(2):
+        assert await _claim(store, worker_id=f"w{n}", lease_ttl_seconds=60, host="runner-a")
+    assert await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-a") is None
+
+    assert await hosts.set_host_slots_desired(host="runner-a", slots=None) == "ok"
+
+    assert await _claim(store, worker_id="w3", lease_ttl_seconds=60, host="runner-a") is not None
+
+
+async def test_an_unmetered_host_is_bounded_by_the_request_alone(
+    store, hosts: PostgresHostPoolRepository
+):
+    """No report means nothing to compare; the request is then the only bound."""
+    await _enrol(store, "runner-a", hosts=hosts)
+    assert await hosts.set_host_slots_desired(host="runner-a", slots=2) == "ok"
+    for _ in range(3):
+        await _create_job(store)
+
+    claims = [
+        await _claim(store, worker_id=f"w{n}", lease_ttl_seconds=60, host="runner-a")
+        for n in range(3)
+    ]
+
+    assert [claim is not None for claim in claims] == [True, True, False]
+
+
+async def test_sizing_an_unknown_host_writes_nothing(store, hosts: PostgresHostPoolRepository):
+    assert await hosts.set_host_slots_desired(host="nope", slots=2) == "unknown"
+
+
+async def test_the_request_survives_heartbeats_and_re_enrollment(
+    store, hosts: PostgresHostPoolRepository
+):
+    """It is a decision about the named machine, not a field the host reports."""
     await _enrol(store, "runner-a", slots_total=4, hosts=hosts)
+    await hosts.set_host_slots_desired(host="runner-a", slots=2)
+
+    await hosts.record_host_heartbeat(host="runner-a", slots_total=4)
+    assert (await hosts.get_host(host="runner-a"))["slots_desired"] == 2
+
+    await hosts.register_host(host="runner-a", credential_hash=hash_secret("new"), slots_total=4)
+    assert (await hosts.get_host(host="runner-a"))["slots_desired"] == 2
+
+
+async def test_the_schema_refuses_a_non_positive_request(db, store, hosts):
+    """A size of zero is not a size; the column says so before any code does."""
+    import asyncpg
+
+    await _enrol(store, "runner-a", slots_total=3, hosts=hosts)
+
+    async with db.acquire() as conn:
+        with pytest.raises(asyncpg.CheckViolationError):
+            await conn.execute(
+                "UPDATE agent_runner_hosts SET slots_desired = 0 WHERE host = 'runner-a'"
+            )
+
+
+async def test_a_host_reports_why_it_is_not_claiming_and_can_clear_it(
+    store, hosts: PostgresHostPoolRepository
+):
+    """A machine with room and no work needs a reason on the page, not a guess.
+
+    ``""`` is the host saying nothing is wrong and has to be able to clear a
+    stale reason; omitting the field is a host that does not report this at
+    all and must leave what is stored alone.
+    """
+    await _enrol(store, "runner-a", slots_total=3, hosts=hosts)
+
+    await hosts.record_host_heartbeat(host="runner-a", launch_error="3 turns in a row failed")
+    assert (await hosts.get_host(host="runner-a"))["launch_error"] == "3 turns in a row failed"
+
+    await hosts.record_host_heartbeat(host="runner-a", slots_total=3)
+    assert (await hosts.get_host(host="runner-a"))["launch_error"] == "3 turns in a row failed", (
+        "an unreported field changes nothing"
+    )
+
+    await hosts.record_host_heartbeat(host="runner-a", launch_error="")
+    assert (await hosts.get_host(host="runner-a"))["launch_error"] == ""
+
+
+async def test_a_draining_host_receives_no_new_claims(store, hosts: PostgresHostPoolRepository):
     await _create_job(store)
     await hosts.set_host_status(host="runner-a", status=HOST_DRAINING)
 

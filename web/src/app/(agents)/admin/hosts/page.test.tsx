@@ -35,6 +35,10 @@ vi.mock('@/lib/api/admin', () => ({
   drainAgentRunnerHost: vi.fn(),
   undrainAgentRunnerHost: vi.fn(),
   removeAgentRunnerHost: vi.fn(),
+  setAgentRunnerHostSlots: vi.fn(),
+  HOST_CONCURRENCY_CAPABILITY: 'host-concurrency-v1',
+  MIN_HOST_SLOTS: 2,
+  MAX_HOST_SLOTS: 128,
   setAgentRuntimeVersion: vi.fn(),
 }));
 
@@ -44,6 +48,7 @@ import {
   getAgentRunnerHosts,
   removeAgentRunnerHost,
   setActiveAgentRunnerHost,
+  setAgentRunnerHostSlots,
   setAgentRuntimeVersion,
 } from '@/lib/api/admin';
 
@@ -57,6 +62,7 @@ const mocked = {
   pin: setActiveAgentRunnerHost as unknown as ReturnType<typeof vi.fn>,
   drain: drainAgentRunnerHost as unknown as ReturnType<typeof vi.fn>,
   remove: removeAgentRunnerHost as unknown as ReturnType<typeof vi.fn>,
+  slots: setAgentRunnerHostSlots as unknown as ReturnType<typeof vi.fn>,
   setVersion: setAgentRuntimeVersion as unknown as ReturnType<typeof vi.fn>,
 };
 
@@ -112,9 +118,11 @@ function host(over: Partial<Record<string, unknown>> = {}) {
     status: 'online',
     enrolled: true,
     labels: {},
-    capabilities: ['kata'],
+    capabilities: ['kata', 'host-concurrency-v1'],
     slots_total: 4,
     slots_used: 0,
+    slots_desired: null,
+    launch_error: '',
     runner_version: '1.2.3',
     broker_url: 'http://runner-a:8092',
     last_heartbeat_at: '2026-08-05T00:00:00Z',
@@ -481,6 +489,101 @@ describe('capacity columns', () => {
     expect(
       within(row).getByText('37%').closest('div')!.querySelector('span[aria-hidden] > span'),
     ).toHaveStyle({ width: '37.24%' });
+  });
+
+  it('asks a host for a number of turns and reports it as saved, not applied', async () => {
+    mocked.list.mockResolvedValue(pool([host({ slots_total: 4, slots_used: 1 })]));
+    mocked.slots.mockResolvedValue(
+      pool([host({ slots_total: 4, slots_used: 1, slots_desired: 6 })]),
+    );
+    render(<AdminHostsPage />);
+
+    const input = await screen.findByLabelText('Turns at once for runner-a');
+    // Pre-filled with what the host runs, so Apply without typing asks for
+    // what is already true rather than for a surprise.
+    expect(input).toHaveValue(4);
+    fireEvent.change(input, { target: { value: '6' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+
+    await waitFor(() => expect(mocked.slots).toHaveBeenCalledWith('runner-a', 6));
+    const row = (await screen.findByRole('rowheader', { name: 'runner-a' })).closest('tr')!;
+    // The host's own number still bounds the ceiling until it confirms, and
+    // the row says the saved one is on its way rather than in force.
+    expect(await within(row).findByText('1 / 4 in use')).toBeInTheDocument();
+    expect(within(row).getByText('3 free · applying 6')).toBeInTheDocument();
+    expect(within(row).getByText(/takes the new one up on its next heartbeat/)).toBeInTheDocument();
+    // The confirmation says saved, because that is all that has happened.
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Saved: runner-a runs at most 6 turns at once',
+    );
+  });
+
+  it('returns a host to its own default', async () => {
+    mocked.list.mockResolvedValue(pool([host({ slots_total: 4, slots_desired: 3 })]));
+    mocked.slots.mockResolvedValue(pool([host({ slots_total: 4, slots_desired: null })]));
+    render(<AdminHostsPage />);
+
+    const select = await screen.findByLabelText('Turns at once for runner-a');
+    expect(select).toHaveValue(3);
+    fireEvent.click(screen.getByRole('button', { name: 'Host default' }));
+
+    await waitFor(() => expect(mocked.slots).toHaveBeenCalledWith('runner-a', null));
+    expect(await screen.findByRole('status')).toHaveTextContent('goes back to its own default');
+    // Nothing to reset any more.
+    expect(screen.queryByRole('button', { name: 'Host default' })).not.toBeInTheDocument();
+  });
+
+  it('refuses a number outside the protocol bounds without asking the control plane', async () => {
+    mocked.list.mockResolvedValue(pool([host()]));
+    render(<AdminHostsPage />);
+
+    const input = await screen.findByLabelText('Turns at once for runner-a');
+    fireEvent.change(input, { target: { value: '1' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    fireEvent.change(input, { target: { value: '129' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+
+    expect(mocked.slots).not.toHaveBeenCalled();
+  });
+
+  it('says when a saved number will never be applied', async () => {
+    mocked.list.mockResolvedValue(
+      pool([host({ capabilities: ['kata'], slots_total: 3, slots_desired: 6 })]),
+    );
+    render(<AdminHostsPage />);
+
+    const row = (await screen.findByRole('rowheader', { name: 'runner-a' })).closest('tr')!;
+    expect(within(row).getByText('0 / 3 in use')).toBeInTheDocument();
+    expect(within(row).getByText('3 free · redeploy to change')).toBeInTheDocument();
+    expect(within(row).getByText(/predates remote limits/)).toBeInTheDocument();
+  });
+
+  it('counts turns finishing above a limit that came down', async () => {
+    mocked.list.mockResolvedValue(
+      pool([host({ slots_total: 5, slots_used: 5, slots_desired: 2 })]),
+    );
+    render(<AdminHostsPage />);
+
+    const row = (await screen.findByRole('rowheader', { name: 'runner-a' })).closest('tr')!;
+    expect(within(row).getByText('5 / 2 in use')).toBeInTheDocument();
+    expect(within(row).getByText('0 free · applying 2 · 3 finishing')).toBeInTheDocument();
+  });
+
+  it('shows why a host with room is claiming nothing', async () => {
+    mocked.list.mockResolvedValue(
+      pool([
+        host({
+          slots_total: 3,
+          slots_used: 0,
+          launch_error: '3 turns in a row could not be started (image is broken)',
+        }),
+      ]),
+    );
+    render(<AdminHostsPage />);
+
+    const row = (await screen.findByRole('rowheader', { name: 'runner-a' })).closest('tr')!;
+    expect(within(row).getByText('3 free · not claiming')).toBeInTheDocument();
+    expect(await within(row).findByRole('alert')).toHaveTextContent('image is broken');
   });
 
   it('names the reason a value is missing instead of printing zero', async () => {

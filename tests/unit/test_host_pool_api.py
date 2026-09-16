@@ -105,6 +105,7 @@ class FakeHostPoolStore(AllCapabilities):
             "labels": {},
             "capabilities": [],
             "slots_total": None,
+            "launch_error": None,
             "slots_used": 0,
             "runner_version": None,
             "broker_url": None,
@@ -168,6 +169,7 @@ class FakeHostPoolStore(AllCapabilities):
         capacity_sample_age_ms: int | None = None,
         physical_host: str | None = None,
         slots_total: int | None = None,
+        launch_error: str | None = None,
         runner_version: str | None = None,
         broker_url: str | None = None,
         capabilities: list[str] | None = None,
@@ -184,6 +186,9 @@ class FakeHostPoolStore(AllCapabilities):
         row["last_heartbeat_at"] = datetime.now(UTC)
         for field, value in (
             ("slots_total", slots_total),
+            # "" overwrites — the host saying nothing is wrong — exactly the
+            # COALESCE the real store applies.
+            ("launch_error", launch_error),
             ("runner_version", runner_version),
             ("broker_url", broker_url),
             # "" and {} overwrite — only None means "not reported", exactly
@@ -655,6 +660,7 @@ async def test_the_enrollment_token_is_never_shown_twice(client):
         "/admin/agent/runner-hosts/{host}/drain",
         "/admin/agent/runner-hosts/{host}/undrain",
         "/admin/agent/runner-hosts/{host}/remove",
+        "/admin/agent/runner-hosts/{host}/slots",
     ],
 )
 def test_every_pool_admin_route_declares_the_admin_gate(path):
@@ -810,6 +816,33 @@ async def test_a_stampless_heartbeat_keeps_the_last_stamp(client):
 
     assert store.rows["runner-a"]["sandbox_runtime"] == "io.containerd.kata.v2"
     assert store.rows["runner-a"]["runtime_versions"] == {}
+
+
+async def test_a_heartbeat_answers_with_the_requested_limit(client):
+    """The host serves this number from here on; null means its own default."""
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    store.rows["runner-a"]["slots_desired"] = 6
+
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"slots_total": 3},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["slots_desired"] == 6
+    # The host's own report is echoed unchanged beside it.
+    assert body["slots_total"] == 3
+
+    store.rows["runner-a"]["slots_desired"] = None
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"slots_total": 3},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+    assert response.json()["slots_desired"] is None
 
 
 async def test_a_heartbeat_without_a_credential_is_refused(client):

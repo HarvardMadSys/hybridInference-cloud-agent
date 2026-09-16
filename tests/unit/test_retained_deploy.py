@@ -25,8 +25,8 @@ def _host(
     tmp_path: Path,
     *,
     slots: str | None = "3",
-    replicas: str = "3",
-    running_replicas: int = 3,
+    running_containers: int = 1,
+    turn_starts: bool = True,
     credential: bool = True,
     configured_root: str = "/var/lib/docker",
     daemon_root: str = "/var/lib/docker",
@@ -54,18 +54,19 @@ def _host(
     ]
     if slots is not None:
         dotenv.append(f"AGENT_HOST_SLOTS={slots}")
-    dotenv.append(f"AGENT_RUNNER_REPLICAS={replicas}")
     (app_dir / ".env").write_text("\n".join([*dotenv, ""]))
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     rejection_log = "agent_host_credential_rejected" if credential_rejected else ""
-    runner_ids = "\n".join(f"runner-{index}" for index in range(1, running_replicas + 1))
+    runner_ids = "\n".join(f"runner-{index}" for index in range(1, running_containers + 1))
     broker_id = "workspace-broker-1" if broker_running else ""
     # The readiness wait probes the broker with urllib; the fake answers it
     # separately from the attestation exec so a broker that is up but not yet
     # serving can be modelled.
     broker_probe_exit = 0 if broker_serving else 1
+    turn_probe = "declined no turn was delivered" if turn_starts else "ImportError: no module"
+    turn_probe_exit = 0 if turn_starts else 1
     _write_executable(
         fake_bin / "docker",
         "#!/bin/sh\n"
@@ -80,6 +81,7 @@ def _host(
         f"  *' logs --since 2m runner') echo '{rejection_log}' ;;\n"
         f"  exec*'_shared_live_host_capabilities'*) echo '{capability}'; exit {attest_exit} ;;\n"
         f"  exec*8092/health*) exit {broker_probe_exit} ;;\n"
+        f"  exec*--turn*) echo '{turn_probe}'; exit {turn_probe_exit} ;;\n"
         f"  exec*'retained_docker_data_root'*) echo '{daemon_root}' ;;\n"
         "  exec*'AGENT_CONTROL_PLANE_URL'*) echo '200' ;;\n"
         "  run*) printf '200' ;;\n"
@@ -410,18 +412,54 @@ def test_first_kata_deploy_builds_the_image_before_using_it_for_the_kernel_probe
     assert command.index("kata_smoke_test") < command.index("compose up")
 
 
-def test_shared_live_refuses_more_slots_than_runner_executors(tmp_path: Path) -> None:
-    result = _run(_host(tmp_path, slots="3", replicas="2"), "preflight")
+def test_shared_live_refuses_a_default_pool_size_outside_the_bounds(tmp_path: Path) -> None:
+    """One executor would run a fork's sibling behind its parent."""
+    result = _run(_host(tmp_path, slots="1"), "preflight")
 
     assert result.returncode != 0
-    assert "overstates AGENT_RUNNER_REPLICAS=2" in result.stderr
+    assert "AGENT_HOST_SLOTS must be an integer from 2 through 128" in result.stderr
 
 
-def test_shared_live_check_requires_every_configured_runner_to_be_alive(tmp_path: Path) -> None:
-    result = _run(_host(tmp_path, replicas="3", running_replicas=1), "check")
+def test_a_leftover_replica_count_is_warned_about_not_read(tmp_path: Path) -> None:
+    env = _host(tmp_path)
+    with (Path(env["APP_DIR"]) / ".env").open("a") as dotenv:
+        dotenv.write("AGENT_RUNNER_REPLICAS=3\n")
+
+    result = _run(env, "preflight")
+
+    assert result.returncode == 0, result.stderr
+    assert "AGENT_RUNNER_REPLICAS is no longer read" in result.stderr
+
+
+def test_shared_live_check_requires_the_image_to_start_a_turn(tmp_path: Path) -> None:
+    """A configured limit is not proof that a turn can be started at all.
+
+    A host that claims turns it cannot start takes the queue apart one claim at
+    a time, so the deployment proves the path a turn takes up to the moment it
+    would begin — and no further, since nothing is claimed by the probe.
+    """
+    result = _run(_host(tmp_path, turn_starts=False), "check")
 
     assert result.returncode != 0
-    assert "only 1 of 3 configured runner replicas are running" in result.stderr
+    assert "cannot start a turn process" in result.stderr
+
+
+def test_shared_live_check_does_not_count_runner_containers(tmp_path: Path) -> None:
+    """One container per host; its limit, not a container count, is the concurrency."""
+    result = _run(_host(tmp_path, running_containers=1), "check")
+
+    assert result.returncode == 0, result.stderr
+    assert "turn processes start" in result.stdout
+
+
+def test_up_no_longer_takes_a_replica_count(tmp_path: Path) -> None:
+    env = _host(tmp_path)
+    _add_required_host_paths(env, tmp_path)
+
+    result = _run(env, "up", "3")
+
+    assert result.returncode != 0
+    assert "no longer takes a replica count" in result.stderr
 
 
 def test_shared_live_check_runs_the_real_sandbox_preflight_before_attesting() -> None:
@@ -506,14 +544,16 @@ def test_host_up_waits_for_parallel_control_bootstrap_but_manual_check_is_immedi
     assert "check) cmd_check 0" in dispatch
 
 
-def test_every_failing_replica_is_reported_not_just_the_first(tmp_path: Path) -> None:
-    """Run together, all three answers exist at once; report all of them.
+def test_every_failing_container_is_reported_not_just_the_first(tmp_path: Path) -> None:
+    """Run together, all the answers exist at once; report all of them.
 
-    "All three failed" is a configuration problem and "one failed" is that
-    machine, and the serial loop could only ever surface the first — which is
+    A host runs one runner container, but a rollout lists the outgoing one
+    beside its replacement, so the check still asks every container it finds.
+    "They all failed" is a configuration problem and "one failed" is that
+    container, and a serial loop could only ever surface the first — which is
     the pattern the reader needs to tell them apart.
     """
-    result = _run(_host(tmp_path, capability=""), "check")
+    result = _run(_host(tmp_path, running_containers=3, capability=""), "check")
 
     assert result.returncode != 0
     for index in (1, 2, 3):

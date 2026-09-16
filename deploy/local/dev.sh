@@ -17,9 +17,9 @@ fi
 compose() {
   configure_browser_urls
   LOCAL_SANDBOX_IMAGE=$(local_sandbox_image)
-  LOCAL_RUNNER_REPLICAS=$(local_runner_replicas)
+  LOCAL_HOST_SLOTS=$(local_host_slots)
   AGENT_DEPLOYMENT_SHA=$(local_deployment_sha)
-  export LOCAL_SANDBOX_IMAGE LOCAL_RUNNER_REPLICAS AGENT_DEPLOYMENT_SHA
+  export LOCAL_SANDBOX_IMAGE LOCAL_HOST_SLOTS AGENT_DEPLOYMENT_SHA
   # Intentional word splitting: COMPOSE is either one command or `docker compose`.
   # shellcheck disable=SC2086
   $COMPOSE --env-file "$ENV_FILE" --project-name "$(local_project_name)" \
@@ -59,17 +59,17 @@ local_sandbox_image() {
   printf 'freeinference-cloud-agent-sandbox-%s:local\n' "${project_slug:-local}"
 }
 
-local_runner_replicas() {
-  replicas=$(env_file_value LOCAL_RUNNER_REPLICAS)
+local_host_slots() {
+  replicas=$(env_file_value LOCAL_HOST_SLOTS)
   replicas=${replicas:-2}
   case "$replicas" in
     '' | *[!0-9]*)
-      echo "LOCAL_RUNNER_REPLICAS must be an integer of at least 2." >&2
+      echo "LOCAL_HOST_SLOTS must be an integer of at least 2." >&2
       return 1
       ;;
   esac
   if [ "$replicas" -lt 2 ]; then
-    echo "LOCAL_RUNNER_REPLICAS must be at least 2 for concurrent native forks." >&2
+    echo "LOCAL_HOST_SLOTS must be at least 2 for concurrent native forks." >&2
     return 1
   fi
   printf '%s\n' "$replicas"
@@ -170,7 +170,7 @@ upgrade_existing_env() {
   append_env_if_missing AGENT_WORKSPACE_BROKER_TOKEN "$(random_hex)"
   append_env_if_missing LOCAL_PROJECT_NAME freeinference-local
   append_env_if_missing LOCAL_SANDBOX_IMAGE "$(local_sandbox_image)"
-  append_env_if_missing LOCAL_RUNNER_REPLICAS 2
+  append_env_if_missing LOCAL_HOST_SLOTS 2
   append_env_if_missing AGENT_DEPLOYMENT_SHA "local-$(local_project_name)"
   append_env_if_missing LOCAL_AGENT_EGRESS_NETWORK freeinference-local-agent-egress
   append_env_if_missing LOCAL_CHAT_NETWORK_POOL 10.240.0.0/16
@@ -230,7 +230,7 @@ ensure_env() {
       'LOCAL_EDGE_PORT=13002' \
       'LOCAL_PROJECT_NAME=freeinference-local' \
       'LOCAL_SANDBOX_IMAGE=freeinference-cloud-agent-sandbox-freeinference-local:local' \
-      'LOCAL_RUNNER_REPLICAS=2' \
+      'LOCAL_HOST_SLOTS=2' \
       'AGENT_DEPLOYMENT_SHA=local-freeinference-local' \
       'LOCAL_AGENT_EGRESS_NETWORK=freeinference-local-agent-egress' \
       'LOCAL_CHAT_NETWORK_POOL=10.240.0.0/16' \
@@ -371,7 +371,7 @@ case "$command" in
       compose build sandbox-image migrate
     fi
     start_database_and_probe
-    compose up --detach "$build_flag" --scale "runner=$(local_runner_replicas)"
+    compose up --detach "$build_flag"
     wait_ready
     echo "Local Cloud Agent is ready: $(local_base_url)"
     echo "Run '$0 smoke' for an automated login/config/agent lifecycle check."

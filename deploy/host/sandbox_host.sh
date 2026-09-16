@@ -14,7 +14,7 @@
 #
 # Usage, from the repository root on the runner host:
 #
-#   deploy/host/sandbox_host.sh up [N]   # build, start the tunnel + N runners
+#   deploy/host/sandbox_host.sh up       # build, start the tunnels, broker and runner
 #   deploy/host/sandbox_host.sh status   # what is running, and the log tails
 #   deploy/host/sandbox_host.sh check    # prove the tunnel reaches the gateway
 #   deploy/host/sandbox_host.sh down     # stop everything this file started
@@ -343,17 +343,17 @@ validate_retained_config() {
       "$default_pin is a source-level shared protocol pin, not a host override. Remove it and put ${default_pin%_VERSION}_EXTRA_VERSIONS=$configured_pin in this host's configuration, then select that version in Admin; or update the Dockerfile and SHARED_SANDBOX_RUNTIME_PINS together in a reviewed change."
   done
 
-  local slots runner_replicas resident_capacity chat_idle_timeout
+  local slots resident_capacity chat_idle_timeout
+  # The limit this host serves until an admin sets one. The Servers page sets
+  # size afterwards; this only has to be a valid starting point. Two is the
+  # shared-live floor and 128 the pool's own ceiling.
   slots="$(env_or_dotenv AGENT_HOST_SLOTS)"
   slots="${slots:-3}"
-  [[ "$slots" =~ ^[0-9]+$ && "$slots" -ge 2 ]] \
-    || die "AGENT_HOST_SLOTS must be an integer >= 2 (got '${slots:-unset}')"
-  runner_replicas="$(env_or_dotenv AGENT_RUNNER_REPLICAS)"
-  runner_replicas="${runner_replicas:-3}"
-  [[ "$runner_replicas" =~ ^[0-9]+$ && "$runner_replicas" -ge 2 ]] \
-    || die "AGENT_RUNNER_REPLICAS must be an integer >= 2 (got '${runner_replicas:-unset}')"
-  [[ "$slots" -le "$runner_replicas" ]] \
-    || die "AGENT_HOST_SLOTS=$slots overstates AGENT_RUNNER_REPLICAS=$runner_replicas; one runner executes one turn, so shared-live slots cannot exceed executors"
+  [[ "$slots" =~ ^[0-9]+$ && "$slots" -ge 2 && "$slots" -le 128 ]] \
+    || die "AGENT_HOST_SLOTS must be an integer from 2 through 128 (got '${slots:-unset}')"
+  if [[ -n "$(env_or_dotenv AGENT_RUNNER_REPLICAS)" ]]; then
+    warn "AGENT_RUNNER_REPLICAS is no longer read: this host takes its concurrency limit from the admin Servers page and AGENT_HOST_SLOTS is only the default it starts with. Remove it from .env."
+  fi
   resident_capacity="$(env_or_dotenv AGENT_SHARED_RESIDENT_CAPACITY)"
   resident_capacity="${resident_capacity:-8}"
   [[ "$resident_capacity" =~ ^[0-9]+$ \
@@ -568,38 +568,34 @@ except urllib.error.HTTPError:
 
 check_shared_live_stack() {
   local deadline="${1:-$SECONDS}"
-  # Ask every running replica to complete the same executable preflight as its
-  # claim loop, then attest the exact image labels, helper pins, runtime
-  # drivers, broker settings and slot count used by the claim path.  Calling
-  # preflight here is intentional: a freshly started runner may still be
-  # blocked inside its own proxy/kernel/network probe while `docker exec`
-  # already works.  Static capability inspection during that window would
-  # publish the ready marker immediately before the runner crash-looped.
-  local runner_ids running_replicas expected_replicas id capability first_id=""
+  # Ask the runner container to complete the same executable preflight as its
+  # turns' own processes, then attest the exact image labels, helper pins,
+  # runtime drivers, broker settings and default pool size used by the claim
+  # path.  Calling preflight here is intentional: a freshly started runner may
+  # still be blocked inside its own proxy/kernel/network probe while
+  # `docker exec` already works.  Static capability inspection during that
+  # window would publish the ready marker immediately before the runner
+  # crash-looped.
+  local runner_ids id capability first_id="" turn_probe
   runner_ids="$(compose ps -q runner)" \
-    || die "could not list runner replicas for shared-live verification"
-  [[ -n "$runner_ids" ]] || die "no running runner replica is available to attest shared-sandbox-v1"
-  running_replicas="$(wc -w <<<"$runner_ids" | tr -d '[:space:]')"
-  expected_replicas="$(env_or_dotenv AGENT_RUNNER_REPLICAS)"
-  expected_replicas="${expected_replicas:-3}"
-  [[ "$running_replicas" -ge "$expected_replicas" ]] \
-    || die "only $running_replicas of $expected_replicas configured runner replicas are running; shared-live concurrency is not ready"
+    || die "could not list the runner container for shared-live verification"
+  [[ -n "$runner_ids" ]] || die "no running runner container is available to attest shared-sandbox-v1"
 
-  # Only once the replicas that will be asked are known to be there: this is
-  # about what they are about to ask the broker, so it must not pre-empt a more
-  # specific verdict about the replicas themselves.
+  # Only once the container that will be asked is known to be there: this is
+  # about what it is about to ask the broker, so it must not pre-empt a more
+  # specific verdict about the runner itself.
   wait_for_broker_health "$deadline"
 
-  # Replicas attest at the same time. The preflight is dominated by the real
-  # request it makes through the tunnels, not by anything the replicas share,
-  # and no replica reads another's answer — so the order the serial loop
-  # imposed bought nothing and cost the sum of three waits: measured on
-  # staging, 16.6s of a 46s host deployment. Verdicts are still reported per
-  # runner, in listing order, so a failure names the container it came from
-  # and the first replica is still the one asked about the broker below.
+  # Every listed container attests at the same time — a rollout can briefly
+  # list the old one beside the new. The preflight is dominated by the real
+  # request it makes through the tunnels, not by anything they share, and none
+  # reads another's answer, so a serial loop bought nothing and cost the sum
+  # of the waits. Verdicts are still reported per container, in listing order,
+  # so a failure names the container it came from and the first one is still
+  # the one asked to start a turn process and dial the broker below.
   #
-  # Each replica's exit status goes to a file because `wait` is reaped in a
-  # second pass, after every replica has been started — and it is captured with
+  # Each container's exit status goes to a file because `wait` is reaped in a
+  # second pass, after every one has been started — and it is captured with
   # `|| rc=$?` rather than read from `$?` after the command: under `set -e` a
   # failing `docker exec` ends this subshell where it stands, so a status
   # written after it would never be written at all, on the only path that reads
@@ -607,7 +603,7 @@ check_shared_live_stack() {
   # container or the exec itself is gone, which is a different problem from a
   # preflight that raised.
   ATTEST_DIR="$(mktemp -d)" \
-    || die "could not create a directory for per-replica attestation output"
+    || die "could not create a directory for per-container attestation output"
   # Registered here and not at the top of the script, because a trap belongs to
   # the shell that ran the function. `cmd_up` runs these checks in a subshell —
   # `( cmd_check ... ) || probe_ok=$?` — and a subshell resets traps to its
@@ -673,6 +669,26 @@ check_shared_live_stack() {
   fi
   cleanup_attest_dir
 
+  # A host that claims turns it cannot start takes the queue apart one claim
+  # at a time, so prove the image can start one. A turn process with nothing on
+  # its standard input must come up, import everything a turn needs, pass the
+  # same read-only Docker/image/network preflight a real turn does, and then
+  # decline cleanly — which is exactly the path a turn takes up to the moment
+  # it would begin, and no further: nothing is claimed and no sandbox is
+  # touched. A broken image fails here instead of after the readiness marker
+  # is published.
+  while ! turn_probe="$(docker exec "$first_id" python -m cloud_agent_host.runner \
+    --turn --handover-fd 1 2>&1)"; do
+    (( SECONDS < deadline )) \
+      || die "runner $first_id cannot start a turn process: ${turn_probe:-no output}"
+    log "waiting for the runner to be able to start a turn: ${turn_probe:-no output}"
+    sleep 3
+  done
+  case "$turn_probe" in
+    declined*) log "turn processes start: ${turn_probe}" ;;
+    *) die "runner $first_id started a turn process that answered '${turn_probe:-nothing}' instead of declining an empty turn; the image cannot run turns" ;;
+  esac
+
   # Capability attestation proves the runner is configured to dial the broker;
   # make the dial as well. This catches a broker crash-loop (including a
   # DockerRootDir mismatch) before the control plane begins assigning chats.
@@ -712,7 +728,7 @@ check_shared_live_stack() {
     die "the control plane rejected this host's persisted credential; re-enrol the host before enabling retained chats"
   fi
 
-  log "host-local shared-live ready: every runner attests shared-sandbox-v1 and native-fork-at-anchor-v1, control plane is reachable, and broker storage is ${broker_root}"
+  log "host-local shared-live ready: the runner attests shared-sandbox-v1 and native-fork-at-anchor-v1, can start a turn process, reaches the control plane, and broker storage is ${broker_root}"
 }
 
 # ── Isolation ─────────────────────────────────────────────────────────
@@ -825,11 +841,9 @@ check_candidate() {
 }
 
 cmd_up() {
-  local replicas="${1:-$(env_or_dotenv AGENT_RUNNER_REPLICAS)}"
-  replicas="${replicas:-3}"
-  [[ "$replicas" =~ ^[0-9]+$ ]] || die "replicas must be a number, got '$replicas'"
-  AGENT_RUNNER_REPLICAS="$replicas"
-  export AGENT_RUNNER_REPLICAS
+  if [[ $# -gt 0 ]]; then
+    die "'up' no longer takes a replica count: this host takes its concurrency limit from the admin Servers page, and AGENT_HOST_SLOTS in .env is only the default it starts with"
+  fi
   command -v docker >/dev/null || die "docker is not installed on this host"
   docker info >/dev/null 2>&1 || die "the Docker daemon is not running (or not accessible)"
   require_env
@@ -917,7 +931,7 @@ cmd_up() {
     # above: a regenerated attestation makes an unchanged rebuild a new image as
     # far as Compose is concerned, and it then replaces every container it built.
     log "building host services"
-    AGENT_SANDBOX_IMAGE="$SANDBOX_IMAGE" AGENT_RUNNER_REPLICAS="$replicas" \
+    AGENT_SANDBOX_IMAGE="$SANDBOX_IMAGE" \
       compose build --provenance=false
   fi
   check_candidate
@@ -927,12 +941,12 @@ cmd_up() {
     compose stop runner
   fi
 
-  log "starting the three purpose-scoped tunnels, egress proxy, broker, and ${replicas} runner(s)"
+  log "starting the three purpose-scoped tunnels, egress proxy, broker, and the runner service"
   # `--remove-orphans` because a renamed service leaves its old container
   # running otherwise: compose only replaces containers for services the file
   # still declares, so `agent-runner` outliving `runner` would mean two sets of
   # runners claiming from one host, which is the two-brokers incident again.
-  AGENT_SANDBOX_IMAGE="$SANDBOX_IMAGE" AGENT_RUNNER_REPLICAS="$replicas" \
+  AGENT_SANDBOX_IMAGE="$SANDBOX_IMAGE" \
     compose up -d --no-build --remove-orphans
 
   # The probes below wait for what they need instead of being preceded by a
@@ -1019,5 +1033,5 @@ case "${1:-}" in
   status) cmd_status ;;
   down) cmd_down ;;
   mark-ready) shift; cmd_mark_ready "$@" ;;
-  *) die "usage: $0 {up [N]|preflight|check|status|down|mark-ready SHA}" ;;
+  *) die "usage: $0 {up|preflight|check|status|down|mark-ready SHA}" ;;
 esac

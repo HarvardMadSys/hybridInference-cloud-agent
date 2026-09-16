@@ -58,6 +58,23 @@ from cloud_agent_host.drivers import (
 )
 from cloud_agent_host.enrollment import HostHeartbeat, ensure_enrolled
 from cloud_agent_host.host_capacity import HostCapacityCollector, capacity_enabled
+from cloud_agent_host.host_runtime import (
+    HANDOVER_ACCEPTED,
+    HANDOVER_DECLINED,
+    HANDOVER_TIMEOUT_S,
+    HOST_CONCURRENCY_CAPABILITY,
+    LAUNCH_NOT_STARTED,
+    LAUNCH_STARTED,
+    LAUNCH_UNCERTAIN,
+    LaunchResult,
+    TurnPool,
+    decode_turn,
+    default_slots,
+    encode_turn,
+    read_handover,
+    requested_slots,
+    write_handover,
+)
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
 from cloud_agent_host.patch_gate import branch_name_for
 from cloud_agent_host.resident_transport import ResidentLaunch
@@ -669,6 +686,30 @@ def claim(
     The credential names the machine, so the body cannot claim as another
     host. It remains in the trusted runner and never enters the agent process.
     """
+    return claim_payload(
+        base_url=base_url,
+        host_credential=host_credential,
+        worker_id=worker_id,
+        lease_ttl=lease_ttl,
+        attestation=attestation,
+    )
+
+
+def claim_payload(
+    *,
+    base_url: str,
+    host_credential: str,
+    worker_id: str,
+    lease_ttl: float,
+    attestation: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Claim the next queued job and return the control plane's raw answer.
+
+    The host service hands this document to the child that will run the turn,
+    unread beyond the few fields it needs to account for the claim. Parsing it
+    into a :class:`ClaimedJob` is the child's job, in the process that will
+    actually use the credentials it carries.
+    """
     payload: dict[str, Any] = {"worker_id": worker_id, "lease_ttl_seconds": lease_ttl}
     if attestation:
         payload["attestation"] = attestation
@@ -688,7 +729,42 @@ def claim(
         raise ClaimUnreachable(str(exc)) from exc
     response.raise_for_status()
     body = response.json()
-    return ClaimedJob.from_response(body) if body else None
+    return body if body else None
+
+
+def release_turn(*, base_url: str, worker_token: str, job_id: str, reason: str) -> bool:
+    """Hand a claimed turn back to the queue, having proved it never began.
+
+    Called only where this host can show the turn was not started — the child
+    could not be spawned, or exited without taking delivery. The control plane
+    checks the same thing from its own side and refuses otherwise, so a host
+    that is wrong about it cannot requeue work that ran.
+
+    Returns whether the turn went back. ``False`` is not an error path worth
+    retrying: the lease is the backstop it always was, and a turn this call
+    could not release is one the control plane has already decided about.
+    """
+    try:
+        response = httpx.post(
+            f"{base_url.rstrip('/')}/v1/agent/worker/jobs/{job_id}/release",
+            json={"reason": reason},
+            headers={"Authorization": f"Bearer {worker_token}"},
+            timeout=30.0,
+        )
+    except httpx.HTTPError as exc:
+        _log_control_failure("release", job_id, exc)
+        return False
+    if response.status_code >= 400:
+        logger.warning(
+            "agent_turn_release_refused",
+            extra={
+                "event": "agent_turn_release_refused",
+                "job_id": job_id,
+                "status": response.status_code,
+            },
+        )
+        return False
+    return True
 
 
 def _run_git(
@@ -994,21 +1070,15 @@ def _shared_live_host_capabilities(
     """Advertise shared-v1 only when this exact host can honor its contract."""
     if not isinstance(backend, ContainerBackend):
         return []
+    # One child process runs one claimed turn, and the host claims only while
+    # it is under its limit, so slots can never outnumber the processes that
+    # honour them. What can still be wrong is the floor: shared native forks
+    # need a sibling running beside its parent, and a limit of one would
+    # serialize them. The default is validated here because the deployment
+    # check attests through this function before any turn has been claimed.
     try:
-        slots = int(os.environ.get("AGENT_HOST_SLOTS") or 3)
+        default_slots()
     except ValueError:
-        return []
-    if slots < 2:
-        return []
-    try:
-        runner_replicas = int(os.environ.get("AGENT_RUNNER_REPLICAS") or 3)
-    except ValueError:
-        return []
-    # A runner executes one claimed turn synchronously. Declaring more host
-    # slots than configured executors would let the scheduler admit concurrent
-    # fork siblings that this host can only serialize. The host deployment also
-    # verifies that this many containers are actually running before rollout.
-    if runner_replicas < 2 or slots > runner_replicas:
         return []
     try:
         resident_capacity = int(os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY") or 8)
@@ -2081,6 +2151,11 @@ def run_once(
 ) -> int:
     """Claim and deliver one turn through the shared retained-session protocol.
 
+    Claim and execution in one process. The deployed host service separates
+    them — it claims, and a child process of its own runs the turn — but a
+    single-turn path is what local tooling and the tests that exercise the
+    protocol end to end use, and it is the same execution either way.
+
     A runner-created backend is preflighted before claim. The retained
     container owns the only workspace, so there is deliberately no host
     worktree argument or bind-mount fallback.
@@ -2099,6 +2174,40 @@ def run_once(
     if job is None:
         print("no queued agent job; nothing to do")
         return 0
+
+    return run_turn(
+        job,
+        base_url=base_url,
+        gateway_url=gateway_url,
+        worker_id=worker_id,
+        lease_ttl=lease_ttl,
+        agent_timeout_s=agent_timeout_s,
+        backend=backend,
+        host=host,
+    )
+
+
+def run_turn(
+    job: ClaimedJob,
+    *,
+    base_url: str,
+    gateway_url: str = "",
+    worker_id: str,
+    lease_ttl: float = DEFAULT_LEASE_TTL_S,
+    agent_timeout_s: float = DEFAULT_AGENT_TIMEOUT_S,
+    backend: SandboxBackend | None = None,
+    host: str | None = None,
+) -> int:
+    """Deliver one already-claimed turn, and report its outcome.
+
+    Everything after the claim: the lease renewal, the retained session, the
+    agent, and the terminal transition. This is what the host service starts a
+    child process for, and the boundary is the claim precisely because it is
+    the last point at which a turn can be handed back to the queue unspent.
+    """
+    if backend is None:
+        backend = build_backend_from_env()
+        backend.preflight()
 
     print(f"claimed {job.job_id} attempt {job.attempt_no} runtime={job.runtime}")
     logger.info(
@@ -2276,6 +2385,190 @@ def _start_host_capacity_collector(backend: SandboxBackend) -> HostCapacityColle
     return collector
 
 
+def _spawn_turn(
+    payload: dict[str, Any],
+    *,
+    base_url: str,
+    gateway_url: str,
+    worker_id: str,
+    lease_ttl: float,
+    agent_timeout_s: float,
+    host: str,
+) -> LaunchResult:
+    """Start a child for one claimed turn and find out whether it took it.
+
+    The turn travels on the child's standard input, because it carries this
+    attempt's credentials and both ``/proc/<pid>/cmdline`` and
+    ``/proc/<pid>/environ`` are readable by anyone who can see the process. The
+    child's answer comes back on a descriptor of its own, because its standard
+    output is the container log and a reader that stopped draining that would
+    block the turn it was waiting for.
+
+    Every path that returns ``LAUNCH_NOT_STARTED`` has shown the child never
+    had the turn: the spawn itself failed, delivery failed, or the child closed
+    its answer without giving one, which is what exiting does for it. A child
+    that answered owns the turn, and a child that answered nothing and is still
+    alive is not evidence of anything — the turn stays claimed and its lease
+    remains the backstop.
+    """
+    read_fd, write_fd = os.pipe()
+    argv = [
+        sys.executable,
+        "-m",
+        "cloud_agent_host.runner",
+        "--turn",
+        "--handover-fd",
+        str(write_fd),
+        "--base-url",
+        base_url,
+        "--gateway-url",
+        gateway_url,
+        "--worker-id",
+        worker_id,
+        "--host",
+        host,
+        "--lease-ttl",
+        str(lease_ttl),
+        "--agent-timeout",
+        str(agent_timeout_s),
+    ]
+    try:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            pass_fds=(write_fd,),
+        )
+    except OSError as exc:
+        os.close(read_fd)
+        os.close(write_fd)
+        return LaunchResult(
+            outcome=LAUNCH_NOT_STARTED, detail=f"could not start a turn process: {exc}"
+        )
+    # This process's copy, closed so the read below ends at end-of-file when
+    # the child exits rather than waiting out the handover deadline.
+    os.close(write_fd)
+    try:
+        assert process.stdin is not None
+        # Underscore-prefixed keys are this host's own bookkeeping; what the
+        # child parses is the control plane's answer and nothing else.
+        process.stdin.write(
+            encode_turn({key: value for key, value in payload.items() if not key.startswith("_")})
+        )
+        process.stdin.close()
+    except OSError as exc:
+        os.close(read_fd)
+        _reap_unstarted(process)
+        return LaunchResult(
+            outcome=LAUNCH_NOT_STARTED, detail=f"the turn could not be delivered: {exc}"
+        )
+
+    answer = read_handover(read_fd)
+    if answer is None:
+        return LaunchResult(
+            outcome=LAUNCH_UNCERTAIN,
+            handle=process,
+            detail=(
+                f"no answer within {HANDOVER_TIMEOUT_S:.0f}s; the turn stays claimed "
+                "because silence is not proof that it did not start"
+            ),
+        )
+    if answer.split(" ", 1)[0] == HANDOVER_ACCEPTED:
+        return LaunchResult(outcome=LAUNCH_STARTED, handle=process)
+    _reap_unstarted(process)
+    detail = answer or "the turn process exited without taking delivery"
+    if answer.split(" ", 1)[0] == HANDOVER_DECLINED:
+        detail = answer
+    return LaunchResult(outcome=LAUNCH_NOT_STARTED, detail=detail)
+
+
+def _reap_unstarted(process: subprocess.Popen[bytes]) -> None:
+    """Collect a child that never took its turn, without waiting on it forever.
+
+    It has already answered — or closed its answer — so it is on its way out.
+    A child that somehow is not gets killed: it holds no turn, so there is
+    nothing for it to finish, and leaving it would leak a process per failure.
+    """
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=10)
+
+
+def _serve_turn(
+    *,
+    handover_fd: int,
+    base_url: str,
+    gateway_url: str,
+    worker_id: str,
+    lease_ttl: float,
+    agent_timeout_s: float,
+    host: str | None,
+) -> int:
+    """Run the one turn delivered on standard input, or decline having none.
+
+    The answer is sent **after everything that can still be declined and
+    before anything that cannot**. That ordering is the whole contract in both
+    directions: the host treats a child that exits without answering as one
+    that never had the turn and requeues it unspent, so everything this
+    process could fail at without consequence belongs above the answer, and
+    everything a user or an operator could notice belongs below it.
+
+    Preflight is above it for exactly that reason. It observes Docker, the
+    image and the network and changes nothing, so failing it means the turn
+    has not begun — and answering first would instead strand that turn behind
+    a lease it will never use, having spent one of its attempts.
+    """
+    # Drained first, and before anything slow, so the host is never left
+    # blocked writing a long prompt into a pipe this process has not read yet.
+    raw = sys.stdin.read()
+
+    # Then the read-only probe of Docker, the image and the network. It runs
+    # before the payload is even looked at so that a turn process started with
+    # nothing on its input still proves this machine could have run one, which
+    # is what the deployment check needs of it.
+    try:
+        backend = build_backend_from_env()
+        backend.preflight()
+    except Exception as exc:
+        # Non-zero: the deployment check reads this exit status, and an image
+        # that cannot run turns has to fail a rollout rather than pass it. For
+        # a real turn the host puts it straight back and, after a run of these,
+        # stops claiming and says why — so a machine in this state costs the
+        # queue nothing while somebody fixes it.
+        write_handover(handover_fd, f"{HANDOVER_DECLINED} {exc}")
+        return 2
+
+    payload = decode_turn(raw)
+    if payload is None:
+        write_handover(handover_fd, f"{HANDOVER_DECLINED} no turn was delivered")
+        return 0
+    try:
+        job = ClaimedJob.from_response(payload)
+    except (KeyError, TypeError, ValueError) as exc:
+        write_handover(handover_fd, f"{HANDOVER_DECLINED} unusable turn ({type(exc).__name__})")
+        return 0
+
+    # Installed before the answer, so there is no window in which this process
+    # owns a turn and SIGTERM would still kill it outright. From here the turn
+    # is this process's: SIGTERM means the container is being replaced, the
+    # turn still runs to its end, and the grace period bounds that exactly as
+    # it did when a replica ran one job at a time.
+    _drain_on_sigterm()
+    write_handover(handover_fd, f"{HANDOVER_ACCEPTED} {job.job_id}")
+    return run_turn(
+        job,
+        base_url=base_url,
+        gateway_url=gateway_url,
+        worker_id=worker_id,
+        lease_ttl=lease_ttl,
+        agent_timeout_s=agent_timeout_s,
+        backend=backend,
+        host=host,
+    )
+
+
 def run_forever(
     *,
     base_url: str,
@@ -2286,8 +2579,24 @@ def run_forever(
     idle_sleep_s: float = 5.0,
     backend: SandboxBackend | None = None,
     host: str | None = None,
+    spawn_turn: Callable[[dict[str, Any]], LaunchResult] | None = None,
+    tick_s: float | None = None,
 ) -> int:
-    """Claim shared-live turns until interrupted.
+    """Serve this host: claim turns up to its limit, and run each in its own child.
+
+    One process per machine. It enrolls, heartbeats and samples capacity — the
+    things a host does once — and it claims a turn only when it is under the
+    limit an operator set on the admin Servers page. There is no pool of idle
+    processes to keep at a size: the limit is a number this loop compares
+    against what it is already running, so raising it lets the next poll take
+    more and lowering it simply stops taking any until the count has come down.
+    Turns already running are never interrupted by a change.
+
+    The limit arrives on the heartbeat answer and is this host's own default
+    until one has been set. It is reported back as ``slots_total`` on every
+    beat, and the control plane admits claims against the lower of that and the
+    operator's number, so a number this host has not yet confirmed can only
+    ever admit less work, never more.
 
     The host runner owns scheduling and attestation only. The workspace broker
     owns every retained container and resident Agent CLI process, so this loop
@@ -2306,7 +2615,7 @@ def run_forever(
     if SHARED_SANDBOX_CAPABILITY not in capabilities:
         raise RuntimeError(
             "this runner cannot attest shared-sandbox-v1; verify the container "
-            "backend, broker URL/token, host slots, runner replicas, image labels, "
+            "backend, broker URL/token, AGENT_HOST_SLOTS, image labels, "
             "runtime pins, and live-session driver capabilities"
         )
     if not (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip():
@@ -2316,16 +2625,25 @@ def run_forever(
         )
     if not host:
         raise RuntimeError(
-            "shared-live sandbox execution requires AGENT_RUNNER_HOST; every replica "
-            "on one machine must report the same enrolled host name"
+            "shared-live sandbox execution requires AGENT_RUNNER_HOST; every turn "
+            "this machine runs reports the same enrolled host name"
         )
-    slots_total = int(os.environ.get("AGENT_HOST_SLOTS") or 3)
+    try:
+        host_default = default_slots()
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    # Advertised beside the shared-live capabilities, never instead of them: it
+    # says this runner applies ``slots_desired``, which is what lets the admin
+    # page tell a host that will honour a new number from one that needs a
+    # redeploy to change.
+    host_capabilities = [*capabilities, HOST_CONCURRENCY_CAPABILITY]
     identity = ensure_enrolled(
         base_url=base_url,
         host=host,
         broker_url=_broker_url_from_env(),
-        slots_total=slots_total,
-        capabilities=capabilities,
+        slots_total=host_default,
+        capabilities=host_capabilities,
         runner_version=_runner_version(),
     )
     if identity is None:
@@ -2334,13 +2652,37 @@ def run_forever(
             "configure AGENT_ENROLL_TOKEN or a persisted host credential"
         )
 
+    launch = spawn_turn or (
+        lambda payload: _spawn_turn(
+            payload,
+            base_url=base_url,
+            gateway_url=gateway_url or base_url,
+            worker_id=str(payload.get("_worker_id") or worker_id),
+            lease_ttl=lease_ttl,
+            agent_timeout_s=agent_timeout_s,
+            host=host,
+        )
+    )
+    turns = TurnPool(launch=launch)
+    # The limit this host is willing to serve right now. Held across beats so
+    # a control plane that is briefly unreachable leaves the host running what
+    # it last confirmed rather than falling back to a default nobody chose.
+    limit = host_default
+
     capacity = _start_host_capacity_collector(backend)
     pool = HostHeartbeat(
         base_url=base_url,
         identity=identity,
         broker_url=_broker_url_from_env(),
-        slots_total=slots_total,
-        capabilities=lambda: _shared_live_host_capabilities(backend, stamp),
+        # Read per beat: the limit is what this host will actually allow, and
+        # the control plane admits claims against the lower of it and the
+        # operator's number.
+        slots_total=lambda: limit,
+        launch_error=lambda: turns.launch_error,
+        capabilities=lambda: [
+            *_shared_live_host_capabilities(backend, stamp),
+            HOST_CONCURRENCY_CAPABILITY,
+        ],
         runner_version=_runner_version(),
         sandbox_runtime=stamp.get("sandbox_runtime"),
         sandbox_image_digest=stamp.get("sandbox_image_digest"),
@@ -2372,60 +2714,181 @@ def run_forever(
             capacity.stop()
 
     print(
-        f"agent runner {worker_id} started on host {identity.host} (enrolled; "
-        f"sandbox backend: {backend.name})",
+        f"agent runner {worker_id} serving host {identity.host} (enrolled; "
+        f"sandbox backend: {backend.name}; up to {limit} turn(s) at once until the "
+        "control plane says otherwise)",
         flush=True,
     )
 
-    while True:
-        if _STOPPING.is_set():
-            print("agent runner: stopping after the current job", file=sys.stderr, flush=True)
-            stop_all()
-            return 0
-
-        if not pool.claimable:
+    idle_wait = tick_s if tick_s is not None else idle_sleep_s
+    immediate = False
+    claims = 0
+    try:
+        while True:
+            for finished in turns.reap():
+                logger.info(
+                    "agent_turn_finished",
+                    extra={
+                        "event": "agent_turn_finished",
+                        "job_id": finished.job_id,
+                        "attempt_id": finished.attempt_id,
+                        "exit_code": finished.exit_code,
+                    },
+                )
+            if _STOPPING.is_set():
+                print(
+                    "agent runner: stopping; turns already running finish first",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                break
             if pool.removed.is_set():
                 print(
                     "agent runner: this host's credential was rejected; not claiming further work",
                     file=sys.stderr,
                     flush=True,
                 )
-                stop_all()
-                return 0
-            time.sleep(idle_sleep_s)
-            continue
+                break
 
-        # Keep the old control plane safe during a parallel rollout. It does
-        # not enforce this generation's exact-SHA attestation, so the polling
-        # replica itself must remain idle until host-local checks complete.
-        if not _shared_live_deployment_ready(backend, stamp):
-            time.sleep(idle_sleep_s)
-            continue
+            # Whatever the last successful beat carried, including nothing:
+            # clearing the number on the admin page is an instruction like any
+            # other, and a host that only followed numbers it could parse went
+            # on serving the old one until its container was replaced.
+            #
+            # No special case is needed to survive an outage. A failed beat
+            # raises before it reads the answer, so ``slots_desired`` keeps the
+            # value it last carried and this follows it unchanged.
+            confirmed = requested_slots(identity.slots_desired)
+            target = host_default if confirmed is None else confirmed
+            if target != limit:
+                logger.info(
+                    "agent_host_concurrency_changed",
+                    extra={
+                        "event": "agent_host_concurrency_changed",
+                        "host": identity.host,
+                        "was": limit,
+                        "now": target,
+                        "source": "host_default" if confirmed is None else "control_plane",
+                        "running": turns.running(),
+                    },
+                )
+                limit = target
+                # The scheduler admits against the number on the host row, so
+                # a change this host has applied should be there now rather
+                # than up to an interval from now.
+                pool.wake()
 
-        try:
-            run_once(
-                gateway_url=gateway_url,
-                base_url=base_url,
-                host_credential=pool.credential,
-                worker_id=worker_id,
-                lease_ttl=lease_ttl,
-                agent_timeout_s=agent_timeout_s,
-                backend=backend,
-                host=identity.host,
-            )
-        except KeyboardInterrupt:
-            stop_all()
-            return 0
-        except ClaimUnreachable as exc:
-            print(
-                f"agent runner: control plane unreachable, retrying: {exc}",
-                file=sys.stderr,
-                flush=True,
-            )
-        except Exception as exc:
-            print(f"agent runner: job failed unexpectedly: {exc}", file=sys.stderr, flush=True)
+            if not pool.claimable or not turns.may_claim(limit):
+                time.sleep(idle_wait)
+                continue
+            # Keep the old control plane safe during a parallel rollout. It
+            # does not enforce this generation's exact-SHA attestation, so this
+            # host stays idle until its own checks complete.
+            if not _shared_live_deployment_ready(backend, stamp):
+                time.sleep(idle_wait)
+                continue
 
-        time.sleep(idle_sleep_s)
+            # A distinct lease owner per turn. Fencing never reads this
+            # string, but "which turn is stuck" stops being answerable the
+            # moment two concurrent turns report the same name — which is
+            # exactly when it is worth asking.
+            claims += 1
+            turn_worker_id = f"{worker_id}-{claims}"
+            try:
+                payload = claim_payload(
+                    base_url=base_url,
+                    host_credential=pool.credential,
+                    worker_id=turn_worker_id,
+                    lease_ttl=lease_ttl,
+                    attestation=_claim_attestation(backend),
+                )
+            except ClaimUnreachable as exc:
+                print(
+                    f"agent runner: control plane unreachable, retrying: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(idle_wait)
+                continue
+            except Exception as exc:
+                print(
+                    f"agent runner: claim failed unexpectedly: {exc}", file=sys.stderr, flush=True
+                )
+                time.sleep(idle_wait)
+                continue
+
+            if payload is None:
+                time.sleep(idle_wait)
+                continue
+
+            _hand_over_turn(payload, turns=turns, base_url=base_url, worker_id=turn_worker_id)
+    except KeyboardInterrupt:
+        immediate = True
+    turns.shutdown(immediate=immediate)
+    stop_all()
+    return 0
+
+
+def _hand_over_turn(
+    payload: dict[str, Any], *, turns: TurnPool, base_url: str, worker_id: str
+) -> None:
+    """Give one claimed turn to a child, and requeue it only if it never began.
+
+    The requeue is the narrow case and is kept narrow deliberately. A turn the
+    child took is the child's — if it then dies, the lease expires and the
+    control plane decides under the retained-session rules, which can end a
+    conversation rather than replay an admitted prompt. Handing such a turn
+    back from here would be this host overruling that judgement with a guess.
+    """
+    job_id = str(payload.get("job_id") or "")
+    # Carried beside the turn rather than in it: the child logs under the same
+    # name the claim recorded as this turn's lease owner. Stripped before
+    # delivery, so the payload the child parses is the control plane's answer
+    # and nothing this host added to it.
+    payload = {**payload, "_worker_id": worker_id}
+    try:
+        result = turns.launch(payload)
+    except Exception as exc:
+        # Whatever went wrong here, this host cannot say the turn did not
+        # start — and an exception escaping the loop would end the service,
+        # leaving every turn it was running to its lease. Treat it as the
+        # ambiguous case it is.
+        logger.warning(
+            "agent_turn_handover_failed",
+            exc_info=True,
+            extra={"event": "agent_turn_handover_failed", "job_id": job_id},
+        )
+        result = LaunchResult(LAUNCH_UNCERTAIN, None, f"{type(exc).__name__}: {exc}")
+    if result.outcome == LAUNCH_STARTED:
+        return
+    if result.outcome == LAUNCH_UNCERTAIN:
+        logger.warning(
+            "agent_turn_handover_uncertain",
+            extra={
+                "event": "agent_turn_handover_uncertain",
+                "job_id": job_id,
+                "detail": result.detail,
+            },
+        )
+        return
+    # Provably never started: back to the queue, with no attempt spent and no
+    # wait for a lease that nothing is holding.
+    worker_token = str(payload.get("worker_token") or "")
+    released = bool(worker_token) and release_turn(
+        base_url=base_url,
+        worker_token=worker_token,
+        job_id=job_id,
+        reason="launch_failed",
+    )
+    logger.warning(
+        "agent_turn_not_started",
+        extra={
+            "event": "agent_turn_not_started",
+            "job_id": job_id,
+            "detail": result.detail,
+            "requeued": released,
+        },
+    )
 
 
 def _env_float(name: str, fallback: float) -> float:
@@ -2537,6 +3000,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=_env_float("AGENT_TIMEOUT_S", DEFAULT_AGENT_TIMEOUT_S),
     )
+    # Not operator flags. The host service starts each turn's child with these
+    # and the exact configuration it was given itself; the turn arrives on that
+    # child's standard input and its answer goes back on the descriptor named
+    # here. Started by hand, a turn process reads an empty standard input,
+    # declines, and exits.
+    parser.add_argument("--turn", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--handover-fd", type=int, default=None, help=argparse.SUPPRESS)
     return parser
 
 
@@ -2554,6 +3024,18 @@ def main(argv: list[str] | None = None) -> int:
     if not args.base_url:
         parser.error("AGENT_CONTROL_PLANE_URL (or AGENT_GATEWAY_URL) is required")
 
+    if args.turn:
+        if args.handover_fd is None:
+            parser.error("--turn requires --handover-fd; the host service supplies both")
+        return _serve_turn(
+            handover_fd=args.handover_fd,
+            base_url=args.base_url,
+            gateway_url=args.gateway_url or args.base_url,
+            worker_id=args.worker_id,
+            lease_ttl=args.lease_ttl,
+            agent_timeout_s=args.agent_timeout,
+            host=args.host,
+        )
     return run_forever(
         base_url=args.base_url,
         gateway_url=args.gateway_url or args.base_url,
@@ -2576,5 +3058,7 @@ __all__ = [
     "checkout_output_branch",
     "main",
     "prepare_worktree",
+    "run_forever",
     "run_once",
+    "run_turn",
 ]

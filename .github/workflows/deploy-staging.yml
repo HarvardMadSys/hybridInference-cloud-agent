@@ -261,12 +261,10 @@ jobs:
           # Keep a failed local probe bounded; deploy.sh restores the previous
           # host generation if the replacement cannot advertise readiness.
           SHARED_READY_TIMEOUT: "120"
-          # One capacity value drives both the number of synchronous runner
-          # executors and the scheduler slots they advertise. Letting these
-          # drift can claim three simultaneous turns with only one process
-          # available to execute them, silently serialising fork siblings.
+          # Turns at once until an admin sets a number on the Servers page;
+          # the host takes that number up at runtime without a redeploy. Two
+          # is the floor, because fork siblings run beside each other.
           AGENT_HOST_SLOTS: ${{ vars.STAGING_HOST_SLOTS || '3' }}
-          AGENT_RUNNER_REPLICAS: ${{ vars.STAGING_HOST_SLOTS || '3' }}
           AGENT_CHAT_IDLE_TIMEOUT_S: "1800"
           # Docker, not a chat bind mount, owns retained writable layers. Set
           # the repository variable if this daemon uses a non-default data-root.
