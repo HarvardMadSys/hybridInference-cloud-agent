@@ -136,10 +136,12 @@ function EventStepDetails({
   tab: EventTab;
   idPrefix: string;
 }) {
+  const payload = step.sourceEvents[0]?.payload ?? {};
+  const truncationPayload = step.runtimeNotifications ? { truncated: step.truncated } : payload;
   if (tab === 'raw') {
     return (
       <TabPanel idPrefix={idPrefix} tab="raw">
-        <TruncationNote payload={step.sourceEvents[0]?.payload ?? {}} />
+        <TruncationNote payload={truncationPayload} />
         <div className="space-y-1.5">
           {step.sourceEvents.map((event) => (
             <StoredRecord
@@ -152,12 +154,15 @@ function EventStepDetails({
       </TabPanel>
     );
   }
-  const payload = step.sourceEvents[0]?.payload ?? {};
   return (
     <TabPanel idPrefix={idPrefix} tab="summary">
       <DetailRows>
         <DetailRow label="Event type">
-          <span className="font-mono">{step.sourceEvents[0]?.event_type ?? step.label}</span>
+          <span className="font-mono">
+            {step.runtimeNotifications
+              ? 'Runtime notifications'
+              : (step.sourceEvents[0]?.event_type ?? step.label)}
+          </span>
         </DetailRow>
         <DetailRow label="Status" tone={step.status === 'failed' ? 'error' : 'muted'}>
           {STATUS_LABEL[step.status]}
@@ -165,9 +170,19 @@ function EventStepDetails({
         <DetailRow label="Recorded at">{recordedAt(step.at)}</DetailRow>
         <DetailRow label="Seq">{step.sourceEvents[0]?.seq ?? 'Not recorded'}</DetailRow>
         <DetailRow label="Attempt">{step.attemptId}</DetailRow>
+        {step.runtimeNotifications ? (
+          <DetailRow label="Records">{step.sourceEvents.length}</DetailRow>
+        ) : null}
       </DetailRows>
-      <TruncationNote payload={payload} />
-      <ValueBlock value={payload} what="Payload" />
+      <TruncationNote payload={truncationPayload} />
+      {step.runtimeNotifications ? (
+        <p className="text-[12px] text-gray-500 dark:text-gray-400">
+          Status updates and streaming fragments are grouped for this attempt. Open Raw to inspect
+          all {step.sourceEvents.length} stored records.
+        </p>
+      ) : (
+        <ValueBlock value={payload} what="Payload" />
+      )}
     </TabPanel>
   );
 }

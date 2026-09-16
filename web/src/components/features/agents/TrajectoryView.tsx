@@ -3,8 +3,8 @@
 // The trajectory: every stored event of the conversation, projected into the
 // steps a reader can inspect.
 //
-// The chat tab beside this is a reading of the stream. This is the stream —
-// unfolded, undeduplicated, including the rows no view knows how to render.
+// Tool results join their calls and protocol notifications share one log step
+// per attempt. Unknown events remain visible; the session log keeps every row.
 // Selecting a row no longer opens an inline panel: the detail goes to the
 // right-hand inspector, so the list keeps its place while a step is read.
 //

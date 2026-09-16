@@ -159,6 +159,8 @@ export interface TrajectoryStep {
    * that read it only then.
    */
   harness?: HarnessInventory;
+  /** Protocol bookkeeping grouped within one attempt, with every record in Raw. */
+  runtimeNotifications?: boolean;
 }
 
 /** What the projection needs to know about a turn that the events cannot say. */
@@ -204,6 +206,70 @@ const REASONING_KEYS = ['reasoning_tokens', 'reasoning_output_tokens', 'reasonin
 const CONTENT_KEYS = ['content_tokens', 'text_tokens'];
 
 const RESULT_TEXT_KEYS = ['content', 'output', 'aggregated_output', 'text'] as const;
+
+// These Codex app-server notifications describe transport/progress, not new
+// model or tool operations. Keep an allowlist: unfamiliar events (including
+// raw-only runtimes) must remain independently inspectable.
+const CODEX_PROGRESS_METHODS = new Set([
+  'thread/started',
+  'thread/status/changed',
+  'thread/tokenUsage/updated',
+  'turn/started',
+  'remoteControl/status/changed',
+  'item/agentMessage/delta',
+  'item/reasoning/summaryTextDelta',
+  'item/reasoning/summaryPartAdded',
+  'item/reasoning/textDelta',
+  'item/commandExecution/outputDelta',
+  'item/mcpToolCall/progress',
+]);
+
+function rawNotification(event: StoredEvent): Record<string, unknown> | null {
+  if (event.event_type !== 'raw') return null;
+  const payload = asRecord(event.payload);
+  const text = payload.line ?? payload.text;
+  if (typeof text !== 'string') return null;
+  try {
+    const value = asRecord(JSON.parse(text));
+    // Requests that happen to use one of these methods still need attention.
+    return typeof value.method === 'string' && value.method && value.id === undefined
+      ? value
+      : null;
+  } catch {
+    // A partial/invalid JSON record cannot safely be classified as bookkeeping.
+    return null;
+  }
+}
+
+function notificationHasError(notification: Record<string, unknown>): boolean {
+  const params = asRecord(notification.params);
+  const item = asRecord(params.item);
+  const status = asRecord(params.status).type ?? params.status ?? item.status;
+  return Boolean(
+    notification.method === 'error' ||
+    notification.error ||
+    params.error ||
+    item.error ||
+    params.is_error === true ||
+    status === 'failed' ||
+    status === 'error',
+  );
+}
+
+function isRuntimeNotification(notification: Record<string, unknown>): boolean {
+  if (notificationHasError(notification)) return false;
+  const item = asRecord(asRecord(notification.params).item);
+  const method = asText(notification.method);
+  if (CODEX_PROGRESS_METHODS.has(method)) return true;
+  // The final assistant/tool records are normalized by the driver. Only their
+  // start/update notifications and the echoed user input belong in this group.
+  if (method === 'item/started' || method === 'item/updated') {
+    return ['userMessage', 'agentMessage', 'reasoning', 'commandExecution', 'mcpToolCall'].includes(
+      asText(item.type),
+    );
+  }
+  return method === 'item/completed' && item.type === 'userMessage';
+}
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -380,9 +446,9 @@ function blockOf(event: StoredEvent): AssistantBlock | null {
 /**
  * Project stored events into the steps a reader can select.
  *
- * Every stored event remains reachable: tool results join their call, and an
- * event that belongs to no call or message becomes its own step. Nothing is
- * dropped to make the list tidier.
+ * Every stored event remains reachable: tool results join their call, known
+ * protocol notifications share one log step per attempt, and other events
+ * become their own steps. Grouping never changes the session-log export.
  */
 export function buildTrajectorySteps(
   events: StoredEvent[],
@@ -589,8 +655,24 @@ export function buildTrajectorySteps(
 
     const row = toTrajectory([event])[0];
     const harness = harnessOf(payload);
-    steps.push({
-      key: `event:${jobIdOf(event)}:${event.attempt_id}:${event.id}`,
+    const notification = rawNotification(event);
+    const runtimeNotification = notification !== null && isRuntimeNotification(notification);
+    const key = runtimeNotification
+      ? `runtime:${scopeOf(event)}`
+      : `event:${jobIdOf(event)}:${event.attempt_id}:${event.id}`;
+    if (runtimeNotification) {
+      const existing = byKey.get(key);
+      if (existing) {
+        existing.sourceEvents.push(event);
+        existing.truncated ||= isTruncatedPayload(payload);
+        existing.detail = `${existing.sourceEvents.length} protocol events · status updates and streaming fragments`;
+        continue;
+      }
+    }
+    const params = asRecord(notification?.params);
+    const protocolError = notification !== null && notificationHasError(notification);
+    const step: TrajectoryStep = {
+      key,
       kind: 'event',
       jobId: jobIdOf(event),
       turnNo: turnNoOf(event),
@@ -600,15 +682,26 @@ export function buildTrajectorySteps(
       sourceEvents: [event],
       lane: row.lane,
       actor: row.actor,
-      label: row.label,
-      detail: row.detail,
+      label: runtimeNotification
+        ? 'Runtime notifications'
+        : notification
+          ? asText(notification.method)
+          : row.label,
+      detail: runtimeNotification
+        ? '1 protocol event · status updates and streaming fragments'
+        : notification
+          ? preview(params.summary ?? params.message ?? params.error ?? params)
+          : row.detail,
       at: event.created_at ?? null,
-      isError: row.isError,
-      status: event.event_type === 'error' ? 'failed' : 'recorded',
+      isError: row.isError || protocolError,
+      status: event.event_type === 'error' || protocolError ? 'failed' : 'recorded',
       truncated: isTruncatedPayload(payload),
       timing: { source: null, startedAt: null, finishedAt: null, durationMs: null },
       ...(harness ? { harness } : {}),
-    });
+      ...(runtimeNotification ? { runtimeNotifications: true } : {}),
+    };
+    byKey.set(key, step);
+    steps.push(step);
   }
 
   // Usage that a native message recorded, de-duplicated by message identity:

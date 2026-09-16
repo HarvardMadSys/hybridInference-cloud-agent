@@ -87,6 +87,28 @@ function Harness({
 }
 
 describe('TrajectoryView', () => {
+  it('keeps protocol chatter from inflating the overview and step list', () => {
+    const notifications = Array.from({ length: 400 }, (_, index) =>
+      event({
+        id: index + 10,
+        event_type: 'raw',
+        payload: {
+          text: JSON.stringify({ method: 'item/agentMessage/delta', params: { delta: 'x' } }),
+        },
+      }),
+    );
+    render(<Harness events={[...notifications, ...EVENTS]} />);
+
+    expect(screen.getByText('3 steps')).toBeInTheDocument();
+    expect(screen.getByText('Runtime notifications')).toBeInTheDocument();
+    expect(screen.getByText(/400 protocol events/)).toBeInTheDocument();
+    expect(
+      screen.getAllByRole('button').filter((button) => button.hasAttribute('data-step-key')),
+    ).toHaveLength(3);
+    expect(screen.getByText('Bash')).toBeInTheDocument();
+    expect(screen.getByText('the build passes')).toBeInTheDocument();
+  });
+
   it('lists every stored event as a step, including the one chat folds away', () => {
     render(<Harness events={EVENTS} />);
 
