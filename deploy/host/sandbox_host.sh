@@ -668,6 +668,96 @@ print(
 PY
 }
 
+storage_host_helper() {
+  # Docker can resolve source directories that the deployment user cannot
+  # traverse. Select a candidate mount from the *table*, without stat'ing the
+  # path; the helper must independently prove the two actual binds match it.
+  # Only those two directories are bound, non-recursively and read-only. No
+  # host proc tree, capabilities, socket, credentials or network are passed.
+  local id="$1" upperdir="$2" deadline="$3" image helper_name helper_seconds rc=0
+  local plan_file target fstype device fsroot upper_root
+  plan_file="$4/${id}.mount-plan.json"
+  if ! storage_bounded "$deadline" findmnt --kernel --list --json \
+      --output TARGET,FSTYPE,MAJ:MIN,FSROOT >"$plan_file" 2>/dev/null; then
+    rm -f "$plan_file"
+    return 1
+  fi
+  target=""; fstype=""; device=""; fsroot=""; upper_root=""
+  IFS=$'\037' read -r target fstype device fsroot upper_root < <(
+    python3 - "$plan_file" "$upperdir" <<'PY_PLAN'
+import json
+import posixpath
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        mounts = json.load(handle)["filesystems"]
+    path = sys.argv[2]
+    if not path.startswith("/") or posixpath.normpath(path) != path:
+        raise ValueError("non-canonical upperdir")
+    candidates = [m for m in mounts if path == m["target"] or path.startswith(m["target"].rstrip("/") + "/")]
+    mount = max(candidates, key=lambda m: len(m["target"]))
+    target, root = mount["target"], mount["fsroot"]
+    upper_root = posixpath.join(root, posixpath.relpath(path, target))
+    fields = [target, mount["fstype"], mount["maj:min"], root, posixpath.normpath(upper_root)]
+    if not all(isinstance(v, str) and v and not any(ord(c) < 32 or c == "," for c in v)
+               for v in [*fields, path]):
+        raise ValueError("unsafe mount path")
+except (OSError, ValueError, KeyError, TypeError):
+    raise SystemExit(0)
+print("\x1f".join(fields))
+PY_PLAN
+  ) || true
+  rm -f "$plan_file"
+  [[ -n "$target" && "$target" == /* && -n "$upper_root" ]] || return 1
+  image="$(storage_bounded "$deadline" docker inspect --format '{{.Image}}' "$id" 2>/dev/null)" || return 1
+  [[ "$image" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  helper_seconds=$(( deadline - SECONDS - STORAGE_KILL_AFTER_S - 1 ))
+  (( helper_seconds > 0 )) || return 1
+  if (( helper_seconds > 5 )); then helper_seconds=5; fi
+  helper_name="agent-storage-attest-${BASHPID:-$$}-${RANDOM}"
+  storage_bounded "$deadline" docker run --rm --pull=never --name "$helper_name" \
+    --label org.freeinference.storage-attestation=true \
+    --runtime runc --network none --read-only --user 0:0 \
+    --cap-drop ALL --security-opt no-new-privileges:true \
+    --pids-limit 16 --memory 64m --cpus 0.25 \
+    --mount "type=bind,src=${target},dst=/disk,readonly,bind-recursive=disabled,bind-propagation=rslave" \
+    --mount "type=bind,src=${upperdir},dst=/upper,readonly,bind-recursive=disabled,bind-propagation=rslave" \
+    --env PYTHONDONTWRITEBYTECODE=1 --entrypoint python "$image" \
+    -m cloud_agent_host.storage_attestation "$target" "$device" "$fsroot" "$upper_root" "$fstype" "$helper_seconds" || rc=$?
+  if (( rc != 0 )); then
+    # --rm handles completed helpers; explicit cleanup also covers create or
+    # start failures. It may only use the same remaining attestation budget.
+    storage_bounded "$deadline" docker rm -f "$helper_name" >/dev/null 2>&1 || true
+  fi
+  return "$rc"
+}
+
+storage_helper_fields() {
+  # A malformed/partial helper response is absence, never zero capacity.
+  python3 - "$1" <<'PY_HELPER'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        value = json.load(handle)
+    fields = [value[name] for name in (
+        "mount_root", "fstype", "total_bytes", "upper_total_bytes", "used_bytes", "available_bytes"
+    )]
+    if not all(isinstance(item, str) and item and not any(ord(c) < 32 for c in item)
+               for item in fields[:2]) or not fields[0].startswith("/"):
+        raise ValueError("invalid mount")
+    if not all(type(item) is int and 0 <= item <= 2**53 - 1 for item in fields[2:]):
+        raise ValueError("invalid counters")
+    if fields[4] + fields[5] > fields[2]:
+        raise ValueError("invalid occupancy")
+except (OSError, ValueError, KeyError, TypeError):
+    raise SystemExit(0)
+print("\x1f".join(map(str, fields)))
+PY_HELPER
+}
+
 storage_usage_agrees() {
   # Compare the container's occupancy figures with the host's, up to three
   # times, and print a note describing the last discrepancy. Returns 0 when the
@@ -684,6 +774,7 @@ storage_usage_agrees() {
   local id="$1" mount_root="$2" size="$3" deadline="${4:-$SECONDS}" attempt tolerance pause
   local container_used container_avail host_used host_avail delta_used delta_avail
   local note="the reading could not be taken" container_line host_line
+  local helper_upper="${5:-}" helper_file="${6:-}" helper_root helper_type helper_size helper_upper_size
   tolerance=$(( size / 100 ))
   if (( tolerance < STORAGE_DIAGNOSTIC_FLOOR_BYTES )); then
     tolerance="$STORAGE_DIAGNOSTIC_FLOOR_BYTES"
@@ -712,10 +803,24 @@ if not all(isinstance(value, int) and not isinstance(value, bool)
     raise SystemExit(0)
 print(size - free, available)' || true
     )"
-    host_line="$(
-      storage_bounded "$deadline" df -B1 --output=used,avail "$mount_root" 2>/dev/null \
-        | tail -n1 || true
-    )"
+    if [[ -n "$helper_upper" ]]; then
+      # Refresh the independent host reading on retries as occupancy moves.
+      if (( attempt > 1 )); then
+        storage_host_helper "$id" "$helper_upper" "$deadline" "${helper_file%/*}" >"$helper_file" 2>/dev/null || : >"$helper_file"
+      fi
+      host_used=""; host_avail=""; helper_root=""; helper_size=""; helper_upper_size=""
+      IFS=$'\037' read -r helper_root helper_type helper_size helper_upper_size host_used host_avail \
+        < <(storage_helper_fields "$helper_file") || true
+      host_line=""
+      if [[ "$helper_root" == "$mount_root" && "$helper_size" == "$size" && "$helper_upper_size" == "$size" ]]; then
+        host_line="$host_used $host_avail"
+      fi
+    else
+      host_line="$(
+        storage_bounded "$deadline" df -B1 --output=used,avail "$mount_root" 2>/dev/null \
+          | tail -n1 || true
+      )"
+    fi
     # Cleared first: `read` leaves its targets alone at EOF, so a second
     # attempt would otherwise compare the previous attempt's numbers.
     container_used=""; container_avail=""; host_used=""; host_avail=""
@@ -774,6 +879,7 @@ verify_storage_probe() {
   local attest_dir="$1" runner_ids="$2" deadline="${3:-$SECONDS}" fenced="${4:-0}"
   local entries_file verdict_file id index storage_rc ok reason upperdir fstype
   local total upper_size root_size host_fstype note verdict storage_deadline
+  local helper_upper helper_file helper_used helper_available
   local -a ids=() pids=()
 
   if [[ "$(storage_probe_name)" == "off" ]]; then
@@ -865,7 +971,8 @@ verify_storage_probe() {
     # The mount root, not the upper directory: a project quota on the upper
     # directory's project returns the quota from both, so the two would agree
     # while neither describes the disk.
-    root_size=""
+    root_size=""; upper_size=""; helper_upper=""
+    helper_file="${attest_dir}/${id}.host-storage.json"
     mount_root="$(
       storage_bounded "$storage_deadline" findmnt -n -o TARGET -T "$upperdir" 2>/dev/null \
         | head -n1 || true
@@ -881,13 +988,25 @@ verify_storage_probe() {
       host_fstype="$fstype"
     fi
     if [[ -z "$mount_root" || "$mount_root" != /* ]]; then
+      # The ordinary host-user path remains useful on accessible filesystems.
+      # A permission failure needs independent metadata, not a guessed parent.
+      if storage_host_helper "$id" "$upperdir" "$storage_deadline" "$attest_dir" >"$helper_file" \
+          2>"${attest_dir}/${id}.host-storage.stderr"; then
+        IFS=$'\037' read -r mount_root host_fstype root_size upper_size helper_used helper_available \
+          < <(storage_helper_fields "$helper_file") || true
+        if [[ -n "$root_size" ]]; then helper_upper="$upperdir"; fi
+      fi
+    fi
+    if [[ -z "$mount_root" || "$mount_root" != /* ]]; then
       verdict="unverified"
       append_storage_entry "$upperdir" "$verdict" "" "$host_fstype" "$total" \
         "the host could not locate the filesystem containing ${upperdir}" "$entries_file"
       warn "runner $id: findmnt could not locate the filesystem containing ${upperdir}"
       continue
     fi
-    root_size="$(storage_df_size "$mount_root" "$storage_deadline")"
+    if [[ -z "$helper_upper" ]]; then
+      root_size="$(storage_df_size "$mount_root" "$storage_deadline")"
+    fi
     if [[ -z "$root_size" ]]; then
       append_storage_entry "$upperdir" "unverified" "$mount_root" "$host_fstype" "$total" \
         "df could not size ${mount_root} on the host" "$entries_file"
@@ -901,7 +1020,9 @@ verify_storage_probe() {
       warn "runner $id: daemon configuration sets overlay2.size; storage capacity would be a quota, not the disk"
       continue
     fi
-    upper_size="$(storage_df_size "$upperdir" "$storage_deadline")"
+    if [[ -z "$helper_upper" ]]; then
+      upper_size="$(storage_df_size "$upperdir" "$storage_deadline")"
+    fi
     if [[ -z "$upper_size" ]]; then
       # "No answer" is not "a different answer". A `df` that was cut short, or
       # skipped because the budget ran out, returns nothing — and comparing
@@ -930,7 +1051,7 @@ verify_storage_probe() {
       warn "runner $id: the container and the host disagree on the filesystem's size; treating the topology as unsupported"
       continue
     fi
-    if note="$(storage_usage_agrees "$id" "$mount_root" "$root_size" "$storage_deadline")"; then
+    if note="$(storage_usage_agrees "$id" "$mount_root" "$root_size" "$storage_deadline" "$helper_upper" "$helper_file")"; then
       append_storage_entry "$upperdir" "verified" "$mount_root" "$host_fstype" "$root_size" "" "$entries_file"
       log "runner $id: storage verified against ${mount_root} (${fstype}, ${root_size} B)"
     else

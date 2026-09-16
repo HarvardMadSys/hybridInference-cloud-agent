@@ -1498,7 +1498,7 @@ are still free are in neither figure — which is why the two do not add up to
 the total, and why `total - available` is not used space.
 
 **Why a deployment has to attest it first.** Docker's `overlay2.size` (and a
-container's `--storage-opt size=`) is implemented with ext4/XFS project quotas,
+container's `--storage-opt size=` on XFS with pquota) is implemented with project quotas,
 and a quota is what `statfs` returns for a directory inside the project. A
 container reading its own quota, and a host running `df <upperdir>`, would then
 report the *quota* — 10 GiB, say — with the same device number, so comparing
@@ -1515,6 +1515,22 @@ upper directory, which no container project covers, and writes the verdict to
 * `used` and `available` are compared within `max(1 GiB, 1% of size)` and only
   as a diagnosis, because builds and cleanup interleave and nothing pauses the
   world for monitoring.
+
+A non-root deployment user may be unable to traverse Docker/containerd's
+root-owned snapshot directories. When direct mount lookup fails, the deployment
+uses the running replica's immutable image ID for a temporary metadata helper.
+Docker resolves two non-recursive, read-only directory binds: the candidate
+mount root and that replica's upper directory. The helper checks the actual
+binds' device, filesystem root and type against the host mount-table plan before
+reading counters. A guessed path or mismatched mount never becomes verified.
+
+The helper has no network, capabilities, host PID namespace, Docker socket or
+credentials. Its root filesystem is read-only; it only reads its own mount
+metadata and calls `fstatvfs` on the two bound directories. It shares the
+attestation's remaining deadline, has its own maximum five-second alarm, and is
+removed on exit. Failed starts are cleaned up within the remaining budget. This
+is a deployment-only mount exception; collectors and job containers do not get
+these host views. No sudo rule or host directory permission change is needed.
 
 Each runner reads that file every sampling round and publishes a number only for
 its own upper directory, with a matching size. Anything else — no file, no

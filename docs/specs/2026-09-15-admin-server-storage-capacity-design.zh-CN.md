@@ -166,6 +166,14 @@ runner 的 upper 目录和沙箱的可写层由同一个 driver 放在同一个�
 5. `used`／`avail` 只做诊断，不是拓扑判据：最多三轮，容器读数与任一宿主读数之差在 `max(1 GiB, size × 1%)` 内即可；始终超出则记 `unverified`，附上观测到的差值。占用不单调，构建与清理可以交错，因此不用前后夹取当硬性标准。
 6. 把结果写进 verdict 文件。存储验证的任何失败只写 verdict 和警告日志，**不加入部署的致命 verdicts，不阻断部署**。`AGENT_HOST_STORAGE_PROBE=off` 时跳过。
 
+**非 root 部署用户的验证路径。** `findmnt -T upperdir` 需要遍历 snapshot 目录，默认的 `/var/lib/containerd` 是 root-owned 0700；Docker socket 可用不代表宿主 shell 可以遍历它。直接读取失败时，部署从 `findmnt --kernel --list --json` 的挂载表选择候选挂载，再用当前 runner 的不可变 image ID 启动一次性 `storage_attestation` helper：
+
+- 仅将候选挂载根和当前 upperdir 作为两个**非递归、只读**目录 bind，目标固定为 `/disk` 和 `/upper`。这是部署阶段的受控例外；运行时采集器和 retained sandbox 不增加宿主目录挂载。
+- helper 读取自己的 fdinfo / mountinfo，以打开目录的 mount ID 精确定位实际 bind，核对设备号、文件系统内根路径和类型与候选计划一致。只做字符串前缀匹配不能签发 verified；软链接、遮蔽挂载或拓扑变化导致不一致时拒绝读数。
+- 两个路径各做一次 `fstatvfs`，返回挂载根的 total / used / available 和 upperdir 的 total；其后仍走同一套配额、总量和占用容差判定。占用重试会刷新宿主读数。
+- `--network none`、`--cap-drop ALL`、`no-new-privileges`、只读容器根、资源限制、`--pull=never`；不挂 Docker socket、宿主 proc 树或凭据，不用 privileged / host PID / sudo，也不改变宿主目录权限。bind 使用 `rslave`，满足 Docker 对覆盖 daemon root 的目录挂载的要求，传播方向仅为宿主到 helper。
+- Docker 调用共享原来的剩余预算；helper 自身另有最多 5 秒的 SIGALRM，以免 CLI 被终止后留下继续运行的探针。正常结束由 `--rm` 删除，启动失败或超时在剩余预算内尝试清理。无法读取时仍为 unverified，不阻断部署。
+
 **verdict 文件。** 沿用 `.shared-live-ready` 的模式：deploy 用户拥有、位于 checkout 根下的 `.storage-probe-verdict`，`sandbox_host.sh` 在 `up` 之前先写一份 `unverified`，验证后原地覆盖写；Compose 以 `create_host_path: false` 只读挂到 `/run/cloud-agent/storage-probe-verdict`。文件 bind mount 跟随 inode，所以必须原地写，不能 rename 替换。内容上限 16 KiB：
 
 ```json
@@ -335,3 +343,5 @@ Staging 验收：页面、admin API 和宿主 `df <挂载根>` 在同一时段�
 **2026-09-16 第三轮修订（缺测分类）。** 复核 `57e76af` 后原 P1 关闭，另发现一处误判：`df <upperdir>` 被超时切断（或因预算耗尽被跳过）时返回空值，代码随即把这个空值与有效的挂载根 `size` 比较——二者"不相等"，于是记成 `unsupported` +"which is a project quota"。这是在**没有任何人建立该事实**的情况下声称宿主配置了配额，恰好违反本指标存在的理由。现在空值单独成一支：记 `unverified`，缺测原因写明 `df could not size ...`；只有两个**有效**数值不相等时才进入配额判定。测试用只在 upperdir 上挂起的 `df` 复现，并保留一条"真实配额仍记 `unsupported`"的用例，防止新分支吞掉对照本身要抓的情形。
 
 **2026-09-16 真机验收。** 上述“实验和截图未完成”是各轮修订当时的状态。现已完成第 5 节所述 XFS 配额反例 A、vfs 反例 B、独立 loop-backed XFS 正例 C，并取得真实 staging 的 unverified 页面截图；结果见[验收记录](../acceptance/2026-09-16-admin-storage-capacity.md)。验收发现非 root 部署用户无法遍历 containerd 快照目录，正向容量展示因此未通过，合并仍需等待权限路径修复及 staging 复验。
+
+**2026-09-16 验收问题修复。** 为非 root 部署用户增加上述一次性 metadata helper，并对实际 bind 的文件系统身份进行核对。原先直接读取宿主路径的分支保留；权限修复后的正向 staging 验收结果另行记录，不覆写首次验收失败的历史。

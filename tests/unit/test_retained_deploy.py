@@ -1143,6 +1143,7 @@ def _storage_host(
         capability=capability,
         replicas=replicas,
         slots=slots,
+        running_replicas=int(replicas),
         storage_json=storage_document() if describe is None else describe,
         storage_exit=storage_exit,
         storage_hang=storage_hang,
@@ -1513,3 +1514,125 @@ def test_a_quota_on_the_upper_directory_is_still_unsupported(tmp_path: Path) -> 
     entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
     assert entry["verdict"] == "unsupported"
     assert "project quota" in entry["reason"]
+
+
+def _add_storage_helper(
+    tmp_path: Path, *, record: str | None = None, exit_code: int = 0, hangs: bool = False
+) -> None:
+    """Model Docker's metadata helper separately from the inaccessible host path."""
+    if record is None:
+        record = json.dumps(
+            {
+                "mount_root": STORAGE_MOUNT_ROOT,
+                "fstype": "xfs",
+                "total_bytes": STORAGE_SIZE,
+                "upper_total_bytes": STORAGE_SIZE,
+                "used_bytes": 60 * STORAGE_GIB,
+                "available_bytes": 35 * STORAGE_GIB,
+            }
+        )
+    (tmp_path / "helper-response.json").write_text(record)
+    docker = tmp_path / "bin/docker"
+    original = docker.read_text()
+    answer = "exec sleep 300" if hangs else 'cat "$test_dir/helper-response.json"'
+    prefix = (
+        '#!/bin/sh\ntest_dir="$(dirname "$(dirname "$0")")"\n'
+        'case "$*" in\n'
+        "  'inspect --format {{.Image}} '*) echo 'sha256:" + "a" * 64 + "'; exit 0 ;;\n"
+        "  run*'cloud_agent_host.storage_attestation'*)\n"
+        '    printf \'%s\\n\' "$@" >>"$test_dir/helper-args"\n'
+        f"    {answer}; exit {exit_code} ;;\n"
+        "  'rm -f agent-storage-attest-'*) echo cleanup >>\"$test_dir/helper-cleanup\"; exit 0 ;;\n"
+        "esac\n"
+    )
+    docker.write_text(prefix + original.removeprefix("#!/bin/sh\n"))
+    findmnt = tmp_path / "bin/findmnt"
+    mounts = json.dumps(
+        {
+            "filesystems": [
+                {"target": STORAGE_MOUNT_ROOT, "fstype": "xfs", "maj:min": "8:2", "fsroot": "/"}
+            ]
+        }
+    )
+    (tmp_path / "mount-plan.json").write_text(mounts)
+    findmnt.write_text(
+        '#!/bin/sh\ncase "$*" in *--json*) cat "$(dirname "$(dirname "$0")")/mount-plan.json"; exit 0 ;; esac\n'
+        + findmnt.read_text().removeprefix("#!/bin/sh\n")
+    )
+
+
+def test_inaccessible_host_path_uses_the_read_only_helper(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path, findmnt_fails=True)
+    _add_storage_helper(tmp_path)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "verified"
+    assert entry["mount_root"] == STORAGE_MOUNT_ROOT
+    assert entry["fstype"] == "xfs"
+    args = (tmp_path / "helper-args").read_text().splitlines()
+    for flag, value in (
+        ("--network", "none"),
+        ("--cap-drop", "ALL"),
+        ("--security-opt", "no-new-privileges:true"),
+        ("--entrypoint", "python"),
+        (
+            "--mount",
+            f"type=bind,src={STORAGE_MOUNT_ROOT},dst=/disk,readonly,bind-recursive=disabled,bind-propagation=rslave",
+        ),
+    ):
+        assert args[args.index(flag) + 1] == value
+    assert "sha256:" + "a" * 64 in args
+    assert "--read-only" in args and "--pull=never" in args and "--rm" in args
+    assert "--privileged" not in args and "--pid=host" not in args and "--cap-add" not in args
+    assert (
+        f"type=bind,src={STORAGE_UPPERDIR},dst=/upper,readonly,bind-recursive=disabled,bind-propagation=rslave"
+        in args
+    )
+
+
+def test_helper_still_rejects_a_real_project_quota(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path, findmnt_fails=True)
+    _add_storage_helper(tmp_path)
+    response = tmp_path / "helper-response.json"
+    value = json.loads(response.read_text())
+    value["upper_total_bytes"] = 10 * STORAGE_GIB
+    response.write_text(json.dumps(value))
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unsupported"
+    assert "project quota" in entry["reason"]
+
+
+@pytest.mark.parametrize("record,exit_code", [("{}", 0), ("null", 0), ("{", 0), (None, 125)])
+def test_failed_or_malformed_helper_does_not_publish_capacity(
+    tmp_path: Path, record: str | None, exit_code: int
+) -> None:
+    env = _storage_host(tmp_path, findmnt_fails=True)
+    _add_storage_helper(tmp_path, record=record, exit_code=exit_code)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert _verdict(env)["entries"][STORAGE_UPPERDIR]["verdict"] == "unverified"
+    if exit_code:
+        assert (tmp_path / "helper-cleanup").exists()
+
+
+def test_hung_helper_is_bounded_and_cleaned_up(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path, findmnt_fails=True, replicas="2", slots="2")
+    _add_storage_helper(tmp_path, hangs=True)
+    _cap_fake_timeout(tmp_path, 1)
+
+    started = time.monotonic()
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert time.monotonic() - started < 12
+    assert _verdict(env)["entries"][STORAGE_UPPERDIR]["verdict"] == "unverified"
+    assert (tmp_path / "helper-cleanup").read_text().splitlines() == ["cleanup", "cleanup"]
