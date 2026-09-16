@@ -97,8 +97,9 @@ function capacity(over: Partial<AgentHostCapacity> = {}): AgentHostCapacity {
  * The same observation with a measured storage block on it.
  *
  * The three byte figures are mutually consistent the way the control plane's
- * derivation leaves them: used = total - free, so it includes the reserved
- * blocks that `available` excludes.
+ * derivation leaves them: used = total - free, and the 15 GiB between `free`
+ * and `available` is the root reserve that is still free — counted by neither
+ * figure, and the reason the pair does not add up to the total.
  */
 function storageCapacity(over: Partial<AgentHostCapacity> = {}): AgentHostCapacity {
   return capacity({
@@ -277,8 +278,8 @@ describe('storage cell', () => {
     // 100 × 335 / (335 + 650) = 34.01%, and the table rounds up where CPU and
     // memory round to nearest.
     expect(cell.text).toBe('35% · 335 / 1000 GiB');
-    // 650 GiB, not 665: `available` excludes the reserved blocks that `free`
-    // carries, and it is the number a writer can actually use.
+    // 650 GiB, not 665: `available` excludes the root reserve that is still
+    // free, and it is the number a writer can actually use.
     expect(cell.note).toBe('650 GiB available');
   });
 
@@ -450,7 +451,12 @@ describe('storage cell', () => {
     // reserved-block caveat that keeps the two lines from being read as a
     // partition of the total.
     expect(title).toContain('used / (used + available)');
-    expect(title).toContain('reserves for');
+    // The caveat has to say what `used` *is* (total minus free), not that it
+    // counts the reserve: it does not, and a reader who acts on the wrong
+    // version concludes the disk is fuller than it is.
+    expect(title).toContain('used is total minus free');
+    expect(title).toContain('reserved blocks that are still free');
+    expect(title).not.toContain('used counts the blocks');
     expect(title).toContain('Source: linux_overlay_root_statvfs.');
     // No target: the sentence is still grammatical rather than leaving a
     // dangling preposition.

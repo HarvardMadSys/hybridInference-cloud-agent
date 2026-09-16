@@ -1491,7 +1491,11 @@ The reading itself is cheap and local. A runner is an ordinary container under
 the same Docker daemon and storage driver as the sandboxes, so OverlayFS's
 `statfs` semantics make `os.statvfs("/")` inside it describe the upper layer's
 filesystem — the disk the writable layers are on. No host mount, no Docker
-query, no child process.
+query, no child process. The figures are `df`'s: `used` is `total - free`,
+`available` is what an unprivileged writer may still use, and the percentage is
+taken over `used + available`. The blocks the filesystem reserves for root that
+are still free are in neither figure — which is why the two do not add up to
+the total, and why `total - available` is not used space.
 
 **Why a deployment has to attest it first.** Docker's `overlay2.size` (and a
 container's `--storage-opt size=`) is implemented with ext4/XFS project quotas,

@@ -130,7 +130,12 @@ export interface AgentHostCapacity {
   storage_free_bytes?: number | null;
   /** `f_bavail`: what an unprivileged writer may still use. Excludes reserved blocks. */
   storage_available_bytes?: number | null;
-  /** total - free, which counts the reserved blocks as used space. */
+  /**
+   * `total - free`: the blocks actually in use. The reserved-but-unused
+   * blocks are in neither this figure nor `available` — they are free, just
+   * not to an unprivileged writer — which is why used plus available need
+   * not add up to the total.
+   */
   storage_used_bytes?: number | null;
   /**
    * `100 × used / (used + available)`, the denominator GNU `df` prints, and

@@ -300,10 +300,11 @@ function optionalBytes(value: number | null | undefined): number | null {
  * are block space in `df` terms, and the differences are the ones a reader has
  * to be told about rather than left to infer:
  *
- *   * `used` counts reserved blocks (it is total minus `free`), while the
- *     second line is `available`, which does not include them. The two lines
- *     are therefore not a partition, and the tooltip says so — computing used
- *     as `total - available` would overstate it by the reservation;
+ *   * `used` is `total - free`, and the root reserve that is still free sits
+ *     outside both it and `available` — free, but not to an unprivileged
+ *     writer. The two lines are therefore not a partition, and the tooltip
+ *     says so: computing used as `total - available` would count that unused
+ *     reserve as written space;
  *   * the percentage is GNU `df`'s, and rounds up, unlike CPU and memory;
  *   * available space picks its own unit, so a nearly full terabyte disk does
  *     not report `0 TiB` still writable when the answer is 40 GiB.
@@ -375,11 +376,12 @@ function storageTitle(capacity: AgentHostCapacity): string {
     `Block space of the filesystem holding the sandboxes' writable layers${
       target ? `, the filesystem mounted at ${target}` : ''
     }.`,
-    // Both clauses are one sentence on purpose: saying `used` counts reserved
-    // blocks without saying `available` does not is the half that leaves a
-    // reader adding the two lines up and finding the total.
-    'The percentage is used / (used + available): used counts the blocks the filesystem reserves for ' +
-      'root, and available does not, so used plus available need not equal the total.',
+    // One sentence on purpose: the reader's question is why the two lines do
+    // not add up to the total, and the answer is a third quantity — the
+    // reserve — that neither line counts.
+    'The percentage is used / (used + available), as GNU df prints it: used is total minus free, and ' +
+      'the reserved blocks that are still free are in neither figure, so used plus available need ' +
+      'not equal the total.',
     // The same fact the CPU and memory charts state in the panel, said here
     // because this metric has no chart of its own: the column is a reading of
     // now, not a trend, and a disk filling over days is not something a
