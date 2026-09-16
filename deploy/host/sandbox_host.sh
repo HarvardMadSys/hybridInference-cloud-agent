@@ -471,6 +471,370 @@ complete_shared_live_marker() {
   log "shared-live host deployment ${deployment_sha} is ready for control-plane activation"
 }
 
+# ── Storage probe attestation ─────────────────────────────────────────
+#
+# The admin page may say how full the filesystem holding sandbox writable
+# layers is, but only about the right filesystem. The runner reads its own root
+# filesystem — an overlay whose upper layer sits on that disk — and OverlayFS
+# makes `statvfs("/")` describe the upper layer's filesystem. What it cannot
+# tell is whether that filesystem is the disk or a project quota on it: Docker's
+# `overlay2.size` (and a container's `--storage-opt size=`) is implemented as
+# one, and a quota makes the container *and* `df <upperdir>` report the quota,
+# with the same device number, so comparing the two proves nothing.
+#
+# The comparison that does prove something is against the **mount root** of the
+# filesystem containing the upper directory, which no container directory's
+# project covers. This section runs that comparison per replica and writes the
+# result to a file the runner reads every sampling round.
+#
+# **Nothing here is fatal.** A page that cannot say how full a disk is must not
+# be able to stop the work that fills it, so every failure below is a warning
+# and an `unverified` entry. The one exception is the verdict file itself,
+# which is a bind-mount source: without it the runner containers cannot start
+# at all, and failing there names the problem instead of letting Compose's own
+# error do it.
+
+# The diagnostic band's floor. Occupancy moves between the two reads — builds
+# and cleanup interleave, and nothing pauses the world for monitoring — so
+# `used` and `available` are compared within a tolerance and only as a
+# diagnosis. `size` does not move under writes, and it is the actual test.
+STORAGE_DIAGNOSTIC_FLOOR_BYTES=$((1024 * 1024 * 1024))
+
+storage_verdict_file() {
+  # Beside .shared-live-ready and .deployed-sha, for the same reason: the
+  # deployment user owns this checkout, and each runner mounts the file
+  # read-only rather than needing access to credentials or host state.
+  printf '%s/.storage-probe-verdict' "${PWD%/}"
+}
+
+storage_probe_name() {
+  # The deployment declares the topology; the collector never guesses it. An
+  # absent value takes the same default the compose file interpolates.
+  local probe
+  probe="$(env_or_dotenv AGENT_HOST_STORAGE_PROBE)"
+  printf '%s' "${probe:-overlay_root}"
+}
+
+prepare_storage_verdict() {
+  # An empty entry set before `compose up`, overwritten in place after the
+  # checks: every runner holds a read-only file bind of this path, so replacing
+  # the file by rename would leave running replicas reading the old inode.
+  # Fail-closed on purpose — a runner that starts while the checks are still
+  # running reads "unverified", never the previous deployment's verdict.
+  local verdict_file written_at
+  verdict_file="$(storage_verdict_file)"
+  written_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '{"schema_version":1,"written_at":"%s","deployment_sha":"%s","entries":{}}\n' \
+    "$written_at" "${AGENT_DEPLOYMENT_SHA:-}" >"$verdict_file" \
+    || die "could not write the storage-probe verdict to $verdict_file"
+  chmod 0644 "$verdict_file" \
+    || die "could not make the storage-probe verdict readable by runner replicas"
+}
+
+storage_quota_configured() {
+  # Best effort, and known to be: `df` cannot distinguish a project quota on
+  # the mount root itself from the disk, so the configuration is checked as
+  # well. `overlay2.size` is the only quota this deployment can impose.
+  #
+  # The bracket in the pattern is load-bearing: `ps` snapshots the grep process
+  # too, and a pattern spelled with a literal dot would match its own command
+  # line and report a quota on every host.
+  local daemon_json="${DOCKER_DAEMON_JSON:-/etc/docker/daemon.json}"
+  if [[ -r "$daemon_json" ]] && grep -q 'overlay2[.]size' "$daemon_json" 2>/dev/null; then
+    return 0
+  fi
+  if ps -eo args= 2>/dev/null | grep -q -- 'overlay2[.]size'; then
+    return 0
+  fi
+  return 1
+}
+
+storage_df_size() {
+  # Bytes of the filesystem containing a path, as GNU df reports it. `-B1`
+  # with `--output=size` prints one exact integer: no human rounding, and no
+  # dependence on the terminal's idea of a block. Prints nothing when df
+  # cannot answer, so the caller can tell "no answer" from a real zero.
+  local value
+  value="$(df -B1 --output=size "$1" 2>/dev/null | tail -n1 | tr -d '[:space:]' || true)"
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+  printf '%s' "$value"
+}
+
+storage_describe_fields() {
+  # One separator-delimited line for a describe document: ok, reason, upperdir,
+  # fstype, total, free, available.
+  #
+  # The separator is ASCII unit separator (0x1f), not a tab, and that is not
+  # decoration: a tab is IFS *whitespace*, so `read` collapses runs of it and
+  # an empty field — a null reason, say — would silently shift every field
+  # after it. A non-whitespace separator preserves empty fields, which matters
+  # because the reader below indexes them by position.
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8", errors="replace") as handle:
+        document = json.load(handle)
+except (OSError, ValueError):
+    document = {}
+if not isinstance(document, dict):
+    document = {}
+
+
+def text(name):
+    value = document.get(name)
+    return "" if value is None else str(value)
+
+
+print(
+    "\x1f".join(
+        [
+            "1" if document.get("ok") else "0",
+            text("reason"),
+            text("upperdir"),
+            text("fstype"),
+            text("total_bytes") or "0",
+            text("free_bytes") or "0",
+            text("available_bytes") or "0",
+        ]
+    )
+)
+PY
+}
+
+storage_usage_agrees() {
+  # Compare the container's occupancy figures with the host's, up to three
+  # times, and print a note describing the last discrepancy. Returns 0 when the
+  # two agree within max(1 GiB, 1% of the size).
+  #
+  # Used and available are diagnostics rather than a topology test: they move
+  # between the two reads because builds and cleanup interleave, so requiring
+  # equality would fail on any busy host. A monotonic assumption is not
+  # available either — nothing here pauses the world for monitoring.
+  local id="$1" mount_root="$2" size="$3" attempt tolerance
+  local container_used container_avail host_used host_avail delta_used delta_avail
+  local note="the reading could not be taken" container_line host_line
+  tolerance=$(( size / 100 ))
+  if (( tolerance < STORAGE_DIAGNOSTIC_FLOOR_BYTES )); then
+    tolerance="$STORAGE_DIAGNOSTIC_FLOOR_BYTES"
+  fi
+  for attempt in 1 2 3; do
+    container_line="$(
+      docker exec "$id" python -m cloud_agent_host.host_capacity describe 2>/dev/null \
+        | python3 -c 'import json, sys
+try:
+    reading = json.load(sys.stdin)
+except ValueError:
+    reading = {}
+print(
+    int(reading.get("total_bytes") or 0) - int(reading.get("free_bytes") or 0),
+    int(reading.get("available_bytes") or 0),
+)' || true
+    )"
+    host_line="$(df -B1 --output=used,avail "$mount_root" 2>/dev/null | tail -n1 || true)"
+    read -r container_used container_avail <<<"$container_line" || true
+    read -r host_used host_avail <<<"$host_line" || true
+    container_used="${container_used:-0}"
+    container_avail="${container_avail:-0}"
+    host_used="${host_used:-0}"
+    host_avail="${host_avail:-0}"
+    if [[ ! "$container_used" =~ ^[0-9]+$ || ! "$container_avail" =~ ^[0-9]+$ \
+       || ! "$host_used" =~ ^[0-9]+$ || ! "$host_avail" =~ ^[0-9]+$ ]]; then
+      note="one of the two readings was not numeric"
+    else
+      delta_used=$(( container_used - host_used ))
+      delta_avail=$(( container_avail - host_avail ))
+      if (( delta_used < 0 )); then delta_used=$(( -delta_used )); fi
+      if (( delta_avail < 0 )); then delta_avail=$(( -delta_avail )); fi
+      note="used differs by ${delta_used} B and available by ${delta_avail} B (tolerance ${tolerance} B)"
+      if (( delta_used <= tolerance && delta_avail <= tolerance )); then
+        printf '%s' "$note"
+        return 0
+      fi
+    fi
+    if (( attempt < 3 )); then
+      sleep 2
+    fi
+  done
+  printf '%s' "$note"
+  return 1
+}
+
+append_storage_entry() {
+  # Key, verdict, mount root, filesystem type, size and reason; the file last.
+  local key="$1" verdict="$2" mount_root="$3" fstype="$4" size="$5" reason="$6" file="$7"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$key" "$verdict" "$mount_root" "$fstype" "$size" "$reason" >>"$file"
+}
+
+verify_storage_probe() {
+  # Attest every replica's storage reading and write the verdict document.
+  #
+  # Takes the attestation directory and the runner ids from
+  # check_shared_live_stack, which has already proven the replicas are alive —
+  # a verdict about a container that is not running would be about nothing.
+  local attest_dir="$1" runner_ids="$2"
+  local entries_file verdict_file id index storage_rc ok reason upperdir fstype
+  local total upper_size root_size host_fstype note verdict
+  local -a ids=() pids=()
+
+  if [[ "$(storage_probe_name)" == "off" ]]; then
+    log "storage measurement is switched off; runners report it as disabled"
+    return 0
+  fi
+  if [[ -z "$runner_ids" ]]; then
+    warn "no runner replica is available to attest storage against"
+    return 0
+  fi
+
+  # Asked in parallel and through the same command the runner samples with: a
+  # shell re-implementation could agree with itself while both differ from
+  # what the heartbeat will carry.
+  for id in $runner_ids; do
+    (
+      storage_rc=0
+      docker exec "$id" python -m cloud_agent_host.host_capacity describe \
+        >"${attest_dir}/${id}.storage.json" 2>"${attest_dir}/${id}.storage.stderr" \
+        || storage_rc=$?
+      printf '%s' "${storage_rc}" >"${attest_dir}/${id}.storage.status"
+    ) &
+    ids+=("$id")
+    pids+=("$!")
+  done
+  for index in "${!pids[@]}"; do
+    wait "${pids[index]}" || true
+  done
+
+  entries_file="${attest_dir}/storage-entries.tsv"
+  : >"$entries_file"
+  for index in "${!ids[@]}"; do
+    id="${ids[index]}"
+    if [[ "$(cat "${attest_dir}/${id}.storage.status" 2>/dev/null || true)" != "0" ]]; then
+      warn "runner $id could not run the storage probe description; leaving its storage unverified"
+      continue
+    fi
+    ok=""; reason=""; upperdir=""; fstype=""; total=""
+    # The two free-space fields are deliberately dropped here: occupancy is
+    # compared by storage_usage_agrees below, under a tolerance, and reading
+    # them into names nobody reads is how a stricter check than the design's
+    # gets added by accident.
+    # shellcheck disable=SC2034
+    IFS=$'\037' read -r ok reason upperdir fstype total ignored_free ignored_avail \
+      < <(storage_describe_fields "${attest_dir}/${id}.storage.json") || true
+    if [[ "$ok" != "1" || -z "$upperdir" ]]; then
+      # No entry is written: the runner reaches the same conclusion on its own,
+      # and reporting it "unsupported" here would speak for a probe that has
+      # not been asked. A reason of `source_unavailable` may be transient.
+      warn "runner $id cannot describe its storage filesystem (${reason:-no reason}); it will report no reading"
+      continue
+    fi
+
+    # The mount root, not the upper directory: a project quota on the upper
+    # directory's project returns the quota from both, so the two would agree
+    # while neither describes the disk.
+    root_size=""
+    mount_root="$(findmnt -n -o TARGET -T "$upperdir" 2>/dev/null | head -n1 || true)"
+    # The filesystem type recorded in the verdict is the *host's*, not the
+    # container's: inside the container `/` is an overlay, and the entry is
+    # meant to name the filesystem the writable layers actually live on.
+    host_fstype="$(findmnt -n -o FSTYPE -T "$upperdir" 2>/dev/null | head -n1 || true)"
+    if [[ -z "$host_fstype" ]]; then
+      host_fstype="$fstype"
+    fi
+    if [[ -z "$mount_root" || "$mount_root" != /* ]]; then
+      verdict="unverified"
+      append_storage_entry "$upperdir" "$verdict" "" "$host_fstype" "$total" \
+        "the host could not locate the filesystem containing ${upperdir}" "$entries_file"
+      warn "runner $id: findmnt could not locate the filesystem containing ${upperdir}"
+      continue
+    fi
+    root_size="$(storage_df_size "$mount_root")"
+    if [[ -z "$root_size" ]]; then
+      append_storage_entry "$upperdir" "unverified" "$mount_root" "$host_fstype" "$total" \
+        "df could not size ${mount_root} on the host" "$entries_file"
+      warn "runner $id: df could not size ${mount_root}"
+      continue
+    fi
+    if storage_quota_configured; then
+      append_storage_entry "$upperdir" "unsupported" "$mount_root" "$host_fstype" "$root_size" \
+        "the Docker daemon is configured with overlay2.size, so this reading is a project quota" \
+        "$entries_file"
+      warn "runner $id: daemon configuration sets overlay2.size; storage capacity would be a quota, not the disk"
+      continue
+    fi
+    upper_size="$(storage_df_size "$upperdir")"
+    if [[ "$upper_size" != "$root_size" ]]; then
+      append_storage_entry "$upperdir" "unsupported" "$mount_root" "$host_fstype" "$root_size" \
+        "df reports ${upper_size:-no} B for ${upperdir} but ${root_size} B for its mount root, which is a project quota" \
+        "$entries_file"
+      warn "runner $id: the upper directory and its mount root disagree on size; treating the topology as unsupported"
+      continue
+    fi
+    if [[ "$total" != "$root_size" ]]; then
+      # `size` is the hard criterion: it does not move under writes, so a
+      # mismatch means the container is not looking at the filesystem the host
+      # just measured.
+      append_storage_entry "$upperdir" "unsupported" "$mount_root" "$host_fstype" "$root_size" \
+        "the container reports ${total} B for its root filesystem but the host reports ${root_size} B for ${mount_root}" \
+        "$entries_file"
+      warn "runner $id: the container and the host disagree on the filesystem's size; treating the topology as unsupported"
+      continue
+    fi
+    if note="$(storage_usage_agrees "$id" "$mount_root" "$root_size")"; then
+      append_storage_entry "$upperdir" "verified" "$mount_root" "$host_fstype" "$root_size" "" "$entries_file"
+      log "runner $id: storage verified against ${mount_root} (${fstype}, ${root_size} B)"
+    else
+      append_storage_entry "$upperdir" "unverified" "$mount_root" "$fstype" "$root_size" \
+        "the container's occupancy never matched the host's: ${note}" "$entries_file"
+      warn "runner $id: occupancy readings did not agree; ${note}"
+    fi
+  done
+
+  verdict_file="$(storage_verdict_file)"
+  python3 - "$entries_file" "$verdict_file" "${AGENT_DEPLOYMENT_SHA:-}" <<'PY'
+import datetime
+import json
+import sys
+
+entries_file, verdict_file, deployment_sha = sys.argv[1:4]
+entries = {}
+with open(entries_file, encoding="utf-8") as handle:
+    for line in handle:
+        key, _, rest = line.rstrip("\n").partition("\t")
+        verdict, _, rest = rest.partition("\t")
+        mount_root, _, rest = rest.partition("\t")
+        fstype, _, rest = rest.partition("\t")
+        size, _, reason = rest.partition("\t")
+        if not key or not verdict:
+            continue
+        entries[key] = {
+            "verdict": verdict,
+            "mount_root": mount_root or None,
+            "fstype": fstype or None,
+            "size_bytes": int(size) if size.isdigit() else None,
+            "reason": reason or None,
+        }
+
+written_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+document = {
+    "schema_version": 1,
+    "written_at": written_at,
+    "deployment_sha": deployment_sha,
+    "entries": entries,
+}
+# Overwritten in place, never renamed: each runner holds a read-only file bind,
+# so a new inode would be a file nobody is reading.
+with open(verdict_file, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, sort_keys=True)
+    handle.write("\n")
+PY
+  chmod 0644 "$verdict_file" || warn "could not relax the storage verdict's permissions"
+  log "storage verdict written to ${verdict_file} ($(wc -l <"$entries_file" | tr -d '[:space:]') entries)"
+}
+
 probe_sandbox_relay() {
   local network="$1" url="$2" label="$3" deadline="$4" diagnostic="$5"
   local relay_service="$6" relay_id relay_ip relay_host
@@ -671,6 +1035,11 @@ check_shared_live_stack() {
     done
     die "$(printf '%s\n' "${verdicts[@]}")"
   fi
+  # Storage attestation, after the capability verdicts and before the directory
+  # it uses is cleaned up. Deliberately not part of the fatal set above: see the
+  # section comment — a metric that cannot be established is not a reason to
+  # keep a working host out of the pool.
+  verify_storage_probe "$ATTEST_DIR" "$runner_ids"
   cleanup_attest_dir
 
   # Capability attestation proves the runner is configured to dial the broker;
@@ -922,6 +1291,11 @@ cmd_up() {
   fi
   check_candidate
   prepare_shared_live_marker
+  # Beside the readiness marker and before `up`: every runner has a read-only
+  # bind of this file, and the empty entry set it starts from is what makes a
+  # container that comes up before the checks finish report `unverified`
+  # instead of the previous deployment's reading.
+  prepare_storage_verdict
   if [[ -n "$(compose ps -q runner 2>/dev/null || true)" ]]; then
     log "draining existing runners before replacing their workspace broker"
     compose stop runner

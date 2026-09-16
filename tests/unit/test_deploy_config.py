@@ -651,6 +651,41 @@ def test_runner_receives_exact_sha_rollout_metadata(compose: dict) -> None:
     assert any("AGENT_HOST_STATE_ROOT" in str(mount) for mount in runner["volumes"])
 
 
+def test_runner_mounts_the_storage_verdict_read_only(compose: dict) -> None:
+    """The attested topology reaches the runner as a file it may only read.
+
+    `create_host_path: false` is load-bearing here: a host that has never run
+    the storage attestation must fail loudly at container start instead of
+    coming up with an empty directory it would report as "unverified" forever,
+    which is indistinguishable from a topology that genuinely cannot be
+    measured.
+    """
+    runner = compose["services"]["runner"]
+    env = runner["environment"]
+
+    assert env["AGENT_HOST_STORAGE_PROBE"] == "${AGENT_HOST_STORAGE_PROBE:-overlay_root}"
+    mount = next(
+        mount
+        for mount in runner["volumes"]
+        if isinstance(mount, dict)
+        and mount.get("target") == "/run/cloud-agent/storage-probe-verdict"
+    )
+    assert mount["type"] == "bind"
+    assert mount["read_only"] is True
+    assert mount["bind"]["create_host_path"] is False
+    compose_dir = REPO_ROOT / "deploy/host"
+    assert (compose_dir / mount["source"]).resolve() == REPO_ROOT / ".storage-probe-verdict"
+
+
+def test_the_storage_probe_is_documented_and_kept_out_of_git() -> None:
+    """The verdict is deployment metadata, like the readiness marker beside it."""
+    assert (
+        "AGENT_HOST_STORAGE_PROBE=overlay_root"
+        in (REPO_ROOT / "deploy/host/.env.example").read_text()
+    )
+    assert ".storage-probe-verdict" in (REPO_ROOT / ".gitignore").read_text()
+
+
 def test_staging_deploy_runs_both_halves_in_parallel_with_a_runtime_fence() -> None:
     """Actions overlap, while deploy.sh still proves the target host before rollout."""
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-staging.yml").read_text())

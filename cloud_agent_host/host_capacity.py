@@ -29,6 +29,19 @@ would make monitoring a lifecycle writer. This module makes one ``container
 ls`` with a JSON Go template and no inspection at all — no ``--size``, no
 ``--all``-plus-inspect, no ``stats``, nothing that writes.
 
+**Why storage is read from this container's own root, and why a file gates it.**
+The sandbox writable layers live on the filesystem the Docker storage driver
+keeps its upper directories on. This runner is an ordinary container under that
+same daemon and driver, so ``overlay``'s ``statfs`` semantics make
+``os.statvfs("/")`` that filesystem — no host mount, no Docker query, no child
+process. The catch is that a *plausible* number is not a *verified* one: a
+project quota on the upper directory returns the quota rather than the disk, and
+a container that reads its quota would report a 10 GiB ceiling as though it were
+the machine's capacity. So the number is withheld unless the deployment has
+attested the topology and written that verdict to a file the runner reads each
+round; an absent, stale or mismatched verdict reports ``unverified`` rather than
+a value. See ``docs/specs/2026-09-15-admin-server-storage-capacity-design.zh-CN.md``.
+
 **Why a daemon thread.** The heartbeat is this host's liveness signal, and a
 Docker daemon under load can take seconds to answer. Sampling on its own thread
 and publishing only the latest result keeps a slow Docker out of the heartbeat
@@ -55,13 +68,14 @@ import os
 import selectors
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
 from cloud_agent_host.logging_utils import get_logger
 
@@ -82,6 +96,47 @@ SOURCE: Final = "linux_host_proc_and_docker_list"
 #: the compose file mounts the proc files, and an operator who did not ask for
 #: the feature off should get it.
 ENV_CAPACITY_ENABLED = "AGENT_HOST_CAPACITY_ENABLED"
+
+#: Which storage probe this deployment declared. The deployment script knows
+#: the topology — which driver keeps the writable layers, and where — and this
+#: module never guesses it: a value it does not recognize reports
+#: ``unsupported`` rather than silently measuring whatever ``/`` happens to be.
+#: Absent means the one probe this version ships, matching the compose file's
+#: own default.
+ENV_STORAGE_PROBE = "AGENT_HOST_STORAGE_PROBE"
+STORAGE_PROBE_OVERLAY_ROOT = "overlay_root"
+STORAGE_PROBE_OFF = "off"
+
+#: Identity of the only probe in this version: the runner's root filesystem,
+#: which is an overlay whose upper layer sits on the sandbox writable layer's
+#: filesystem. A new probe is a new value here, not a new protocol version.
+STORAGE_SOURCE_OVERLAY_ROOT: Final = "linux_overlay_root_statvfs"
+
+#: Where the deployment writes the topology verdict it reached, and what the
+#: runner reads instead of trusting its own reading. A file bind mount follows
+#: the inode, so the writer must overwrite in place. The path is a contract with
+#: the host compose file, exactly like ``DEFAULT_PROC_ROOT``.
+DEFAULT_STORAGE_VERDICT_PATH = "/run/cloud-agent/storage-probe-verdict"
+VERDICT_SCHEMA_VERSION: Final = 1
+VERDICT_VERIFIED: Final = "verified"
+
+#: The verdict document's ceiling. Small on purpose: it holds one short record
+#: per runner replica, and a file larger than this is not the file that was
+#: written — it is read on the heartbeat's own thread every cycle.
+VERDICT_MAX_BYTES = 16 * 1024
+
+#: The wire range of the three block-space figures, stated once. Anything
+#: outside it — a negative, an ordering that cannot happen, a value a
+#: JavaScript client cannot hold exactly — is not a reading to be forwarded.
+MAX_STORAGE_BYTES: Final = 2**53 - 1
+
+#: The mount table of this container, which is where an overlay's upper layer is
+#: named. Read, never parsed as a general mount table: this module looks for the
+#: one record whose mount point is ``/``.
+MOUNTINFO_PATH = "/proc/self/mountinfo"
+CONTAINER_ROOT = "/"
+OVERLAY_FSTYPE: Final = "overlay"
+UPPERDIR_OPTION: Final = "upperdir="
 
 #: Where the compose file mounts the three host proc files. Not configurable
 #: through the environment on purpose: this path is a contract with the host
@@ -139,6 +194,15 @@ CPU_MISSING_SOURCE_UNAVAILABLE: Final = "source_unavailable"
 CPU_MISSING_INVALID_SAMPLE: Final = "invalid_sample"
 MEMORY_MISSING_SOURCE_UNAVAILABLE: Final = "source_unavailable"
 MEMORY_MISSING_INVALID_SAMPLE: Final = "invalid_sample"
+
+#: Missing-measurement vocabulary for storage. The first four are the runner's
+#: to produce; ``invalid_sample`` is the control plane's verdict on a sub-block
+#: that failed validation, and ``not_reported`` is what an older runner's
+#: silence reads as. Every member is explained on the page, so this is closed.
+STORAGE_MISSING_DISABLED: Final = "disabled"
+STORAGE_MISSING_UNSUPPORTED: Final = "unsupported"
+STORAGE_MISSING_UNVERIFIED: Final = "unverified"
+STORAGE_MISSING_SOURCE_UNAVAILABLE: Final = "source_unavailable"
 
 #: Inventory outcomes.
 INVENTORY_AVAILABLE = "available"
@@ -344,6 +408,535 @@ def parse_boot_id(text: str) -> str | None:
         return str(uuid.UUID(text.strip()))
     except (ValueError, AttributeError):
         return None
+
+
+# ── Storage: the filesystem holding sandbox writable layers ────────────
+
+
+@dataclass(frozen=True)
+class StorageUsage:
+    """Used block space derived from a total/free/available triple.
+
+    Attributes:
+        used_bytes: ``total - free``, the figure GNU ``df`` prints.
+        used_percent: ``used_bytes`` over ``used_bytes + available_bytes``.
+    """
+
+    used_bytes: int
+    used_percent: float
+
+
+def storage_bytes_in_range(*, total_bytes: int, free_bytes: int, available_bytes: int) -> bool:
+    """Whether a block-space triple is transmissible at all.
+
+    ``available <= free <= total`` is a fact about filesystems rather than a
+    sanity margin: ``free`` counts the blocks reserved for root and
+    ``available`` does not, so a triple that breaks the relation came from
+    something this code cannot describe. A zero total is inside the wire range
+    — an empty pseudo-filesystem is a real answer — but it yields no usage,
+    because there is no denominator to take a percentage of.
+
+    Args:
+        total_bytes: Filesystem size in bytes.
+        free_bytes: Free bytes, reserve included.
+        available_bytes: Free bytes an unprivileged writer may use.
+
+    Returns:
+        ``True`` when the triple fits the protocol's range and ordering.
+    """
+    return 0 <= available_bytes <= free_bytes <= total_bytes <= MAX_STORAGE_BYTES
+
+
+def storage_usage(
+    *, total_bytes: int | None, free_bytes: int | None, available_bytes: int | None
+) -> StorageUsage | None:
+    """Return used block space in the ``df`` sense, or ``None``.
+
+    The shared formula, mirroring :func:`memory_usage`: the runner's live value
+    and the admin page's stored value come through here, so the two cannot
+    disagree. The three inputs are not interchangeable, and used is *not*
+    ``total - available``: ``available`` excludes the reserve, so that
+    subtraction would report every healthy filesystem as partly full with
+    blocks nobody wrote.
+
+    Args:
+        total_bytes: Filesystem size in bytes.
+        free_bytes: Free bytes, reserve included.
+        available_bytes: Free bytes an unprivileged writer may use.
+
+    Returns:
+        The derived usage, or ``None`` when the triple is absent, outside the
+        wire range, or has no denominator — a filesystem whose every block is
+        reserved and none of them written. Callers render ``None`` as
+        ``invalid_sample``, never as zero.
+    """
+    if total_bytes is None or free_bytes is None or available_bytes is None:
+        return None
+    if not storage_bytes_in_range(
+        total_bytes=total_bytes, free_bytes=free_bytes, available_bytes=available_bytes
+    ):
+        return None
+    if total_bytes <= 0:
+        return None
+    used_bytes = total_bytes - free_bytes
+    denominator = used_bytes + available_bytes
+    if denominator <= 0:
+        return None
+    return StorageUsage(used_bytes=used_bytes, used_percent=100.0 * used_bytes / denominator)
+
+
+@dataclass(frozen=True)
+class StorageSample:
+    """One usable reading of the filesystem that holds writable layers.
+
+    Attributes:
+        total_bytes: Filesystem size.
+        free_bytes: Free bytes, reserve included.
+        available_bytes: Free bytes an unprivileged writer may use.
+        target: Human-readable label for what was measured — the host mount
+            root the deployment attested. A label for the tooltip, never
+            something any logic branches on.
+    """
+
+    total_bytes: int
+    free_bytes: int
+    available_bytes: int
+    target: str | None = None
+
+
+@dataclass(frozen=True)
+class StorageMissing:
+    """Why this round produced no storage reading."""
+
+    reason: Literal["disabled", "unsupported", "unverified", "source_unavailable"]
+
+
+class StatvfsReading(Protocol):
+    """The four ``statvfs`` fields a block-space reading needs."""
+
+    f_frsize: int
+    f_blocks: int
+    f_bfree: int
+    f_bavail: int
+
+
+class StorageProbe(Protocol):
+    """What the collector is allowed to know about a storage measurement.
+
+    One identifier and one method. A different host type, driver or storage
+    backend is a new implementation of this protocol with a new ``source`` —
+    not a new field on the wire, and never a branch in the page.
+    """
+
+    source: str
+
+    def sample(self) -> StorageSample | StorageMissing:
+        """Return this round's reading, or why there is none."""
+        ...
+
+
+@dataclass(frozen=True)
+class RootMount:
+    """The mountinfo record for the container's own ``/``.
+
+    Attributes:
+        fstype: The filesystem type the record names.
+        upperdir: The overlay upper directory, when the record names one.
+        mount_point: The record's mount point, always ``/`` here.
+    """
+
+    fstype: str
+    upperdir: str | None
+    mount_point: str
+
+
+def find_root_mount(text: str) -> RootMount | None:
+    r"""Find the mountinfo record whose mount point is ``/``, or ``None``.
+
+    Deliberately not a mount-table parser: one line is selected by mount point,
+    and three fields are read off it. Escape sequences (``\\040`` and friends)
+    are left exactly as written, because the value is a lookup key shared with
+    the deployment script, which extracts the same substring the same way — an
+    unescaping difference would make the runner and the verdict disagree about
+    a path that is, byte for byte, identical.
+
+    Args:
+        text: Contents of a ``mountinfo`` file.
+
+    Returns:
+        The root record, or ``None`` when no record has ``/`` as its mount
+        point or the record is too short to carry a filesystem type.
+    """
+    for line in text.splitlines():
+        fields = line.split(" ")
+        if len(fields) < 7 or fields[4] != CONTAINER_ROOT:
+            continue
+        try:
+            separator = fields.index("-")
+        except ValueError:
+            return None
+        # The separator is followed by fstype, source and super options.
+        if separator + 3 >= len(fields):
+            return None
+        upperdir: str | None = None
+        for option in fields[separator + 3].split(","):
+            if option.startswith(UPPERDIR_OPTION):
+                upperdir = option[len(UPPERDIR_OPTION) :] or None
+                break
+        return RootMount(fstype=fields[separator + 1], upperdir=upperdir, mount_point=fields[4])
+    return None
+
+
+def root_overlay_upperdir(text: str) -> str | None:
+    """Return the upper directory behind this container's ``/``, or ``None``.
+
+    The kernel's ``ovl_statfs`` resolves the overlay root to its upper layer
+    before asking the underlying filesystem for its statistics, which is the
+    whole reason a runner can answer "how full is the sandbox writable layer's
+    disk" about itself. The reverse is also true and is why this exists: on a
+    container whose root is *not* such an overlay, the same call would describe
+    some other filesystem, so the reading is refused instead.
+
+    Args:
+        text: Contents of a ``mountinfo`` file.
+
+    Returns:
+        The upper directory, or ``None`` when the root is not an overlay or
+        carries no upper layer.
+    """
+    mount = find_root_mount(text)
+    if mount is None or mount.fstype != OVERLAY_FSTYPE:
+        return None
+    return mount.upperdir
+
+
+@dataclass(frozen=True)
+class StorageVerdictEntry:
+    """One attested topology, as the deployment's script recorded it.
+
+    Attributes:
+        verdict: ``verified``, ``unsupported`` or ``unverified``. An unknown
+            value is treated as ``unverified`` by the reader.
+        mount_root: Host mount root of the filesystem that was measured.
+        size_bytes: The size the host's ``df`` reported for that mount root.
+        reason: Human-readable detail for the deployment log.
+    """
+
+    verdict: str
+    mount_root: str | None = None
+    size_bytes: int | None = None
+    reason: str | None = None
+
+
+def parse_storage_verdict(text: str) -> dict[str, StorageVerdictEntry] | None:
+    """Parse the deployment's verdict document, or ``None`` when unusable.
+
+    Args:
+        text: The file's contents, already length-checked by the caller.
+
+    Returns:
+        Entries keyed by the runner's own upper directory. ``None`` means the
+        document cannot be trusted at all — not JSON, not an object, an unknown
+        schema version, or an ``entries`` member that is not an object. Every
+        one of those makes the caller report ``unverified``: an unreadable
+        attestation is not an attestation, and the failure direction of a
+        monitoring field has to be silence rather than a number. A single
+        malformed *entry* is skipped instead, so a corrupt row for a sibling
+        replica cannot take this one's verdict away.
+    """
+    try:
+        document = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    if document.get("schema_version") != VERDICT_SCHEMA_VERSION:
+        return None
+    raw_entries = document.get("entries")
+    if not isinstance(raw_entries, dict):
+        return None
+    entries: dict[str, StorageVerdictEntry] = {}
+    for key, raw in raw_entries.items():
+        if not isinstance(key, str) or not isinstance(raw, dict):
+            continue
+        verdict = raw.get("verdict")
+        if not isinstance(verdict, str):
+            continue
+        size = raw.get("size_bytes")
+        if isinstance(size, bool) or not isinstance(size, int):
+            size = None
+        mount_root = raw.get("mount_root")
+        reason = raw.get("reason")
+        entries[key] = StorageVerdictEntry(
+            verdict=verdict,
+            mount_root=mount_root if isinstance(mount_root, str) and mount_root else None,
+            size_bytes=size,
+            reason=reason if isinstance(reason, str) else None,
+        )
+    return entries
+
+
+class OverlayRootStorageProbe:
+    """Read this runner's root filesystem, and report it only when attested.
+
+    The order of the checks is the design's, and each step fails closed:
+
+    1. ``/`` is not an overlay with an upper layer → ``unsupported``; there is
+       no claim to make about this container.
+    2. ``statvfs`` raised, or returned a triple outside the wire range →
+       ``source_unavailable``.
+    3. the verdict file is absent, unreadable, oversized or unusable → the
+       number is withheld as ``unverified``.
+    4. no entry for *this* upper directory → ``unverified``. A rebuilt
+       container gets a new upper directory, so the previous attestation stops
+       applying on its own; nothing here expires by time.
+    5. the entry says ``unsupported``/``unverified`` → that reason.
+    6. the entry's ``size_bytes`` no longer matches what ``statvfs`` reports →
+       ``unverified``: the filesystem was resized or replaced since the
+       deployment looked at it, and only a new deployment can say what it is
+       now.
+
+    Only then is a reading published, labelled with the attested host mount
+    root. A mountinfo read that fails is ``source_unavailable`` rather than
+    ``unsupported``: the conditions could not be established at all, which is a
+    different statement from having established that they do not hold.
+    """
+
+    source = STORAGE_SOURCE_OVERLAY_ROOT
+
+    def __init__(
+        self,
+        *,
+        verdict_path: str | Path = DEFAULT_STORAGE_VERDICT_PATH,
+        mountinfo_path: str | Path = MOUNTINFO_PATH,
+        root: str = CONTAINER_ROOT,
+        mountinfo_reader: Callable[[], str | None] | None = None,
+        verdict_reader: Callable[[], str | None] | None = None,
+        statvfs: Callable[[str], StatvfsReading] = os.statvfs,
+    ) -> None:
+        """Build the probe.
+
+        Args:
+            verdict_path: File the deployment writes its attestation to.
+            mountinfo_path: This container's mount table.
+            root: The mount point to measure.
+            mountinfo_reader: Test seam replacing the mount-table read.
+            verdict_reader: Test seam replacing the verdict read.
+            statvfs: Test seam replacing the system call.
+        """
+        self._verdict_path = Path(verdict_path)
+        self._mountinfo_path = Path(mountinfo_path)
+        self._root = root
+        self._mountinfo_reader = mountinfo_reader
+        self._verdict_reader = verdict_reader
+        self._statvfs = statvfs
+
+    def sample(self) -> StorageSample | StorageMissing:
+        """Take one reading, or say why there is none."""
+        mountinfo = self._read_mountinfo()
+        if mountinfo is None:
+            return StorageMissing(reason=STORAGE_MISSING_SOURCE_UNAVAILABLE)
+        upperdir = root_overlay_upperdir(mountinfo)
+        if upperdir is None:
+            return StorageMissing(reason=STORAGE_MISSING_UNSUPPORTED)
+        try:
+            reading = self._statvfs(self._root)
+        except OSError:
+            return StorageMissing(reason=STORAGE_MISSING_SOURCE_UNAVAILABLE)
+        total_bytes = reading.f_frsize * reading.f_blocks
+        free_bytes = reading.f_frsize * reading.f_bfree
+        available_bytes = reading.f_frsize * reading.f_bavail
+        if not storage_bytes_in_range(
+            total_bytes=total_bytes, free_bytes=free_bytes, available_bytes=available_bytes
+        ):
+            return StorageMissing(reason=STORAGE_MISSING_SOURCE_UNAVAILABLE)
+        entry = self._verdict_for(upperdir)
+        if entry is None:
+            return StorageMissing(reason=STORAGE_MISSING_UNVERIFIED)
+        if entry.verdict == STORAGE_MISSING_UNSUPPORTED:
+            return StorageMissing(reason=STORAGE_MISSING_UNSUPPORTED)
+        if entry.verdict != VERDICT_VERIFIED:
+            # Includes an unknown verdict from a newer script: a value this
+            # code cannot read is not a value it may publish.
+            return StorageMissing(reason=STORAGE_MISSING_UNVERIFIED)
+        if entry.size_bytes != total_bytes or entry.mount_root is None:
+            return StorageMissing(reason=STORAGE_MISSING_UNVERIFIED)
+        return StorageSample(
+            total_bytes=total_bytes,
+            free_bytes=free_bytes,
+            available_bytes=available_bytes,
+            target=entry.mount_root,
+        )
+
+    def _read_mountinfo(self) -> str | None:
+        """Read the container's mount table, or ``None``."""
+        if self._mountinfo_reader is not None:
+            return self._mountinfo_reader()
+        return _read_text_file(self._mountinfo_path.parent, self._mountinfo_path.name)
+
+    def _read_verdict(self) -> str | None:
+        """Read the deployment's verdict file, or ``None``."""
+        if self._verdict_reader is not None:
+            return self._verdict_reader()
+        return _read_text_file(
+            self._verdict_path.parent, self._verdict_path.name, max_bytes=VERDICT_MAX_BYTES
+        )
+
+    def _verdict_for(self, upperdir: str) -> StorageVerdictEntry | None:
+        """Look this runner's upper directory up in the verdict document."""
+        text = self._read_verdict()
+        if text is None:
+            return None
+        entries = parse_storage_verdict(text)
+        if entries is None:
+            return None
+        return entries.get(upperdir)
+
+
+class UnsupportedStorageProbe:
+    """A probe for a name this version does not implement.
+
+    Reports ``unsupported`` rather than falling back to the root filesystem:
+    the deployment asked for a measurement this code does not know how to take,
+    and measuring something else under that name would be a wrong number
+    wearing the right label.
+    """
+
+    source = "unconfigured"
+
+    def sample(self) -> StorageMissing:
+        """Report that this deployment named a probe this build does not have."""
+        return StorageMissing(reason=STORAGE_MISSING_UNSUPPORTED)
+
+
+def describe_storage_probe(
+    *,
+    mountinfo_path: str | Path = MOUNTINFO_PATH,
+    root: str = CONTAINER_ROOT,
+    statvfs: Callable[[str], StatvfsReading] = os.statvfs,
+) -> dict[str, Any]:
+    """Describe what this runner's probe currently sees, for the deployment.
+
+    The deployment has to compare the container's own reading against the
+    host's ``df``, and it has to be *this* reading: a shell re-implementation
+    could agree with itself while both differ from what the runner reports.
+    Deliberately independent of the verdict file — this is the reading the
+    verdict is about to be derived from, so consulting it here would be
+    circular.
+
+    Args:
+        mountinfo_path: This container's mount table.
+        root: The mount point to measure.
+        statvfs: Test seam replacing the system call.
+
+    Returns:
+        A JSON-safe description. ``ok`` is false when the topology cannot be
+        measured, with ``reason`` naming the missing-measurement vocabulary;
+        when the mount table names a filesystem type, it is reported even on
+        failure, because that is the fact the operator needs in the log.
+    """
+    mount: RootMount | None = None
+    try:
+        mountinfo = Path(mountinfo_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        mountinfo = None
+    if mountinfo is not None:
+        mount = find_root_mount(mountinfo)
+    if mountinfo is None:
+        return _describe_failure(STORAGE_MISSING_SOURCE_UNAVAILABLE, mount)
+    if mount is None or mount.fstype != OVERLAY_FSTYPE or mount.upperdir is None:
+        return _describe_failure(STORAGE_MISSING_UNSUPPORTED, mount)
+    try:
+        reading = statvfs(root)
+    except OSError:
+        return _describe_failure(STORAGE_MISSING_SOURCE_UNAVAILABLE, mount)
+    total_bytes = reading.f_frsize * reading.f_blocks
+    free_bytes = reading.f_frsize * reading.f_bfree
+    available_bytes = reading.f_frsize * reading.f_bavail
+    if not storage_bytes_in_range(
+        total_bytes=total_bytes, free_bytes=free_bytes, available_bytes=available_bytes
+    ):
+        return _describe_failure(STORAGE_MISSING_SOURCE_UNAVAILABLE, mount)
+    return {
+        "ok": True,
+        "reason": None,
+        "fstype": mount.fstype,
+        "upperdir": mount.upperdir,
+        "total_bytes": total_bytes,
+        "free_bytes": free_bytes,
+        "available_bytes": available_bytes,
+    }
+
+
+def _describe_failure(reason: str, mount: RootMount | None) -> dict[str, Any]:
+    """Return the failing shape :func:`describe_storage_probe` promises."""
+    return {
+        "ok": False,
+        "reason": reason,
+        "fstype": None if mount is None else mount.fstype,
+        "upperdir": None if mount is None else mount.upperdir,
+        "total_bytes": None,
+        "free_bytes": None,
+        "available_bytes": None,
+    }
+
+
+def build_storage_probe(
+    environ: Mapping[str, str] | None = None,
+    *,
+    verdict_path: str | Path = DEFAULT_STORAGE_VERDICT_PATH,
+) -> StorageProbe | None:
+    """Return the probe this deployment declared, or ``None`` for ``off``.
+
+    Args:
+        environ: Environment to read; the process environment by default.
+        verdict_path: Where the deployment writes its attestation.
+
+    Returns:
+        The probe, or ``None`` when storage measurement is switched off. An
+        unrecognized name gets a probe that reports ``unsupported``: the
+        deployment named a method this build does not have, and guessing which
+        one it meant is how a page ends up describing the wrong filesystem.
+    """
+    source = os.environ if environ is None else environ
+    raw = (source.get(ENV_STORAGE_PROBE) or "").strip().lower()
+    if raw in {"", STORAGE_PROBE_OVERLAY_ROOT}:
+        return OverlayRootStorageProbe(verdict_path=verdict_path)
+    if raw in {STORAGE_PROBE_OFF, "0", "false", "no", "disabled"}:
+        return None
+    logger.warning(
+        "agent_host_storage_probe_unknown",
+        extra={"event": "agent_host_storage_probe_unknown", "storage_probe": raw[:64]},
+    )
+    return UnsupportedStorageProbe()
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run this module's small command line — currently only ``describe``.
+
+    The deployment script runs it inside each runner to attest the topology, so
+    it prints JSON and never raises: a traceback would read as "the runner is
+    broken" when the honest answer is "this host is not a supported topology".
+
+    Args:
+        argv: Argument vector without the program name; ``sys.argv[1:]`` when
+            omitted.
+
+    Returns:
+        A process exit status. Only a usage error is non-zero; a probe that
+        cannot measure reports ``ok: false`` in its document instead, because
+        the deployment's diagnosis is the JSON.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args[:1] != ["describe"]:
+        print("usage: python -m cloud_agent_host.host_capacity describe", file=sys.stderr)
+        return 2
+    print(json.dumps(describe_storage_probe(), sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - reached through the module CLI
+    raise SystemExit(main())
 
 
 class CommandStatus(StrEnum):
@@ -736,6 +1329,12 @@ class HostMeasurement:
         memory_total_bytes: ``MemTotal``.
         memory_available_bytes: ``MemAvailable``.
         memory_missing_reason: Why the memory figures are absent.
+        storage_total_bytes: Size of the filesystem holding writable layers.
+        storage_free_bytes: Free bytes there, reserve included.
+        storage_available_bytes: Free bytes an unprivileged writer may use.
+        storage_source: Which probe produced the storage reading.
+        storage_target: Attested host mount root of that filesystem.
+        storage_missing_reason: Why the storage figures are absent.
         inventory: The container count.
     """
 
@@ -748,10 +1347,22 @@ class HostMeasurement:
     memory_total_bytes: int | None
     memory_available_bytes: int | None
     memory_missing_reason: str | None
+    storage_total_bytes: int | None
+    storage_free_bytes: int | None
+    storage_available_bytes: int | None
+    storage_source: str | None
+    storage_target: str | None
+    storage_missing_reason: str | None
     inventory: SandboxInventory
 
     def as_payload(self) -> dict[str, Any]:
-        """Return the ``capacity`` block exactly as the heartbeat sends it."""
+        """Return the ``capacity`` block exactly as the heartbeat sends it.
+
+        The storage sub-block is present only when this round produced a
+        reading. ``None`` plus a reason is the honest shape for "there is no
+        number" — copying the previous round's value forward would make a
+        stopped collector look like a live one.
+        """
         return {
             "schema_version": SCHEMA_VERSION,
             "sample_id": self.sample_id,
@@ -762,11 +1373,29 @@ class HostMeasurement:
             "cpu_window_seconds": self.cpu_window_seconds,
             "memory_total_bytes": self.memory_total_bytes,
             "memory_available_bytes": self.memory_available_bytes,
+            "storage": self._storage_payload(),
             "inventory": self.inventory.as_payload(),
             "missing": {
                 "cpu": self.cpu_missing_reason,
                 "memory": self.memory_missing_reason,
+                "storage": self.storage_missing_reason,
             },
+        }
+
+    def _storage_payload(self) -> dict[str, Any] | None:
+        """Return the storage sub-block, or ``None`` when there is no reading."""
+        if self.storage_missing_reason is not None:
+            return None
+        if self.storage_source is None:
+            # A sample without its source cannot be labelled on the wire, and
+            # an unlabelled reading is not one the page may attribute.
+            return None
+        return {
+            "source": self.storage_source,
+            "target": self.storage_target,
+            "total_bytes": self.storage_total_bytes,
+            "free_bytes": self.storage_free_bytes,
+            "available_bytes": self.storage_available_bytes,
         }
 
 
@@ -812,6 +1441,7 @@ class HostCapacityCollector:
         interval_s: float = SAMPLE_INTERVAL_S,
         reader: Callable[[str], str | None] | None = None,
         command_runner: Callable[[Sequence[str]], CommandResult] | None = None,
+        storage_probe: StorageProbe | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """Build a collector.
@@ -824,6 +1454,10 @@ class HostCapacityCollector:
             interval_s: Seconds between samples on the background thread.
             reader: Test seam replacing the proc-file read.
             command_runner: Test seam replacing the bounded child process.
+            storage_probe: The declared storage probe, or ``None`` when this
+                deployment turned storage measurement off. ``None`` is
+                reported as ``disabled`` rather than omitted, so the page can
+                tell a switched-off metric from an old runner's silence.
             clock: Monotonic clock, for sample ages.
         """
         self._namespace = namespace
@@ -832,6 +1466,7 @@ class HostCapacityCollector:
         self._interval_s = interval_s if interval_s > 0 else SAMPLE_INTERVAL_S
         self._reader = reader or self._read_proc
         self._command_runner = command_runner or self._run_docker
+        self._storage_probe = storage_probe
         self._clock = clock
         self._lock = threading.Lock()
         self._measurement: HostMeasurement | None = None
@@ -919,6 +1554,10 @@ class HostCapacityCollector:
             boot_id=boot_id, sampled_at=sampled_at
         )
         total_bytes, available_bytes, memory_reason = self._sample_memory(boot_id=boot_id)
+        storage = self._sample_storage()
+        storage_source = None
+        if isinstance(storage, StorageSample) and self._storage_probe is not None:
+            storage_source = self._storage_probe.source
         inventory = self._sample_inventory()
         measurement = HostMeasurement(
             sample_id=str(uuid.uuid4()),
@@ -930,6 +1569,16 @@ class HostCapacityCollector:
             memory_total_bytes=total_bytes,
             memory_available_bytes=available_bytes,
             memory_missing_reason=memory_reason,
+            storage_total_bytes=None
+            if isinstance(storage, StorageMissing)
+            else storage.total_bytes,
+            storage_free_bytes=None if isinstance(storage, StorageMissing) else storage.free_bytes,
+            storage_available_bytes=(
+                None if isinstance(storage, StorageMissing) else storage.available_bytes
+            ),
+            storage_source=storage_source,
+            storage_target=None if isinstance(storage, StorageMissing) else storage.target,
+            storage_missing_reason=storage.reason if isinstance(storage, StorageMissing) else None,
             inventory=inventory,
         )
         with self._lock:
@@ -1014,6 +1663,28 @@ class HostCapacityCollector:
         if memory_usage(total_bytes=total_bytes, available_bytes=available_bytes) is None:
             return None, None, MEMORY_MISSING_INVALID_SAMPLE
         return total_bytes, available_bytes, None
+
+    def _sample_storage(self) -> StorageSample | StorageMissing:
+        """Take one storage reading, or say why there is none.
+
+        Every failure mode is contained here: a probe that raises costs this
+        round its storage figures and nothing else — not the CPU, not the
+        memory, not the container count, and not the heartbeat they ride. The
+        call is a local filesystem's ``statvfs`` plus one small file read, so
+        it runs in-process rather than in a child, and the collector's own
+        per-field reasons are what keeps its honesty boundary visible.
+        """
+        if self._storage_probe is None:
+            return StorageMissing(reason=STORAGE_MISSING_DISABLED)
+        try:
+            return self._storage_probe.sample()
+        except Exception:
+            logger.warning(
+                "agent_host_storage_probe_failed",
+                exc_info=True,
+                extra={"event": "agent_host_storage_probe_failed"},
+            )
+            return StorageMissing(reason=STORAGE_MISSING_SOURCE_UNAVAILABLE)
 
     def _sample_inventory(self) -> SandboxInventory:
         """Count retained chat containers with one read-only listing."""

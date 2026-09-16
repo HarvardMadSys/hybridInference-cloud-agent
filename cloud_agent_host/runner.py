@@ -57,7 +57,11 @@ from cloud_agent_host.drivers import (
     driver_for,
 )
 from cloud_agent_host.enrollment import HostHeartbeat, ensure_enrolled
-from cloud_agent_host.host_capacity import HostCapacityCollector, capacity_enabled
+from cloud_agent_host.host_capacity import (
+    HostCapacityCollector,
+    build_storage_probe,
+    capacity_enabled,
+)
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
 from cloud_agent_host.patch_gate import branch_name_for
 from cloud_agent_host.resident_transport import ResidentLaunch
@@ -2271,6 +2275,11 @@ def _start_host_capacity_collector(backend: SandboxBackend) -> HostCapacityColle
         # a sibling deployment's containers as its own.
         namespace=getattr(backend, "sandbox_namespace", "") or "",
         docker_binary=getattr(backend, "docker_binary", "docker"),
+        # Which storage probe to run is the deployment's declaration, not this
+        # process's guess: the script that knows the driver and the data root
+        # writes the name into the environment, and the same script attests
+        # the topology before any reading is published.
+        storage_probe=build_storage_probe(),
     )
     collector.start()
     return collector

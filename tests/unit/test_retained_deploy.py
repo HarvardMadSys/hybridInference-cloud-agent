@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -36,6 +37,8 @@ def _host(
     broker_running: bool = True,
     broker_serving: bool = True,
     candidate_exit: int = 0,
+    storage_json: str | None = None,
+    storage_exit: int = 0,
 ) -> dict[str, str]:
     app_dir = tmp_path / "app"
     app_dir.mkdir()
@@ -66,6 +69,18 @@ def _host(
     # separately from the attestation exec so a broker that is up but not yet
     # serving can be modelled.
     broker_probe_exit = 0 if broker_serving else 1
+    # Only modelled when a test asks for it: the storage probe's describe
+    # command is a second `docker exec`, and a fake that answered it by default
+    # would make every deployment test exercise the attestation path.
+    storage_case = ""
+    if storage_json is not None:
+        storage_case = (
+            "  exec*'host_capacity describe'*) printf '%s' '"
+            + storage_json
+            + "'; exit "
+            + str(storage_exit)
+            + " ;;\n"
+        )
     _write_executable(
         fake_bin / "docker",
         "#!/bin/sh\n"
@@ -79,7 +94,8 @@ def _host(
         f"  *' ps -q workspace-broker') printf '%s\\n' '{broker_id}' ;;\n"
         f"  *' logs --since 2m runner') echo '{rejection_log}' ;;\n"
         f"  exec*'_shared_live_host_capabilities'*) echo '{capability}'; exit {attest_exit} ;;\n"
-        f"  exec*8092/health*) exit {broker_probe_exit} ;;\n"
+        + storage_case
+        + f"  exec*8092/health*) exit {broker_probe_exit} ;;\n"
         f"  exec*'retained_docker_data_root'*) echo '{daemon_root}' ;;\n"
         "  exec*'AGENT_CONTROL_PLANE_URL'*) echo '200' ;;\n"
         "  run*) printf '200' ;;\n"
@@ -127,6 +143,8 @@ def _host(
         "AGENT_BROKER_REVERSE_BIND",
         "AGENT_BROKER_REVERSE_PORT",
         "AGENT_WORKSPACE_BROKER_ADVERTISE_URL",
+        "AGENT_HOST_STORAGE_PROBE",
+        "DOCKER_DAEMON_JSON",
     ):
         env.pop(name, None)
     return env
@@ -902,3 +920,309 @@ def test_host_deploy_reads_the_recorded_generation_before_it_overwrites_it() -> 
     )
     assert 'mark-ready "${recorded}"' in script
     assert "restore_recorded_generation" in script
+
+
+# ── Storage attestation ───────────────────────────────────────────────
+#
+# The runner refuses to publish a storage reading that the deployment has not
+# attested, so these tests are about two things at once: that a sound topology
+# produces a `verified` entry the runner will accept, and that nothing here can
+# fail a deployment. The second is why every assertion below also checks the
+# exit status.
+
+STORAGE_GIB = 1024**3
+STORAGE_UPPERDIR = "/var/lib/docker/overlay2/9f1c/diff"
+STORAGE_MOUNT_ROOT = "/var/lib/docker"
+STORAGE_SIZE = 100 * STORAGE_GIB
+
+
+def storage_document(
+    *,
+    upperdir: str = STORAGE_UPPERDIR,
+    total: int = STORAGE_SIZE,
+    free: int = 40 * STORAGE_GIB,
+    available: int = 35 * STORAGE_GIB,
+) -> str:
+    """What the runner's own describe command prints for a sound topology."""
+    return json.dumps(
+        {
+            "ok": True,
+            "reason": None,
+            "fstype": "overlay",
+            "upperdir": upperdir,
+            "total_bytes": total,
+            "free_bytes": free,
+            "available_bytes": available,
+        }
+    )
+
+
+def _add_storage_host_tools(
+    tmp_path: Path,
+    *,
+    upper_size: int | None = None,
+    used: int = 60 * STORAGE_GIB,
+    available: int = 35 * STORAGE_GIB,
+    findmnt_fails: bool = False,
+) -> None:
+    """Fake the two host tools the attestation shells out to.
+
+    ``findmnt`` and ``df`` do not exist on the machine these tests run on, and
+    the values they answer with *are* the thing under test — a mount root, an
+    upper directory that reports a quota, a df that disagrees with the
+    container. Faking them is the only way to exercise the comparison at all.
+    """
+    sizes = {
+        STORAGE_MOUNT_ROOT: STORAGE_SIZE,
+        STORAGE_UPPERDIR: STORAGE_SIZE if upper_size is None else upper_size,
+    }
+    size_arms = "\n".join(f"      '{path}') echo {value} ;;" for path, value in sizes.items())
+    _write_executable(
+        tmp_path / "bin/df",
+        "#!/bin/sh\n"
+        'path=""; for arg in "$@"; do path="$arg"; done\n'
+        'case "$*" in\n'
+        "  *--output=size*)\n"
+        '    echo "1B-blocks"\n'
+        '    case "$path" in\n'
+        f"{size_arms}\n"
+        "      *) exit 1 ;;\n"
+        "    esac ;;\n"
+        "  *--output=used,avail*)\n"
+        '    echo "1B-blocks 1B-blocks"\n'
+        '    case "$path" in\n'
+        f"      '{STORAGE_MOUNT_ROOT}') echo '{used} {available}' ;;\n"
+        "      *) exit 1 ;;\n"
+        "    esac ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+    )
+    _write_executable(
+        tmp_path / "bin/findmnt",
+        "#!/bin/sh\n"
+        'field=""; expect=""\n'
+        'for arg in "$@"; do\n'
+        '  case "$expect" in\n'
+        '    field) field="$arg"; expect=""; continue ;;\n'
+        "  esac\n"
+        '  case "$arg" in\n'
+        '    -o) expect="field" ;;\n'
+        "  esac\n"
+        "done\n"
+        f"if [ '{1 if findmnt_fails else 0}' = '1' ]; then exit 1; fi\n"
+        'case "$field" in\n'
+        f"  TARGET) echo '{STORAGE_MOUNT_ROOT}' ;;\n"
+        "  FSTYPE) echo 'xfs' ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+    )
+
+
+def _storage_host(
+    tmp_path: Path,
+    *,
+    describe: str | None = None,
+    storage_exit: int = 0,
+    capability: str = "shared-sandbox-v1,native-fork-at-anchor-v1",
+    probe: str | None = None,
+    findmnt_fails: bool = False,
+    upper_size: int | None = None,
+    used: int = 60 * STORAGE_GIB,
+    available: int = 35 * STORAGE_GIB,
+) -> dict[str, str]:
+    """A host whose storage attestation inputs the caller controls."""
+    env = _host(
+        tmp_path,
+        capability=capability,
+        storage_json=storage_document() if describe is None else describe,
+        storage_exit=storage_exit,
+    )
+    env["AGENT_DEPLOYMENT_SHA"] = "target-sha"
+    _add_storage_host_tools(
+        tmp_path,
+        upper_size=upper_size,
+        used=used,
+        available=available,
+        findmnt_fails=findmnt_fails,
+    )
+    if probe is not None:
+        with (Path(env["APP_DIR"]) / ".env").open("a") as dotenv:
+            dotenv.write(f"AGENT_HOST_STORAGE_PROBE={probe}\n")
+    return env
+
+
+def _verdict(env: dict[str, str]) -> dict:
+    return json.loads((Path(env["APP_DIR"]) / ".storage-probe-verdict").read_text())
+
+
+def test_a_sound_topology_becomes_a_verified_entry(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert f"storage verified against {STORAGE_MOUNT_ROOT}" in result.stdout
+    document = _verdict(env)
+    assert document["schema_version"] == 1
+    assert document["deployment_sha"] == "target-sha"
+    entry = document["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "verified"
+    assert entry["mount_root"] == STORAGE_MOUNT_ROOT
+    assert entry["fstype"] == "xfs"
+    assert entry["size_bytes"] == STORAGE_SIZE
+
+
+def test_a_quota_on_the_upper_directory_is_reported_as_unsupported(tmp_path: Path) -> None:
+    """The whole reason the comparison is against the mount root.
+
+    `df <upperdir>` returns the project quota, so an attestation that compared
+    the container against that path would agree with a container reading the
+    quota — and call a 10 GiB ceiling the machine's capacity.
+    """
+    env = _storage_host(tmp_path, upper_size=10 * STORAGE_GIB)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unsupported"
+    assert "project quota" in entry["reason"]
+
+
+def test_a_daemon_configured_with_overlay2_size_is_unsupported(tmp_path: Path) -> None:
+    """Checked even when the sizes happen to agree: the config is the tell."""
+    env = _storage_host(tmp_path)
+    daemon_json = tmp_path / "daemon.json"
+    daemon_json.write_text('{"storage-opts": ["overlay2.size=10G"]}')
+    env["DOCKER_DAEMON_JSON"] = str(daemon_json)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unsupported"
+    assert "overlay2.size" in entry["reason"]
+
+
+def test_a_mount_root_that_cannot_be_located_is_unverified(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path, findmnt_fails=True)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unverified"
+    assert "could not locate" in entry["reason"]
+
+
+def test_a_size_disagreement_between_container_and_host_is_unsupported(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path, describe=storage_document(total=200 * STORAGE_GIB))
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unsupported"
+    assert str(STORAGE_SIZE) in entry["reason"]
+
+
+def test_occupancy_that_never_agrees_is_unverified_and_names_the_deltas(tmp_path: Path) -> None:
+    """Used and available are a diagnostic band, never a topology verdict."""
+    env = _storage_host(tmp_path, used=60 * STORAGE_GIB + 8 * STORAGE_GIB)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unverified"
+    assert "differs by" in entry["reason"]
+
+
+def test_a_runner_that_cannot_describe_its_filesystem_gets_no_entry(tmp_path: Path) -> None:
+    """The runner reaches the same conclusion itself; no entry is written for it."""
+    env = _storage_host(tmp_path, describe='{"ok": false, "reason": "unsupported"}')
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert _verdict(env)["entries"] == {}
+    assert "cannot describe its storage filesystem" in result.stderr
+
+
+def test_storage_measurement_can_be_switched_off(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path, probe="off")
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert "switched off" in result.stdout
+    assert not (Path(env["APP_DIR"]) / ".storage-probe-verdict").exists()
+
+
+def test_a_failed_rollout_still_writes_a_fail_closed_verdict(tmp_path: Path) -> None:
+    """A runner that starts before the checks finish must read `unverified`.
+
+    The capability failure stops the deployment before storage verification
+    runs, which is exactly the window the empty entry set exists for.
+    """
+    env = _storage_host(tmp_path, capability="")
+    _add_required_host_paths(env, tmp_path)
+    env["DEFER_SHARED_READY_MARKER"] = "1"
+    _write_executable(tmp_path / "bin/sleep", "#!/bin/sh\nexit 0\n")
+
+    result = _run(env, "up")
+
+    assert result.returncode != 0
+    document = _verdict(env)
+    assert document["entries"] == {}
+    assert document["schema_version"] == 1
+    assert document["deployment_sha"] == "target-sha"
+    assert document["written_at"].endswith("Z")
+
+
+def test_the_verdict_is_overwritten_in_place_for_the_running_replicas(tmp_path: Path) -> None:
+    """Each runner holds a file bind, so a rename would leave them on the old inode."""
+    env = _storage_host(tmp_path)
+    first = _run(env, "check")
+    assert first.returncode == 0, first.stderr
+    verdict_file = Path(env["APP_DIR"]) / ".storage-probe-verdict"
+    inode = verdict_file.stat().st_ino
+
+    second = _run(env, "check")
+
+    assert second.returncode == 0, second.stderr
+    assert verdict_file.stat().st_ino == inode
+
+
+def test_check_refreshes_a_verdict_without_a_redeploy(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path)
+    verdict_file = Path(env["APP_DIR"]) / ".storage-probe-verdict"
+    verdict_file.write_text('{"schema_version":1,"entries":{}}')
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert _verdict(env)["entries"][STORAGE_UPPERDIR]["verdict"] == "verified"
+
+
+def test_no_storage_failure_path_can_end_the_deployment() -> None:
+    """The one exception is the bind-mount source, and it is a separate function."""
+    script = SANDBOX_HOST.read_text()
+    verify = script[
+        script.index("verify_storage_probe() {") : script.index("probe_sandbox_relay() {")
+    ]
+    check = script[script.index("check_shared_live_stack() {") : script.index("# ── Isolation")]
+
+    assert "die " not in verify
+    assert "verify_storage_probe " in check
+    # The non-fatal contract is why the fatal verdict list is built before it.
+    assert check.index("verdicts+=(") < check.index("verify_storage_probe ")
+
+
+def test_the_verdict_marker_is_prepared_before_the_containers_start() -> None:
+    """The runner containers bind it, so it has to exist before `compose up`."""
+    script = SANDBOX_HOST.read_text()
+    up = script[script.index("cmd_up() {") : script.index("cmd_check() {")]
+
+    assert up.index("prepare_storage_verdict") < up.index("compose up -d")
+    assert up.index("prepare_shared_live_marker") < up.index("prepare_storage_verdict")
