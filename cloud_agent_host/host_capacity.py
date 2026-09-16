@@ -116,7 +116,7 @@ STORAGE_SOURCE_OVERLAY_ROOT: Final = "linux_overlay_root_statvfs"
 #: runner reads instead of trusting its own reading. A file bind mount follows
 #: the inode, so the writer must overwrite in place. The path is a contract with
 #: the host compose file, exactly like ``DEFAULT_PROC_ROOT``.
-DEFAULT_STORAGE_VERDICT_PATH = "/run/cloud-agent/storage-probe-verdict"
+DEFAULT_STORAGE_VERDICT_PATH = "/run/cloud-agent/storage-probe/verdict.json"
 VERDICT_SCHEMA_VERSION: Final = 1
 VERDICT_VERIFIED: Final = "verified"
 

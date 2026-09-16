@@ -554,10 +554,10 @@ storage_bounded() {
 }
 
 storage_verdict_file() {
-  # Beside .shared-live-ready and .deployed-sha, for the same reason: the
-  # deployment user owns this checkout, and each runner mounts the file
-  # read-only rather than needing access to credentials or host state.
-  printf '%s/.storage-probe-verdict' "${PWD%/}"
+  # The deployment owns this dedicated directory. Runners bind the directory
+  # read-only so they observe deletion/recreation of its verdict, without
+  # gaining a view of the checkout, credentials or other host state.
+  printf '%s/.storage-probe/verdict.json' "${PWD%/}"
 }
 
 storage_probe_name() {
@@ -569,13 +569,15 @@ storage_probe_name() {
 }
 
 prepare_storage_verdict() {
-  # An empty entry set before `compose up`, overwritten in place after the
-  # checks: every runner holds a read-only file bind of this path, so replacing
-  # the file by rename would leave running replicas reading the old inode.
+  # Keep the bound directory itself in place across up/check. The file inside
+  # it can be deleted or replaced: every sample opens its current directory
+  # entry, rather than an inode pinned by a file bind.
   # Fail-closed on purpose — a runner that starts while the checks are still
   # running reads "unverified", never the previous deployment's verdict.
   local verdict_file written_at
   verdict_file="$(storage_verdict_file)"
+  mkdir -p "${verdict_file%/*}" && chmod 0755 "${verdict_file%/*}" \
+    || die "could not prepare the storage-probe directory ${verdict_file%/*}"
   written_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '{"schema_version":1,"written_at":"%s","deployment_sha":"%s","entries":{}}\n' \
     "$written_at" "${AGENT_DEPLOYMENT_SHA:-}" >"$verdict_file" \
@@ -1062,7 +1064,11 @@ verify_storage_probe() {
   done
 
   verdict_file="$(storage_verdict_file)"
-  python3 - "$entries_file" "$verdict_file" "${AGENT_DEPLOYMENT_SHA:-}" <<'PY'
+  if ! mkdir -p "${verdict_file%/*}" || ! chmod 0755 "${verdict_file%/*}"; then
+    warn "could not prepare the storage-probe directory ${verdict_file%/*}; storage attestation not refreshed"
+    return 0
+  fi
+  if ! python3 - "$entries_file" "$verdict_file" "${AGENT_DEPLOYMENT_SHA:-}" <<'PY'
 import datetime
 import json
 import sys
@@ -1093,12 +1099,16 @@ document = {
     "deployment_sha": deployment_sha,
     "entries": entries,
 }
-# Overwritten in place, never renamed: each runner holds a read-only file bind,
-# so a new inode would be a file nobody is reading.
+# The parent directory is the bind source. Opening this path also recreates a
+# deleted verdict, and running replicas see the new file on their next sample.
 with open(verdict_file, "w", encoding="utf-8") as handle:
     json.dump(document, handle, sort_keys=True)
     handle.write("\n")
 PY
+  then
+    warn "could not write the storage verdict to ${verdict_file}; storage attestation not refreshed"
+    return 0
+  fi
   chmod 0644 "$verdict_file" || warn "could not relax the storage verdict's permissions"
   log "storage verdict written to ${verdict_file} ($(wc -l <"$entries_file" | tr -d '[:space:]') entries)"
 }

@@ -652,13 +652,11 @@ def test_runner_receives_exact_sha_rollout_metadata(compose: dict) -> None:
 
 
 def test_runner_mounts_the_storage_verdict_read_only(compose: dict) -> None:
-    """The attested topology reaches the runner as a file it may only read.
+    """Mount only the dedicated directory, so file replacement remains visible.
 
-    `create_host_path: false` is load-bearing here: a host that has never run
-    the storage attestation must fail loudly at container start instead of
-    coming up with an empty directory it would report as "unverified" forever,
-    which is indistinguishable from a topology that genuinely cannot be
-    measured.
+    The deployment creates the bind source before up. Runners cannot write it
+    or read unrelated checkout files, and a missing verdict is handled by the
+    probe rather than Docker silently creating a directory in its place.
     """
     runner = compose["services"]["runner"]
     env = runner["environment"]
@@ -667,14 +665,13 @@ def test_runner_mounts_the_storage_verdict_read_only(compose: dict) -> None:
     mount = next(
         mount
         for mount in runner["volumes"]
-        if isinstance(mount, dict)
-        and mount.get("target") == "/run/cloud-agent/storage-probe-verdict"
+        if isinstance(mount, dict) and mount.get("target") == "/run/cloud-agent/storage-probe"
     )
     assert mount["type"] == "bind"
     assert mount["read_only"] is True
     assert mount["bind"]["create_host_path"] is False
     compose_dir = REPO_ROOT / "deploy/host"
-    assert (compose_dir / mount["source"]).resolve() == REPO_ROOT / ".storage-probe-verdict"
+    assert (compose_dir / mount["source"]).resolve() == REPO_ROOT / ".storage-probe"
 
 
 def test_the_storage_probe_is_documented_and_kept_out_of_git() -> None:
@@ -683,7 +680,7 @@ def test_the_storage_probe_is_documented_and_kept_out_of_git() -> None:
         "AGENT_HOST_STORAGE_PROBE=overlay_root"
         in (REPO_ROOT / "deploy/host/.env.example").read_text()
     )
-    assert ".storage-probe-verdict" in (REPO_ROOT / ".gitignore").read_text()
+    assert ".storage-probe/" in (REPO_ROOT / ".gitignore").read_text()
 
 
 def test_staging_deploy_runs_both_halves_in_parallel_with_a_runtime_fence() -> None:

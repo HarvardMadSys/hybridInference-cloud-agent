@@ -174,7 +174,7 @@ runner 的 upper 目录和沙箱的可写层由同一个 driver 放在同一个�
 - `--network none`、`--cap-drop ALL`、`no-new-privileges`、只读容器根、资源限制、`--pull=never`；不挂 Docker socket、宿主 proc 树或凭据，不用 privileged / host PID / sudo，也不改变宿主目录权限。bind 使用 `rslave`，满足 Docker 对覆盖 daemon root 的目录挂载的要求，传播方向仅为宿主到 helper。
 - Docker 调用共享原来的剩余预算；helper 自身另有最多 5 秒的 SIGALRM，以免 CLI 被终止后留下继续运行的探针。正常结束由 `--rm` 删除，启动失败或超时在剩余预算内尝试清理。无法读取时仍为 unverified，不阻断部署。
 
-**verdict 文件。** 沿用 `.shared-live-ready` 的模式：deploy 用户拥有、位于 checkout 根下的 `.storage-probe-verdict`，`sandbox_host.sh` 在 `up` 之前先写一份 `unverified`，验证后原地覆盖写；Compose 以 `create_host_path: false` 只读挂到 `/run/cloud-agent/storage-probe-verdict`。文件 bind mount 跟随 inode，所以必须原地写，不能 rename 替换。内容上限 16 KiB：
+**verdict 文件。** deploy 用户拥有 checkout 根下的专用目录 `.storage-probe/`，文件为其中的 `verdict.json`。`sandbox_host.sh` 在 `up` 之前准备目录和空 entries，验证后写回结果；Compose 以 `create_host_path: false` 将**目录**只读挂到 `/run/cloud-agent/storage-probe`。每轮重新打开 `verdict.json`，因此文件删除、重建、rename 替换都会在下一轮可见。保持挂载目录本身不变，不暴露 checkout 或其他凭据。旧单文件挂载需要通过正常 `up` 重建 runner 完成升级，单独 `check` 不能改变已创建容器的挂载。内容上限 16 KiB：
 
 ```json
 {
@@ -317,7 +317,7 @@ Staging 验收：页面、admin API 和宿主 `df <挂载根>` 在同一时段�
 - verdict 文档里单条畸形条目被跳过（该 runner 因此报 `unverified`），不使整份文档作废；文档级错误（非 JSON、schema 版本不符、`entries` 非对象）仍整体作废。
 - verdict 条目的 `fstype` 取宿主 `findmnt -T <upperdir>` 的结果（即第 4.3 节示例里的 `xfs`），不是容器内的 `overlay`。
 - `used`／`avail` 容差复核最多三轮，轮间等 2 秒。
-- `.storage-probe-verdict` 是 `create_host_path: false` 的挂载源，写不进去时部署以明确报错停止——这是“存储失败不阻断部署”的唯一例外，因为它同时是所有 runner 的启动前提。
+- `.storage-probe/` 是 `create_host_path: false` 的挂载源，`up` 无法准备目录或初始 verdict 时以明确报错停止，因为它同时是所有 runner 的启动前提；运行中的 `check` 写入失败只告警，不让可选存储验证阻断部署。
 - 第 7 节“Storage 与 Memory 一样是瞬时观察”落在 Storage 的 tooltip 里；`CapacityPanel` 与 `CapacityMetric` 未改（面板里那句同类说明只服务于 CPU／内存历史图）。
 - 表宽从 1080px 提到 1220px：九列在 1080px 下会把 Memory／Storage 的数值对挤成换行。
 - 截图未做（实现环境无浏览器），Staging 验收中的截图项仍未完成。
@@ -347,3 +347,5 @@ Staging 验收：页面、admin API 和宿主 `df <挂载根>` 在同一时段�
 **2026-09-16 验收问题修复。** 为非 root 部署用户增加上述一次性 metadata helper，并对实际 bind 的文件系统身份进行核对。原先直接读取宿主路径的分支保留；权限修复后的正向 staging 验收结果另行记录，不覆写首次验收失败的历史。
 
 **2026-09-16 修复后复验。** `a2e2e36` 已完成实际部署、三个 runner 的 verified、页面和 HTTP 正向读数、已停止 retained sandbox 同盘确认、新 helper 下的 XFS A / C 以及清空 verdict 条目后的 `check` 恢复；详见[最新验收记录](../acceptance/2026-09-16-admin-storage-capacity.md)。权限阻塞关闭。staging 的 off、过期和宿主 unlink verdict 未在本轮强制构造，不把原地清空文件内容等同于删除 bind source。
+
+**2026-09-16 verdict 删除修复。** 补验确认单文件 bind 在宿主 unlink 后仍持有旧 inode，重建文件也不会被运行中 runner 看到。因此改为只读挂载专用 `.storage-probe/` 目录，每轮打开其中的 `verdict.json`，并保持目录本身不变。新增真实 Docker external 回归，直接使用 Compose 挂载配置验证同一运行中容器能观察删除、重建及 rename 替换；恢复单文件挂载时该回归在删除后的 unverified 断言处失败。目录权限、初始化、`check` 重建与写入失败隔离亦有单测；未改采样口径或 quota attestation。

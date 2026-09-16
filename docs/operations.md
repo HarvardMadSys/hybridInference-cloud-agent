@@ -1505,7 +1505,7 @@ report the *quota* — 10 GiB, say — with the same device number, so comparing
 those two proves nothing. `sandbox_host.sh` therefore compares the container's
 numbers against `df` of the **mount root** of the filesystem containing the
 upper directory, which no container project covers, and writes the verdict to
-`.storage-probe-verdict` beside `.shared-live-ready`:
+`.storage-probe/verdict.json` beside `.shared-live-ready`:
 
 * the mount root's size must equal the container's own `total_bytes` exactly —
   `size` does not move under writes, so this is the topology test;
@@ -1538,6 +1538,15 @@ entry, an entry that says `unsupported`, a resized filesystem — is reported as
 `unverified` / `unsupported` and the page says so instead of drawing a number.
 A rebuilt container gets a new upper directory, so an old attestation stops
 applying on its own; there is no time-based expiry.
+
+Compose binds only the dedicated `.storage-probe/` directory read-only at
+`/run/cloud-agent/storage-probe`. Each sample opens `verdict.json` by name, so
+deleting it reports `unverified` on the next sample; `sandbox_host.sh check`
+recreates it and sampling resumes without restarting replicas. Keep the bound
+directory itself in place. Upgrade from the old `.storage-probe-verdict` file
+bind with a normal `up`, which recreates runners with the new mount; `check`
+alone cannot change an existing container's mount configuration. The legacy
+file is ignored and is not used as a fallback.
 
 **Storage verification never blocks a deployment.** A metric that cannot be
 established is not a reason to keep a working host out of the pool: every

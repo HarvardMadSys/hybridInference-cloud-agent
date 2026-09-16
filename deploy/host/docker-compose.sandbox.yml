@@ -431,12 +431,13 @@ services:
       # writes it before `up` and refreshes it on every `check`; the runner
       # withholds a storage reading that no matching entry attests, because a
       # project quota and a small disk look identical from inside the
-      # container. Read-only, and `create_host_path: false` so a missing file
-      # fails loudly rather than becoming an empty directory the runner would
-      # read as "unverified" forever.
+      # container. Bind the dedicated directory, not the file: deleting or
+      # replacing verdict.json must be visible to already-running replicas.
+      # The deployment creates this directory before up; nothing else from
+      # the checkout is exposed, and the runner cannot write it.
       - type: bind
-        source: ../../.storage-probe-verdict
-        target: /run/cloud-agent/storage-probe-verdict
+        source: ../../.storage-probe
+        target: /run/cloud-agent/storage-probe
         read_only: true
         bind:
           create_host_path: false

@@ -42,8 +42,9 @@ next-env.d.ts
 .deployed-sha
 # Host readiness is deployment metadata, written beside .deployed-sha.
 .shared-live-ready
-# The host stack's storage-probe attestation. Written beside the two above and
-# read by every runner replica through a read-only bind.
+# The host stack's dedicated, read-only-bound storage attestation directory.
+.storage-probe/
+# Legacy file from the earlier single-file bind deployment.
 .storage-probe-verdict
 # Local inference test credential (never commit).
 /api_key

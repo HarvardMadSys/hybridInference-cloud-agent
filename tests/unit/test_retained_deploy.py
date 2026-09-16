@@ -1165,7 +1165,7 @@ def _storage_host(
 
 
 def _verdict(env: dict[str, str]) -> dict:
-    return json.loads((Path(env["APP_DIR"]) / ".storage-probe-verdict").read_text())
+    return json.loads((Path(env["APP_DIR"]) / ".storage-probe" / "verdict.json").read_text())
 
 
 def test_a_sound_topology_becomes_a_verified_entry(tmp_path: Path) -> None:
@@ -1269,7 +1269,7 @@ def test_storage_measurement_can_be_switched_off(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "switched off" in result.stdout
-    assert not (Path(env["APP_DIR"]) / ".storage-probe-verdict").exists()
+    assert not (Path(env["APP_DIR"]) / ".storage-probe" / "verdict.json").exists()
 
 
 def test_a_failed_rollout_still_writes_a_fail_closed_verdict(tmp_path: Path) -> None:
@@ -1294,28 +1294,56 @@ def test_a_failed_rollout_still_writes_a_fail_closed_verdict(tmp_path: Path) -> 
 
 
 def test_the_verdict_is_overwritten_in_place_for_the_running_replicas(tmp_path: Path) -> None:
-    """Each runner holds a file bind, so a rename would leave them on the old inode."""
+    """Refreshing metadata must preserve the directory mounted by running replicas."""
     env = _storage_host(tmp_path)
     first = _run(env, "check")
     assert first.returncode == 0, first.stderr
-    verdict_file = Path(env["APP_DIR"]) / ".storage-probe-verdict"
+    verdict_file = Path(env["APP_DIR"]) / ".storage-probe" / "verdict.json"
     inode = verdict_file.stat().st_ino
+    directory_inode = verdict_file.parent.stat().st_ino
 
     second = _run(env, "check")
 
     assert second.returncode == 0, second.stderr
     assert verdict_file.stat().st_ino == inode
+    assert verdict_file.parent.stat().st_ino == directory_inode
 
 
 def test_check_refreshes_a_verdict_without_a_redeploy(tmp_path: Path) -> None:
     env = _storage_host(tmp_path)
-    verdict_file = Path(env["APP_DIR"]) / ".storage-probe-verdict"
+    verdict_file = Path(env["APP_DIR"]) / ".storage-probe" / "verdict.json"
+    verdict_file.parent.mkdir()
     verdict_file.write_text('{"schema_version":1,"entries":{}}')
 
     result = _run(env, "check")
 
     assert result.returncode == 0, result.stderr
     assert _verdict(env)["entries"][STORAGE_UPPERDIR]["verdict"] == "verified"
+
+
+def test_check_recreates_a_deleted_verdict_in_the_same_bound_directory(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path)
+    assert _run(env, "check").returncode == 0
+    verdict_file = Path(env["APP_DIR"]) / ".storage-probe" / "verdict.json"
+    directory_inode = verdict_file.parent.stat().st_ino
+    verdict_file.unlink()
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert _verdict(env)["entries"][STORAGE_UPPERDIR]["verdict"] == "verified"
+    assert verdict_file.parent.stat().st_ino == directory_inode
+    assert verdict_file.stat().st_mode & 0o777 == 0o644
+
+
+def test_check_does_not_fail_when_the_verdict_directory_cannot_be_created(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path)
+    (Path(env["APP_DIR"]) / ".storage-probe").write_text("a file blocks the directory")
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert "could not prepare the storage-probe directory" in result.stderr
 
 
 def test_no_storage_failure_path_can_end_the_deployment() -> None:

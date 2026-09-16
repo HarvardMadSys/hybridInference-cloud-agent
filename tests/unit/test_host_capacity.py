@@ -877,6 +877,28 @@ def test_a_missing_verdict_withholds_the_number() -> None:
     assert storage_probe(verdict=None).sample() == StorageMissing(reason=STORAGE_MISSING_UNVERIFIED)
 
 
+def test_each_sample_reopens_the_verdict_after_unlink_and_replacement(tmp_path) -> None:
+    """A long-lived probe must observe the current file, not cache a verdict or FD."""
+    verdict_file = tmp_path / "verdict.json"
+    verdict_file.write_text(verified_verdict())
+    probe = OverlayRootStorageProbe(
+        verdict_path=verdict_file,
+        mountinfo_reader=lambda: overlay_mountinfo(),
+        statvfs=lambda path: FakeStatvfs(),
+    )
+    reading = probe.sample()
+    assert isinstance(reading, StorageSample)
+
+    verdict_file.unlink()
+    assert probe.sample() == StorageMissing(reason=STORAGE_MISSING_UNVERIFIED)
+    verdict_file.write_text(verdict_document({}))
+    assert probe.sample() == StorageMissing(reason=STORAGE_MISSING_UNVERIFIED)
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text(verified_verdict())
+    replacement.replace(verdict_file)
+    assert probe.sample() == reading
+
+
 @pytest.mark.parametrize(
     "document",
     [
