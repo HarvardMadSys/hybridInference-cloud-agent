@@ -1,4 +1,4 @@
-"""Server-side selection for file and terminal measurements.
+"""Server-side selection for platform operations the control plane roots.
 
 The runner roots ``attempt.startup`` and knows its own attempt, so
 ``operation_profiling.start_operation`` selects there. A file or terminal
@@ -6,34 +6,42 @@ request has no attempt at all: it arrives at the control plane, which is the
 only place that knows who is asking, which chat owns the workspace, and whether
 the experiment targets it. This module is that root.
 
-What it guarantees, and why each one is here:
+Three identities, and the difference between them matters:
+
+* **interaction** -- one logical user interaction, such as opening a terminal.
+  A browser echoes ``X-Agent-Interaction-Id`` and every request of that
+  interaction carries the same id, which is what lets the records be read
+  together. It is correlation only: it grants no selection and no access.
+* **measurement** -- one local root request. **Every request mints its own.**
+  Two requests never share a collector, so one finishing cannot close the
+  other's record or consume its answer, and the id is immutable and therefore
+  safe to use as a database key later.
+* **call** -- one physical downstream call inside one measurement. Each call
+  mints its own id and the answer is recorded against the id that call was
+  made with, never against a mutable "current call".
+
+What else this module guarantees, and why each one is here:
 
 * **Selection happens after the existing checks, never instead of them.** The
   caller authenticates, resolves ownership and entitlement, and resolves the
   broker exactly as before; only then does :func:`observe` decide whether to
   measure. Profiling adds no permission exemption and no extra probe request.
-* **The target filter is applied where the facts are.** Every field a run
-  scopes itself by is matched against what this route already knows -- the job,
-  its thread, its sandbox, its host -- and a run that scopes itself by a field
-  the route cannot prove simply does not select. That is why selection lives
-  here rather than being delegated to ``bind``, whose job is to confirm the
-  facts of an attempt a runner has already claimed.
-* **A slot is charged only for a candidate that survives the filter.** The
-  cheap pre-filter runs first; the budget is claimed last, immediately before
-  the measurement exists.
-* **A continuing interaction reuses one measurement.** A terminal open is a
-  list, a create and a stream; the browser echoes the measurement id back and
-  this module returns the same selection instead of charging a second slot.
-  The cache is bounded and every entry dies with the run's own deadline, so a
-  client that never finishes cannot grow it or extend the experiment.
+* **The current request's own facts are the only evidence.** A continuation is
+  re-validated against what *this* request resolved -- run, operation, chat,
+  host, thread, sandbox -- and a fact that is missing or has changed means the
+  request is simply not measured. The previous request's facts are never
+  copied forward to fill a gap: a record that claimed the old host would be
+  attributing this request's time to a machine that did not serve it.
+* **A slot is charged only for a candidate the run selects, and refunded
+  otherwise.** A rejected candidate gives its slot back, so traffic from other
+  chats cannot spend a chat-scoped experiment.
 * **Nothing here can fail a business request.** Every entry point answers
   ``None`` for "not selected"; a malformed run descriptor or an unparseable
   header disables collection and leaves the request to behave as it always did.
 
-The budget is per process. The design is explicit that a fleet-wide admission
-is a separate slice, so an experiment on more than one control-plane replica
-must record each instance's share in its manifest rather than claim a global
-cap.
+The budget is per process. The design is explicit that fleet-wide admission is
+a separate slice, so an experiment on more than one control-plane replica must
+record each instance's share in its manifest rather than claim a global cap.
 """
 
 from __future__ import annotations
@@ -74,18 +82,44 @@ BROKER_PRODUCER = "broker"
 ROUTE_FILES = "files"
 ROUTE_TERMINALS = "terminals"
 
-#: Where the browser hands back the measurement it is continuing. The browser's
-#: id is only a correlation handle: it cannot start a measurement, name a host
-#: or claim a workspace, because no selection exists for an id this process
-#: never minted.
-CONTINUATION_HEADER = "X-Agent-Measurement-Id"
+#: Which local request a record describes. Distinct from the operation because
+#: one interaction makes several requests: aggregating them under one operation
+#: name would mix a directory listing into a file-open distribution.
+REQUEST_KINDS = {
+    FILES_LIST: "files.list",
+    FILES_OPEN: "files.open",
+    TERMINAL_OPEN: "terminal.open",
+}
+#: The local requests one terminal interaction makes. An operation filter can
+#: select ``terminal.open``; a distribution over the requests has to be able to
+#: say which of them a sample is, because a list and a stream attach are not
+#: the same wait.
+TERMINAL_LIST = "terminal.list"
+TERMINAL_CREATE = "terminal.create"
+TERMINAL_STREAM = "terminal.stream_attach"
+for _request in (TERMINAL_LIST, TERMINAL_CREATE, TERMINAL_STREAM):
+    REQUEST_KINDS[_request] = _request
 
-#: Longest continuation id accepted, matching the minted shape with room to
-#: spare. A longer value is malformed, not a selection.
-MAX_MEASUREMENT_ID_CHARS = 64
+#: The operation a request measures before its kind is known. A non-empty path
+#: may be a file preview or a directory expansion, and only the read result can
+#: say which, so the request starts as a bounded candidate over both.
+FILE_CANDIDATES = (FILES_LIST, FILES_OPEN)
 
-_SELECTIONS: OrderedDict[str, Selection] | None = None
-_SELECTION_LOCK = threading.Lock()
+#: Where the browser hands back the interaction it is continuing. The id is a
+#: correlation handle: it cannot name a host or a workspace, and it only
+#: resolves to an interaction this process already authorized.
+INTERACTION_HEADER = "X-Agent-Interaction-Id"
+
+#: The id this replaced. Accepted during the migration so a client that already
+#: echoes a measurement id keeps correlating; it is resolved through the
+#: server-side table and is never reused as a new record's id.
+LEGACY_MEASUREMENT_HEADER = "X-Agent-Measurement-Id"
+
+#: Longest id accepted, matching the minted shape with room to spare.
+MAX_ID_CHARS = 64
+
+_INTERACTIONS: OrderedDict[str, Interaction] | None = None
+_INTERACTION_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -102,44 +136,97 @@ class Root:
     job_id: str
     facts: Mapping[str, str] = field(default_factory=dict)
     service: str = ROUTE_FILES
+    #: Operations this request may resolve to before its result is known. A
+    #: file path is a candidate over listing and opening; everything else is
+    #: the one operation it names. The route states this because it is the
+    #: route that knows which outcomes are still possible for its own call.
+    candidates: frozenset[str] | None = None
+
+    def offered(self) -> frozenset[str]:
+        """Return the operations this request may be filed under."""
+        if self.candidates:
+            return self.candidates
+        return _candidates(self.operation)
+
+
+@dataclass(frozen=True)
+class Interaction:
+    """One logical interaction, as far as it can be decided up front.
+
+    Immutable on purpose: it is the part every request of the interaction
+    shares, and nothing a later request does may change what the first one
+    established. It carries the operation *candidates* rather than the
+    operation, because a non-empty path's kind is only known after the read.
+    """
+
+    interaction_id: str
+    job_id: str
+    service: str
+    run_id: str
+    #: Operations this interaction may resolve to. More than one only for a
+    #: file path, whose kind the read decides.
+    candidates: frozenset[str]
+    #: Operations the run actually named, so a confirmed kind that this
+    #: experiment does not select is dropped rather than reported.
+    allowed: frozenset[str]
+    #: The run's own deadline, so no request of the interaction outlives it.
+    deadline_mono: float
+    started_mono: float
+    last_used_mono: float
+
+    @property
+    def operation(self) -> str:
+        """Return the single operation, or the first candidate deterministically."""
+        return min(self.candidates)
+
+    @property
+    def offered(self) -> frozenset[str]:
+        """Return the candidate operation names, for the wire context."""
+        return frozenset(name for name in self.candidates if name)
 
 
 @dataclass
 class Selection:
-    """One selected platform operation, and everything the caller needs for it.
+    """One selected root request: its own measurement, its own lifetime.
 
-    The object is also the operation's lifetime: ``with profiling.observe(...)
-    as measure:`` ends the measurement on exit, so a route cannot return a
-    response that was never reported. Finishing is safe more than once.
+    The object is the request's lifetime: :func:`operation` ends the
+    measurement on exit, so every exit path -- a returned response, a raised
+    HTTP error, a cancelled request -- reports exactly one outcome. Finishing
+    is safe more than once. Nothing here is shared with another request.
     """
 
     measurement: Measurement
-    operation: str
-    service: str
-    run_id: str
-    deadline_mono: float
-    started_mono: float
-    last_used_mono: float
-    call_id: str | None = None
+    interaction: Interaction
     outcome: str = "incomplete"
     failure_stage: str | None = None
-    #: Whether the last registered downstream call came back with an answer
-    #: this process could match to that call.
-    _answered: bool = False
+    #: Answers this request received, keyed by the call they answer, so a
+    #: second call cannot overwrite the first call's answer.
+    calls: dict[str, bool] = field(default_factory=dict)
+    #: Which local request this record describes. Every route states it: an
+    #: interaction is several requests, and a sample that cannot say which one
+    #: it is turns a latency distribution into a mixture.
+    request_kind: str | None = None
     _finished: bool = False
 
     @property
     def measurement_id(self) -> str:
-        """Return the id a browser echoes back to continue this interaction."""
+        """Return this request's immutable record id."""
         return self.measurement.measurement_id
 
-    def close(self) -> None:
-        """End the measurement. The caller's half of the lifetime API.
+    @property
+    def interaction_id(self) -> str:
+        """Return the interaction every request of this interaction shares."""
+        return self.interaction.interaction_id
 
-        :func:`operation` calls this on every exit path; a caller that manages
-        its own lifetime uses the same door so a record is emitted once.
-        """
-        self.finish()
+    @property
+    def operation(self) -> str:
+        """Return the operation this request is currently filed under."""
+        return self.measurement.operation
+
+    def name_request(self, request_kind: str) -> None:
+        """State which local request this record describes."""
+        self.request_kind = request_kind
+        operation_profiling.set_attributes(self.measurement, request_kind=request_kind)
 
     def mark(self, name: str) -> None:
         """Record one local stage boundary."""
@@ -153,22 +240,74 @@ class Selection:
             self.measurement, parent, name, producer=producer or PRODUCER
         )
 
-    def begin_call(
-        self, stage: str, *, producer: str = BROKER_PRODUCER, fresh: bool = False
-    ) -> str | None:
+    def begin_call(self, stage: str, *, producer: str = BROKER_PRODUCER) -> str | None:
         """Register one downstream call and return the id that identifies it.
 
-        Registered before the call, so a call that never answers is a fragment
-        this record owed rather than an absence nobody can see. ``fresh`` mints
-        a new id for a second physical call within one interaction; without it
-        the current id is reused, which is what lets a list/create/stream
-        sequence be answered by the call that actually finished.
+        Always a fresh id. A request that makes two calls -- a terminal open
+        that lists and then creates -- owes an answer for each, and a mutable
+        "current call" would let the second silently replace the first.
         """
-        if fresh or self.call_id is None:
-            self.call_id = operation_profiling.expect_fragment(self.measurement, producer, stage)
-        return self.call_id
+        return operation_profiling.expect_fragment(self.measurement, producer, stage)
 
-    def record_answer(self, stage: str, response: Any) -> bool:
+    def context(self, call_id: str | None) -> dict[str, Any]:
+        """Return what a downstream producer inherits for one call.
+
+        The transport decides how to encode it. It states the interaction, this
+        request's measurement, the call, the candidate operations, and an
+        absolute wall-clock expiry -- two processes share no monotonic clock.
+        """
+        context = operation_profiling.measurement_context(self.measurement, call_id) or {}
+        if not context:
+            return {}
+        context["interaction_id"] = self.interaction_id
+        # The *candidate operation strings* this request may be filed under,
+        # intersected with what the run selects here. Deliberately not a list of
+        # measurement objects: the broker is told which operations are in play,
+        # not asked to choose one before its result exists.
+        context["operations"] = sorted(self.interaction.allowed)
+        context.pop("operation", None)
+        return context
+
+    def confirm(self, operation: str, *, request_kind: str | None = None) -> bool:
+        """File this request under the operation its result actually was.
+
+        A file path starts as a candidate over ``files.list`` and
+        ``files.open`` because only the read can say which it was. Once the
+        answer names the kind, the request is filed under it -- but only if
+        this experiment selects that operation. Returns whether it does; a
+        caller that gets ``False`` should :func:`discard` the measurement
+        rather than report a sample under a name the run did not ask for.
+        """
+        if operation not in self.interaction.allowed:
+            return False
+        self.measurement.operation = operation
+        operation_profiling.set_attributes(
+            self.measurement,
+            operation=operation,
+            request_kind=request_kind or REQUEST_KINDS.get(operation, operation),
+        )
+        self.request_kind = request_kind or REQUEST_KINDS.get(operation, operation)
+        return True
+
+    def result_operation(self, response: Any, *, default: str) -> str:
+        """Return the operation this request's result turned out to be.
+
+        The operation comes from the broker's answer when it named one, and
+        otherwise from the response body's own ``kind`` -- the same evidence,
+        read where the answer could not carry it. A request that already had a
+        single candidate keeps it. This only answers the question; the caller
+        decides with :meth:`confirm` whether that operation is one to report.
+        """
+        operation = default
+        if isinstance(response, Mapping):
+            named = str(
+                response.get("profiling_operation") or _operation_from_kind(response, default) or ""
+            ).strip()
+            if named:
+                operation = named
+        return operation
+
+    def record_answer(self, stage: str, call_id: str | None, response: Any) -> bool:
         """Record what a downstream producer answered about one call.
 
         Returns whether the response matched the call it claims to answer. The
@@ -178,20 +317,15 @@ class Selection:
         recorded = operation_profiling.record_fragment(
             self.measurement,
             producer=BROKER_PRODUCER,
-            call_id=self.call_id,
+            call_id=call_id,
             stage=stage,
             response=response,
         )
-        if recorded:
-            self._answered = True
+        if call_id:
+            self.calls[call_id] = recorded
         return recorded
 
-    @property
-    def answered(self) -> bool:
-        """Return whether the last registered call came back with an answer."""
-        return self._answered
-
-    def record_answer_from_headers(self, stage: str, answer: Any) -> bool:
+    def record_answer_from_headers(self, stage: str, call_id: str | None, answer: Any) -> bool:
         """Record an answer that arrived in response headers rather than a body.
 
         A terminal stream has already started sending the terminal's own bytes
@@ -201,32 +335,48 @@ class Selection:
         """
         if not isinstance(answer, Mapping):
             return False
-        return self.record_answer(stage, dict(answer))
+        return self.record_answer(stage, call_id, dict(answer))
 
-    def context(self) -> dict[str, Any]:
-        """Return the selection a downstream producer inherits, as plain data.
+    def settle(self) -> None:
+        """Run the deadline judgement the record will be emitted with.
 
-        The transport decides how to encode it; this process only states the
-        run, the operation, the call, and an absolute wall-clock expiry, since
-        two processes share no monotonic clock.
+        Called before a response is built, so the response cannot claim a
+        sample is complete while ``finish`` is about to mark it expired. The
+        judgement itself lives in the collector and is idempotent.
         """
-        return operation_profiling.measurement_context(self.measurement, self.call_id) or {}
+        operation_profiling.settle(self.measurement)
 
-    def metadata(self, *, recorded: bool, truncated: bool = False) -> dict[str, Any] | None:
-        """Return the fragment block for a response, or ``None`` when nothing ran.
+    def metadata(self) -> dict[str, Any] | None:
+        """Return the block a response carries, or ``None`` when unselected.
 
-        ``recorded`` is the broker's answer about *collecting*, not about how
-        much it collected: a stage that legitimately did no timed work still
-        counts, and an empty stage list must not be reported as a missing
-        producer.
+        Two different completeness questions, kept apart on purpose: whether
+        each downstream fragment answered, and whether this whole local record
+        is complete. A reader must not have to infer either from the other.
         """
-        if self.call_id is None:
+        if self._finished:
+            # Discarded: the request ran, but it was not a sample this run
+            # asked for, so the response carries no measurement block at all.
             return None
+        recorded_calls = [call for call, answered in self.calls.items() if answered]
         return {
+            "interaction_id": self.interaction_id,
             "measurement_id": self.measurement_id,
-            "call_id": self.call_id,
-            "recorded": recorded,
-            "truncated": truncated,
+            # The call this answer belongs to, most recent first: a request
+            # that made several calls reports the one that produced the reply.
+            "call_id": recorded_calls[-1] if recorded_calls else None,
+            "operation": self.measurement.operation,
+            "request_kind": self.request_kind or REQUEST_KINDS.get(self.measurement.operation, ""),
+            # At least one downstream call answered. Every call that did not
+            # is named in the record's ``missing_fragments``, so per-call
+            # completeness is stated there rather than compressed into a
+            # single boolean here.
+            "fragment_recorded": bool(recorded_calls),
+            "fragment_truncated": operation_profiling.fragment_truncated(
+                self.measurement, recorded_calls
+            ),
+            "collection_complete": operation_profiling.collection_complete(
+                self.measurement, self.outcome
+            ),
         }
 
     def finish(self, outcome: str | None = None, *, failure_stage: str | None = None) -> None:
@@ -274,18 +424,25 @@ def scope_facts(job: Mapping[str, Any]) -> dict[str, str]:
     return facts
 
 
-def root_scope(operation: str, job: Mapping[str, Any], *, service: str = ROUTE_FILES) -> Root:
+def root_scope(
+    operation: str,
+    job: Mapping[str, Any],
+    *,
+    service: str = ROUTE_FILES,
+    candidates: frozenset[str] | None = None,
+) -> Root:
     """Build one root operation's scope from the job its route already resolved."""
     return Root(
         operation=operation,
         job_id=str(job.get("id") or ""),
         facts=scope_facts(job),
         service=service,
+        candidates=candidates,
     )
 
 
 def continuation(request_headers: Mapping[str, str] | None) -> str | None:
-    """Return the measurement id a browser echoed, if it sent a usable one.
+    """Return the interaction a browser echoed, if it sent a usable one.
 
     Header lookup is case-insensitive because HTTP header names are, and a
     value that is not a plausible id is dropped rather than raising: profile
@@ -293,44 +450,68 @@ def continuation(request_headers: Mapping[str, str] | None) -> str | None:
     """
     if not request_headers:
         return None
+    wanted = {INTERACTION_HEADER.lower(), LEGACY_MEASUREMENT_HEADER.lower()}
     for name, value in request_headers.items():
-        if str(name).lower() != CONTINUATION_HEADER.lower():
+        if str(name).lower() not in wanted:
             continue
         text = str(value).strip()
-        if not text or len(text) > MAX_MEASUREMENT_ID_CHARS:
+        if not text or len(text) > MAX_ID_CHARS:
             return None
         return text
     return None
 
 
-def fragment(selection: Selection | None, **states: bool) -> dict[str, Any] | None:
-    """Return the response block for one selection, or ``None`` when unselected."""
-    if selection is None:
+#: What a workspace read reports it found. The broker is the only component
+#: that knows, because it performs the read; a path alone cannot say.
+FILE_KINDS = {
+    "directory": FILES_LIST,
+    "file": FILES_OPEN,
+    "symlink": FILES_OPEN,
+}
+
+
+def _operation_from_kind(response: Mapping[str, Any], default: str) -> str | None:
+    """Return the file operation a response's own ``kind`` implies."""
+    if default not in FILE_CANDIDATES:
         return None
-    return selection.metadata(
-        recorded=bool(states.get("recorded")), truncated=bool(states.get("truncated"))
-    )
+    return FILE_KINDS.get(str(response.get("kind") or "").strip())
+
+
+def _candidates(operation: str) -> frozenset[str]:
+    """Return the operations one route may resolve to before its result is in."""
+    return frozenset(FILE_CANDIDATES if operation in FILE_CANDIDATES else (operation,))
+
+
+def _eligible(run: operation_profiling.ProfilingRun, candidates: frozenset[str]) -> frozenset[str]:
+    """Return the candidates this run actually selects."""
+    return frozenset(name for name in candidates if name in run.operations)
 
 
 def start(operation: str, scope: Root) -> Selection | None:
-    """Select one root operation, or return ``None`` when it is not selected.
+    """Root one request, or return ``None`` when the run does not select it.
 
-    The cheap pre-filter -- is this operation named by the run at all, and does
-    its host match -- runs before the budget is claimed. The authoritative scope
-    check is then ``bind``, which requires every field the run scopes itself by
-    to be present on the measurement and equal to the configured value, so a
-    workspace the route could not resolve is a mismatch rather than a wildcard.
-    A candidate that fails it returns its slot: a run scoped to one chat must
-    not be spent by traffic from every other chat.
+    The cheap pre-filter -- does the run name any candidate operation, and does
+    its host match -- runs before the budget is claimed. The authoritative
+    scope check is then ``bind``, which requires every field the run scopes
+    itself by to be present and equal, so a workspace this route could not
+    resolve is a mismatch rather than a wildcard. A candidate that fails it
+    returns its slot.
     """
+    return _root(operation, scope, interaction_id=None)
+
+
+def _root(operation: str, scope: Root, *, interaction_id: str | None) -> Selection | None:
+    """Create one request's measurement under an existing or new interaction."""
     run = operation_profiling.active_run()
-    if run is None or operation not in run.operations:
+    candidates = scope.offered()
+    if run is None:
+        return None
+    allowed = _eligible(run, candidates)
+    if not allowed:
         return None
     measurement = operation_profiling.start_operation(
-        operation=operation,
+        operation=min(allowed),
         producer=PRODUCER,
-        # Known before the request and part of the run's scope, so it is the
-        # one fact the cheap pre-filter can use without the rest of the scope.
         host=scope.facts.get("host"),
     )
     if measurement is None:
@@ -342,155 +523,124 @@ def start(operation: str, scope: Root) -> Selection | None:
         operation_profiling.discard(measurement)
         return None
     now = time.monotonic()
-    selection = Selection(
-        measurement=measurement,
-        operation=operation,
+    interaction = Interaction(
+        interaction_id=interaction_id or measurement.measurement_id,
+        job_id=scope.job_id,
         service=scope.service,
         run_id=measurement.run_id,
+        candidates=candidates,
+        allowed=allowed,
         deadline_mono=measurement.deadline_mono,
         started_mono=now,
         last_used_mono=now,
     )
-    _remember(selection)
+    selection = Selection(measurement=measurement, interaction=interaction)
+    operation_profiling.set_attributes(
+        measurement,
+        interaction_id=interaction.interaction_id,
+        request_kind=REQUEST_KINDS.get(interaction.operation, interaction.operation),
+    )
+    selection.request_kind = REQUEST_KINDS.get(interaction.operation, interaction.operation)
+    _remember(interaction)
     return selection
 
 
 def observe(operation: str, scope: Root, *, continuing: str | None = None) -> Selection | None:
-    """Return the selection for one request, continuing an earlier one if asked.
+    """Return the selection for one request, continuing an interaction if asked.
 
-    ``continuing`` is the id the browser echoed. It only ever resolves to a
-    selection this process minted for the same operation and the same chat, so
-    a guessed id cannot observe another workspace or start an experiment.
+    ``continuing`` is the id the browser echoed. It only ever resolves to an
+    interaction this process minted for the same operation and the same chat
+    *and* whose scope still agrees with what this request just resolved, so a
+    guessed or stale id cannot observe another workspace, outlive a change of
+    host, or start an experiment.
     """
     if continuing:
-        selection = _continue(continuing, operation=operation, job_id=scope.job_id)
-        if selection is not None:
-            return selection
-        # An id this process no longer holds is not a reason to fail the
-        # request: it is a new interaction, and the run may still select it.
+        interaction = _resume(continuing, scope=scope)
+        if interaction is not None:
+            return _root(operation, scope, interaction_id=interaction.interaction_id)
+        # An id this process cannot honour is not a reason to fail the request.
+        # It is a new interaction, and the run may still select it -- but it is
+        # measured on its own evidence, never on the stale interaction's.
     return start(operation, scope)
 
 
-def _prune(now: float) -> None:
-    """Drop expired selections. The caller holds the lock."""
-    assert _SELECTIONS is not None
-    for key in [key for key, item in _SELECTIONS.items() if item.deadline_mono <= now]:
-        del _SELECTIONS[key]
+def _resume(interaction_id: str, *, scope: Root) -> Interaction | None:
+    """Return a live interaction this request may continue, if any.
 
-
-def _remember(selection: Selection) -> None:
-    """Remember one selection under a bounded, TTL'd table."""
-    global _SELECTIONS
-    now = time.monotonic()
-    with _SELECTION_LOCK:
-        if _SELECTIONS is None:
-            _SELECTIONS = OrderedDict()
-        _prune(now)
-        _SELECTIONS[selection.measurement_id] = selection
-        while len(_SELECTIONS) > operation_profiling.MAX_SELECTIONS:
-            # Oldest first. Dropping a live selection only costs coverage: the
-            # client's next request finds no entry and simply is not measured.
-            _SELECTIONS.popitem(last=False)
-
-
-def _continue(measurement_id: str, *, operation: str, job_id: str) -> Selection | None:
-    """Return a selection this process already made, or re-root it under its id.
-
-    One interaction is a list, a create and a stream -- separate platform
-    operations, each with a duration worth stating. So a request that arrives
-    after the previous one already emitted its record is rooted afresh *under
-    the same id*: the browser, the broker fragments and every record of the
-    interaction stay correlatable, while each request reports its own time. The
-    interaction remains bounded because the original deadline and TTL still
-    govern it, and each request claims its own slot -- a slot that paid for
-    unbounded requests would make ``max_operations`` meaningless.
+    Everything is checked against *this* request: the candidates must cover the
+    operation, the chat must be the one this route just authorized, and every
+    fact the run is scoped by must still be present and equal to what this
+    request resolved. A host or sandbox that changed, or that could not be
+    resolved at all, ends the interaction here rather than recording the new
+    request under the old facts.
     """
-    wanted = (measurement_id or "").strip()
-    if not wanted or len(wanted) > MAX_MEASUREMENT_ID_CHARS:
+    wanted = (interaction_id or "").strip()
+    if not wanted or len(wanted) > MAX_ID_CHARS:
+        return None
+    run = operation_profiling.active_run()
+    if run is None:
         return None
     now = time.monotonic()
-    with _SELECTION_LOCK:
-        if _SELECTIONS is None:
+    with _INTERACTION_LOCK:
+        if _INTERACTIONS is None:
             return None
         _prune(now)
-        selection = _SELECTIONS.get(wanted)
-        if selection is None:
+        interaction = _INTERACTIONS.get(wanted)
+        if interaction is None:
             return None
-        if selection.operation != operation or selection.measurement.facts.get("job_id") != job_id:
-            # Same id, different operation or chat: not a continuation of this
-            # interaction, and not something to measure under that id.
+        if interaction.job_id != scope.job_id or interaction.run_id != run.run_id:
             return None
-        if now - selection.last_used_mono > operation_profiling.SELECTION_TTL_S:
-            del _SELECTIONS[wanted]
+        if not scope.offered() & interaction.candidates:
             return None
-        if not selection._finished:
-            selection.last_used_mono = now
-            selection.measurement.facts["continued_requests"] = (
-                int(selection.measurement.facts.get("continued_requests") or 0) + 1
-            )
-            return selection
-        facts = dict(selection.measurement.facts)
-        deadline_mono = selection.deadline_mono
-        service = selection.service
-    # Re-rooted outside the lock: claiming a slot and remembering the new
-    # selection must not happen while this table is held.
-    return _restart(
-        measurement_id=wanted,
-        operation=operation,
-        job_id=job_id,
-        service=service,
-        facts=facts,
-        host=str(facts.get("host") or "") or None,
-        deadline_mono=deadline_mono,
-    )
+        if now - interaction.last_used_mono > operation_profiling.SELECTION_TTL_S:
+            del _INTERACTIONS[wanted]
+            return None
+        for key, wanted_value in run.target.items():
+            observed = scope.facts.get(key)
+            if observed is None or str(observed) != wanted_value:
+                # The scope moved, or this request cannot prove it. Either way
+                # the interaction's evidence does not cover this request.
+                return None
+        refreshed = Interaction(
+            interaction_id=interaction.interaction_id,
+            job_id=interaction.job_id,
+            service=interaction.service,
+            run_id=interaction.run_id,
+            candidates=interaction.candidates,
+            allowed=_eligible(run, interaction.candidates),
+            deadline_mono=interaction.deadline_mono,
+            started_mono=interaction.started_mono,
+            last_used_mono=now,
+        )
+        _INTERACTIONS[wanted] = refreshed
+        return refreshed
 
 
-def _restart(
-    *,
-    measurement_id: str,
-    operation: str,
-    job_id: str,
-    service: str,
-    facts: Mapping[str, Any],
-    host: str | None,
-    deadline_mono: float,
-) -> Selection | None:
-    """Root another request of an interaction under the interaction's own id."""
-    run = operation_profiling.active_run()
-    if run is None or operation not in run.operations:
-        return None
-    measurement = operation_profiling.start_operation(
-        operation=operation, producer=PRODUCER, host=host
-    )
-    if measurement is None:
-        return None
-    if not operation_profiling.bind(measurement, **dict(facts)):
-        operation_profiling.discard(measurement)
-        return None
-    # The id stays the interaction's, and the deadline stays the experiment's:
-    # a later request can neither rename the interaction nor extend the run.
-    measurement.measurement_id = measurement_id
-    measurement.deadline_mono = min(measurement.deadline_mono, deadline_mono)
-    selection = Selection(
-        measurement=measurement,
-        operation=operation,
-        service=service,
-        run_id=measurement.run_id,
-        deadline_mono=measurement.deadline_mono,
-        started_mono=time.monotonic(),
-        last_used_mono=time.monotonic(),
-    )
-    operation_profiling.set_attributes(
-        measurement,
-        continued_requests=int(facts.get("continued_requests") or 0) + 1,
-    )
-    _remember(selection)
-    return selection
+def _prune(now: float) -> None:
+    """Drop expired interactions. The caller holds the lock."""
+    assert _INTERACTIONS is not None
+    for key in [key for key, item in _INTERACTIONS.items() if item.deadline_mono <= now]:
+        del _INTERACTIONS[key]
+
+
+def _remember(interaction: Interaction) -> None:
+    """Remember one interaction under a bounded, TTL'd table."""
+    global _INTERACTIONS
+    now = time.monotonic()
+    with _INTERACTION_LOCK:
+        if _INTERACTIONS is None:
+            _INTERACTIONS = OrderedDict()
+        _prune(now)
+        _INTERACTIONS[interaction.interaction_id] = interaction
+        while len(_INTERACTIONS) > operation_profiling.MAX_SELECTIONS:
+            # Oldest first. Dropping a live interaction only costs coverage: a
+            # browser continuing it finds no entry and simply is not measured.
+            _INTERACTIONS.popitem(last=False)
 
 
 @contextmanager
 def operation(op: str, scope: Root, *, continuing: str | None = None) -> Iterator[Selection | None]:
-    """Run one request inside its measurement and report the outcome.
+    """Run one request inside its own measurement and report the outcome.
 
     The measurement ends when the block does, so every exit path -- a returned
     response, a raised HTTP error, a cancelled request -- reports exactly one
@@ -514,27 +664,34 @@ def operation(op: str, scope: Root, *, continuing: str | None = None) -> Iterato
 
 
 def reset() -> None:
-    """Forget every remembered selection. Tests call this."""
-    global _SELECTIONS
-    with _SELECTION_LOCK:
-        _SELECTIONS = None
+    """Forget every remembered interaction. Tests call this."""
+    global _INTERACTIONS
+    with _INTERACTION_LOCK:
+        _INTERACTIONS = None
 
 
 __all__ = [
     "BROKER_PRODUCER",
-    "CONTINUATION_HEADER",
     "FILES_LIST",
     "FILES_OPEN",
-    "MAX_MEASUREMENT_ID_CHARS",
+    "FILE_CANDIDATES",
+    "FILE_KINDS",
+    "INTERACTION_HEADER",
+    "LEGACY_MEASUREMENT_HEADER",
+    "MAX_ID_CHARS",
     "PRODUCER",
+    "REQUEST_KINDS",
     "ROUTE_FILES",
     "ROUTE_TERMINALS",
+    "TERMINAL_CREATE",
+    "TERMINAL_LIST",
     "TERMINAL_OPEN",
+    "TERMINAL_STREAM",
+    "Interaction",
     "Root",
     "Selection",
     "continuation",
     "current_run",
-    "fragment",
     "observe",
     "operation",
     "reset",

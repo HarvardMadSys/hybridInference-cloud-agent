@@ -86,14 +86,16 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp_catalogue import catalogue as mcp_catalogue
 from cloud_agent.mcp_registry import connection_states, registry_for_user
 from cloud_agent.operation_measurement import (
+    FILE_CANDIDATES,
     FILES_LIST,
-    FILES_OPEN,
     ROUTE_FILES,
     ROUTE_TERMINALS,
+    TERMINAL_CREATE,
+    TERMINAL_LIST,
     TERMINAL_OPEN,
+    TERMINAL_STREAM,
     Selection,
     continuation,
-    fragment,
     operation as measured_operation,
     root_scope,
 )
@@ -2862,26 +2864,37 @@ async def _terminal_owner_workspace(
 _T = TypeVar("_T")
 
 
-def _profiling_fragment(measure: Selection | None) -> AgentOperationProfilingFragment | None:
+def _render_fragment(measure: Selection | None) -> dict[str, Any] | None:
     """Return the profiling block for a response, or ``None`` when unselected.
 
-    Reported and unrecorded is a real answer: the broker was called and said it
-    collected nothing. The record then names the fragment it owed and did not
-    get, instead of the response implying a producer that never ran.
+    Built from the measurement *after* its deadline judgement has run, so the
+    block a client receives cannot claim a sample is complete while the record
+    is about to be emitted as expired. Serialized as plain data because a
+    streaming response puts the same block in headers rather than a body.
     """
-    block = fragment(measure, recorded=measure is not None and measure.answered)
+    if measure is None:
+        return None
+    measure.settle()
+    block = measure.metadata()
     if block is None:
         return None
-    return AgentOperationProfilingFragment(**block)
+    return AgentOperationProfilingFragment(**block).model_dump(exclude_none=True)
+
+
+def _profiling_fragment(measure: Selection | None) -> AgentOperationProfilingFragment | None:
+    """Return the typed profiling block, for callers that want the model."""
+    rendered = _render_fragment(measure)
+    if rendered is None:
+        return None
+    return AgentOperationProfilingFragment(**rendered)
 
 
 def _with_fragment(payload: dict[str, Any], measure: Selection | None) -> dict[str, Any]:
     """Return a broker body with the profiling block, when there is one.
 
-    The key is omitted entirely when nothing was measured, so a deployment with
-    profiling off returns byte-for-byte what it returned before this field
-    existed, and a client only ever sees the block for a request that really
-    was selected.
+    The key is added only for a request that really was selected. When there is
+    no block the payload is returned untouched, so a deployment with profiling
+    off returns exactly what it returned before this field existed.
     """
     block = _profiling_fragment(measure)
     if block is None:
@@ -2890,35 +2903,48 @@ def _with_fragment(payload: dict[str, Any], measure: Selection | None) -> dict[s
 
 
 def _measured_response(model: Any, measure: Selection | None, payload: dict[str, Any]) -> Response:
-    """Serialize a workspace or terminal response, with the fragment only when measured.
+    """Serialize a response, adding the profiling block only when one exists.
 
-    Returned as a ``Response`` on purpose. When a handler returns the model
-    itself, FastAPI re-serializes it and emits every declared field -- including
-    ones that were never set -- so an experiment that is switched off would add
-    ``profiling: null`` to responses that never had it. Serializing here keeps
-    the off path byte-for-byte what it was, which is the design's requirement
-    for a disabled switch, and the response model still documents the shape.
+    Serialized here rather than by FastAPI, because a handler that returns the
+    model makes FastAPI emit every declared field -- including ones that were
+    never set -- so an experiment that is switched off would add
+    ``profiling: null`` to responses that never had it.
+
+    Exactly one key is omitted when nothing was measured: ``profiling`` itself.
+    Dropping every null instead would also drop the business fields the parent
+    version has always sent as null (``content``, ``size``, ``status``,
+    ``omitted_reason`` and the per-entry equivalents), which changes the public
+    contract for a reason that has nothing to do with measurement.
     """
-    return JSONResponse(model(**_with_fragment(payload, measure)).model_dump(exclude_none=True))
+    body = model(**payload).model_dump()
+    body.pop("profiling", None)
+    block = _render_fragment(measure)
+    if block is not None:
+        body["profiling"] = block
+    return JSONResponse(body)
 
 
 def _profiling_answer_headers(measure: Selection | None) -> dict[str, str]:
     """Return the measurement answer for a streaming response, as headers.
 
     A terminal stream's body is the terminal's own bytes, so the browser cannot
-    be handed a JSON block the way a file read can. The same correlation id is
-    echoed here instead, which is all the browser needs to attach its own
-    endpoint to the server's measurement.
+    be handed a JSON block the way a file read can. The same correlation ids and
+    the same completeness signals are echoed here instead.
     """
-    block = _profiling_fragment(measure)
-    if block is None:
+    rendered = _render_fragment(measure)
+    if rendered is None:
         return {}
     headers = {
-        "X-Agent-Profiling-Measurement-Id": block.measurement_id,
-        "X-Agent-Profiling-Call-Id": block.call_id,
+        "X-Agent-Profiling-Interaction-Id": str(rendered["interaction_id"]),
+        "X-Agent-Profiling-Measurement-Id": str(rendered["measurement_id"]),
     }
-    if block.truncated:
-        headers["X-Agent-Profiling-Truncated"] = "1"
+    if rendered.get("call_id"):
+        headers["X-Agent-Profiling-Call-Id"] = str(rendered["call_id"])
+    if rendered.get("fragment_truncated"):
+        headers["X-Agent-Profiling-Fragment-Truncated"] = "1"
+    headers["X-Agent-Profiling-Collection-Complete"] = (
+        "1" if rendered.get("collection_complete") else "0"
+    )
     return headers
 
 
@@ -2927,6 +2953,8 @@ async def _measured_call(
     stage: str,
     *,
     call: Callable[[dict[str, Any] | None], Awaitable[_T]],
+    record: bool = True,
+    call_id: str | None = None,
 ) -> _T:
     """Register one broker call, time it, and record the answer it returned.
 
@@ -2935,16 +2963,22 @@ async def _measured_call(
     answer is taken only from the response's own echo of the call id, so a body
     that cannot be matched to the call is not an answer -- and an exception
     leaves the fragment unanswered, which makes a retry a second fragment
-    rather than a replacement for the first. A streaming call answers in
-    headers instead, so its caller records that answer itself.
+    rather than a replacement for the first.
+
+    ``record=False`` is for a call whose answer is recorded by the caller: a
+    terminal stream answers in headers rather than a body, and a file read
+    cannot be filed under an operation until its result says which one it was.
+    Such a caller mints the id itself and passes it in, so the answer is
+    recorded against the id that call was actually made with.
     """
     if measure is None:
         return await call(None)
-    measure.begin_call(stage)
+    if call_id is None:
+        call_id = measure.begin_call(stage)
     with measure.stage(stage, "broker_call"):
-        response = await call(measure.context())
-    if isinstance(response, dict):
-        measure.record_answer(stage, response)
+        response = await call(measure.context(call_id))
+    if record and isinstance(response, dict):
+        measure.record_answer(stage, call_id, response)
     return response
 
 
@@ -2972,12 +3006,13 @@ async def get_agent_job_workspace_file(
         job=job, user=user, store=job_store, app_credentials=app_credentials
     )
 
-    # The empty path is the chat's root listing; anything else is the user
-    # having selected an entry. The route cannot know yet whether that entry is
-    # a file or a directory -- the broker does -- so it is measured as the
-    # selection it is, and the record's facts name the kind that came back.
-    operation_name = FILES_OPEN if safe_path else FILES_LIST
-    scope = root_scope(operation_name, job, service=ROUTE_FILES)
+    # A path alone cannot say what this request is. The empty path is the
+    # chat's root listing, but a non-empty one may be a file the user selected
+    # or a directory they expanded, and only the read can tell them apart. So
+    # the request starts as a bounded candidate over both file operations and
+    # is filed under the one its own result turns out to be.
+    candidates = frozenset(FILE_CANDIDATES if safe_path else (FILES_LIST,))
+    scope = root_scope(FILES_LIST, job, service=ROUTE_FILES, candidates=candidates)
     broker = await _workspace_broker_for_job(job_store, job)
     if broker is None:
         raise HTTPException(
@@ -2989,11 +3024,10 @@ async def get_agent_job_workspace_file(
                 }
             },
         )
-    with measured_operation(
-        operation_name, scope, continuing=continuation(request.headers)
-    ) as measure:
-        if measure is not None:
-            measure.mark("read")
+    with measured_operation(FILES_LIST, scope, continuing=continuation(request.headers)) as measure:
+        # The frame is captured outside the closure so the answer is recorded
+        # against the id this call was made with.
+        frame = measure.begin_call("read") if measure is not None else None
         try:
             body = await _measured_call(
                 measure,
@@ -3001,6 +3035,11 @@ async def get_agent_job_workspace_file(
                 call=lambda profiling: broker.files(
                     _workspace_id(job), safe_path, profiling=profiling
                 ),
+                # Recorded below, once the operation the result turned out to
+                # be is known: the fragment has to hang on the stage that
+                # operation names, and only this call can say which it is.
+                record=False,
+                call_id=frame,
             )
         except WorkspaceBrokerError as exc:
             if _workspace_not_materialized(exc):
@@ -3015,8 +3054,34 @@ async def get_agent_job_workspace_file(
                 ) from exc
             raise _workspace_broker_http_error(exc) from exc
         if measure is not None:
-            measure.measurement.facts["kind"] = str(body.get("kind") or "")
-            if body.get("kind") == "directory":
+            kind = str(body.get("kind") or "")
+            # The read's own kind is the evidence, read from the body. The
+            # broker names the same conclusion when it was collecting; a
+            # disagreement means one of them is wrong, and neither may win by
+            # default, so the request is simply not reported.
+            kind_operation = measure.result_operation(body, default=FILES_LIST)
+            broker_operation = str(body.get("profiling_operation") or "").strip()
+            result_operation = kind_operation
+            if broker_operation and broker_operation != kind_operation:
+                result_operation = ""
+            if not measure.confirm(result_operation):
+                # The read turned out to be an operation this run does not
+                # select -- a listing under a preview-only experiment, or a
+                # preview under a listing-only one. That is not a sample, so
+                # the slot goes back and nothing is reported: a record filed
+                # under a kind nobody asked for would corrupt the distribution
+                # it lands in.
+                measure.discard()
+                return _measured_response(AgentWorkspaceResponse, None, body)
+            # One local stage for the whole read, named for the operation the
+            # read turned out to be, and the one its broker fragment hangs on.
+            operation = measure.operation
+            measure.mark(operation)
+            with measure.stage(operation, "broker_call"):
+                pass
+            measure.record_answer(operation, frame, body)
+            measure.measurement.facts["kind"] = kind
+            if kind == "directory":
                 measure.measurement.facts["entry_count"] = len(body.get("entries") or [])
             else:
                 measure.measurement.facts["content_truncated"] = bool(body.get("truncated"))
@@ -3139,11 +3204,12 @@ async def create_agent_job_terminal(
         TERMINAL_OPEN, scope, continuing=continuation(request.headers)
     ) as measure:
         if measure is not None:
-            measure.mark("create")
+            measure.name_request(TERMINAL_CREATE)
+            measure.mark(TERMINAL_CREATE)
         try:
             payload = await _measured_call(
                 measure,
-                "create",
+                TERMINAL_CREATE,
                 call=lambda profiling: broker.create_terminal(
                     _workspace_id(job),
                     rows=body.rows,
@@ -3182,11 +3248,12 @@ async def list_agent_job_terminals(
         TERMINAL_OPEN, scope, continuing=continuation(request.headers)
     ) as measure:
         if measure is not None:
-            measure.mark("list")
+            measure.name_request(TERMINAL_LIST)
+            measure.mark(TERMINAL_LIST)
         try:
             payload = await _measured_call(
                 measure,
-                "list",
+                TERMINAL_LIST,
                 call=lambda profiling: broker.list_terminals(
                     _workspace_id(job), profiling=profiling
                 ),
@@ -3221,14 +3288,20 @@ async def stream_agent_job_terminal(
         TERMINAL_OPEN, scope, continuing=continuation(request.headers)
     ) as measure:
         if measure is not None:
-            measure.mark("stream")
+            measure.name_request(TERMINAL_STREAM)
+            measure.mark(TERMINAL_STREAM)
+        # The call id is captured outside the closure that makes the call, so
+        # the answer is recorded against the id *this* call was made with.
+        stream_call = measure.begin_call(TERMINAL_STREAM) if measure is not None else None
         try:
             upstream = await _measured_call(
                 measure,
-                "stream",
+                TERMINAL_STREAM,
                 call=lambda profiling: broker.stream_terminal(
                     _workspace_id(job), terminal_id, after=after, profiling=profiling
                 ),
+                record=False,
+                call_id=stream_call,
             )
         except WorkspaceBrokerError as exc:
             raise _terminal_broker_http_error(exc) from exc
@@ -3236,7 +3309,9 @@ async def stream_agent_job_terminal(
             # The stream's answer travels in the response headers: its body is
             # the terminal's own bytes. Until the handshake is validated the
             # fragment stays unanswered, and the record says so by name.
-            measure.record_answer_from_headers("stream", upstream.profiling_answer)
+            measure.record_answer_from_headers(
+                TERMINAL_STREAM, stream_call, upstream.profiling_answer
+            )
             measure.outcome = "completed"
 
         async def relay() -> AsyncIterator[Any]:

@@ -62,7 +62,7 @@ import socket
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -112,6 +112,9 @@ PROFILING_ANSWER_CALL_ID_HEADER = "x-agent-profiling-call-id"
 PROFILING_ANSWER_RECORDED_HEADER = "x-agent-profiling-recorded"
 PROFILING_ANSWER_TRUNCATED_HEADER = "x-agent-profiling-truncated"
 PROFILING_ANSWER_STAGES_HEADER = "x-agent-profiling-stages"
+#: Which operation the producer decided this call was, when the context offered
+#: candidates. A file path is collected before its kind is known.
+PROFILING_ANSWER_OPERATION_HEADER = "x-agent-profiling-operation"
 
 #: Longest context a caller may hand over. The context carries five bounded
 #: strings, so anything larger is a malformed or hostile value, not a selection.
@@ -634,6 +637,14 @@ def record_fragment(
         return False
     measurement.answered_fragments.add((producer, call_id))
     measurement.answered_by.add(producer)
+    resolved = str(response.get("profiling_operation") or "").strip()
+    if resolved:
+        run = _load().run
+        if run is not None and resolved in run.operations:
+            # The producer named the operation its result turned out to be.
+            # Only a name this run selects is adopted; anything else keeps the
+            # operation the caller filed the measurement under.
+            measurement.operation = resolved
     if response.get("profiling_truncated"):
         # The call answered, but collection stopped at this producer's own
         # deadline: the fragment is present and still a floor, not a duration.
@@ -699,6 +710,15 @@ class StageRecorder:
     #: the runner so a caller written before this producer existed, and a
     #: request that names no producer, cannot silently claim another's work.
     producer: str = DEFAULT_PRODUCER
+    #: The operation this call belongs to, when the context named one the run
+    #: selects. A producer that learned the result narrows it with
+    #: :meth:`set_operation`; the sub-stages already recorded keep their name
+    #: and are relabelled with the answer, because the whole call was one
+    #: operation and only its kind was in question.
+    operation: str = ""
+    #: Operations this call may be filed under. More than one means the
+    #: producer is expected to narrow it once it knows the result.
+    allowed: frozenset[str] = frozenset()
     #: Fallback root stage for a caller that records sub-stages without marking
     #: one first. An operation that never marks is not necessarily a startup.
     root_stage: str = "startup"
@@ -725,6 +745,26 @@ class StageRecorder:
             self.skipped += 1
             return _NULL_SPAN
         return _recorded_stage(self, name)
+
+    def set_operation(self, operation: str) -> bool:
+        """File this call, and everything already timed for it, under ``operation``.
+
+        A file path is collected before its kind is known, so the stages are
+        recorded first and named afterwards. They belong to that one call
+        either way; only its operation was in question.
+
+        Returns whether the operation was accepted. A producer may only report
+        one this run selects here: anything else would file a sample under a
+        name nobody asked for, and a caller that is refused must report nothing
+        rather than leave a stale name standing.
+        """
+        named = str(operation)
+        if self.allowed and named not in self.allowed:
+            return False
+        self.operation = named
+        for item in self.stages:
+            item["operation"] = self.operation
+        return True
 
     def names(self) -> list[str]:
         """Return the stage names recorded so far, in order."""
@@ -863,6 +903,27 @@ def measurement_context(
     }
 
 
+def _candidate_operations(context: Mapping[str, Any]) -> frozenset[str]:
+    """Return the operations a producer may file this call under.
+
+    A file path is a candidate over listing and opening until the read says
+    which it was, so the context may name more than one. A context that names
+    only ``operation`` -- every caller written before candidates existed -- is
+    the single-operation case, and an empty set means "not stated".
+    """
+    raw = context.get("operations")
+    if isinstance(raw, (list, tuple, set, frozenset)):
+        named = frozenset(
+            str(item.get("operation") if isinstance(item, Mapping) else item).strip()
+            for item in raw
+        )
+        named = frozenset(item for item in named if item)
+        if named:
+            return named
+    single = str(context.get("operation") or "").strip()
+    return frozenset({single}) if single else frozenset()
+
+
 def start_stage_recording(
     context: Any, *, producer: str = DEFAULT_PRODUCER
 ) -> StageRecorder | None:
@@ -888,8 +949,8 @@ def start_stage_recording(
         return None
     if str(context.get("run_id") or "") != run.run_id:
         return None
-    operation = str(context.get("operation") or "")
-    if operation and operation not in run.operations:
+    allowed = _resolved_operations(run, context)
+    if not allowed:
         return None
     inherited = _context_deadline(context)
     if inherited is None:
@@ -897,11 +958,34 @@ def start_stage_recording(
     deadline = min(run.deadline_mono, inherited)
     if time.monotonic() > deadline:
         return None
+    # One candidate is already decided; several are narrowed after the call.
+    settled = next(iter(allowed)) if len(allowed) == 1 else ""
     return StageRecorder(
         deadline_mono=deadline,
         producer=producer,
-        root_stage=operation or DEFAULT_ROOT_STAGE,
+        root_stage=settled or DEFAULT_ROOT_STAGE,
+        operation=settled,
+        allowed=allowed,
     )
+
+
+def _resolved_operations(run: ProfilingRun, context: Mapping[str, Any]) -> frozenset[str]:
+    """Return the operations this context may collect under.
+
+    Empty means "do not collect": the context names operations, but this run
+    selects none of them. A context that names no operation at all is a caller
+    that measures whatever the run does, and is reported as the empty-string
+    operation so it can still be recorded.
+
+    More than one result is not a refusal. A file path is collected before its
+    kind is known, so several candidates are exactly the case where the
+    producer learns the answer and narrows it afterwards with
+    :meth:`StageRecorder.set_operation`.
+    """
+    candidates = _candidate_operations(context)
+    if not candidates:
+        return frozenset({""})
+    return frozenset(name for name in candidates if name in run.operations)
 
 
 def _context_deadline(context: Mapping[str, Any]) -> float | None:
@@ -996,6 +1080,9 @@ def answer_from_headers(headers: Any) -> dict[str, Any] | None:
     if not call_id or str(getter(PROFILING_ANSWER_RECORDED_HEADER) or "") not in {"1", "true"}:
         return None
     answer: dict[str, Any] = {"profiling_call_id": call_id, "profiling_recorded": True}
+    operation = str(getter(PROFILING_ANSWER_OPERATION_HEADER) or "").strip()
+    if operation:
+        answer["profiling_operation"] = operation
     if str(getter(PROFILING_ANSWER_TRUNCATED_HEADER) or "") in {"1", "true"}:
         answer["profiling_truncated"] = True
     raw = str(getter(PROFILING_ANSWER_STAGES_HEADER) or "").strip()
@@ -1217,6 +1304,58 @@ def _stages(measurement: Measurement) -> list[dict[str, Any]]:
     return stages
 
 
+def settle(measurement: Measurement | None) -> None:
+    """Run the deadline judgement the record will be emitted with.
+
+    A caller that builds a response before ``finish`` must call this first, or
+    the response can claim a sample is complete while ``finish`` is about to
+    mark it expired. Idempotent, and safe on ``None``.
+    """
+    if measurement is None or measurement.finished:
+        return
+    if measurement.past_deadline():
+        measurement.expired = True
+        measurement.truncated = True
+
+
+def collection_complete(measurement: Measurement | None, outcome: str) -> bool:
+    """Return whether this local record collected everything it set out to.
+
+    Not the same as the operation succeeding: a failed startup can be a
+    complete sample of a failure. A record is incomplete when a boundary never
+    closed, a fragment it owed never answered, a span was dropped, or the
+    deadline cut collection short. Computed from the same fields ``to_record``
+    reports, so a response cannot disagree with the record it describes.
+    """
+    if measurement is None:
+        return False
+    missing = any(
+        (producer, call_id) not in measurement.answered_fragments
+        for producer, call_id, _stage in measurement.expected_fragments
+    )
+    return not (
+        outcome == "incomplete"
+        or measurement.dropped_spans
+        or measurement.expired
+        or measurement.truncated
+        or missing
+    )
+
+
+def fragment_truncated(measurement: Measurement | None, calls: Iterable[Any]) -> bool:
+    """Return whether any of these calls answered but was cut short.
+
+    A fragment can be answered and still be a floor rather than a duration,
+    and a reader has to be able to tell that from the answer alone.
+    """
+    if measurement is None:
+        return False
+    if measurement.truncated_fragments:
+        wanted = {str(call) for call in calls}
+        return any(call_id in wanted for _producer, call_id in measurement.truncated_fragments)
+    return False
+
+
 def to_record(
     measurement: Measurement,
     *,
@@ -1261,13 +1400,9 @@ def to_record(
         "timing_sources": sources,
         "outcome": outcome,
         "duration_us": ended,
-        "measurement_complete": (
-            outcome != "incomplete"
-            and measurement.dropped_spans == 0
-            and not measurement.expired
-            and not measurement.truncated
-            and not missing_fragments
-        ),
+        "collection_complete": collection_complete(measurement, outcome),
+        # The v2 name for the same judgement, kept while readers migrate.
+        "measurement_complete": collection_complete(measurement, outcome),
         "dropped_spans": measurement.dropped_spans,
         # Completion order is not timeline order: a nested span closes first.
         "spans": [
@@ -1563,6 +1698,7 @@ __all__ = [
     "OUTCOMES",
     "PRODUCER_INSTANCE_ID",
     "PROFILING_ANSWER_CALL_ID_HEADER",
+    "PROFILING_ANSWER_OPERATION_HEADER",
     "PROFILING_ANSWER_RECORDED_HEADER",
     "PROFILING_ANSWER_STAGES_HEADER",
     "PROFILING_ANSWER_TRUNCATED_HEADER",
@@ -1583,11 +1719,13 @@ __all__ = [
     "attributed_stage",
     "bind",
     "close_sink",
+    "collection_complete",
     "context_call_id",
     "discard",
     "expect_fragment",
     "finish",
     "flush_sink",
+    "fragment_truncated",
     "mark",
     "measurement_context",
     "parse_context",
@@ -1596,6 +1734,7 @@ __all__ = [
     "record_fragment",
     "reset_cache",
     "set_attributes",
+    "settle",
     "span",
     "stage_observer",
     "start_operation",

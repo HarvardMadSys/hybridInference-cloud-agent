@@ -1920,22 +1920,30 @@ def create_app(
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
         relative = _relative_path(path)
-        # The empty path is the chat's root listing; anything else is an entry
-        # the caller selected. The broker is what discovers whether that entry
-        # turned out to be a file or a directory, and it says so in the body.
-        operation = "files.open" if path else "files.list"
-        call = open_call(request.headers.get(PROFILING_CONTEXT_HEADER), operation=operation)
-        return retained_operation(
-            workspace_id,
-            lambda retained, active: read_retained_file(
+        # A path alone cannot say what this request is: the empty path is the
+        # root listing, but a non-empty one may be a file preview or a
+        # directory expansion, and only the read can tell them apart. So the
+        # call is opened for the candidates the caller offered and filed by the
+        # kind its own result reports.
+        candidates = ("files.list", "files.open") if path else ("files.list",)
+        call = open_call(request.headers.get(PROFILING_CONTEXT_HEADER), operations=candidates)
+
+        def _read(retained: Any, active: BrokerCall) -> dict[str, Any]:
+            body = read_retained_file(
                 retained,
                 relative,
                 max_preview_bytes=MAX_FILE_PREVIEW_BYTES,
                 max_directory_entries=MAX_DIRECTORY_ENTRIES,
                 observer=active.recorder,
-            ),
-            call=call,
-        )
+            )
+            kind = str(body.get("kind") or "")
+            if kind == "directory":
+                active.set_operation("files.list")
+            elif kind in {"file", "symlink"}:
+                active.set_operation("files.open")
+            return body
+
+        return retained_operation(workspace_id, _read, call=call)
 
     @app.put("/workspaces/{workspace_id}/files")
     def write_file(
@@ -1976,7 +1984,9 @@ def create_app(
         body: TerminalCreateRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        call = open_call(request.headers.get(PROFILING_CONTEXT_HEADER), operation="terminal.open")
+        call = open_call(
+            request.headers.get(PROFILING_CONTEXT_HEADER), operations=("terminal.open",)
+        )
         owner = retained_owner(workspace_id)
         terminal_token: str | None = None
         try:
@@ -2059,7 +2069,9 @@ def create_app(
         request: Request,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        call = open_call(request.headers.get(PROFILING_CONTEXT_HEADER), operation="terminal.open")
+        call = open_call(
+            request.headers.get(PROFILING_CONTEXT_HEADER), operations=("terminal.open",)
+        )
         scope = terminal_scope(workspace_id)
         with call.stage("list"):
             body = {"terminals": await asyncio.to_thread(terminals.list, scope)}
@@ -2073,7 +2085,9 @@ def create_app(
         after: int = Query(0, ge=0),
         _: None = Depends(authenticate),
     ) -> StreamingResponse:
-        call = open_call(request.headers.get(PROFILING_CONTEXT_HEADER), operation="terminal.open")
+        call = open_call(
+            request.headers.get(PROFILING_CONTEXT_HEADER), operations=("terminal.open",)
+        )
         scope = terminal_scope(workspace_id)
         with call.stage("stream_attach"):
             session = terminals.get(scope, terminal_id)

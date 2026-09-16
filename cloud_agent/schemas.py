@@ -928,24 +928,41 @@ class AgentWorkspaceEntry(BaseModel):
 
 
 class AgentOperationProfilingFragment(BaseModel):
-    """Which selected measurement produced this response, and who answered.
+    """Which selected measurement produced this response, and how complete it is.
 
     Present only while an experiment has selected this operation. A client that
     does not know the field sees no change, and a client that does can carry
-    ``measurement_id`` into the next request of the same interaction and report
+    ``interaction_id`` into the next request of the same interaction and report
     its own endpoint separately -- the browser's clock is never compared with
-    the server's, the two are correlated through this id.
+    the server's, the two are correlated through that id.
+
+    Two completeness questions are kept apart on purpose. The ``fragment_*``
+    pair describes the downstream call this reply came from; ``collection_complete``
+    describes this whole local record. A reader must not have to infer either
+    from the other, and a fragment can be answered and still be a floor.
     """
 
+    #: One logical interaction. Every request of it shares this id.
+    interaction_id: str = Field(..., min_length=1, max_length=64)
+    #: This request's own record id. Never reused across requests.
     measurement_id: str = Field(..., min_length=1, max_length=64)
-    call_id: str = Field(..., min_length=1, max_length=64)
+    #: The downstream call this reply answers, when one answered.
+    call_id: str | None = Field(None, min_length=1, max_length=64)
+    #: The operation the request was filed under, once its result was known.
+    operation: str = Field("", max_length=128)
+    #: Which local request this was, so a distribution does not mix a listing
+    #: with a file preview or a terminal attach.
+    request_kind: str = Field("", max_length=128)
     #: Whether the broker finished collecting for that call. Distinct from
     #: having timed something: a stage that legitimately did no timed work --
     #: a reuse, an empty directory -- answers without stages and is complete.
-    recorded: bool = False
+    fragment_recorded: bool = False
     #: Whether that collection was cut short by a deadline. An empty stage list
     #: means "collected and nothing to time" only when this is false.
-    truncated: bool = False
+    fragment_truncated: bool = False
+    #: Whether this local record closed every boundary, owed no unanswered
+    #: fragment and lost no span. A failed operation can still be complete.
+    collection_complete: bool = False
 
 
 class AgentWorkspaceResponse(BaseModel):
@@ -1034,13 +1051,20 @@ class AgentTerminalSessionResponse(BaseModel):
     rows: int = Field(..., ge=2, le=200)
     cols: int = Field(..., ge=20, le=500)
     last_seq: int = Field(..., ge=0)
-    profiling: AgentOperationProfilingFragment | None = None
+    # Deliberately no profiling field here. This model is the terminal *item*
+    # inside a list as well as the reply to a create, and it is reused by
+    # routes that are not instrumented (input, resize, delete). A field on it
+    # would put ``profiling: null`` on every nested item and on those replies,
+    # changing the contract for requests that were never measured. The measured
+    # routes add their block to the serialized body instead.
 
 
 class AgentTerminalSessionListResponse(BaseModel):
     """Interactive terminal sessions retained by one live workspace."""
 
     terminals: list[AgentTerminalSessionResponse] = Field(default_factory=list)
+    #: Present only on a measured list request; the instrumented handler adds
+    #: it after serializing, so an unmeasured reply has no key at all.
     profiling: AgentOperationProfilingFragment | None = None
 
 

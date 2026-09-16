@@ -5,6 +5,14 @@
 已实现，浏览器终点仍待实现**。
 基于本地代码检查，扩展 [沙盒启动测量设计](2026-09-14-sandbox-startup-measurement-design.zh-CN.md)。
 
+**2026-09-16 整合修订**：下一轮将 #218 的存储与 Admin 读面接到 #258 的统一采集器，
+具体身份、预算、持久化、版本与交付契约见
+[存储/Admin 整合设计](2026-09-16-operation-measurement-storage-admin-integration-design.zh-CN.md)。
+本地 `e77e3e6` 的服务端扩展还有
+[五项 review 问题](2026-09-16-operation-measurement-e77e3e6-review.zh-CN.md)待修；
+尤其是下文旧版“共用 measurement_id”应按新设计拆为 interaction_id 与每请求唯一
+measurement_id，不能直接作为持久化身份。下文描述的实现不等同于已验收。
+
 目标：在按需开启的 profiling 实验中，每个主要用户操作都能回答：
 **多久可用、是否成功、卡在哪一步、结果是否新鲜**。
 执行中的 CPU、内存和 I/O 继续由已有 member-window/eBPF 体系解释；平台操作的等待由
@@ -21,7 +29,8 @@
 
 截至 2026-09-16 检查，[#258](https://github.com/HarvardMadSys/hybridInference-cloud-agent/pull/258)
 为 OPEN、目标 dev，代码 head 为 3a191e5，CI Gate 通过，尚未合并。这是检查时的状态，
-不代表已部署。下表以该提交为实现依据；§3.1–§3.5 是待实现的补充契约。
+不代表已部署。下表的服务端扩展以本地后续提交 e77e3e6 为依据，该提交尚未 push；
+§3.1–§3.5 中的浏览器等剩余部分仍是待实现契约。
 
 | 能力 | 已有内容 | 尚缺内容 |
 | --- | --- | --- |
