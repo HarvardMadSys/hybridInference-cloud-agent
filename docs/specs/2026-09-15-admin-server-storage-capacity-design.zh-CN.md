@@ -320,3 +320,12 @@ Staging 验收：页面、admin API 和宿主 `df <挂载根>` 在同一时段�
 3. **Tooltip 把保留块的含义写反了。** `used = total - free` **不**把保留块算作已用；仍空闲的保留块既不在 `used` 也不在 `available` 里，这正是二者相加不等于总量的原因。`used / (used + available)` 的分母口径不变，写反的说明（web tooltip、`admin.ts` 字段注释、`docs/operations.md`）已改正，并加了 `not.toContain('used counts the blocks')` 作为回归护栏。
 
 仍待完成：第 5 节的真机验收实验（尤其反例 A）与 staging 截图。
+
+**2026-09-16 第二轮 P1 修订。** 复核 `c11b5ac` 后确认 P2／P3 可关闭，P1 只修了一半：
+
+- **预算只写在阶段边界上，每次调用仍固定 8 秒。** `SHARED_READY_TIMEOUT=2` + 探针不返回时，从首次 storage 调用到结束实测 8.08 秒——"最终会返回"做到了，"在剩余预算内返回"没有。现在每次调用重新计算 `min(STORAGE_CALL_TIMEOUT_S, 剩余预算 − 强制终止宽限期)`，负担不起就**不发起**该调用；容差重试之间的等待也计入同一预算。
+- **`deadline <= SECONDS` 被当成了"手动 check"。** 它同样可能是**已耗尽预算的 rollout**，而原实现会给后者重新分配 30 秒。现在 `cmd_check` 把"这个 deadline 是不是 fence"显式传下去（`check_shared_live_stack` → `verify_storage_probe`）：有 fence 时预算就是 fence 剩余，已耗尽则一次调用都不做；只有无 fence 的手动 `check`（设计指定的 verdict 刷新路径）使用自身预算。
+- **`timeout` 缺少强制终止阶段。** GNU `timeout` 默认只发 SIGTERM，对忽略该信号的进程会一直等下去；而测试替身直接 `kill -9`，比生产行为更强，恰好掩盖了这个缺口。现在使用 `timeout -k "$STORAGE_KILL_AFTER_S"`，宽限期计入预算（因此即使需要 KILL 的调用也在 deadline 内结束）；测试替身改为按 GNU 语义实现（预算处 TERM → 宽限后 KILL → 124／137，且**不传 `-k` 就不提供宽限**），并新增"探针忽略 SIGTERM 仍会被切断"的用例。
+- **两条回归护栏都实测过：** 把按剩余预算改成固定 8 秒 → `test_a_partly_spent_fence_shrinks_the_call_bound` 报 "a call was handed the flat bound: [8]"；去掉 `-k` → 预算日志变成 `8 none`（断言失败），且忽略 SIGTERM 的用例会挂住直到测试被杀。
+
+诚实边界收窄为一条：处于不可中断 I/O 的进程任何信号都杀不掉，`timeout` 自己会一直等它——这是本脚本无法设界的情形。其余（卡住的 `docker exec`、忽略 SIGTERM 的探针、仍响应信号的死挂载 `df`）都在界内。
