@@ -95,7 +95,7 @@ export function McpImportStep({
   const [text, setText] = useState('');
   const [preview, setPreview] = useState<McpImportPreviewApi | null>(null);
   const [locations, setLocations] = useState<Record<string, McpLocation>>({});
-  const [secrets, setSecrets] = useState<Record<string, string>>({});
+  const [secrets, setSecrets] = useState<Record<string, Record<string, string>>>({});
   const [checking, setChecking] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -128,6 +128,7 @@ export function McpImportStep({
   }, [text]);
 
   function edit(value: string) {
+    if (value === text) return;
     setText(value);
     setPreview(null);
     setError(null);
@@ -135,15 +136,12 @@ export function McpImportStep({
     setSecrets({});
   }
 
-  const missingSecrets = [
-    ...new Set(
-      preview?.drafts.flatMap((draft) =>
-        draft.secrets
-          .filter((secret) => secret.value === '(not provided)')
-          .map((secret) => secret.name),
-      ) ?? [],
-    ),
-  ];
+  const missingSecrets =
+    preview?.drafts.flatMap((draft) =>
+      draft.secrets
+        .filter((secret) => secret.value === '(not provided)')
+        .map((secret) => ({ server: draft.label, name: secret.name })),
+    ) ?? [];
 
   async function save() {
     if (!preview?.drafts.length || saving) return;
@@ -151,7 +149,7 @@ export function McpImportStep({
     onBusyChange?.(true);
     setError(null);
     try {
-      const result = await saveMcpImport(text, locations, secrets);
+      const result = await saveMcpImport(text, locations, {}, undefined, secrets);
       if (!result.saved.length) {
         setError(
           result.rejected.map((entry) => `${entry.name}: ${entry.reason}`).join(' ') ||
@@ -275,19 +273,22 @@ export function McpImportStep({
               ))}
             </div>
           ))}
-          {missingSecrets.map((name) => (
+          {missingSecrets.map(({ server, name }) => (
             <label
-              key={name}
+              key={JSON.stringify([server, name])}
               className="mt-3 block text-xs font-medium text-gray-700 dark:text-gray-300"
             >
-              Value for {name}
+              {server} · Value for {name}
               <input
                 type="password"
                 autoComplete="off"
                 disabled={saving}
-                value={secrets[name] ?? ''}
+                value={secrets[server]?.[name] ?? ''}
                 onChange={(event) =>
-                  setSecrets((current) => ({ ...current, [name]: event.target.value }))
+                  setSecrets((current) => ({
+                    ...current,
+                    [server]: { ...current[server], [name]: event.target.value },
+                  }))
                 }
                 className={`mt-1 ${FIELD}`}
               />
@@ -311,7 +312,7 @@ export function McpImportStep({
             disabled={
               saving ||
               !preview.drafts.length ||
-              missingSecrets.some((name) => !secrets[name]?.trim())
+              missingSecrets.some(({ server, name }) => !secrets[server]?.[name]?.trim())
             }
             onClick={() => void save()}
             className="mt-4 rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"

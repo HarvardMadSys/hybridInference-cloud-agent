@@ -104,7 +104,9 @@ describe('McpAddDialog', () => {
     );
     fireEvent.change(screen.getByLabelText('MCP configuration'), { target: { value: text } });
     fireEvent.click(await screen.findByRole('button', { name: 'Add 1 server' }));
-    await waitFor(() => expect(saveMcpImport).toHaveBeenCalledWith(text, { docs: 'remote' }, {}));
+    await waitFor(() =>
+      expect(saveMcpImport).toHaveBeenCalledWith(text, { docs: 'remote' }, {}, undefined, {}),
+    );
     expect(added).toHaveBeenCalledWith([{ id: 5, label: 'docs' }]);
     expect(screen.queryByLabelText('Run location for docs')).not.toBeInTheDocument();
   });
@@ -133,16 +135,14 @@ describe('McpAddDialog', () => {
     fireEvent.change(screen.getByLabelText('Run location for docs'), {
       target: { value: 'managed-worker' },
     });
-    fireEvent.change(screen.getByLabelText('Value for API_KEY'), {
+    fireEvent.change(screen.getByLabelText('docs · Value for API_KEY'), {
       target: { value: 'private-token' },
     });
     fireEvent.click(add);
     await waitFor(() =>
-      expect(saveMcpImport).toHaveBeenCalledWith(
-        text,
-        { docs: 'managed-worker' },
-        { API_KEY: 'private-token' },
-      ),
+      expect(saveMcpImport).toHaveBeenCalledWith(text, { docs: 'managed-worker' }, {}, undefined, {
+        docs: { API_KEY: 'private-token' },
+      }),
     );
   });
 
@@ -197,5 +197,44 @@ describe('McpAddDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: 'JSON configuration' }));
     expect(screen.getByLabelText('MCP configuration')).toHaveValue(text);
     expect(screen.getByRole('button', { name: 'Add 1 server' })).toBeEnabled();
+  });
+
+  it('keeps the validated configuration when selecting the same example again', async () => {
+    vi.mocked(previewMcpImport).mockResolvedValue(preview);
+    render(<McpAddDialog templates={[]} onClose={vi.fn()} onAdded={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'URL example' }));
+    await screen.findByRole('button', { name: 'Add 1 server' });
+    fireEvent.click(screen.getByRole('button', { name: 'URL example' }));
+    expect(screen.getByRole('button', { name: 'Add 1 server' })).toBeEnabled();
+  });
+
+  it('asks for a separate credential for each server in a batch', async () => {
+    const drafts = ['wiki', 'tracker'].map((label) => ({
+      ...preview.drafts[0],
+      label,
+      secrets: [{ name: 'Authorization', target: 'header', value: '(not provided)' }],
+    }));
+    vi.mocked(previewMcpImport).mockResolvedValue({ ...preview, drafts });
+    vi.mocked(saveMcpImport).mockResolvedValue({ ...preview, saved: [] });
+    render(<McpAddDialog templates={[]} onClose={vi.fn()} onAdded={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('MCP configuration'), { target: { value: text } });
+    const add = await screen.findByRole('button', { name: 'Add 2 servers' });
+    fireEvent.change(screen.getByLabelText('wiki · Value for Authorization'), {
+      target: { value: 'wiki-token' },
+    });
+    expect(add).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('tracker · Value for Authorization'), {
+      target: { value: 'tracker-token' },
+    });
+    fireEvent.click(add);
+    await waitFor(() =>
+      expect(saveMcpImport).toHaveBeenCalledWith(
+        text,
+        { wiki: 'remote', tracker: 'remote' },
+        {},
+        undefined,
+        { wiki: { Authorization: 'wiki-token' }, tracker: { Authorization: 'tracker-token' } },
+      ),
+    );
   });
 });

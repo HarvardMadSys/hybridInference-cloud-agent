@@ -268,6 +268,8 @@ class ImportRequest(BaseModel):
     #: user chose after seeing what the configuration implied.
     locations: dict[str, str] = Field(default_factory=dict)
     env_secrets: dict[str, str] = Field(default_factory=dict)
+    #: Missing values belong to a server, even when several use the same key.
+    server_secrets: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
 class ImportPreview(BaseModel):
@@ -686,8 +688,11 @@ async def import_connections(
             template=None,
         )
         secrets = {secret.name: secret.value for secret in draft.secrets if secret.value}
-        for name, value in body.env_secrets.items():
-            secrets.setdefault(name, value)
+        supplied = body.server_secrets.get(draft.label, {})
+        for secret in draft.secrets:
+            value = supplied.get(secret.name, body.env_secrets.get(secret.name))
+            if secret.value is None and value is not None:
+                secrets[secret.name] = value
         if secrets:
             await _store_import_secrets(job_store, row=row, secrets=secrets)
         refreshed = await job_store.mcp.get_mcp_connection(
@@ -2238,13 +2243,18 @@ async def _store_import_secrets(
     if str(row.get("transport")) == Transport.STDIO.value:
         await _store_env_secrets(store, row=row, secrets=secrets)
         return
-    first = next(iter(secrets.values()))
+    header_name = _header_of(row)
+    secret = secrets.get(header_name)
+    if secret is None:
+        return
+    config = row.get("auth_config")
+    settings = config if isinstance(config, Mapping) else {}
     await _store_static_secret(
         store,
         row=row,
-        secret=first,
-        header_name=_header_of(row),
-        header_scheme=None,
+        secret=secret,
+        header_name=header_name,
+        header_scheme=str(settings.get("scheme") or ""),
         replaces_identity=False,
     )
 

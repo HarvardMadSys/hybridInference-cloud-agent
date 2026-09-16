@@ -341,6 +341,7 @@ export async function saveMcpImport(
   locations: Record<string, McpLocation> = {},
   envSecrets: Record<string, string> = {},
   formatHint?: string,
+  serverSecrets?: Record<string, Record<string, string>>,
 ): Promise<McpImportSavedApi> {
   const resp = await fetchWithAuth(API_BASE, '/v1/agent/mcp/connections/import', {
     method: 'POST',
@@ -351,6 +352,7 @@ export async function saveMcpImport(
       save: true,
       locations,
       env_secrets: envSecrets,
+      server_secrets: serverSecrets,
     }),
   });
   return jsonOrThrow(resp);

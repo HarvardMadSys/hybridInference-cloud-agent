@@ -18,6 +18,9 @@ action after adding a server or returning from OAuth.
 - Add with JSON opens a `mcp.json` editor. URL and command examples explain the
   accepted shape. Validation runs after typing stops and shows the servers that
   will be added, missing credential values and any rejected entries.
+- Missing credentials are entered separately for each server, even when several
+  servers use the same header or environment-variable name. Saving preserves the
+  authentication scheme declared in the configuration.
 - JSON and preset tabs retain the JSON draft when switching. Saving adds the
   displayed servers to existing connections; this is not a global config-file
   replacement or an editor for existing connections.
