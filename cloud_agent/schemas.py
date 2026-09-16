@@ -927,6 +927,27 @@ class AgentWorkspaceEntry(BaseModel):
     omitted_reason: str | None = None
 
 
+class AgentOperationProfilingFragment(BaseModel):
+    """Which selected measurement produced this response, and who answered.
+
+    Present only while an experiment has selected this operation. A client that
+    does not know the field sees no change, and a client that does can carry
+    ``measurement_id`` into the next request of the same interaction and report
+    its own endpoint separately -- the browser's clock is never compared with
+    the server's, the two are correlated through this id.
+    """
+
+    measurement_id: str = Field(..., min_length=1, max_length=64)
+    call_id: str = Field(..., min_length=1, max_length=64)
+    #: Whether the broker finished collecting for that call. Distinct from
+    #: having timed something: a stage that legitimately did no timed work --
+    #: a reuse, an empty directory -- answers without stages and is complete.
+    recorded: bool = False
+    #: Whether that collection was cut short by a deadline. An empty stage list
+    #: means "collected and nothing to time" only when this is false.
+    truncated: bool = False
+
+
 class AgentWorkspaceResponse(BaseModel):
     """A directory listing or bounded text-file preview from a job workspace."""
 
@@ -941,6 +962,7 @@ class AgentWorkspaceResponse(BaseModel):
     omitted_reason: str | None = None
     writable: bool = False
     source: Literal["workspace"] = "workspace"
+    profiling: AgentOperationProfilingFragment | None = None
 
 
 class AgentWorkspaceWriteRequest(BaseModel):
@@ -1012,12 +1034,14 @@ class AgentTerminalSessionResponse(BaseModel):
     rows: int = Field(..., ge=2, le=200)
     cols: int = Field(..., ge=20, le=500)
     last_seq: int = Field(..., ge=0)
+    profiling: AgentOperationProfilingFragment | None = None
 
 
 class AgentTerminalSessionListResponse(BaseModel):
     """Interactive terminal sessions retained by one live workspace."""
 
     terminals: list[AgentTerminalSessionResponse] = Field(default_factory=list)
+    profiling: AgentOperationProfilingFragment | None = None
 
 
 class AgentGitChange(BaseModel):

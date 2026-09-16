@@ -774,7 +774,7 @@ def test_remote_stages_need_a_stage_to_attach_to(monkeypatch, caplog):
     assert profiling.attach_remote_stages(measurement, "x", None, source="broker") is False
     assert profiling.attach_remote_stages(measurement, "x", "oops", source="broker") is False
     assert profiling.attach_remote_stages(None, "x", [{"name": "a"}], source="broker") is False
-    assert measurement.producers == set()
+    assert measurement.contributors == set()
 
 
 def test_a_substage_observer_records_against_the_current_stage(monkeypatch, caplog, clock):
@@ -1292,3 +1292,142 @@ def test_a_truncated_answer_still_contributes_the_stages_it_measured(monkeypatch
     assert [child["stage"] for child in children] == ["container_start"]
     assert record["truncated_fragments"] == ["broker:c1"]
     assert record["measurement_complete"] is False
+
+
+# ---------------------------------------------------------------------------
+# One collector, more than one producer
+# ---------------------------------------------------------------------------
+
+
+def test_a_v1_reader_can_still_find_a_startups_outcome(monkeypatch, caplog):
+    """The startup alias survives, so records already written keep their name."""
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    _enable(monkeypatch)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+
+    profiling.finish(measurement, outcome="dispatched")
+
+    record = _records(caplog)[0]
+    assert record["schema_version"] == 2
+    assert record["outcome"] == "dispatched"
+    assert record["startup_outcome"] == "dispatched"
+    assert record["producer"] == "runner"
+    assert record["facts"]["outcome"] == "dispatched"
+
+
+def test_a_file_read_is_never_reported_as_a_startup(monkeypatch, caplog):
+    """A record names its own producer and its own endpoint, not the runner's."""
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    _enable(monkeypatch, operations=["files.open", "attempt.startup"])
+    measurement = profiling.start_operation(operation="files.open", producer="control-plane")
+    assert profiling.bind(measurement, job_id="ajob_1", sandbox_id="asbx_1")
+
+    profiling.mark(measurement, "read")
+    profiling.finish(measurement, outcome="completed")
+
+    record = _records(caplog)[0]
+    assert record["operation"] == "files.open"
+    assert record["producer"] == "control-plane"
+    assert record["producers"] == ["control-plane"]
+    assert record["outcome"] == "completed"
+    assert record["milestones"] == [
+        {
+            "name": "read",
+            "offset_us": record["milestones"][0]["offset_us"],
+            "source": "control-plane",
+        }
+    ]
+    # `startup_outcome` is a claim about a startup, and this was not one.
+    assert "startup_outcome" not in record
+    assert "startup_outcome" not in record["facts"]
+
+
+def test_a_root_producer_can_time_its_own_sub_stages(monkeypatch, caplog):
+    """A control-plane stage is reported in the broker's own shape and source."""
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    _enable(monkeypatch, operations=["files.list"])
+    measurement = profiling.start_operation(operation="files.list", producer="control-plane")
+    assert profiling.bind(measurement, job_id="ajob_1")
+
+    profiling.mark(measurement, "list")
+    with profiling.attributed_stage(measurement, "list", "broker_call"):
+        pass
+    profiling.finish(measurement, outcome="completed")
+
+    record = _records(caplog)[0]
+    children = record["stages"][0]["children"]
+    assert [child["stage"] for child in children] == ["broker_call"]
+    assert children[0]["source"] == "control-plane"
+    assert children[0]["outcome"] == "ok"
+
+
+def test_a_local_sub_stage_is_attributed_to_its_own_producer(monkeypatch, caplog):
+    """A shared observer must not file a broker's work under the runner."""
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    _enable(monkeypatch, operations=["files.list"])
+    measurement = profiling.start_operation(operation="files.list", producer="control-plane")
+    assert profiling.bind(measurement, job_id="ajob_1")
+
+    observer = profiling.stage_observer(measurement, producer="broker")
+    assert observer is not None
+    with observer.stage("admission"):
+        pass
+    profiling.finish(measurement, outcome="completed")
+
+    record = _records(caplog)[0]
+    # No mark was ever placed, so the sub-stage hangs under the producer's own
+    # name -- never under "startup", which would be a false claim.
+    # The record names the producer that rooted the operation, the observer's
+    # work is attributed to the producer that did it, and a measurement that
+    # placed no mark still has one stage -- the operation's whole span -- for
+    # that work to land on.
+    assert record["producer"] == "control-plane"
+    assert record["producers"] == ["control-plane", "broker"]
+    assert record["timing_sources"] == ["control-plane", "broker"]
+    stage = record["stages"][0]
+    assert stage["stage"] == "files.list"
+    assert stage["start_offset_us"] == 0
+    assert [child["source"] for child in stage["children"]] == ["broker"]
+
+
+def test_a_context_round_trips_through_its_wire_form(monkeypatch):
+    """What one producer writes is exactly what the next one reads."""
+    _enable(monkeypatch, operations=["files.open"])
+    measurement = profiling.start_operation(operation="files.open", producer="control-plane")
+    assert profiling.bind(measurement, job_id="ajob_1", host="host-a")
+    call = profiling.expect_fragment(measurement, "broker", "read")
+
+    encoded = json.dumps(profiling.measurement_context(measurement, call))
+    decoded = profiling.parse_context(encoded)
+
+    assert decoded is not None
+    assert decoded["run_id"] == "run-1"
+    assert decoded["measurement_id"] == measurement.measurement_id
+    assert decoded["operation"] == "files.open"
+    assert decoded["call_id"] == call
+    assert decoded["expires_at"] == pytest.approx(time.time() + 3600, abs=120)
+
+
+def test_an_unusable_context_is_refused_rather_than_guessed(monkeypatch):
+    """Measurement metadata never becomes a reason to measure something else."""
+    _enable(monkeypatch, operations=["files.open"])
+    assert profiling.parse_context(None) is None
+    assert profiling.parse_context("") is None
+    assert profiling.parse_context("not json") is None
+    assert profiling.parse_context(json.dumps([1, 2])) is None
+    assert profiling.parse_context(json.dumps({"run_id": "run-1"})) is None
+    assert profiling.parse_context("x" * (profiling.MAX_CONTEXT_CHARS + 1)) is None
+    # Decodable, but not a run this process is experimenting with.
+    assert (
+        profiling.start_stage_recording(
+            {"run_id": "other-run", "operation": "files.open", "expires_at": time.time() + 60}
+        )
+        is None
+    )
+    # Decodable, in the run, but for an operation this run does not select.
+    assert (
+        profiling.start_stage_recording(
+            {"run_id": "run-1", "operation": "sandbox.wake", "expires_at": time.time() + 60}
+        )
+        is None
+    )

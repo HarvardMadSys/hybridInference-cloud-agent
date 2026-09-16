@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -10,8 +11,14 @@ from urllib.parse import quote
 
 import httpx
 
+from cloud_agent_host.operation_profiling import (
+    MAX_CONTEXT_CHARS,
+    PROFILING_CONTEXT_HEADER,
+    answer_from_headers,
+)
+
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Mapping
 
 
 @dataclass
@@ -31,8 +38,14 @@ class WorkspaceBrokerStream:
 
     _client: httpx.AsyncClient
     _response: httpx.Response
+    #: The broker's measurement answer for a streaming route, read from the
+    #: response headers because the body is the terminal's own bytes. ``None``
+    #: when the broker was not collecting, which leaves the caller's fragment
+    #: unanswered rather than inventing an answer it never received.
+    profiling_answer: dict[str, Any] | None = None
 
     def __aiter__(self) -> AsyncIterator[bytes]:
+        """Stream the broker's raw body."""
         return self._response.aiter_raw()
 
     async def aclose(self) -> None:
@@ -106,13 +119,14 @@ class WorkspaceBrokerClient:
         params: dict[str, str] | None = None,
         json: dict[str, Any] | None = None,
         timeout: float = 30,
+        headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         try:
             async with self._http(timeout) as client:
                 response = await client.request(
                     method,
                     f"{self._base_url}/workspaces/{workspace_id}/{suffix}",
-                    headers=self._headers,
+                    headers=headers or self._headers,
                     params=params,
                     json=json,
                     timeout=timeout,
@@ -186,9 +200,35 @@ class WorkspaceBrokerClient:
         if response.is_error:
             raise self._response_error(response)
 
-    async def files(self, workspace_id: str, path: str) -> dict[str, Any]:
+    def _profiling_headers(self, context: Mapping[str, Any] | None) -> dict[str, str]:
+        """Return this request's headers, carrying the inherited selection.
+
+        The selection is measurement metadata, never an authorization token: the
+        broker validates it against its own switch, run and deadline and treats
+        it as absent when it cannot. It travels as one header rather than as a
+        query parameter so it cannot end up in an access log or a cache key.
+        """
+        if not context:
+            return self._headers
+        try:
+            encoded = json.dumps(dict(context), separators=(",", ":"), default=str)
+        except (TypeError, ValueError):  # pragma: no cover - context is plain data
+            return self._headers
+        if len(encoded) > MAX_CONTEXT_CHARS:
+            return self._headers
+        return {**self._headers, PROFILING_CONTEXT_HEADER: encoded}
+
+    async def files(
+        self, workspace_id: str, path: str, *, profiling: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
         """Read one file or directory from a live workspace."""
-        return await self._request("GET", workspace_id, "files", params={"path": path})
+        return await self._request(
+            "GET",
+            workspace_id,
+            "files",
+            params={"path": path},
+            headers=self._profiling_headers(profiling),
+        )
 
     async def write_file(self, workspace_id: str, path: str, content: str) -> dict[str, Any]:
         """Replace one UTF-8 file in a live workspace."""
@@ -208,15 +248,25 @@ class WorkspaceBrokerClient:
             timeout=timeout_seconds + 10,
         )
 
-    async def create_terminal(self, workspace_id: str, *, rows: int, cols: int) -> dict[str, Any]:
+    async def create_terminal(
+        self, workspace_id: str, *, rows: int, cols: int, profiling: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
         """Open one interactive terminal in a durable workspace."""
         return await self._request(
-            "POST", workspace_id, "terminals", json={"rows": rows, "cols": cols}
+            "POST",
+            workspace_id,
+            "terminals",
+            json={"rows": rows, "cols": cols},
+            headers=self._profiling_headers(profiling),
         )
 
-    async def list_terminals(self, workspace_id: str) -> dict[str, Any]:
+    async def list_terminals(
+        self, workspace_id: str, *, profiling: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
         """List the interactive terminals retained by a workspace."""
-        return await self._request("GET", workspace_id, "terminals")
+        return await self._request(
+            "GET", workspace_id, "terminals", headers=self._profiling_headers(profiling)
+        )
 
     async def suspend_terminals(
         self, workspace_id: str, *, lease_generation: int, job_id: str | None = None
@@ -255,7 +305,12 @@ class WorkspaceBrokerClient:
         )
 
     async def stream_terminal(
-        self, workspace_id: str, terminal_id: str, *, after: int
+        self,
+        workspace_id: str,
+        terminal_id: str,
+        *,
+        after: int,
+        profiling: Mapping[str, Any] | None = None,
     ) -> WorkspaceBrokerStream:
         """Open and validate a terminal SSE stream before public headers are sent."""
         client = httpx.AsyncClient(
@@ -268,7 +323,7 @@ class WorkspaceBrokerClient:
             request = client.build_request(
                 "GET",
                 f"{self._base_url}/workspaces/{workspace_id}/{suffix}",
-                headers=self._headers,
+                headers=self._profiling_headers(profiling),
                 params={"after": str(after)},
             )
             response = await client.send(request, stream=True)
@@ -276,7 +331,9 @@ class WorkspaceBrokerClient:
                 await response.aread()
                 raise self._response_error(response)
             ownership_transferred = True
-            return WorkspaceBrokerStream(client, response)
+            return WorkspaceBrokerStream(
+                client, response, profiling_answer=answer_from_headers(response.headers)
+            )
         except WorkspaceBrokerError:
             raise
         except httpx.HTTPError as exc:

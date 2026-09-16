@@ -8,10 +8,13 @@ is passed as argv/stdin, never interpolated into code or a shell command.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.chat_sandbox import CHAT_WORKDIR, RetainedChatBackend
 from cloud_agent_host.sandbox import SandboxError
+
+if TYPE_CHECKING:
+    from cloud_agent_host.operation_profiling import StageObserver
 
 
 class RetainedWorkspaceError(SandboxError):
@@ -263,8 +266,15 @@ def read_retained_file(
     *,
     max_preview_bytes: int,
     max_directory_entries: int,
+    observer: StageObserver | None = None,
 ) -> dict[str, Any]:
-    """Read one normalized path without following a repository symlink."""
+    """Read one normalized path without following a repository symlink.
+
+    ``observer`` times the exec that performs the read, so a measured file
+    request can attribute the container round trip separately from the broker's
+    own admission and network work. Nothing about the read changes: the helper
+    program, its arguments and its bounds are exactly what they were.
+    """
     result = backend.manager.exec_capture(
         backend.spec,
         [
@@ -282,6 +292,7 @@ def read_retained_file(
         # the workspace, while isolated Python from / keeps sys.path clean.
         workdir="/",
         timeout_s=60,
+        observer=observer,
     )
     if result.returncode != 0:
         raise _error_from_result(result.returncode, result.stdout, result.stderr)

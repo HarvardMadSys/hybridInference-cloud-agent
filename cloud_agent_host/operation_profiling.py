@@ -36,8 +36,9 @@ Three costs are bounded on purpose, because this measures a path users wait on:
 
 Known limits of this slice, all deliberate:
 
-* Selection happens at the runner's root operation, not at the control plane.
-  ``max_operations`` is therefore a per-process budget, not a fleet-wide one.
+* Selection happens at each producer's root operation. ``max_operations`` is
+  therefore a per-process budget, not a fleet-wide one, and a deployment
+  experiments with one admission instance until shared admission exists.
 * ``target`` accepts ``host`` (known before claim) plus ``job_id``,
   ``thread_id`` and ``sandbox_id`` (known only once an attempt is claimed), so
   a target filter is applied in two steps: the cheap pre-filter at
@@ -81,8 +82,54 @@ ENV_PROFILING_RUN = "AGENT_OPERATION_PROFILING_RUN"
 #: Optional JSONL path. Each finished measurement is appended as one line.
 ENV_PROFILING_SINK = "AGENT_OPERATION_PROFILING_SINK"
 
-#: Bumped when the emitted record shape changes.
-SCHEMA_VERSION = 1
+#: Major is bumped when a reader of an older record would misread a new one;
+#: minor when fields are only added. v2 is additive over v1: ``outcome`` joins
+#: ``startup_outcome``, and ``producer`` names whichever producer rooted the
+#: operation instead of always the runner. A v1 reader can still consume a v2
+#: record for ``attempt.startup`` by ignoring fields it does not know.
+SCHEMA_VERSION = 2
+
+#: The runner's root operation. Only this operation keeps the v1
+#: ``startup_outcome`` alias, because that name is a claim about a startup.
+STARTUP_OPERATION = "attempt.startup"
+
+#: Alias carrying the same value as ``outcome``, written only for
+#: ``attempt.startup``. A file read is not a startup and must not say it is.
+STARTUP_OUTCOME_ALIAS = "startup_outcome"
+
+#: Producer name for a record whose root is the runner process.
+DEFAULT_PRODUCER = "runner"
+
+#: Header a selected root operation's context travels in. It is measurement
+#: metadata, never an authorization token, and every producer re-validates it
+#: against its own switch, run and deadline.
+PROFILING_CONTEXT_HEADER = "X-Agent-Operation-Profiling"
+
+#: Headers a producer answers in when its response body cannot carry the
+#: answer -- a terminal stream has already started sending the terminal's own
+#: bytes. Lower case because that is how an ASGI response exposes headers.
+PROFILING_ANSWER_CALL_ID_HEADER = "x-agent-profiling-call-id"
+PROFILING_ANSWER_RECORDED_HEADER = "x-agent-profiling-recorded"
+PROFILING_ANSWER_TRUNCATED_HEADER = "x-agent-profiling-truncated"
+PROFILING_ANSWER_STAGES_HEADER = "x-agent-profiling-stages"
+
+#: Longest context a caller may hand over. The context carries five bounded
+#: strings, so anything larger is a malformed or hostile value, not a selection.
+MAX_CONTEXT_CHARS = 2048
+
+#: How long a control-plane instance remembers a selection while a browser
+#: interaction continues across requests (a terminal open is a list, a create
+#: and a stream). Beyond the run's own deadline the selection is gone.
+SELECTION_TTL_S = 120.0
+
+#: Ceiling on remembered selections per process, so a client that never
+#: finishes an interaction cannot grow the table without bound.
+MAX_SELECTIONS = 512
+
+#: Supplied by the control plane as the fallback root stage name when no
+#: operation is inherited. Kept generic deliberately: an unmarked file or
+#: terminal measurement is not a startup, and must not be labelled one.
+DEFAULT_ROOT_STAGE = "operation"
 
 #: Per-measurement span ceiling; the design budgets 128 spans per attempt.
 MAX_SPANS = 128
@@ -113,7 +160,28 @@ MAX_REMOTE_STAGES = 32
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
-_OUTCOMES = {"dispatched", "failed", "cancelled", "lease_lost", "incomplete"}
+#: Every outcome a root operation may report. The runner's startup outcomes are
+#: about an attempt's fate; the others are about the endpoint a platform
+#: operation reached and are what a file or terminal request reports. One list,
+#: because the schema is one schema -- but no producer borrows the other's
+#: words: a startup is never "completed" and a file read is never "dispatched".
+OUTCOMES = frozenset(
+    {
+        # attempt.startup
+        "dispatched",
+        "failed",
+        "cancelled",
+        "lease_lost",
+        "incomplete",
+        # files.list, files.open, terminal.open
+        "completed",
+        # A newer request replaced this one before its result reached the user.
+        "superseded",
+    }
+)
+
+#: Retained for callers written against the first slice.
+_OUTCOMES = OUTCOMES
 
 
 def _instance_id() -> str:
@@ -197,6 +265,11 @@ class Measurement:
     #: The run's monotonic deadline, carried per measurement so expiry is
     #: enforced while collecting and not only when a new measurement starts.
     deadline_mono: float
+    #: Which producer rooted this operation: the runner for an attempt startup,
+    #: the control plane for a file or terminal request. It names the record's
+    #: owner and the source of its local milestones. Declared among the
+    #: defaulted fields because :func:`start_operation` sets it by keyword.
+    producer: str = DEFAULT_PRODUCER
     facts: dict[str, Any] = field(default_factory=dict)
     spans: list[_SpanRecord] = field(default_factory=list)
     marks: list[tuple[str, int]] = field(default_factory=list)
@@ -218,8 +291,14 @@ class Measurement:
     #: stage they belong to. They carry no offset because a different process
     #: has a different monotonic clock domain; only durations travel.
     remote_stages: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
-    #: Producers that contributed to this record, beyond the runner itself.
-    producers: set[str] = field(default_factory=set)
+    #: Producers that sent durations this record accepted. Not the same as
+    #: having answered a call: durations attach to a stage, so a producer whose
+    #: timings landed on a stage no mark produced contributed nothing to the
+    #: timeline even though it collected.
+    contributors: set[str] = field(default_factory=set)
+    #: Producers that answered for a call on this record, whether or not their
+    #: durations reached the timeline.
+    answered_by: set[str] = field(default_factory=set)
     #: (producer, call id, local stage) fragments this path asked for. Keyed by
     #: call rather than by stage so a retry is a second fragment that must be
     #: accounted for, and so an unanswered call cannot be hidden by a later one
@@ -459,6 +538,7 @@ def start_operation(
     operation: str,
     host: str | None = None,
     worker_id: str | None = None,
+    producer: str = DEFAULT_PRODUCER,
 ) -> Measurement | None:
     """Begin timing a root operation, or return ``None`` when not selected.
 
@@ -487,6 +567,7 @@ def start_operation(
         measurement_id=f"msm_{uuid.uuid4().hex[:16]}",
         started_mono_ns=time.monotonic_ns(),
         deadline_mono=run.deadline_mono,
+        producer=producer,
         facts={"operation": operation},
     )
     if host:
@@ -552,6 +633,7 @@ def record_fragment(
     if not response.get("profiling_recorded"):
         return False
     measurement.answered_fragments.add((producer, call_id))
+    measurement.answered_by.add(producer)
     if response.get("profiling_truncated"):
         # The call answered, but collection stopped at this producer's own
         # deadline: the fragment is present and still a floor, not a duration.
@@ -613,6 +695,13 @@ class StageRecorder:
     """
 
     deadline_mono: float = float("inf")
+    #: Producer that owns the sub-stages this recorder collects. Defaults to
+    #: the runner so a caller written before this producer existed, and a
+    #: request that names no producer, cannot silently claim another's work.
+    producer: str = DEFAULT_PRODUCER
+    #: Fallback root stage for a caller that records sub-stages without marking
+    #: one first. An operation that never marks is not necessarily a startup.
+    root_stage: str = "startup"
     stages: list[dict[str, Any]] = field(default_factory=list)
     #: Sub-stages that were clamped at the deadline.
     truncated: int = 0
@@ -671,24 +760,49 @@ def _recorded_stage(recorder: StageRecorder, name: str) -> Iterator[None]:
 
 @dataclass
 class _MeasurementObserver:
-    """Records sub-stages as children of the measurement's current stage."""
+    """Records sub-stages as children of the measurement's current stage.
+
+    ``producer`` is this observer's attribution, not the measurement's: a
+    caller may time work it did itself under its own name while the record
+    still belongs to whoever rooted the operation.
+    """
 
     measurement: Measurement
+    producer: str | None = None
 
     def stage(self, name: str) -> AbstractContextManager[None]:
         """Time one sub-stage onto the measurement's current stage."""
-        return _observed_stage(self.measurement, name)
+        if self.producer is None or self.producer == self.measurement.producer:
+            attribution = None
+        else:
+            attribution = self.producer
+        return _observed_stage(self.measurement, name, producer=attribution)
 
 
 @contextmanager
-def _observed_stage(measurement: Measurement, name: str) -> Iterator[None]:
-    """Attach one in-process sub-stage to the stage currently open."""
+def _observed_stage(
+    measurement: Measurement, name: str, *, producer: str | None = None
+) -> Iterator[None]:
+    """Attach one in-process sub-stage to the stage currently open.
+
+    ``producer`` overrides the attribution for a caller sharing another
+    producer's measurement. Omitted, the measurement's own producer is used --
+    which is also what keeps a ``StageObserver`` protocol implementation that
+    predates this parameter working unchanged.
+    """
     if not _recording(measurement):
         yield
         return
     started = measurement.offset_us()
-    # The stage the runner last marked is the one this work belongs to.
-    parent = measurement.marks[-1][0] if measurement.marks else "startup"
+    # The stage the caller last marked is the one this work belongs to. With no
+    # mark it belongs to the same implicit whole-operation stage that
+    # ``_stages`` emits; attaching it to the producer's name instead would file
+    # it under a stage that never exists and drop the timing without a trace.
+    parent = (
+        measurement.marks[-1][0]
+        if measurement.marks
+        else measurement.operation or DEFAULT_ROOT_STAGE
+    )
     outcome = "ok"
     try:
         yield
@@ -702,18 +816,29 @@ def _observed_stage(measurement: Measurement, name: str) -> Iterator[None]:
             "stage": name,
             "duration_us": max(0, end - started),
             "outcome": outcome,
-            "source": "runner",
+            "source": producer or measurement.producer or DEFAULT_PRODUCER,
         }
         if truncate:
             entry["truncated"] = True
+        # This is where a producer's timing actually enters the record, so this
+        # is where it is counted as a source of it.
+        measurement.contributors.add(str(entry["source"]))
         measurement.remote_stages.setdefault(parent, []).append(entry)
 
 
-def stage_observer(measurement: Measurement | None) -> StageObserver | None:
-    """Return an observer that records sub-stages onto a live measurement."""
+def stage_observer(
+    measurement: Measurement | None, *, producer: str | None = None
+) -> StageObserver | None:
+    """Return an observer that records sub-stages onto a live measurement.
+
+    ``producer`` attributes the observed work to a caller sharing someone
+    else's measurement, such as a broker timing its own work under a selection
+    the control plane rooted. It changes nothing about who owns the record:
+    ``measurement.producer`` stays the producer that rooted the operation.
+    """
     if measurement is None or measurement.finished:
         return None
-    return _MeasurementObserver(measurement)
+    return _MeasurementObserver(measurement, producer=producer)
 
 
 def measurement_context(
@@ -738,7 +863,9 @@ def measurement_context(
     }
 
 
-def start_stage_recording(context: Any) -> StageRecorder | None:
+def start_stage_recording(
+    context: Any, *, producer: str = DEFAULT_PRODUCER
+) -> StageRecorder | None:
     """Return a recorder when this process should record for that selection.
 
     Recording requires an inherited selection, never just a local switch. A
@@ -770,7 +897,11 @@ def start_stage_recording(context: Any) -> StageRecorder | None:
     deadline = min(run.deadline_mono, inherited)
     if time.monotonic() > deadline:
         return None
-    return StageRecorder(deadline_mono=deadline)
+    return StageRecorder(
+        deadline_mono=deadline,
+        producer=producer,
+        root_stage=operation or DEFAULT_ROOT_STAGE,
+    )
 
 
 def _context_deadline(context: Mapping[str, Any]) -> float | None:
@@ -802,12 +933,80 @@ def expect_fragment(measurement: Measurement | None, producer: str, stage: str) 
     return call_id
 
 
+def _bounded_context_str(value: Any, limit: int = MAX_ATTRIBUTE_CHARS) -> str:
+    """Return a bounded string from an untrusted context value."""
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        return ""
+    return str(value).strip()[:limit]
+
+
+def parse_context(raw: Any) -> dict[str, Any] | None:
+    """Decode the profiling header one producer inherited from another.
+
+    The value crosses a process boundary and is not trusted: it is bounded,
+    parsed defensively, and reduced to the fields the contract names. Every
+    failure returns ``None`` -- measurement metadata must never turn a malformed
+    experiment setting into a failed file read or terminal keystroke.
+    """
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text or len(text) > MAX_CONTEXT_CHARS:
+        return None
+    try:
+        body = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    try:
+        expires_at = float(body.get("expires_at"))
+    except (TypeError, ValueError):
+        return None
+    return {
+        "run_id": _bounded_context_str(body.get("run_id"), MAX_RUN_ID_CHARS),
+        "measurement_id": _bounded_context_str(body.get("measurement_id")),
+        "operation": _bounded_context_str(body.get("operation")),
+        "call_id": _bounded_context_str(body.get("call_id")),
+        "expires_at": expires_at,
+    }
+
+
 def context_call_id(context: Any) -> str | None:
     """Return the call id a request carried, if it carried one."""
     if not isinstance(context, Mapping):
         return None
     value = str(context.get("call_id") or "").strip()
     return value or None
+
+
+def answer_from_headers(headers: Any) -> dict[str, Any] | None:
+    """Read a streamed call's answer out of response headers.
+
+    Returns ``None`` when the response does not answer a call, so a caller can
+    leave its fragment unanswered and report it as missing rather than inventing
+    an answer from a response that never carried one.
+    """
+    getter = getattr(headers, "get", None)
+    if getter is None:
+        return None
+    call_id = str(getter(PROFILING_ANSWER_CALL_ID_HEADER) or "").strip()
+    if not call_id or str(getter(PROFILING_ANSWER_RECORDED_HEADER) or "") not in {"1", "true"}:
+        return None
+    answer: dict[str, Any] = {"profiling_call_id": call_id, "profiling_recorded": True}
+    if str(getter(PROFILING_ANSWER_TRUNCATED_HEADER) or "") in {"1", "true"}:
+        answer["profiling_truncated"] = True
+    raw = str(getter(PROFILING_ANSWER_STAGES_HEADER) or "").strip()
+    if raw:
+        try:
+            stages = json.loads(raw)
+        except (TypeError, ValueError):
+            stages = None
+        if isinstance(stages, list):
+            answer["stages"] = stages
+    return answer
 
 
 def substage(observer: StageObserver | None, name: str) -> AbstractContextManager[None]:
@@ -874,10 +1073,53 @@ def attach_remote_stages(
     if not entries:
         return False
     measurement.remote_stages.setdefault(stage_name, []).extend(entries)
-    measurement.producers.add(source)
+    measurement.contributors.add(source)
+    measurement.answered_by.add(source)
     if any(entry.get("truncated") for entry in entries):
         measurement.truncated = True
     return True
+
+
+@contextmanager
+def attributed_stage(
+    measurement: Measurement | None,
+    parent: str,
+    name: str,
+    *,
+    producer: str | None = None,
+) -> Iterator[None]:
+    """Time one in-process sub-stage under a named parent.
+
+    This is how a root producer reports its own internal work in the same shape
+    the broker reports its durations: ``{"name", "duration_us", "outcome",
+    "source"}`` hung under a stage of the local timeline. Unlike
+    :func:`_observed_stage` the parent is named explicitly rather than taken
+    from the last mark, so a producer can time the work it does before the first
+    mark. An unselected measurement costs one generator and records nothing.
+    """
+    if measurement is None or not _recording(measurement):
+        yield
+        return
+    started = measurement.offset_us()
+    outcome = "ok"
+    try:
+        yield
+    except BaseException:
+        outcome = "error"
+        raise
+    finally:
+        end = measurement.offset_us()
+        end, truncate = _clamp_to_deadline(measurement, end)
+        entry: dict[str, Any] = {
+            "stage": name,
+            "duration_us": max(0, end - started),
+            "outcome": outcome,
+            "source": producer or measurement.producer or DEFAULT_PRODUCER,
+        }
+        if truncate:
+            entry["truncated"] = True
+        measurement.contributors.add(str(entry["source"]))
+        measurement.remote_stages.setdefault(parent, []).append(entry)
 
 
 def set_attributes(measurement: Measurement | None, **values: Any) -> None:
@@ -946,15 +1188,22 @@ def _stages(measurement: Measurement) -> list[dict[str, Any]]:
     Without the closing boundary the stage that was running when the
     measurement ended had no duration at all, which is exactly the stage a slow
     or failed startup is sitting in.
+
+    A measurement that placed no mark still gets one stage covering its whole
+    span, named for its own operation. Sub-stage timing attaches to a stage, so
+    without this the work a producer timed would have nowhere to land and would
+    be dropped without a trace -- and a record that collected nothing would be
+    indistinguishable from one whose timings went missing.
     """
-    if not measurement.marks:
-        return []
+    marks = measurement.marks
+    if not marks:
+        marks = [(measurement.operation or "operation", 0)]
     ended = measurement.ended_offset_us
     if ended is None:
         ended = measurement.offset_us()
-    following = [offset for _, offset in measurement.marks[1:]] + [ended]
+    following = [offset for _, offset in marks[1:]] + [ended]
     stages: list[dict[str, Any]] = []
-    for (name, start), stop in zip(measurement.marks, following, strict=False):
+    for (name, start), stop in zip(marks, following, strict=False):
         entry: dict[str, Any] = {
             "stage": name,
             "start_offset_us": start,
@@ -986,19 +1235,31 @@ def to_record(
         if (producer, call_id) not in measurement.answered_fragments
     )
     missing_producers = sorted({item.split(":", 1)[0] for item in missing_fragments})
+    root = measurement.producer or DEFAULT_PRODUCER
+    # Who owns this record, then who answered a call on it, then whose timings
+    # actually reached the timeline. The root producer leads and is never
+    # dropped: a record whose only timing came from downstream still has to say
+    # who owned the operation.
+    contributors = list(
+        dict.fromkeys([root, *sorted(measurement.answered_by | measurement.contributors | {root})])
+    )
+    sources = list(dict.fromkeys([root, *sorted(measurement.contributors | {root})]))
     record: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "measurement_id": measurement.measurement_id,
         "profiling_run_id": measurement.run_id,
         "operation": measurement.operation,
-        "producer": "runner",
+        "producer": root,
         "producer_instance_id": PRODUCER_INSTANCE_ID,
         "clock_domain_id": CLOCK_DOMAIN_ID,
         # Who actually contributed to this record. A run needs the broker's
         # switch as well as the runner's for the container sub-stages, and a
         # missing producer is reported here rather than silently absent.
-        "producers": ["runner", *sorted(measurement.producers)],
-        "startup_outcome": outcome,
+        "producers": contributors,
+        # The same list again, minus anyone whose durations never reached a
+        # stage: a reader asking "who timed this" gets an answer it can trust.
+        "timing_sources": sources,
+        "outcome": outcome,
         "duration_us": ended,
         "measurement_complete": (
             outcome != "incomplete"
@@ -1014,13 +1275,18 @@ def to_record(
             for item in sorted(measurement.spans, key=lambda span: span.start_offset_us)
         ],
         "milestones": [
-            {"name": name, "offset_us": offset, "source": "runner"}
+            {"name": name, "offset_us": offset, "source": root}
             for name, offset in measurement.marks
         ],
         "stages": _stages(measurement),
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "facts": measurement.facts,
     }
+    if measurement.operation == STARTUP_OPERATION:
+        # A v1 consumer reads this field by name. It is written only where the
+        # name is true -- for the runner's own startup operation -- so a file
+        # or terminal record cannot be mistaken for a startup by that reader.
+        record[STARTUP_OUTCOME_ALIAS] = outcome
     if measurement.truncated:
         record["truncated"] = True
     if measurement.truncated_fragments:
@@ -1251,8 +1517,10 @@ def finish(
         )
         return
     # Written directly rather than through set_attributes, which stops
-    # collecting, and the closing facts have to survive that boundary.
-    measurement.facts["startup_outcome"] = outcome
+    # collecting, and the closing facts have to survive that boundary. The
+    # alias is emitted top-level by ``to_record``; ``facts`` carries the
+    # generic name so no consumer reads a file read as a startup.
+    measurement.facts["outcome"] = outcome
     if failure_stage:
         measurement.facts["failure_stage"] = failure_stage
     if measurement.expired:
@@ -1282,22 +1550,37 @@ def reset_cache() -> None:
 
 __all__ = [
     "CLOCK_DOMAIN_ID",
+    "DEFAULT_PRODUCER",
+    "DEFAULT_ROOT_STAGE",
     "ENV_PROFILING_ENABLED",
     "ENV_PROFILING_RUN",
     "ENV_PROFILING_SINK",
+    "MAX_CONTEXT_CHARS",
     "MAX_REMOTE_STAGES",
     "MAX_RUN_ID_CHARS",
+    "MAX_SELECTIONS",
     "MAX_SPANS",
+    "OUTCOMES",
     "PRODUCER_INSTANCE_ID",
+    "PROFILING_ANSWER_CALL_ID_HEADER",
+    "PROFILING_ANSWER_RECORDED_HEADER",
+    "PROFILING_ANSWER_STAGES_HEADER",
+    "PROFILING_ANSWER_TRUNCATED_HEADER",
+    "PROFILING_CONTEXT_HEADER",
     "SCHEMA_VERSION",
+    "SELECTION_TTL_S",
     "SINK_QUEUE_MAX",
+    "STARTUP_OPERATION",
+    "STARTUP_OUTCOME_ALIAS",
     "TARGET_KEYS",
     "Measurement",
     "ProfilingRun",
     "StageObserver",
     "StageRecorder",
     "active_run",
+    "answer_from_headers",
     "attach_remote_stages",
+    "attributed_stage",
     "bind",
     "close_sink",
     "context_call_id",
@@ -1307,6 +1590,7 @@ __all__ = [
     "flush_sink",
     "mark",
     "measurement_context",
+    "parse_context",
     "parse_run",
     "reason",
     "record_fragment",

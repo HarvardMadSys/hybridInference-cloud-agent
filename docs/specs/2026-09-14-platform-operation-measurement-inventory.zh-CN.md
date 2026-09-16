@@ -1,7 +1,8 @@
 # 平台操作测量清单
 
-日期：2026-09-14。状态：设计清单；**§0 的开关与 runner 侧启动计时已实现**，
-统一采集、报表与其他操作尚未实现。
+创建：2026-09-14；范围与接入契约更新：2026-09-16。
+状态：**启动测量已在 #258 实现；文件与终端的服务端接入（CP 选择 + broker 阶段）
+已实现，浏览器终点仍待实现**。
 基于本地代码检查，扩展 [沙盒启动测量设计](2026-09-14-sandbox-startup-measurement-design.zh-CN.md)。
 
 目标：在按需开启的 profiling 实验中，每个主要用户操作都能回答：
@@ -12,6 +13,32 @@
 **2026-09-14 范围修订：新增平台 profiling 默认关闭，优先服务前期性能定位、基线和优化
 对比，不作为长期常驻采集。** 下文所有计时、operation ID、spans、报表和上报，仅针对
 显式开启且选中的实验操作。此决定同时取代启动设计中原先的默认全量采集建议。
+
+## 交付状态与首批范围
+
+用户要求的首批范围是**沙盒启动、文件浏览/打开、终端打开**。三者共享测量方法，
+区别在入口、成功终点和内部阶段。启动测量通过验收，不等于三类需求都已交付。
+
+截至 2026-09-16 检查，[#258](https://github.com/HarvardMadSys/hybridInference-cloud-agent/pull/258)
+为 OPEN、目标 dev，代码 head 为 3a191e5，CI Gate 通过，尚未合并。这是检查时的状态，
+不代表已部署。下表以该提交为实现依据；§3.1–§3.5 是待实现的补充契约。
+
+| 能力 | 已有内容 | 尚缺内容 |
+| --- | --- | --- |
+| attempt.startup | runner claim 请求前至 prompt 交给 supervisor；四路径、内部阶段、可选采集与完整性协议 | CP 排队、浏览器等待、模型首输出等完整用户边界；真实四路径基线 |
+| files.list / files.open | 独立 helper/stack/docker/live benchmark；环境范围明确的 baseline 文档；**CP 选择 + broker 阶段 + 响应片段透传** | 浏览器起点与内容可见终点、纯缓存命中的覆盖、真实整段开销实测 |
+| terminal.open | 终端现有业务流程；本清单中的边界设计；**list/create/stream 的共同操作身份（`measurement_id`）、PTY 阶段、流式片段的响应头回传** | 前端 xterm 可交互终点、buffer replay 与新输出的区分、首输出观察窗口 |
+| 共享采集器 | 默认关闭、run/期限/单进程预算、call ID、缺失与截断、有界异步导出；**schema v2 通用 `outcome`/`producer`，files/terminals 可选择与应答** | 前端适配器与上报入口、分布式名额分配 |
+| 分析与展示 | 结构化日志、可选 JSONL、启动采集器微基准 | 三类真实操作报告、CP 持久化、Admin 读面；broker 完整采集开销实测 |
+
+服务端接入的落地位置、关闭路径不变性与明确未交付范围见
+[启动设计 §9.3](2026-09-14-sandbox-startup-measurement-design.zh-CN.md)。
+**服务端片段不等于用户端到端测量**：浏览器起点与 UI 终点未接入前，只能声明 server
+覆盖，不能用它回答“用户等了多久”。
+
+文件 benchmark 的 live 模式只计到公共 HTTP 请求返回，仍不包括浏览器渲染。
+终端尚无同等已交付的专项 benchmark；不能以设计表或已有业务测试代替测量结果。
+文件与终端接入见 §3，首批整体完成条件见 §5；其他 P0/P1/P2 项是后续扩展清单。
 
 ## 0. 可选 profiling 开关
 
@@ -38,7 +65,9 @@
 （空 claim、目标不匹配、claim 失败）会归还。产出写入结构化日志，并在配置
 `AGENT_OPERATION_PROFILING_SINK` 时经**有界队列与后台线程**追加 JSONL，尚无 CP
 持久化与 Admin 读面。目标过滤要求每个配置字段都匹配，未知字段直接拒绝该 run。
-broker 侧需要同样打开开关才会贡献内部阶段，否则记录只显示 `["runner"]`。
+broker 侧需要同样打开开关并校验继承的选择才会贡献内部阶段。记录按每次调用的
+call ID 判断完整性，并区分缺失、已应答但截断、正常复用而无需执行子阶段；完整协议
+见启动设计 §9.1。日志和 JSONL 都经同一有界后台队列发布。
 截止时间由 run descriptor 的绝对 `expires_at` 在首次读取时转成单调期限，服务重启
 不会续期；到期后停止采集，记录在截止点收尾并标 partial（`measurement_complete=false`、
 `profiling_stopped=expired`），已采部分保留。
@@ -47,13 +76,16 @@ broker 侧需要同样打开开关才会贡献内部阶段，否则记录只显�
 
 ```yaml
 mode: profiling
-run_id: terminal-open-baseline-01
+run_id: workspace-interaction-baseline-01
 target: {sandbox_id: "<专用测试沙盒>"}
-operations: [terminal.create, terminal.reattach]
+operations: [files.list, files.open, terminal.open]
 expires_at: "<开启时生成的固定 UTC 截止时间，例如 15 分钟后>"
 max_operations: 200
 sample_rate: 1.0
 ```
+
+这是文件/终端接入后的目标形态；#258 只接入 attempt.startup，尚未实现这些入口和
+sample_rate。终端 create/reattach 是 terminal.open 的路径分类，不重复消耗根操作名额。
 
 可按测试 session/thread/sandbox 或指定 host 限定目标；host 级实验也必须显式选择，
 不隐式扩大到全部用户。`operations` 选择根操作，其必要子阶段自动继承。缺少范围、
@@ -197,7 +229,8 @@ operation、验证网络，再通过 [retained_workspace](../../cloud_agent_host
 
 ```text
 interaction_id: 一次用户意图，可含多次请求/重试
-operation_id: 一次平台操作，如 files.open、terminal.create、sandbox.wake
+operation: 操作类型，如 files.open、terminal.open、sandbox.wake
+operation_id: 一次平台操作的唯一 ID；接入时复用现有 measurement_id，不另造重复身份
 parent_operation_id / links: 子步骤或共同等待的共享操作
 attempt_id?: 只有关联 agent 执行时才有
 thread_id? / sandbox_id? / terminal_id?: 按实际作用域关联
@@ -219,6 +252,143 @@ group/lock-wait、sandbox-wake、exec、operation-work、serialization、render�
 每个版本化 operation contract 都要写清：负责代码、起点、成功终点、失败/取消终点、
 时钟、包含的等待、分类维度、数据上限和验收场景。新增主要交互时把这个 contract
 作为设计验收项，防止只留下“以后加 monitoring”。
+
+### 3.1 三类操作共用机制，分别定义完成条件
+
+下表保留已实现的 attempt.startup 边界，文件与终端行是待接入契约；不改变 #258
+已有记录的语义：
+
+| 操作名 | 根操作与起点 | 成功终点 | 必须区分的路径 |
+| --- | --- | --- | --- |
+| attempt.startup | 当前 runner 在发 claim 前创建 measurement | prompt 已交给 supervisor；不等同于模型接受或首输出 | new_group / resume_stopped / resume_running / reuse_live |
+| files.list | 浏览器点击 Files 面板或展开目录；CP API 请求可独立发起服务端操作 | 对应请求的目录条目或确认的空目录提交到可见 UI；服务端另记响应完成 | root/expand/refresh、cache hit/miss、running/stopped |
+| files.open | 浏览器选中文件；纯 API 请求从 CP 入口开始 | 当前仍选中的文件内容提交到可见 UI；服务端另记响应完成 | 文件大小桶、预览截断、running/stopped、请求替换 |
+| terminal.open | 浏览器打开终端面板、创建/选择一个终端；纯 API 请求独立记录 | xterm 已挂载、对应流已连接、平台输入门已打开三者均成立 | create / reattach、模块冷/热、buffer replay、running/stopped |
+
+浏览器终点记录具体来源：React commit 或 xterm 回调是可见性的代理边界，不伪称物理
+屏幕绘制完成。自动 refresh 标为 background trigger；用户手动 refresh 才计用户等待。
+终端可交互不等于 shell 已完成 rc 文件或命令能够立即执行，shell-ready 仍按 §2 单独取证。
+
+实现时先把 operation_profiling.py 的选择、时钟、片段关联与 exporter 变成可由不同
+producer 调用的公共能力，保持单一实现。producer 由发起者传入，允许 runner、CP、broker；
+浏览器用相同契约的轻量适配器。公共记录使用 operation、outcome、failure_stage，
+startup_path 等只属于启动 facts；不得把文件返回成功写成 startup_outcome=dispatched。
+schema 升版，保留 #258 的 v1 读取兼容，不在同一 schema_version 下改变旧字段含义。
+无需为了计时先迁移目录或引入新的 tracing 服务。
+
+**已实现**：schema v2（`outcome`、`producer`、`producers`、`timing_sources`）；
+`startup_outcome` 仅作为 `attempt.startup` 的 v1 别名保留；CP 与 broker 作为 producer
+接入，broker 片段经 `operation_call.py` 校验与应答。**未实现**：浏览器 producer 与其
+轻量适配器（前端仍不上报，因此 browser 片段按缺失计）。
+
+### 3.2 文件与终端的选择、关联和导出
+
+文件/终端入口走 CP 与 workspace broker，可能完全没有当前 agent attempt。
+job_id 用于验证工作区归属，不表示把此次操作归入该 job 的 agent 启动或资源窗口。
+
+1. 开启实验后，受认证的页面/session 配置下发最小实验描述，前端才加载 profiler。
+   点击时记录本地起点和 interaction ID；关闭时不增加配置请求、监听器或上传。
+2. CP 在已有业务请求中执行服务端选择。依次完成原有认证、ownership、entitlement
+   和 broker/host 解析，再确认目标匹配；不得为 profiling 增加权限豁免或探测命令。
+   先做开关/操作等廉价预过滤；目标信息尚不齐全时可暂存候选起点，只有身份与范围
+   确认后才消费名额、形成样本。后置绑定不匹配即丢弃候选，不输出范围外记录。
+3. CP 为选中操作返回 measurement ID 与有期限的选择引用。一个 terminal.open 可包含
+   list、create、stream 多个请求；后续请求继承同一选择，每次 RPC 生成独立 call ID。
+   浏览器 ID 只用于关联，不能自行开启测量或声明 host、用户和 sandbox 归属。
+4. broker 同时校验本地开关、run、操作和继承期限，deadline 取本地与继承期限较早者。
+   files/terminals 路由都要支持可选上下文；无效元数据仅停用采集，业务权限校验保持原样。
+5. 响应复用 #258 的 call ID 回声、profiling_recorded、profiling_truncated、stages。
+   重试逐次登记；正常跳过是已应答且未截断；过期前收集的阶段继续保留。
+   GET 文件和 SSE 流需设计可选 metadata/header 或旁路片段，不能更改文件内容、终端字节
+   或把 PTY 原始输出作为测量数据。公共响应模型与客户端必须显式透传/消费 metadata，
+   避免 CP 的 response_model 把 broker 片段过滤掉。
+6. 浏览器和 CP 分别输出本地时长，用 measurement/interaction ID 关联；不把浏览器
+   performance.now 与服务器单调时钟相减。缺浏览器样本时，服务端耗时仍可用，用户
+   端到端覆盖标为不完整；纯 API 客户端只要求它声明的 server 范围。
+7. 前端采集仅在开启且获准的实验中使用有界异步批次，服务端沿用有界 exporter。
+   所有片段有数目/字节/期限上限，服务重启和长连接不得续期。诊断上传失败只影响覆盖，
+   不阻塞用户打开文件或输入终端；上报入口的身份、run 和数据上限必须独立验证。
+
+**名额与纯缓存命中必须显式设计。** #258 的名额只在 runner 进程内生效；文件/终端
+扩展后由 CP 的根操作入口负责服务端名额，broker 子调用不再消费。单进程选择缓存须
+有 TTL/数量上限，重试不重新抽样；在未实现共享 admission 前，实验 manifest 记录每个
+admission 实例的预算，不能宣称 fleet-wide 上限。首轮可在专用单 CP 实例上验证。
+**已实现的部分**：CP 根操作选择、服务端名额、有界 TTL 选择缓存、同名方法跳过与
+重试各自登记片段。**未实现的部分**：跨实例共享 admission、浏览器预领名额，以及
+不产生 HTTP 请求的纯目录缓存命中覆盖——该场景当前没有 server 片段，必须按缺失报告。
+跨实例无法恢复原选择时，继续业务并标明片段不可用，不能用一次新的选择伪装连续测量。
+
+目录纯缓存命中没有 CP 请求：前端需在开启实验时从可信配置/实验 admission 预领一小批
+有范围、有绝对截止时间的浏览器样本名额，耗尽即停，不为 cache hit 发业务请求。
+这些名额由 admission 从该 run 的预算预留并绑定会话；若后来发生 HTTP 请求，CP 校验并
+复用同一名额，不能再扣一份。刷新页面不能获得无限新名额；
+签发和校验方案是前端接入的一部分，未实现前只能声明 server 范围，不能承诺覆盖 cache hit。
+本地命中只要求 browser producer，不应报告缺失 CP/broker；发出网络请求后再要求相应片段。
+
+### 3.3 文件浏览/打开的具体接入
+
+实际调用顺序为 browser → CP → broker → supervisor.operation_opened() →
+网络验证 → retained file helper → CP 响应 → browser UI。operation_opened 在 broker
+内部，可能唤醒容器，不经过 runner.run_once()。
+
+| 位置 | 要记录的边界 |
+| --- | --- |
+| useWorkspaceFiles / WorkspaceFiles | 点击、目录缓存命中、request generation、响应接收、当前请求对应内容的 UI commit |
+| api/routes.py:get_agent_job_workspace_file | 选中请求的认证/归属与 entitlement、broker 解析、broker RPC、响应构造；框架发送完成若未观测则不命名为网络传输完成 |
+| WorkspaceBrokerClient.files / workspace_broker.py:files | 上下文与片段透传、工作区 admission、operation_opened、group 等待与容器 wake、network check |
+| retained_workspace.read_retained_file / ChatSandboxManager.exec_capture | exec 总耗时、helper 执行、读取或目录遍历、返回字节/条目数量桶 |
+
+第一轮可把 docker exec + Python 启动 + read 作为可证实的组合阶段；如要再拆，需让
+固定 helper 在选中时返回自己计的子时长，不增加第二次 exec 来探测，也不把组合阶段
+误称为纯磁盘读取耗时。数据大小与条目数有界，文件路径与内容不进入 profiling 记录。
+
+目录缓存命中仍记录用户可见时间。文件请求被较新的选择替代时记 superseded；响应晚到
+且未被 UI 使用不能算成功可见。页面离开记 abandoned/unknown；错误、超时与空文件
+分别处理。一个请求发现目标其实是目录时记录实际返回 kind 与 UI 结果，不伪称文件可见。
+文件预览截断与计时截断使用不同字段，例如 content_truncated 与 measurement.truncated。
+
+### 3.4 终端打开的具体接入
+
+一次 terminal.open 从用户意图开始，包含终端列表和前置 workspace-ready 等待。
+TerminalWorkspace 负责列出、新建、选择终端；TerminalPane 负责 xterm 和现有 SSE 流。
+相关 HTTP 入口是 /jobs/{job_id}/terminals、/{terminal_id}/stream，以及对应 broker 路由。
+
+| 位置 | 要记录的边界 |
+| --- | --- |
+| TerminalWorkspace / terminalRuntime | 点击、前置 ready 等待、list/create/reattach、模块加载冷/热、选中 terminal ID |
+| CP terminal API / WorkspaceBrokerClient | ownership/entitlement、broker 解析、每次 list/create/stream 请求与重试 |
+| workspace_broker.create_terminal / supervisor.terminal_opened | 工作区 admission、锁等待、容器 wake、network check、PTY/shell spawn、descriptor 返回 |
+| TerminalPane / stream 客户端 | xterm mounted、stream connected、input enabled、首条输出接收、xterm 写入回调；buffer replay 与新输出分开 |
+
+当前 stream 客户端需补可验证的连接建立回调；它来自对应请求的成功握手/流建立，
+不等首条输出到达。安静的 shell 可以正常可交互却没有 first-output；后者单独标
+未观察到，不能把终端打开计为超时。首输出 callback 不是 shell-ready 证据。
+create 与 reattach 分开聚合；reattach 正常不生成 PTY-spawn 阶段，仍可得到完整片段。
+
+测量在可交互、失败、取消或截止点结束；首输出可使用同一 run 截止前的短观察窗口，
+不把整段终端会话纳入启动 span。断线重连另记子操作/后续操作，不把已完成的打开
+时长改长。异步模块完成、旧 stream 的事件都必须匹配本次 interaction/terminal，
+组件重挂载不能重复完结同一条记录。生产用户终端不注入 marker、按键或 shell 命令。
+
+### 3.5 三类共同的验收矩阵
+
+| 场景 | 通过条件 |
+| --- | --- |
+| profiling off | 无新增计时、测量对象、导出线程、前端 profiler 加载/监听/上传；业务行为一致 |
+| 开启但未选中 | 入口预过滤直接跳过；后置绑定不匹配丢弃候选、归还名额，不导出范围外数据 |
+| 配置错误、任一 producer 未开启、旧客户端 | 业务正常；已选中操作按范围报告缺失，不伪造完整 |
+| 文件目录缓存命中、空目录、空文件、大文件 | 用户侧终点正确；缓存命中不要求 server 片段；内容截断不混同计时截断 |
+| 文件快速切换、后台 refresh、页面离开 | 无旧请求误报可见；superseded/background/abandoned 分开 |
+| 终端新建、热复用/reattach、安静 shell、模块冷/热 | 正常跳过仍完整；首字节不是可交互的前提；首输出与 replay 单列 |
+| 文件/终端触发 stopped 容器 wake，并发共同等待 | 原操作包含全部等待，wake 因果关联；不重复累计共享执行成本 |
+| 调用失败后重试、应答 call ID 不匹配 | 每次物理调用独立，后一次成功不掩盖前一次缺失 |
+| 等锁时过期、broker 期限更短、阶段跨截止点 | 已应答但部分，保留先前阶段；空列表不能抹掉 skipped/truncated |
+| exporter 队列满、线程启动失败、文件/日志阻塞、前端上传失败 | 有界丢样可见，业务不失败、不等待导出 |
+| browser 未回报或只有纯 API 调用 | 分别判断 browser/server 所需覆盖，不能把 server latency 标为点击到可用 |
+
+每类都要有真实业务路径的 on/off 对照；文件 helper 微基准与启动 recorder 微基准
+不能代替 CP → broker → 前端整段采集开销。完整结果需覆盖选中、失败、超时、部分与
+缺失的分母；不只展示最快的成功请求。
 
 ## 4. 统一报告四类结果
 
@@ -253,12 +423,18 @@ group/lock-wait、sandbox-wake、exec、operation-work、serialization、render�
 
 ## 5. 怎样落地并用于优化
 
-先落实默认关闭的快路径、有范围/有效期的 run 与开关验收，再为用户明确提出的三类
-操作加按需埋点，并复用公共阶段：
+首批三类操作的完成标准是同时具备：**可信的边界、按需采集、阶段归因、完整性信息，
+以及能跑通真实操作的验证**。下列步骤组织实现依赖，不要求每一步单独拆 PR：
 
-1. **sandbox prepare/wake**：沿用启动设计，补上 files/terminal 等非 attempt trigger。
-2. **terminal open/create/reattach**：记录 server PTY 与 browser stream/input/first-output 边界。
-3. **files list/open**：记录 browser 可见、CP/broker、wake、exec/helper 和数据量。
+1. **启动切片（#258，已实现）**：保持 §0 的关闭快路径和启动片段回归；真实四路径基线
+   与 broker 自身开销仍待补，不因微基准通过就宣称启动已变快。
+2. **公共记录与 CP 接入（已实现）**：schema v2 的通用记录语义、CP 根操作选择与名额、
+   选择缓存与交互关联，以及无 attempt 请求的片段透传。
+3. **文件和终端完整接入（部分实现）**：§3.3–§3.4 的后端阶段（含 files/terminal 引发的
+   sandbox wake）已实现并标为 **server-only** 交付；前端起点、UI/终端终点与本地导出仍
+   待实现，实现前不得声明端到端覆盖。
+4. **首批整体验收（待实现）**：跑 §3.5 的回归与三类真实操作基线，提交原始样本、
+   P50/P95、覆盖率、失败率、on/off 开销和实验 manifest。该步骤完成后才称三类需求完成。
 
 随后补齐 P0 的提交/会话打开/停止闭环，再按表推进 P1/P2。第一版可用结构化日志、
 有界存储与导出验证，不以完成一个通用 tracing 平台或全量仪表盘作为前置任务。
@@ -273,4 +449,5 @@ workspace，不清生产缓存、不更改用户 shell，不向生产任务注�
 helper benchmark 负责解释该层成本，完整产品路径需要浏览器与真实 broker/Kata 测试。
 
 实施 PR 仍按仓库要求完成 `make check`、涉及数据库时的 `make test-db` 及相应真实
-集成测试。本清单只记录设计范围，没有宣称埋点、性能基线或线上验证已经完成。
+集成测试。当前实现不包含浏览器终点，也不宣称三类端到端基线、缓存命中覆盖或线上
+验证已经完成；哪些能力已交付、哪些仍是缺口以本节和启动设计 §9.3 为准。

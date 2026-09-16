@@ -2737,8 +2737,16 @@ class ChatSandboxManager:
         input_bytes: bytes | None = None,
         user_uid: int | None = None,
         user_gid: int | None = None,
+        observer: StageObserver | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
-        """Run one bounded command and capture bytes without opening a host path."""
+        """Run one bounded command and capture bytes without opening a host path.
+
+        ``observer`` times the exec as one stage covering the attach, the
+        process start and the command's own run. That is a combination and is
+        reported as one: it is never presented as pure disk-read time, and
+        splitting it further would need the exec'd helper to report its own
+        sub-durations rather than a second exec to probe them.
+        """
         current = self._require(spec)
         if not current.running:
             raise SandboxError("chat sandbox must be started before exec")
@@ -2757,14 +2765,15 @@ class ChatSandboxManager:
             user_gid=user_gid,
         )
         try:
-            return subprocess.run(
-                command,
-                env={**os.environ},
-                input=input_bytes,
-                capture_output=True,
-                timeout=timeout_s,
-                check=False,
-            )
+            with substage(observer, "exec"):
+                return subprocess.run(
+                    command,
+                    env={**os.environ},
+                    input=input_bytes,
+                    capture_output=True,
+                    timeout=timeout_s,
+                    check=False,
+                )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SandboxError(f"chat sandbox exec failed: {exc}") from exc
 

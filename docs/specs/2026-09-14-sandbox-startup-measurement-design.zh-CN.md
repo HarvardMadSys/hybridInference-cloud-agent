@@ -1,15 +1,30 @@
 # 沙盒启动时间测量设计
 
-日期：2026-09-14。状态：**已实现开关、run descriptor、分阶段计时、四条启动路径分类、
-关键内部阶段与自身开销基准**；CP 存储、Admin 读面和端到端 benchmark 报告仍未实现。
-代码依据：本地 checkout `01cfbae`；本文描述该版本的实际路径，不代表线上耗时。
+创建：2026-09-14；交付范围更新：2026-09-16。
+状态：**#258 已实现开关、run descriptor、分阶段计时、四条启动路径分类、关键内部阶段、
+采集器微基准，以及 files/terminal 的服务端接入（CP 选择 + broker 阶段）**；
+浏览器终点、CP 存储、Admin 读面和端到端 benchmark 报告仍未实现。
+初始路径检查基于 checkout `01cfbae`；交付核对基于 #258 head `3a191e5` 及后续提交，
+不代表线上耗时。
+2026-09-16 检查时 [#258](https://github.com/HarvardMadSys/hybridInference-cloud-agent/pull/258)
+仍为 OPEN、目标 dev、CI Gate 通过，尚未合并；不把分支实现等同于部署完成。
 
 实现现状见 [§9 实施顺序与验收](#9-实施顺序与验收)：本文的字段语义、时钟与失败处理
 仍是后续切片的目标形态，已实现的子集以 `cloud_agent_host/operation_profiling.py` 为准。
 
 目标：对每次启动回答三个问题：**总共等了多久、时间花在哪里、某个优化是否真的有效**。
-第一版交付启动摘要、单次启动时间线和可重复的 benchmark。先用现有 Postgres、
-host 日志和 Admin 页面承载数据；不以部署新的观测平台作为前置条件。
+完整目标包含启动摘要、单次启动时间线和可重复的 benchmark；#258 当前以结构化日志和
+可选 JSONL 承载数据。Postgres 与 Admin 是后续展示方案，不是这次已交付的依赖。
+
+**原始首批需求还包括文件浏览/打开与终端打开。** 它们共享开关、时钟、call ID、
+完整性与异步导出机制，区别在操作入口和完成条件。当前 attempt.startup 只覆盖
+runner claim 请求前到 prompt 交给 supervisor，不包含 CP 队列等待、浏览器渲染或模型
+首输出，也捕获不到没有新 attempt 的文件/终端操作。因此 #258 的启动测量完成，
+不能解释为三类需求全部完成。文件 benchmark 也不等于真实用户请求的 profiling。
+文件/终端已实现 **CP 选择与 broker 阶段**（见 §9.2），但浏览器终点仍未接入：
+交付口径是 server-only 片段，不能声称已覆盖“点击到可用”。完整状态、命名、前端接入、
+缓存/重试/就绪边界和整体验收详见
+[平台操作测量清单 §3–§5](2026-09-14-platform-operation-measurement-inventory.zh-CN.md)。
 
 **2026-09-14 修订：本方案用于按需 profiling，默认关闭。** 下文“每次启动”限定为
 显式开启实验且被选中的启动；不进行长期常驻全量采集。统一开关、目标范围、截止时间、
@@ -339,16 +354,18 @@ benchmark 报告至少包含：环境 manifest、实验顺序、全部 attempt I
 
 ## 9. 实施顺序与验收
 
-按依赖顺序拆成聚焦的 PR，全部从 `dev` 分支工作、PR 目标为 `dev`：
+按可独立验收的操作组织交付；下列是实现依赖，不强制逐项拆 PR。新增工作从 dev
+分支开展，PR 目标为 dev；既有 #258 的后续修订保持在该 PR：
 
-1. **开关、采集契约与基础埋点**：默认关闭的快路径、有范围和期限的 profiling run、
-   纯计时 collector、schema、CP/runner/broker 关联和阶段，
-   独立 dispatch frame、启动摘要 endpoint、Postgres additive migration、结构化日志。
-   覆盖新建/两类 resume/复用，失败和缺失可见。
-2. **benchmark 与基线报告**：专用测试设施、固定 fixture、四路径场景、JSONL/CSV 分析。
-   第一轮完成后能够指向真实慢样本，决定首个优化，而不是先做缓存或并行化。
-3. **Admin 读面**：启动摘要、路径过滤、可展开时间线、趋势及慢样本跳转。
-   展示有明确起止时间的实验，常驻监测和告警不属初版；网页访问不刷新 Gateway 或重做测量。
+1. **启动测量切片（#258）**：默认关闭的快路径、run、runner/broker 阶段、四路径动作、
+   call ID 片段协议与有界日志/JSONL 导出；已实现子集见 §9.1。
+2. **补齐文件/终端首批需求**：复用并通用化采集器，接入 CP 与浏览器，覆盖非 attempt
+   触发的 sandbox wake。入口、终点和回归矩阵以平台清单 §3–§5 为准；文件/终端不以
+   独立 benchmark 或仅后端耗时作为完整用户测量的验收。
+3. **真实 benchmark 与基线报告**：固定 fixture、四启动路径、文件与终端各场景，
+   原始样本与 JSONL/CSV 分析；分别验证采集开销和 profiler 关闭时的实际优化收益。
+4. **持久化和 Admin 读面**：再增加摘要 endpoint、Postgres additive migration、路径
+   过滤、时间线和趋势。该展示层不阻塞三类测量接入；常驻监控和告警仍不属初版。
 
 ### 9.1 已交付的切片
 
@@ -517,7 +534,31 @@ CPython 3.12.13 / macOS arm64：
 - 每个实施 PR 跑 `make check`；新增 DB 行为跑 `make test-db`；实际 Kata/driver 路径跑
   外部集成测试并保留结果，不能用单测替代真实启动验证。
 
-本次只交付设计文档，不包含埋点实现、线上操作、性能数值或已验证的优化收益。
+### 9.3 已交付的文件与终端服务端切片
+
+文件/终端的**服务端**接入已实现，前端终点尚未接入。交付内容是：
+`cloud_agent/operation_measurement.py` 做 CP 侧根操作选择，
+`cloud_agent_host/operation_call.py` 做 broker 侧片段校验与应答，
+`cloud_agent_host/operation_profiling.py` 通用化后可被不同 producer 调用。
+
+| 能力 | 落地位置 |
+| --- | --- |
+| schema v2 | `outcome` 为通用结果字段；`startup_outcome` 只对 `attempt.startup` 作为别名保留，文件/终端记录不会自称 startup |
+| 通用 producer | 记录带 `producer`（根操作归属）与 `producers`（应答过调用的生产者）；`timing_sources` 只列真正进入时间线的来源 |
+| CP 根操作选择 | 目标匹配走 collector 的 `bind()`：路由无法证明的 fact 不匹配，不匹配者归还名额 |
+| 名额 | 仍为单进程预算，由 CP 根操作消耗；broker 子调用不消耗。跨 replica 分配仍未实现 |
+| 交互关联 | `X-Agent-Measurement-Id` 回传同一 `measurement_id`；一次交互的 list/create/stream 各自成记录但共享 ID |
+| 选择缓存 | 单进程有界（`MAX_SELECTIONS`）+ TTL（`SELECTION_TTL_S`），并受 run 截止时间约束 |
+| broker 阶段 | `files`：`admission`/`network_phase`/`exec`；`terminals`：`admission`/`network_phase`/`pty_spawn`/`list`/`stream_attach` |
+| 流式应答 | 终端 SSE 的 body 是终端字节，片段的 `call_id`/`recorded`/`stages` 走响应头回传 |
+| 关闭路径不变 | 未选中时响应体与响应头与接入前逐字节一致（`profiling` 键不出现），不新增请求或监听 |
+
+**明确未交付。** 浏览器终点（点击、UI commit、xterm 可交互、本地导出与预领名额）、
+纯缓存命中不产生 HTTP 请求时的覆盖、跨 replica 的统一名额、CP 持久化与 Admin 读面、
+三类真实操作基线均未实现。因此当前只能声明 **server-only** 覆盖：不能把服务端耗时
+说成“点击到可用”，也不能用文件 helper 微基准代替 CP → broker → 前端整段采集的开销实测。
+文件与终端的入参、成功终点、缓存/重试/就绪边界和验收矩阵以
+[平台操作测量清单 §3–§5](2026-09-14-platform-operation-measurement-inventory.zh-CN.md) 为准。
 
 ## 10. 代码与现有设计索引
 
@@ -526,6 +567,9 @@ CPython 3.12.13 / macOS arm64：
 - [shared supervisor](../../cloud_agent_host/shared_session_supervisor.py)：group/member、锁和 turn 边界。
 - [resident transport](../../cloud_agent_host/resident_transport.py) / [drivers](../../cloud_agent_host/drivers.py)：实际 CLI readiness 与 prompt 协议。
 - [workspace broker](../../cloud_agent_host/workspace_broker.py)：RPC 和流式 frame。
+- [operation profiling](../../cloud_agent_host/operation_profiling.py)：开关、run、collector、片段协议。
+- [operation call](../../cloud_agent_host/operation_call.py)：broker 侧一次调用的片段校验与应答。
+- [operation measurement](../../cloud_agent/operation_measurement.py)：CP 侧根操作选择、名额与选择缓存。
 - [claim API](../../cloud_agent/api/routes.py) / [attempt store](../../cloud_agent/storage/repositories/attempt_commands.py)：claim 及 fencing。
 - [host capacity](../../cloud_agent_host/host_capacity.py)：已有 host 快照。
 - [Admin observability](2026-09-10-admin-observability-v1.md)：接收时间、权限、metadata 语义。

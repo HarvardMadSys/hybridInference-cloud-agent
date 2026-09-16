@@ -33,10 +33,20 @@ import os
 import re
 import secrets
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Path, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    Response,
+)
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from cloud_agent.api.deps import (
     bearer_token,
@@ -75,6 +85,18 @@ from cloud_agent.identity import SESSION_COOKIE
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp_catalogue import catalogue as mcp_catalogue
 from cloud_agent.mcp_registry import connection_states, registry_for_user
+from cloud_agent.operation_measurement import (
+    FILES_LIST,
+    FILES_OPEN,
+    ROUTE_FILES,
+    ROUTE_TERMINALS,
+    TERMINAL_OPEN,
+    Selection,
+    continuation,
+    fragment,
+    operation as measured_operation,
+    root_scope,
+)
 from cloud_agent.schemas import (
     BASE_REF_METADATA_KEY,
     EVENT_TYPE_PATTERN,
@@ -93,6 +115,7 @@ from cloud_agent.schemas import (
     AgentJobEventsResponse,
     AgentJobListResponse,
     AgentJobResponse,
+    AgentOperationProfilingFragment,
     AgentProject,
     AgentProjectListResponse,
     AgentSessionArchiveRequest,
@@ -199,7 +222,7 @@ from cloud_agent_host.workspace_browser import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.ports import (
@@ -2835,14 +2858,105 @@ async def _terminal_owner_workspace(
     return job, broker
 
 
+#: What one measured broker call returns: a response body, or a live stream.
+_T = TypeVar("_T")
+
+
+def _profiling_fragment(measure: Selection | None) -> AgentOperationProfilingFragment | None:
+    """Return the profiling block for a response, or ``None`` when unselected.
+
+    Reported and unrecorded is a real answer: the broker was called and said it
+    collected nothing. The record then names the fragment it owed and did not
+    get, instead of the response implying a producer that never ran.
+    """
+    block = fragment(measure, recorded=measure is not None and measure.answered)
+    if block is None:
+        return None
+    return AgentOperationProfilingFragment(**block)
+
+
+def _with_fragment(payload: dict[str, Any], measure: Selection | None) -> dict[str, Any]:
+    """Return a broker body with the profiling block, when there is one.
+
+    The key is omitted entirely when nothing was measured, so a deployment with
+    profiling off returns byte-for-byte what it returned before this field
+    existed, and a client only ever sees the block for a request that really
+    was selected.
+    """
+    block = _profiling_fragment(measure)
+    if block is None:
+        return payload
+    return {**payload, "profiling": block}
+
+
+def _measured_response(model: Any, measure: Selection | None, payload: dict[str, Any]) -> Response:
+    """Serialize a workspace or terminal response, with the fragment only when measured.
+
+    Returned as a ``Response`` on purpose. When a handler returns the model
+    itself, FastAPI re-serializes it and emits every declared field -- including
+    ones that were never set -- so an experiment that is switched off would add
+    ``profiling: null`` to responses that never had it. Serializing here keeps
+    the off path byte-for-byte what it was, which is the design's requirement
+    for a disabled switch, and the response model still documents the shape.
+    """
+    return JSONResponse(model(**_with_fragment(payload, measure)).model_dump(exclude_none=True))
+
+
+def _profiling_answer_headers(measure: Selection | None) -> dict[str, str]:
+    """Return the measurement answer for a streaming response, as headers.
+
+    A terminal stream's body is the terminal's own bytes, so the browser cannot
+    be handed a JSON block the way a file read can. The same correlation id is
+    echoed here instead, which is all the browser needs to attach its own
+    endpoint to the server's measurement.
+    """
+    block = _profiling_fragment(measure)
+    if block is None:
+        return {}
+    headers = {
+        "X-Agent-Profiling-Measurement-Id": block.measurement_id,
+        "X-Agent-Profiling-Call-Id": block.call_id,
+    }
+    if block.truncated:
+        headers["X-Agent-Profiling-Truncated"] = "1"
+    return headers
+
+
+async def _measured_call(
+    measure: Selection | None,
+    stage: str,
+    *,
+    call: Callable[[dict[str, Any] | None], Awaitable[_T]],
+) -> _T:
+    """Register one broker call, time it, and record the answer it returned.
+
+    The fragment is registered *before* the call, so a call that never returns
+    is a fragment this record owed rather than an absence nobody can see. The
+    answer is taken only from the response's own echo of the call id, so a body
+    that cannot be matched to the call is not an answer -- and an exception
+    leaves the fragment unanswered, which makes a retry a second fragment
+    rather than a replacement for the first. A streaming call answers in
+    headers instead, so its caller records that answer itself.
+    """
+    if measure is None:
+        return await call(None)
+    measure.begin_call(stage)
+    with measure.stage(stage, "broker_call"):
+        response = await call(measure.context())
+    if isinstance(response, dict):
+        measure.record_answer(stage, response)
+    return response
+
+
 @router.get("/jobs/{job_id}/files", response_model=AgentWorkspaceResponse)
 async def get_agent_job_workspace_file(
     job_id: str,
+    request: Request,
     path: str = Query("", max_length=4096),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _RoutesStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
-) -> AgentWorkspaceResponse:
+) -> Response:
     """Browse the chat's retained workspace through its owning host broker."""
     job_store = _require_store(store)
     job = await _owned_job(job_store.conversation_queries, job_id, user)
@@ -2858,6 +2972,12 @@ async def get_agent_job_workspace_file(
         job=job, user=user, store=job_store, app_credentials=app_credentials
     )
 
+    # The empty path is the chat's root listing; anything else is the user
+    # having selected an entry. The route cannot know yet whether that entry is
+    # a file or a directory -- the broker does -- so it is measured as the
+    # selection it is, and the record's facts name the kind that came back.
+    operation_name = FILES_OPEN if safe_path else FILES_LIST
+    scope = root_scope(operation_name, job, service=ROUTE_FILES)
     broker = await _workspace_broker_for_job(job_store, job)
     if broker is None:
         raise HTTPException(
@@ -2869,10 +2989,40 @@ async def get_agent_job_workspace_file(
                 }
             },
         )
-    try:
-        return AgentWorkspaceResponse(**(await broker.files(_workspace_id(job), safe_path)))
-    except WorkspaceBrokerError as exc:
-        raise _workspace_broker_http_error(exc) from exc
+    with measured_operation(
+        operation_name, scope, continuing=continuation(request.headers)
+    ) as measure:
+        if measure is not None:
+            measure.mark("read")
+        try:
+            body = await _measured_call(
+                measure,
+                "read",
+                call=lambda profiling: broker.files(
+                    _workspace_id(job), safe_path, profiling=profiling
+                ),
+            )
+        except WorkspaceBrokerError as exc:
+            if _workspace_not_materialized(exc):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": {
+                            "type": "workspace_unavailable",
+                            "message": "This chat has no retained workspace.",
+                        }
+                    },
+                ) from exc
+            raise _workspace_broker_http_error(exc) from exc
+        if measure is not None:
+            measure.measurement.facts["kind"] = str(body.get("kind") or "")
+            if body.get("kind") == "directory":
+                measure.measurement.facts["entry_count"] = len(body.get("entries") or [])
+            else:
+                measure.measurement.facts["content_truncated"] = bool(body.get("truncated"))
+                measure.measurement.facts["binary"] = bool(body.get("binary"))
+            measure.outcome = "completed"
+        return _measured_response(AgentWorkspaceResponse, measure, body)
 
 
 @router.put("/jobs/{job_id}/files", response_model=AgentWorkspaceResponse)
@@ -2970,11 +3120,12 @@ async def run_agent_job_terminal_command(
 )
 async def create_agent_job_terminal(
     job_id: str,
+    request: Request,
     body: AgentTerminalSessionCreateRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _RoutesStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
-) -> AgentTerminalSessionResponse:
+) -> Response:
     """Open an interactive PTY in the agent's workspace."""
     job, broker = await _terminal_owner_workspace(
         job_id=job_id,
@@ -2983,18 +3134,28 @@ async def create_agent_job_terminal(
         app_credentials=app_credentials,
         require_ready=True,
     )
-    try:
-        return AgentTerminalSessionResponse(
-            **(
-                await broker.create_terminal(
+    scope = root_scope(TERMINAL_OPEN, job, service=ROUTE_TERMINALS)
+    with measured_operation(
+        TERMINAL_OPEN, scope, continuing=continuation(request.headers)
+    ) as measure:
+        if measure is not None:
+            measure.mark("create")
+        try:
+            payload = await _measured_call(
+                measure,
+                "create",
+                call=lambda profiling: broker.create_terminal(
                     _workspace_id(job),
                     rows=body.rows,
                     cols=body.cols,
-                )
+                    profiling=profiling,
+                ),
             )
-        )
-    except WorkspaceBrokerError as exc:
-        raise _terminal_broker_http_error(exc) from exc
+        except WorkspaceBrokerError as exc:
+            raise _terminal_broker_http_error(exc) from exc
+        if measure is not None:
+            measure.outcome = "completed"
+        return _measured_response(AgentTerminalSessionResponse, measure, payload)
 
 
 @router.get(
@@ -3003,10 +3164,11 @@ async def create_agent_job_terminal(
 )
 async def list_agent_job_terminals(
     job_id: str,
+    request: Request,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _RoutesStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
-) -> AgentTerminalSessionListResponse:
+) -> Response:
     """List interactive terminals, including exited sessions kept for replay."""
     job, broker = await _terminal_owner_workspace(
         job_id=job_id,
@@ -3015,10 +3177,26 @@ async def list_agent_job_terminals(
         app_credentials=app_credentials,
         require_ready=True,
     )
-    try:
-        return AgentTerminalSessionListResponse(**(await broker.list_terminals(_workspace_id(job))))
-    except WorkspaceBrokerError as exc:
-        raise _terminal_broker_http_error(exc) from exc
+    scope = root_scope(TERMINAL_OPEN, job, service=ROUTE_TERMINALS)
+    with measured_operation(
+        TERMINAL_OPEN, scope, continuing=continuation(request.headers)
+    ) as measure:
+        if measure is not None:
+            measure.mark("list")
+        try:
+            payload = await _measured_call(
+                measure,
+                "list",
+                call=lambda profiling: broker.list_terminals(
+                    _workspace_id(job), profiling=profiling
+                ),
+            )
+        except WorkspaceBrokerError as exc:
+            raise _terminal_broker_http_error(exc) from exc
+        if measure is not None:
+            measure.outcome = "completed"
+            measure.measurement.facts["terminal_count"] = len(payload.get("terminals") or [])
+        return _measured_response(AgentTerminalSessionListResponse, measure, payload)
 
 
 @router.get("/jobs/{job_id}/terminals/{terminal_id}/stream")
@@ -3038,25 +3216,47 @@ async def stream_agent_job_terminal(
         store=store,
         app_credentials=app_credentials,
     )
-    try:
-        upstream = await broker.stream_terminal(_workspace_id(job), terminal_id, after=after)
-    except WorkspaceBrokerError as exc:
-        raise _terminal_broker_http_error(exc) from exc
-
-    async def relay() -> AsyncIterator[Any]:
+    scope = root_scope(TERMINAL_OPEN, job, service=ROUTE_TERMINALS)
+    with measured_operation(
+        TERMINAL_OPEN, scope, continuing=continuation(request.headers)
+    ) as measure:
+        if measure is not None:
+            measure.mark("stream")
         try:
-            async for chunk in upstream:
-                if await request.is_disconnected():
-                    break
-                yield chunk
-        finally:
-            await upstream.aclose()
+            upstream = await _measured_call(
+                measure,
+                "stream",
+                call=lambda profiling: broker.stream_terminal(
+                    _workspace_id(job), terminal_id, after=after, profiling=profiling
+                ),
+            )
+        except WorkspaceBrokerError as exc:
+            raise _terminal_broker_http_error(exc) from exc
+        if measure is not None:
+            # The stream's answer travels in the response headers: its body is
+            # the terminal's own bytes. Until the handshake is validated the
+            # fragment stays unanswered, and the record says so by name.
+            measure.record_answer_from_headers("stream", upstream.profiling_answer)
+            measure.outcome = "completed"
 
-    return StreamingResponse(
-        relay(),
-        media_type="text/event-stream",
-        headers=_SSE_HEADERS,
-    )
+        async def relay() -> AsyncIterator[Any]:
+            try:
+                async for chunk in upstream:
+                    if await request.is_disconnected():
+                        break
+                    yield chunk
+            finally:
+                await upstream.aclose()
+
+        return StreamingResponse(
+            relay(),
+            media_type="text/event-stream",
+            headers=(
+                _SSE_HEADERS
+                if measure is None
+                else {**_SSE_HEADERS, **_profiling_answer_headers(measure)}
+            ),
+        )
 
 
 @router.post(

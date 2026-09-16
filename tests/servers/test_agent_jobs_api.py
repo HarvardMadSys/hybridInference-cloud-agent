@@ -2541,7 +2541,7 @@ async def test_live_workspace_routes_use_the_job_broker(store: FakeStorage, monk
         async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
             return None
 
-        async def files(self, workspace_id: str, path: str):
+        async def files(self, workspace_id: str, path: str, *, profiling=None):
             self.calls.append(("files", workspace_id, path))
             return {
                 "path": path,
@@ -2619,7 +2619,7 @@ async def test_missing_shared_workspace_is_a_conflict_not_a_missing_file(
         async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
             return None
 
-        async def files(self, _workspace_id: str, _path: str):
+        async def files(self, _workspace_id: str, _path: str, *, profiling=None):
             raise WorkspaceBrokerError(404, "shared chat workspace is not materialized")
 
     monkeypatch.setattr(broker_routing, "_client_for", lambda _host: Broker())
@@ -2742,11 +2742,11 @@ class _TerminalSessionBroker:
     async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
         return None
 
-    async def create_terminal(self, workspace_id: str, *, rows: int, cols: int):
+    async def create_terminal(self, workspace_id: str, *, rows: int, cols: int, profiling=None):
         self.calls.append(("create", workspace_id, rows, cols))
         return _terminal_session_descriptor()
 
-    async def list_terminals(self, workspace_id: str):
+    async def list_terminals(self, workspace_id: str, *, profiling=None):
         self.calls.append(("list", workspace_id))
         return {"terminals": [_terminal_session_descriptor()]}
 
@@ -2782,7 +2782,9 @@ class _TerminalSessionBroker:
         self.suspended.discard(workspace_id)
         return {"ok": True}
 
-    async def stream_terminal(self, workspace_id: str, terminal_id: str, *, after: int):
+    async def stream_terminal(
+        self, workspace_id: str, terminal_id: str, *, after: int, profiling=None
+    ):
         self.calls.append(("stream", workspace_id, terminal_id, after))
         return self.stream
 
@@ -3303,7 +3305,9 @@ async def test_terminal_routes_report_missing_broker_and_workspace_as_conflicts(
         )
 
         class MissingWorkspaceBroker(_TerminalSessionBroker):
-            async def create_terminal(self, workspace_id: str, *, rows: int, cols: int):
+            async def create_terminal(
+                self, workspace_id: str, *, rows: int, cols: int, profiling=None
+            ):
                 raise WorkspaceBrokerError(404, "shared chat workspace is not materialized")
 
         monkeypatch.setattr(

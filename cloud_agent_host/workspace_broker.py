@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import uvicorn
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -47,6 +47,8 @@ from cloud_agent_host.guest_observer import (
     attribute_processes,
 )
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
+from cloud_agent_host.operation_call import BrokerCall, closed, open_call
+from cloud_agent_host.operation_profiling import PROFILING_CONTEXT_HEADER
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
 from cloud_agent_host.retained_workspace import (
@@ -1339,15 +1341,29 @@ def create_app(
 
     def retained_operation(
         workspace_id: str,
-        operation: Callable[[SandboxBackend], dict[str, Any]],
+        operation: Callable[[SandboxBackend, BrokerCall], dict[str, Any]],
+        *,
+        call: BrokerCall | None = None,
     ) -> dict[str, Any]:
+        """Open a workspace, run one operation, and answer its measurement call.
+
+        ``call`` is this request's measurement fragment, if the inherited
+        selection named one. It gates nothing: the workspace is admitted, its
+        network phase is verified, and the operation runs exactly as before.
+        Only the timings are conditional, and the answer is merged into the
+        body so a caller can tell a producer that collected nothing from one
+        that never reported at all.
+        """
+        active = call if call is not None else closed()
         owner = retained_owner(workspace_id)
         token: str | None = None
         try:
-            token, _ = owner.operation_opened(workspace_id)
+            with active.stage("admission"):
+                token, _ = owner.operation_opened(workspace_id)
             retained = owner.backend(workspace_id)
-            retained.manager.require_network_phase(retained.spec, "agent")
-            return operation(retained)
+            with active.stage("network_phase"):
+                retained.manager.require_network_phase(retained.spec, "agent")
+            return active.answer(operation(retained, active))
         except RetainedWorkspaceError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
         except (SandboxError, ValueError) as exc:
@@ -1899,18 +1915,26 @@ def create_app(
     @app.get("/workspaces/{workspace_id}/files")
     def files(
         workspace_id: str,
+        request: Request,
         path: str = Query("", max_length=4096),
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
         relative = _relative_path(path)
+        # The empty path is the chat's root listing; anything else is an entry
+        # the caller selected. The broker is what discovers whether that entry
+        # turned out to be a file or a directory, and it says so in the body.
+        operation = "files.open" if path else "files.list"
+        call = open_call(request.headers.get(PROFILING_CONTEXT_HEADER), operation=operation)
         return retained_operation(
             workspace_id,
-            lambda retained: read_retained_file(
+            lambda retained, active: read_retained_file(
                 retained,
                 relative,
                 max_preview_bytes=MAX_FILE_PREVIEW_BYTES,
                 max_directory_entries=MAX_DIRECTORY_ENTRIES,
+                observer=active.recorder,
             ),
+            call=call,
         )
 
     @app.put("/workspaces/{workspace_id}/files")
@@ -1923,7 +1947,7 @@ def create_app(
         relative = _relative_path(path)
         return retained_operation(
             workspace_id,
-            lambda retained: write_retained_file(
+            lambda retained, _call: write_retained_file(
                 retained,
                 relative,
                 body.content,
@@ -1942,38 +1966,44 @@ def create_app(
         return await asyncio.to_thread(
             retained_operation,
             workspace_id,
-            lambda retained: _run_terminal(retained, "/workspace", body),
+            lambda retained, _call: _run_terminal(retained, "/workspace", body),
         )
 
     @app.post("/workspaces/{workspace_id}/terminals")
     async def create_terminal(
         workspace_id: str,
+        request: Request,
         body: TerminalCreateRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
+        call = open_call(request.headers.get(PROFILING_CONTEXT_HEADER), operation="terminal.open")
         owner = retained_owner(workspace_id)
         terminal_token: str | None = None
         try:
-            terminal_token, descriptor = await asyncio.to_thread(
-                owner.terminal_opened, workspace_id
-            )
+            with call.stage("admission"):
+                terminal_token, descriptor = await asyncio.to_thread(
+                    owner.terminal_opened, workspace_id
+                )
             retained = owner.backend(workspace_id)
-            retained.manager.require_network_phase(retained.spec, "agent")
+            with call.stage("network_phase"):
+                retained.manager.require_network_phase(retained.spec, "agent")
             token = terminal_token
-            return await asyncio.to_thread(
-                terminals.create,
-                descriptor.origin_thread_id,
-                "/workspace",
-                rows=body.rows,
-                cols=body.cols,
-                backend=retained,
-                idle_ttl_s=owner.idle_timeout_s,
-                on_closed=lambda last_activity: owner.terminal_closed(
-                    workspace_id,
-                    token,
-                    last_activity_monotonic=last_activity,
-                ),
-            )
+            with call.stage("pty_spawn"):
+                body_out = await asyncio.to_thread(
+                    terminals.create,
+                    descriptor.origin_thread_id,
+                    "/workspace",
+                    rows=body.rows,
+                    cols=body.cols,
+                    backend=retained,
+                    idle_ttl_s=owner.idle_timeout_s,
+                    on_closed=lambda last_activity: owner.terminal_closed(
+                        workspace_id,
+                        token,
+                        last_activity_monotonic=last_activity,
+                    ),
+                )
+            return call.answer(body_out)
         except (HTTPException, SandboxError, ValueError) as exc:
             if terminal_token is not None:
                 with contextlib.suppress(SandboxError):
@@ -2026,21 +2056,28 @@ def create_app(
     @app.get("/workspaces/{workspace_id}/terminals")
     async def list_terminals(
         workspace_id: str,
+        request: Request,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
+        call = open_call(request.headers.get(PROFILING_CONTEXT_HEADER), operation="terminal.open")
         scope = terminal_scope(workspace_id)
-        return {"terminals": await asyncio.to_thread(terminals.list, scope)}
+        with call.stage("list"):
+            body = {"terminals": await asyncio.to_thread(terminals.list, scope)}
+        return call.answer(body)
 
     @app.get("/workspaces/{workspace_id}/terminals/{terminal_id}/stream")
     async def stream_terminal(
         workspace_id: str,
         terminal_id: str,
+        request: Request,
         after: int = Query(0, ge=0),
         _: None = Depends(authenticate),
     ) -> StreamingResponse:
+        call = open_call(request.headers.get(PROFILING_CONTEXT_HEADER), operation="terminal.open")
         scope = terminal_scope(workspace_id)
-        session = terminals.get(scope, terminal_id)
-        session.open_stream()
+        with call.stage("stream_attach"):
+            session = terminals.get(scope, terminal_id)
+            session.open_stream()
 
         async def event_stream():
             cursor = after
@@ -2066,7 +2103,9 @@ def create_app(
         return StreamingResponse(
             event_stream(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            # A stream's body is the terminal's own bytes, so this call's
+            # measurement answer travels in headers rather than in the body.
+            headers=call.headers(extra={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}),
         )
 
     @app.post("/workspaces/{workspace_id}/terminals/{terminal_id}/input")
