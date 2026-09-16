@@ -104,6 +104,33 @@ ENV_MCP_PUBLIC_BASE_URL = "AGENT_MCP_PUBLIC_BASE_URL"
 #: convenience, never a gate: a server with no template is added the same way.
 _TEMPLATES: tuple[dict[str, Any], ...] = (
     {
+        "name": "linear",
+        "label": "Linear",
+        "description": "Find issues, plan projects and keep your team's work up to date.",
+        "url": "https://mcp.linear.app/mcp",
+        "transport": Transport.STREAMABLE_HTTP.value,
+        "auth_kind": AuthKind.OAUTH.value,
+        "notes": [],
+    },
+    {
+        "name": "notion",
+        "label": "Notion",
+        "description": "Search your workspace and work with pages, docs and project notes.",
+        "url": "https://mcp.notion.com/mcp",
+        "transport": Transport.STREAMABLE_HTTP.value,
+        "auth_kind": AuthKind.OAUTH.value,
+        "notes": [],
+    },
+    {
+        "name": "context7",
+        "label": "Context7",
+        "description": "Look up current library documentation and code examples.",
+        "url": "https://mcp.context7.com/mcp/oauth",
+        "transport": Transport.STREAMABLE_HTTP.value,
+        "auth_kind": AuthKind.OAUTH.value,
+        "notes": [],
+    },
+    {
         "name": "github",
         "label": "GitHub",
         "description": (

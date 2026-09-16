@@ -370,6 +370,20 @@ export async function testMcpConnection(connectionId: number): Promise<McpTestRe
   return jsonOrThrow(resp);
 }
 
+/** Opt into browser sign-in after a pasted URL reports that it needs authorization. */
+export async function enableMcpOAuth(connection: McpConnectionApi): Promise<McpConnectionApi> {
+  return jsonOrThrow(
+    await fetchWithAuth(API_BASE, `/v1/agent/mcp/connections/${connection.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_config_revision: connection.config_revision,
+        auth_kind: 'oauth',
+      }),
+    }),
+  );
+}
+
 /** Turn a connection off, keeping a tombstone and clearing its credential. */
 export async function disconnectMcpConnection(connectionId: number): Promise<void> {
   const resp = await fetchWithAuth(API_BASE, `/v1/agent/mcp/connections/${connectionId}`, {

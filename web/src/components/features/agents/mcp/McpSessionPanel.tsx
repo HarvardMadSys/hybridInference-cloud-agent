@@ -376,6 +376,15 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
     });
   }
 
+  function setServerPolicy(binding: McpBindingApi, policy: 'confirm' | 'deny') {
+    if (selectionOperation.current) return;
+    const next: Selection = { tools: {}, resources: {}, prompts: {} };
+    for (const capability of binding.capabilities) {
+      next[selectionKey(capability.kind)][capability.name] = policy;
+    }
+    setSelections((current) => ({ ...current, [binding.connection_id]: next }));
+  }
+
   /**
    * Add a connection to the conversation's draft.
    *
@@ -635,13 +644,31 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
                   server offers.
                 </p>
               ) : (
-                <CapabilityList
-                  capabilities={binding.capabilities}
-                  selection={selection}
-                  onPolicy={(kind, name, policy) =>
-                    setPolicy(binding.connection_id, kind, name, policy)
-                  }
-                />
+                <>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setServerPolicy(binding, 'confirm')}
+                      className="rounded-lg border border-gray-200 dark:border-white/10 px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-white/5"
+                    >
+                      Ask before each call
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setServerPolicy(binding, 'deny')}
+                      className="rounded-lg border border-gray-200 dark:border-white/10 px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-white/5"
+                    >
+                      Disable all
+                    </button>
+                  </div>
+                  <CapabilityList
+                    capabilities={binding.capabilities}
+                    selection={selection}
+                    onPolicy={(kind, name, policy) =>
+                      setPolicy(binding.connection_id, kind, name, policy)
+                    }
+                  />
+                </>
               )}
             </div>
           );
