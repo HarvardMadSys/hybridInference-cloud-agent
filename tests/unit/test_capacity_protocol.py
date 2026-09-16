@@ -642,12 +642,52 @@ def test_a_malformed_storage_sub_block_does_not_refuse_the_heartbeat() -> None:
     assert request.slots_total == 3
 
 
-def test_a_sample_and_a_missing_reason_together_are_refused() -> None:
+def test_a_sample_and_a_missing_reason_together_cost_only_the_storage() -> None:
+    """A contradiction in the storage half is not a malformed heartbeat.
+
+    The two statements cannot both be true, so neither is published — but the
+    CPU, the memory and the inventory beside them are facts about a live host,
+    and a monitoring field does not get to take them down.
+    """
     block = capacity_block(
         storage=storage_block(), missing={"cpu": None, "memory": None, "storage": "unverified"}
     )
 
-    assert parse_capacity_block(block) is None
+    report = parse_capacity_block(block)
+
+    assert report is not None
+    assert report.storage is None
+    assert report.missing.storage == "invalid_sample"
+    assert report.cpu_percent == pytest.approx(37.2)
+    assert report.inventory.stopped == 7
+
+
+@pytest.mark.parametrize("reason", ["teleported", "DISABLED", 42, ["unverified"], {"a": 1}])
+def test_a_reason_outside_the_vocabulary_costs_only_the_storage(reason: object) -> None:
+    """A newer runner's new reason must not cost an older control plane the CPU.
+
+    The page would render an unknown string as "Not measured" anyway, so the
+    closed vocabulary is enforced by degrading the field rather than by failing
+    the model — which would take three unrelated measurements down with it.
+    """
+    report = parse_capacity_block(
+        capacity_block(storage=None, missing={"cpu": None, "memory": None, "storage": reason})
+    )
+
+    assert report is not None
+    assert report.storage is None
+    assert report.missing.storage == "invalid_sample"
+    assert report.memory_total_bytes == 137_438_953_472
+
+
+def test_a_storage_fault_never_refuses_the_heartbeat() -> None:
+    request = HostHeartbeatRequest.model_validate(
+        heartbeat_body(capacity_block(storage=storage_block(), missing={"storage": "warped"}))
+    )
+
+    assert request.capacity is not None
+    assert request.capacity.missing.storage == "invalid_sample"
+    assert request.slots_total == 3
 
 
 def test_an_unknown_source_is_accepted_as_long_as_it_fits_the_format() -> None:

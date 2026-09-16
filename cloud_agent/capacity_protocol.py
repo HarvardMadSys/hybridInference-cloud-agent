@@ -161,6 +161,13 @@ assert set(get_args(StorageMissingReason)) == {
 assert set(get_args(StorageAdminMissingReason)) == set(get_args(StorageMissingReason)) | {
     STORAGE_MISSING_NOT_REPORTED
 }
+
+#: The vocabulary a runner's ``missing.storage`` may name, as a set. The
+#: validator below checks membership itself rather than letting the field's
+#: `Literal` do it, because a `Literal` failure is a *model* failure: it would
+#: take the CPU, the memory and the inventory down with a storage reason this
+#: control plane happens not to know.
+STORAGE_MISSING_REASONS = frozenset(get_args(StorageMissingReason))
 InventoryStatus = Literal["available", "partial", "unavailable"]
 Freshness = Literal["fresh", "stale", "unavailable"]
 
@@ -410,28 +417,64 @@ class HostCapacityReport(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _drop_unusable_storage(cls, data: Any) -> Any:
-        """Turn an unusable storage sub-block into an explicit missing sample.
+    def _degrade_unusable_storage(cls, data: Any) -> Any:
+        """Turn any storage-shaped fault into an explicit missing sample.
 
-        The sub-block is validated *here* rather than by the model's own field
-        validation, and the difference is what an operator sees. Rejecting the
-        whole report over one bad sub-block would cost that host its CPU, its
-        memory and its container count — three independent facts about a
-        machine that is, after all, still alive and still claiming work. So the
-        sub-block alone is dropped, and the gap is named ``invalid_sample``
-        rather than left absent: a runner that sent something wrong is a
-        different thing from a runner that cannot measure at all.
+        The storage half is validated *here* rather than by the model's own
+        field validation, and the difference is what an operator sees.
+        Rejecting the whole report over one bad sub-block would cost that host
+        its CPU, its memory and its container count — three independent facts
+        about a machine that is, after all, still alive and still claiming
+        work.
+
+        Every way storage can be wrong is caught here, not just an unparsable
+        number, because a fault the model's own validation sees is a fault that
+        takes the whole block with it:
+
+        * a sub-block that does not validate;
+        * a sub-block and a ``missing.storage`` at the same time — the two
+          statements contradict each other, and the block cannot say which is
+          true;
+        * a ``missing.storage`` outside the closed vocabulary. A newer runner
+          inventing a reason must not cost this control plane the CPU figures
+          it does understand; the page would show the unknown string as
+          "Not measured" either way.
+
+        All three become ``storage = null`` plus ``missing.storage =
+        "invalid_sample"``: a runner that sent something wrong is a different
+        thing from a runner that cannot measure at all, and the page says so.
         """
-        if not isinstance(data, dict) or data.get("storage") is None:
+        if not isinstance(data, dict):
             return data
-        try:
-            HostCapacityStorage.model_validate(data["storage"])
-        except ValidationError:
-            missing = data.get("missing")
-            missing = dict(missing) if isinstance(missing, dict) else {}
-            missing["storage"] = STORAGE_MISSING_INVALID_SAMPLE
-            return {**data, "storage": None, "missing": missing}
-        return data
+        storage = data.get("storage")
+        missing = data.get("missing")
+        reason: Any = None
+        if isinstance(missing, dict):
+            reason = missing.get("storage")
+        elif isinstance(missing, HostCapacityMissing):
+            reason = missing.storage
+        if storage is None:
+            # Nothing to publish: either the runner said nothing about storage
+            # at all — an older runner — or it named a gap from the closed
+            # vocabulary. Anything else is the fault handled below.
+            if reason is None or (isinstance(reason, str) and reason in STORAGE_MISSING_REASONS):
+                return data
+        else:
+            try:
+                HostCapacityStorage.model_validate(storage)
+            except ValidationError:
+                pass
+            else:
+                if reason is None:
+                    return data
+        if isinstance(missing, dict):
+            degraded = dict(missing)
+        elif isinstance(missing, HostCapacityMissing):
+            degraded = missing.model_dump()
+        else:
+            degraded = {}
+        degraded["storage"] = STORAGE_MISSING_INVALID_SAMPLE
+        return {**data, "storage": None, "missing": degraded}
 
     @model_validator(mode="after")
     def _measurements_agree_with_their_reasons(self) -> HostCapacityReport:
