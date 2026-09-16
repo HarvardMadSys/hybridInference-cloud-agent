@@ -311,3 +311,12 @@ Staging 验收：页面、admin API 和宿主 `df <挂载根>` 在同一时段�
 - 第 7 节“Storage 与 Memory 一样是瞬时观察”落在 Storage 的 tooltip 里；`CapacityPanel` 与 `CapacityMetric` 未改（面板里那句同类说明只服务于 CPU／内存历史图）。
 - 表宽从 1080px 提到 1220px：九列在 1080px 下会把 Memory／Storage 的数值对挤成换行。
 - 截图未做（实现环境无浏览器），Staging 验收中的截图项仍未完成。
+
+**2026-09-16 评审后修订（PR #265）。** 评审提出三处，均已修，并各带一条会先失败的回归测试：
+
+1. **部署验证会卡住部署。** storage 的 `docker exec describe`、`df`、`findmnt` 都没有超时，readiness deadline 也没传进来，一次卡住的调用就能让 `up` 永远不发布 ready 标记（评审用 `SHARED_READY_TIMEOUT=1` 复现）。现在：每次调用都由 coreutils `timeout` 限时（`STORAGE_CALL_TIMEOUT_S=8`，超时记 `unverified` 并继续）；整个验证另有预算（`STORAGE_ATTEST_BUDGET_S=30`），并以仍在前方的 readiness deadline 为上限；预算耗尽时未处理的副本不写条目（runner 侧即 `unverified`）。宿主若没有 `timeout`，整个验证直接跳过而不是让无界调用进入 rollout 路径。诚实边界写进了注释：处于不可中断 I/O 的进程任何预算都杀不掉。
+   - 这是**部署脚本**的预算，第 6 节"不起子进程、不设单独预算"说的是 30 秒运行时采集周期，两者不冲突，运行时采样未改。
+2. **Storage 局部降级不完整。** "有合法 `storage` 数值同时有 `missing.storage`"与"`missing.storage` 不在词表内"原先都会让**整份** CPU／内存／inventory 样本被丢弃。第 3.3 节的"只丢 Storage"现在覆盖全部 storage 形状的错误：这三类都在 `HostCapacityReport` 内降级为 `storage = null` + `missing.storage = "invalid_sample"`，其余字段与心跳不受影响。原来断言"整块丢弃"的新增测试已按设计改为断言局部降级。
+3. **Tooltip 把保留块的含义写反了。** `used = total - free` **不**把保留块算作已用；仍空闲的保留块既不在 `used` 也不在 `available` 里，这正是二者相加不等于总量的原因。`used / (used + available)` 的分母口径不变，写反的说明（web tooltip、`admin.ts` 字段注释、`docs/operations.md`）已改正，并加了 `not.toContain('used counts the blocks')` 作为回归护栏。
+
+仍待完成：第 5 节的真机验收实验（尤其反例 A）与 staging 截图。
