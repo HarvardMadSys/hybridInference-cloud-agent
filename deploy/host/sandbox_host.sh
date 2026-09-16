@@ -902,9 +902,20 @@ verify_storage_probe() {
       continue
     fi
     upper_size="$(storage_df_size "$upperdir" "$storage_deadline")"
+    if [[ -z "$upper_size" ]]; then
+      # "No answer" is not "a different answer". A `df` that was cut short, or
+      # skipped because the budget ran out, returns nothing — and comparing
+      # that nothing against the mount root's size disagrees with it, which is
+      # how a missing measurement becomes a statement about the host's
+      # configuration that nobody established.
+      append_storage_entry "$upperdir" "unverified" "$mount_root" "$host_fstype" "$root_size" \
+        "df could not size ${upperdir} within the attestation's budget" "$entries_file"
+      warn "runner $id: df could not size ${upperdir}; leaving its storage unverified"
+      continue
+    fi
     if [[ "$upper_size" != "$root_size" ]]; then
       append_storage_entry "$upperdir" "unsupported" "$mount_root" "$host_fstype" "$root_size" \
-        "df reports ${upper_size:-no} B for ${upperdir} but ${root_size} B for its mount root, which is a project quota" \
+        "df reports ${upper_size} B for ${upperdir} but ${root_size} B for its mount root, which is a project quota" \
         "$entries_file"
       warn "runner $id: the upper directory and its mount root disagree on size; treating the topology as unsupported"
       continue

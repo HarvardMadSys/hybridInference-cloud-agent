@@ -1051,19 +1051,26 @@ def _add_storage_host_tools(
     used: int = 60 * STORAGE_GIB,
     available: int = 35 * STORAGE_GIB,
     findmnt_fails: bool = False,
+    df_upper_hangs: bool = False,
 ) -> None:
     """Fake the two host tools the attestation shells out to.
 
     ``findmnt`` and ``df`` do not exist on the machine these tests run on, and
     the values they answer with *are* the thing under test — a mount root, an
     upper directory that reports a quota, a df that disagrees with the
-    container. Faking them is the only way to exercise the comparison at all.
+    container, a df that never answers. Faking them is the only way to exercise
+    the comparison at all.
     """
-    sizes = {
-        STORAGE_MOUNT_ROOT: STORAGE_SIZE,
-        STORAGE_UPPERDIR: STORAGE_SIZE if upper_size is None else upper_size,
-    }
-    size_arms = "\n".join(f"      '{path}') echo {value} ;;" for path, value in sizes.items())
+    upper_answer = (
+        # `exec` so the hang is this process: the bounded call has to be the
+        # thing that ends it, and the header this line may already have printed
+        # is exactly what must not be mistaken for a size.
+        "exec sleep 300"
+        if df_upper_hangs
+        else f"echo {STORAGE_SIZE if upper_size is None else upper_size}"
+    )
+    sizes = {STORAGE_MOUNT_ROOT: f"echo {STORAGE_SIZE}", STORAGE_UPPERDIR: upper_answer}
+    size_arms = "\n".join(f"      '{path}') {answer} ;;" for path, answer in sizes.items())
     _write_executable(
         tmp_path / "bin/df",
         "#!/bin/sh\n"
@@ -1116,14 +1123,26 @@ def _storage_host(
     capability: str = "shared-sandbox-v1,native-fork-at-anchor-v1",
     probe: str | None = None,
     findmnt_fails: bool = False,
+    df_upper_hangs: bool = False,
     upper_size: int | None = None,
     used: int = 60 * STORAGE_GIB,
     available: int = 35 * STORAGE_GIB,
+    replicas: str = "3",
+    slots: str = "3",
 ) -> dict[str, str]:
-    """A host whose storage attestation inputs the caller controls."""
+    """A host whose storage attestation inputs the caller controls.
+
+    ``replicas`` and ``slots`` are three by default because that is what a
+    deployment runs, and two is the deployment's own floor for both. A test
+    that says nothing about them can ask for two, since every replica reaches
+    the same verdict and the ones that cost seconds per attempt would otherwise
+    be paid for three times.
+    """
     env = _host(
         tmp_path,
         capability=capability,
+        replicas=replicas,
+        slots=slots,
         storage_json=storage_document() if describe is None else describe,
         storage_exit=storage_exit,
         storage_hang=storage_hang,
@@ -1136,6 +1155,7 @@ def _storage_host(
         used=used,
         available=available,
         findmnt_fails=findmnt_fails,
+        df_upper_hangs=df_upper_hangs,
     )
     if probe is not None:
         with (Path(env["APP_DIR"]) / ".env").open("a") as dotenv:
@@ -1220,7 +1240,7 @@ def test_a_size_disagreement_between_container_and_host_is_unsupported(tmp_path:
 
 def test_occupancy_that_never_agrees_is_unverified_and_names_the_deltas(tmp_path: Path) -> None:
     """Used and available are a diagnostic band, never a topology verdict."""
-    env = _storage_host(tmp_path, used=60 * STORAGE_GIB + 8 * STORAGE_GIB)
+    env = _storage_host(tmp_path, used=60 * STORAGE_GIB + 8 * STORAGE_GIB, replicas="2", slots="2")
 
     result = _run(env, "check")
 
@@ -1454,3 +1474,42 @@ def test_a_partly_spent_fence_shrinks_the_call_bound(tmp_path: Path) -> None:
     assert budgets, "the attestation made no call, so this asserts nothing"
     assert max(budgets) < 8, f"a call was handed the flat bound: {budgets}"
     assert elapsed < 6, f"the attestation took {elapsed:.1f}s inside a four-second fence"
+
+
+def test_a_df_that_cannot_size_the_upper_directory_is_unverified(tmp_path: Path) -> None:
+    """No answer is not a different answer.
+
+    A `df <upperdir>` that is cut short prints nothing, and comparing that
+    nothing with the mount root's size "disagrees" with it — which used to be
+    recorded as a project quota: a statement about the host's configuration
+    that nobody established, on the one metric whose whole purpose is to avoid
+    exactly that kind of claim. It is a missing measurement, and the page says
+    so.
+    """
+    env = _storage_host(tmp_path, df_upper_hangs=True, replicas="2", slots="2")
+    _cap_fake_timeout(tmp_path, 1)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unverified"
+    assert "could not size" in entry["reason"]
+    assert "quota" not in entry["reason"]
+
+
+def test_a_quota_on_the_upper_directory_is_still_unsupported(tmp_path: Path) -> None:
+    """The answer that *is* a real disagreement keeps its verdict.
+
+    The empty case must not swallow the one the comparison exists for: two
+    valid sizes that differ are a project quota, and the attestation has to go
+    on saying so.
+    """
+    env = _storage_host(tmp_path, upper_size=10 * STORAGE_GIB)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unsupported"
+    assert "project quota" in entry["reason"]

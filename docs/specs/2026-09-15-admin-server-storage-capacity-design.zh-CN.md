@@ -329,3 +329,5 @@ Staging 验收：页面、admin API 和宿主 `df <挂载根>` 在同一时段�
 - **两条回归护栏都实测过：** 把按剩余预算改成固定 8 秒 → `test_a_partly_spent_fence_shrinks_the_call_bound` 报 "a call was handed the flat bound: [8]"；去掉 `-k` → 预算日志变成 `8 none`（断言失败），且忽略 SIGTERM 的用例会挂住直到测试被杀。
 
 诚实边界收窄为一条：处于不可中断 I/O 的进程任何信号都杀不掉，`timeout` 自己会一直等它——这是本脚本无法设界的情形。其余（卡住的 `docker exec`、忽略 SIGTERM 的探针、仍响应信号的死挂载 `df`）都在界内。
+
+**2026-09-16 第三轮修订（缺测分类）。** 复核 `57e76af` 后原 P1 关闭，另发现一处误判：`df <upperdir>` 被超时切断（或因预算耗尽被跳过）时返回空值，代码随即把这个空值与有效的挂载根 `size` 比较——二者"不相等"，于是记成 `unsupported` +"which is a project quota"。这是在**没有任何人建立该事实**的情况下声称宿主配置了配额，恰好违反本指标存在的理由。现在空值单独成一支：记 `unverified`，缺测原因写明 `df could not size ...`；只有两个**有效**数值不相等时才进入配额判定。测试用只在 upperdir 上挂起的 `df` 复现，并保留一条"真实配额仍记 `unsupported`"的用例，防止新分支吞掉对照本身要抓的情形。
