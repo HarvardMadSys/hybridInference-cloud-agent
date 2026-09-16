@@ -349,3 +349,5 @@ Staging 验收：页面、admin API 和宿主 `df <挂载根>` 在同一时段�
 **2026-09-16 修复后复验。** `a2e2e36` 已完成实际部署、三个 runner 的 verified、页面和 HTTP 正向读数、已停止 retained sandbox 同盘确认、新 helper 下的 XFS A / C 以及清空 verdict 条目后的 `check` 恢复；详见[最新验收记录](../acceptance/2026-09-16-admin-storage-capacity.md)。权限阻塞关闭。staging 的 off、过期和宿主 unlink verdict 未在本轮强制构造，不把原地清空文件内容等同于删除 bind source。
 
 **2026-09-16 verdict 删除修复。** 补验确认单文件 bind 在宿主 unlink 后仍持有旧 inode，重建文件也不会被运行中 runner 看到。因此改为只读挂载专用 `.storage-probe/` 目录，每轮打开其中的 `verdict.json`，并保持目录本身不变。新增真实 Docker external 回归，直接使用 Compose 挂载配置验证同一运行中容器能观察删除、重建及 rename 替换；恢复单文件挂载时该回归在删除后的 unverified 断言处失败。目录权限、初始化、`check` 重建与写入失败隔离亦有单测；未改采样口径或 quota attestation。
+
+**2026-09-16 unlink 真机复验通过（`5d0050f`）。** 实际 staging 的三个 runner 在宿主文件被真正删除后全部报告 unverified；新心跳和页面正确局部降级。`check` 重建 verdict 后，API 和页面恢复容量，三个容器的 ID／StartedAt 及挂载目录 inode 全程未变。此项不再是未测项；[最新验收记录](../acceptance/2026-09-16-admin-storage-capacity.md) 包含前后截图、时间和字段。off、stale 页面仍未在 staging 强制构造，沿用自动化覆盖。

@@ -1,5 +1,45 @@
 # PR #265 存储容量真机验收
 
+## 最新结论：verdict 删除与恢复通过（5d0050f）
+
+**单文件 bind 的删除缺陷已关闭。** 被测代码为 `5d0050f0800ad0a8031675284a71b67711c29c6b`，已[部署到实际 staging](https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/35106331536)。本轮真正 unlink 宿主文件，而非清空内容；三个运行中的 runner、心跳、HTTP API 和页面均按设计降级，`check` 重建文件后无需重启便恢复。下文保留此前权限修复和首次失败的历史结果。
+
+### 缺陷与修复
+
+补验旧配置时，删除 bind source 后容器仍能读取原文件，`st_nlink=0`，探针继续沿用旧 verified 条目；宿主重建空文件也不影响该旧 inode。这说明先前“清空 entries”的验收不能替代 unlink。
+
+现在 Compose 只读挂载专用 `.storage-probe/` 目录到 `/run/cloud-agent/storage-probe`，每轮读取其中的 `verdict.json`。`up` 在启动前创建目录和空 verdict，`check` 可在原目录重建已删除文件。旧 `.storage-probe-verdict` 不再使用；升级通过正常部署重建 runner，使新挂载生效。保持专用目录本身不变，不挂载整个 checkout。
+
+### 实际 staging 的删除→恢复
+
+2026-09-16，UTC：
+
+| 阶段                    | 证据                                                                                                                                              |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 删除前                  | 三个副本均正常读取 `1966736678912 B`；实际 Docker Mounts 确认目录 bind，`RW=false`                                                                |
+| 14:09:36 unlink         | 删除 `.storage-probe/verdict.json`，宿主路径不存在；三个副本各自调用实际探针，全部返回 `{"reason":"unverified"}`                                  |
+| 14:09:48 新采样         | API `storage_missing_reason=unverified`，Storage 的数值、source、target 均为 null；CPU、内存、0 running / 25 stopped inventory 及 online 状态保留 |
+| `sandbox_host.sh check` | 真实部署用户重新验证三个副本并写出三条 verified；没有通过复制备份来恢复                                                                           |
+| 14:11:18 新采样         | API 恢复正常容量，missing reason 为 null，freshness 为 fresh；页面恢复 37% · 0.6 / 1.8 TiB、1.1 TiB available                                     |
+
+恢复后的 HTTP API：total `1966736678912`、used `683362381824`、available `1183394045952 B`，used percent `36.606938733733905`。删除前、删除后、恢复后的 sample ID 不同，缺测和恢复均来自新采样。
+
+三个容器 ID（`81442fc97af6…`、`5fb643ff958f…`、`108581e55876…`）及 StartedAt 全程未变；宿主挂载目录 inode 全程为 `72258720`。因此恢复没有依赖重建或重启容器。
+
+![真正删除 verdict 后，Storage 局部降级](assets/2026-09-16-pr265-verdict-deleted.png)
+
+![check 重建文件后，无需重启恢复正常容量](assets/2026-09-16-pr265-verdict-recovered.png)
+
+### 回归检查和范围
+
+- `env -u CODEX_VERSION make check`：**4054 passed、490 deselected**，格式、lint、typecheck 通过；[修复提交 CI](https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/35106310677) 15 success / 1 skipped。
+- 新增 `tests/external/test_storage_verdict_mount.py`，在真实 Linux Docker 上通过，使用仓库实际 Compose 挂载配置和当前探针文件。覆盖同一容器中删除、重建空 verdict、重新验证以及 rename 替换。只把测试环境的 Compose 改回单文件 bind，回归立即在删除后的 unverified 断言失败；配置已恢复。
+- 单测覆盖长生命周期探针重新打开文件、`check` 删除后重建、保留挂载目录 inode、初始化及写入失败隔离。既有断言保留；目录和文件权限不依赖宿主默认 umask。
+- 本轮没有重跑 XFS A / C；存储口径、quota attestation 和只读 helper 未变，前轮机制证据保留。本轮仍未强制构造 staging `off` 或 stale 页面，不将其说成已经演练；unlink 已从未测项变为真实通过项。
+- 已[恢复原 staging dev](https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/35106981227) `6669a88308e19fd655899dbf7fe5c67846325326`。独立测试容器和临时测试环境已清理。PR 未合并，生产未改。
+
+external 回归需在 Docker 宿主上运行，设置 `AGENT_STORAGE_TEST_IMAGE` 为已有 runner 镜像，再执行 `uv run pytest tests/external/test_storage_verdict_mount.py -m external -q`。原始证据保存在执行机器 `pr265-storage-fix-20260916` 目录的 `unlink-*` 文件中。
+
 ## 修复后结论（a2e2e36）
 
 **部署权限阻塞已修复，核心真机验收通过。** 被测代码为 `a2e2e3645ff6cf7ac3f52219243f3750167a1437`。实际非 root 部署用户在 containerd image store 下签发了三个 `verified` 条目，runner → 心跳 → admin API → Servers 页面均收到正常容量；XFS 配额反例仍被拒绝。
