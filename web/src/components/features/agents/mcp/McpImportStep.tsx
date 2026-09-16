@@ -171,8 +171,8 @@ export function McpImportStep({
   return (
     <div>
       <p className="text-sm text-gray-600 dark:text-gray-400">
-        Paste the <code className="text-xs">mcpServers</code> configuration from Cursor or your MCP
-        provider. You can add several servers at once.
+        Paste your <code className="text-xs">mcpServers</code> configuration to connect your tools
+        and data. You can add several servers at once.
       </p>
       <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 dark:border-white/10">
         <div className="flex items-center justify-between gap-3 border-b border-gray-200 bg-gray-50 px-3 py-2 dark:border-white/10 dark:bg-white/5">
@@ -216,7 +216,7 @@ export function McpImportStep({
         />
       </div>
       <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-        Also accepts VS Code JSON and Codex TOML. Adding servers keeps your existing connections.
+        Supports JSON and TOML configurations. Adding servers keeps your existing connections.
       </p>
       {checking ? (
         <p role="status" className="mt-3 text-xs text-gray-500 dark:text-gray-400">

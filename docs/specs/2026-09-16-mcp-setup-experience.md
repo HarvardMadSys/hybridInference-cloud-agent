@@ -2,8 +2,8 @@
 
 ## Goal
 
-Make connecting MCP servers familiar to users of Cursor: choose a known service
-or paste its `mcpServers` JSON, then see whether it connected and which tools it
+Make MCP servers easy to connect: choose a known service or paste its
+`mcpServers` JSON, then see whether it connected and which tools it
 offers. The previous UI separated templates, import and manual configuration,
 exposed protocol and execution details up front, and required a separate Test
 action after adding a server or returning from OAuth.
@@ -33,15 +33,13 @@ action after adding a server or returning from OAuth.
   Save selection commits that choice. Adding a server never silently grants its
   tools permission to run.
 
-The importer continues accepting VS Code JSON and Codex TOML. It now recognizes
+The importer accepts JSON and TOML configurations. It recognizes
 `${env:NAME}` and `${input:NAME}` references in environment/header values, including
 Bearer headers, and asks for missing values. This is not full emulation of every
 client-specific config field or interpolation rule.
 
 ## References
 
-- [Cursor MCP documentation](https://cursor.com/docs/context/mcp): JSON configuration,
-  server discovery and tool approval.
 - [Linear MCP](https://linear.app/docs/mcp): remote endpoint and OAuth.
 - [Notion client guide](https://developers.notion.com/guides/mcp/build-mcp-client):
   remote endpoint and OAuth.
