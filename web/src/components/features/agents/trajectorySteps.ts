@@ -145,8 +145,6 @@ export interface TrajectoryStep {
   nativeItemId?: string;
   streaming?: boolean;
   inputText?: string;
-  /** A model-issued tool request, without claiming a provider message ID. */
-  toolRequest?: boolean;
   blocks?: AssistantBlock[];
   usage?: AssistantUsage;
   /** Assistant steps: the tool steps that carry this message's calls. */
@@ -439,7 +437,6 @@ export function buildTrajectorySteps(
   // before calls are emitted so a call always finds the answer that arrived.
   const resultsByCall = new Map<string, StoredEvent[]>();
   const callCounts = new Map<string, number>();
-  const assistantFirstIndex = new Map<string, number>();
   const outputByCall = new Map<string, StoredEvent[]>();
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index];
@@ -457,17 +454,6 @@ export function buildTrajectorySteps(
     if (call) {
       const key = `${scopeOf(event)}:${call}`;
       callCounts.set(key, (callCounts.get(key) ?? 0) + 1);
-    }
-    if (event.event_type === 'message' || event.event_type === 'thinking') {
-      const key = assistantKeyOf(event, messageIdOf(asRecord(event.payload)));
-      if (!assistantFirstIndex.has(key)) assistantFirstIndex.set(key, index);
-    }
-    if (event.event_type === 'tool_use') {
-      const usageId = usageIdOf(asRecord(event.payload));
-      if (usageId) {
-        const key = assistantKeyOf(event, usageId);
-        if (!assistantFirstIndex.has(key)) assistantFirstIndex.set(key, index);
-      }
     }
   }
 
@@ -514,12 +500,8 @@ export function buildTrajectorySteps(
   };
   const inputs = new Map((context.inputs ?? []).map((input) => [input.jobId, input]));
 
-  const pushAssistant = (
-    event: StoredEvent,
-    usageId: string,
-    keyOverride?: string,
-  ): TrajectoryStep => {
-    const key = keyOverride ?? assistantKeyOf(event, usageId);
+  const pushAssistant = (event: StoredEvent, usageId: string): TrajectoryStep => {
+    const key = assistantKeyOf(event, usageId);
     const block = blockOf(event);
     const payload = asRecord(event.payload);
     const streaming = typeof payload.stream_state === 'string';
@@ -703,31 +685,18 @@ export function buildTrajectorySteps(
         existing.ambiguity = 'duplicate_call';
         continue;
       }
-      // A Codex tool item proves a model-issued call, but not which neighboring
-      // prose message issued it. Give that request its own tool-only parent.
-      const toolRequest =
-        !usageId &&
-        (payload.native_tool_request === true || payload.name === 'commandExecution') &&
-        callId;
-      const parentKey = toolRequest
-        ? `assistant-tool:${scopeOf(event)}:${callId}`
-        : usageId
-          ? assistantKeyOf(event, usageId)
-          : '';
-      if (parentKey && !byKey.has(parentKey)) {
-        // The parent message's blocks may be stored after the call it issued;
-        // the design orders the message first, so open it here.
-        const parent = pushAssistant(event, usageId, parentKey);
-        if (toolRequest) {
-          parent.nativeMessageId = undefined;
-          parent.toolRequest = true;
-        }
-      }
+      // DSH groups tool-call blocks by their owning model message. A tool
+      // item ID only identifies the call; it cannot create a model message.
+      const parentKey = usageId ? assistantKeyOf(event, usageId) : '';
+      if (parentKey && !byKey.has(parentKey)) pushAssistant(event, usageId);
       const step = pushTool(event);
       if (parentKey && byKey.get(parentKey)?.kind === 'assistant') {
         step.parentKey = parentKey;
         const parent = byKey.get(parentKey);
         parent?.toolKeys?.push(step.key);
+        if (parent && !parent.sourceEvents.some((source) => source.id === event.id)) {
+          parent.sourceEvents.push(event);
+        }
       }
       continue;
     }
@@ -780,7 +749,9 @@ export function buildTrajectorySteps(
       (notification !== null && isRuntimeNotification(notification)) ||
       event.event_type === 'tool_output';
     const diagnostic =
-      runtimeNotification || (event.event_type === 'lifecycle' && !harness && !lifecycleFailure);
+      runtimeNotification ||
+      event.event_type === 'usage' ||
+      (event.event_type === 'lifecycle' && !lifecycleFailure);
     const key = runtimeNotification
       ? `runtime:${scopeOf(event)}`
       : `event:${jobIdOf(event)}:${event.attempt_id}:${event.id}`;
@@ -805,7 +776,7 @@ export function buildTrajectorySteps(
       anchorEventId: event.id,
       sourceEvents: [event],
       lane: row.lane,
-      actor: row.actor === 'system' && !harness ? 'runtime' : row.actor,
+      actor: row.actor,
       label: runtimeNotification
         ? 'Run logs'
         : notification
@@ -833,6 +804,21 @@ export function buildTrajectorySteps(
   for (const input of inputs.values()) pushUser(input.jobId, input.turnNo, input.text, input.at);
   // A queued turn may have an input but no stored event yet.
   steps.sort((left, right) => left.turnNo - right.turnNo);
+
+  // Usage is metadata, never an injected Context message. Attach it only
+  // when the runtime recorded a matching model-message owner; unowned/turn
+  // totals stay in Run logs and cannot create a new Assistant.
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    const event = steps[index].sourceEvents[0];
+    if (event?.event_type !== 'usage') continue;
+    const payload = asRecord(event.payload);
+    const usageId = usageIdOf(payload);
+    if (!usageId || payload.usage_scope === 'attempt') continue;
+    const owner = byKey.get(assistantKeyOf(event, usageId));
+    if (owner?.kind !== 'assistant' || owner.nativeMessageId !== usageId) continue;
+    owner.sourceEvents.push(event);
+    steps.splice(index, 1);
+  }
 
   // Usage that a native message recorded, de-duplicated by message identity:
   // the same response repeats its counters on every block it emitted.
@@ -889,25 +875,19 @@ function resultView(events: StoredEvent[]): ToolResultView {
 }
 
 function usageOf(events: StoredEvent[]): AssistantUsage {
-  for (const event of events) {
-    const usage = asRecord(asRecord(event.payload).usage);
-    if (Object.keys(usage).length === 0) continue;
-    return {
-      outputTokens: firstCount(usage, OUTPUT_KEYS),
-      inputTokens: firstCount(usage, INPUT_KEYS),
-      reasoningTokens: firstCount(usage, REASONING_KEYS),
-      contentTokens: firstCount(usage, CONTENT_KEYS),
-      cacheReadTokens: firstCount(usage, CACHE_READ_KEYS),
-      cacheWriteTokens: firstCount(usage, CACHE_WRITE_KEYS),
-    };
-  }
+  const snapshots = events
+    .filter((event) => asRecord(event.payload).usage_scope !== 'attempt')
+    .sort((left, right) => right.seq - left.seq)
+    .map((event) => asRecord(asRecord(event.payload).usage));
+  const latestCount = (keys: string[]): number | null =>
+    snapshots.map((usage) => firstCount(usage, keys)).find((count) => count !== null) ?? null;
   return {
-    outputTokens: null,
-    inputTokens: null,
-    reasoningTokens: null,
-    contentTokens: null,
-    cacheReadTokens: null,
-    cacheWriteTokens: null,
+    outputTokens: latestCount(OUTPUT_KEYS),
+    inputTokens: latestCount(INPUT_KEYS),
+    reasoningTokens: latestCount(REASONING_KEYS),
+    contentTokens: latestCount(CONTENT_KEYS),
+    cacheReadTokens: latestCount(CACHE_READ_KEYS),
+    cacheWriteTokens: latestCount(CACHE_WRITE_KEYS),
   };
 }
 

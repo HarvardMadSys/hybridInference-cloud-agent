@@ -199,11 +199,6 @@ export function AssistantStepDetails({
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
           Source is the recorded Codex item ID. It does not identify a provider request.
         </p>
-      ) : step.toolRequest ? (
-        <p className="text-[11px] text-gray-400 dark:text-gray-500">
-          This row represents the recorded tool request. No provider message association was
-          recorded.
-        </p>
       ) : null}
 
       <DetailSection title="Preview" onOpen={() => onSelectTab('preview')}>

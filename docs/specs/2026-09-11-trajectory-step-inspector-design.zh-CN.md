@@ -534,14 +534,18 @@ npm run build
 
 ## 16. 2026-09-17：消息轨迹与运行日志分离
 
-PR #264 将主列表的阅读单位调整为 User / Assistant / Tool：
+PR #264 参考 DSH 的消息归属逻辑，将主列表的阅读单位调整为 User / Assistant / Tool：
 
 - 每轮输入来自 job 的 `task_prompt`；原生 userMessage 回显作为同一输入的来源，不另计步骤。没有 job 输入时使用原生记录。重试不重复用户输入。
 - Codex adapter 为完成的消息保留 `native_item_id`，为原始通知保留结构化内容。开始、流式片段和完成记录按 job / attempt / item 更新同一条 Assistant；完成快照替换片段，不重复显示或改变 Chat 的最终回复。
-- Codex 原生工具请求显示一个 ASSISTANT 父行及其 TOOL 行。角色标签共用 76px 列并右对齐，ASSISTANT 标签占满列宽，TOOL 随文本收窄；CONTEXT 使用绿色。无正文时不额外填入说明性占位文案。该父行表达已记录的工具请求，不声称是 provider message，也不把请求挂到相邻的文字回复。缺少 provider 关联时不合并多个请求为一次模型调用，不推断 token 用量或模型耗时。
+- ASSISTANT 表示一条模型消息，可以包含思考、正文和多个工具请求；只有工具请求的消息仍属于 ASSISTANT，无正文时不填占位文案。按已记录的消息 ID 归并，同一消息发出的多个请求共用一个父行，工具调用与结果按 call ID 配对。每个请求都保留在父消息的 Raw 来源中。
+- Codex 的工具 item ID 只标识工具，当前采集未记录它所属的 provider message ID。因此保留独立 TOOL，不按每个工具补造 ASSISTANT，也不按相邻位置、token 用量通知或同一用户轮次猜测消息归属。已有真实 `usage_id` 的记录可以建立消息与工具的父子关系。
 - Tool 在列表显示名称、参数 → 结果；未完成输出可预览，但有输出不等于成功。详情继续保留调用与结果的配对证据。
 - 正常 lifecycle 和已识别的协议通知进入 Run logs，保留 Raw 和完整 Session log 下载，排除在主列表、步骤编号和 overview 之外。流式片段保留在对应消息/工具的 Raw 来源中。
-- 错误、警告和未知记录仍直接可见；运行时记录标记为 Runtime，不将后台通知称为 System prompt。真实 harness 配置保留原来的独立详情。
+- CONTEXT 只用于明确记录的上下文输入，SYSTEM 只用于明确记录的系统提示内容。token 用量不是上下文消息：有真实消息归属的用量附在对应 ASSISTANT，取最新快照，不累加同一消息重复出现的计数；轮次总量、未匹配用量进入 Run logs，不增加模型消息数。当前 adapter 没有采集到的上下文或系统提示不补造。
+- 错误、警告和未知记录仍直接可见；运行时记录标记为 Runtime，不将后台通知称为 System prompt。harness 初始化配置进入 Run logs，保留原来的工具清单与 MCP 详情入口。
 - 空的已结束 Assistant 进入 Run logs；仍在生成的 Assistant 保留位置。每轮有 Turn 边界，overview 与搜索栏随列表滚动保持在顶部。
 
-兼容性：旧记录缺少完成消息的 native item ID 时，不能可靠还原流式片段与最终回复的对应关系，因此旧片段仍在 Run logs，最终消息照常显示。新 host 采集生效后才有完整的流式关联；不按文本或邻近位置猜测。此改动对齐消息阅读方式，不声明与 DSH 的 Duration / Turns / Calls、provider 调用计量及虚拟列表完全一致。
+参考源码：[Assistant 消息组装](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-trajectory/src/client/trajectory-assistant-definition.ts)、[User / Context 来源分类](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-trajectory/src/client/trajectory-message-definitions.ts)、[工具调用与结果配对](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-trajectory/src/client/trajectory-tool-definition.ts)。DSH 以真实 turn / step 和消息内容块组装 ASSISTANT，以输入来源区分 USER 与 CONTEXT；角色颜色不决定这些语义。
+
+兼容性：旧记录缺少完成消息的 native item ID 时，不能可靠还原流式片段与最终回复的对应关系，因此旧片段仍在 Run logs，最终消息照常显示。新 host 采集生效后才有完整的流式关联。Codex 工具所属模型消息仍是采集缺项；本次没有将 item ID 冒充 message ID。此改动对齐已记录消息的处理规则，不声明与 DSH 的完整消息采集、Duration / Turns / Calls、provider 调用计量及虚拟列表完全一致。

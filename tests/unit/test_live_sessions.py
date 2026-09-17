@@ -749,6 +749,6 @@ def test_codex_trajectory_keeps_native_identity_and_structured_streams(tmp_path)
     assert fragments[1].payload["protocol"] == "codex-app-server"
     assert len(fragments[1].payload["text"]) == 4000
     call = next(event for event in events if event.event_type == "tool_use")
-    assert call.payload["native_tool_request"] is True
+    assert "usage_id" not in call.payload
     assert call.payload["id"] == "c"
     assert turn.wait().final_output == "Done"

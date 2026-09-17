@@ -112,7 +112,7 @@ describe('TrajectoryView', () => {
           id: 'c',
           name: 'commandExecution',
           input: 'cat README.md',
-          native_tool_request: true,
+          usage_id: 'message-with-tool',
         },
       }),
       event({

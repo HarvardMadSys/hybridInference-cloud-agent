@@ -19,7 +19,6 @@ _IDENTITY = frozenset(
         "usage_id",
         "usage_scope",
         "native_item_id",
-        "native_tool_request",
     }
 )
 _TEXT_FIELDS = frozenset({"text", "content", "output", "detail", "input"})

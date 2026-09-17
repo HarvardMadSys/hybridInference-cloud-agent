@@ -180,7 +180,7 @@ describe('Codex trajectory projection', () => {
     ]);
   });
 
-  it('links a native tool request to its own tool-only assistant instead of adjacent prose', () => {
+  it('keeps an unowned native tool as one tool record without inventing an assistant message', () => {
     const events = [
       event(1, 'message', { text: 'Earlier prose', native_item_id: 'm' }),
       event(2, 'tool_use', {
@@ -192,20 +192,19 @@ describe('Codex trajectory projection', () => {
       notification(3, 'item/commandExecution/outputDelta', { itemId: 'c', delta: 'README' }),
     ];
     const partial = buildTrajectorySteps(events, active);
-    expect(partial.map((step) => step.kind)).toEqual(['assistant', 'assistant', 'tool']);
-    expect(partial[2].parentKey).toBe(partial[1].key);
-    expect(partial[1].toolRequest).toBe(true);
-    expect(partial[1].nativeMessageId).toBeUndefined();
-    expect(partial[2].result).toBeUndefined();
-    expect(partial[2].outputPreview).toBe('README');
-    expect(partial[2].status).toBe('waiting');
+    expect(partial.map((step) => step.kind)).toEqual(['assistant', 'tool']);
+    expect(partial[1].parentKey).toBeUndefined();
+    expect(partial[0].toolKeys).toEqual([]);
+    expect(partial[1].result).toBeUndefined();
+    expect(partial[1].outputPreview).toBe('README');
+    expect(partial[1].status).toBe('waiting');
     const done = buildTrajectorySteps([
       ...events,
       event(4, 'tool_result', { tool_use_id: 'c', content: 'README.md', exit_code: 0 }),
     ]);
-    expect(done[2].key).toBe(partial[2].key);
-    expect(done[2].result?.text).toBe('README.md');
-    expect(done[2].sourceEvents.map((event) => event.id)).toEqual([2, 3, 4]);
+    expect(done[1].key).toBe(partial[1].key);
+    expect(done[1].result?.text).toBe('README.md');
+    expect(done[1].sourceEvents.map((event) => event.id)).toEqual([2, 3, 4]);
   });
 
   it('separates normal runtime bookkeeping from errors and empty assistant records', () => {

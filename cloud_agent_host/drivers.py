@@ -896,7 +896,6 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                     "name": item.get("tool") or item_type,
                     "id": item_id or None,
                     "input": item.get("command") or item.get("arguments"),
-                    "native_tool_request": True,
                 },
                 raw_line=line,
             )

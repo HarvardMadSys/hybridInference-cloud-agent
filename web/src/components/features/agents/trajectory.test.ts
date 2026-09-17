@@ -98,7 +98,7 @@ describe('toTrajectory', () => {
     ]);
 
     expect(rows.map((row) => row.lane)).toEqual(['model', 'tools', 'other']);
-    expect(rows.map((row) => row.actor)).toEqual(['assistant', 'assistant', 'system']);
+    expect(rows.map((row) => row.actor)).toEqual(['assistant', 'assistant', 'runtime']);
   });
 
   it('marks a failed call from either the result flag or a non-zero exit', () => {
