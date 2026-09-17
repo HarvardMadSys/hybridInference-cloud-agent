@@ -9,7 +9,18 @@ MAX_EVENT_PAYLOAD_BYTES = 256 * 1024
 TRUNCATION_NOTICE = "\n\n[Content truncated: event payload exceeded 256 KiB.]"
 _MARKERS = frozenset({"truncated", "original_payload_bytes", "truncation_notice"})
 _IDENTITY = frozenset(
-    {"id", "tool_use_id", "name", "phase", "is_error", "usage", "usage_id", "usage_scope"}
+    {
+        "id",
+        "tool_use_id",
+        "name",
+        "phase",
+        "is_error",
+        "usage",
+        "usage_id",
+        "usage_scope",
+        "native_item_id",
+        "native_tool_request",
+    }
 )
 _TEXT_FIELDS = frozenset({"text", "content", "output", "detail", "input"})
 

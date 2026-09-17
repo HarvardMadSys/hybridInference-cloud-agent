@@ -2269,13 +2269,14 @@ describe('the trajectory tab', () => {
   });
 
   it('still renders when no stored stream was handed down', () => {
-    // Fixtures and older callers pass no events; the tab must degrade to its
-    // empty state rather than throwing on an undefined list.
+    // Even without runtime events, the recorded turn input remains readable.
     render(<JobDetail job={makeJob()} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
 
-    expect(screen.getByText(/stored no events/)).toBeInTheDocument();
+    expect(screen.getByText('user')).toBeInTheDocument();
+    expect(screen.getByText('Current task with all of its detail.')).toBeInTheDocument();
+    expect(screen.getByText('1 step')).toBeInTheDocument();
   });
 
   it('opens the selected step in the right-hand region, not under the row', () => {
@@ -2285,7 +2286,9 @@ describe('the trajectory tab', () => {
     fireEvent.click(screen.getByText('Bash'));
 
     const panel = screen.getByRole('region', { name: 'Step details' });
-    expect(within(panel).getByText(/Tool · Turn 1 · Step 1/)).toBeInTheDocument();
+    // The turn's User input is step 1; its joined tool call/result is step 2.
+    expect(screen.getByText('user')).toBeInTheDocument();
+    expect(within(panel).getByText(/Tool · Turn 1 · Step 2/)).toBeInTheDocument();
     expect(within(panel).getByRole('tab', { name: 'Schema' })).toBeInTheDocument();
     // The result joined its call rather than becoming a second row.
     expect(within(panel).getByText(/2 passed/)).toBeInTheDocument();

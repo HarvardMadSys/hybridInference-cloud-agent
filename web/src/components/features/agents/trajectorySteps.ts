@@ -13,12 +13,18 @@
 
 import type { AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { preview, toTrajectory, type TrajectoryLane, type TrajectoryRow } from './trajectory';
+import {
+  rawNotification,
+  notificationHasError,
+  isRuntimeNotification,
+  projectProtocolEvents,
+} from './trajectoryProtocol';
 
 /** A stored event, with or without the conversation labels a thread read adds. */
 export type StoredEvent = AgentJobEventApi | AgentThreadEventApi;
 
 /** The three detail shapes the inspector can render. */
-export type StepKind = 'assistant' | 'tool' | 'event';
+export type StepKind = 'user' | 'assistant' | 'tool' | 'event';
 
 /**
  * What the stored records can prove about a step. `waiting` is the only state
@@ -47,6 +53,7 @@ export const STATUS_LABEL: Record<StepStatus, string> = {
 export interface AssistantBlock {
   type: 'thinking' | 'text';
   text: string;
+  channel?: string;
 }
 
 /**
@@ -135,6 +142,11 @@ export interface TrajectoryStep {
   timing: StepTiming;
   /** Assistant steps: the native message identity the runtime recorded. */
   nativeMessageId?: string;
+  nativeItemId?: string;
+  streaming?: boolean;
+  inputText?: string;
+  /** A model-issued tool request, without claiming a provider message ID. */
+  toolRequest?: boolean;
   blocks?: AssistantBlock[];
   usage?: AssistantUsage;
   /** Assistant steps: the tool steps that carry this message's calls. */
@@ -148,6 +160,7 @@ export interface TrajectoryStep {
   /** Tool steps: a recorded one-line argument preview, when that is all there is. */
   payloadPreview?: string;
   result?: ToolResultView;
+  outputPreview?: string;
   /**
    * Set when the records disagree — a repeated call id, or two results for one
    * call. The step stays visible and stops claiming a verified pairing.
@@ -161,12 +174,15 @@ export interface TrajectoryStep {
   harness?: HarnessInventory;
   /** Protocol bookkeeping grouped within one attempt, with every record in Raw. */
   runtimeNotifications?: boolean;
+  /** Accessible through Run logs, excluded from execution counts and timeline. */
+  diagnostic?: boolean;
 }
 
 /** What the projection needs to know about a turn that the events cannot say. */
 export interface TurnContext {
   /** Whether this attempt is the one still running, from the job row. */
   isAttemptActive: (jobId: string, attemptId: number) => boolean;
+  inputs?: Array<{ jobId: string; turnNo: number; text: string; at: string | null }>;
 }
 
 // Server-side job states that can still produce a record. A queued turn is one
@@ -183,10 +199,28 @@ const ACTIVE_JOB_STATES = new Set(['running', 'queued', 'publishing']);
  * one. Only a row that omits the field leaves the question open.
  */
 export function turnContextFromJobs(
-  jobs: Array<{ id: string; state: string; current_attempt_id?: number | null }>,
+  jobs: Array<{
+    id: string;
+    state: string;
+    current_attempt_id?: number | null;
+    task_prompt?: string;
+    turn_no?: number;
+    created_at?: string | null;
+  }>,
 ): TurnContext {
   const byId = new Map(jobs.map((job) => [job.id, job]));
   return {
+    inputs: jobs.flatMap((job) => {
+      if (typeof job.task_prompt !== 'string') return [];
+      return [
+        {
+          jobId: job.id,
+          turnNo: job.turn_no ?? 1,
+          text: job.task_prompt,
+          at: job.created_at ?? null,
+        },
+      ];
+    }),
     isAttemptActive: (jobId, attemptId) => {
       const job = byId.get(jobId);
       if (!job || !ACTIVE_JOB_STATES.has(job.state)) return false;
@@ -206,70 +240,6 @@ const REASONING_KEYS = ['reasoning_tokens', 'reasoning_output_tokens', 'reasonin
 const CONTENT_KEYS = ['content_tokens', 'text_tokens'];
 
 const RESULT_TEXT_KEYS = ['content', 'output', 'aggregated_output', 'text'] as const;
-
-// These Codex app-server notifications describe transport/progress, not new
-// model or tool operations. Keep an allowlist: unfamiliar events (including
-// raw-only runtimes) must remain independently inspectable.
-const CODEX_PROGRESS_METHODS = new Set([
-  'thread/started',
-  'thread/status/changed',
-  'thread/tokenUsage/updated',
-  'turn/started',
-  'remoteControl/status/changed',
-  'item/agentMessage/delta',
-  'item/reasoning/summaryTextDelta',
-  'item/reasoning/summaryPartAdded',
-  'item/reasoning/textDelta',
-  'item/commandExecution/outputDelta',
-  'item/mcpToolCall/progress',
-]);
-
-function rawNotification(event: StoredEvent): Record<string, unknown> | null {
-  if (event.event_type !== 'raw') return null;
-  const payload = asRecord(event.payload);
-  const text = payload.line ?? payload.text;
-  if (typeof text !== 'string') return null;
-  try {
-    const value = asRecord(JSON.parse(text));
-    // Requests that happen to use one of these methods still need attention.
-    return typeof value.method === 'string' && value.method && value.id === undefined
-      ? value
-      : null;
-  } catch {
-    // A partial/invalid JSON record cannot safely be classified as bookkeeping.
-    return null;
-  }
-}
-
-function notificationHasError(notification: Record<string, unknown>): boolean {
-  const params = asRecord(notification.params);
-  const item = asRecord(params.item);
-  const status = asRecord(params.status).type ?? params.status ?? item.status;
-  return Boolean(
-    notification.method === 'error' ||
-    notification.error ||
-    params.error ||
-    item.error ||
-    params.is_error === true ||
-    status === 'failed' ||
-    status === 'error',
-  );
-}
-
-function isRuntimeNotification(notification: Record<string, unknown>): boolean {
-  if (notificationHasError(notification)) return false;
-  const item = asRecord(asRecord(notification.params).item);
-  const method = asText(notification.method);
-  if (CODEX_PROGRESS_METHODS.has(method)) return true;
-  // The final assistant/tool records are normalized by the driver. Only their
-  // start/update notifications and the echoed user input belong in this group.
-  if (method === 'item/started' || method === 'item/updated') {
-    return ['userMessage', 'agentMessage', 'reasoning', 'commandExecution', 'mcpToolCall'].includes(
-      asText(item.type),
-    );
-  }
-  return method === 'item/completed' && item.type === 'userMessage';
-}
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -363,6 +333,10 @@ function usageIdOf(payload: Record<string, unknown>): string {
   return typeof value === 'string' ? value : '';
 }
 
+function messageIdOf(payload: Record<string, unknown>): string {
+  return typeof payload.native_item_id === 'string' ? payload.native_item_id : usageIdOf(payload);
+}
+
 function callIdOf(event: StoredEvent): string {
   const payload = asRecord(event.payload);
   return event.event_type === 'tool_use' ? asText(payload.id) : '';
@@ -451,16 +425,29 @@ function blockOf(event: StoredEvent): AssistantBlock | null {
  * become their own steps. Grouping never changes the session-log export.
  */
 export function buildTrajectorySteps(
-  events: StoredEvent[],
+  storedEvents: StoredEvent[],
   context: TurnContext = { isAttemptActive: () => false },
 ): TrajectoryStep[] {
+  const singleInput = context.inputs?.length === 1 ? context.inputs[0] : undefined;
+  const events = projectProtocolEvents(storedEvents).map((event) =>
+    !('job_id' in event) && singleInput
+      ? { ...event, job_id: singleInput.jobId, turn_no: singleInput.turnNo }
+      : event,
+  );
+  const originals = new Map(storedEvents.map((event) => [event.id, event]));
   // Pass one: the identities a step can be matched on. Results are indexed
   // before calls are emitted so a call always finds the answer that arrived.
   const resultsByCall = new Map<string, StoredEvent[]>();
   const callCounts = new Map<string, number>();
   const assistantFirstIndex = new Map<string, number>();
+  const outputByCall = new Map<string, StoredEvent[]>();
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index];
+    if (event.event_type === 'tool_output') {
+      const id = asText(asRecord(event.payload).tool_use_id);
+      const key = `${scopeOf(event)}:${id}`;
+      outputByCall.set(key, [...(outputByCall.get(key) ?? []), event]);
+    }
     const callId = resultCallIdOf(event);
     if (callId) {
       const key = `${scopeOf(event)}:${callId}`;
@@ -472,7 +459,7 @@ export function buildTrajectorySteps(
       callCounts.set(key, (callCounts.get(key) ?? 0) + 1);
     }
     if (event.event_type === 'message' || event.event_type === 'thinking') {
-      const key = assistantKeyOf(event, usageIdOf(asRecord(event.payload)));
+      const key = assistantKeyOf(event, messageIdOf(asRecord(event.payload)));
       if (!assistantFirstIndex.has(key)) assistantFirstIndex.set(key, index);
     }
     if (event.event_type === 'tool_use') {
@@ -488,9 +475,55 @@ export function buildTrajectorySteps(
   const byKey = new Map<string, TrajectoryStep>();
   const toolStepByKey = new Map<string, TrajectoryStep>();
 
-  const pushAssistant = (event: StoredEvent, usageId: string): TrajectoryStep => {
-    const key = assistantKeyOf(event, usageId);
+  const pushUser = (
+    jobId: string,
+    turnNo: number,
+    text: string,
+    at: string | null,
+    event?: StoredEvent,
+  ): TrajectoryStep => {
+    const key = `user:${jobId || `attempt:${event?.attempt_id}`}`;
+    const current = byKey.get(key);
+    if (current) {
+      if (event) current.sourceEvents.push(event);
+      return current;
+    }
+    const step: TrajectoryStep = {
+      key,
+      kind: 'user',
+      jobId,
+      turnNo,
+      attemptId: event?.attempt_id ?? 0,
+      stepNo: 0,
+      anchorEventId: event?.id ?? 0,
+      sourceEvents: event ? [event] : [],
+      lane: 'input',
+      actor: 'user',
+      label: 'User message',
+      detail: preview(text),
+      inputText: text,
+      at,
+      isError: false,
+      status: 'recorded',
+      truncated: false,
+      timing: { source: null, startedAt: null, finishedAt: null, durationMs: null },
+    };
+    byKey.set(key, step);
+    steps.push(step);
+    return step;
+  };
+  const inputs = new Map((context.inputs ?? []).map((input) => [input.jobId, input]));
+
+  const pushAssistant = (
+    event: StoredEvent,
+    usageId: string,
+    keyOverride?: string,
+  ): TrajectoryStep => {
+    const key = keyOverride ?? assistantKeyOf(event, usageId);
     const block = blockOf(event);
+    const payload = asRecord(event.payload);
+    const streaming = typeof payload.stream_state === 'string';
+    if (block && streaming) block.channel = asText(payload.stream_channel) || 'summary';
     const step: TrajectoryStep = {
       key,
       kind: 'assistant',
@@ -506,10 +539,21 @@ export function buildTrajectorySteps(
       detail: block ? preview(block.text) : '',
       at: event.created_at ?? null,
       isError: false,
-      status: block?.type === 'text' ? 'completed' : 'recorded',
+      status: streaming
+        ? context.isAttemptActive(jobIdOf(event), event.attempt_id)
+          ? 'waiting'
+          : 'recorded'
+        : block?.type === 'text'
+          ? 'completed'
+          : 'recorded',
       truncated: isTruncatedPayload(asRecord(event.payload)),
       timing: { source: null, startedAt: null, finishedAt: null, durationMs: null },
-      ...(usageId ? { nativeMessageId: usageId } : {}),
+      ...(typeof payload.native_item_id === 'string'
+        ? { nativeItemId: payload.native_item_id }
+        : usageId
+          ? { nativeMessageId: usageId }
+          : {}),
+      ...(streaming ? { streaming: true } : {}),
       blocks: block ? [block] : [],
       toolKeys: [],
     };
@@ -524,6 +568,7 @@ export function buildTrajectorySteps(
     const key = toolKeyOf(event, callId);
     const hasInput = Object.prototype.hasOwnProperty.call(payload, 'input');
     const resultEvents = resultsByCall.get(`${scopeOf(event)}:${callId}`) ?? [];
+    const outputs = outputByCall.get(`${scopeOf(event)}:${callId}`) ?? [];
     // A call id stored twice, or a call answered more than once, leaves the
     // pairing unverified. The records are all kept, but a status and a duration
     // would be claims about a pairing the platform cannot prove, so neither is
@@ -540,13 +585,16 @@ export function buildTrajectorySteps(
       anchorEventId: event.id,
       // The call record leads; its answers stay reachable through the same
       // step, which is what Raw, Result and the truncation marker read.
-      sourceEvents: [event, ...resultEvents],
+      sourceEvents: [event, ...outputs, ...resultEvents],
       lane: 'tools',
       actor: 'tool',
-      label: asText(payload.name || payload.tool) || 'tool',
+      label:
+        payload.name === 'commandExecution'
+          ? 'Shell'
+          : asText(payload.name || payload.tool) || 'tool',
       detail: preview(hasInput ? payload.input : (payload.detail ?? payload.text)),
       at: event.created_at ?? null,
-      isError: false,
+      isError: resultEvents.some((item) => asRecord(item.payload).is_error === true),
       status: ambiguous ? 'unknown' : statusOfTool(event, resultEvents[0], context),
       truncated:
         isTruncatedPayload(payload) ||
@@ -561,6 +609,9 @@ export function buildTrajectorySteps(
         ? { payloadPreview: preview(payload.detail, 200) }
         : {}),
       ...(resultEvents.length ? { result: resultView(resultEvents) } : {}),
+      ...(outputs.length
+        ? { outputPreview: outputs.map((item) => asText(asRecord(item.payload).text)).join('') }
+        : {}),
       ...(repeatedCall ? { ambiguity: 'duplicate_call' as const } : {}),
       ...(resultEvents.length > 1 ? { ambiguity: 'duplicate_result' as const } : {}),
     };
@@ -573,30 +624,71 @@ export function buildTrajectorySteps(
   for (const event of events) {
     const payload = asRecord(event.payload);
     const usageId = usageIdOf(payload);
+    const input = inputs.get(jobIdOf(event));
+    if (input) pushUser(input.jobId, input.turnNo, input.text, input.at);
+
+    if (event.event_type === 'input') {
+      const step = pushUser(
+        jobIdOf(event),
+        turnNoOf(event),
+        asText(payload.text),
+        event.created_at ?? null,
+        event,
+      );
+      if (!input) {
+        step.inputText = asText(payload.text);
+        step.detail = preview(payload.text);
+      }
+      step.truncated ||= isTruncatedPayload(payload);
+      continue;
+    }
 
     if (event.event_type === 'message' || event.event_type === 'thinking') {
-      const key = assistantKeyOf(event, usageId);
+      const messageId = messageIdOf(payload);
+      const key = assistantKeyOf(event, messageId);
       const current = byKey.get(key);
       if (current && current.kind === 'assistant') {
         const block = blockOf(event);
         current.sourceEvents.push(event);
         if (block) {
-          current.blocks = [...(current.blocks ?? []), block];
+          if (typeof payload.native_item_id === 'string') {
+            const channel = asText(payload.stream_channel) || 'summary';
+            const previous = current.blocks?.find(
+              (item) => item.type === block.type && (item.channel ?? 'summary') === channel,
+            );
+            if (payload.stream_state === 'delta') block.text = (previous?.text ?? '') + block.text;
+            block.channel = channel;
+            current.blocks = [
+              ...(current.blocks ?? []).filter(
+                (item) => !(item.type === block.type && (item.channel ?? 'summary') === channel),
+              ),
+              block,
+            ];
+            current.streaming = typeof payload.stream_state === 'string';
+          } else {
+            current.blocks = [...(current.blocks ?? []), block];
+          }
           current.detail = preview(
             (current.blocks ?? [])
               .filter((item) => item.type === 'text')
               .map((item) => item.text)
               .join(' ') || block.text,
           );
-          if (block.type === 'text') {
+          if (current.streaming) {
+            current.status = context.isAttemptActive(jobIdOf(event), event.attempt_id)
+              ? 'waiting'
+              : 'recorded';
+          } else if (block.type === 'text') {
             current.status = 'completed';
             current.label = 'Assistant message';
+          } else if (typeof payload.native_item_id === 'string') {
+            current.status = 'recorded';
           }
         }
         current.truncated = current.truncated || isTruncatedPayload(payload);
         continue;
       }
-      pushAssistant(event, usageId);
+      pushAssistant(event, messageId);
       continue;
     }
 
@@ -611,11 +703,25 @@ export function buildTrajectorySteps(
         existing.ambiguity = 'duplicate_call';
         continue;
       }
-      const parentKey = usageId ? assistantKeyOf(event, usageId) : '';
+      // A Codex tool item proves a model-issued call, but not which neighboring
+      // prose message issued it. Give that request its own tool-only parent.
+      const toolRequest =
+        !usageId &&
+        (payload.native_tool_request === true || payload.name === 'commandExecution') &&
+        callId;
+      const parentKey = toolRequest
+        ? `assistant-tool:${scopeOf(event)}:${callId}`
+        : usageId
+          ? assistantKeyOf(event, usageId)
+          : '';
       if (parentKey && !byKey.has(parentKey)) {
         // The parent message's blocks may be stored after the call it issued;
         // the design orders the message first, so open it here.
-        pushAssistant(event, usageId);
+        const parent = pushAssistant(event, usageId, parentKey);
+        if (toolRequest) {
+          parent.nativeMessageId = undefined;
+          parent.toolRequest = true;
+        }
       }
       const step = pushTool(event);
       if (parentKey && byKey.get(parentKey)?.kind === 'assistant') {
@@ -653,10 +759,28 @@ export function buildTrajectorySteps(
       continue;
     }
 
+    if (event.event_type === 'tool_output') {
+      // The call indexes all its fragments before rendering; an orphan stays
+      // available as a runtime record instead of inventing a completed result.
+      const id = asText(payload.tool_use_id);
+      if (callCounts.has(`${scopeOf(event)}:${id}`)) continue;
+    }
+
     const row = toTrajectory([event])[0];
     const harness = harnessOf(payload);
     const notification = rawNotification(event);
-    const runtimeNotification = notification !== null && isRuntimeNotification(notification);
+    const lifecycleFailure =
+      event.event_type === 'lifecycle' &&
+      (row.isError ||
+        Boolean(payload.error) ||
+        payload.status === 'failed' ||
+        payload.status === 'error' ||
+        payload.phase === 'failed');
+    const runtimeNotification =
+      (notification !== null && isRuntimeNotification(notification)) ||
+      event.event_type === 'tool_output';
+    const diagnostic =
+      runtimeNotification || (event.event_type === 'lifecycle' && !harness && !lifecycleFailure);
     const key = runtimeNotification
       ? `runtime:${scopeOf(event)}`
       : `event:${jobIdOf(event)}:${event.attempt_id}:${event.id}`;
@@ -665,7 +789,7 @@ export function buildTrajectorySteps(
       if (existing) {
         existing.sourceEvents.push(event);
         existing.truncated ||= isTruncatedPayload(payload);
-        existing.detail = `${existing.sourceEvents.length} protocol events · status updates and streaming fragments`;
+        existing.detail = `${existing.sourceEvents.length} runtime records`;
         continue;
       }
     }
@@ -681,33 +805,49 @@ export function buildTrajectorySteps(
       anchorEventId: event.id,
       sourceEvents: [event],
       lane: row.lane,
-      actor: row.actor,
+      actor: row.actor === 'system' && !harness ? 'runtime' : row.actor,
       label: runtimeNotification
-        ? 'Runtime notifications'
+        ? 'Run logs'
         : notification
           ? asText(notification.method)
           : row.label,
       detail: runtimeNotification
-        ? '1 protocol event · status updates and streaming fragments'
+        ? '1 runtime record'
         : notification
           ? preview(params.summary ?? params.message ?? params.error ?? params)
           : row.detail,
       at: event.created_at ?? null,
-      isError: row.isError || protocolError,
-      status: event.event_type === 'error' || protocolError ? 'failed' : 'recorded',
+      isError: row.isError || protocolError || lifecycleFailure,
+      status:
+        event.event_type === 'error' || protocolError || lifecycleFailure ? 'failed' : 'recorded',
       truncated: isTruncatedPayload(payload),
       timing: { source: null, startedAt: null, finishedAt: null, durationMs: null },
       ...(harness ? { harness } : {}),
-      ...(runtimeNotification ? { runtimeNotifications: true } : {}),
+      ...(runtimeNotification ? { runtimeNotifications: true, diagnostic: true } : {}),
+      ...(diagnostic ? { diagnostic: true } : {}),
     };
     byKey.set(key, step);
     steps.push(step);
   }
 
+  for (const input of inputs.values()) pushUser(input.jobId, input.turnNo, input.text, input.at);
+  // A queued turn may have an input but no stored event yet.
+  steps.sort((left, right) => left.turnNo - right.turnNo);
+
   // Usage that a native message recorded, de-duplicated by message identity:
   // the same response repeats its counters on every block it emitted.
   for (const step of steps) {
+    step.sourceEvents = step.sourceEvents.map((event) => originals.get(event.id) ?? event);
+    if (step.diagnostic) continue;
     if (step.kind !== 'assistant') continue;
+    if (
+      !step.streaming &&
+      !step.blocks?.some((block) => block.text.trim()) &&
+      !step.toolKeys?.length
+    ) {
+      step.diagnostic = true;
+      step.label = 'Empty assistant record';
+    }
     step.usage = usageOf(step.sourceEvents);
   }
 
@@ -715,6 +855,7 @@ export function buildTrajectorySteps(
   // when the reader searches; selection never uses them.
   const perTurn = new Map<string, number>();
   for (const step of steps) {
+    if (step.diagnostic) continue;
     const turn = `${step.turnNo}:${step.jobId}`;
     const next = (perTurn.get(turn) ?? 0) + 1;
     perTurn.set(turn, next);
@@ -776,7 +917,9 @@ function usageOf(events: StoredEvent[]): AssistantUsage {
 export function filterSteps(steps: TrajectoryStep[], query: string): TrajectoryStep[] {
   const needle = query.trim().toLowerCase();
   if (!needle) return steps;
-  return steps.filter((step) =>
-    `${step.label} ${step.detail} ${step.kind}`.toLowerCase().includes(needle),
-  );
+  return steps.filter((step) => stepSearchText(step).includes(needle));
+}
+
+export function stepSearchText(step: TrajectoryStep): string {
+  return `${step.label} ${step.detail} ${step.kind} ${step.result?.text ?? step.outputPreview ?? ''}`.toLowerCase();
 }

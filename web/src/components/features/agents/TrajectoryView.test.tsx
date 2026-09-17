@@ -87,6 +87,79 @@ function Harness({
 }
 
 describe('TrajectoryView', () => {
+  it('reads as user, assistant tool request, tool input and output with a recorded hierarchy', () => {
+    const events = [
+      event({
+        id: 1,
+        event_type: 'raw',
+        payload: {
+          text: JSON.stringify({
+            method: 'item/completed',
+            params: {
+              item: {
+                id: 'u',
+                type: 'userMessage',
+                content: [{ type: 'text', text: 'Summarize this repo' }],
+              },
+            },
+          }),
+        },
+      }),
+      event({
+        id: 2,
+        event_type: 'tool_use',
+        payload: {
+          id: 'c',
+          name: 'commandExecution',
+          input: 'cat README.md',
+          native_tool_request: true,
+        },
+      }),
+      event({
+        id: 3,
+        event_type: 'tool_result',
+        payload: { tool_use_id: 'c', content: 'Cloud Agent control plane' },
+      }),
+      event({
+        id: 4,
+        event_type: 'message',
+        payload: { text: 'The repository runs coding agents.' },
+      }),
+    ];
+    render(<Harness events={events} />);
+    expect(screen.getByText('Summarize this repo')).toBeInTheDocument();
+    expect(screen.getByText('(tool call only)')).toBeInTheDocument();
+    const tool = screen.getByText('Shell').closest('button')!;
+    expect(within(tool).getByText('cat README.md')).toBeInTheDocument();
+    expect(within(tool).getByText('→')).toBeInTheDocument();
+    expect(within(tool).getByText('Cloud Agent control plane')).toBeInTheDocument();
+    expect(tool).toHaveAttribute(
+      'data-parent-key',
+      screen.getByText('(tool call only)').closest('button')?.dataset.stepKey,
+    );
+    expect(tool).toHaveClass('pl-12');
+    expect(screen.queryByText('Assistant message')).not.toBeInTheDocument();
+    expect(screen.getByTestId('trajectory-overview-toolbar')).toHaveClass('sticky', 'top-0');
+    fireEvent.change(screen.getByLabelText('Search steps'), { target: { value: 'control plane' } });
+    expect(screen.getByText('Shell')).toBeInTheDocument();
+    expect(screen.getByText('1 of 4')).toBeInTheDocument();
+  });
+
+  it('keeps runtime-only attempts accessible without counting their logs as steps', () => {
+    render(
+      <Harness
+        events={[
+          event({ id: 1, event_type: 'lifecycle', payload: { phase: 'workspace_preparing' } }),
+        ]}
+      />,
+    );
+    expect(screen.getByText('0 steps')).toBeInTheDocument();
+    expect(screen.getByText(/No execution steps recorded yet/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Run logs (1)' }));
+    expect(screen.getByRole('region', { name: 'Trajectory' })).toBeInTheDocument();
+    expect(screen.getByText(/workspace_preparing ·/)).toBeInTheDocument();
+  });
+
   it('keeps protocol chatter from inflating the overview and step list', () => {
     const notifications = Array.from({ length: 400 }, (_, index) =>
       event({
@@ -99,9 +172,10 @@ describe('TrajectoryView', () => {
     );
     render(<Harness events={[...notifications, ...EVENTS]} />);
 
-    expect(screen.getByText('3 steps')).toBeInTheDocument();
-    expect(screen.getByText('Runtime notifications')).toBeInTheDocument();
-    expect(screen.getByText(/400 protocol events/)).toBeInTheDocument();
+    expect(screen.getByText('2 steps')).toBeInTheDocument();
+    expect(screen.queryByText('Run logs')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Run logs (400)' }));
+    expect(screen.getByText(/Run logs · 400 runtime records/)).toBeInTheDocument();
     expect(
       screen.getAllByRole('button').filter((button) => button.hasAttribute('data-step-key')),
     ).toHaveLength(3);

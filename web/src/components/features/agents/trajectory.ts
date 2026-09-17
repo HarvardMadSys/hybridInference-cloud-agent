@@ -23,7 +23,7 @@ export interface TrajectoryRow {
   seq: number;
   eventType: string;
   /** Who or what this row is, in the vocabulary the reader sees. */
-  actor: 'user' | 'assistant' | 'tool' | 'context' | 'system';
+  actor: 'user' | 'assistant' | 'tool' | 'context' | 'system' | 'runtime';
   lane: TrajectoryLane;
   /** One-line label: the tool's name, the lifecycle phase, the event type. */
   label: string;

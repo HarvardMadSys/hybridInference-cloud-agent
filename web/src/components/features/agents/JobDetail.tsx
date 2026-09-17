@@ -1049,10 +1049,24 @@ export function JobDetail({
   const [trajectoryQuery, setTrajectoryQuery] = useState('');
   const [focusJobId, setFocusJobId] = useState<string | null>(null);
   const inspectorTriggerRef = useRef<HTMLElement | null>(null);
-  const trajectorySteps = useMemo(
-    () => buildTrajectorySteps(events, turnContextFromJobs(threadJobs)),
-    [events, threadJobs],
-  );
+  const trajectorySteps = useMemo(() => {
+    const context = turnContextFromJobs(threadJobs);
+    if (
+      !context.inputs?.some((input) => input.jobId === job.id) &&
+      typeof job.prompt === 'string'
+    ) {
+      context.inputs = [
+        ...(context.inputs ?? []),
+        {
+          jobId: job.id,
+          turnNo: job.turnNo ?? 1,
+          text: job.prompt,
+          at: job.createdAt ?? null,
+        },
+      ];
+    }
+    return buildTrajectorySteps(events, context);
+  }, [events, threadJobs, job.id, job.prompt, job.turnNo, job.createdAt]);
   const [followUp, setFollowUp] = useState('');
   const [chosenSkills, setChosenSkills] = useState<SelectedSkillApi[] | null>(null);
   // Follow-ups append to the thread's latest turn, even from an older URL.

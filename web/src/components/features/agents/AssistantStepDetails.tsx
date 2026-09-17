@@ -112,7 +112,7 @@ export function AssistantStepDetails({
             </div>
           ),
         )}
-        {!hasContent && blocks.length === 0 ? (
+        {!hasContent ? (
           <EmptyNote>
             {tools.length ? '(tool call only)' : 'No message content was recorded for this step.'}
           </EmptyNote>
@@ -173,8 +173,8 @@ export function AssistantStepDetails({
     <TabPanel idPrefix={idPrefix} tab="summary">
       <DetailRows>
         <DetailRow label="Source">
-          {step.nativeMessageId ? (
-            <span className="font-mono">{step.nativeMessageId}</span>
+          {step.nativeMessageId || step.nativeItemId ? (
+            <span className="font-mono">{step.nativeMessageId ?? step.nativeItemId}</span>
           ) : (
             <span className="text-gray-400 dark:text-gray-500">Not recorded</span>
           )}
@@ -195,6 +195,16 @@ export function AssistantStepDetails({
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
           Source is the native message identity recorded with this content. It is not a Gateway
           request id, and no Gateway request was recorded for it.
+        </p>
+      ) : null}
+      {step.nativeItemId ? (
+        <p className="text-[11px] text-gray-400 dark:text-gray-500">
+          Source is the recorded Codex item ID. It does not identify a provider request.
+        </p>
+      ) : step.toolRequest ? (
+        <p className="text-[11px] text-gray-400 dark:text-gray-500">
+          This row represents the recorded tool request. No provider message association was
+          recorded.
         </p>
       ) : null}
 

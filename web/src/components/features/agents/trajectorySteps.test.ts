@@ -617,17 +617,21 @@ describe('buildTrajectorySteps', () => {
     const steps = buildTrajectorySteps(events);
 
     expect(steps.map((step) => step.label)).toEqual([
-      'Runtime notifications',
+      'Run logs',
       'Assistant message',
-      'commandExecution',
+      'Assistant message',
+      'Shell',
     ]);
     expect(steps[0].sourceEvents).toEqual(notifications);
-    expect(steps[0].detail).toContain('400 protocol events');
+    expect(steps[0].detail).toContain('400 runtime records');
+    expect(steps[0].diagnostic).toBe(true);
     expect(steps[0].truncated).toBe(true);
-    expect(steps[2].result?.text).toBe('README.md');
-    expect(steps.map((step) => step.stepNo)).toEqual([1, 2, 3]);
+    expect(steps[3].result?.text).toBe('README.md');
+    expect(steps[3].parentKey).toBe(steps[2].key);
+    expect(steps.map((step) => step.stepNo)).toEqual([0, 1, 2, 3]);
     expect(
       steps
+        .filter((step) => !step.toolRequest)
         .flatMap((step) => step.sourceEvents)
         .map((entry) => entry.id)
         .sort((a, b) => a - b),
@@ -672,7 +676,6 @@ describe('buildTrajectorySteps', () => {
     ['item/commandExecution/outputDelta', { delta: 'output' }],
     ['item/started', { item: { type: 'agentMessage' } }],
     ['item/updated', { item: { type: 'commandExecution' } }],
-    ['item/completed', { item: { type: 'userMessage' } }],
   ])('groups known progress notification %s', (method, params) => {
     const [step] = buildTrajectorySteps([
       event({

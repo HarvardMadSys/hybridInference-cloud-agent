@@ -530,3 +530,18 @@ npm run build
 实现时从最新 `dev` 开始，保留本文标注的当前数据边界；先检查是否已有其他 PR 改动上述组件。实际落地若需要修改身份采集/用量归属契约，清楚拆出它的范围，不把未经验证的数据猜测写进前端。
 
 最终交付包括可运行的交互、测试与构建结果、真实数据缺项说明及 PR。实现见同一 PR：新增 trajectorySteps.ts 投影、TrajectoryInspector / AssistantStepDetails / ToolStepDetails / RunDetails 组件，以及 JobDetail 的单一右侧区域；未改动后端采集契约。
+
+
+## 16. 2026-09-17：消息轨迹与运行日志分离
+
+PR #264 将主列表的阅读单位调整为 User / Assistant / Tool：
+
+- 每轮输入来自 job 的 `task_prompt`；原生 userMessage 回显作为同一输入的来源，不另计步骤。没有 job 输入时使用原生记录。重试不重复用户输入。
+- Codex adapter 为完成的消息保留 `native_item_id`，为原始通知保留结构化内容。开始、流式片段和完成记录按 job / attempt / item 更新同一条 Assistant；完成快照替换片段，不重复显示或改变 Chat 的最终回复。
+- Codex 原生工具请求显示一个 `(tool call only)` Assistant 和缩进 Tool。该父行表达已记录的工具请求，不声称是 provider message，也不把请求挂到相邻的文字回复。缺少 provider 关联时不合并多个请求为一次模型调用，不推断 token 用量或模型耗时。
+- Tool 在列表显示名称、参数 → 结果；未完成输出可预览，但有输出不等于成功。详情继续保留调用与结果的配对证据。
+- 正常 lifecycle 和已识别的协议通知进入 Run logs，保留 Raw 和完整 Session log 下载，排除在主列表、步骤编号和 overview 之外。流式片段保留在对应消息/工具的 Raw 来源中。
+- 错误、警告和未知记录仍直接可见；运行时记录标记为 Runtime，不将后台通知称为 System prompt。真实 harness 配置保留原来的独立详情。
+- 空的已结束 Assistant 进入 Run logs；仍在生成的 Assistant 保留位置。每轮有 Turn 边界，overview 与搜索栏随列表滚动保持在顶部。
+
+兼容性：旧记录缺少完成消息的 native item ID 时，不能可靠还原流式片段与最终回复的对应关系，因此旧片段仍在 Run logs，最终消息照常显示。新 host 采集生效后才有完整的流式关联；不按文本或邻近位置猜测。此改动对齐消息阅读方式，不声明与 DSH 的 Duration / Turns / Calls、provider 调用计量及虚拟列表完全一致。
