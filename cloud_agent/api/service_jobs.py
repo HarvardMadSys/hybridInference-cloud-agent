@@ -70,6 +70,7 @@ if TYPE_CHECKING:
         ConversationQueries,
         ExecutionQueries,
         McpConnectionRepository,
+        SkillRepository,
         SourceControlRepository,
     )
 
@@ -93,6 +94,7 @@ class _ServiceJobsStorage(Protocol):
     conversation_queries: ConversationQueries
     execution_queries: ExecutionQueries
     mcp: McpConnectionRepository
+    skills: SkillRepository
     source_control: SourceControlRepository
 
 

@@ -1,3 +1,4 @@
+import type { SelectedSkillApi } from '@/lib/api/skills';
 // UI types for the cloud agent sandbox (roadmap: issue #1041).
 //
 // The normalized event kinds mirror the agent_job_events schema decided in the
@@ -231,6 +232,7 @@ export interface TurnResources {
 }
 
 export interface AgentJob {
+  skills?: SelectedSkillApi[];
   id: string;
   /** Used to group conversation rows in the recent-tasks sidebar. */
   createdAt?: string | null;

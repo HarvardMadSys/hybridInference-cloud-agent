@@ -157,6 +157,8 @@ from cloud_agent.schemas import (
     WorkerThreadSandbox,
     WorkerTurnResourcesRequest,
 )
+from cloud_agent.skills.models import SkillError
+from cloud_agent.skills.selection import prompt_with_skills, resolve_skills
 from cloud_agent.source_control import (
     OAuthStateError,
     SourceControlError,
@@ -215,6 +217,7 @@ if TYPE_CHECKING:
         ResidencyRepository,
         SandboxRepository,
         SessionForkRepository,
+        SkillRepository,
         SourceControlRepository as SourceControlPort,
     )
 
@@ -226,6 +229,7 @@ class _JobCreationStorage(Protocol):
 
     conversation_commands: ConversationCommands
     mcp: McpConnectionRepository
+    skills: SkillRepository
     source_control: SourceControlPort
 
 
@@ -243,6 +247,7 @@ class _RoutesStorage(Protocol):
     grants: GrantRepository
     host_pool: HostPoolRepository
     mcp: McpConnectionRepository
+    skills: SkillRepository
     residency: ResidencyRepository
     sandbox: SandboxRepository
     session_fork: SessionForkRepository
@@ -538,6 +543,7 @@ def _job_response(
         forked_from_job_id=job.get("fork_source_job_id"),
         metadata=metadata or None,
         mcp_bindings=[McpBindingSummary(**entry) for entry in (job.get("mcp_bindings") or [])],
+        skills=job.get("skills") or [],
         created_at=_iso(job["created_at"]),
         updated_at=_iso(job["updated_at"]),
         pinned_at=_iso(job.get("pinned_at")),
@@ -1479,6 +1485,19 @@ async def _require_offered_effort(
     )
 
 
+async def _resolve_skill_selection(
+    store: SkillRepository, *, user_id: str, skill_ids: list[int] | None
+) -> list[dict[str, Any]] | None:
+    """Resolve owned instruction snapshots before persisting a submission."""
+    try:
+        return await resolve_skills(store, user_id=user_id, skill_ids=skill_ids)
+    except SkillError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"type": "invalid_skill_selection", "message": str(exc)}},
+        ) from exc
+
+
 async def _create_job_as(
     body: AgentJobCreate,
     user: dict[str, Any],
@@ -1504,7 +1523,12 @@ async def _create_job_as(
     # send created the job, and running them again on the resend is how a lost
     # response became a 4xx instead of the job it had already made.
     fingerprint = (
-        request_fingerprint("create", body.model_dump(mode="json"))
+        request_fingerprint(
+            "create",
+            body.model_dump(
+                mode="json", exclude={"skill_ids"} if body.skill_ids is None else set()
+            ),
+        )
         if client_request_id is not None
         else None
     )
@@ -1595,6 +1619,9 @@ async def _create_job_as(
             status_code=503,
             detail={"error": {"type": "invalid_configuration", "message": str(exc)}},
         ) from exc
+    skills = await _resolve_skill_selection(
+        job_store.skills, user_id=user["user_id"], skill_ids=body.skill_ids
+    )
     job = await job_store.conversation_commands.create_job(
         user_id=user["user_id"],
         repo=body.repo,
@@ -1607,6 +1634,7 @@ async def _create_job_as(
         setup_script=body.setup_script,
         metadata=metadata or None,
         mcp_bindings=mcp_bindings,
+        **({"skills": skills} if skills is not None else {}),
         client_request_id=client_request_id,
         # Over the request as sent, not as resolved: a branch that moved
         # between two sends of one submission is still one submission. The
@@ -2093,7 +2121,15 @@ async def create_agent_follow_up(
     # context going indeterminate, must still return the turn that send made —
     # otherwise the retry is refused for a reason the first send never saw.
     fingerprint = (
-        request_fingerprint("follow_up", {"parent_job_id": job_id, **body.model_dump(mode="json")})
+        request_fingerprint(
+            "follow_up",
+            {
+                "parent_job_id": job_id,
+                **body.model_dump(
+                    mode="json", exclude={"skill_ids"} if body.skill_ids is None else set()
+                ),
+            },
+        )
         if idempotency_key is not None
         else None
     )
@@ -2199,6 +2235,13 @@ async def create_agent_follow_up(
                     }
                 },
             )
+    skills = (
+        await _resolve_skill_selection(
+            job_store.skills, user_id=user["user_id"], skill_ids=body.skill_ids
+        )
+        if body.skill_ids is not None
+        else None
+    )
     job = await job_store.conversation_commands.create_follow_up(
         parent_job_id=job_id,
         user_id=user["user_id"],
@@ -2209,6 +2252,7 @@ async def create_agent_follow_up(
         model=model if body.model else None,
         reasoning_effort=reasoning_effort,
         reset_reasoning_effort=reset_effort,
+        **({"skills": skills} if skills is not None else {}),
         client_request_id=idempotency_key,
         # The same value the replay lookup above used, so the pre-check and the
         # unique index cannot disagree about what was submitted.
@@ -3879,7 +3923,7 @@ async def worker_claim(
         attempt_no=claim["attempt_no"],
         repo=claim["repo"],
         base_sha=claim["base_sha"],
-        task_prompt=claim["task_prompt"],
+        task_prompt=prompt_with_skills(claim["task_prompt"], claim.get("skills")),
         setup_script=claim.get("setup_script"),
         runtime=claim["runtime"],
         model=claim["model"],

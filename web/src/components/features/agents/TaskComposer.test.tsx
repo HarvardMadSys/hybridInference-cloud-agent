@@ -15,6 +15,9 @@ vi.mock('next/navigation', () => ({
   useRouter: () => navigation,
 }));
 
+import { listSkills } from '@/lib/api/skills';
+vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
+
 vi.mock('@/lib/api/agents', () => ({
   createAgentJob: vi.fn(),
   getAgentConfig: vi.fn(),
@@ -36,6 +39,7 @@ function config(overrides: Partial<AgentConfigApi> = {}): AgentConfigApi {
 
 describe('TaskComposer source-control onboarding', () => {
   beforeEach(() => {
+    vi.mocked(listSkills).mockResolvedValue([]);
     navigation.push.mockReset();
     vi.mocked(createAgentJob).mockReset();
     vi.mocked(getAgentConfig).mockReset();
@@ -111,9 +115,82 @@ describe('TaskComposer source-control onboarding', () => {
         runtime: 'claude-code',
         model: 'model-a',
         base_ref: 'dev',
+        skill_ids: [],
       }),
     );
     expect(navigation.push).toHaveBeenCalledWith('/ajob_1');
+  });
+
+  it('submits default skills and lets the conversation explicitly clear them', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
+    vi.mocked(listSkills).mockResolvedValue([
+      {
+        id: 9,
+        name: 'Review',
+        description: 'Review changes',
+        revision: 2,
+        source: 'created',
+        source_url: null,
+        source_revision: null,
+        default_enabled: true,
+        created_at: '',
+        updated_at: '',
+      },
+    ]);
+    render(<TaskComposer />);
+    await screen.findByLabelText('Branch');
+    const picker = await screen.findByRole('button', { name: /1 selected/ });
+    fireEvent.click(picker);
+    fireEvent.click(await screen.findByRole('checkbox'));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    expect(screen.getByRole('button', { name: /0 selected/ })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Review the diff' } });
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await waitFor(() =>
+      expect(createAgentJob).toHaveBeenCalledWith(expect.objectContaining({ skill_ids: [] })),
+    );
+  });
+
+  it('sends selected account defaults with a new task', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
+    vi.mocked(listSkills).mockResolvedValue([
+      {
+        id: 9,
+        name: 'Review',
+        description: 'Review changes',
+        revision: 2,
+        source: 'created',
+        source_url: null,
+        source_revision: null,
+        default_enabled: true,
+        created_at: '',
+        updated_at: '',
+      },
+    ]);
+    render(<TaskComposer />);
+    await screen.findByLabelText('Branch');
+    await screen.findByRole('button', { name: /1 selected/ });
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Review the diff' } });
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await waitFor(() =>
+      expect(createAgentJob).toHaveBeenCalledWith(expect.objectContaining({ skill_ids: [9] })),
+    );
+  });
+
+  it('keeps submission disabled if loading defaults fails and supports retry', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(listSkills)
+      .mockRejectedValueOnce(new Error('Skills unavailable'))
+      .mockResolvedValue([]);
+    render(<TaskComposer />);
+    await screen.findByLabelText('Branch');
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Review the diff' } });
+    expect(await screen.findByRole('alert')).toHaveTextContent('Skills unavailable');
+    expect(screen.getByRole('button', { name: /Run/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry loading skills' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /Run/ })).toBeEnabled());
   });
 
   it('preselects a requested repository that is available in backend config', async () => {
@@ -162,6 +239,7 @@ describe('TaskComposer source-control onboarding', () => {
         runtime: 'claude-code',
         model: 'model-a',
         base_ref: 'dev',
+        skill_ids: [],
       }),
     );
     expect(navigation.push).toHaveBeenCalledWith('/ajob_1');

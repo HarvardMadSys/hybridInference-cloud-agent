@@ -750,6 +750,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     runtime: job.runtime,
     model: job.model,
     reasoningEffort: job.reasoning_effort ?? undefined,
+    skills: job.skills ?? [],
     // Summed server-side from api_logs. Null there means no ledger is
     // configured; 0 is the honest display for that, but the panel below reads
     // `hasLedger` so it can say so rather than imply the job was free.

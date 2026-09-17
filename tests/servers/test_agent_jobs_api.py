@@ -351,6 +351,7 @@ class FakeStorage(AllCapabilities):
         model: str | None = None,
         reasoning_effort: str | None = None,
         reset_reasoning_effort: bool = False,
+        skills: list[dict[str, Any]] | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:
@@ -379,6 +380,7 @@ class FakeStorage(AllCapabilities):
             "turn_no": turn_no,
             "base_sha": parent.get("published_commit_sha") or parent.get("base_sha"),
             "task_prompt": prompt,
+            "skills": skills if skills is not None else parent.get("skills"),
             "runtime": runtime or parent["runtime"],
             "model": model or parent["model"],
             # Mirrors the store: inherit when omitted, and only the explicit
@@ -6560,3 +6562,82 @@ async def test_a_new_key_still_runs_the_checks_that_can_refuse_it(
     fresh = await client.post("/v1/agent/jobs", json=body, headers={"Idempotency-Key": "submit-2"})
     assert fresh.status_code == 400, fresh.text
     assert len(store.jobs) == 1
+
+
+async def test_selected_skills_are_snapshotted_and_delivered_only_to_worker(
+    client, store, monkeypatch
+):
+    rows = [
+        {
+            "id": 5,
+            "name": "Review",
+            "description": "Review changes",
+            "revision": 1,
+            "instructions": "Inspect tests and edge cases.",
+            "default_enabled": True,
+        }
+    ]
+    lookup = AsyncMock(return_value=rows)
+    monkeypatch.setattr(store, "list_skills", lookup)
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
+        headers={"Idempotency-Key": "skill-submit"},
+    )
+    assert created.status_code == 201, created.text
+    job = created.json()
+    assert job["skills"] == [
+        {"id": 5, "name": "Review", "description": "Review changes", "revision": 1}
+    ]
+    assert job["task_prompt"] == "fix it"
+    lookup.assert_awaited_once_with(user_id=_OWNER)
+    rows[0]["instructions"] = "A later edit."
+    rows[0]["revision"] = 2
+    # A resend must retain the first accepted content even if defaults changed.
+    lookup.reset_mock()
+    replay = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
+        headers={"Idempotency-Key": "skill-submit"},
+    )
+    assert replay.json()["id"] == job["id"]
+    lookup.assert_not_awaited()
+    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    assert claim.status_code == 200, claim.text
+    assert "Inspect tests and edge cases." in claim.json()["task_prompt"]
+    assert "A later edit." not in claim.json()["task_prompt"]
+    assert claim.json()["task_prompt"].endswith("User task:\nfix it")
+    assert store.messages[0]["content"] == "fix it"
+    follow = await client.post(
+        f"/v1/agent/jobs/{job['id']}/follow-ups", json={"prompt": "Continue"}
+    )
+    assert follow.status_code == 201, follow.text
+    assert follow.json()["skills"][0]["revision"] == 1
+    lookup.assert_not_awaited()
+    updated = await client.post(
+        f"/v1/agent/jobs/{job['id']}/follow-ups", json={"prompt": "Update", "skill_ids": [5]}
+    )
+    assert updated.status_code == 201, updated.text
+    assert updated.json()["skills"][0]["revision"] == 2
+    cleared = await client.post(
+        f"/v1/agent/jobs/{job['id']}/follow-ups", json={"prompt": "Clear", "skill_ids": []}
+    )
+    assert cleared.status_code == 201 and cleared.json()["skills"] == []
+    assert store.jobs[cleared.json()["id"]]["skills"] == []
+
+
+@pytest.mark.parametrize(
+    "selection,status", [([999], 400), ([5, 5], 400), ([0], 422), ([True], 422), (["5"], 422)]
+)
+async def test_invalid_skill_selections_never_create_jobs(client, store, selection, status):
+    result = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "model": "glm-5.1",
+            "task_prompt": "fix it",
+            "skill_ids": selection,
+        },
+    )
+    assert result.status_code == status
+    assert not store.jobs
