@@ -19,6 +19,14 @@
 #   deploy/host/sandbox_host.sh check    # prove the tunnel reaches the gateway
 #   deploy/host/sandbox_host.sh down     # stop everything this file started
 #
+# `up` in its two halves, for a deployer that has to put something between them
+# — the release design sequences the control plane's database preparation
+# between this host's preparation and its replacement (#270):
+#
+#   deploy/host/sandbox_host.sh prepare  # everything `up` does while the old
+#                                        # generation is still serving
+#   deploy/host/sandbox_host.sh activate # drain, replace, prove
+#
 # Required in the environment or in .env on this host:
 #
 #   COMPOSE_PROJECT                this stack's compose project, unique on this machine
@@ -116,8 +124,14 @@ compose_env_value() {
   done <<< "$_COMPOSE_ENVIRONMENT"
 }
 
+# Every command that reads configuration, which is every command that is not
+# pure help. Review found `prepare` and `activate` missing from this list after
+# the phase split: they fell through to the hand-rolled dotenv reader below,
+# which does not resolve `${VAR}` references or strip an inline comment. The
+# same `.env` that `up` correctly refused was accepted by `prepare`, with a
+# state root and a network name that were the literal text of the file.
 case "${1:-}" in
-  up|check|status|down|mark-ready) load_compose_environment ;;
+  up|prepare|activate|check|status|down|mark-ready) load_compose_environment ;;
 esac
 
 if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
@@ -850,25 +864,18 @@ check_candidate() {
     "$runner_image" python -m cloud_agent_host.candidate_check
 }
 
-cmd_up() {
-  if [[ $# -gt 0 ]]; then
-    die "'up' no longer takes a replica count: this host takes its concurrency limit from the admin Servers page, and AGENT_HOST_SLOTS in .env is only the default it starts with"
-  fi
-  command -v docker >/dev/null || die "docker is not installed on this host"
-  docker info >/dev/null 2>&1 || die "the Docker daemon is not running (or not accessible)"
-  require_env
-  validate_retained_config
-  # The cheap host check stays before the build. The authoritative guest-kernel
-  # probe needs the just-built image and therefore runs immediately after it;
-  # this also makes the first deployment work when no old image exists.
-  require_kata_host
-
-  # This machine's name in the admin host switch. Resolved here because the
-  # script runs on the host: inside a container the hostname is a container id,
-  # so a runner cannot answer "which machine am I" for itself.
-  # One server may run several independently enrolled execution environments.
-  # Report the server separately; container hostnames and deployment aliases
-  # cannot identify the physical machine in the admin inventory.
+# This machine's name in the admin host switch. Resolved here because the
+# script runs on the host: inside a container the hostname is a container id,
+# so a runner cannot answer "which machine am I" for itself.
+# One server may run several independently enrolled execution environments.
+# Report the server separately; container hostnames and deployment aliases
+# cannot identify the physical machine in the admin inventory.
+#
+# A function rather than two lines inside the rollout, because the rollout is
+# two phases that a deployer may run as two processes: these are exported for
+# the `compose up` in `activate`, and resolving them only in `prepare` would
+# start the runners of a phased deployment with no name for their machine.
+resolve_host_identity() {
   AGENT_PHYSICAL_HOST="$(env_or_dotenv AGENT_PHYSICAL_HOST)"
   if [[ -z "$AGENT_PHYSICAL_HOST" ]]; then
     AGENT_PHYSICAL_HOST="$(hostname -s 2>/dev/null || hostname)"
@@ -881,6 +888,33 @@ cmd_up() {
     log "this machine joins the host pool as '${AGENT_RUNNER_HOST}'" \
         "(set AGENT_RUNNER_HOST in .env to rename it)"
   fi
+}
+
+# Everything a rollout does while the generation it replaces is still serving.
+#
+# The boundary is the one the comment below `check_candidate` has always drawn:
+# build or pull every replacement, prove the candidate kernel and guest
+# observer, and only then invalidate the marker and drain. Naming the two halves
+# is what lets a deployer put something *between* them — which is what the
+# release design asks for, and what no caller could express while `up` was the
+# only entry point (#270).
+#
+# This phase writes caches and creates temporary probe containers. It replaces
+# nothing that is serving, and `up` runs it exactly as it always did.
+cmd_prepare() {
+  if [[ $# -gt 0 ]]; then
+    die "'prepare' takes no arguments"
+  fi
+  command -v docker >/dev/null || die "docker is not installed on this host"
+  docker info >/dev/null 2>&1 || die "the Docker daemon is not running (or not accessible)"
+  require_env
+  validate_retained_config
+  # The cheap host check stays before the build. The authoritative guest-kernel
+  # probe needs the just-built image and therefore runs immediately after it;
+  # this also makes the first deployment work when no old image exists.
+  require_kata_host
+
+  resolve_host_identity
 
   if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
     log "pulling sandbox image (${SANDBOX_IMAGE})"
@@ -945,6 +979,23 @@ cmd_up() {
       compose build --provenance=false
   fi
   check_candidate
+}
+
+# The half that replaces things: invalidate the marker, drain the runners,
+# start the target generation and prove it.
+#
+# Assumes `prepare` has run in this deployment root — for the same release, on
+# this machine. It does not re-check that, because the check would be the
+# marker file this phase is about to write; what keeps the two together is the
+# deployer calling them in order, and `up` doing so itself.
+cmd_activate() {
+  if [[ $# -gt 0 ]]; then
+    die "'activate' takes no arguments"
+  fi
+  # Cheap, deterministic, and the reason it is not left to `prepare`: a phased
+  # deployment runs the two halves as two processes, and these are exported for
+  # the `compose up` below.
+  resolve_host_identity
   prepare_shared_live_marker
   if [[ -n "$(compose ps -q runner 2>/dev/null || true)" ]]; then
     log "draining existing runners before replacing their workspace broker"
@@ -989,6 +1040,16 @@ cmd_up() {
     complete_shared_live_marker
   fi
   log "done. 'deploy/host/sandbox_host.sh status' shows the live tail."
+}
+
+# Both halves, in order. What every caller before the split invoked, and what
+# `deploy/host/deploy.sh` still invokes when it is given no phase.
+cmd_up() {
+  if [[ $# -gt 0 ]]; then
+    die "'up' no longer takes a replica count: this host takes its concurrency limit from the admin Servers page, and AGENT_HOST_SLOTS in .env is only the default it starts with"
+  fi
+  cmd_prepare
+  cmd_activate
 }
 
 cmd_check() {
@@ -1038,10 +1099,12 @@ cmd_mark_ready() {
 
 case "${1:-}" in
   up) shift; cmd_up "$@" ;;
+  prepare) shift; cmd_prepare "$@" ;;
+  activate) shift; cmd_activate "$@" ;;
   preflight) cmd_preflight ;;
   check) cmd_check 0 ;;
   status) cmd_status ;;
   down) cmd_down ;;
   mark-ready) shift; cmd_mark_ready "$@" ;;
-  *) die "usage: $0 {up|preflight|check|status|down|mark-ready SHA}" ;;
+  *) die "usage: $0 {up|prepare|activate|preflight|check|status|down|mark-ready SHA}" ;;
 esac

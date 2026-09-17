@@ -66,7 +66,7 @@ from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -397,7 +397,7 @@ class _NullSpan:
         """Enter a span that records nothing."""
         return None
 
-    def __exit__(self, *exc_info: object) -> bool:
+    def __exit__(self, *exc_info: object) -> Literal[False]:
         """Leave without suppressing the exception."""
         return False
 
@@ -1048,7 +1048,7 @@ def _resolved_operations(run: ProfilingRun, context: Mapping[str, Any]) -> froze
 def _context_deadline(context: Mapping[str, Any]) -> float | None:
     """Convert a caller's wall-clock expiry into this process's monotonic one."""
     try:
-        expires_at = float(context.get("expires_at"))
+        expires_at = float(str(context.get("expires_at")))
     except (TypeError, ValueError):
         return None
     remaining = expires_at - time.time()
@@ -1103,7 +1103,7 @@ def parse_context(raw: Any) -> dict[str, Any] | None:
     if not isinstance(body, dict):
         return None
     try:
-        expires_at = float(body.get("expires_at"))
+        expires_at = float(str(body.get("expires_at")))
     except (TypeError, ValueError):
         return None
     return {
@@ -1179,7 +1179,7 @@ def _bounded_remote_stages(
         if not name:
             continue
         try:
-            duration = int(item.get("duration_us"))
+            duration = int(str(item.get("duration_us")))
         except (TypeError, ValueError):
             continue
         entry: dict[str, Any] = {

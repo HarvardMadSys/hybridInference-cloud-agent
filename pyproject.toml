@@ -140,7 +140,7 @@ match-dir = "(?!tests|\\.venv|node_modules|web|migrations|docs).*"
 # imports` covers asyncpg, which ships no stubs.
 [tool.mypy]
 python_version = "3.12"
-files = ["cloud_agent"]
+files = ["cloud_agent", "cloud_agent_host"]
 follow_imports = "silent"
 ignore_missing_imports = true
 check_untyped_defs = true

@@ -273,6 +273,45 @@ DEPLOY_ROOT=/srv/cloud-agent-host \
 bash /opt/cloud-agent/release/recipe/deploy/host/deploy.sh
 ```
 
+### Deploying the two in the order the design specifies
+
+Each command above is the whole of its side, and the two sides are independent
+processes on two machines, so running them both is a deployment whose ordering
+is whatever the two happen to do. The design sequences them: both sides prepare,
+the control plane then prepares its database and checks the identity namespace,
+the host then publishes its generation, and only then does the control plane
+switch public services.
+
+`--phase` is how a deployer expresses that. Every phase is idempotent and takes
+the same environment as the whole script; `prepare` and `prepare-database`
+replace nothing that is serving.
+
+```bash
+# 1. both sides, in parallel
+… deploy/control-plane/deploy.sh --phase prepare
+… deploy/host/deploy.sh          --phase prepare
+
+# 2. the control plane's database, alone. On a cold machine this also starts
+#    the API and the MCP relay, which the host's readiness probe needs and
+#    which nothing is serving yet; a machine that already has them keeps the
+#    ones it is running.
+… deploy/control-plane/deploy.sh --phase prepare-database
+
+# 3. the host replaces its runners and publishes the target generation
+… deploy/host/deploy.sh          --phase activate
+
+# 4. the control plane's fence, then the public services
+… deploy/control-plane/deploy.sh --phase activate
+```
+
+Passing no `--phase` runs every phase of that side in order, which is what a
+deployer that does not need to interleave the two should do.
+
+Every phase is safe to run again. Re-running `prepare-database` does not disown
+the listeners an earlier run of it started, and re-running `activate` after a
+failure restarts anything that failure's cleanup stopped — a fence waits for a
+heartbeat, and only a running API can accept one.
+
 The manifest supplies the commit and all owned image references. Any conflicting
 effective Compose configuration is refused before pulling or replacing services.
 Remove old image/commit overrides when switching to artifact mode. The default

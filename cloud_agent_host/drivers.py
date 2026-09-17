@@ -669,7 +669,7 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
 
     def _new_turn(self) -> _JsonResidentTurn[_LiveRuntimeT]:
         assert self._process is not None
-        return _JsonResidentTurn[_LiveRuntimeT](self, self._process)
+        return _JsonResidentTurn(self, self._process)
 
     def start_turn(self, turn_input: TurnInput) -> HarnessTurn[_LiveRuntimeT]:
         if self._closed:
@@ -1692,7 +1692,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
             self._process.wait()
 
 
-_DRIVER_TYPES: dict[str, type[HarnessDriver[Any]]] = {
+_DRIVER_TYPES: dict[str, type[HarnessDriver[DialectRuntime]]] = {
     "claude-code": ClaudeCodeDriver,
     "codex": CodexDriver,
     "pi": PiDriver,
@@ -1701,12 +1701,12 @@ _DRIVER_TYPES: dict[str, type[HarnessDriver[Any]]] = {
 }
 
 
-def get_driver(runtime_id: str) -> HarnessDriver[Any]:
+def get_driver(runtime_id: str) -> HarnessDriver[DialectRuntime]:
     """Resolve a registry id to its driver. Raises ``KeyError`` like get_runtime."""
     return driver_for(get_runtime(runtime_id))
 
 
-def driver_for(runtime: AgentRuntime) -> HarnessDriver[Any]:
+def driver_for(runtime: AgentRuntime) -> HarnessDriver[DialectRuntime]:
     """The driver for an already-resolved dialect adapter.
 
     Only the five live-session drivers are executable. A dialect adapter with
