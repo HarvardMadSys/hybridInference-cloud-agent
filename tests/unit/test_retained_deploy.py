@@ -962,3 +962,60 @@ def test_host_deploy_reads_the_recorded_generation_before_it_overwrites_it() -> 
     )
     assert 'mark-ready "${recorded}"' in script
     assert "restore_recorded_generation" in script
+
+
+def test_every_command_that_reads_configuration_reads_the_resolved_one(
+    tmp_path: Path,
+) -> None:
+    """The phase commands must parse `.env` the way `up` does, not the way a
+    hand-rolled reader would.
+
+    Review found `prepare` and `activate` missing from the list of commands that
+    load Compose's resolved environment after the phase split. Compose expands
+    `${VAR}` and strips an inline comment; the fallback reader does neither, so
+    the same file that `up` correctly refused was accepted by `prepare` — with a
+    state root that was the literal text `${STATE_BASE}/agent-host` and a
+    network name with ` # shared default` on the end of it.
+    """
+    dispatch = SANDBOX_HOST.read_text()
+    loads = dispatch[dispatch.index('case "${1:-}" in') :]
+    loads = loads[: loads.index("esac")]
+    assert "prepare" in loads and "activate" in loads, loads
+
+
+def _resolve_environment_with_real_compose(tmp_path: Path) -> None:
+    """Let the fixture's fake `docker` hand one subcommand to the real one.
+
+    `config --environment` is where interpolation and inline comments are
+    decided, and a fake that answers it cannot show which reader a command used.
+    Everything else stays recorded and synthetic: no pull, no run, no service.
+    """
+    real = shutil.which("docker")
+    if not real:
+        pytest.skip("Compose's own dotenv parser is what this compares against")
+    docker = tmp_path / "bin" / "docker"
+    lines = docker.read_text().splitlines(keepends=True)
+    lines[1:1] = [f'case " $* " in *" config --environment "*) exec "{real}" "$@";; esac\n']
+    docker.write_text("".join(lines))
+
+
+@pytest.mark.parametrize("command", ["up", "prepare"])
+def test_a_shared_default_is_refused_whichever_command_reads_it(
+    tmp_path: Path, command: str
+) -> None:
+    """Interpolation and an inline comment, through Compose, for both."""
+    env = _host(tmp_path)
+    _add_required_host_paths(env, tmp_path)
+    _resolve_environment_with_real_compose(tmp_path)
+    app = Path(env["APP_DIR"])
+    with (app / ".env").open("a") as stream:
+        stream.write("SIBLING_COMPOSE_PROJECTS=other-environment\n")
+        stream.write("STATE_BASE=/var/lib/hybridinference\n")
+        stream.write("AGENT_HOST_STATE_ROOT=${STATE_BASE}/agent-host\n")
+        stream.write("AGENT_ENROLL_TOKEN=synthetic-token\n")
+        stream.write("AGENT_EGRESS_NETWORK_PLATFORM_ONLY=agent-egress # shared default\n")
+
+    result = _run(env, command)
+
+    assert result.returncode != 0
+    assert "must be unique to this stack" in result.stderr, result.stdout + result.stderr

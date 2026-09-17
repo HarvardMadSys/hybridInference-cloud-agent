@@ -24,9 +24,12 @@
 # whole script first, which would switch public services ahead of the host.
 #
 #   prepare           build or pull the images. Replaces nothing.
-#   prepare-database  start Postgres, migrate, check the identity namespace.
-#                     Migrations stay backwards-compatible with the API that is
-#                     still running, so this too replaces nothing.
+#   prepare-database  start Postgres, migrate, check the identity namespace,
+#                     and on a cold machine start the API and MCP relay the
+#                     host's readiness probe needs. Migrations stay
+#                     backwards-compatible with the API that is still running,
+#                     and starting a service nothing is running replaces
+#                     nothing, so this phase too replaces nothing.
 #   activate          the compatibility fence, the stack, the health checks and
 #                     the record of what is deployed.
 #
@@ -236,12 +239,14 @@ wait_for() {
 # relays for its exact-SHA probe. Track the services this invocation starts so
 # a failed deploy restores the *actual* prior state instead of stopping a
 # healthy service that happened to survive.
+BOOTSTRAP_RECORD=".bootstrapped-services"
 BOOTSTRAP_SERVICES=()
 cleanup_failed_bootstrap() {
   local status=$?
   if [ "${status}" -ne 0 ] && [ "${#BOOTSTRAP_SERVICES[@]}" -gt 0 ]; then
     log "deployment failed; restoring previously stopped bootstrap services"
     compose stop "${BOOTSTRAP_SERVICES[@]}" >/dev/null 2>&1 || true
+    rm -f "${BOOTSTRAP_RECORD}"
   fi
 }
 trap cleanup_failed_bootstrap EXIT
@@ -286,43 +291,58 @@ if runs_phase prepare-database; then
   log "checking the Agent database identity issuer"
   compose run --rm --no-deps control-plane \
     python -m cloud_agent.identity_namespace --check
+
+  # Heartbeats are HTTP calls to the control plane, not direct database writes.
+  # Preserve the old API on an ordinary rolling deploy.  Only when no API
+  # container is running may this target generation be started early so a host
+  # coming up in parallel can enroll/heartbeat and release the compatibility
+  # fence.  There is no older service to replace in this branch; user work stays
+  # queued until an eligible host appears.
+  #
+  # **In this phase, not in `activate`.** Review found the phase split had moved
+  # it: with the host activating before the control plane, a cold machine
+  # deadlocked — the database was prepared, the host replaced its runners, and
+  # then waited for an API and an MCP relay that only a later phase would have
+  # started. The design says the same thing in its own words (§8.2 constraint
+  # 6): keep the controlled bootstrap of missing listeners so a first
+  # deployment does not hang waiting for a host heartbeat. Starting a service
+  # that is not running replaces nothing, which is what lets it live here.
+  RUNNING_CONTROL_ID="$(compose ps --status running -q control-plane 2>/dev/null || true)"
+  RUNNING_MCP_ID="$(compose ps --status running -q mcp-relay 2>/dev/null || true)"
+  if [ -z "${RUNNING_CONTROL_ID}" ]; then
+    BOOTSTRAP_SERVICES+=(control-plane)
+  fi
+  if [ -z "${RUNNING_MCP_ID}" ]; then
+    BOOTSTRAP_SERVICES+=(mcp-relay)
+  fi
+  if [ "${#BOOTSTRAP_SERVICES[@]}" -gt 0 ]; then
+    log "starting missing target services for parallel host readiness: ${BOOTSTRAP_SERVICES[*]}"
+    # Host readiness probes both fixed sandbox relays. Starting only the API on
+    # a clean machine, or assuming MCP is running merely because the API is,
+    # deadlocks deployment: the host cannot publish its exact-SHA marker while
+    # the full compose up that would start the missing service is fenced on that
+    # marker. The MCP app exposes only the scoped relay surface and both services
+    # are loopback-bound; browser-facing web remains stopped until the gate.
+    compose up -d --no-deps "${BOOTSTRAP_SERVICES[@]}"
+    # Which services this deployment started, for the phase that has to undo
+    # them. The two phases are two processes, so a shell variable does not
+    # reach `activate`, and stopping a service the deployment found already
+    # running would be this repository taking down something it did not start.
+    printf '%s\n' "${BOOTSTRAP_SERVICES[@]}" > "${BOOTSTRAP_RECORD}"
+  else
+    rm -f "${BOOTSTRAP_RECORD}"
+  fi
+  if [ -z "${RUNNING_CONTROL_ID}" ]; then
+    wait_for "bootstrap control plane" "http://127.0.0.1:${CP_PORT}/healthz"
+  fi
+  if [ -z "${RUNNING_MCP_ID}" ]; then
+    wait_for "bootstrap MCP relay" "http://127.0.0.1:${MCP_PORT}/healthz"
+  fi
 fi
 
 if ! runs_phase activate; then
   log "phase ${PHASE} complete; nothing serving was replaced"
   exit 0
-fi
-
-# Heartbeats are HTTP calls to the control plane, not direct database writes.
-# Preserve the old API on an ordinary rolling deploy.  Only when no API
-# container is running may this target generation be started early so a host
-# coming up in parallel can enroll/heartbeat and release the compatibility
-# fence.  There is no older service to replace in this branch; user work stays
-# queued until an eligible host appears.  The EXIT trap above restores the
-# services this invocation bootstrapped if their health or the fence fails.
-RUNNING_CONTROL_ID="$(compose ps --status running -q control-plane 2>/dev/null || true)"
-RUNNING_MCP_ID="$(compose ps --status running -q mcp-relay 2>/dev/null || true)"
-if [ -z "${RUNNING_CONTROL_ID}" ]; then
-  BOOTSTRAP_SERVICES+=(control-plane)
-fi
-if [ -z "${RUNNING_MCP_ID}" ]; then
-  BOOTSTRAP_SERVICES+=(mcp-relay)
-fi
-if [ "${#BOOTSTRAP_SERVICES[@]}" -gt 0 ]; then
-  log "starting missing target services for parallel host readiness: ${BOOTSTRAP_SERVICES[*]}"
-  # Host readiness probes both fixed sandbox relays. Starting only the API on
-  # a clean machine, or assuming MCP is running merely because the API is,
-  # deadlocks deployment: the host cannot publish its exact-SHA marker while
-  # the full compose up that would start the missing service is fenced on that
-  # marker. The MCP app exposes only the scoped relay surface and both services
-  # are loopback-bound; browser-facing web remains stopped until the gate.
-  compose up -d --no-deps "${BOOTSTRAP_SERVICES[@]}"
-fi
-if [ -z "${RUNNING_CONTROL_ID}" ]; then
-  wait_for "bootstrap control plane" "http://127.0.0.1:${CP_PORT}/healthz"
-fi
-if [ -z "${RUNNING_MCP_ID}" ]; then
-  wait_for "bootstrap MCP relay" "http://127.0.0.1:${MCP_PORT}/healthz"
 fi
 
 # The retained/shared-live topology is the only executable path, so there is
@@ -332,6 +352,18 @@ fi
 # root pass their local checks; this reverse probe then waits for that fact and
 # proves the control plane can dial every eligible broker before replacing live
 # API containers. It is a compatibility fence, not a feature switch.
+# What the database phase started, if that was a different process. Adopted
+# before the fence so the trap above covers them: a failure here has to leave
+# the machine as it found it, and "as it found it" is a fact only the phase
+# that started them knows.
+if [ "${#BOOTSTRAP_SERVICES[@]}" -eq 0 ] && [ -f "${BOOTSTRAP_RECORD}" ]; then
+  while IFS= read -r bootstrapped; do
+    [ -n "${bootstrapped}" ] && BOOTSTRAP_SERVICES+=("${bootstrapped}")
+  done < "${BOOTSTRAP_RECORD}"
+  [ "${#BOOTSTRAP_SERVICES[@]}" -eq 0 ] \
+    || log "adopting services the database phase started: ${BOOTSTRAP_SERVICES[*]}"
+fi
+
 log "waiting for target ${SHA} host readiness and reverse broker probes"
 READINESS_CONTAINER="${COMPOSE_PROJECT}-readiness-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}"
 READINESS_ARGS=()
@@ -348,6 +380,7 @@ WATCH_READINESS=1 compose run --rm --no-deps ${READINESS_ARGS[@]+"${READINESS_AR
 # startup/health failure must not stop API/MCP selectively while leaving web or
 # another replacement service running.
 BOOTSTRAP_SERVICES=()
+rm -f "${BOOTSTRAP_RECORD}"
 
 # `up -d` with no service list brings the whole stack to the file's desired
 # state, which is what makes this idempotent. Compose may run the idempotent

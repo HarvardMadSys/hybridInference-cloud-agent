@@ -124,8 +124,14 @@ compose_env_value() {
   done <<< "$_COMPOSE_ENVIRONMENT"
 }
 
+# Every command that reads configuration, which is every command that is not
+# pure help. Review found `prepare` and `activate` missing from this list after
+# the phase split: they fell through to the hand-rolled dotenv reader below,
+# which does not resolve `${VAR}` references or strip an inline comment. The
+# same `.env` that `up` correctly refused was accepted by `prepare`, with a
+# state root and a network name that were the literal text of the file.
 case "${1:-}" in
-  up|check|status|down|mark-ready) load_compose_environment ;;
+  up|prepare|activate|check|status|down|mark-ready) load_compose_environment ;;
 esac
 
 if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then

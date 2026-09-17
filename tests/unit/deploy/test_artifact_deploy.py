@@ -562,3 +562,70 @@ def test_activating_on_its_own_still_names_this_machine(tmp_path: Path):
     )
     assert replacement["physical_host"], replacement
     assert replacement["runner_host"], replacement
+
+
+def test_a_cold_machine_has_its_listeners_before_the_host_activates(tmp_path: Path):
+    """The deadlock the phase split introduced, and the design's constraint 6.
+
+    With the host activating before the control plane, a cold machine had its
+    database prepared, its runners replaced, and then waited for an API and an
+    MCP relay that only a later phase would have started. Starting a service
+    that is not running replaces nothing, which is what lets the bootstrap live
+    in the database phase where the host can reach it.
+    """
+    script, env = deployment(tmp_path, "control-plane")
+    env["TEST_RUNNING"] = "0"
+
+    result, calls = run(script, env, "--phase", "prepare-database", COMMIT)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    started = next(call for call in calls if "up" in call["args"] and "--no-deps" in call["args"])
+    assert "control-plane" in started["args"] and "mcp-relay" in started["args"]
+    assert (Path(env["DEPLOY_ROOT"]) / ".bootstrapped-services").read_text().split() == [
+        "control-plane",
+        "mcp-relay",
+    ]
+    assert not any("cloud_agent.deploy_readiness" in c["args"] for c in calls), (
+        "the fence is still activation's"
+    )
+
+
+def test_a_warm_machine_bootstraps_nothing(tmp_path: Path):
+    """The ordinary rolling deploy keeps the old API and relay serving."""
+    script, env = deployment(tmp_path, "control-plane")
+
+    result, calls = run(script, env, "--phase", "prepare-database", COMMIT)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not any("--no-deps" in c["args"] and "up" in c["args"] for c in calls)
+    assert not (Path(env["DEPLOY_ROOT"]) / ".bootstrapped-services").exists()
+
+
+def test_a_failed_activation_stops_only_what_the_database_phase_started(tmp_path: Path):
+    """The two phases are two processes, so the list of services this
+    deployment started has to reach the one that may have to undo them."""
+    script, env = deployment(tmp_path, "control-plane")
+    env["TEST_RUNNING"] = "0"
+    prepared, _ = run(script, env, "--phase", "prepare-database", COMMIT)
+    assert prepared.returncode == 0, prepared.stdout + prepared.stderr
+
+    env["TEST_READINESS_EXIT"] = "9"
+    failed, calls = run(script, env, "--phase", "activate", COMMIT)
+
+    assert failed.returncode != 0
+    stopped = next(call for call in calls if "stop" in call["args"])
+    assert "control-plane" in stopped["args"] and "mcp-relay" in stopped["args"]
+    assert not any("--remove-orphans" in c["args"] for c in calls), "nothing was replaced"
+    assert (Path(env["DEPLOY_ROOT"]) / ".deployed-sha").read_text().strip() == "previous-generation"
+
+
+def test_a_successful_activation_stops_adopting_them(tmp_path: Path):
+    """Past the gate they are the target stack, not temporary readiness aids."""
+    script, env = deployment(tmp_path, "control-plane")
+    env["TEST_RUNNING"] = "0"
+    run(script, env, "--phase", "prepare-database", COMMIT)
+
+    result, _ = run(script, env, "--phase", "activate", COMMIT)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (Path(env["DEPLOY_ROOT"]) / ".bootstrapped-services").exists()

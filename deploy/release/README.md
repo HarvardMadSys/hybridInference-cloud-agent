@@ -291,7 +291,10 @@ replace nothing that is serving.
 … deploy/control-plane/deploy.sh --phase prepare
 … deploy/host/deploy.sh          --phase prepare
 
-# 2. the control plane's database, alone
+# 2. the control plane's database, alone. On a cold machine this also starts
+#    the API and the MCP relay, which the host's readiness probe needs and
+#    which nothing is serving yet; a machine that already has them keeps the
+#    ones it is running.
 … deploy/control-plane/deploy.sh --phase prepare-database
 
 # 3. the host replaces its runners and publishes the target generation
