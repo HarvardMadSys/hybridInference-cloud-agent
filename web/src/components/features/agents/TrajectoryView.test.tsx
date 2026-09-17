@@ -128,16 +128,15 @@ describe('TrajectoryView', () => {
     ];
     render(<Harness events={events} />);
     expect(screen.getByText('Summarize this repo')).toBeInTheDocument();
-    expect(screen.getByText('(tool call only)')).toBeInTheDocument();
+    const request = screen.getByRole('button', { name: 'assistant' });
     const tool = screen.getByText('Shell').closest('button')!;
     expect(within(tool).getByText('cat README.md')).toBeInTheDocument();
     expect(within(tool).getByText('→')).toBeInTheDocument();
     expect(within(tool).getByText('Cloud Agent control plane')).toBeInTheDocument();
-    expect(tool).toHaveAttribute(
-      'data-parent-key',
-      screen.getByText('(tool call only)').closest('button')?.dataset.stepKey,
-    );
-    expect(tool).toHaveClass('pl-12');
+    expect(tool).toHaveAttribute('data-parent-key', request.dataset.stepKey);
+    expect(tool).toHaveClass('pl-5');
+    expect(request.querySelector('[data-role-slot]')).toHaveClass('w-[76px]', 'justify-end');
+    expect(tool.querySelector('[data-role-slot]')).toHaveClass('w-[76px]', 'justify-end');
     expect(screen.queryByText('Assistant message')).not.toBeInTheDocument();
     expect(screen.getByTestId('trajectory-overview-toolbar')).toHaveClass('sticky', 'top-0');
     fireEvent.change(screen.getByLabelText('Search steps'), { target: { value: 'control plane' } });

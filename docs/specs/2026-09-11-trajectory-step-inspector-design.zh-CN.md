@@ -166,7 +166,7 @@ type EventTab = 'summary' | 'raw';
 - 面向阅读的已存消息内容，Markdown 使用现有安全渲染方式。归一化器可能只保留 native response 的部分内容块，不能声称还原了未保存的全部响应。
 - 已记录 thinking 按独立折叠区显示，不与最终回复拼成一个段落。
 - 工具调用显示工具名和简短参数，点击进入对应 Tool 的 Summary。
-- 有可靠 native message ID、但消息只携带工具调用时，显示 `(tool call only)`。
+- 有可靠 native message ID、但消息只携带工具调用时，保留 ASSISTANT 标签并列出工具调用，不增加占位文案。
 - 不把 Raw JSON 当成 Preview，不用 `detail` 的截断单行替代完整内容。
 
 ### 5.3 Raw
@@ -339,7 +339,7 @@ interface TrajectoryStep {
 
 - 优先使用明确的 native message ID、parent message ID 等已记录关联。
 - Claude 的部分归一化 payload 保留 `usage_id`，其来自 native `message.id`；在已验证同一 message 的范围内，可将正文、thinking 与 tool-call blocks 组织成一个 Assistant step。
-- 同一 message 的 tools 仍各自有 Tool step，其 Hierarchy 指向该 Assistant；message 只有工具调用时可呈现 `(tool call only)`，前提是 native message 身份确有记录。
+- 同一 message 的 tools 仍各自有 Tool step，其 Hierarchy 指向该 Assistant；message 只有工具调用时仍呈现为 ASSISTANT 行，不增加占位文案，前提是 native message 身份确有记录。
 - Codex / pi 等记录中若没有保留下来的 message 关联，就按单条 message/thinking 展示，Tool Hierarchy 显示 `Not recorded`。
 - 不使用“最近一条 Assistant”、时间接近、文本相似或工具名作为父子关联依据。
 - 不将两个不同 native messages 的重复文本去重为一个消息，不将整个 turn 合成一个 Assistant。
@@ -538,7 +538,7 @@ PR #264 将主列表的阅读单位调整为 User / Assistant / Tool：
 
 - 每轮输入来自 job 的 `task_prompt`；原生 userMessage 回显作为同一输入的来源，不另计步骤。没有 job 输入时使用原生记录。重试不重复用户输入。
 - Codex adapter 为完成的消息保留 `native_item_id`，为原始通知保留结构化内容。开始、流式片段和完成记录按 job / attempt / item 更新同一条 Assistant；完成快照替换片段，不重复显示或改变 Chat 的最终回复。
-- Codex 原生工具请求显示一个 `(tool call only)` Assistant 和缩进 Tool。该父行表达已记录的工具请求，不声称是 provider message，也不把请求挂到相邻的文字回复。缺少 provider 关联时不合并多个请求为一次模型调用，不推断 token 用量或模型耗时。
+- Codex 原生工具请求显示一个 ASSISTANT 父行及其 TOOL 行。角色标签共用 76px 列并右对齐，ASSISTANT 标签占满列宽，TOOL 随文本收窄；CONTEXT 使用绿色。无正文时不额外填入说明性占位文案。该父行表达已记录的工具请求，不声称是 provider message，也不把请求挂到相邻的文字回复。缺少 provider 关联时不合并多个请求为一次模型调用，不推断 token 用量或模型耗时。
 - Tool 在列表显示名称、参数 → 结果；未完成输出可预览，但有输出不等于成功。详情继续保留调用与结果的配对证据。
 - 正常 lifecycle 和已识别的协议通知进入 Run logs，保留 Raw 和完整 Session log 下载，排除在主列表、步骤编号和 overview 之外。流式片段保留在对应消息/工具的 Raw 来源中。
 - 错误、警告和未知记录仍直接可见；运行时记录标记为 Runtime，不将后台通知称为 System prompt。真实 harness 配置保留原来的独立详情。

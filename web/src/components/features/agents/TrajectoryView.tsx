@@ -62,7 +62,7 @@ const ACTOR_TONE: Record<TrajectoryStep['actor'], string> = {
   user: 'bg-sky-50 dark:bg-sky-500/10 text-sky-700 dark:text-sky-400',
   assistant: 'bg-violet-50 dark:bg-violet-500/10 text-violet-700 dark:text-violet-400',
   tool: 'bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400',
-  context: 'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400',
+  context: 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400',
   system: 'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400',
   runtime: 'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400',
 };
@@ -923,7 +923,7 @@ export function TrajectoryView({
                 data-parent-key={step.parentKey}
                 onClick={() => onSelectStep(step.key)}
                 aria-current={open ? 'true' : undefined}
-                className={`relative flex w-full scroll-mt-80 items-baseline gap-2 py-1.5 pr-3 text-left text-[12px] transition-colors hover:bg-gray-50 dark:hover:bg-white/5 ${step.parentKey ? 'pl-12' : 'pl-5'} ${
+                className={`relative flex w-full scroll-mt-80 items-baseline gap-2 py-1.5 pl-5 pr-3 text-left text-[12px] transition-colors hover:bg-gray-50 dark:hover:bg-white/5 ${
                   open ? 'bg-gray-50 dark:bg-gray-950' : ''
                 }`}
               >
@@ -933,10 +933,12 @@ export function TrajectoryView({
                     className="absolute left-1 top-4 h-1 w-1 rounded-full bg-gray-400 dark:bg-gray-500"
                   />
                 ) : null}
-                <span
-                  className={`w-16 shrink-0 rounded px-1.5 py-0.5 text-center text-[10px] font-medium uppercase tracking-wide ${ACTOR_TONE[step.actor]}`}
-                >
-                  {step.actor}
+                <span className="flex w-[76px] shrink-0 justify-end" data-role-slot>
+                  <span
+                    className={`inline-flex h-[19px] items-center rounded px-1.5 text-[10px] font-semibold uppercase tracking-wide ${step.actor === 'assistant' ? 'w-full justify-center' : ''} ${ACTOR_TONE[step.actor]}`}
+                  >
+                    {step.actor}
+                  </span>
                 </span>
                 {step.kind === 'tool' || step.kind === 'event' ? (
                   <span
@@ -952,7 +954,7 @@ export function TrajectoryView({
                   {step.detail ||
                     (step.kind === 'assistant'
                       ? step.toolKeys?.length
-                        ? '(tool call only)'
+                        ? ''
                         : step.streaming
                           ? 'Generating…'
                           : '(no text recorded)'

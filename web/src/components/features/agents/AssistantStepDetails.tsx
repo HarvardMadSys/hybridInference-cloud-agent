@@ -112,10 +112,8 @@ export function AssistantStepDetails({
             </div>
           ),
         )}
-        {!hasContent ? (
-          <EmptyNote>
-            {tools.length ? '(tool call only)' : 'No message content was recorded for this step.'}
-          </EmptyNote>
+        {!hasContent && !tools.length ? (
+          <EmptyNote>No message content was recorded for this step.</EmptyNote>
         ) : null}
         {tools.length ? (
           <DetailSection title="Tool calls">
@@ -213,11 +211,9 @@ export function AssistantStepDetails({
           <div className="max-h-40 overflow-hidden text-[12px] leading-relaxed text-gray-700 dark:text-gray-300">
             <Markdown text={blocks.find((block) => block.type === 'text')?.text ?? ''} />
           </div>
-        ) : (
-          <EmptyNote>
-            {tools.length ? '(tool call only)' : 'No message content was recorded.'}
-          </EmptyNote>
-        )}
+        ) : !tools.length ? (
+          <EmptyNote>No message content was recorded.</EmptyNote>
+        ) : null}
         {blocks.some((block) => block.type === 'thinking') ? (
           <p className="text-[11px] text-gray-400 dark:text-gray-500">
             {blocks.filter((block) => block.type === 'thinking').length} recorded thinking block
