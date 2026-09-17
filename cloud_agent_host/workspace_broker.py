@@ -37,6 +37,7 @@ from cloud_agent_host.chat_sandbox import (
     CHAT_WORKDIR,
     ChatSandboxManager,
     ChatSandboxSpec,
+    RetainedChatBackend,
     RetainedChatLost,
 )
 from cloud_agent_host.drivers import DriverError
@@ -973,10 +974,10 @@ class _TerminalManager:
                 detail="terminal cleanup could not be confirmed; retry kill",
             ) from exc
         with self._lock:
-            group = self._sessions.get(workspace_id)
-            if group is not None and group.get(terminal_id) is session:
-                group.pop(terminal_id, None)
-                if not group:
+            remaining = self._sessions.get(workspace_id)
+            if remaining is not None and remaining.get(terminal_id) is session:
+                remaining.pop(terminal_id, None)
+                if not remaining:
                     self._sessions.pop(workspace_id, None)
         return descriptor
 
@@ -1328,7 +1329,7 @@ def create_app(
 
     def retained_operation(
         workspace_id: str,
-        operation: Callable[[SandboxBackend], dict[str, Any]],
+        operation: Callable[[RetainedChatBackend], dict[str, Any]],
     ) -> dict[str, Any]:
         owner = retained_owner(workspace_id)
         token: str | None = None
@@ -1566,7 +1567,9 @@ def create_app(
                 # normalizes shared writes; if either fails the runner must
                 # receive an error frame instead of a result followed by an
                 # opaque settle failure.
-                telemetry = owner.complete_turn(thread_id, body.token, turn)
+                telemetry: SharedTurnTelemetry | None = owner.complete_turn(
+                    thread_id, body.token, turn
+                )
                 turn_boundary_closed = True
                 resources = close_resources(telemetry)
                 yield (
@@ -1941,12 +1944,18 @@ def create_app(
         owner = retained_owner(workspace_id)
         terminal_token: str | None = None
         try:
-            terminal_token, descriptor = await asyncio.to_thread(
-                owner.terminal_opened, workspace_id
-            )
+            token, descriptor = await asyncio.to_thread(owner.terminal_opened, workspace_id)
+            terminal_token = token
             retained = owner.backend(workspace_id)
             retained.manager.require_network_phase(retained.spec, "agent")
-            token = terminal_token
+
+            def on_terminal_closed(last_activity: float) -> None:
+                owner.terminal_closed(
+                    workspace_id,
+                    token,
+                    last_activity_monotonic=last_activity,
+                )
+
             return await asyncio.to_thread(
                 terminals.create,
                 descriptor.origin_thread_id,
@@ -1955,11 +1964,7 @@ def create_app(
                 cols=body.cols,
                 backend=retained,
                 idle_ttl_s=owner.idle_timeout_s,
-                on_closed=lambda last_activity: owner.terminal_closed(
-                    workspace_id,
-                    token,
-                    last_activity_monotonic=last_activity,
-                ),
+                on_closed=on_terminal_closed,
             )
         except (HTTPException, SandboxError, ValueError) as exc:
             if terminal_token is not None:

@@ -32,6 +32,7 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatBackend,
     RetainedChatLost,
 )
+from cloud_agent_host.drivers import DialectRuntime
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_SOURCE,
     GuestObservation,
@@ -226,8 +227,8 @@ class _Member:
     lease_owner: str | None = None
     # Only the last completed activation can replay its acknowledgement.
     settlement_receipt: tuple[str, SharedSessionDescriptor] | None = field(default=None, repr=False)
-    transport: ResidentTransport[Any] | None = None
-    current_turn: ResidentTurn[Any] | None = None
+    transport: ResidentTransport[DialectRuntime] | None = None
+    current_turn: ResidentTurn[DialectRuntime] | None = None
     activation_processes: tuple[tuple[int, int], ...] | None = None
     observer_cursor: GuestObserverCursor | None = None
     tool_mark_reader: ToolMarkReader | None = None
@@ -275,7 +276,7 @@ class _Group:
 
 
 NativeForker = Callable[
-    [ChatSandboxSpec, ResidentTransport[Any], str, ResidentLaunch, int],
+    [ChatSandboxSpec, ResidentTransport[DialectRuntime], str, ResidentLaunch, int],
     str,
 ]
 
@@ -458,6 +459,10 @@ class SharedChatSessionSupervisor:
         if not members:
             raise ValueError("a shared sandbox manifest cannot be empty")
         seen_slots: set[int] = set()
+        # The validation pass rejects a manifest with no resident slot before
+        # anything is mutated, so the install pass below reads the slot from
+        # this pair rather than re-deciding what the check above established.
+        validated_members: builtins.list[tuple[SharedMemberManifest, int]] = []
         for manifest in members:
             if manifest.resident_slot_id is None:
                 raise ValueError("every ready shared member needs a resident slot")
@@ -466,6 +471,7 @@ class SharedChatSessionSupervisor:
             if manifest.resident_slot_id in seen_slots:
                 raise ValueError("two shared members cannot own one resident slot")
             seen_slots.add(manifest.resident_slot_id)
+            validated_members.append((manifest, manifest.resident_slot_id))
         with self._lock:
             group = self._groups.get(spec.sandbox_id)
             if group is None:
@@ -482,7 +488,7 @@ class SharedChatSessionSupervisor:
                 raise RetainedChatLost("shared sandbox container identity changed")
 
             wanted = {item.thread_id for item in members}
-            for manifest in members:
+            for manifest, resident_slot_id in validated_members:
                 other_group = self._members.get(manifest.thread_id)
                 if other_group is not None and other_group is not group:
                     raise SandboxError("chat membership points at two sandbox groups")
@@ -512,7 +518,7 @@ class SharedChatSessionSupervisor:
                         process_generation=manifest.process_generation,
                         residency_generation=manifest.residency_generation,
                         resident_state=resident_state,
-                        resident_slot_id=manifest.resident_slot_id,
+                        resident_slot_id=resident_slot_id,
                         last_settled_job_id=manifest.last_settled_job_id,
                     )
                     group.members[manifest.thread_id] = member
@@ -649,7 +655,7 @@ class SharedChatSessionSupervisor:
         prompt: str,
         model: str,
         reasoning_effort: str | None,
-    ) -> ResidentTurn[Any]:
+    ) -> ResidentTurn[DialectRuntime]:
         """Send a prompt to one member without taking a group-wide turn lock."""
         with self._lock:
             group, member = self._leased_member(thread_id, token)
@@ -804,7 +810,7 @@ class SharedChatSessionSupervisor:
         self,
         thread_id: str,
         token: str,
-        turn: ResidentTurn[Any],
+        turn: ResidentTurn[DialectRuntime],
     ) -> SharedTurnTelemetry:
         """Close observation, then enforce and release the activation boundary."""
         with self._lock:
@@ -1304,7 +1310,7 @@ class SharedChatSessionSupervisor:
         self,
         thread_id: str,
         token: str,
-        turn: ResidentTurn[Any],
+        turn: ResidentTurn[DialectRuntime],
     ) -> SharedTurnTelemetry:
         """Fence a turn whose broker stream disappeared before its result.
 
@@ -1597,7 +1603,7 @@ class SharedChatSessionSupervisor:
         # happens under the supervisor-wide metadata lock, so sibling turns
         # and terminals continue while this source is being prepared.
         self._ensure_running(group)
-        stale_transport: ResidentTransport[Any] | None = None
+        stale_transport: ResidentTransport[DialectRuntime] | None = None
         with self._lock:
             self._require_mutation_admission(group)
             fork_lifecycle_generation = group.lifecycle_generation
@@ -1899,7 +1905,7 @@ class SharedChatSessionSupervisor:
 
     def status(self, thread_id: str) -> SharedSessionDescriptor:
         """Return fresh Docker and member process state."""
-        stale_transport: ResidentTransport[Any] | None = None
+        stale_transport: ResidentTransport[DialectRuntime] | None = None
         with self._lock:
             group, member = self._member(thread_id)
             current = self._manager.inspect(group.spec.container_name)
@@ -1918,7 +1924,7 @@ class SharedChatSessionSupervisor:
     def list(self) -> builtins.list[SharedSessionDescriptor]:
         """Return one observation per known membership."""
         self.reconcile()
-        stale_transports: builtins.list[ResidentTransport[Any]] = []
+        stale_transports: builtins.list[ResidentTransport[DialectRuntime]] = []
         with self._lock:
             for group in self._groups.values():
                 for member in group.members.values():
@@ -2118,13 +2124,15 @@ class SharedChatSessionSupervisor:
             raise SandboxError("a new resident process needs a residency generation fence")
         launch_invalid = False
         with self._lock:
-            current_group = self._members.get(member.thread_id)
-            current_member = (
-                current_group.members.get(member.thread_id) if current_group is not None else None
+            rechecked_group = self._members.get(member.thread_id)
+            rechecked_member = (
+                rechecked_group.members.get(member.thread_id)
+                if rechecked_group is not None
+                else None
             )
             launch_invalid = (
-                current_group is not group
-                or current_member is not member
+                rechecked_group is not group
+                or rechecked_member is not member
                 or group.stopping
                 or group.lifecycle_generation != lifecycle_generation
             )
@@ -2148,7 +2156,7 @@ class SharedChatSessionSupervisor:
         current = self._manager.inspect(group.spec.container_name)
         if current is None:
             raise RetainedChatLost("shared sandbox container is missing")
-        network_phase = (
+        network_phase: Literal["setup", "agent"] = (
             "agent"
             if any(member.native_session_id for member in group.members.values())
             else "setup"
@@ -2165,7 +2173,7 @@ class SharedChatSessionSupervisor:
             group.idle_deadline = None
 
     @staticmethod
-    def _detach_dead_transport(member: _Member) -> ResidentTransport[Any] | None:
+    def _detach_dead_transport(member: _Member) -> ResidentTransport[DialectRuntime] | None:
         # The turn-lock owner controls transport replacement. Native fork
         # deliberately closes the source while copying its private state,
         # then resumes it under the same residency fence. A concurrent

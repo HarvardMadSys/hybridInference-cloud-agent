@@ -1109,13 +1109,13 @@ def _shared_live_host_capabilities(
         return []
     for runtime_id in registered_runtimes():
         try:
-            capabilities = driver_for(get_runtime(runtime_id)).capabilities()
+            runtime_capabilities = driver_for(get_runtime(runtime_id)).capabilities()
         except KeyError:
             return []
         if (
-            capabilities.resident_transport != "supervisor_live"
-            or capabilities.fork != "at_anchor"
-            or not capabilities.concurrent_shared_workspace
+            runtime_capabilities.resident_transport != "supervisor_live"
+            or runtime_capabilities.fork != "at_anchor"
+            or not runtime_capabilities.concurrent_shared_workspace
         ):
             return []
     capabilities = [SHARED_SANDBOX_CAPABILITY, NATIVE_FORK_AT_ANCHOR_CAPABILITY]
