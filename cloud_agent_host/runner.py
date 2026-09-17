@@ -686,13 +686,14 @@ def claim(
     The credential names the machine, so the body cannot claim as another
     host. It remains in the trusted runner and never enters the agent process.
     """
-    return claim_payload(
+    payload = claim_payload(
         base_url=base_url,
         host_credential=host_credential,
         worker_id=worker_id,
         lease_ttl=lease_ttl,
         attestation=attestation,
     )
+    return ClaimedJob.from_response(payload) if payload else None
 
 
 def claim_payload(
