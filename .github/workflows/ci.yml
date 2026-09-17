@@ -724,8 +724,12 @@ jobs:
       # This repository is intended to be open-sourced with its history intact,
       # so history is scanned too — a secret removed in a later commit is still
       # published by the commit that introduced it.
+      # Scan every ancestor of this checkout, including both parents of a PR
+      # merge. The default --all also walks unrelated remote/PR refs retained
+      # by a self-hosted runner, so an obsolete commit from another PR can fail
+      # this one even after that other branch has been fixed and deleted.
       - name: Scan history
-        run: gitleaks detect --source . --redact --verbose --no-banner
+        run: gitleaks detect --source . --redact --verbose --no-banner --log-opts="--full-history HEAD"
   # --------------------------------------------------------------- artifacts
   # One cell per artifact, on the architecture that artifact is deployed to:
   # build it, then start it. Both halves in one job deliberately — a self-hosted
