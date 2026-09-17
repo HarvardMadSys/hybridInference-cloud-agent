@@ -12,6 +12,7 @@ import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
+from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
 from cloud_agent_host.chat_sandbox import RetainedChatBackend
 from cloud_agent_host.guest_observer import GuestObservation, GuestProcess
 from cloud_agent_host.sandbox import ProcessBackend, SandboxError, TerminalProcess
@@ -30,7 +31,6 @@ from cloud_agent_host.workspace_broker import (
     _TerminalSession,
     create_app,
 )
-from cloud_agent_host.workspace_broker_client import WorkspaceBrokerClient
 
 
 class _TerminalProcess(TerminalProcess):

@@ -252,7 +252,7 @@ volume or resets its password automatically.
 
 The five default versions live in both
 `deploy/sandbox/Dockerfile.agent-sandbox` and
-`cloud_agent_host/shared_protocol.py`. They are one reviewed protocol unit:
+`cloud_agent_contracts/shared_protocol.py`. They are one reviewed protocol unit:
 the image installs and labels them, while every runner and the control plane
 use the matching constants to decide whether `shared-sandbox-v1` may be
 advertised or claimed. They are therefore source pins, not per-host `.env`

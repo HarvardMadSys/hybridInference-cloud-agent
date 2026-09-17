@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from cloud_agent.execution_profiles import KATA_RUNTIME
 from cloud_agent.host_pool import (
     HOST_DISABLED,
     HOST_ENROLLING,
@@ -26,7 +27,6 @@ from cloud_agent.storage._sql.hosts import (
 )
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
-from cloud_agent_host.sandbox import KATA_RUNTIME
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

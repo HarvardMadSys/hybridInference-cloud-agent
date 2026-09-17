@@ -12,10 +12,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cloud_agent.logging_utils import get_logger
-from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
+from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 
 if TYPE_CHECKING:
-    from cloud_agent_host.workspace_broker_client import WorkspaceBrokerClient
+    from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
 
 logger = get_logger(__name__)
 

@@ -2795,7 +2795,7 @@ async def test_missing_shared_workspace_is_a_conflict_not_a_missing_file(
     store: FakeStorage, monkeypatch
 ):
     """The broker's shared-only 404 describes the workspace, not a file path."""
-    from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
+    from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 
     class Broker:
         async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
@@ -2971,7 +2971,7 @@ class _TerminalSessionBroker:
     async def terminal_input(self, workspace_id: str, terminal_id: str, *, data: str):
         self.calls.append(("input", workspace_id, terminal_id, data))
         if workspace_id in self.suspended:
-            from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
+            from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 
             raise WorkspaceBrokerError(409, "workspace terminals are suspended")
         return _terminal_session_descriptor()
@@ -3470,7 +3470,7 @@ async def test_terminal_routes_report_missing_broker_and_workspace_as_conflicts(
     store: FakeStorage, monkeypatch
 ):
     """A retained chat reports missing broker/workspace as actionable conflicts."""
-    from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
+    from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 
     app = _build_app(store)
     transport = ASGITransport(app=app)

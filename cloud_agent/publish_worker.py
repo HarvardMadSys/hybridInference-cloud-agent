@@ -38,7 +38,7 @@ from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.publisher import PublishError, fetch_base_bundle, publish_patch
 from cloud_agent.schemas import BASE_REF_METADATA_KEY
-from cloud_agent_host.patch_gate import branch_name_for
+from cloud_agent_git.patch_gate import branch_name_for
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (

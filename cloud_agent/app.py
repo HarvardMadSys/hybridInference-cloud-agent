@@ -581,7 +581,7 @@ async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> None:
         return
 
     from cloud_agent.broker_routing import broker_for_job
-    from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
+    from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 
     try:
         broker = await broker_for_job(store.host_pool, snapshot["anchor_job_id"])

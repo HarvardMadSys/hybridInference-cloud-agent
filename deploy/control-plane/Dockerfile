@@ -1,11 +1,14 @@
 # The control plane: the API, the reaper, the publisher.
 #
-# **It ships the host package too, and that is not an oversight.** `patch_gate`
-# is imported by the publisher and the publish worker on this side and by the
-# runner and the snapshotter on the host side; the migration manifest called it
-# host-only, which was wrong. Dropping `cloud_agent_host/` here produces an image that
-# builds, starts, serves, and fails at the first publish — the furthest
-# possible point from the mistake. See MIGRATION.md, "Manifest corrections".
+# **It ships the host package too, and that is not an oversight.**
+# `cloud_agent/api/routes.py` still imports the runtime registry —
+# `registered_runtimes`, `runtime_reasoning_efforts` and
+# `runtimes_supporting_mcp` — from `cloud_agent_host.runtimes`, and
+# `create_app()` imports that router, so dropping `cloud_agent_host/` here
+# produces an image whose control plane cannot start. The publisher's patch
+# gate and archive builders are no longer part of that reach: they live in
+# `cloud_agent_git/`, which this image and the runner image both ship. See
+# MIGRATION.md, "Manifest corrections".
 #
 # **No agent runtimes, no docker socket, no git credentials at build time.**
 # This image never executes an agent and never checks a repository out. The one
@@ -37,9 +40,10 @@ COPY cloud_agent_host/__init__.py cloud_agent_host/__init__.py
 ARG PIP_DEFAULT_TIMEOUT=120
 RUN pip install --no-cache-dir .
 
-# All three packages. See the header: `patch_gate` crosses the boundary.
+# All four packages. See the header for why this image needs the host one.
 COPY cloud_agent/ cloud_agent/
 COPY cloud_agent_contracts/ cloud_agent_contracts/
+COPY cloud_agent_git/ cloud_agent_git/
 COPY cloud_agent_host/ cloud_agent_host/
 
 # Alembic owns the schema. Nothing in this service creates a table at startup,
