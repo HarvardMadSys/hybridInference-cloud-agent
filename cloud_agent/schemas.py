@@ -1620,7 +1620,7 @@ class WorkerResourcesRequest(BaseModel):
         return self
 
 
-class WorkerReleaseRequest(BaseModel):  # type: ignore[no-any-unimported]
+class WorkerReleaseRequest(BaseModel):
     """A claimed turn handed back because it provably never began."""
 
     reason: str = Field(
@@ -2069,7 +2069,7 @@ class SetRuntimeVersionRequest(BaseModel):
     )
 
 
-class SetHostSlotsRequest(BaseModel):  # type: ignore[no-any-unimported]
+class SetHostSlotsRequest(BaseModel):
     """Ask one host to run this many turns at once, or with ``null`` its default."""
 
     slots: int | None = Field(
