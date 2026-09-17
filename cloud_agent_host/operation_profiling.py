@@ -1521,6 +1521,13 @@ def to_record(
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "facts": measurement.facts,
     }
+    # Promoted from facts because it is identity, not an observation: a stored
+    # measurement is correlated with the rest of its interaction by this value,
+    # and a reader should not have to know which dictionary it lives in. An
+    # operation with no interaction -- an attempt startup -- is its own.
+    record["interaction_id"] = str(
+        measurement.facts.get("interaction_id") or measurement.measurement_id
+    )
     if measurement.operation == STARTUP_OPERATION:
         # A v1 consumer reads this field by name. It is written only where the
         # name is true -- for the runner's own startup operation -- so a file

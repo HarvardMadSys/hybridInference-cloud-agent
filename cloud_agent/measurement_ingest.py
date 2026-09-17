@@ -331,7 +331,13 @@ def validate_measurement(
 
     return StoredMeasurement(
         measurement_id=_require(record, "measurement_id", limit=MAX_MEASUREMENT_ID_CHARS),
-        interaction_id=_require(record, "interaction_id", limit=MAX_MEASUREMENT_ID_CHARS),
+        # An operation with no interaction of its own is its own interaction,
+        # which is what the collector states; a producer that omits the field
+        # is taken at that same meaning rather than refused.
+        interaction_id=str(
+            record.get("interaction_id")
+            or _require(record, "measurement_id", limit=MAX_MEASUREMENT_ID_CHARS)
+        )[:MAX_MEASUREMENT_ID_CHARS],
         profiling_run_id=_require(record, "profiling_run_id", limit=MAX_RUN_ID_CHARS),
         schema_version=int(schema_version),
         operation=operation,
