@@ -692,11 +692,16 @@ One command per host makes the runner standing; compose's
 crashes and reboots:
 
 ```bash
-deploy/host/sandbox_host.sh up 4    # build images, tunnel + 4 runners
+deploy/host/sandbox_host.sh up      # build images, tunnel + runners
 deploy/host/sandbox_host.sh preflight # validate this host against an existing image
 deploy/host/sandbox_host.sh check   # probe all relay/control paths
 deploy/host/sandbox_host.sh status  # containers + recent log tail
 deploy/host/sandbox_host.sh down    # stop them
+
+# `up` in its two halves, for a deployer that has to put something between
+# them. Nothing in `prepare` replaces a container that is serving.
+deploy/host/sandbox_host.sh prepare  # pull or build, Kata smoke test, candidate check
+deploy/host/sandbox_host.sh activate # drain, replace, prove
 ```
 
 There is one script now, not two. The co-located `agent_runner.sh` was an

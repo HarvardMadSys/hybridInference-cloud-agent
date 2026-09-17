@@ -11,7 +11,25 @@
 # Idempotent: running it twice with the same SHA is a no-op that still proves
 # the stack is healthy.
 #
-# Usage:  deploy.sh <sha>
+# Usage:  deploy.sh [--phase prepare|prepare-database|activate] <sha>
+#
+# With no `--phase` this runs all three in order, which is what every caller
+# before the split invoked and what the repository's own workflows still do.
+#
+# The phases exist because the release design sequences them across two
+# machines (#270): both sides prepare, *then* this side prepares the database
+# and checks the namespace, *then* the runner host publishes its generation,
+# and only then does this side activate. A deployer that can only invoke the
+# whole script cannot express that order — and cannot get it by running the
+# whole script first, which would switch public services ahead of the host.
+#
+#   prepare           build or pull the images. Replaces nothing.
+#   prepare-database  start Postgres, migrate, check the identity namespace.
+#                     Migrations stay backwards-compatible with the API that is
+#                     still running, so this too replaces nothing.
+#   activate          the compatibility fence, the stack, the health checks and
+#                     the record of what is deployed.
+#
 #   SOURCE_REPO   a local clone holding <sha> (default: $GITHUB_WORKSPACE)
 #   DEPLOY_ROOT   where the deployed checkout lives (default /srv/freeinference-cloud-agent)
 #   COMPOSE_PROJECT  compose project name (default cloudagent)
@@ -22,6 +40,25 @@ set -euo pipefail
 
 AGENT_DEPLOY_MODE="${AGENT_DEPLOY_MODE:-source}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PHASE=all
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --phase)
+      [ "$#" -ge 2 ] || { printf '[deploy] ERROR: --phase needs a value\n' >&2; exit 1; }
+      PHASE="$2"; shift 2 ;;
+    --phase=*) PHASE="${1#--phase=}"; shift ;;
+    *) break ;;
+  esac
+done
+case "${PHASE}" in
+  all|prepare|prepare-database|activate) ;;
+  *) printf '[deploy] ERROR: unknown phase %s; expected prepare, prepare-database, activate\n' "${PHASE}" >&2; exit 1 ;;
+esac
+# Every phase runs the same setup below — the mode check, the checkout or the
+# artifact environment, the Compose helper — because each is a separate process
+# and none of it is a change to the deployment.
+runs_phase() { [ "${PHASE}" = all ] || [ "${PHASE}" = "$1" ]; }
+
 SHA="${1:-${DEPLOY_SHA:-}}"
 SOURCE_REPO="${SOURCE_REPO:-${GITHUB_WORKSPACE:-}}"
 DEPLOY_ROOT="${DEPLOY_ROOT:-/srv/freeinference-cloud-agent}"
@@ -209,20 +246,22 @@ cleanup_failed_bootstrap() {
 }
 trap cleanup_failed_bootstrap EXIT
 
-if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
-  log "pulling release images"
-  compose pull
-else
-  log "building images"
-  # `--provenance=false` keeps a rebuild of an unchanged image the image Compose
-  # already has. Buildx regenerates the provenance attestation on every build, so
-  # its manifest *index* changes even when every layer is cached; a daemon using
-  # the containerd image store identifies an image by that index, and Compose then
-  # replaces every container it just rebuilt. This machine still uses the classic
-  # store, where the identity is the config digest and the churn is invisible —
-  # but the flag costs nothing here and the host's stack is not so lucky.
-  # Artifact mode pulls a published digest and never builds at all.
-  compose build --provenance=false
+if runs_phase prepare; then
+  if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
+    log "pulling release images"
+    compose pull
+  else
+    log "building images"
+    # `--provenance=false` keeps a rebuild of an unchanged image the image Compose
+    # already has. Buildx regenerates the provenance attestation on every build, so
+    # its manifest *index* changes even when every layer is cached; a daemon using
+    # the containerd image store identifies an image by that index, and Compose then
+    # replaces every container it just rebuilt. This machine still uses the classic
+    # store, where the identity is the config digest and the churn is invisible —
+    # but the flag costs nothing here and the host's stack is not so lucky.
+    # Artifact mode pulls a published digest and never builds at all.
+    compose build --provenance=false
+  fi
 fi
 
 # Readiness itself uses the agent-owned database. Bring up only that durable
@@ -232,20 +271,27 @@ fi
 # full `compose up` first would replace the API before compatibility was proved.
 # Migrations shipped here must therefore remain backwards-compatible with the
 # still-running API for the duration of this rolling-deploy window.
-log "starting deployment database"
-# `--wait` makes the healthcheck above an executable ordering guarantee. A
-# plain detached `up` returns as soon as the container has started, which can
-# still let Alembic race Postgres initialization on a fresh volume.
-compose up -d --wait --wait-timeout "${HEALTH_TIMEOUT}" postgres
-log "migrating deployment database"
-compose run --rm --no-deps migrate
+if runs_phase prepare-database; then
+  log "starting deployment database"
+  # `--wait` makes the healthcheck above an executable ordering guarantee. A
+  # plain detached `up` returns as soon as the container has started, which can
+  # still let Alembic race Postgres initialization on a fresh volume.
+  compose up -d --wait --wait-timeout "${HEALTH_TIMEOUT}" postgres
+  log "migrating deployment database"
+  compose run --rm --no-deps migrate
 
-# Check the identity boundary before bootstrapping or replacing either listener.
-# Historical data is never adopted by CD: an operator must first acknowledge
-# its original issuer. A refusal here leaves the running API and relay intact.
-log "checking the Agent database identity issuer"
-compose run --rm --no-deps control-plane \
-  python -m cloud_agent.identity_namespace --check
+  # Check the identity boundary before bootstrapping or replacing either listener.
+  # Historical data is never adopted by CD: an operator must first acknowledge
+  # its original issuer. A refusal here leaves the running API and relay intact.
+  log "checking the Agent database identity issuer"
+  compose run --rm --no-deps control-plane \
+    python -m cloud_agent.identity_namespace --check
+fi
+
+if ! runs_phase activate; then
+  log "phase ${PHASE} complete; nothing serving was replaced"
+  exit 0
+fi
 
 # Heartbeats are HTTP calls to the control plane, not direct database writes.
 # Preserve the old API on an ordinary rolling deploy.  Only when no API

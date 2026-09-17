@@ -71,7 +71,9 @@ log = pathlib.Path(os.environ["TEST_COMMAND_LOG"])
 with log.open("a") as f:
     f.write(json.dumps({"args": a, "sha": os.getenv("AGENT_DEPLOYMENT_SHA"),
                        "sandbox": os.getenv("AGENT_SANDBOX_IMAGE"),
-                       "edge": os.getenv("AGENT_EDGE_CONFIG_FILE")}) + "\n")
+                       "edge": os.getenv("AGENT_EDGE_CONFIG_FILE"),
+                       "physical_host": os.getenv("AGENT_PHYSICAL_HOST"),
+                       "runner_host": os.getenv("AGENT_RUNNER_HOST")}) + "\n")
 if "config" in a and "--environment" in a:
     if os.getenv("TEST_REAL_COMPOSE"):
         raise SystemExit(subprocess.run([os.environ["TEST_REAL_COMPOSE"], *a],
@@ -224,9 +226,9 @@ def deployment(tmp_path: Path, stack: str, *, real_compose: bool = False) -> tup
     return script, env
 
 
-def run(script: Path, env: dict) -> tuple[subprocess.CompletedProcess, list[dict]]:
+def run(script: Path, env: dict, *arguments: str) -> tuple[subprocess.CompletedProcess, list[dict]]:
     result = subprocess.run(
-        ["bash", str(script)], env=env, text=True, capture_output=True, timeout=30
+        ["bash", str(script), *arguments], env=env, text=True, capture_output=True, timeout=30
     )
     log = Path(env["TEST_COMMAND_LOG"])
     calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
@@ -429,3 +431,134 @@ def test_manifest_validation_and_rendering_use_the_same_bytes(tmp_path: Path):
     generated = next((Path(env["DEPLOY_ROOT"]) / "deploy/control-plane").glob(".release-*.yml"))
     service = yaml.safe_load(generated.read_text())["services"]["control-plane"]
     assert service["image"] == manifest()["artifacts"][0]["image"]
+
+
+# ------------------------------------------------------------------ phases
+#
+# The release design sequences a deployment across two machines: both sides
+# prepare, the control plane then prepares its database and checks the identity
+# namespace, the runner host then publishes its generation, and only then does
+# the control plane switch public services. A deployer could not express that
+# while each side had one entry point that did all of it (#270).
+#
+# What these pin is the property that makes the phases worth having: `prepare`
+# replaces nothing, and the things that replace something are all in `activate`.
+
+
+def replaces_something(call: dict) -> bool:
+    """Would this Docker invocation disturb a container that is serving?
+
+    `up -d --wait postgres` and the readiness `run --rm` are in neither camp by
+    name, so the check is narrow on purpose: a `stop`, or an `up` that is not
+    the durable dependency the database phase brings up by itself.
+    """
+    arguments = call["args"]
+    if "stop" in arguments or "down" in arguments:
+        return True
+    if "up" in arguments:
+        return "postgres" not in arguments
+    return False
+
+
+@pytest.mark.parametrize("stack", ["control-plane", "host"])
+def test_preparing_replaces_nothing_that_is_serving(tmp_path: Path, stack: str):
+    script, env = deployment(tmp_path, stack)
+    state = Path(env["DEPLOY_ROOT"])
+
+    result, calls = run(script, env, "--phase", "prepare", COMMIT)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not [c for c in calls if replaces_something(c)], [c["args"] for c in calls]
+    assert any(c["args"][:1] == ["pull"] or c["args"][-1:] == ["pull"] for c in calls), (
+        "preparing is where the images arrive"
+    )
+    # The generation this host advertises, and the record of what is deployed,
+    # are both untouched: nothing has been replaced, so nothing may claim to be.
+    assert (state / ".deployed-sha").read_text().strip() == "previous-generation"
+    assert (state / ".shared-live-ready").read_text().strip() == "previous-generation"
+
+
+def test_the_control_planes_database_phase_migrates_and_stops_there(tmp_path: Path):
+    """The phase the design puts between the two hosts' preparation and the
+    host's replacement, which had no name a deployer could call."""
+    script, env = deployment(tmp_path, "control-plane")
+
+    result, calls = run(script, env, "--phase", "prepare-database", COMMIT)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert any("migrate" in c["args"] for c in calls)
+    assert any("cloud_agent.identity_namespace" in c["args"] for c in calls)
+    assert not any("cloud_agent.deploy_readiness" in c["args"] for c in calls), (
+        "the fence belongs to activation"
+    )
+    assert not any("--remove-orphans" in c["args"] for c in calls)
+    assert (Path(env["DEPLOY_ROOT"]) / ".deployed-sha").read_text().strip() == "previous-generation"
+
+
+@pytest.mark.parametrize("stack", ["control-plane", "host"])
+def test_the_phases_together_do_what_one_invocation_does(tmp_path: Path, stack: str):
+    """The split has to be a split, not a rewrite: running the phases in order
+    has to end where the single entry point ends."""
+    phases = (
+        ["prepare", "prepare-database", "activate"]
+        if stack == "control-plane"
+        else [
+            "prepare",
+            "activate",
+        ]
+    )
+    script, env = deployment(tmp_path, stack)
+    state = Path(env["DEPLOY_ROOT"])
+
+    for phase in phases:
+        result, _ = run(script, env, "--phase", phase, COMMIT)
+        assert result.returncode == 0, f"{phase}: {result.stdout}{result.stderr}"
+
+    assert (state / ".deployed-sha").read_text().strip() == COMMIT
+    if stack == "host":
+        assert (state / ".shared-live-ready").read_text().strip() == COMMIT
+
+
+@pytest.mark.parametrize("stack", ["control-plane", "host"])
+def test_no_phase_is_the_whole_deployment_it_always_was(tmp_path: Path, stack: str):
+    """Every existing caller passes a commit and nothing else."""
+    script, env = deployment(tmp_path, stack)
+
+    result, calls = run(script, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (Path(env["DEPLOY_ROOT"]) / ".deployed-sha").read_text().strip() == COMMIT
+    assert any(replaces_something(c) for c in calls), "it still replaces the stack"
+
+
+@pytest.mark.parametrize("stack", ["control-plane", "host"])
+def test_an_unknown_phase_is_refused_before_anything_runs(tmp_path: Path, stack: str):
+    script, env = deployment(tmp_path, stack)
+
+    result, calls = run(script, env, "--phase", "activat", COMMIT)
+
+    assert result.returncode != 0
+    assert "unknown phase" in result.stderr
+    assert calls == []
+
+
+def test_activating_on_its_own_still_names_this_machine(tmp_path: Path):
+    """The state that has to survive the boundary.
+
+    `up` resolved the physical host and the runner host in the middle of the
+    rollout and exported them for the `compose up` that followed. Split into two
+    processes, the second one would have started the runners with no name for
+    their machine — and the admin inventory identifies a server by exactly that.
+    """
+    script, env = deployment(tmp_path, "host")
+
+    prepared, _ = run(script, env, "--phase", "prepare", COMMIT)
+    assert prepared.returncode == 0, prepared.stdout + prepared.stderr
+    activated, calls = run(script, env, "--phase", "activate", COMMIT)
+    assert activated.returncode == 0, activated.stdout + activated.stderr
+
+    replacement = next(
+        call for call in calls if "up" in call["args"] and "--remove-orphans" in call["args"]
+    )
+    assert replacement["physical_host"], replacement
+    assert replacement["runner_host"], replacement

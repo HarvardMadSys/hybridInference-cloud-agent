@@ -408,9 +408,14 @@ def test_host_up_refuses_an_unsafe_reverse_broker_bind(tmp_path: Path, unsafe_bi
 
 
 def test_first_kata_deploy_builds_the_image_before_using_it_for_the_kernel_probe() -> None:
-    """A clean host has no previous sandbox image for ``docker run`` to use."""
+    """A clean host has no previous sandbox image for ``docker run`` to use.
+
+    Sliced from ``cmd_prepare`` rather than ``cmd_up``: the rollout is two named
+    halves since #270, and this ordering lives in the first of them. ``cmd_up``
+    is now the pair, so slicing it would read four lines and assert nothing.
+    """
     script = SANDBOX_HOST.read_text()
-    command = script[script.index("cmd_up() {") : script.index("cmd_check() {")]
+    command = script[script.index("cmd_prepare() {") : script.index("cmd_check() {")]
 
     assert command.index("docker build") < command.index("kata_smoke_test")
     assert command.index("kata_smoke_test") < command.index("compose up")
@@ -551,7 +556,7 @@ def test_host_readiness_probes_both_sandbox_relays() -> None:
 
 def test_host_up_waits_for_parallel_control_bootstrap_but_manual_check_is_immediate() -> None:
     script = SANDBOX_HOST.read_text()
-    up = script[script.index("cmd_up() {") : script.index("cmd_check() {")]
+    up = script[script.index("cmd_prepare() {") : script.index("cmd_check() {")]
     dispatch = script[script.rindex('case "${1:-}" in') :]
 
     assert 'readiness_wait="${readiness_wait:-900}"' in up
@@ -643,7 +648,7 @@ def test_host_up_probes_the_tunnels_instead_of_pausing_first() -> None:
     immediately after it.
     """
     script = SANDBOX_HOST.read_text()
-    up = script[script.index("cmd_up() {") : script.index("cmd_check() {")]
+    up = script[script.index("cmd_prepare() {") : script.index("cmd_check() {")]
     # Statements, not the word: the comment above the probe explains the pause
     # that was removed, and a substring search over the function would fail on
     # the strength of the sentence describing it.
