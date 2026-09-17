@@ -36,7 +36,7 @@ Two properties are load-bearing and easy to break by accident:
 
 - **No repository credential ever enters the sandbox.** The host captures a
   quiescent group diff; the publisher — running in the control plane, outside the sandbox — is the
-  only component holding a GitHub token that can *write*. The runner does hold
+  only component holding a GitHub token that can _write_. The runner does hold
   a clone credential, but it is read-only, scoped to the one repository, and
   deliberately never recorded in `.git/config`: the checkout adds no remote,
   the credential travels in git's environment rather than its argv, and the
@@ -93,28 +93,28 @@ not change task scheduling or retry behavior.
 
 Against real components on a developer machine:
 
-| | How |
-|---|---|
-| Store: fencing, reaper, retained-group snapshot publish | dbtests against Postgres |
-| Job API, SSE resume, worker endpoints | control-plane API and server suites |
-| Per-job inference grant: attempt fencing ~~, budget 429~~ | live gateway. The struck half exercised a per-job spend cap that no longer exists: C5/C6 replaced it with the owner's gateway daily quota, which this service does not enforce and so cannot verify here |
-| Retained runner + runtime adapters | Docker-only local product stack with the exact Claude Code, Codex, Pi, OpenCode, and Kilo pins: every CLI passed `NEW → LIVE → docker stop → RESTORED` |
-| Native Fork concurrency | every pinned CLI created a distinct child native session immediately; source and child were simultaneously `RUNNING` against one container/workspace and both crossed the local inference barrier |
-| Publish: patch → branch → draft PR | real `git push` to a local bare repo |
-| **A real job on a real model** | live Claude Code CLI × `deepseek-v4-flash` through the production gateway: docstring landed on disk, patch produced, 3 calls / 74,523 tokens / $0.0075 attributed to the job in `api_logs` |
-| Retained Docker lifecycle | real mount-free (`Mounts=[]`) chat containers keep one writable layer and container id across group idle `docker stop` and later `docker start`; the phase bridge is released while stopped and recreated on wake, and publication capture replaces neither |
-| Source import → edit → snapshot | the trusted runner imports a credential-scrubbed source archive into `/workspace`; real Git status/diff and the quiescent group publication snapshot complete without a host worktree or snapshot bind mount |
-| Sandbox process boundary | real Docker: non-root Agent CLI member UIDs, dropped capabilities, and closed agent egress; production multi-tenant Kata/gVisor remains a deployment gate below |
-| The control plane on staging | `/v1/agent/*` live: job create/get/list/cancel, SSE stream, and an unauthenticated host refused at `/worker/claim` |
-| MCP: per-user resolution, relay authorization, tool filtering | unit + API tests against a mocked upstream: one user's credential never resolves for another, a job cannot reach a server it was not granted, a dead fence loses tools, and a blocked tool never leaves the relay |
-| **MCP: what `--strict-mcp-config` (hybridInference#1129) actually prevents** | the flag was added on the strength of the CLI's documented behaviour; this is the measurement. Real Claude Code 2.1.220 in a job's exact configuration (headless, `bypassPermissions`, cwd = a checkout carrying a `.mcp.json`): without the flag the CLI reports the repository's server alongside the platform's, with it only the platform's. No approval step was involved either way |
-| MCP: the adapter's `--mcp-config` is accepted by the real CLI | the argv `ClaudeCodeRuntime.prepare` emits, run against the real binary: the platform's server appears in `system/init`, and a deliberately bogus flag in the same argv fails instantly, so the flags are being parsed rather than ignored |
-| MCP: the token can stay out of argv | the same run with the header written as `Bearer ${AGENT_MCP_TOKEN}` and the variable exported: the CLI expanded it and the proxy authenticated the request, while the command line carried only the placeholder |
-| **MCP: the proxy against a real hosted server** | the shipping router and filters against live `mcp.deepwiki.com` (which answers over SSE, so the streaming filter is the one that ran): `initialize` → `serverInfo: DeepWiki`, `tools/list` → its three real tools, `tools/call read_wiki_structure` → real documentation for `psf/requests`. Measured before the deployment-wide registry was replaced by the per-user catalogue (hybridInference#48); `deepwiki` is not a catalogue entry today, so this records the relay path rather than a shippable configuration |
-| MCP: the allowlist, on a real catalogue | same server, `tools: [read_wiki_structure]`: `tools/list` returned that one tool of the three, and `tools/call ask_question` came back `-32601` without the request leaving the relay. Same caveat as the row above: the tool-name allowlist path is real but no current catalogue entry uses it — `github` declares `read_scope="endpoint"` instead |
-| MCP: the authorization matrix, end to end | live token + granted server 200; live token + a server the job was not granted 403; a superseded attempt 401; an ordinary `hyi-` key 401; no credential 401 |
-| MCP: Claude Code driving the proxy | the real CLI, pointed at the proxy, completed the whole handshake through it — `initialize`, `notifications/initialized`, the `GET` stream, `tools/list` — each reaching deepwiki and returning 200 |
-| **A self-hosted runner completing a real job** | `ajob_04de5d509a25ded2` against staging: claimed → cloned `psf/requests` at `414f0513` (verified equal to that repo's HEAD) → Claude Code 2.1.220 in a Docker sandbox as uid 10001 → `Read` + `Edit` with `is_error: false` → 518-byte patch stored → `succeeded`. The patch was read back and matches the file the agent left on disk |
+|                                                                              | How                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Store: fencing, reaper, retained-group snapshot publish                      | dbtests against Postgres                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Job API, SSE resume, worker endpoints                                        | control-plane API and server suites                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Per-job inference grant: attempt fencing ~~, budget 429~~                    | live gateway. The struck half exercised a per-job spend cap that no longer exists: C5/C6 replaced it with the owner's gateway daily quota, which this service does not enforce and so cannot verify here                                                                                                                                                                                                                                                                                                               |
+| Retained runner + runtime adapters                                           | Docker-only local product stack with the exact Claude Code, Codex, Pi, OpenCode, and Kilo pins: every CLI passed `NEW → LIVE → docker stop → RESTORED`                                                                                                                                                                                                                                                                                                                                                                 |
+| Native Fork concurrency                                                      | every pinned CLI created a distinct child native session immediately; source and child were simultaneously `RUNNING` against one container/workspace and both crossed the local inference barrier                                                                                                                                                                                                                                                                                                                      |
+| Publish: patch → branch → draft PR                                           | real `git push` to a local bare repo                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| **A real job on a real model**                                               | live Claude Code CLI × `deepseek-v4-flash` through the production gateway: docstring landed on disk, patch produced, 3 calls / 74,523 tokens / $0.0075 attributed to the job in `api_logs`                                                                                                                                                                                                                                                                                                                             |
+| Retained Docker lifecycle                                                    | real mount-free (`Mounts=[]`) chat containers keep one writable layer and container id across group idle `docker stop` and later `docker start`; the phase bridge is released while stopped and recreated on wake, and publication capture replaces neither                                                                                                                                                                                                                                                            |
+| Source import → edit → snapshot                                              | the trusted runner imports a credential-scrubbed source archive into `/workspace`; real Git status/diff and the quiescent group publication snapshot complete without a host worktree or snapshot bind mount                                                                                                                                                                                                                                                                                                           |
+| Sandbox process boundary                                                     | real Docker: non-root Agent CLI member UIDs, dropped capabilities, and closed agent egress; production multi-tenant Kata/gVisor remains a deployment gate below                                                                                                                                                                                                                                                                                                                                                        |
+| The control plane on staging                                                 | `/v1/agent/*` live: job create/get/list/cancel, SSE stream, and an unauthenticated host refused at `/worker/claim`                                                                                                                                                                                                                                                                                                                                                                                                     |
+| MCP: per-user resolution, relay authorization, tool filtering                | unit + API tests against a mocked upstream: one user's credential never resolves for another, a job cannot reach a server it was not granted, a dead fence loses tools, and a blocked tool never leaves the relay                                                                                                                                                                                                                                                                                                      |
+| **MCP: what `--strict-mcp-config` (hybridInference#1129) actually prevents** | the flag was added on the strength of the CLI's documented behaviour; this is the measurement. Real Claude Code 2.1.220 in a job's exact configuration (headless, `bypassPermissions`, cwd = a checkout carrying a `.mcp.json`): without the flag the CLI reports the repository's server alongside the platform's, with it only the platform's. No approval step was involved either way                                                                                                                              |
+| MCP: the adapter's `--mcp-config` is accepted by the real CLI                | the argv `ClaudeCodeRuntime.prepare` emits, run against the real binary: the platform's server appears in `system/init`, and a deliberately bogus flag in the same argv fails instantly, so the flags are being parsed rather than ignored                                                                                                                                                                                                                                                                             |
+| MCP: the token can stay out of argv                                          | the same run with the header written as `Bearer ${AGENT_MCP_TOKEN}` and the variable exported: the CLI expanded it and the proxy authenticated the request, while the command line carried only the placeholder                                                                                                                                                                                                                                                                                                        |
+| **MCP: the proxy against a real hosted server**                              | the shipping router and filters against live `mcp.deepwiki.com` (which answers over SSE, so the streaming filter is the one that ran): `initialize` → `serverInfo: DeepWiki`, `tools/list` → its three real tools, `tools/call read_wiki_structure` → real documentation for `psf/requests`. Measured before the deployment-wide registry was replaced by the per-user catalogue (hybridInference#48); `deepwiki` is not a catalogue entry today, so this records the relay path rather than a shippable configuration |
+| MCP: the allowlist, on a real catalogue                                      | same server, `tools: [read_wiki_structure]`: `tools/list` returned that one tool of the three, and `tools/call ask_question` came back `-32601` without the request leaving the relay. Same caveat as the row above: the tool-name allowlist path is real but no current catalogue entry uses it — `github` declares `read_scope="endpoint"` instead                                                                                                                                                                   |
+| MCP: the authorization matrix, end to end                                    | live token + granted server 200; live token + a server the job was not granted 403; a superseded attempt 401; an ordinary `hyi-` key 401; no credential 401                                                                                                                                                                                                                                                                                                                                                            |
+| MCP: Claude Code driving the proxy                                           | the real CLI, pointed at the proxy, completed the whole handshake through it — `initialize`, `notifications/initialized`, the `GET` stream, `tools/list` — each reaching deepwiki and returning 200                                                                                                                                                                                                                                                                                                                    |
+| **A self-hosted runner completing a real job**                               | `ajob_04de5d509a25ded2` against staging: claimed → cloned `psf/requests` at `414f0513` (verified equal to that repo's HEAD) → Claude Code 2.1.220 in a Docker sandbox as uid 10001 → `Read` + `Edit` with `is_error: false` → 518-byte patch stored → `succeeded`. The patch was read back and matches the file the agent left on disk                                                                                                                                                                                 |
 
 ## Not verified
 
@@ -123,7 +123,7 @@ Be precise about these when reporting status:
 - **The full model matrix.** One real job on one real model is verified (see
   above); the 2-runtime × 3-model matrix has not been run, so cross-model
   behaviour differences are still unknown.
-- **No real *job* has used MCP.** The proxy is verified against a live server
+- **No real _job_ has used MCP.** The proxy is verified against a live server
   (see above), but through a harness: the shipping router and filters, with a
   faked job store, and an agent CLI running outside a sandbox. What has not run
   is the whole chain — a queued job, a runner, a real sandbox on the
@@ -144,7 +144,7 @@ Be precise about these when reporting status:
   the image.
 - **This service's production deployment.** `/v1/agent/*` belongs to this
   service, so whether it answers in production is a fact about this
-  deployment. The 404 this bullet used to report was the *gateway's* agent
+  deployment. The 404 this bullet used to report was the _gateway's_ agent
   routes — a different service, deleted 2026-08-09 — never these. Deployment
   state is recorded by `docs/cutover.md`,
   `deploy/control-plane/README-cd.md` and `deploy/DEPLOY_PROTOCOL`, not here;
@@ -160,7 +160,7 @@ Be precise about these when reporting status:
   What changed is that the host side is now provisionable rather than absent.
   `deploy/host/setup_kata_runtime.sh` installs and links a pinned Kata release,
   and the runner's own preflight refuses to claim jobs until one real container
-  comes back reporting a kernel that is *not* the host's;
+  comes back reporting a kernel that is _not_ the host's;
   `deploy/host/sandbox_host.sh up` surfaces that verdict before it
   returns. Both are covered by unit tests, including the case where the runtime
   is accepted and the sandbox still lands on the host kernel.
@@ -174,11 +174,11 @@ Be precise about these when reporting status:
   give three distinct errors, which is what makes this meaningful rather than
   hopeful:
 
-  | `--runtime` | Result |
-  |---|---|
-  | unset (runc) | runs |
+  | `--runtime`                | Result                                                                                                                          |
+  | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+  | unset (runc)               | runs                                                                                                                            |
   | a name that does not exist | `unknown or invalid runtime name` — the daemon rejects it, so the flag is reaching the daemon and is not being silently dropped |
-  | `io.containerd.kata.v2` | `failed to start shim` — the name is accepted and the shim is attempted; only the binary is missing |
+  | `io.containerd.kata.v2`    | `failed to start shim` — the name is accepted and the shim is attempted; only the binary is missing                             |
 
   A dropped flag would be the dangerous failure: the kata backend would
   silently run as a plain shared-kernel container while every log line and
@@ -191,11 +191,11 @@ closed: with neither, no job can be created at all.
 
 **A connection the user made.** They authorize the GitHub App, GitHub returns a
 code to `<frontend>/agents/connected`, and the platform exchanges it for a
-token that speaks *as that user* to ask which installations they can reach.
+token that speaks _as that user_ to ask which installations they can reach.
 Those installation ids are recorded against the user, and the repositories they
 cover are what the composer offers. Every step is GitHub's answer rather than
 the requester's — which is the point, because the requester chooses the
-repository and the *platform* mints the credential for it. Anything the
+repository and the _platform_ mints the credential for it. Anything the
 requester could simply assert would be a confused deputy.
 
 **The deployment allowlist** (`AGENT_REPO_ALLOWLIST`), for the single-tenant
@@ -280,7 +280,7 @@ protocol capabilities are described below and in the
 
 The relay follows these rules:
 
-- **Nothing is reachable by name.** A URL path segment is a *binding alias* —
+- **Nothing is reachable by name.** A URL path segment is a _binding alias_ —
   a name one conversation gave one connection — and a token names a job, so the
   relay resolves the alias against that job's own bindings. A connection
   somebody else added cannot be named into existence.
@@ -320,7 +320,7 @@ The relay follows these rules:
   bindings, never a split on the separator: an alias may itself contain `__`, so
   ambiguous or long names receive a stable bounded suffix. The same endpoint
   serves resources and prompts, resolved through that one catalogue and decided by the same function
-  as a tool call — the design gives them their own *scopes* so that they are not
+  as a tool call — the design gives them their own _scopes_ so that they are not
   a way round tool authorization, and a separate code path is exactly how they
   would become one. A tool and a prompt are namespaced by alias because a bare
   name is ambiguous the moment two connections offer one. A resource uses
@@ -338,11 +338,11 @@ migrated database, one seeded connection with a static credential and a
 discovery snapshot, one live job whose attempt holds the fence, and pi 0.73.1
 driving the bridge at `/v1/agent/mcp`. The model was advertised exactly
 `session__github__get_issue`; the upstream server saw `server/discover`,
-`initialize` and `tools/call`, every one carrying the *connection's* credential
+`initialize` and `tools/call`, every one carrying the _connection's_ credential
 rather than the sandbox token; the call reached it as `get_issue` with the
 model's own arguments; and the tool result the model received was the upstream's
 text. Two details that only a live run shows: the era probe falls back to the
-handshake against a server that answers `-32601`, and the tool's *namespaced*
+handshake against a server that answers `-32601`, and the tool's _namespaced_
 name never leaves the platform — the upstream is addressed by its own.
 
 It is `tests/external/test_agent_mcp_end_to_end.py`, and it runs in seconds:
@@ -361,7 +361,7 @@ at rest, like every other credential here), renames it, revokes it, and binds a
 bound: it is a server the platform reaches directly, and sending it the long way
 round a user's laptop would be a detour with no purpose. Binding is the
 authorization step and it moves both versions, because a connector decides
-*where* a local process runs and that is a change of target like any other.
+_where_ a local process runs and that is a change of target like any other.
 Revoking detaches everything that routed through it in the same transaction — a
 connector marked revoked while a connection still names it is a job resolving to
 a target its owner has withdrawn.
@@ -375,7 +375,7 @@ nothing here claims otherwise.
 **Deploying this, and backing it out.** Three things have to be true in order,
 and the middle one is the one people skip.
 
-*Order the schema first.* `0008_generic_mcp_connections` drops
+_Order the schema first._ `0008_generic_mcp_connections` drops
 `UNIQUE(user_id, server)`, renames `server` to `template`, adds the connection's
 transport, location, endpoint / launch spec and auth profile, moves the legacy
 `agent_threads.mcp_servers` list onto explicit bindings. It retains an empty,
@@ -391,7 +391,7 @@ applied the original, destructive `0008`. Apply migrations through head before
 replacing the API. This is a forward repair: it preserves connections,
 credentials and permissions, and does not require a database downgrade.
 
-*Migrate, do not guess.* The revision maps a legacy name only where the thread's
+_Migrate, do not guess._ The revision maps a legacy name only where the thread's
 owner has exactly one connection for that provider, and writes everything else
 into `agent_mcp_legacy_bindings` with `no_connection` or `ambiguous_connection`.
 Those rows are the list of sessions whose tools a human has to look at; they are
@@ -418,19 +418,19 @@ no second encryption root — connection credentials are wrapped with the same
 key to rotate and two credential kinds that cannot be read as each other.
 
 **An adapter may claim MCP only when it can do both halves**: point the CLI at
-the platform's relay, *and* stop it reading any other MCP source. A runtime that
+the platform's relay, _and_ stop it reading any other MCP source. A runtime that
 could be given servers but not stopped from picking up the repository's own
 would be worse than one with no MCP at all, so the capability is declared per
 runtime and checked against the pinned binary rather than inferred from the
 family a CLI belongs to.
 
-| Runtime | Pin | How the relay reaches it | Why the repository cannot add servers |
-|---|---|---|---|
-| `claude-code` | 2.1.220 | `--mcp-config` with the platform's servers | `--strict-mcp-config`, verified against the CLI: without it a committed `.mcp.json` is loaded alongside ours with no approval step |
-| `opencode` | 1.18.9 | the reviewed `opencode-freeinference` wrapper merges the relay endpoints into the `OPENCODE_CONFIG` it writes | the wrapper exports `OPENCODE_DISABLE_PROJECT_CONFIG`, which covers both `opencode.json` and `.opencode/` |
-| `kilo` | 7.4.17 | the reviewed wrapper configures the authenticated merged relay for run and serve; the live bridge verifies connection before reporting ready | the pinned build patches the legacy MCP loader to honor `KILO_DISABLE_PROJECT_CONFIG`, covering `.kilo/mcp.json` and `.kilocode/mcp.json` alongside the regular project configuration |
-| `codex` | 0.145.0 | exec and app-server share the merged relay URL and token environment reference; app-server verifies MCP startup | trusted guest-root bootstrap atomically installs the deployment's exact relay URL as the sole server identity in `/etc/codex/requirements.toml` before launch; repository and user configuration cannot expand that system allowlist |
-| `pi` | 0.73.1 | the reviewed `pi-mcp-bridge.ts` shipped at `/usr/local/libexec/`, loaded with an explicit `-e` | `--no-extensions` disables every other extension source — the project's `.pi/extensions/`, the global directory, and anything a settings file names — so the explicit path is the only way in. Verified against the pinned binary: a repository's own extension does not load, the relay's tools are registered as `<alias>__<tool>`, and a call reaches the upstream |
+| Runtime       | Pin     | How the relay reaches it                                                                                                                     | Why the repository cannot add servers                                                                                                                                                                                                                                                                                                                                 |
+| ------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude-code` | 2.1.220 | `--mcp-config` with the platform's servers                                                                                                   | `--strict-mcp-config`, verified against the CLI: without it a committed `.mcp.json` is loaded alongside ours with no approval step                                                                                                                                                                                                                                    |
+| `opencode`    | 1.18.9  | the reviewed `opencode-freeinference` wrapper merges the relay endpoints into the `OPENCODE_CONFIG` it writes                                | the wrapper exports `OPENCODE_DISABLE_PROJECT_CONFIG`, which covers both `opencode.json` and `.opencode/`                                                                                                                                                                                                                                                             |
+| `kilo`        | 7.4.17  | the reviewed wrapper configures the authenticated merged relay for run and serve; the live bridge verifies connection before reporting ready | the pinned build patches the legacy MCP loader to honor `KILO_DISABLE_PROJECT_CONFIG`, covering `.kilo/mcp.json` and `.kilocode/mcp.json` alongside the regular project configuration                                                                                                                                                                                 |
+| `codex`       | 0.145.0 | exec and app-server share the merged relay URL and token environment reference; app-server verifies MCP startup                              | trusted guest-root bootstrap atomically installs the deployment's exact relay URL as the sole server identity in `/etc/codex/requirements.toml` before launch; repository and user configuration cannot expand that system allowlist                                                                                                                                  |
+| `pi`          | 0.73.1  | the reviewed `pi-mcp-bridge.ts` shipped at `/usr/local/libexec/`, loaded with an explicit `-e`                                               | `--no-extensions` disables every other extension source — the project's `.pi/extensions/`, the global directory, and anything a settings file names — so the explicit path is the only way in. Verified against the pinned binary: a repository's own extension does not load, the relay's tools are registered as `<alias>__<tool>`, and a call reaches the upstream |
 
 A job naming connections on a runtime that has not declared them is refused at
 creation rather than run with the tools silently missing.
@@ -454,7 +454,7 @@ environment, never in argv and never in the config file.
 
 The flag landed in hybridInference#1129 on the strength of the CLI's documented behaviour, and
 `--mcp-config` now supplies the platform's servers alongside it. The pairing is
-load-bearing in both directions: strict mode makes our config the *only* source
+load-bearing in both directions: strict mode makes our config the _only_ source
 of servers, and our config is passed even when empty so there is no gap.
 
 What the flag prevents was measured rather than assumed, in exactly the
@@ -462,18 +462,22 @@ configuration a job runs in (headless `-p`, `bypassPermissions`, cwd = the
 checkout). A directory containing
 
 ```json
-{"mcpServers":{"evil_repo_server":{"command":"/bin/echo","args":["pwned"]}}}
+{
+  "mcpServers": {
+    "evil_repo_server": { "command": "/bin/echo", "args": ["pwned"] }
+  }
+}
 ```
 
 produces these two `system/init` lines, differing only in the flag:
 
-| invocation | MCP servers reported by the CLI |
-|---|---|
-| `--mcp-config <ours>` | `evil_repo_server`, `github` |
-| `--mcp-config <ours> --strict-mcp-config` | `github` |
+| invocation                                | MCP servers reported by the CLI |
+| ----------------------------------------- | ------------------------------- |
+| `--mcp-config <ours>`                     | `evil_repo_server`, `github`    |
+| `--mcp-config <ours> --strict-mcp-config` | `github`                        |
 
 No prompt, no approval step: the permission mode the sandbox needs for its
-*own* work is exactly what removes the one gate that would have stopped this.
+_own_ work is exactly what removes the one gate that would have stopped this.
 That is why the flag stays unconditional now that there is a real config to
 pass beside it — a job with no MCP at all is the case where an injected server
 would be least expected and least noticed.
@@ -528,7 +532,7 @@ AGENT_EGRESS_NETWORK_CUSTOM=agent-routable
 That gives the agent phase general egress — untrusted repository code included
 — which is the property `platform_only` exists to hold.
 
-One more compose detail worth knowing: the overlay *declares* `agent-egress` as
+One more compose detail worth knowing: the overlay _declares_ `agent-egress` as
 the relay-discovery backplane, so compose insists on creating it. A network of
 that name created by hand beforehand is refused with a label mismatch — let
 compose own it, or point the tier variables at names compose does not declare.
@@ -584,7 +588,7 @@ control plane and every host broker. It authorizes file, terminal, Git, and
 session-lifecycle calls. It is not a claim credential and never enters a chat
 container.
 
-**GitHub credential** — install a GitHub App and give the *control plane* its private
+**GitHub credential** — install a GitHub App and give the _control plane_ its private
 key. Nothing needs to be minted or rotated by hand: the platform signs a
 nine-minute App JWT (`github_app.py`; GitHub refuses more than ten) and
 exchanges it for an hour-long token scoped to the installation covering the
@@ -622,7 +626,7 @@ The App needs `contents: write` and `pull_requests: write` and nothing else —
 notably not `workflows`, so a patch touching `.github/` cannot be pushed even
 if the gate were bypassed. Revocation is uninstalling the App.
 
-For the *connect* flow (a user authorizing their own repositories) the App
+For the _connect_ flow (a user authorizing their own repositories) the App
 also needs its OAuth half, with the callback pointing at this deployment's
 frontend:
 
@@ -644,7 +648,7 @@ installation. Keeping those two URLs separate is required for reconnects:
 GitHub sends an already-installed App's `/installations/new` link to its
 settings page without invoking the OAuth callback.
 
-That same redirect is what *Configure repositories* relies on, so the install
+That same redirect is what _Configure repositories_ relies on, so the install
 URL stays wired to a connected user's Manage menu: it is the only route to the
 page where the App's repository selection changes, and GitHub picks the user
 or organization settings page itself. Set `AGENT_GITHUB_APP_INSTALL_URL` to
@@ -652,7 +656,7 @@ the `/apps/<slug>/installations/new` form — pointing it at the OAuth endpoint
 instead leaves a user with no installation looping through authorization.
 
 The same App also supplies the runner's clone credential, and the two are
-*not* the same token. An installation token inherits every permission the App
+_not_ the same token. An installation token inherits every permission the App
 holds unless it asks for less, so the clone token is requested as
 `contents: read` on the single repository being worked on. Getting that wrong
 would put a push-capable credential on the host that executes untrusted
@@ -1213,7 +1217,7 @@ out. The compose project below is staging's (`cloudagent`).
    written to the row and the heartbeat deliberately never clears it, so the
    restored host authenticates, heartbeats, and still claims nothing; step 6
    then fails readiness with `pinned host ... is not shared-live ready: ...
-   status is draining`. Replaying step 1's generated statements puts back
+status is draining`. Replaying step 1's generated statements puts back
    exactly the hosts that were online, and leaves a host that was already
    drained or disabled alone.
 
@@ -1221,7 +1225,7 @@ out. The compose project below is staging's (`cloudagent`).
    it prints nothing, the old database had no binding: verify the original
    Gateway issuer before the rebuild, then adopt it with
    `python -m cloud_agent.identity_namespace --adopt-existing --issuer
-   <original-issuer>`. Do not adopt the currently configured issuer without
+<original-issuer>`. Do not adopt the currently configured issuer without
    that check, and do not drop the check — it is what stops the rebuild from
    silently handing one Gateway's `user_id`s to another.
 
@@ -1392,11 +1396,11 @@ proves the expected container/data-root is gone may transition the context to
 one service per host. It enrolls, heartbeats and samples capacity — the things
 a machine does once — and it claims a turn only while it is under its limit,
 starting a process for that turn as it claims it. That process runs the turn to
-completion and exits. So the limit *is* how many turns the host runs at once,
+completion and exits. So the limit _is_ how many turns the host runs at once,
 and everything else waits in the queue. Each turn's sandbox is capped at
 4g / 2 cpus, so budget roughly that per concurrent turn.
 
-Set it on the Servers page (*Execution slots*, the field under the numbers), or
+Set it on the Servers page (_Execution slots_, the field under the numbers), or
 with `PUT /admin/agent/runner-hosts/<host>/slots` and `{"slots": N}`; `null`
 returns the host to its `AGENT_HOST_SLOTS` default. Nothing is started or
 stopped to apply it: the host reads the number off its next heartbeat answer
@@ -1407,16 +1411,16 @@ reports the limit the host is serving back as `slots_total`, and the claim
 admits against the lower of that and the saved number. Lowering therefore takes
 effect immediately, before the host has heard about it, and turns already
 running are untouched — they finish, and the host claims nothing more until it
-is under the new limit; the page counts those as *finishing*. Raising takes
+is under the new limit; the page counts those as _finishing_. Raising takes
 effect when the host confirms, one heartbeat away, and until then the row says
-*applying N*. A host that is offline says *N not applied*, and one whose runner
-predates remote limits says *redeploy to change*.
+_applying N_. A host that is offline says _N not applied_, and one whose runner
+predates remote limits says _redeploy to change_.
 
 The bounds are two through 128. Two is the shared-live floor; 128 is a typo
 guard the host checks again, and neither is a statement about what the machine
 can carry — the CPU and memory on the same page are. The saved number survives
 heartbeats, restarts and re-enrolment: it is a decision about the named
-machine, and only *Host default* returns it to the environment.
+machine, and only _Host default_ returns it to the environment.
 
 **A turn that never started goes back to the queue; one that started does
 not.** When the host cannot start a turn's process, or that process exits
@@ -1469,32 +1473,32 @@ cannot replace the other's image.
 `claim_job` uses `FOR UPDATE SKIP LOCKED`, so every host shares one queue
 with no leader and no sharding.
 
-| Variable | Default | Notes |
-|---|---|---|
-| `AGENT_SANDBOX_BACKEND` | `kata` | `process` (no isolation) refuses to start unless `AGENT_SANDBOX_ALLOW_UNISOLATED=1`. On the default `kata`, deploy refuses until the host has the shim and one real container proves it gets its own kernel; `container` is an explicit, and loudly restated, shared-kernel downgrade |
-| `AGENT_SANDBOX_IMAGE` | required | Image built from `Dockerfile.agent-sandbox` or an equivalent deployment-owned image |
-| `*_EXTRA_VERSIONS` | blank | Comma-separated tested versions to bake beside each source-reviewed default. Select one for new chats in Admin; retained chats keep the version they started with. The five defaults are not host settings because runner/control-plane capability admission attests them as one protocol unit |
-| `AGENT_SANDBOX_NETWORK` | *no default* | Legacy alias for the `platform_only` discovery backplane, honoured so an existing deployment keeps working. It deliberately has no default (`sandbox.py`: "AGENT_SANDBOX_NETWORK is not set. There is deliberately no default"), and a tier with no network is a preflight failure rather than a fall back to a more open one. Current setting: `AGENT_EGRESS_NETWORK_PLATFORM_ONLY`, which compose defaults to `agent-egress`. A chat is attached to its own derived `freeinference-chat-net-*` bridge, not directly to this shared network |
-| `AGENT_EGRESS_SETUP_TIER` / `_AGENT_TIER` | `trusted` / `platform_only` | One of `platform_only` / `trusted` / `custom` / `full`, **per phase**. Dependency setup reaches the checked-in allowlist proxy; the model-driven Agent CLI phase stays on the closed relay-only network |
-| `AGENT_EGRESS_NETWORK_*` | — | Network per tier. A tier with no network is an error when a phase selects it, never a fall back to a more open one |
-| `AGENT_EGRESS_CHAT_NETWORK_POOL` | `10.240.0.0/16` | Non-overlapping private IPv4 pool split into daemon-arbitrated `/29` chat/phase bridges. Bridges are removed at phase transition or stop and rebuilt on wake |
-| `AGENT_EGRESS_ALLOWLIST` | — | Checked at startup: it may not contain an agent vendor's telemetry domain, which would let a "closed" sandbox report on the repository it was given |
-| `AGENT_RUNNER_HOST` | host name | Enrolled execution environment, shared by every turn it runs — the unit the admin placement switch picks between. `deploy/host/sandbox_host.sh` fills it from the host's own name. Never derived inside the container, where the hostname is a container id. After enrolment the persisted credential is authoritative, so editing this renames nothing. Unset keeps the environment out of the pool and changes nothing else. Distinct from `AGENT_PHYSICAL_HOST`, which is the display-only inventory name grouping environments that share one server |
-| `AGENT_PHYSICAL_HOST` | host name | Physical server this environment runs on, reported at enrolment as the `physical_host` label and used to group the admin inventory. `sandbox_host.sh` defaults it to `hostname -s`; set it explicitly when invoking Compose directly. Never a container hostname or a runtime suffix |
-| `AGENT_HOST_SLOTS` | `3` | Turns at once until an admin sets a number on the Servers page; at least two, at most 128. `AGENT_RUNNER_REPLICAS` is no longer read |
-| `AGENT_RETAINED_DOCKER_DATA_ROOT` | `/var/lib/docker` | Expected daemon `DockerRootDir`; provision this root on durable storage. It is verified by the host and broker and is never mounted into a chat container |
-| `AGENT_HOST_STORAGE_PROBE` | `overlay_root` | Which probe measures the filesystem holding the sandbox writable layers, shown as the Servers page's Storage column. `off` stops measuring storage on that host and is the rollback; an unrecognized name reports `unsupported` rather than measuring something else. A reading is published only for a topology the host deployment has attested; see *How full is the sandbox storage?* |
-| `AGENT_SANDBOX_UID` / `_GID` | `10001` | Only for a custom sandbox image; must match its user |
-| `AGENT_REPO_ALLOWLIST` | — | Comma-separated `owner/name`, or `owner/*`, for the single-tenant dogfood. Users who connect the App themselves do not need it; unset simply means the only entitlement is a user's own connection |
-| `AGENT_GITHUB_APP_CLIENT_ID` / `_CLIENT_SECRET` | — | The App's OAuth half. Only the user-facing connect flow needs it; minting installation tokens uses the private key alone |
-| `AGENT_GITHUB_APP_INSTALL_URL` | — | GitHub App installation URL, `https://github.com/apps/<slug>/installations/new`. Used when OAuth finds no accessible installation, and behind *Configure repositories* for a connected user. The control plane adds a short-lived, user-bound `state`; set the App callback to `<frontend>/agents/connected?provider=github` |
-| `AGENT_GITLAB_OAUTH_CLIENT_ID` / `_CLIENT_SECRET` | — | GitLab.com OAuth application credentials, kept on the control plane. Configure only `read_user` and `read_api` scopes |
-| `AGENT_GITLAB_OAUTH_REDIRECT_URI` | — | Exact registered callback, normally `<frontend>/agents/connected?provider=gitlab`. HTTPS is required except for localhost development |
-| `AGENT_SANDBOX_ALLOW_OPEN_NETWORK` | — | Accepts a non-`internal` sandbox network. Preflight refuses one otherwise, so a missing setting cannot quietly mean full egress |
-| `AGENT_SANDBOX_MCP_URL` | — | MCP-only relay URL as a sandbox sees it. The standalone host compose derives it from the MCP tunnel alias; never point it at inference or the full control API |
-| `AGENT_MCP_TUNNEL_*` | — | Remote MCP-only listener destination and independent restricted SSH key/known-hosts; see `ENVIRONMENT.md` for the complete set |
-| `AGENT_GITHUB_TOKEN` | — | Control-plane fallback publisher credential; unset means the publisher idles |
-| `AGENT_PUBLISH_BASE_BRANCH` | `dev` | What a draft PR targets when its job named no branch of its own. A job started from a branch targets *that* branch; this is only the fallback |
+| Variable                                          | Default                     | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------------------------- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AGENT_SANDBOX_BACKEND`                           | `kata`                      | `process` (no isolation) refuses to start unless `AGENT_SANDBOX_ALLOW_UNISOLATED=1`. On the default `kata`, deploy refuses until the host has the shim and one real container proves it gets its own kernel; `container` is an explicit, and loudly restated, shared-kernel downgrade                                                                                                                                                                                                                                                                    |
+| `AGENT_SANDBOX_IMAGE`                             | required                    | Image built from `Dockerfile.agent-sandbox` or an equivalent deployment-owned image                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `*_EXTRA_VERSIONS`                                | blank                       | Comma-separated tested versions to bake beside each source-reviewed default. Select one for new chats in Admin; retained chats keep the version they started with. The five defaults are not host settings because runner/control-plane capability admission attests them as one protocol unit                                                                                                                                                                                                                                                           |
+| `AGENT_SANDBOX_NETWORK`                           | _no default_                | Legacy alias for the `platform_only` discovery backplane, honoured so an existing deployment keeps working. It deliberately has no default (`sandbox.py`: "AGENT_SANDBOX_NETWORK is not set. There is deliberately no default"), and a tier with no network is a preflight failure rather than a fall back to a more open one. Current setting: `AGENT_EGRESS_NETWORK_PLATFORM_ONLY`, which compose defaults to `agent-egress`. A chat is attached to its own derived `freeinference-chat-net-*` bridge, not directly to this shared network             |
+| `AGENT_EGRESS_SETUP_TIER` / `_AGENT_TIER`         | `trusted` / `platform_only` | One of `platform_only` / `trusted` / `custom` / `full`, **per phase**. Dependency setup reaches the checked-in allowlist proxy; the model-driven Agent CLI phase stays on the closed relay-only network                                                                                                                                                                                                                                                                                                                                                  |
+| `AGENT_EGRESS_NETWORK_*`                          | —                           | Network per tier. A tier with no network is an error when a phase selects it, never a fall back to a more open one                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `AGENT_EGRESS_CHAT_NETWORK_POOL`                  | `10.240.0.0/16`             | Non-overlapping private IPv4 pool split into daemon-arbitrated `/29` chat/phase bridges. Bridges are removed at phase transition or stop and rebuilt on wake                                                                                                                                                                                                                                                                                                                                                                                             |
+| `AGENT_EGRESS_ALLOWLIST`                          | —                           | Checked at startup: it may not contain an agent vendor's telemetry domain, which would let a "closed" sandbox report on the repository it was given                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `AGENT_RUNNER_HOST`                               | host name                   | Enrolled execution environment, shared by every turn it runs — the unit the admin placement switch picks between. `deploy/host/sandbox_host.sh` fills it from the host's own name. Never derived inside the container, where the hostname is a container id. After enrolment the persisted credential is authoritative, so editing this renames nothing. Unset keeps the environment out of the pool and changes nothing else. Distinct from `AGENT_PHYSICAL_HOST`, which is the display-only inventory name grouping environments that share one server |
+| `AGENT_PHYSICAL_HOST`                             | host name                   | Physical server this environment runs on, reported at enrolment as the `physical_host` label and used to group the admin inventory. `sandbox_host.sh` defaults it to `hostname -s`; set it explicitly when invoking Compose directly. Never a container hostname or a runtime suffix                                                                                                                                                                                                                                                                     |
+| `AGENT_HOST_SLOTS`                                | `3`                         | Turns at once until an admin sets a number on the Servers page; at least two, at most 128. `AGENT_RUNNER_REPLICAS` is no longer read                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `AGENT_RETAINED_DOCKER_DATA_ROOT`                 | `/var/lib/docker`           | Expected daemon `DockerRootDir`; provision this root on durable storage. It is verified by the host and broker and is never mounted into a chat container                                                                                                                                                                                                                                                                                                                                                                                                |
+| `AGENT_HOST_STORAGE_PROBE`                        | `overlay_root`              | Which probe measures the filesystem holding the sandbox writable layers, shown as the Servers page's Storage column. `off` stops measuring storage on that host and is the rollback; an unrecognized name reports `unsupported` rather than measuring something else. A reading is published only for a topology the host deployment has attested; see _How full is the sandbox storage?_                                                                                                                                                                |
+| `AGENT_SANDBOX_UID` / `_GID`                      | `10001`                     | Only for a custom sandbox image; must match its user                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `AGENT_REPO_ALLOWLIST`                            | —                           | Comma-separated `owner/name`, or `owner/*`, for the single-tenant dogfood. Users who connect the App themselves do not need it; unset simply means the only entitlement is a user's own connection                                                                                                                                                                                                                                                                                                                                                       |
+| `AGENT_GITHUB_APP_CLIENT_ID` / `_CLIENT_SECRET`   | —                           | The App's OAuth half. Only the user-facing connect flow needs it; minting installation tokens uses the private key alone                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `AGENT_GITHUB_APP_INSTALL_URL`                    | —                           | GitHub App installation URL, `https://github.com/apps/<slug>/installations/new`. Used when OAuth finds no accessible installation, and behind _Configure repositories_ for a connected user. The control plane adds a short-lived, user-bound `state`; set the App callback to `<frontend>/agents/connected?provider=github`                                                                                                                                                                                                                             |
+| `AGENT_GITLAB_OAUTH_CLIENT_ID` / `_CLIENT_SECRET` | —                           | GitLab.com OAuth application credentials, kept on the control plane. Configure only `read_user` and `read_api` scopes                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `AGENT_GITLAB_OAUTH_REDIRECT_URI`                 | —                           | Exact registered callback, normally `<frontend>/agents/connected?provider=gitlab`. HTTPS is required except for localhost development                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `AGENT_SANDBOX_ALLOW_OPEN_NETWORK`                | —                           | Accepts a non-`internal` sandbox network. Preflight refuses one otherwise, so a missing setting cannot quietly mean full egress                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `AGENT_SANDBOX_MCP_URL`                           | —                           | MCP-only relay URL as a sandbox sees it. The standalone host compose derives it from the MCP tunnel alias; never point it at inference or the full control API                                                                                                                                                                                                                                                                                                                                                                                           |
+| `AGENT_MCP_TUNNEL_*`                              | —                           | Remote MCP-only listener destination and independent restricted SSH key/known-hosts; see `ENVIRONMENT.md` for the complete set                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `AGENT_GITHUB_TOKEN`                              | —                           | Control-plane fallback publisher credential; unset means the publisher idles                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `AGENT_PUBLISH_BASE_BRANCH`                       | `dev`                       | What a draft PR targets when its job named no branch of its own. A job started from a branch targets _that_ branch; this is only the fallback                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 The authenticated `/agents/integrations` page is the only supported place to
 start either OAuth flow. OAuth state is unpredictable, bound to the signed-in
@@ -1534,18 +1538,18 @@ the total, and why `total - available` is not used space.
 container's `--storage-opt size=` on XFS with pquota) is implemented with project quotas,
 and a quota is what `statfs` returns for a directory inside the project. A
 container reading its own quota, and a host running `df <upperdir>`, would then
-report the *quota* — 10 GiB, say — with the same device number, so comparing
+report the _quota_ — 10 GiB, say — with the same device number, so comparing
 those two proves nothing. `sandbox_host.sh` therefore compares the container's
 numbers against `df` of the **mount root** of the filesystem containing the
 upper directory, which no container project covers, and writes the verdict to
 `.storage-probe/verdict.json` beside `.shared-live-ready`:
 
-* the mount root's size must equal the container's own `total_bytes` exactly —
+- the mount root's size must equal the container's own `total_bytes` exactly —
   `size` does not move under writes, so this is the topology test;
-* `df <upperdir>` and `df <mount_root>` must agree on size, and `daemon.json`
+- `df <upperdir>` and `df <mount_root>` must agree on size, and `daemon.json`
   / the `dockerd` command line must not mention `overlay2.size`; either
   disagreement is recorded as `unsupported` (project quota);
-* `used` and `available` are compared within `max(1 GiB, 1% of size)` and only
+- `used` and `available` are compared within `max(1 GiB, 1% of size)` and only
   as a diagnosis, because builds and cleanup interleave and nothing pauses the
   world for monitoring.
 
@@ -1582,6 +1586,16 @@ reads either the old document or the new one and never an empty one. Upgrade fro
 bind with a normal `up`, which recreates runners with the new mount; `check`
 alone cannot change an existing container's mount configuration. The legacy
 file is ignored and is not used as a fallback.
+
+Where the helper is used, it needs **Docker 25 or newer on the host**. It binds
+its two directories non-recursively, which `--mount` spells
+`bind-recursive=disabled` — parsed by the CLI itself, and added in 25. The
+older spelling is not an alternative to fall back on: a current CLI refuses it
+outright — 29.2.1 answers `bind-nonrecursive=true` by naming its replacement
+and exiting 125 — so a build that reaches for it to support older hosts loses
+every host that is not old. Below 25 the helper call fails, the host reports
+`unverified`, and the warning quotes the CLI's own complaint. Hosts whose
+deployment user can traverse the storage root never take this path at all.
 
 **Storage verification never blocks a deployment.** A metric that cannot be
 established is not a reason to keep a working host out of the pool: every
@@ -1627,7 +1641,7 @@ Its default option is **Automatic**, which means whoever polls first takes a
 new chat. Once a retained group exists, its turns can be claimed only by that
 group's owning environment.
 
-Runners *pull*, so this is a gate on the claim rather than a dispatch target —
+Runners _pull_, so this is a gate on the claim rather than a dispatch target —
 the gateway cannot push a job at a machine, and the only moment it gets to say
 "not you" is when a runner asks for work. Three consequences worth knowing
 before using it:
@@ -1652,13 +1666,13 @@ before using it:
   polled recently, but the authoritative operational signals are its enrolled
   heartbeat and broker probe, not whether one runner happened to claim recently.
 
-Adding a *second* machine is not only this switch. A sandbox reaches the
+Adding a _second_ machine is not only this switch. A sandbox reaches the
 gateway over a per-chat network declared `internal: true`, which routes nowhere
 off its own host — so a runner box that is not the gateway's host needs the
 routable-network configuration from
 [§0 above](#0-a-closed-agent-network-needs-both-narrow-relays-on-its-backplane) (or local
 instances of both relays). Preflight refuses at startup rather than failing
-jobs at their first model or MCP call, but it refuses *there*, on that machine,
+jobs at their first model or MCP call, but it refuses _there_, on that machine,
 not here.
 
 ### Running runners on another machine
@@ -1711,15 +1725,15 @@ alternative overlay declared `depends_on: backend` and, pointed at a machine
 with no gateway, did not fail but started one there. It is the only topology
 this repository ships.
 
-| Variable | Notes |
-|---|---|
-| `AGENT_TUNNEL_*` | Inference relay destination, key, known-hosts file and ports; remote default `127.0.0.1:8080` |
-| `AGENT_MCP_TUNNEL_*` | MCP-only relay's independent destination and SSH material; remote default `127.0.0.1:8001`. Do not point it at the full control API on 8000 |
-| `AGENT_CONTROL_PLANE_TUNNEL_*` | Runner-only control API relay; remote default `127.0.0.1:8000`. It is deliberately absent from sandbox networks |
-| `AGENT_*_TUNNEL_SSH_KEY` | Private key, mounted read-only. Use a separate restricted key per relay with `command="",restrict,port-forwarding,permitopen="127.0.0.1:<that relay's port>"`; no relay needs a shell or permission to open another relay's port |
-| `AGENT_*_TUNNEL_SSH_KNOWN_HOSTS` | Required host-key file for each relay. Host checking is not disableable: an unverified hop would hand scoped tokens and tunnel traffic to whatever answers there |
-| `AGENT_GATEWAY_HOSTNAME` / `AGENT_MCP_HOSTNAME` | The two names a sandbox resolves on the closed network, `agent-gateway` and `agent-mcp` by default. Do not replace them with routable service addresses |
-| `AGENT_CONTROL_PLANE_HOSTNAME` | Runner-only control relay name, `agent-control-plane` by default |
+| Variable                                        | Notes                                                                                                                                                                                                                            |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AGENT_TUNNEL_*`                                | Inference relay destination, key, known-hosts file and ports; remote default `127.0.0.1:8080`                                                                                                                                    |
+| `AGENT_MCP_TUNNEL_*`                            | MCP-only relay's independent destination and SSH material; remote default `127.0.0.1:8001`. Do not point it at the full control API on 8000                                                                                      |
+| `AGENT_CONTROL_PLANE_TUNNEL_*`                  | Runner-only control API relay; remote default `127.0.0.1:8000`. It is deliberately absent from sandbox networks                                                                                                                  |
+| `AGENT_*_TUNNEL_SSH_KEY`                        | Private key, mounted read-only. Use a separate restricted key per relay with `command="",restrict,port-forwarding,permitopen="127.0.0.1:<that relay's port>"`; no relay needs a shell or permission to open another relay's port |
+| `AGENT_*_TUNNEL_SSH_KNOWN_HOSTS`                | Required host-key file for each relay. Host checking is not disableable: an unverified hop would hand scoped tokens and tunnel traffic to whatever answers there                                                                 |
+| `AGENT_GATEWAY_HOSTNAME` / `AGENT_MCP_HOSTNAME` | The two names a sandbox resolves on the closed network, `agent-gateway` and `agent-mcp` by default. Do not replace them with routable service addresses                                                                          |
+| `AGENT_CONTROL_PLANE_HOSTNAME`                  | Runner-only control relay name, `agent-control-plane` by default                                                                                                                                                                 |
 
 Generate the known_hosts entry deliberately, and look at it:
 
@@ -1771,11 +1785,11 @@ already opens — a reverse forward on the control-plane tunnel:
 └──────────────────────────┘              └────────┴─────────────────┘
 ```
 
-| variable | |
-|---|---|
-| `AGENT_BROKER_REVERSE_BIND` | The **control plane host's docker bridge gateway**. Not `127.0.0.1`, which its containers cannot see; not `0.0.0.0`, which publishes the broker to that machine's whole network behind one shared token. Find it with `docker network inspect <net> --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'` |
-| `AGENT_BROKER_REVERSE_PORT` | A free port on that host |
-| `AGENT_WORKSPACE_BROKER_ADVERTISE_URL` | `http://<bind>:<port>` — what the runner reports, and what the control plane will dial |
+| variable                               |                                                                                                                                                                                                                                                                                                           |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AGENT_BROKER_REVERSE_BIND`            | The **control plane host's docker bridge gateway**. Not `127.0.0.1`, which its containers cannot see; not `0.0.0.0`, which publishes the broker to that machine's whole network behind one shared token. Find it with `docker network inspect <net> --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'` |
+| `AGENT_BROKER_REVERSE_PORT`            | A free port on that host                                                                                                                                                                                                                                                                                  |
+| `AGENT_WORKSPACE_BROKER_ADVERTISE_URL` | `http://<bind>:<port>` — what the runner reports, and what the control plane will dial                                                                                                                                                                                                                    |
 
 A non-loopback remote bind requires `GatewayPorts yes` or `clientspecified` in
 the **control plane host's** sshd. Without it the bind is refused and, because
@@ -1833,12 +1847,12 @@ The tier is where the work is. `setup` defaults to `trusted` and `agent` stays
 `platform_only`, which in this deployment means three compose-level networks
 plus one derived internal bridge per chat and selected phase:
 
-| Network | Internal | Who is on it |
-|---|---|---|
-| `agent-egress` | yes | discovery backplane for inference and MCP relay containers; sandboxes are not left on it |
-| `agent-egress-trusted` | yes | discovery backplane for the setup proxy; sandboxes are not left on it |
-| `agent-egress-uplink` | **no** | the proxy, alone |
-| `freeinference-chat-net-*` | yes | one sandbox group plus only the relay(s) or proxy required by that phase |
+| Network                    | Internal | Who is on it                                                                             |
+| -------------------------- | -------- | ---------------------------------------------------------------------------------------- |
+| `agent-egress`             | yes      | discovery backplane for inference and MCP relay containers; sandboxes are not left on it |
+| `agent-egress-trusted`     | yes      | discovery backplane for the setup proxy; sandboxes are not left on it                    |
+| `agent-egress-uplink`      | **no**   | the proxy, alone                                                                         |
+| `freeinference-chat-net-*` | yes      | one sandbox group plus only the relay(s) or proxy required by that phase                 |
 
 The supported host script derives project-specific names for the two new
 Trusted/proxy networks, so staging and production on one Docker daemon do not
@@ -1868,7 +1882,7 @@ The renderer's named volume contains only generated Squid configuration. It is
 host infrastructure, not chat state: Docker inspection of every chat container
 still reports no bind or volume mounts.
 
-**Adding a domain.** `AGENT_EGRESS_ALLOWLIST` is *added to* the built-in
+**Adding a domain.** `AGENT_EGRESS_ALLOWLIST` is _added to_ the built-in
 registry list (PyPI, npm, crates, Go, RubyGems, Maven, github.com), never a
 replacement for it. `*.example.com` covers subdomains. An agent vendor's
 telemetry domain is refused outright — a sandbox that can phone home about a
@@ -1887,17 +1901,17 @@ complete policy or the new complete policy, never a partially rewritten ACL.
 **Three preflight failures and what each means.** The runner refuses to claim
 jobs unless the setup tier is genuinely enforcing:
 
-- *"the sandbox network … is not `internal`"* — a tier variable points at a
+- _"the sandbox network … is not `internal`"_ — a tier variable points at a
   routable network. The setup phase would have the whole internet while the
   config still said `trusted`.
-- *"egress proxy is unreachable"* — the proxy is not running, or not on that
+- _"egress proxy is unreachable"_ — the proxy is not running, or not on that
   network. Check `docker compose logs agent-egress-proxy`; a config Squid
   rejects shows up there as a parse error on the first line. This one stops the
   runner claiming **any** job, including jobs that install nothing — deliberate,
   because it means the deploy is broken, but if this host genuinely does not
   need dependency installation, `AGENT_EGRESS_SETUP_TIER=platform_only` skips
   the tier and its probe entirely.
-- *"egress proxy answered … it is not enforcing an allowlist"* — the proxy
+- _"egress proxy answered … it is not enforcing an allowlist"_ — the proxy
   served a host that does not exist and is on no list. Treat this as an open
   proxy on the sandbox's network.
 
@@ -1951,15 +1965,15 @@ Surfaced by the conformance suite, tracked separately from this feature:
 
 ## Model behaviour observed on the first real run
 
-`deepseek-v4-flash` replied *"I've added a docstring to the `greet` function.
-It now reads: ..."* immediately after receiving a tool result with
+`deepseek-v4-flash` replied _"I've added a docstring to the `greet` function.
+It now reads: ..."_ immediately after receiving a tool result with
 `is_error: true` saying the write had been denied. Nothing had changed on
 disk.
 
 This is why the runner reports what the tools did rather than what the agent
 says about them: it collects errored `tool_result` entries, emits them into
 the owner's stream, and refuses to record a run as successful when it produced
-no patch *and* a tool failed. A model's own account of its work is not
+no patch _and_ a tool failed. A model's own account of its work is not
 evidence.
 
 ## What changed when this moved
@@ -1971,18 +1985,18 @@ artifacts that did not move**. The table below records that baseline; later
 feature work has intentionally brought the live operational sections above up
 to date.
 
-| Source | Here | Why |
-|---|---|---|
-| `ops/setup/setup_kata_runtime.sh` | `deploy/host/setup_kata_runtime.sh` | D7 |
-| `ops/deploy/sandbox_host.sh` | `deploy/host/sandbox_host.sh` | D7 |
-| `deploy/docker/Dockerfile.agent-sandbox` | `deploy/sandbox/Dockerfile.agent-sandbox` | D7 |
-| `ops/deploy/agent_runner.sh up/preflight/status/down` | the standalone script's `up/preflight/check/status/down` | The co-located overlay was dropped (MIGRATION.md, open decisions, decided 2026-08-04). The standalone preflight validates an already-built image; `up` builds the target image and then repeats the authoritative checks. |
-| `docker compose -f docker-compose.yml -f docker-compose.agent-runner.yml` | `docker compose -f deploy/host/docker-compose.sandbox.yml` | Same decision. There is no base compose here and no `backend` service. |
-| "Use that script, not `agent_runner.sh`" | a note that the standalone compose is the only topology | Same decision. |
-| The staging deploy-pipeline paragraph (`deploy_staging.sh`, the same-invocation requirement, the overlay attaching `backend` to the agent-egress network) | removed | It describes the *gateway's* deploy pipeline driving the overlay that did not move. Keeping it would be an instruction nobody here can follow. |
-| `AGENT_RUNNER_HOST` row naming `agent_runner.sh` and `deploy_staging.sh` | names the standalone script | Same. |
-| `MCP_CONFIG_PATH` / `config/examples/mcp.example.yaml` | initially marked gateway-side | The move-only baseline still used the old gateway registry. Subsequent extraction work replaced it with this service's in-code catalogue, per-user connections and isolated MCP relay. |
-| `pytest … test_agent_mcp.py test_agent_mcp_api.py` | initially `pytest tests/unit/test_agent_runtimes.py` | The move-only baseline left the proxy suites behind. They were subsequently ported and expanded in this repository. |
+| Source                                                                                                                                                    | Here                                                       | Why                                                                                                                                                                                                                       |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ops/setup/setup_kata_runtime.sh`                                                                                                                         | `deploy/host/setup_kata_runtime.sh`                        | D7                                                                                                                                                                                                                        |
+| `ops/deploy/sandbox_host.sh`                                                                                                                              | `deploy/host/sandbox_host.sh`                              | D7                                                                                                                                                                                                                        |
+| `deploy/docker/Dockerfile.agent-sandbox`                                                                                                                  | `deploy/sandbox/Dockerfile.agent-sandbox`                  | D7                                                                                                                                                                                                                        |
+| `ops/deploy/agent_runner.sh up/preflight/status/down`                                                                                                     | the standalone script's `up/preflight/check/status/down`   | The co-located overlay was dropped (MIGRATION.md, open decisions, decided 2026-08-04). The standalone preflight validates an already-built image; `up` builds the target image and then repeats the authoritative checks. |
+| `docker compose -f docker-compose.yml -f docker-compose.agent-runner.yml`                                                                                 | `docker compose -f deploy/host/docker-compose.sandbox.yml` | Same decision. There is no base compose here and no `backend` service.                                                                                                                                                    |
+| "Use that script, not `agent_runner.sh`"                                                                                                                  | a note that the standalone compose is the only topology    | Same decision.                                                                                                                                                                                                            |
+| The staging deploy-pipeline paragraph (`deploy_staging.sh`, the same-invocation requirement, the overlay attaching `backend` to the agent-egress network) | removed                                                    | It describes the _gateway's_ deploy pipeline driving the overlay that did not move. Keeping it would be an instruction nobody here can follow.                                                                            |
+| `AGENT_RUNNER_HOST` row naming `agent_runner.sh` and `deploy_staging.sh`                                                                                  | names the standalone script                                | Same.                                                                                                                                                                                                                     |
+| `MCP_CONFIG_PATH` / `config/examples/mcp.example.yaml`                                                                                                    | initially marked gateway-side                              | The move-only baseline still used the old gateway registry. Subsequent extraction work replaced it with this service's in-code catalogue, per-user connections and isolated MCP relay.                                    |
+| `pytest … test_agent_mcp.py test_agent_mcp_api.py`                                                                                                        | initially `pytest tests/unit/test_agent_runtimes.py`       | The move-only baseline left the proxy suites behind. They were subsequently ported and expanded in this repository.                                                                                                       |
 
 ### Historical statements that remain historical
 

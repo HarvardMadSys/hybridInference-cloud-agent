@@ -1791,7 +1791,7 @@ def test_inaccessible_host_path_uses_the_read_only_helper(tmp_path: Path) -> Non
         ("--entrypoint", "python"),
         (
             "--mount",
-            f"type=bind,src={STORAGE_MOUNT_ROOT},dst=/disk,readonly,bind-nonrecursive=true,bind-propagation=rslave",
+            f"type=bind,src={STORAGE_MOUNT_ROOT},dst=/disk,readonly,bind-recursive=disabled,bind-propagation=rslave",
         ),
         # Pinned because the helper needs no privilege it does not have as
         # `nobody`, and because nothing else would notice it regaining one.
@@ -1802,10 +1802,15 @@ def test_inaccessible_host_path_uses_the_read_only_helper(tmp_path: Path) -> Non
     assert "--read-only" in args and "--pull=never" in args and "--rm" in args
     assert "--privileged" not in args and "--pid=host" not in args and "--cap-add" not in args
     assert (
-        f"type=bind,src={STORAGE_UPPERDIR},dst=/upper,readonly,bind-nonrecursive=true,bind-propagation=rslave"
+        f"type=bind,src={STORAGE_UPPERDIR},dst=/upper,readonly,bind-recursive=disabled,bind-propagation=rslave"
         in args
     )
-    assert "bind-recursive" not in " ".join(args)
+    # Not the pre-25 spelling: a current CLI does not accept it at all. Docker
+    # 29.2.1 answers `bind-nonrecursive=true` with "invalid argument ... use
+    # bind-recursive=disabled instead" and exits 125, so reaching for the older
+    # key to support older hosts takes the feature away from every host that is
+    # not one.
+    assert "bind-nonrecursive" not in " ".join(args)
 
 
 def test_helper_still_rejects_a_real_project_quota(tmp_path: Path) -> None:

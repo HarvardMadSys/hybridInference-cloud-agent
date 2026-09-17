@@ -353,7 +353,7 @@ Staging 验收：页面、admin API 和宿主 `df <挂载根>` 在同一时段�
 **2026-09-17 独立评审后的修订。** 一轮多视角评审在部署脚本这一段发现十余处问题，逐条核实后修复如下，均带回归测试：
 
 - **验证抢占就绪预算。** 存储验证原本排在三个致命探测之前、共用同一条 fence。它本身不致命，但花掉的秒数正是那些探测用来重试的；staging 的 120 秒 fence 下，控制面拨号可能只剩一次机会，失败即回滚整个部署。现改为在全部致命检查之后运行，并让第一次占用比较复用并行阶段已经取到的 describe 文档，不再为两个数字多跑一次 `docker exec`。
-- **helper 挂载参数要求 Docker 25。** `bind-recursive=disabled` 由 CLI 解析，v25 才引入；而 helper 恰是非 root 部署用户的正常路径，低于 25 的主机会永远 `unverified`。改用语义相同、19.03 起即有的 `bind-nonrecursive=true`。
+- **helper 挂载参数要求 Docker 25。** `bind-recursive=disabled` 由 CLI 解析，v25 才引入；而 helper 恰是非 root 部署用户的正常路径，低于 25 的主机会永远 `unverified`。当时改用了旧拼写 `bind-nonrecursive=true`，**这一步是错的，已于 2026-09-17 撤回**（见下一条）：两个键各被一半版本拒绝，而实际部署跑的是新版本。现在保留 `bind-recursive=disabled`，把“helper 路径需要 Docker ≥ 25”写进运维文档。
 - **helper 失败被记成 findmnt 失败**，且它自己的 stderr 写进一个无人读取、随后即删的文件。现在按退出码分别归因，并把 helper 的最后几行原样打印。
 - **`AGENT_HOST_STORAGE_PROBE` 两侧词表不一致。** 脚本只认小写 `off`，runner 还认 `OFF/0/false/no/disabled`，于是同一份配置能让日志写“storage verified”而页面显示“已关闭”。现在只接受 `overlay_root` 和 `off`，在 `validate_retained_config` 里当场拒绝其它拼写；`off` 时 `check` 会清空 verdict，使切换前启动的副本立即停止发布容量（真正停止测量仍需 `up`）。
 - **转义路径无法验证。** runner 按设计保留内核的 `\040` 等转义（那是 verdict 的键），脚本却把这串东西直接交给 `findmnt`、`df` 和 `docker --mount`。现在只在交给宿主工具前反转义，键本身不变。
@@ -367,6 +367,10 @@ Staging 验收：页面、admin API 和宿主 `df <挂载根>` 在同一时段�
 
 评审驳回两条候选，不作修改：`ps | grep -q` 在 `pipefail` 下的 SIGPIPE 误判（procps 的 `ps` 自带处理函数，以 0 退出）、以及浮点百分比向上取整多一个点（字节数都是块大小的整数倍，2^53 以内乘 100 精确）。
 
-**这些改动尚未在 staging 复验。** 上一轮验收记录的是 `5d0050f`；其中部署路径的部分需要在合并前按第 5 节和第 10.3 节重跑，尤其是 helper 以 `nobody` 运行、`bind-nonrecursive` 和新的调用顺序。
+**这些改动尚未在 staging 复验。** 上一轮验收记录的是 `5d0050f`；其中部署路径的部分需要在合并前按第 5 节和第 10.3 节重跑，尤其是 helper 以 `nobody` 运行、挂载参数和新的调用顺序。
+
+**2026-09-17 真机复验，撤回其中一处。** 合并后的 staging 页面显示 Storage not verified；verdict 记录的原因是“helper 退出 125”——这正是上一轮新增的归因修复在起作用，它点名了 helper 而不是 `findmnt`。在 rtx6000b（Docker 29.2.1）上对照两种拼写：`bind-nonrecursive=true` 被整条 `--mount` 拒绝并提示改用新键，退出 125；`bind-recursive=disabled` 解析通过。也就是说旧拼写并非“更兼容的等价写法”，当前版本已不接受它，为照顾 25 以下的主机而改用它，等于让所有不老的主机都失去这项指标。已改回新键，并把版本要求写进运维文档。
+
+同一次复验确认了另一处：以 `--user 65534:65534` 从实际 runner 镜像启动 helper，模块可正常导入；用修正后的参数对真实 upper 目录跑完整 helper，返回 `mount_root=/`、ext4、total `1966736678912 B`，且 `upper_total_bytes` 与之相等（无配额）。降权这一步成立。
 
 **2026-09-16 unlink 真机复验通过（`5d0050f`）。** 实际 staging 的三个 runner 在宿主文件被真正删除后全部报告 unverified；新心跳和页面正确局部降级。`check` 重建 verdict 后，API 和页面恢复容量，三个容器的 ID／StartedAt 及挂载目录 inode 全程未变。此项不再是未测项；[最新验收记录](../acceptance/2026-09-16-admin-storage-capacity.md) 包含前后截图、时间和字段。off、stale 页面仍未在 staging 强制构造，沿用自动化覆盖。

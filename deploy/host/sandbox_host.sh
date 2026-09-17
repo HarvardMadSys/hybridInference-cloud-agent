@@ -780,11 +780,16 @@ storage_host_helper() {
   # Only those two directories are bound, non-recursively and read-only. No
   # host proc tree, capabilities, socket, credentials or network are passed.
   #
-  # `bind-nonrecursive=true` rather than its modern spelling `bind-recursive=
-  # disabled`: the newer key is parsed by the CLI and only exists from Docker
-  # 25, so on an older host every helper call would fail — and the helper is
-  # the *normal* path wherever the deployment user cannot traverse the storage
-  # root. Both set the same thing. Nothing here requires root either: the
+  # `bind-recursive=disabled` is the only spelling that works, and the choice
+  # is not free. Both keys set the same field, but each is refused by half the
+  # versions: the CLI parses this one and added it in 25, while the older
+  # `bind-nonrecursive=true` is not merely deprecated on a current CLI — 29.2.1
+  # rejects the whole `--mount` with "use bind-recursive=disabled instead" and
+  # exits 125. Trying to reach older hosts with the old key therefore breaks
+  # every host that is not old, which is all of them; this deployment needs
+  # Docker 25 or newer for the helper path, and `docs/operations.md` says so.
+  # A host below that gets `unverified` and a warning quoting the CLI's own
+  # complaint, which is the honest outcome. Nothing here requires root: the
   # helper opens its two binds with `O_PATH`, which needs no permission on the
   # object, and answers with `fstatvfs`, so it runs as `nobody` and cannot read
   # a host file that merely happens to share the bound filesystem.
@@ -840,8 +845,8 @@ PY_PLAN
     --runtime runc --network none --read-only --user 65534:65534 \
     --cap-drop ALL --security-opt no-new-privileges:true \
     --pids-limit 16 --memory 64m --cpus 0.25 \
-    --mount "type=bind,src=${target},dst=/disk,readonly,bind-nonrecursive=true,bind-propagation=rslave" \
-    --mount "type=bind,src=${upperdir},dst=/upper,readonly,bind-nonrecursive=true,bind-propagation=rslave" \
+    --mount "type=bind,src=${target},dst=/disk,readonly,bind-recursive=disabled,bind-propagation=rslave" \
+    --mount "type=bind,src=${upperdir},dst=/upper,readonly,bind-recursive=disabled,bind-propagation=rslave" \
     --env PYTHONDONTWRITEBYTECODE=1 --entrypoint python "$image" \
     -m cloud_agent_host.storage_attestation "$target" "$device" "$fsroot" "$upper_root" "$fstype" "$helper_seconds" || rc=$?
   if (( rc != 0 )); then
