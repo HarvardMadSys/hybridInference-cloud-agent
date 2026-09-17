@@ -1,5 +1,9 @@
 'use client';
 
+import { DEFAULT_SKILL_LIMITS } from '@/lib/skillLimits';
+
+import { getErrorMessage } from '@/lib/utils/errors';
+
 import { useId, useState, type FormEvent } from 'react';
 import { createSkill, updateSkill, type SkillApi } from '@/lib/api/skills';
 import {
@@ -25,7 +29,11 @@ export function SkillEditor({
   const editing = Boolean(skill && !copy);
   const formId = useId();
   const [name, setName] = useState(
-    skill ? (copy ? `${skill.name.slice(0, 75)} copy` : skill.name) : '',
+    skill
+      ? copy
+        ? `${skill.name.slice(0, DEFAULT_SKILL_LIMITS.max_name_length - 5)} copy`
+        : skill.name
+      : '',
   );
   const [description, setDescription] = useState(skill?.description ?? '');
   const [instructions, setInstructions] = useState(skill?.instructions ?? '');
@@ -37,7 +45,7 @@ export function SkillEditor({
     event.preventDefault();
     if (busy) return;
     setError(null);
-    if (new TextEncoder().encode(instructions).length > 65536) {
+    if (new TextEncoder().encode(instructions).length > DEFAULT_SKILL_LIMITS.max_skill_bytes) {
       setError('Skill instructions must be no larger than 64 KB.');
       return;
     }
@@ -55,7 +63,7 @@ export function SkillEditor({
           : await createSkill({ ...content, source: 'created' });
       onSaved(result);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not save this skill.');
+      setError(getErrorMessage(cause));
     } finally {
       setBusy(false);
     }
@@ -83,7 +91,7 @@ export function SkillEditor({
           Name
           <input
             required
-            maxLength={80}
+            maxLength={DEFAULT_SKILL_LIMITS.max_name_length}
             value={name}
             disabled={busy}
             onChange={(event) => setName(event.target.value)}
@@ -95,7 +103,7 @@ export function SkillEditor({
           Description
           <textarea
             required
-            maxLength={1024}
+            maxLength={DEFAULT_SKILL_LIMITS.max_description_length}
             rows={2}
             value={description}
             disabled={busy}

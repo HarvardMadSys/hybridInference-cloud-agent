@@ -176,7 +176,9 @@ async def create_oncall_job(
     choices passes the owner route's checks under the service account: the
     model must resolve for that user, the repository must be entitled (for a
     headless account that means the deployment's ``AGENT_REPO_ALLOWLIST``), and
-    a ``base_ref`` is pinned to the commit it names right now.
+    a ``base_ref`` is pinned to the commit it names right now. Skill selection
+    has the same semantics: omitted IDs use this service account's defaults;
+    the relay can send ``skill_ids=[]`` to opt out explicitly.
     """
     job_store = _require_store(store)
     user = _oncall_owner()

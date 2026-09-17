@@ -201,3 +201,34 @@ it('closes on Escape without letting the conversation shortcut handle it', async
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(outside).not.toHaveBeenCalled();
 });
+
+it('keeps inherited content when Apply leaves the selected IDs unchanged', async () => {
+  const changed = vi.fn();
+  vi.mocked(api.listSkills).mockResolvedValue([
+    { ...skill, revision: 9, description: 'New revision' },
+  ]);
+  render(<SkillPicker selected={[skill]} onChange={changed} />);
+  fireEvent.click(screen.getByRole('button', { name: /1 selected/ }));
+  await screen.findByRole('checkbox');
+  fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+  expect(changed).not.toHaveBeenCalled();
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
+
+it('shows selected bytes and blocks oversized combinations before submission', async () => {
+  const changed = vi.fn();
+  vi.mocked(api.listSkills).mockResolvedValue([
+    { ...skill, instruction_bytes: 64 * 1024 },
+    { ...skill, id: 2, name: 'Large two', instruction_bytes: 64 * 1024 },
+    { ...skill, id: 3, name: 'Large three', instruction_bytes: 1 },
+  ]);
+  render(<SkillPicker selected={[]} onChange={changed} />);
+  fireEvent.click(screen.getByRole('button', { name: /0 selected/ }));
+  const checkboxes = await screen.findAllByRole('checkbox');
+  for (const checkbox of checkboxes) fireEvent.click(checkbox);
+  expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled();
+  expect(screen.getByRole('alert')).toHaveTextContent('Unselect a skill');
+  fireEvent.click(checkboxes[2]);
+  expect(screen.getByText('128.0 / 128 KB selected')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Apply' })).toBeEnabled();
+});

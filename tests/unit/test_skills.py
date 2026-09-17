@@ -59,7 +59,7 @@ def test_rejects_invalid_or_oversized_documents(document):
         "https://github.com/a/b/tree/main/a%2fb",
         "https://github.com/a/b/blob/main/run.sh",
         "https://raw.githubusercontent.com/a/b/main/SKILL.md",
-        "https://github.com/a/b?target=http://localhost",
+        "https://github.com/acme/.github",
         "file:///etc/passwd",
         "https://[bad",
     ],
@@ -96,8 +96,11 @@ async def test_github_import_never_fetches_download_url_and_preserves_review_dig
         )
 
     result = await fetch_github_skill(
-        URL, token="scoped-token", transport=httpx.MockTransport(respond)
+        URL + "?plain=1&target=http://localhost#L1",
+        token="scoped-token",
+        transport=httpx.MockTransport(respond),
     )
+    assert result["source_url"] == URL
     assert len(requests) == 1
     assert requests[0].url.host == "api.github.com"
     assert requests[0].url.path == "/repos/example/skills/contents/code-review/SKILL.md"
@@ -140,9 +143,9 @@ async def test_selection_snapshots_owned_defaults_and_explicit_none():
         "default_enabled": True,
         "user_id": "owner",
     }
-    store = SimpleNamespace(list_skills=AsyncMock(return_value=[row]))
+    store = SimpleNamespace(select_skills=AsyncMock(return_value=[row]))
     snapshot = await resolve_skills(store, user_id="owner", skill_ids=None)
-    store.list_skills.assert_awaited_once_with(user_id="owner")
+    store.select_skills.assert_awaited_once_with(user_id="owner", skill_ids=None)
     assert snapshot == [
         {
             "id": 1,
@@ -154,9 +157,9 @@ async def test_selection_snapshots_owned_defaults_and_explicit_none():
     ]
     row["instructions"] = "Version two"
     assert snapshot[0]["instructions"] == "Version one"
-    store.list_skills.reset_mock()
+    store.select_skills.reset_mock()
     assert await resolve_skills(store, user_id="owner", skill_ids=[]) == []
-    store.list_skills.assert_not_awaited()
+    store.select_skills.assert_not_awaited()
     for selection in ([2], [1, 1]):
         with pytest.raises(SkillError):
             await resolve_skills(store, user_id="owner", skill_ids=selection)
@@ -165,7 +168,7 @@ async def test_selection_snapshots_owned_defaults_and_explicit_none():
 @pytest.mark.asyncio
 async def test_selection_checks_combined_instruction_size():
     rows = [{"id": i, "instructions": "x" * 65536, "default_enabled": True} for i in range(3)]
-    store = SimpleNamespace(list_skills=AsyncMock(return_value=rows))
+    store = SimpleNamespace(select_skills=AsyncMock(return_value=rows))
     with pytest.raises(SkillError, match="128 KB"):
         await resolve_skills(store, user_id="owner", skill_ids=[0, 1, 2])
 
@@ -180,3 +183,29 @@ def test_prompt_keeps_legacy_behavior_and_explicitly_replaces_prior_selection():
     prompt = prompt_with_skills("Actual request", snapshot)
     assert json.dumps(snapshot, ensure_ascii=False) in prompt
     assert prompt.endswith("User task:\nActual request")
+
+
+def test_idempotency_keeps_legacy_null_fields_and_omitted_skill_defaults():
+    import hashlib
+
+    from cloud_agent.domain.requests import request_fingerprint
+
+    original = {"repo": "owner/repo", "task_prompt": "Fix it", "mcp_bindings": None}
+    legacy = hashlib.sha256(
+        json.dumps({"kind": "create", **original}, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert request_fingerprint("create", original) == legacy
+    assert request_fingerprint("create", {**original, "skill_ids": None}) == legacy
+    assert request_fingerprint("create", {**original, "skill_ids": []}) != legacy
+
+
+@pytest.mark.asyncio
+async def test_one_fake_delegates_its_skill_repository_without_shadowing():
+    from tests.support.storage import OneFake
+
+    inner = SimpleNamespace(select_skills=AsyncMock(return_value=[{"id": 9}]))
+    wrapped = OneFake(inner)
+    assert await wrapped.skills.select_skills(user_id="owner", skill_ids=[9]) == [{"id": 9}]
+    inner.select_skills.assert_awaited_once_with(user_id="owner", skill_ids=[9])
+    with pytest.raises(AttributeError):
+        _ = wrapped.misspelled_method

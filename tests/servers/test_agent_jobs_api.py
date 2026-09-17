@@ -42,7 +42,7 @@ from cloud_agent.api import routes as agent_jobs_router
 from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.tokens import mint_worker_token
-from tests.support.storage import AllCapabilities
+from tests.support.storage import AllCapabilities, EmptySkillLibrary
 
 pytestmark = pytest.mark.asyncio
 
@@ -54,7 +54,7 @@ _UPSTREAM_URL = "https://mcp.example.com/mcp/readonly"
 _UPSTREAM_TOKEN = "ghu_owner_secret"
 
 
-class FakeStorage(AllCapabilities):
+class FakeStorage(EmptySkillLibrary, AllCapabilities):
     """In-memory stand-in exposing the storage surface the router uses."""
 
     def __init__(self) -> None:
@@ -6587,7 +6587,7 @@ async def test_selected_skills_are_snapshotted_and_delivered_only_to_worker(
         }
     ]
     lookup = AsyncMock(return_value=rows)
-    monkeypatch.setattr(store, "list_skills", lookup)
+    monkeypatch.setattr(store, "select_skills", lookup)
     created = await client.post(
         "/v1/agent/jobs",
         json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
@@ -6599,9 +6599,10 @@ async def test_selected_skills_are_snapshotted_and_delivered_only_to_worker(
         {"id": 5, "name": "Review", "description": "Review changes", "revision": 1}
     ]
     assert job["task_prompt"] == "fix it"
-    lookup.assert_awaited_once_with(user_id=_OWNER)
+    lookup.assert_awaited_once_with(user_id=_OWNER, skill_ids=None)
     rows[0]["instructions"] = "A later edit."
     rows[0]["revision"] = 2
+    rows[0]["default_enabled"] = False
     # A resend must retain the first accepted content even if defaults changed.
     lookup.reset_mock()
     replay = await client.post(

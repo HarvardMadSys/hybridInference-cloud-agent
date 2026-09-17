@@ -23,7 +23,10 @@ from cloud_agent.capacity_protocol import (
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.execution_profiles import ExecutionProfile
 from cloud_agent.host_pool import ENROLL_TOKEN_TTL_S
-from cloud_agent.skills.models import SelectedSkill  # noqa: TC001 - Pydantic model field.
+from cloud_agent.skills.models import (
+    SelectedSkill,
+    SkillLimits,
+)
 from cloud_agent_host.event_payloads import bound_event_payload
 from cloud_agent_host.shared_protocol import (
     HOST_CONCURRENCY_MAX_SLOTS,
@@ -1751,6 +1754,8 @@ class AgentConfigResponse(BaseModel):
     static labels while submitting different hardcoded values — so the UI
     described a job nobody was running. These are the real answers.
     """
+
+    skill_limits: SkillLimits = Field(default_factory=SkillLimits)
 
     repos: list[str] = Field(
         default_factory=list,

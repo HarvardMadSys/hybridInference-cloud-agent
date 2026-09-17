@@ -1,5 +1,6 @@
 'use client';
 
+import { getErrorMessage } from '@/lib/utils/errors';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { listSkills, type SkillSummaryApi } from '@/lib/api/skills';
 
@@ -16,8 +17,7 @@ export function useSkillLibrary() {
       const rows = await listSkills();
       if (generation.current === request) setSkills(rows);
     } catch (cause) {
-      if (generation.current === request)
-        setError(cause instanceof Error ? cause.message : 'Could not load your skills.');
+      if (generation.current === request) setError(getErrorMessage(cause));
     } finally {
       if (generation.current === request) setLoading(false);
     }

@@ -110,29 +110,42 @@ def skill_http_error(exc: SkillError) -> HTTPException:
     )
 
 
+def skill_not_found() -> HTTPException:
+    """Use the owner API error envelope for missing library entries."""
+    return HTTPException(
+        status_code=404,
+        detail={
+            "error": {
+                "type": "skill_not_found",
+                "message": "Skill not found. Refresh your library.",
+            }
+        },
+    )
+
+
 async def _github_preview(
     url: str, *, user_id: str, store: _SkillsStorage, credentials: Any
 ) -> dict[str, str]:
-    """Try public content first; private content requires this owner's entitlement."""
+    """Prefer entitled, repository-scoped reads; public imports need no connection."""
+    location = github_skill_location(url)
+    if credentials is not None:
+        try:
+            await require_entitled_repo(
+                location.repo, user_id, store=store.source_control, app_credentials=credentials
+            )
+        except (RepoNotAllowed, GitHubAppError):
+            # An unrelated public skill remains importable without granting this
+            # owner access to any connected account's private repositories.
+            pass
+        else:
+            return await fetch_github_skill(url, credentials=credentials)
     try:
         return await fetch_github_skill(url)
-    except SkillImportNotFound:
-        if credentials is None:
-            raise
-    location = github_skill_location(url)
-    try:
-        await require_entitled_repo(
-            location.repo, user_id, store=store.source_control, app_credentials=credentials
-        )
-        token = await credentials.token_for(
-            location.repo, permissions={"contents": "read"}, repository_scoped=True
-        )
-    except (RepoNotAllowed, GitHubAppError) as exc:
+    except SkillImportNotFound as exc:
         raise SkillError(
             "SKILL.md was not found or your connected GitHub account cannot access it. "
             "Check the URL, or upload the file."
         ) from exc
-    return await fetch_github_skill(url, token=token)
 
 
 @router.get("", response_model=SkillList)
@@ -221,7 +234,7 @@ async def get_skill(
     """Read the current content, never another owner's skill."""
     row = await require_store(store).skills.get_skill(user_id=user["user_id"], skill_id=skill_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Skill not found.")
+        raise skill_not_found()
     return SkillView.model_validate(row)
 
 
@@ -236,7 +249,7 @@ async def update_skill(
     storage = require_store(store)
     current = await storage.skills.get_skill(user_id=user["user_id"], skill_id=skill_id)
     if current is None:
-        raise HTTPException(status_code=404, detail="Skill not found.")
+        raise skill_not_found()
     values = body.model_dump(exclude_unset=True, exclude={"revision"})
     if not values or any(value is None for value in values.values()):
         raise skill_http_error(SkillError("Provide nonempty changes to this skill."))
@@ -255,7 +268,7 @@ async def update_skill(
     except SkillError as exc:
         raise skill_http_error(exc) from exc
     if row is None:
-        raise HTTPException(status_code=404, detail="Skill not found.")
+        raise skill_not_found()
     return SkillView.model_validate(row)
 
 
@@ -274,5 +287,5 @@ async def delete_skill(
     except SkillError as exc:
         raise skill_http_error(exc) from exc
     if not removed:
-        raise HTTPException(status_code=404, detail="Skill not found.")
+        raise skill_not_found()
     return Response(status_code=204)

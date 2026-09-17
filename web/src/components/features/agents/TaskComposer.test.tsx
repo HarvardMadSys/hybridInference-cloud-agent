@@ -115,7 +115,6 @@ describe('TaskComposer source-control onboarding', () => {
         runtime: 'claude-code',
         model: 'model-a',
         base_ref: 'dev',
-        skill_ids: [],
       }),
     );
     expect(navigation.push).toHaveBeenCalledWith('/ajob_1');
@@ -152,7 +151,7 @@ describe('TaskComposer source-control onboarding', () => {
     );
   });
 
-  it('sends selected account defaults with a new task', async () => {
+  it('lets the server resolve unchanged account defaults for a new task', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(config());
     vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
     vi.mocked(listSkills).mockResolvedValue([
@@ -174,12 +173,40 @@ describe('TaskComposer source-control onboarding', () => {
     await screen.findByRole('button', { name: /1 selected/ });
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Review the diff' } });
     fireEvent.click(screen.getByRole('button', { name: /Run/ }));
-    await waitFor(() =>
-      expect(createAgentJob).toHaveBeenCalledWith(expect.objectContaining({ skill_ids: [9] })),
-    );
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('skill_ids');
   });
 
-  it('keeps submission disabled if loading defaults fails and supports retry', async () => {
+  it.each(['loading', 'failed', 'empty error'])(
+    'allows starting with account defaults while skills are %s',
+    async (state) => {
+      vi.mocked(getAgentConfig).mockResolvedValue(config());
+      vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
+      if (state === 'loading') {
+        vi.mocked(listSkills).mockReturnValue(new Promise(() => {}));
+      } else {
+        vi.mocked(listSkills).mockRejectedValue(
+          new Error(state === 'empty error' ? '' : 'Skills unavailable'),
+        );
+      }
+      render(<TaskComposer />);
+      await screen.findByLabelText('Branch');
+      if (state !== 'loading') {
+        expect(await screen.findByRole('alert')).toHaveTextContent(
+          'You can still start a task with your account defaults.',
+        );
+      }
+      expect(screen.getByText('Skills · account defaults')).toBeInTheDocument();
+      fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Review the diff' } });
+      expect(screen.getByRole('button', { name: /Run/ })).toBeEnabled();
+      fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+      await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('skill_ids');
+      expect(navigation.push).toHaveBeenCalledWith('/ajob_1');
+    },
+  );
+
+  it('restores the skills picker after retrying a failed defaults load', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(config());
     vi.mocked(listSkills)
       .mockRejectedValueOnce(new Error('Skills unavailable'))
@@ -188,9 +215,11 @@ describe('TaskComposer source-control onboarding', () => {
     await screen.findByLabelText('Branch');
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Review the diff' } });
     expect(await screen.findByRole('alert')).toHaveTextContent('Skills unavailable');
-    expect(screen.getByRole('button', { name: /Run/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Run/ })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'Retry loading skills' }));
+    expect(await screen.findByRole('button', { name: /0 selected/ })).toBeEnabled();
     await waitFor(() => expect(screen.getByRole('button', { name: /Run/ })).toBeEnabled());
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('preselects a requested repository that is available in backend config', async () => {
@@ -239,7 +268,6 @@ describe('TaskComposer source-control onboarding', () => {
         runtime: 'claude-code',
         model: 'model-a',
         base_ref: 'dev',
-        skill_ids: [],
       }),
     );
     expect(navigation.push).toHaveBeenCalledWith('/ajob_1');

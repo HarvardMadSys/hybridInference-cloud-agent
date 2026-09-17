@@ -528,6 +528,7 @@ export interface AgentJobSymlinkApi {
 export type AgentJobFilesApi = AgentJobDirectoryApi | AgentJobFileApi | AgentJobSymlinkApi;
 
 export interface AgentConfigApi {
+  skill_limits?: import('@/lib/skillLimits').SkillLimits;
   repos: string[];
   runtimes: string[];
   /** Models an agent job can actually call — the create endpoint's own list. */

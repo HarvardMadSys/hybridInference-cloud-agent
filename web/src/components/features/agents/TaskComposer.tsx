@@ -37,6 +37,8 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   const [chosenSkills, setChosenSkills] = useState<SelectedSkillApi[] | null>(null);
   const selectedSkills =
     chosenSkills ?? skillLibrary.skills.filter((skill) => skill.default_enabled);
+  const pendingSkillDefaults =
+    chosenSkills === null && (skillLibrary.loading || !!skillLibrary.error);
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
   const [models, setModels] = useState<string[]>([]);
   const [repo, setRepo] = useState('');
@@ -128,8 +130,6 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     config?.github_connected === true &&
     task.trim().length > 0 &&
     !submitting &&
-    !skillLibrary.loading &&
-    !skillLibrary.error &&
     Boolean(repo && runtime && model);
 
   async function run() {
@@ -142,7 +142,9 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
       const job = await createAgentJob({
         repo,
         task_prompt: task.trim(),
-        skill_ids: selectedSkills.map((skill) => skill.id),
+        // Defaults are resolved by the server. Only an explicit picker change
+        // belongs in the request, so retries are independent of library edits.
+        ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
         runtime,
         model,
         // Sent as a ref; the platform pins it to a commit at creation, because
@@ -260,11 +262,18 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
                 options={efforts}
                 onChange={setEffort}
               />
-              <SkillPicker
-                selected={selectedSkills}
-                onChange={setChosenSkills}
-                disabled={submitting || skillLibrary.loading || !!skillLibrary.error}
-              />
+              {pendingSkillDefaults ? (
+                <span className="text-xs text-gray-500 dark:text-gray-400">
+                  Skills · account defaults
+                </span>
+              ) : (
+                <SkillPicker
+                  limits={config?.skill_limits}
+                  selected={selectedSkills}
+                  onChange={setChosenSkills}
+                  disabled={submitting}
+                />
+              )}
             </>
           )}
 
@@ -293,7 +302,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
 
       {skillLibrary.error ? (
         <div className="mt-3 text-center text-sm text-red-600 dark:text-red-400" role="alert">
-          {skillLibrary.error}{' '}
+          {skillLibrary.error} You can still start a task with your account defaults.{' '}
           <button type="button" onClick={() => void skillLibrary.reload()} className="underline">
             Retry loading skills
           </button>

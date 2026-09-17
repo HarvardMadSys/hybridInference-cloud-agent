@@ -1,5 +1,9 @@
 'use client';
 
+import { DEFAULT_SKILL_LIMITS } from '@/lib/skillLimits';
+
+import { getErrorMessage } from '@/lib/utils/errors';
+
 import { useState } from 'react';
 import {
   createSkill,
@@ -44,14 +48,15 @@ export function SkillImportDialog({
         input = { url: url.trim() };
       } else {
         if (!file) throw new Error('Choose a SKILL.md file.');
-        if (file.size > 65536) throw new Error('SKILL.md must be no larger than 64 KB.');
+        if (file.size > DEFAULT_SKILL_LIMITS.max_skill_bytes)
+          throw new Error('SKILL.md must be no larger than 64 KB.');
         input = { content: await file.text() };
       }
       const result = await previewSkillImport(input);
       setPreview(result);
       setName(result.name);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not preview this skill.');
+      setError(getErrorMessage(cause));
     } finally {
       setBusy(false);
     }
@@ -81,7 +86,7 @@ export function SkillImportDialog({
       }
       onSaved(result);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not import this skill.');
+      setError(getErrorMessage(cause));
     } finally {
       setBusy(false);
     }
@@ -139,7 +144,7 @@ export function SkillImportDialog({
             <input
               value={name}
               onChange={(event) => setName(event.target.value)}
-              maxLength={80}
+              maxLength={DEFAULT_SKILL_LIMITS.max_name_length}
               disabled={busy}
               className={SKILL_FIELD}
             />

@@ -8,12 +8,15 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from urllib.parse import quote, unquote, urlsplit
+from typing import Any
+from urllib.parse import unquote, urlsplit
 
 import httpx
 import yaml
 from pydantic import ValidationError
 
+from cloud_agent.entitlement import REPO_PATTERN
+from cloud_agent.github_app import GitHubAppError, read_repository_contents
 from cloud_agent.skills.models import MAX_SKILL_BYTES, SkillContent, SkillError
 
 
@@ -36,14 +39,14 @@ def github_skill_location(url: str) -> GitHubSkillLocation:
         parsed = urlsplit(url)
     except ValueError as exc:
         raise SkillError("The GitHub URL is invalid.") from exc
-    if parsed.scheme != "https" or parsed.netloc.lower() != "github.com" or parsed.query:
+    if parsed.scheme != "https" or parsed.netloc.lower() != "github.com":
         raise SkillError(
             "Use an https://github.com/ link to a repository, skill folder, or SKILL.md."
         )
     parts = [unquote(part) for part in parsed.path.strip("/").split("/")]
     if len(parts) < 2 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}", parts[0]):
         raise SkillError("The GitHub repository URL is invalid.")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", parts[1]) or parts[1] in {".", ".."}:
+    if not re.fullmatch(REPO_PATTERN, "/".join(parts[:2])):
         raise SkillError("The GitHub repository URL is invalid.")
     if any(not part or part in {".", ".."} or "\\" in part or "\x00" in part for part in parts):
         raise SkillError("The GitHub skill path is invalid.")
@@ -100,44 +103,33 @@ async def fetch_github_skill(
     url: str,
     *,
     token: str | None = None,
+    credentials: Any = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> dict[str, str]:
     """Read one bounded GitHub API response, ignoring download and redirect URLs."""
     location = github_skill_location(url)
-    endpoint = (
-        f"https://api.github.com/repos/{location.repo}/contents/{quote(location.path, safe='/')}"
-    )
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
     try:
-        async with (
-            httpx.AsyncClient(
+        if credentials is not None:
+            body = await credentials.repository_contents(
+                location.repo,
+                path=location.path,
+                ref=location.ref,
+                allow_symbolic_ref=True,
+                max_response_bytes=MAX_SKILL_BYTES * 2 + 16384,
+            )
+        else:
+            async with httpx.AsyncClient(
                 timeout=15, follow_redirects=False, transport=transport, trust_env=False
-            ) as client,
-            client.stream(
-                "GET", endpoint, params={"ref": location.ref}, headers=headers
-            ) as response,
-        ):
-            if response.status_code == 404:
-                raise SkillImportNotFound(
-                    "SKILL.md was not found. Check the URL and repository access."
+            ) as client:
+                body = await read_repository_contents(
+                    client,
+                    api_base="https://api.github.com",
+                    repo=location.repo,
+                    path=location.path,
+                    ref=location.ref,
+                    token=token,
+                    max_response_bytes=MAX_SKILL_BYTES * 2 + 16384,
                 )
-            if response.status_code in {403, 429}:
-                raise SkillError(
-                    "GitHub refused this request or is rate limiting. Try again later."
-                )
-            if response.status_code != 200:
-                raise SkillError("GitHub could not return this skill. Check the URL and try again.")
-            data = bytearray()
-            async for chunk in response.aiter_bytes():
-                data.extend(chunk)
-                if len(data) > MAX_SKILL_BYTES * 2 + 16384:
-                    raise SkillError("SKILL.md must be no larger than 64 KB.")
-        body = json.loads(data)
         if (
             not isinstance(body, dict)
             or body.get("type") != "file"
@@ -154,6 +146,14 @@ async def fetch_github_skill(
         if len(raw) > MAX_SKILL_BYTES:
             raise SkillError("SKILL.md must be no larger than 64 KB.")
         content = raw.decode("utf-8")
+    except GitHubAppError as exc:
+        if exc.status == 404:
+            raise SkillImportNotFound(
+                "SKILL.md was not found. Check the URL and repository access."
+            ) from exc
+        raise SkillError(
+            "GitHub could not return this skill. Check access or try again later."
+        ) from exc
     except (httpx.HTTPError, UnicodeError, json.JSONDecodeError, binascii.Error, ValueError) as exc:
         if isinstance(exc, SkillError):
             raise
@@ -164,7 +164,7 @@ async def fetch_github_skill(
     return {
         **skill.model_dump(),
         "source": "github",
-        "source_url": urlsplit(url)._replace(fragment="").geturl(),
+        "source_url": urlsplit(url)._replace(query="", fragment="").geturl(),
         "source_revision": revision,
         "content_digest": hashlib.sha256(raw).hexdigest(),
     }

@@ -1526,9 +1526,7 @@ async def _create_job_as(
     fingerprint = (
         request_fingerprint(
             "create",
-            body.model_dump(
-                mode="json", exclude={"skill_ids"} if body.skill_ids is None else set()
-            ),
+            body.model_dump(mode="json"),
         )
         if client_request_id is not None
         else None
@@ -2126,9 +2124,7 @@ async def create_agent_follow_up(
             "follow_up",
             {
                 "parent_job_id": job_id,
-                **body.model_dump(
-                    mode="json", exclude={"skill_ids"} if body.skill_ids is None else set()
-                ),
+                **body.model_dump(mode="json"),
             },
         )
         if idempotency_key is not None

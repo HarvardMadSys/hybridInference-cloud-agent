@@ -30,7 +30,7 @@ async def resolve_skills(
     """Snapshot owned skills; None selects library defaults for a new chat."""
     if skill_ids == []:
         return []
-    rows = await store.list_skills(user_id=user_id)
+    rows = await store.select_skills(user_id=user_id, skill_ids=skill_ids)
     if skill_ids is None:
         selected = [row for row in rows if row["default_enabled"]]
         if not selected:
@@ -43,7 +43,12 @@ async def resolve_skills(
             raise SkillError("One or more selected skills are unavailable. Refresh your skills.")
         selected = [by_id[skill_id] for skill_id in skill_ids]
     check_selection(selected)
-    return [SkillSnapshot.model_validate(row).model_dump() for row in selected]
+    return [
+        SkillSnapshot.model_validate(
+            {**row, "revision": row.get("content_revision", row["revision"])}
+        ).model_dump()
+        for row in selected
+    ]
 
 
 def prompt_with_skills(prompt: str, skills: list[dict[str, Any]] | None) -> str:

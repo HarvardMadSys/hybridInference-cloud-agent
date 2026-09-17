@@ -9,7 +9,13 @@ class SkillRepository(Protocol):
     """Owner-scoped reads and revision-fenced library writes."""
 
     async def list_skills(self, *, user_id: str) -> list[dict[str, Any]]:
-        """Return the owner's live skills, including their instruction bodies."""
+        """Return lightweight summaries of the owner's live skills."""
+        ...
+
+    async def select_skills(
+        self, *, user_id: str, skill_ids: list[int] | None
+    ) -> list[dict[str, Any]]:
+        """Read bodies only for owned defaults or explicitly selected IDs."""
         ...
 
     async def get_skill(self, *, user_id: str, skill_id: int) -> dict[str, Any] | None:

@@ -499,59 +499,40 @@ class GitHubAppCredentials:
         return sha
 
     async def repository_contents(
-        self, repo: str, *, path: str = "", ref: str
+        self,
+        repo: str,
+        *,
+        path: str = "",
+        ref: str,
+        allow_symbolic_ref: bool = False,
+        max_response_bytes: int | None = None,
     ) -> dict[str, Any] | list[dict[str, Any]]:
         """Read one file or directory from a repository at a pinned commit.
 
         The token is narrowed twice: ``contents: read`` and the one repository
         named by the job.  ``ref`` must be a commit hash rather than a moving
         branch, otherwise the Files view could silently show a different tree
-        from the one the agent actually edited.
+        from the one the agent actually edited. Skill previews explicitly allow
+        symbolic refs and confirm their independently computed content digest.
 
         ``path`` is expected to have passed the owner API's stricter workspace
         validation.  It is still encoded one segment at a time here so a slash
         or query marker can never change the GitHub endpoint being called.
         """
-        owner, separator, name = repo.partition("/")
-        if not owner or separator != "/" or not name or "/" in name:
-            raise GitHubAppError(f"repo must be 'owner/name', got {repo!r}")
-        if not _COMMIT_SHA.fullmatch(ref or ""):
+        if not allow_symbolic_ref and not _COMMIT_SHA.fullmatch(ref or ""):
             raise GitHubAppError("repository contents require a pinned commit sha")
-
-        parts = path.split("/") if path else []
-        if (len(path) >= 3 and path[0].isalpha() and path[1:3] == ":/") or any(
-            not part
-            or part in {".", ".."}
-            or part.casefold() == ".git"
-            or "\\" in part
-            or "\x00" in part
-            for part in parts
-        ):
-            raise GitHubAppError("repository content path is not a safe relative path")
-
+        _repository_content_endpoint(repo, path)
         token = await self.token_for(repo, permissions={"contents": "read"}, repository_scoped=True)
-        endpoint = f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/contents"
-        if parts:
-            endpoint += "/" + "/".join(quote(part, safe="") for part in parts)
         async with self._http() as client:
-            response = await client.get(
-                f"{self._config.api_base}{endpoint}",
-                params={"ref": ref},
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                },
+            return await read_repository_contents(
+                client,
+                api_base=self._config.api_base,
+                repo=repo,
+                path=path,
+                ref=ref,
+                token=token,
+                max_response_bytes=max_response_bytes,
             )
-        if response.status_code >= 400:
-            raise GitHubAppError(
-                f"could not read repository contents for {repo} ({response.status_code})",
-                status=response.status_code,
-            )
-        body = response.json()
-        if not isinstance(body, (dict, list)):
-            raise GitHubAppError("GitHub returned malformed repository contents")
-        return body
 
     async def _installation_token(self, installation_id: int) -> str:
         """Return a plain installation token for a known installation id.
@@ -587,3 +568,64 @@ def _parse_expiry(raw: str, *, default: float) -> float:
         return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return default
+
+
+async def read_repository_contents(
+    client: httpx.AsyncClient,
+    *,
+    api_base: str,
+    repo: str,
+    path: str,
+    ref: str,
+    token: str | None = None,
+    max_response_bytes: int | None = None,
+) -> dict[str, Any] | list[dict[str, Any]]:
+    """Read a fixed GitHub Contents endpoint with optional bounded streaming."""
+    endpoint = _repository_content_endpoint(repo, path)
+    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    async with client.stream(
+        "GET",
+        f"{api_base}{endpoint}",
+        params={"ref": ref},
+        headers=headers,
+        follow_redirects=False,
+    ) as response:
+        if response.status_code != 200:
+            raise GitHubAppError(
+                f"could not read repository contents for {repo} ({response.status_code})",
+                status=response.status_code,
+            )
+        data = bytearray()
+        async for chunk in response.aiter_bytes():
+            data.extend(chunk)
+            if max_response_bytes is not None and len(data) > max_response_bytes:
+                raise GitHubAppError("Repository content exceeds the allowed size")
+    body = json_module.loads(data)
+    if not isinstance(body, (dict, list)):
+        raise GitHubAppError("GitHub returned malformed repository contents")
+    return body
+
+
+def _repository_content_endpoint(repo: str, path: str) -> str:
+    """Validate and encode a repository-relative GitHub Contents path."""
+    owner, separator, name = repo.partition("/")
+    if not owner or separator != "/" or not name or "/" in name:
+        raise GitHubAppError(f"repo must be 'owner/name', got {repo!r}")
+
+    parts = path.split("/") if path else []
+    if (len(path) >= 3 and path[0].isalpha() and path[1:3] == ":/") or any(
+        not part
+        or part in {".", ".."}
+        or part.casefold() == ".git"
+        or "\\" in part
+        or "\x00" in part
+        for part in parts
+    ):
+        raise GitHubAppError("repository content path is not a safe relative path")
+
+    endpoint = f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/contents"
+    if parts:
+        endpoint += "/" + "/".join(quote(part, safe="") for part in parts)
+    return endpoint

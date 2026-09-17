@@ -2040,6 +2040,7 @@ export function JobDetail({
                         </span>
                       )}
                       <SkillPicker
+                        limits={config?.skill_limits}
                         selected={chosenSkills ?? inheritedSkills}
                         onChange={setChosenSkills}
                         disabled={contextLost || submitting}

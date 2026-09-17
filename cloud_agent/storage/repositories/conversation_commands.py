@@ -121,7 +121,9 @@ class PostgresConversationCommands:
                     json.dumps(metadata) if metadata is not None else None,
                     client_request_id,
                     client_request_fingerprint,
-                    json.dumps(skills) if skills is not None else None,
+                    # No earlier skill instructions exist in a new conversation.
+                    # An empty selection needs no clearing context in its prompt.
+                    json.dumps(skills) if skills else None,
                 )
                 row = await conn.fetchrow(f"{JOB_SELECT} WHERE j.id = $1", job_id)
                 await conn.execute(
@@ -529,6 +531,10 @@ class PostgresConversationCommands:
                 # source from which the new runtime can fabricate continuity.
                 return {"error": "sandbox_context_lost"}
             turn_no = parent["turn_no"] + 1
+            previous_skills = load_json(parent["skills"]) if parent["skills"] is not None else None
+            selected_skills = previous_skills if skills is None else skills
+            if selected_skills == [] and previous_skills is None:
+                selected_skills = None
             # Repo, setup script, execution profile and tool servers are the
             # thread's, not copied per turn: the next turn of a conversation
             # runs with the surface the thread has been running with, and a
@@ -559,13 +565,7 @@ class PostgresConversationCommands:
                 else None,
                 client_request_id,
                 client_request_fingerprint,
-                json.dumps(skills)
-                if skills is not None
-                else (
-                    json.dumps(load_json(parent["skills"]))
-                    if parent["skills"] is not None
-                    else None
-                ),
+                json.dumps(selected_skills) if selected_skills is not None else None,
             )
             row = await conn.fetchrow(f"{JOB_SELECT} WHERE j.id = $1", job_id)
             await conn.execute(

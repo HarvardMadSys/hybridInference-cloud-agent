@@ -68,6 +68,16 @@ JOB_SELECT = (
 )
 
 
+# Owner polling reads need identities, not up to 128 KiB of instructions per turn.
+# Execution, inheritance and fork keep JOB_SELECT's complete immutable snapshot.
+SKILL_SUMMARY_SQL = """CASE WHEN j.skills IS NULL THEN NULL ELSE COALESCE(
+    (SELECT jsonb_agg(item - 'instructions' ORDER BY ordinal)
+     FROM jsonb_array_elements(j.skills) WITH ORDINALITY AS entries(item, ordinal)),
+    '[]'::jsonb) END AS skills"""
+QUALIFIED_JOB_SUMMARY_COLUMNS = QUALIFIED_JOB_COLUMNS.replace("j.skills", SKILL_SUMMARY_SQL)
+JOB_SUMMARY_SELECT = JOB_SELECT.replace(QUALIFIED_JOB_COLUMNS, QUALIFIED_JOB_SUMMARY_COLUMNS)
+
+
 # An idle native process and its HOT credential lease outlive the completed
 # turn. Removing a chat from owner history must not tear down that process or
 # its shared workspace. Actual work and unfinished publication remain visible

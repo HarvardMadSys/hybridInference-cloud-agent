@@ -5,8 +5,7 @@ by name (``storage.host_pool.get_host(...)``). A test fake usually implements
 several capabilities in one class, because the scenario it stands in for spans
 them -- and it would otherwise have to carry sixteen aliases of itself.
 
-``AllCapabilities`` supplies those aliases and an empty personal skill library
-for pre-existing execution scenarios. A
+``AllCapabilities`` supplies those aliases. A
 capability name resolves to the fake itself, and any other missing attribute
 still raises ``AttributeError``, so a typo in a fake is still a failure.
 
@@ -31,10 +30,6 @@ CAPABILITIES = frozenset(p.stem for p in _PORTS.glob("*.py") if p.name != "__ini
 
 class AllCapabilities:
     """Mixin: answer every capability name with the fake itself."""
-
-    async def list_skills(self, *, user_id: str) -> list[dict[str, Any]]:
-        """Existing execution fakes start with an empty personal skill library."""
-        return []
 
     def __getattr__(self, name: str) -> Any:
         """Resolve a capability name to this object; anything else is an error."""
@@ -61,3 +56,13 @@ class OneFake(AllCapabilities):
         if name in CAPABILITIES:
             return self
         return getattr(self._inner, name)
+
+
+class EmptySkillLibrary:
+    """Opt-in library for execution fakes whose scenarios do not select skills."""
+
+    async def select_skills(
+        self, *, user_id: str, skill_ids: list[int] | None
+    ) -> list[dict[str, Any]]:
+        """Return no defaults for these execution-only scenarios."""
+        return []

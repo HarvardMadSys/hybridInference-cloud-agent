@@ -9,6 +9,8 @@ export interface SelectedSkillApi {
 }
 
 export interface SkillSummaryApi extends SelectedSkillApi {
+  content_revision?: number;
+  instruction_bytes?: number;
   source: 'created' | 'uploaded' | 'github';
   source_url: string | null;
   source_revision: string | null;

@@ -1104,7 +1104,17 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert child["title_source"] == "inherited"
     assert child["title"] == f"{job['title']} (fork)"
     assert child["execution_profile"] == job["execution_profile"]
-    assert child["skills"] == saved_skills
+    assert child["skills"] == [
+        {key: value for key, value in skill.items() if key != "instructions"}
+        for skill in saved_skills
+    ]
+    async with pool.acquire() as conn:
+        assert (
+            json.loads(
+                await conn.fetchval("SELECT skills FROM agent_jobs WHERE id = $1", child["id"])
+            )
+            == saved_skills
+        )
     child_sandbox = await store.sandbox.thread_sandbox(thread_id=child["thread_id"])
     source_sandbox = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert child_sandbox is not None and source_sandbox is not None

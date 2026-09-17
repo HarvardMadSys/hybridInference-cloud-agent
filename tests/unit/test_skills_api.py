@@ -211,3 +211,26 @@ def test_github_content_is_customized_via_copy_not_in_place(api):
         == 400
     )
     repository.update_skill.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_entitled_import_skips_anonymous_probe_even_when_it_would_be_rate_limited(
+    monkeypatch,
+):
+    credentials = object()
+    entitled = AsyncMock()
+
+    async def fetch(url, **kwargs):
+        assert kwargs == {"credentials": credentials}
+        return {"instructions": "Approved content"}
+
+    monkeypatch.setattr(skills, "require_entitled_repo", entitled)
+    monkeypatch.setattr(skills, "fetch_github_skill", fetch)
+    result = await skills._github_preview(
+        "https://github.com/example/private?plain=1",
+        user_id="owner",
+        store=SimpleNamespace(source_control=object()),
+        credentials=credentials,
+    )
+    assert result == {"instructions": "Approved content"}
+    entitled.assert_awaited_once()

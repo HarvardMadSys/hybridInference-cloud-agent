@@ -6,8 +6,13 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
-from cloud_agent.skills.models import MAX_LIBRARY_SKILLS, SkillConflict, SkillError
-from cloud_agent.skills.selection import check_selection
+from cloud_agent.skills.models import (
+    MAX_LIBRARY_SKILLS,
+    MAX_SELECTED_SKILLS,
+    MAX_SELECTION_BYTES,
+    SkillConflict,
+    SkillError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -21,12 +26,29 @@ class PostgresSkillRepository:
         self._pool = pool
 
     async def list_skills(self, *, user_id: str) -> list[dict[str, Any]]:
-        """Return the owner's live skills, including their instruction bodies."""
+        """Return lightweight summaries of the owner's live skills."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, name, description, source, source_url, source_revision, default_enabled, "
+                "revision, content_revision, created_at, updated_at, "
+                "octet_length(instructions) AS instruction_bytes "
+                "FROM agent_skills WHERE user_id = $1 AND deleted_at IS NULL "
+                "ORDER BY lower(name), id",
+                user_id,
+            )
+        return [dict(row) for row in rows]
+
+    async def select_skills(
+        self, *, user_id: str, skill_ids: list[int] | None
+    ) -> list[dict[str, Any]]:
+        """Read bodies only for owned defaults or explicitly selected IDs."""
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT * FROM agent_skills WHERE user_id = $1 AND deleted_at IS NULL "
+                "AND (($2::bigint[] IS NULL AND default_enabled) OR id = ANY($2::bigint[])) "
                 "ORDER BY lower(name), id",
                 user_id,
+                skill_ids,
             )
         return [dict(row) for row in rows]
 
@@ -53,16 +75,23 @@ class PostgresSkillRepository:
         conn: Any, user_id: str, candidate: Mapping[str, Any], skill_id: int | None = None
     ) -> None:
         """Keep new-chat defaults inside the same limits as explicit selections."""
-        if not candidate["default_enabled"]:
+        if not candidate.get("default_enabled", False):
             return
-        rows = await conn.fetch(
-            "SELECT instructions FROM agent_skills WHERE user_id = $1 "
+        totals = await conn.fetchrow(
+            "SELECT count(*) AS count, COALESCE(sum(octet_length(instructions)), 0) AS bytes "
+            "FROM agent_skills WHERE user_id = $1 "
             "AND default_enabled AND deleted_at IS NULL "
             "AND ($2::bigint IS NULL OR id <> $2)",
             user_id,
             skill_id,
         )
-        check_selection([dict(row) for row in rows] + [dict(candidate)])
+        if totals["count"] + 1 > MAX_SELECTED_SKILLS:
+            raise SkillError("Enable at most 16 default skills for new chats.")
+        if (
+            totals["bytes"] + len(str(candidate["instructions"]).encode("utf-8"))
+            > MAX_SELECTION_BYTES
+        ):
+            raise SkillError("Default skill instructions must total no more than 128 KB.")
 
     async def create_skill(self, *, user_id: str, values: dict[str, Any]) -> dict[str, Any]:
         """Insert a skill, enforcing names, library size, and default limits."""
@@ -114,12 +143,20 @@ class PostgresSkillRepository:
                     return None
                 if current["revision"] != revision:
                     raise SkillConflict("This skill changed. Refresh it before saving.")
+                if current["source"] == "github" and any(
+                    key != "default_enabled" for key in values
+                ):
+                    raise SkillError("Create a copy to customize an imported GitHub skill.")
                 merged = {**dict(current), **values}
                 await self._check_defaults(conn, user_id, merged, skill_id)
                 row = await conn.fetchrow(
                     """
                     UPDATE agent_skills SET name = $3, description = $4, instructions = $5,
-                        default_enabled = $6, revision = revision + 1, updated_at = NOW()
+                        default_enabled = $6, revision = revision + 1,
+                        content_revision = content_revision +
+                            CASE WHEN (name, description, instructions) IS DISTINCT FROM ($3, $4, $5)
+                                 THEN 1 ELSE 0 END,
+                        updated_at = NOW()
                     WHERE id = $1 AND user_id = $2 RETURNING *
                     """,
                     skill_id,

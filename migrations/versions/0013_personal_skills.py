@@ -4,6 +4,8 @@ Revision ID: 0013_personal_skills
 Revises: 0012_host_concurrency
 """
 
+from __future__ import annotations
+
 from alembic import op
 
 revision = "0013_personal_skills"
@@ -26,6 +28,7 @@ def upgrade() -> None:
             source_revision TEXT,
             default_enabled BOOLEAN NOT NULL DEFAULT FALSE,
             revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+            content_revision INTEGER NOT NULL DEFAULT 1 CHECK (content_revision > 0),
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             deleted_at TIMESTAMPTZ

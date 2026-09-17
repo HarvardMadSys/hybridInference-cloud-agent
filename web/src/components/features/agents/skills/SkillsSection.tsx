@@ -1,5 +1,7 @@
 'use client';
 
+import { getErrorMessage } from '@/lib/utils/errors';
+
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
@@ -51,8 +53,7 @@ function SkillDetails({
         if (current) setSkill(result);
       })
       .catch((cause) => {
-        if (current)
-          setError(cause instanceof Error ? cause.message : 'Could not load this skill.');
+        if (current) setError(getErrorMessage(cause));
       })
       .finally(() => {
         if (current) setLoading(false);
@@ -74,7 +75,7 @@ function SkillDetails({
       setSkill(updated);
       onChanged(updated);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not change the default.');
+      setError(getErrorMessage(cause));
     } finally {
       setBusy(false);
     }
@@ -88,7 +89,7 @@ function SkillDetails({
       await deleteSkill(skill.id, skill.revision);
       onRemoved(skill.id);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not remove this skill.');
+      setError(getErrorMessage(cause));
     } finally {
       setBusy(false);
     }
@@ -159,7 +160,7 @@ function SkillDetails({
         <>
           <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
             <span>{SOURCE_LABELS[skill.source]}</span>
-            <span>· Version {skill.revision}</span>
+            <span>· Version {skill.content_revision ?? skill.revision}</span>
             {skill.source_revision ? <span>· {skill.source_revision.slice(0, 7)}</span> : null}
           </div>
           {skill.source_url ? (
@@ -244,7 +245,7 @@ export function SkillsSection() {
       );
       setNotice('Defaults updated for new chats.');
     } catch (cause) {
-      setMutationError(cause instanceof Error ? cause.message : 'Could not change the default.');
+      setMutationError(getErrorMessage(cause));
       void reload();
     } finally {
       setBusyId(null);
