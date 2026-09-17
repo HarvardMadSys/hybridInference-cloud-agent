@@ -43,7 +43,13 @@ def measure(
     """Check the mounted directories against the plan, then read their capacities."""
     readings = []
     for path, expected_root in (("/disk", fsroot), ("/upper", upper_root)):
-        fd = os.open(path, os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+        # `O_PATH` opens a directory as a reference without reading it, which
+        # is why this helper needs no permission on what it is pointed at. It
+        # is a Linux flag and typeshed says so, while this module is also
+        # type-checked and unit-tested on macOS — hence `getattr`, read at the
+        # call so a test can still substitute it. In the Linux container this
+        # runs in, the flag is always there.
+        fd = os.open(path, getattr(os, "O_PATH", 0) | os.O_DIRECTORY | os.O_CLOEXEC)
         try:
             if mount_for_fd(fd) != (device, expected_root, fstype):
                 raise ValueError("mounted directory does not match the host mount-table plan")

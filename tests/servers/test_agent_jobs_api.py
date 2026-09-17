@@ -42,7 +42,7 @@ from cloud_agent.api import routes as agent_jobs_router
 from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.tokens import mint_worker_token
-from tests.support.storage import AllCapabilities
+from tests.support.storage import AllCapabilities, EmptySkillLibrary
 
 pytestmark = pytest.mark.asyncio
 
@@ -54,7 +54,7 @@ _UPSTREAM_URL = "https://mcp.example.com/mcp/readonly"
 _UPSTREAM_TOKEN = "ghu_owner_secret"
 
 
-class FakeStorage(AllCapabilities):
+class FakeStorage(EmptySkillLibrary, AllCapabilities):
     """In-memory stand-in exposing the storage surface the router uses."""
 
     def __init__(self) -> None:
@@ -351,6 +351,7 @@ class FakeStorage(AllCapabilities):
         model: str | None = None,
         reasoning_effort: str | None = None,
         reset_reasoning_effort: bool = False,
+        skills: list[dict[str, Any]] | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:
@@ -379,6 +380,7 @@ class FakeStorage(AllCapabilities):
             "turn_no": turn_no,
             "base_sha": parent.get("published_commit_sha") or parent.get("base_sha"),
             "task_prompt": prompt,
+            "skills": skills if skills is not None else parent.get("skills"),
             "runtime": runtime or parent["runtime"],
             "model": model or parent["model"],
             # Mirrors the store: inherit when omitted, and only the explicit
@@ -5043,15 +5045,10 @@ async def test_disconnecting_clears_the_secret_and_bumps_the_epoch(
     assert len(await store.mcp.list_mcp_connections(user_id=_OWNER, include_deleted=True)) == 1
 
 
-async def test_a_follow_up_is_refused_when_its_thread_s_connection_was_disconnected(
+async def test_a_follow_up_runs_when_an_account_connection_was_disconnected(
     client: AsyncClient, store: FakeStorage
 ):
-    """Fail fast, on **every** turn -- not only when the caller switches runtime.
-
-    Whether a thread's connection is still usable changes on its own, between
-    turns. A plain "keep going" follow-up that returned 201 would discover at
-    its first tool call that the tools the prompt was written around are gone.
-    """
+    """One disconnected integration must not prevent unrelated conversation work."""
     row = store.connect_mcp(user_id=_OWNER, label="GitHub")
     created = await client.post(
         "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
@@ -5063,8 +5060,10 @@ async def test_a_follow_up_is_refused_when_its_thread_s_connection_was_disconnec
 
     follow_up = await client.post(f"/v1/agent/jobs/{job_id}/follow-ups", json={"prompt": "again"})
 
-    assert follow_up.status_code == 400
-    assert "GitHub" in follow_up.text
+    assert follow_up.status_code == 201
+    from cloud_agent.mcp.registry import servers_for_thread
+
+    assert await servers_for_thread(store.mcp, thread_id=created.json()["thread_id"]) == {}
 
 
 async def test_a_follow_up_still_runs_while_its_thread_s_connection_is_connected(
@@ -6571,6 +6570,86 @@ async def test_a_new_key_still_runs_the_checks_that_can_refuse_it(
     assert len(store.jobs) == 1
 
 
+async def test_selected_skills_are_snapshotted_and_delivered_only_to_worker(
+    client, store, monkeypatch
+):
+    rows = [
+        {
+            "id": 5,
+            "name": "Review",
+            "description": "Review changes",
+            "revision": 1,
+            "instructions": "Inspect tests and edge cases.",
+            "default_enabled": True,
+        }
+    ]
+    lookup = AsyncMock(return_value=rows)
+    monkeypatch.setattr(store, "select_skills", lookup)
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
+        headers={"Idempotency-Key": "skill-submit"},
+    )
+    assert created.status_code == 201, created.text
+    job = created.json()
+    assert job["skills"] == [
+        {"id": 5, "name": "Review", "description": "Review changes", "revision": 1}
+    ]
+    assert job["task_prompt"] == "fix it"
+    lookup.assert_awaited_once_with(user_id=_OWNER, skill_ids=None)
+    rows[0]["instructions"] = "A later edit."
+    rows[0]["revision"] = 2
+    rows[0]["default_enabled"] = False
+    # A resend must retain the first accepted content even if defaults changed.
+    lookup.reset_mock()
+    replay = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
+        headers={"Idempotency-Key": "skill-submit"},
+    )
+    assert replay.json()["id"] == job["id"]
+    lookup.assert_not_awaited()
+    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    assert claim.status_code == 200, claim.text
+    assert "Inspect tests and edge cases." in claim.json()["task_prompt"]
+    assert "A later edit." not in claim.json()["task_prompt"]
+    assert claim.json()["task_prompt"].endswith("User task:\nfix it")
+    assert store.messages[0]["content"] == "fix it"
+    follow = await client.post(
+        f"/v1/agent/jobs/{job['id']}/follow-ups", json={"prompt": "Continue"}
+    )
+    assert follow.status_code == 201, follow.text
+    assert follow.json()["skills"][0]["revision"] == 1
+    lookup.assert_not_awaited()
+    updated = await client.post(
+        f"/v1/agent/jobs/{job['id']}/follow-ups", json={"prompt": "Update", "skill_ids": [5]}
+    )
+    assert updated.status_code == 201, updated.text
+    assert updated.json()["skills"][0]["revision"] == 2
+    cleared = await client.post(
+        f"/v1/agent/jobs/{job['id']}/follow-ups", json={"prompt": "Clear", "skill_ids": []}
+    )
+    assert cleared.status_code == 201 and cleared.json()["skills"] == []
+    assert store.jobs[cleared.json()["id"]]["skills"] == []
+
+
+@pytest.mark.parametrize(
+    "selection,status", [([999], 400), ([5, 5], 400), ([0], 422), ([True], 422), (["5"], 422)]
+)
+async def test_invalid_skill_selections_never_create_jobs(client, store, selection, status):
+    result = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "model": "glm-5.1",
+            "task_prompt": "fix it",
+            "skill_ids": selection,
+        },
+    )
+    assert result.status_code == status
+    assert not store.jobs
+
+
 # ── Returning a turn that never started ─────────────────────────────────
 
 
@@ -6660,3 +6739,47 @@ async def test_a_release_reason_outside_the_audit_vocabulary_is_refused(
 
     assert refused.status_code == 422
     assert store.jobs[job_id]["state"] == "running"
+
+
+@pytest.mark.parametrize("runtime", ["codex", "kilo", "claude-code", "opencode", "pi"])
+async def test_claim_loads_current_default_servers_and_skips_unavailable_ones(
+    client: AsyncClient, store: FakeStorage, runtime
+):
+    """Every CLI receives the live, usable set without a composer selection."""
+    working = store.connect_mcp(user_id=_OWNER, label="Wiki")
+    expired = store.connect_mcp(
+        user_id=_OWNER,
+        label="Expired",
+        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+    paused = store.connect_mcp(user_id=_OWNER, label="Paused")
+    store.mcp_connections[paused["id"]]["enabled"] = False
+    created = await client.post("/v1/agent/jobs", json=_job_body(runtime=runtime))
+    assert created.status_code == 201
+    thread = created.json()["thread_id"]
+    # The real repository creates these defaults on list; storage tests exercise
+    # that owner-scoped insert against Postgres. Keep the route fake explicit.
+    store.mcp_bindings[thread] = [
+        store._thread_binding(
+            thread,
+            {
+                "connection_id": row["id"],
+                "alias": f"mcp{row['id']}",
+                "enabled": True,
+                "selection_pending": True,
+                "rules": {},
+                "config_revision": row["config_revision"],
+                "authorization_epoch": row["authorization_epoch"],
+                "capability_revision": row["capability_revision"],
+            },
+        )
+        for row in (working, expired, paused)
+    ]
+    app = _build_app(store, claim_auth=True)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as runner:
+        claimed = await runner.post(
+            "/v1/agent/worker/claim", json={"worker_id": "w-1", "lease_ttl_seconds": 60}
+        )
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["mcp_bindings"] == [f"mcp{working['id']}"]
+    assert claimed.json()["mcp_token"]

@@ -1,17 +1,23 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { McpAddDialog } from './McpAddDialog';
 import type { McpImportPreviewApi, McpTemplateApi } from '@/lib/api/mcp';
 
 vi.mock('@/lib/api/mcp', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api/mcp')>()),
   createMcpConnection: vi.fn(),
+  listMcpCatalog: vi.fn(),
   previewMcpImport: vi.fn(),
   saveMcpImport: vi.fn(),
 }));
-import { createMcpConnection, previewMcpImport, saveMcpImport } from '@/lib/api/mcp';
+import {
+  createMcpConnection,
+  listMcpCatalog,
+  previewMcpImport,
+  saveMcpImport,
+} from '@/lib/api/mcp';
 
 const template: McpTemplateApi = {
   name: 'github',
@@ -43,6 +49,16 @@ const preview: McpImportPreviewApi = {
 };
 const text = '{"mcpServers":{"docs":{"url":"https://docs.example.com/mcp"}}}';
 
+beforeEach(() => {
+  vi.mocked(listMcpCatalog).mockResolvedValue({
+    entries: [],
+    total: 0,
+    next_offset: null,
+    synced_at: null,
+    stale: true,
+  });
+});
+
 afterEach(() => {
   cleanup();
   vi.resetAllMocks();
@@ -53,7 +69,7 @@ describe('McpAddDialog', () => {
     vi.mocked(createMcpConnection).mockResolvedValue({ id: 1, label: 'GitHub' } as never);
     const added = vi.fn();
     render(<McpAddDialog templates={[template]} onClose={vi.fn()} onAdded={added} />);
-    fireEvent.click(screen.getByRole('button', { name: 'GitHub' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'GitHub' }));
     expect(screen.getByText('Register a client ID to use OAuth.')).toBeInTheDocument();
     expect(screen.queryByLabelText('Run location')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Connect GitHub' }));
@@ -73,7 +89,7 @@ describe('McpAddDialog', () => {
   it('lets a GitHub user connect with a token instead of registering an OAuth app', async () => {
     vi.mocked(createMcpConnection).mockResolvedValue({ id: 1, label: 'GitHub' } as never);
     render(<McpAddDialog templates={[template]} onClose={vi.fn()} onAdded={vi.fn()} />);
-    fireEvent.click(screen.getByRole('button', { name: 'GitHub' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'GitHub' }));
     fireEvent.change(screen.getByLabelText('Connect with'), { target: { value: 'static' } });
     expect(screen.getByRole('button', { name: 'Connect GitHub' })).toBeDisabled();
     const input = screen.getByLabelText('Access token');
@@ -126,7 +142,7 @@ describe('McpAddDialog', () => {
       ...preview,
       saved: [{ id: 5, label: 'docs' }] as never,
     });
-    render(<McpAddDialog templates={[]} onClose={vi.fn()} onAdded={vi.fn()} />);
+    render(<McpAddDialog templates={[]} initialMode="json" onClose={vi.fn()} onAdded={vi.fn()} />);
     fireEvent.change(screen.getByLabelText('MCP configuration'), { target: { value: text } });
     const add = await screen.findByRole('button', { name: 'Add 1 server' });
     expect(add).toBeDisabled();
@@ -158,7 +174,7 @@ describe('McpAddDialog', () => {
       drafts: [],
       rejected: [{ name: 'broken', reason: 'Missing URL' }],
     });
-    render(<McpAddDialog templates={[]} onClose={vi.fn()} onAdded={vi.fn()} />);
+    render(<McpAddDialog templates={[]} initialMode="json" onClose={vi.fn()} onAdded={vi.fn()} />);
     const input = screen.getByLabelText('MCP configuration');
     fireEvent.change(input, { target: { value: text } });
     await waitFor(() => expect(previewMcpImport).toHaveBeenCalledTimes(1));
@@ -172,7 +188,7 @@ describe('McpAddDialog', () => {
     vi.mocked(previewMcpImport).mockResolvedValue(preview);
     vi.mocked(saveMcpImport).mockRejectedValue(new Error('Could not save'));
     const added = vi.fn();
-    render(<McpAddDialog templates={[]} onClose={vi.fn()} onAdded={added} />);
+    render(<McpAddDialog templates={[]} initialMode="json" onClose={vi.fn()} onAdded={added} />);
     fireEvent.change(screen.getByLabelText('MCP configuration'), { target: { value: text } });
     fireEvent.click(await screen.findByRole('button', { name: 'Add 1 server' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not save');
@@ -192,7 +208,7 @@ describe('McpAddDialog', () => {
     );
     fireEvent.change(screen.getByLabelText('MCP configuration'), { target: { value: text } });
     await screen.findByRole('button', { name: 'Add 1 server' });
-    fireEvent.click(screen.getByRole('button', { name: 'Popular servers' }));
+    fireEvent.click(screen.getByRole('button', { name: 'MCP servers' }));
     expect(screen.queryByRole('button', { name: 'Add 1 server' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'JSON configuration' }));
     expect(screen.getByLabelText('MCP configuration')).toHaveValue(text);
@@ -201,7 +217,7 @@ describe('McpAddDialog', () => {
 
   it('keeps the validated configuration when selecting the same example again', async () => {
     vi.mocked(previewMcpImport).mockResolvedValue(preview);
-    render(<McpAddDialog templates={[]} onClose={vi.fn()} onAdded={vi.fn()} />);
+    render(<McpAddDialog templates={[]} initialMode="json" onClose={vi.fn()} onAdded={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'URL example' }));
     await screen.findByRole('button', { name: 'Add 1 server' });
     fireEvent.click(screen.getByRole('button', { name: 'URL example' }));
@@ -216,7 +232,7 @@ describe('McpAddDialog', () => {
     }));
     vi.mocked(previewMcpImport).mockResolvedValue({ ...preview, drafts });
     vi.mocked(saveMcpImport).mockResolvedValue({ ...preview, saved: [] });
-    render(<McpAddDialog templates={[]} onClose={vi.fn()} onAdded={vi.fn()} />);
+    render(<McpAddDialog templates={[]} initialMode="json" onClose={vi.fn()} onAdded={vi.fn()} />);
     fireEvent.change(screen.getByLabelText('MCP configuration'), { target: { value: text } });
     const add = await screen.findByRole('button', { name: 'Add 2 servers' });
     fireEvent.change(screen.getByLabelText('wiki · Value for Authorization'), {

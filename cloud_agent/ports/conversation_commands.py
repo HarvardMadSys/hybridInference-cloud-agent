@@ -29,6 +29,7 @@ class ConversationCommands(Protocol):
         setup_script: str | None = None,
         metadata: dict[str, Any] | None = None,
         mcp_bindings: list[dict[str, Any]] | None = None,
+        skills: list[dict[str, Any]] | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any]:
@@ -58,6 +59,7 @@ class ConversationCommands(Protocol):
         model: str | None = None,
         reasoning_effort: str | None = None,
         reset_reasoning_effort: bool = False,
+        skills: list[dict[str, Any]] | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:

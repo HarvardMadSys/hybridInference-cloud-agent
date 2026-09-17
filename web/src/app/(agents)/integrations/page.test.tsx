@@ -9,6 +9,9 @@ const navigation = vi.hoisted(() => ({ search: '' }));
 vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(navigation.search),
 }));
+import { listSkills } from '@/lib/api/skills';
+vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
+
 vi.mock('@/lib/api/agents', () => ({
   getAgentIntegrations: vi.fn(),
   disconnectAgentIntegration: vi.fn(),
@@ -55,6 +58,7 @@ const connection: McpConnectionApi = {
 };
 
 beforeEach(() => {
+  vi.mocked(listSkills).mockResolvedValue([]);
   navigation.search = '';
   vi.mocked(getAgentIntegrations).mockResolvedValue({ providers: [] });
   vi.mocked(listMcpConnections).mockResolvedValue({ connections: [connection], templates: [] });

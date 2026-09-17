@@ -193,6 +193,7 @@ def connection_from_row(row: Mapping[str, Any]) -> McpConnection:
         auth=_parse_auth(row),
         template=_optional(row.get("template")),
         status=ConnectionStatus(str(row.get("status") or ConnectionStatus.DRAFT)),
+        enabled=bool(row.get("enabled", True)),
         error_kind=ConnectionErrorKind(str(row.get("error_kind") or "none")),
         error_detail=_optional(row.get("error_detail")),
         connector_id=str(row["connector_id"]) if row.get("connector_id") else None,
@@ -334,7 +335,7 @@ async def resolve_connection(
     *that* connection and leaves the others alone.
     """
     connection = connection_from_row(row)
-    if connection.status is ConnectionStatus.DISABLED:
+    if not connection.enabled or connection.status is ConnectionStatus.DISABLED:
         return ResolvedConnection(
             connection=connection,
             error="This connection is turned off.",
@@ -453,9 +454,8 @@ async def resolve_for_thread(
 def reachable_tools(resolved: ResolvedConnection, binding: ThreadBinding) -> list[Capability]:
     """The tools one binding may list, from one connection's snapshot.
 
-    Empty means empty. There is no wildcard: a connection whose owner has not
-    chosen capabilities yet shows what is on offer and holds every call, and a
-    connection whose owner chose nothing shows nothing.
+    Default bindings advertise discovered capabilities and require approval.
+    Explicit denials remain hidden, and disabled servers advertise nothing.
     """
     if resolved.snapshot is None:
         return []
@@ -537,7 +537,11 @@ async def servers_for_thread(
     resolved_pairs = await resolve_for_thread(store, thread_id=thread_id, cipher=cipher)
     servers: dict[str, McpServer] = {}
     for resolved, binding in resolved_pairs:
-        if not resolved.usable or not binding.enabled:
+        if (
+            not resolved.usable
+            or not binding.enabled
+            or resolved.connection.status is ConnectionStatus.ERROR
+        ):
             continue
         servers[binding.alias] = server_for(resolved, binding)
     return servers

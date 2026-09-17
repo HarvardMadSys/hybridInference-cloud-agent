@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.storage._sql.mcp import mcp_binding_row
+from cloud_agent.storage._sql.mcp import ensure_mcp_bindings, mcp_binding_row
 from cloud_agent.storage._sql.rows import load_json as _load_json
 
 if TYPE_CHECKING:
@@ -86,7 +86,7 @@ class PostgresMcpConnectionRepository:
 
     _MCP_CONNECTION_COLUMNS = (
         "id, user_id, label, template, transport, location, url, launch_spec, "
-        "auth_kind, auth_config, connector_id, status, error_kind, error_detail, "
+        "auth_kind, auth_config, connector_id, status, enabled, error_kind, error_detail, "
         "access_token_ciphertext, refresh_token_ciphertext, client_secret_ciphertext, "
         "expires_at, scopes, issuer, resource, refresh_rotates, token_endpoint, "
         "revocation_endpoint, registration_endpoint, client_auth_method, "
@@ -313,6 +313,32 @@ class PostgresMcpConnectionRepository:
                     connection_id,
                 )
         return row is not None
+
+    async def set_mcp_connection_enabled(
+        self, *, connection_id: int, user_id: str, enabled: bool
+    ) -> dict[str, Any] | None:
+        """Toggle account-wide availability without deleting credentials or tool choices."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                f"""
+                UPDATE agent_mcp_connections
+                SET enabled = $3,
+                    authorization_epoch = authorization_epoch + (enabled IS DISTINCT FROM $3)::int,
+                    updated_at = NOW()
+                WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+                RETURNING {self._MCP_CONNECTION_COLUMNS}
+                """,
+                connection_id,
+                user_id,
+                enabled,
+            )
+            if row is not None and not enabled:
+                await conn.execute(
+                    "UPDATE agent_mcp_invocations SET status = 'expired' "
+                    "WHERE connection_id = $1 AND status IN ('pending', 'approved')",
+                    connection_id,
+                )
+        return self._mcp_connection(row) if row is not None else None
 
     async def set_mcp_connection_status(
         self,
@@ -809,8 +835,9 @@ class PostgresMcpConnectionRepository:
         return len(deleted)
 
     async def list_mcp_bindings(self, *, thread_id: str) -> list[dict[str, Any]]:
-        """Every connection this conversation may use, with its rules."""
-        async with self._pool.acquire() as conn:
+        """Ensure default bindings for the owner's servers and return all overrides."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            await ensure_mcp_bindings(conn, thread_id=thread_id)
             rows = await conn.fetch(
                 """
                 SELECT b.thread_id, b.connection_id, b.alias, b.enabled, b.selection_pending,
@@ -833,12 +860,13 @@ class PostgresMcpConnectionRepository:
             bindings.append(record)
         return bindings
 
-    async def replace_mcp_bindings(self, *, thread_id: str, bindings: list[dict[str, Any]]) -> None:
+    async def replace_mcp_bindings(
+        self, *, thread_id: str, bindings: list[dict[str, Any]], merge: bool = False
+    ) -> None:
         """Replace a conversation's selection wholesale.
 
-        Wholesale rather than per-row, because a selection is a decision about
-        the *set*: leaving an unmentioned binding in place would mean removing a
-        connection from the dialog did not remove its tools from the session.
+        With merge=True only named servers change. Otherwise unmentioned
+        existing bindings become disabled opt-outs instead of disappearing.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             # Serialize replacements even when the old selection is empty.
@@ -851,25 +879,33 @@ class PostgresMcpConnectionRepository:
                 )
             }
             revisions: dict[int, int] = {}
-            changed = set(previous) - {int(binding["connection_id"]) for binding in bindings}
+            supplied = {int(binding["connection_id"]) for binding in bindings}
+            # An omitted server is explicitly disabled, never deleted: otherwise
+            # the next automatic sync would re-enable a user-removed server.
+            bindings = [
+                *bindings,
+                *[
+                    old if merge else {**old, "enabled": False}
+                    for connection_id, old in previous.items()
+                    if connection_id not in supplied
+                ],
+            ]
+            changed: set[int] = set()
             for binding in bindings:
                 connection_id = int(binding["connection_id"])
                 old = previous.get(connection_id)
-                unchanged = (
-                    old is not None
-                    and not old["selection_pending"]
-                    and all(
-                        old[key] == binding.get(key, default)
-                        for key, default in (
-                            ("alias", ""),
-                            ("enabled", True),
-                            ("config_revision", 1),
-                            ("authorization_epoch", 1),
-                            ("capability_revision", 1),
-                            ("rules", {}),
-                            ("resource_rules", {}),
-                            ("prompt_rules", {}),
-                        )
+                unchanged = old is not None and all(
+                    old[key] == binding.get(key, default)
+                    for key, default in (
+                        ("alias", ""),
+                        ("enabled", True),
+                        ("selection_pending", False),
+                        ("config_revision", 1),
+                        ("authorization_epoch", 1),
+                        ("capability_revision", 1),
+                        ("rules", {}),
+                        ("resource_rules", {}),
+                        ("prompt_rules", {}),
                     )
                 )
                 revisions[connection_id] = (
@@ -899,7 +935,7 @@ class PostgresMcpConnectionRepository:
                         (thread_id, connection_id, alias, enabled, selection_pending,
                          config_revision, authorization_epoch, capability_revision,
                          policy_revision, rules, resource_rules, prompt_rules)
-                    VALUES ($1, $2, $3, $4, FALSE, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb)
+                    VALUES ($1, $2, $3, $4, $12, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb)
                     """,
                     thread_id,
                     int(binding["connection_id"]),
@@ -912,6 +948,7 @@ class PostgresMcpConnectionRepository:
                     json.dumps(binding.get("rules") or {}),
                     json.dumps(binding.get("resource_rules") or {}),
                     json.dumps(binding.get("prompt_rules") or {}),
+                    bool(binding.get("selection_pending", False)),
                 )
 
     async def bump_mcp_binding_policy_revision(self, *, thread_id: str, connection_id: int) -> int:
@@ -1114,7 +1151,7 @@ class PostgresMcpConnectionRepository:
                   AND a.lease_expires_at > NOW()
                   AND b.connection_id = agent_mcp_invocations.connection_id AND b.enabled
                   AND b.policy_revision = agent_mcp_invocations.policy_revision
-                  AND c.user_id = j.user_id AND c.deleted_at IS NULL
+                  AND c.user_id = j.user_id AND c.deleted_at IS NULL AND c.enabled
                   AND c.config_revision = agent_mcp_invocations.config_revision
                   AND c.authorization_epoch = agent_mcp_invocations.authorization_epoch
                   AND c.capability_revision = agent_mcp_invocations.capability_revision

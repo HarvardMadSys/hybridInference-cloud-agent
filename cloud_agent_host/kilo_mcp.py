@@ -142,9 +142,8 @@ def ensure_kilo_runtime(manager: ChatSandboxManager, spec: ChatSandboxSpec, vers
             user_gid=0,
         )
         if installed.returncode != 0:
-            detail = installed.stderr
-            if isinstance(detail, bytes):
-                detail = detail.decode("utf-8", "replace")
+            stderr = installed.stderr
+            detail = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else stderr
             raise SandboxError(
                 "could not activate the retained Kilo MCP runtime: " + detail.strip()[-500:]
             )

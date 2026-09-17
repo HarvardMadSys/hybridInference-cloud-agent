@@ -82,6 +82,8 @@ from cloud_agent_host.logging_utils import get_logger
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
+    from _typeshed import FileDescriptorLike
+
 logger = get_logger(__name__)
 
 #: The wire version of the ``capacity`` block in a host heartbeat. A control
@@ -514,12 +516,28 @@ class StorageMissing:
 
 
 class StatvfsReading(Protocol):
-    """The four ``statvfs`` fields a block-space reading needs."""
+    """The four ``statvfs`` fields a block-space reading needs.
 
-    f_frsize: int
-    f_blocks: int
-    f_bfree: int
-    f_bavail: int
+    Read-only, which is what makes ``os.statvfs_result`` itself satisfy this:
+    its fields are structseq members with no setter, and a protocol asking for
+    assignable attributes would exclude the very type every caller passes.
+    """
+
+    @property
+    def f_frsize(self) -> int:
+        """Fragment size, the unit the block counts are in."""
+
+    @property
+    def f_blocks(self) -> int:
+        """Fragments in the filesystem."""
+
+    @property
+    def f_bfree(self) -> int:
+        """Fragments free, including the ones reserved for root."""
+
+    @property
+    def f_bavail(self) -> int:
+        """Fragments an unprivileged writer may still use."""
 
 
 class StorageProbe(Protocol):
@@ -1050,7 +1068,13 @@ def _drain_child(
     status: CommandStatus | None = None
     lines = 0
     selector = selectors.DefaultSelector()
-    streams = {child.stdout: stdout, child.stderr: stderr}
+    # The selector reports each registered stream back as whatever
+    # ``register`` accepted (``FileDescriptorLike``), so the table it is read
+    # through is keyed by that type rather than by the concrete pipes.
+    streams: dict[FileDescriptorLike | None, bytearray] = {
+        child.stdout: stdout,
+        child.stderr: stderr,
+    }
     try:
         for stream in streams:
             if stream is not None:
@@ -1064,7 +1088,7 @@ def _drain_child(
                 sink = streams[key.fileobj]
                 limit = max_stdout_bytes if sink is stdout else max_stderr_bytes
                 try:
-                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    chunk = os.read(key.fd, 65536)
                 except OSError:
                     chunk = b""
                 if not chunk:

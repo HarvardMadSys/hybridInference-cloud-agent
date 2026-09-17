@@ -509,3 +509,42 @@ async def test_forget_drops_the_entitlement_token_too(config):
         httpx.AsyncClient = original
 
     assert len(minted) == 2
+
+
+@pytest.mark.asyncio
+async def test_skill_contents_reuse_configured_client_and_bound_symbolic_ref_reads(config):
+    from unittest.mock import AsyncMock
+
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"type": "file", "content": "x" * 100})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        credentials.token_for = AsyncMock(return_value="scoped-token")
+        with pytest.raises(GitHubAppError, match="allowed size"):
+            await credentials.repository_contents(
+                "owner/repo",
+                path="SKILL.md",
+                ref="feature/review",
+                allow_symbolic_ref=True,
+                max_response_bytes=50,
+            )
+        result = await credentials.repository_contents(
+            "owner/repo",
+            path="SKILL.md",
+            ref="feature/review",
+            allow_symbolic_ref=True,
+            max_response_bytes=1000,
+        )
+        assert result["type"] == "file"
+        assert not client.is_closed
+        assert len(requests) == 2
+        assert all(request.url.host == "api.test" for request in requests)
+        assert requests[0].url.params["ref"] == "feature/review"
+        assert requests[0].headers["authorization"] == "Bearer scoped-token"
+        credentials.token_for.assert_awaited_with(
+            "owner/repo", permissions={"contents": "read"}, repository_scoped=True
+        )

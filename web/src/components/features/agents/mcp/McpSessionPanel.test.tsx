@@ -3,42 +3,36 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { McpSessionPanel } from './McpSessionPanel';
-import type { McpBindingApi, McpConnectionApi, McpInvocationApi } from '@/lib/api/mcp';
+import type { McpBindingApi, McpInvocationApi } from '@/lib/api/mcp';
 
 vi.mock('@/lib/api/mcp', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api/mcp')>();
   return {
     ...actual,
-    getMcpConnectionCapabilities: vi.fn(),
     getMcpThreadBindings: vi.fn(),
-    listMcpConnections: vi.fn(),
     listMcpInvocations: vi.fn(),
-    replaceMcpThreadBindings: vi.fn(),
+    updateMcpThreadBinding: vi.fn(),
     decideMcpInvocation: vi.fn(),
   };
 });
 
 import {
   decideMcpInvocation,
-  getMcpConnectionCapabilities,
   getMcpThreadBindings,
-  listMcpConnections,
   listMcpInvocations,
-  replaceMcpThreadBindings,
+  updateMcpThreadBinding,
 } from '@/lib/api/mcp';
 
 const mockedBindings = getMcpThreadBindings as unknown as ReturnType<typeof vi.fn>;
 const mockedInvocations = listMcpInvocations as unknown as ReturnType<typeof vi.fn>;
-const mockedReplace = replaceMcpThreadBindings as unknown as ReturnType<typeof vi.fn>;
+const mockedUpdate = updateMcpThreadBinding as unknown as ReturnType<typeof vi.fn>;
 const mockedDecide = decideMcpInvocation as unknown as ReturnType<typeof vi.fn>;
-const mockedConnections = listMcpConnections as unknown as ReturnType<typeof vi.fn>;
-const mockedCapabilities = getMcpConnectionCapabilities as unknown as ReturnType<typeof vi.fn>;
 
 const binding: McpBindingApi = {
   connection_id: 3,
   connection_label: 'Team wiki',
   alias: 'wiki',
-  enabled: false,
+  enabled: true,
   selection_pending: true,
   available: true,
   error: null,
@@ -96,42 +90,12 @@ const invocation: McpInvocationApi = {
   guidance: '',
 };
 
-/** A connection the conversation is not bound to yet. */
-const attachableConnection: McpConnectionApi = {
-  id: 4,
-  label: 'Issue tracker',
-  template: null,
-  transport: 'streamable-http',
-  location: 'remote',
-  url: 'https://issues.example.com/mcp',
-  argv: [],
-  auth_kind: 'none',
-  status: 'active',
-  error_kind: 'none',
-  error_detail: null,
-  account_label: null,
-  connector_id: null,
-  has_credential: false,
-  secret_hint: null,
-  expires_at: null,
-  config_revision: 2,
-  authorization_epoch: 1,
-  capability_revision: 2,
-  server_name: 'issues',
-  server_version: '1.0.0',
-  protocol_version: '2025-06-18',
-  tool_count: 1,
-  resource_count: 0,
-  prompt_count: 0,
-  support: {},
-  created_at: null,
-  updated_at: null,
-};
-
 beforeEach(() => {
-  // Every test renders a panel that also reads the account's connections for
-  // the attach list, even when it has nothing to attach.
-  mockedConnections.mockResolvedValue({ connections: [attachableConnection], templates: [] });
+  mockedBindings.mockResolvedValue({ bindings: [binding] });
+  mockedInvocations.mockResolvedValue({ invocations: [] });
+  mockedUpdate.mockImplementation(async (_thread, request) => ({
+    bindings: [{ ...binding, ...request, selection_pending: request.use_defaults }],
+  }));
 });
 
 afterEach(() => {
@@ -141,96 +105,142 @@ afterEach(() => {
 });
 
 describe('McpSessionPanel', () => {
-  it('repairs stored duplicate aliases without taking a later connections name', async () => {
-    const third = { ...binding, connection_id: 5, alias: 'wiki-4' };
-    mockedBindings.mockResolvedValue({
-      bindings: [binding, { ...binding, connection_id: 4 }, third],
-    });
-    mockedInvocations.mockResolvedValue({ invocations: [] });
-    mockedReplace.mockResolvedValue({ bindings: [binding] });
+  it('shows connected servers automatically without an attach step or save requirement', async () => {
     render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
-    await screen.findByText(/Duplicate connection aliases were adjusted/);
-    fireEvent.click(screen.getByRole('button', { name: 'Save selection' }));
-    await waitFor(() => expect(mockedReplace).toHaveBeenCalled());
-    const saved = mockedReplace.mock.calls[0][1];
-    expect(saved.map((item: { alias: string }) => item.alias)).toEqual([
-      'wiki',
-      'wiki-4-2',
-      'wiki-4',
-    ]);
-  });
-
-  it('finishes attaching a connection before allowing another selection operation', async () => {
-    mockedBindings.mockResolvedValue({ bindings: [binding] });
-    mockedInvocations.mockResolvedValue({ invocations: [] });
-    let finishRead!: (value: []) => void;
-    mockedCapabilities.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          finishRead = resolve;
-        }),
+    expect(await screen.findByRole('switch', { name: /Use Team wiki/ })).toBeChecked();
+    expect(screen.queryByRole('button', { name: /Attach/ })).not.toBeInTheDocument();
+    expect(mockedUpdate).not.toHaveBeenCalled();
+    expect(screen.getByText('Tools and permissions').closest('details')).not.toHaveAttribute(
+      'open',
     );
-    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Attach Issue tracker' }));
-    expect(screen.getByRole('button', { name: 'Save selection' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
-    await act(async () => {
-      finishRead([]);
-    });
-    expect(screen.getByRole('button', { name: 'Save selection' })).toBeEnabled();
-    expect(screen.getByText(/Issue tracker added/)).toBeInTheDocument();
   });
 
-  it('assigns a distinct alias when attaching another connection from the same template', async () => {
-    mockedBindings.mockResolvedValue({ bindings: [binding] });
-    mockedInvocations.mockResolvedValue({ invocations: [] });
-    mockedConnections.mockResolvedValue({
-      connections: [{ ...attachableConnection, template: 'wiki' }],
-      templates: [],
+  it('persists a conversation opt-out immediately while preserving its custom rules', async () => {
+    mockedBindings.mockResolvedValue({
+      bindings: [{ ...binding, selection_pending: false, tools: { search: 'allow' } }],
     });
-    mockedCapabilities.mockResolvedValue([]);
-    mockedReplace.mockResolvedValue({ bindings: [binding] });
     render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Attach Issue tracker' }));
-    await screen.findByText(/Issue tracker added/);
-    fireEvent.click(screen.getByRole('button', { name: 'Save selection' }));
-    await waitFor(() => expect(mockedReplace).toHaveBeenCalled());
-    const saved = mockedReplace.mock.calls[0][1];
-    expect(saved[0].alias).toBe('wiki');
-    expect(saved[1].alias).not.toBe('wiki');
-    expect(new Set(saved.map((item: { alias: string }) => item.alias)).size).toBe(2);
+    fireEvent.click(await screen.findByRole('switch', { name: /Use Team wiki/ }));
+    await waitFor(() =>
+      expect(mockedUpdate).toHaveBeenCalledWith(
+        'thread-1',
+        expect.objectContaining({
+          enabled: false,
+          tools: { search: 'allow' },
+          use_defaults: false,
+        }),
+      ),
+    );
+    expect(await screen.findByText('Off for this conversation')).toBeInTheDocument();
   });
 
-  it('protects the selection while a save is pending, including reopening the panel', async () => {
-    mockedBindings.mockResolvedValue({ bindings: [binding] });
-    mockedInvocations.mockResolvedValue({ invocations: [] });
-    let finishSave!: (value: { bindings: McpBindingApi[] }) => void;
-    mockedReplace.mockImplementation(
+  it('enables a previously empty selection with confirmation required', async () => {
+    mockedBindings.mockResolvedValue({
+      bindings: [{ ...binding, enabled: false, selection_pending: false }],
+    });
+    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
+    fireEvent.click(await screen.findByRole('switch', { name: /Use Team wiki/ }));
+    await waitFor(() =>
+      expect(mockedUpdate).toHaveBeenCalledWith(
+        'thread-1',
+        expect.objectContaining({ enabled: true, use_defaults: true, tools: {} }),
+      ),
+    );
+  });
+
+  it('saves tool, prompt and resource permissions for only the edited server', async () => {
+    mockedBindings.mockResolvedValue({ bindings: [binding, unavailable] });
+    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
+    fireEvent.click(await screen.findByText('Tools and permissions'));
+    const group = screen.getByRole('radiogroup', { name: 'Policy for search' });
+    expect(within(group).getByRole('radio', { name: 'Confirm' })).toBeChecked();
+    fireEvent.click(within(group).getByRole('radio', { name: 'Allow' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save permissions' }));
+    await waitFor(() =>
+      expect(mockedUpdate).toHaveBeenCalledWith('thread-1', {
+        connection_id: 3,
+        alias: 'wiki',
+        enabled: true,
+        use_defaults: true,
+        tools: { search: 'allow' },
+        resources: { 'page://{slug}': 'confirm' },
+        prompts: { summarize: 'confirm' },
+      }),
+    );
+  });
+
+  it('resets explicit permissions to ask without enabling a disabled server', async () => {
+    mockedBindings.mockResolvedValue({
+      bindings: [
+        { ...binding, enabled: false, selection_pending: false, tools: { search: 'allow' } },
+      ],
+    });
+    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
+    fireEvent.click(await screen.findByText('Tools and permissions'));
+    fireEvent.click(screen.getByRole('button', { name: 'Reset to ask before each call' }));
+    await waitFor(() =>
+      expect(mockedUpdate).toHaveBeenCalledWith(
+        'thread-1',
+        expect.objectContaining({
+          enabled: false,
+          use_defaults: true,
+          tools: {},
+          resources: {},
+          prompts: {},
+        }),
+      ),
+    );
+  });
+
+  it('protects pending saves and does not overwrite them when reopening the panel', async () => {
+    let finish!: (value: { bindings: McpBindingApi[] }) => void;
+    mockedUpdate.mockImplementation(
       () =>
         new Promise((resolve) => {
-          finishSave = resolve;
+          finish = resolve;
         }),
     );
     const { rerender } = render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
-    const policy = await screen.findByRole('radiogroup', { name: 'Policy for search' });
-    fireEvent.click(within(policy).getByRole('radio', { name: 'Allow' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Save selection' }));
-    expect(within(policy).getByRole('radio', { name: 'Deny' })).toBeDisabled();
+    fireEvent.click(await screen.findByRole('switch', { name: /Use Team wiki/ }));
+    expect(screen.getByRole('switch')).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Attach Issue tracker' })).toBeDisabled();
     rerender(<McpSessionPanel jobId="job-1" threadId="thread-1" active={false} />);
     rerender(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
     expect(mockedBindings).toHaveBeenCalledTimes(1);
     await act(async () => {
-      finishSave({ bindings: [{ ...binding, tools: { search: 'allow' } }] });
+      finish({ bindings: [{ ...binding, enabled: false }] });
     });
-    expect(within(policy).getByRole('radio', { name: 'Allow' })).toHaveAttribute(
-      'aria-checked',
-      'true',
-    );
-    expect(within(policy).getByRole('radio', { name: 'Deny' })).toBeEnabled();
+    expect(screen.getByRole('switch')).not.toBeChecked();
+    expect(screen.getByRole('switch')).toBeEnabled();
   });
 
+  it('keeps the saved switch state after a failed update', async () => {
+    mockedUpdate.mockRejectedValue(new Error('Could not save'));
+    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
+    fireEvent.click(await screen.findByRole('switch', { name: /Use Team wiki/ }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not save');
+    expect(screen.getByRole('switch')).toBeChecked();
+  });
+
+  it('shows an actionable connection error alongside healthy servers', async () => {
+    mockedBindings.mockResolvedValue({ bindings: [binding, { ...unavailable, enabled: true }] });
+    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
+    expect(await screen.findByText('Needs attention')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Manage connection' })).toHaveAttribute(
+      'href',
+      '/integrations',
+    );
+    expect(screen.getByRole('switch', { name: /Use Team wiki/ })).toBeChecked();
+  });
+
+  it('offers a direct setup link when there are no servers', async () => {
+    mockedBindings.mockResolvedValue({ bindings: [] });
+    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
+    expect(await screen.findByRole('link', { name: 'Add MCP server' })).toHaveAttribute(
+      'href',
+      '/integrations',
+    );
+  });
   it('follows an approved call to its final outcome without reviving stale approvals', async () => {
     vi.useFakeTimers();
     mockedBindings.mockResolvedValue({ bindings: [] });
@@ -304,51 +314,7 @@ describe('McpSessionPanel', () => {
     mockedBindings.mockImplementation(() => new Promise(() => {}));
     rerender(<McpSessionPanel jobId="job-2" threadId="thread-2" active />);
     expect(screen.queryByText('Team wiki wants to call search')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Save selection' })).not.toBeInTheDocument();
-  });
-
-  it('groups capabilities and asks the user to choose on a pending selection', async () => {
-    mockedBindings.mockResolvedValue({ bindings: [binding, unavailable] });
-    mockedInvocations.mockResolvedValue({ invocations: [] });
-
-    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
-
-    expect(await screen.findByText('Choose what this session may use')).toBeInTheDocument();
-    expect(screen.getByText('Tools')).toBeInTheDocument();
-    expect(screen.getByText('Prompts')).toBeInTheDocument();
-    expect(screen.getByText('Resource templates')).toBeInTheDocument();
-    // A mapped binding defaults to confirm, so a pre-existing session keeps
-    // working while its owner is asked once.
-    const toolPolicy = screen.getByRole('radiogroup', { name: 'Policy for search' });
-    expect(toolPolicy).toHaveTextContent('Confirm');
-    // A failed connection reports why instead of offering a selection.
-    expect(screen.getByText('the credential expired')).toBeInTheDocument();
-  });
-
-  it('saves every capability policy the user chose', async () => {
-    mockedBindings.mockResolvedValue({ bindings: [binding] });
-    mockedInvocations.mockResolvedValue({ invocations: [] });
-    mockedReplace.mockResolvedValue({ bindings: [{ ...binding, selection_pending: false }] });
-
-    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
-    await screen.findByText('Choose what this session may use');
-
-    const group = screen.getByRole('radiogroup', { name: 'Policy for search' });
-    fireEvent.click(within(group).getByRole('radio', { name: 'Allow' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Save selection' }));
-
-    await waitFor(() =>
-      expect(mockedReplace).toHaveBeenCalledWith('thread-1', [
-        {
-          connection_id: 3,
-          alias: 'wiki',
-          enabled: true,
-          tools: { search: 'allow' },
-          resources: { 'page://{slug}': 'confirm' },
-          prompts: { summarize: 'confirm' },
-        },
-      ]),
-    );
+    expect(screen.queryByRole('button', { name: 'Save permissions' })).not.toBeInTheDocument();
   });
 
   it('renders a pending call with its arguments and records the decision', async () => {
@@ -393,81 +359,6 @@ describe('McpSessionPanel', () => {
         'This approval expired before it was used. Ask the agent again to re-request it.',
       ),
     ).toBeInTheDocument();
-  });
-
-  it('attaches an unbound connection with its capabilities denied by default', async () => {
-    mockedBindings.mockResolvedValue({ bindings: [binding] });
-    mockedInvocations.mockResolvedValue({ invocations: [] });
-    mockedCapabilities.mockResolvedValue([
-      {
-        kind: 'tool',
-        name: 'create_issue',
-        description: 'Open an issue',
-        input_schema: null,
-        annotations: {},
-      },
-    ]);
-    mockedReplace.mockResolvedValue({ bindings: [binding] });
-
-    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Attach Issue tracker' }));
-
-    await waitFor(() => expect(mockedCapabilities).toHaveBeenCalledWith(4));
-    // Nothing is allowed just because the server was attached; the control
-    // starts at deny and the user has to say otherwise.
-    expect(
-      await screen.findByRole('radiogroup', { name: 'Policy for create_issue' }),
-    ).toHaveTextContent('Deny');
-
-    fireEvent.click(screen.getByRole('button', { name: 'Save selection' }));
-
-    await waitFor(() =>
-      expect(mockedReplace).toHaveBeenCalledWith('thread-1', [
-        {
-          connection_id: 3,
-          alias: 'wiki',
-          enabled: true,
-          tools: { search: 'confirm' },
-          resources: { 'page://{slug}': 'confirm' },
-          prompts: { summarize: 'confirm' },
-        },
-        {
-          connection_id: 4,
-          alias: 'mcp4',
-          enabled: false,
-          tools: { create_issue: 'deny' },
-          resources: {},
-          prompts: {},
-        },
-      ]),
-    );
-  });
-
-  it('applies approval or disable to the server without enabling automatic calls', async () => {
-    mockedBindings.mockResolvedValue({ bindings: [{ ...binding, selection_pending: false }] });
-    mockedInvocations.mockResolvedValue({ invocations: [] });
-    mockedReplace.mockResolvedValue({ bindings: [binding] });
-    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Disable all' }));
-    for (const group of screen.getAllByRole('radiogroup')) {
-      expect(within(group).getByRole('radio', { name: 'Deny' })).toBeChecked();
-    }
-    fireEvent.click(screen.getByRole('button', { name: 'Ask before each call' }));
-    for (const group of screen.getAllByRole('radiogroup')) {
-      expect(within(group).getByRole('radio', { name: 'Confirm' })).toBeChecked();
-      expect(within(group).getByRole('radio', { name: 'Allow' })).not.toBeChecked();
-    }
-    fireEvent.click(screen.getByRole('button', { name: 'Save selection' }));
-    await waitFor(() =>
-      expect(mockedReplace).toHaveBeenCalledWith('thread-1', [
-        expect.objectContaining({
-          enabled: true,
-          tools: { search: 'confirm' },
-          resources: { 'page://{slug}': 'confirm' },
-          prompts: { summarize: 'confirm' },
-        }),
-      ]),
-    );
   });
 
   it('waits to be opened before reading anything', () => {

@@ -56,6 +56,7 @@ def job_row_to_dict(row: Any) -> dict[str, Any]:
         "published_commit_sha": row["published_commit_sha"],
         "detail": row["detail"],
         "metadata": load_json(row["metadata"]),
+        "skills": load_json(row.get("skills")),
         "fork_source_job_id": row["fork_source_job_id"],
         "mcp_bindings": load_json(row.get("mcp_bindings")) or [],
         "created_at": row["created_at"],

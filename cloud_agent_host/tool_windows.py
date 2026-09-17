@@ -161,8 +161,8 @@ class ToolWindowTracker:
                 # Neither duplicate can be retained honestly. Leaving the
                 # original row in place would let the first result close it,
                 # even though that result could belong to the second call.
-                index = self._open.pop(tool_use_id)
-                self._windows[index] = None
+                dropped_index = self._open.pop(tool_use_id)
+                self._windows[dropped_index] = None
                 self._ambiguous_ids.add(tool_use_id)
                 self._dropped += 2
                 return

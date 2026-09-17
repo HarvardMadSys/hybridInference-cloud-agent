@@ -2,7 +2,7 @@
 
 ## Goal
 
-Make MCP servers easy to connect: choose a known service or paste its
+Make MCP servers easy to connect: search the official MCP directory or paste its
 `mcpServers` JSON, then see whether it connected and which tools it
 offers. The previous UI separated templates, import and manual configuration,
 exposed protocol and execution details up front, and required a separate Test
@@ -12,9 +12,15 @@ action after adding a server or returning from OAuth.
 
 - Integrations lists MCP servers with a connection state and tool count. Protocol,
   runtime and credential metadata are available under Server details.
-- Add server opens Popular servers: Linear, Notion, Context7 and GitHub. Connect
-  creates the connection and starts sign-in. GitHub also accepts a personal access
-  token; OAuth can request a client ID when the provider requires one.
+- Add server opens Recommended: a small editorial shortlist of GitHub, Context7,
+  Playwright, Linear, Notion, Figma, Supabase and Sentry for common coding workflows.
+  All servers opens the full synchronized directory; typing in search always searches
+  the full directory, including when starting from Recommended. Cards show the
+  publisher identifier as well as the display name.
+  Select an endpoint or package, review its generated JSON, then add it. Remote
+  endpoints can use automatic authorization discovery or a Bearer access token.
+  Linear, Notion, Context7 and GitHub presets remain available as a fallback when
+  the directory has not synced or cannot be loaded.
 - Add with JSON opens a `mcp.json` editor. URL and command examples explain the
   accepted shape. Validation runs after typing stops and shows the servers that
   will be added, missing credential values and any rejected entries.
@@ -29,12 +35,25 @@ action after adding a server or returning from OAuth.
   available in the cloud merely by pasting a config.
 - Saving starts connection discovery automatically. Returning from successful
   OAuth also discovers tools, after checking that a credential was stored. A
-  pasted URL that requires OAuth offers Sign in. Failed discovery remains an
-  error and offers retry.
-- Conversations still select their own servers and permissions. Ask before each
-  call and Disable all apply to the server's currently discovered capabilities;
-  Save selection commits that choice. Adding a server never silently grants its
-  tools permission to run.
+  single newly added URL that requires OAuth starts sign-in. Existing connections
+  still offer Sign in explicitly. Failed discovery remains an error and offers retry.
+- Connected servers are available automatically in new and existing conversations.
+  Every turn resolves the current account connections before configuring the agent;
+  opening Tools is not required. All five supported runtimes use the same resolution.
+- Integrations has an account-wide enable switch. Turning a server off preserves
+  its credentials and conversation choices, immediately blocks subsequent calls,
+  and expires pending approvals. Connection diagnostics cannot turn it back on.
+- Tools shows server status and an immediate per-conversation switch. Tools and
+  permissions is collapsed by default; users can allow, confirm or deny individual
+  tools, resources and prompts. Default availability requires confirmation before
+  every call, including tools a server adds later. Existing explicit rules survive.
+- Each server's settings save independently, preserving other servers' policy
+  revisions and approvals. Disabling or removing a selection stores an opt-out so
+  automatic discovery cannot recreate it. Reset restores ask-before-call behavior.
+- Newly enabled tools become available on the next message; restrictions apply on
+  subsequent calls immediately. Native agent processes already restart/resume when
+  their MCP configuration changes. A disconnected or expired server stays actionable
+  in Tools and does not block an unrelated follow-up or another healthy server.
 
 The importer accepts JSON and TOML configurations. It recognizes
 `${env:NAME}` and `${input:NAME}` references in environment/header values, including
@@ -61,3 +80,57 @@ preset selection, JSON add/discovery, invalid input, tab switching, Escape,
 mobile layout, dark mode and masked token fields. These checks do not authenticate
 real external provider accounts. Provider sign-in still needs a deployed callback
 URL and an authorized test account for end-to-end verification.
+
+## Official directory synchronization
+
+The control-plane background task fetches all latest Registry pages hourly. It
+keeps active records, follows opaque pagination cursors, and atomically replaces
+a durable Postgres snapshot only after the complete fetch succeeds. A failed or
+incomplete fetch retains the previous snapshot and retries after five minutes.
+The API searches the in-memory snapshot; it never calls the Registry on a user
+request. Fresh database snapshots are reused after restart. The relay listener
+does not run this task, and application readiness never waits for a sync.
+
+This is a directory, not a popularity ranking or a guarantee that a listed
+service is online. The Registry API has no download counts or popularity sort.
+The editorial shortlist matches exact publisher identifiers, includes only active
+entries with supported configurations, and stays small instead of padding the
+home view with arbitrary listings. The same entries appear first in All servers.
+Ranking is applied when reading cached snapshots so an update takes effect without
+waiting for the next sync. Metadata updates remain independent of this shortlist.
+The feed can update descriptions, endpoints and pinned package versions for new
+connections. It never modifies existing connections or credentials.
+
+Directory cards display publisher-provided HTTPS icons. Common services without
+Registry artwork use their own official icon URLs, with an initial as the fallback
+if an image fails to load. The sync timestamp stays in the API for cache handling
+and is not displayed in the setup dialog.
+
+Browser authorization reuses the public API prefix from the deployment's existing
+`AGENT_SESSION_REDIRECT_URI` unless `AGENT_MCP_PUBLIC_BASE_URL` explicitly overrides
+it. Registration, authorization and token exchange share the same MCP callback;
+request headers never select its host. This avoids requiring another address
+setting for deployments that already support account sign-in.
+
+Generated configurations cover public HTTPS streamable HTTP/SSE endpoints,
+single credential headers, and simple pinned npm/PyPI stdio packages. Multiple
+endpoints remain explicit choices. Recipes needing unsupported header combinations,
+URL interpolation, runtime/package arguments or other package formats remain
+listed with a documentation path to manual JSON; required fields are never
+silently omitted. Importing still uses the existing target validation, encrypted
+credential storage, execution-location choice and per-conversation permissions.
+
+Migration 0013 adds a standalone cache table. Migration 0014 adds an account
+`enabled` preference with a default of true, preserving existing connections and
+credentials. Both are additive and leave previous API projections readable during
+rollout. Automatic binding inserts are scoped to the thread owner and serialized
+with conversation edits; no background fan-out or startup backfill is needed.
+No feature flag or external API key is required.
+
+Validation includes real full-feed synchronization, round-tripping generated
+configurations through the importer, cached restart, interrupted pagination,
+deleted records, search races, pagination, endpoint selection, credentials,
+fallback/retry and automatic sign-in after adding a URL. Provider-account OAuth
+and real package execution remain outside the isolated UI smoke test.
+
+Source: [Official Registry aggregator API](https://modelcontextprotocol.io/registry/registry-aggregators).

@@ -690,13 +690,14 @@ def claim(
     The credential names the machine, so the body cannot claim as another
     host. It remains in the trusted runner and never enters the agent process.
     """
-    return claim_payload(
+    payload = claim_payload(
         base_url=base_url,
         host_credential=host_credential,
         worker_id=worker_id,
         lease_ttl=lease_ttl,
         attestation=attestation,
     )
+    return ClaimedJob.from_response(payload) if payload else None
 
 
 def claim_payload(
@@ -777,7 +778,7 @@ def _run_git(
     cwd: str | None = None,
     env_extra: dict[str, str] | None = None,
     input_text: str | None = None,
-):
+) -> subprocess.CompletedProcess[str]:
     """Run one git command hermetically and return the completed process."""
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **_GIT_ENV, **(env_extra or {})}
     return subprocess.run(
@@ -1113,13 +1114,13 @@ def _shared_live_host_capabilities(
         return []
     for runtime_id in registered_runtimes():
         try:
-            capabilities = driver_for(get_runtime(runtime_id)).capabilities()
+            runtime_capabilities = driver_for(get_runtime(runtime_id)).capabilities()
         except KeyError:
             return []
         if (
-            capabilities.resident_transport != "supervisor_live"
-            or capabilities.fork != "at_anchor"
-            or not capabilities.concurrent_shared_workspace
+            runtime_capabilities.resident_transport != "supervisor_live"
+            or runtime_capabilities.fork != "at_anchor"
+            or not runtime_capabilities.concurrent_shared_workspace
         ):
             return []
     capabilities = [SHARED_SANDBOX_CAPABILITY, NATIVE_FORK_AT_ANCHOR_CAPABILITY]

@@ -21,7 +21,7 @@ JOB_OWN_COLUMNS = (
     "runtime, model, reasoning_effort, state, "
     "cancel_requested, terminal_resume_pending, current_attempt_id, "
     "published_pr_url, published_commit_sha, detail, "
-    "metadata, fork_source_job_id, "
+    "metadata, skills, fork_source_job_id, "
     "created_at, updated_at"
 )
 
@@ -66,6 +66,16 @@ JOB_SELECT = (
     f"SELECT {QUALIFIED_JOB_COLUMNS}, {MCP_BINDING_COLUMNS} "
     f"FROM agent_jobs j JOIN agent_threads t ON t.id = j.thread_id {MCP_BINDING_JOIN}"
 )
+
+
+# Owner polling reads need identities, not up to 128 KiB of instructions per turn.
+# Execution, inheritance and fork keep JOB_SELECT's complete immutable snapshot.
+SKILL_SUMMARY_SQL = """CASE WHEN j.skills IS NULL THEN NULL ELSE COALESCE(
+    (SELECT jsonb_agg(item - 'instructions' ORDER BY ordinal)
+     FROM jsonb_array_elements(j.skills) WITH ORDINALITY AS entries(item, ordinal)),
+    '[]'::jsonb) END AS skills"""
+QUALIFIED_JOB_SUMMARY_COLUMNS = QUALIFIED_JOB_COLUMNS.replace("j.skills", SKILL_SUMMARY_SQL)
+JOB_SUMMARY_SELECT = JOB_SELECT.replace(QUALIFIED_JOB_COLUMNS, QUALIFIED_JOB_SUMMARY_COLUMNS)
 
 
 # An idle native process and its HOT credential lease outlive the completed
