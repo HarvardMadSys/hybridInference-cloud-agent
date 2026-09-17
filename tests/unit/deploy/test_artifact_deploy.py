@@ -118,6 +118,8 @@ elif a[:1] == ["exec"]:
     command = " ".join(a)
     if "_shared_live_host_capabilities" in command:
         print("shared-sandbox-v1,native-fork-at-anchor-v1")
+    elif "--turn" in command:
+        print("declined no turn was delivered")
     elif "retained_docker_data_root" in command: print("/var/lib/docker")
     elif "AGENT_CONTROL_PLANE_URL" in command: print("200")
 elif a[:1] == ["run"]:
@@ -159,7 +161,6 @@ def deployment(tmp_path: Path, stack: str, *, real_compose: bool = False) -> tup
         "AGENT_WEB_VARIANT": "agents",
         "AGENT_HOST_STATE_ROOT": str(host_state),
         "AGENT_HOST_SLOTS": "3",
-        "AGENT_RUNNER_REPLICAS": "3",
         "AGENT_SANDBOX_BACKEND": "kata",
         "AGENT_RETAINED_DOCKER_DATA_ROOT": "/var/lib/docker",
         "AGENT_WORKSPACE_BROKER_TOKEN": "fixture-broker-token",

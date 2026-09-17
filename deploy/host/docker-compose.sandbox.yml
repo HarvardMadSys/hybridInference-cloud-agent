@@ -284,8 +284,9 @@ services:
 
   runner:
     # How long docker waits after SIGTERM before SIGKILL, and therefore how
-    # long a job gets to finish when this container is replaced. The runner
-    # stops claiming on SIGTERM and exits after the job in hand.
+    # long a job gets to finish when this container is replaced. The host
+    # service stops claiming on SIGTERM, each turn already running finishes in
+    # its own process, and the service exits after the last of them.
     #
     # Bounded on purpose. A job may run up to AGENT_TIMEOUT_S (an hour by
     # default) and a deploy cannot wait that long, so past this the container
@@ -293,8 +294,12 @@ services:
     # attempt — the behaviour every job through a deploy used to get, now
     # narrowed to the jobs that genuinely outlast the window.
     stop_grace_period: ${AGENT_RUNNER_STOP_GRACE:-5m}
-    deploy:
-      replicas: ${AGENT_RUNNER_REPLICAS:-3}
+    # One container per host, on purpose. It runs one service that enrolls,
+    # heartbeats and claims, and starts a process per turn as it claims one —
+    # up to the limit the control plane last asked for (the admin Servers
+    # page), or AGENT_HOST_SLOTS until one has been set. Concurrency is that
+    # limit, not a fleet size fixed at deploy time, and scaling this service
+    # would enroll the same host twice.
     build:
       context: ../..
       dockerfile: deploy/host/Dockerfile.agent-runner
@@ -338,12 +343,9 @@ services:
       # deploy waits for the matching heartbeat before replacing its service.
       AGENT_DEPLOYMENT_SHA: ${AGENT_DEPLOYMENT_SHA:-}
       AGENT_SHARED_LIVE_READY_FILE: /run/cloud-agent/shared-live-ready
-      # Shared native forks need at least two synchronous executors.
+      # Turns at once until an admin sets a number on the Servers page.
+      # At least two: shared native forks run a sibling beside its parent.
       AGENT_HOST_SLOTS: ${AGENT_HOST_SLOTS:-3}
-      # One process executes one claimed turn at a time. Pass the configured
-      # scale into every replica so its exact claim attestation can refuse a
-      # shared-live capacity that has fewer executors than scheduler slots.
-      AGENT_RUNNER_REPLICAS: ${AGENT_RUNNER_REPLICAS:-3}
       # How this runner reaches its own broker: a service name on this stack's
       # network, which is exactly right here and meaningless anywhere else.
       AGENT_WORKSPACE_BROKER_URL: http://workspace-broker:8092
@@ -405,11 +407,11 @@ services:
       - cloud_agent_host.runner
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # The host credential, and the lock the replicas enroll under. On the
+      # The host credential, and the lock enrollment is taken under. On the
       # machine, not in a container: an enrollment token is single-use, so a
       # credential that dies with the container needs a new token on every
-      # restart. Shared by all three replicas, which is also what makes the
-      # lock work — it is taken on this directory.
+      # restart. The lock is taken on this directory, so a replaced container
+      # and its predecessor cannot both spend a token during a rollout.
       - ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}:${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}
       # The deploy user owns the readiness file; runners only read it. Keep it
       # separate from the container-owned enrollment directory. Refuse a missing

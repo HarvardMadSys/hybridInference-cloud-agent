@@ -66,7 +66,7 @@ containing `/`, use a commit permalink or encode the branch segment in the URL.
 
 ## Rollout
 
-1. Apply additive Alembic revision `0012_personal_skills` before starting the new
+1. Apply additive Alembic revision `0013_personal_skills` before starting the new
    control plane. It adds `agent_skills` and nullable `agent_jobs.skills`; previous
    rows need no content backfill.
 2. Upgrade all control-plane instances before enabling the new web UI. Older API

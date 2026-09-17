@@ -1,13 +1,13 @@
 """Personal skill libraries and immutable per-turn selections.
 
-Revision ID: 0012_personal_skills
-Revises: 0011_mcp_rolling_compat
+Revision ID: 0013_personal_skills
+Revises: 0012_host_concurrency
 """
 
 from alembic import op
 
-revision = "0012_personal_skills"
-down_revision = "0011_mcp_rolling_compat"
+revision = "0013_personal_skills"
+down_revision = "0012_host_concurrency"
 branch_labels = None
 depends_on = None
 

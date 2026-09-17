@@ -28,6 +28,7 @@ import type {
   CapacityInventoryStatus,
   CapacityRange,
 } from '@/lib/api/admin';
+import { HOST_CONCURRENCY_CAPABILITY } from '@/lib/api/admin';
 
 import { isReporting } from './format';
 
@@ -98,23 +99,130 @@ export interface CapacityCell {
 }
 
 /**
- * Execution quota: `2 / 3 in use · 1 free`.
+ * The ceiling the scheduler enforces on one host: the lower of the limit the
+ * host reports and the one an operator asked for, or null when neither is set.
  *
- * A host with no declared ceiling has an unknown number of free slots, not
- * zero and not every number: it says `Limit not set` and the used count, and
- * no free count is invented from it.
+ * Taking the lower one is what makes a change safe in both directions. A
+ * number the host has not confirmed admits only what the host has agreed to
+ * run, and a number that was lowered stops admitting before the host has even
+ * heard about it.
+ */
+export function executionCeiling(reported: number | null, requested: number | null): number | null {
+  if (reported === null) return requested;
+  if (requested === null) return reported;
+  return Math.min(reported, requested);
+}
+
+/** Whether the host has taken up the number an operator saved, and if not, why. */
+export type ConcurrencyState =
+  | 'default' // nothing saved; the host runs its own
+  | 'applied' // saved, and the host reports the same limit
+  | 'pending' // saved; the host has not confirmed it yet
+  | 'offline' // saved; nothing will confirm it until the host comes back
+  | 'unsupported'; // saved; this runner changes only by redeployment
+
+/**
+ * What an operator needs to read off one host's concurrency, as facts.
+ *
+ * Saving a number and a host serving it are two different events, and a page
+ * that showed only the saved number would report a change that had not
+ * happened. So every field here is separately true: `requested` is what was
+ * saved, `reported` is what the host last said it serves, `enforced` is what
+ * the scheduler will actually admit against, `running` is what is running, and
+ * `finishing` is how many of those are above a limit that has since come down.
+ */
+export interface ConcurrencyFacts {
+  state: ConcurrencyState;
+  requested: number | null;
+  reported: number | null;
+  enforced: number | null;
+  running: number;
+  free: number | null;
+  /** Turns admitted before the limit came down. They are never interrupted. */
+  finishing: number;
+  /** Why a host with room is claiming nothing, straight from the host. */
+  launchError: string | null;
+  explanation: string | null;
+}
+
+export function concurrencyFacts(
+  host: Pick<
+    AgentRunnerHost,
+    'slots_used' | 'slots_total' | 'slots_desired' | 'capabilities' | 'status' | 'launch_error'
+  >,
+): ConcurrencyFacts {
+  const requested = host.slots_desired ?? null;
+  const reported = host.slots_total;
+  const enforced = executionCeiling(reported, requested);
+  const running = host.slots_used;
+  const launchError = (host.launch_error ?? '').trim() || null;
+  const resizable = host.capabilities.includes(HOST_CONCURRENCY_CAPABILITY);
+  const offline = host.status === 'offline' || host.status === 'enrolling';
+
+  let state: ConcurrencyState = 'default';
+  let explanation: string | null = null;
+  if (requested !== null) {
+    if (!resizable) {
+      state = 'unsupported';
+      explanation =
+        "This host's runner predates remote limits. It keeps the number it was deployed with until it is redeployed.";
+    } else if (reported === requested) {
+      state = 'applied';
+    } else if (offline) {
+      state = 'offline';
+      explanation = `Saved, but this host is ${host.status} and cannot take it up until it reports in.`;
+    } else {
+      state = 'pending';
+      explanation = `Saved. This host still reports ${reported === null ? 'no limit' : reported} and takes the new one up on its next heartbeat.`;
+    }
+  }
+
+  return {
+    state,
+    requested,
+    reported,
+    enforced,
+    running,
+    free: enforced === null ? null : Math.max(enforced - running, 0),
+    finishing: enforced === null ? 0 : Math.max(running - enforced, 0),
+    launchError,
+    explanation,
+  };
+}
+
+/**
+ * Concurrency as one table cell: `2 / 3 in use · 1 free`.
+ *
+ * The denominator is what the scheduler enforces, never the number that was
+ * merely saved — a page that showed the saved number would claim a change the
+ * host has not made. Everything the two can disagree about is said in the
+ * note instead: a saved number still being taken up, one a host cannot take
+ * up, and turns that were admitted before a limit came down and are finishing.
+ *
+ * A host with nothing reported and nothing saved has an unknown number of free
+ * slots, not zero and not every number: it says `Limit not set` and the
+ * running count, and no free count is invented from it.
  */
 export function executionSlotsCell(
-  host: Pick<AgentRunnerHost, 'slots_used' | 'slots_total'>,
+  host: Pick<
+    AgentRunnerHost,
+    'slots_used' | 'slots_total' | 'slots_desired' | 'capabilities' | 'status' | 'launch_error'
+  >,
 ): CapacityCell {
-  if (host.slots_total === null) {
-    return { text: 'Limit not set', note: `${host.slots_used} in use`, title: null };
+  const facts = concurrencyFacts(host);
+  if (facts.enforced === null) {
+    return { text: 'Limit not set', note: `${facts.running} in use`, title: null };
   }
-  const free = Math.max(host.slots_total - host.slots_used, 0);
+  const notes = [`${facts.free} free`];
+  if (facts.state === 'pending') notes.push(`applying ${facts.requested}`);
+  if (facts.state === 'offline') notes.push(`${facts.requested} not applied`);
+  if (facts.state === 'unsupported') notes.push('redeploy to change');
+  if (facts.finishing > 0) notes.push(`${facts.finishing} finishing`);
+  if (facts.launchError !== null) notes.push('not claiming');
   return {
-    text: `${host.slots_used} / ${host.slots_total} in use`,
-    note: `${free} free`,
-    title: null,
+    text: `${facts.running} / ${facts.enforced} in use`,
+    note: notes.join(' · '),
+    title: [facts.explanation, facts.launchError].filter(Boolean).join(' ') || null,
   };
 }
 

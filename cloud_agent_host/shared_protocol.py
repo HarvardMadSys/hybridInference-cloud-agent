@@ -10,6 +10,18 @@ from __future__ import annotations
 
 SHARED_SANDBOX_CAPABILITY = "shared-sandbox-v1"
 NATIVE_FORK_AT_ANCHOR_CAPABILITY = "native-fork-at-anchor-v1"
+#: Advertised by a runner that takes its concurrency limit from the control
+#: plane's ``slots_desired`` rather than from the count it was deployed with.
+#: The admin page reads it to tell "this host will apply your number" from
+#: "this host needs a redeploy to change".
+HOST_CONCURRENCY_CAPABILITY = "host-concurrency-v1"
+#: How many turns at once an operator may ask a host for. Two is the
+#: shared-live floor — a fork's sibling runs beside its parent, not behind it —
+#: and 128 is a typo guard, checked again by the host that would act on it.
+#: Neither bound is a statement about what a machine can carry; that is what
+#: the load the same page reports is for.
+HOST_CONCURRENCY_MIN_SLOTS = 2
+HOST_CONCURRENCY_MAX_SLOTS = 128
 SHARED_DEPLOYMENT_CAPABILITY_PREFIX = "shared-sandbox-deployment:"
 ENV_DEPLOYMENT_SHA = "AGENT_DEPLOYMENT_SHA"
 #: Stored in the legacy-named ``sampler_version`` field for a current retained

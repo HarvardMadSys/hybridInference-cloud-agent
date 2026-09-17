@@ -551,7 +551,7 @@ a shared dispatcher credential; keeping it manual would still leave a second
 executable topology behind the UI. There is no GitHub Actions fallback.
 
 Deploy at least one host through `deploy/host/deploy.sh`, enroll it with the
-control plane, and let its runner replicas poll `/v1/agent/worker/claim`. A
+control plane, and let its runner service poll `/v1/agent/worker/claim`. A
 runner cannot claim until its exact replica attests the retained protocol,
 container image/runtime pins, broker configuration, execution profile, and
 host capacity.
@@ -695,7 +695,7 @@ crashes and reboots:
 deploy/host/sandbox_host.sh up 4    # build images, tunnel + 4 runners
 deploy/host/sandbox_host.sh preflight # validate this host against an existing image
 deploy/host/sandbox_host.sh check   # probe all relay/control paths
-deploy/host/sandbox_host.sh status  # replicas + recent log tail
+deploy/host/sandbox_host.sh status  # containers + recent log tail
 deploy/host/sandbox_host.sh down    # stop them
 ```
 
@@ -895,10 +895,9 @@ survives. The baseline is never a member-writable file, so repository code
 cannot edit it to preserve a process or redirect cleanup at a reused PID.
 
 `shared-sandbox-v1` is a claim attestation, not a feature switch. A host must
-advertise it from the exact runner replica that claims the job. Configure at
-least two host slots and runner replicas; staging defaults both to three. One
-runner executes one synchronous turn, so `AGENT_HOST_SLOTS` must not exceed
-`AGENT_RUNNER_REPLICAS`.
+advertise it from the exact process that claims the job. A host's limit is at
+least two, because a fork's sibling runs beside its parent; `AGENT_HOST_SLOTS`
+(default three) is that limit until an admin sets one on the Servers page.
 
 Historical Fork additionally requires `native-fork-at-anchor-v1` and an exact
 match between the host's current sandbox image digest and the retained group's
@@ -1030,7 +1029,7 @@ but current control-plane requests always identify the owning job.
 
 The host and control-plane Actions jobs start in parallel. The host builds the
 replacement sandbox/runner stack and proves Kata before invalidating its ready
-marker. It then stops the old runner replicas and lets their five-minute grace
+marker. It then stops the old runner container and lets its five-minute grace
 drain admitted turns before replacing the broker; no new turn can be admitted
 in that interval. After the isolation, tunnel, runtime and retained Docker-root
 checks pass, it records `.deployed-sha` and only then publishes an exact
@@ -1038,7 +1037,7 @@ checks pass, it records `.deployed-sha` and only then publishes an exact
 builds and migrates, then waits for a heartbeat newer than the start of that
 check and reverse-probes every new-chat placement broker before `compose up`
 can replace a running API. The claim route enforces that same exact deployment
-capability. Pending replicas register and heartbeat their base protocol so the
+capability. A pending runner registers and heartbeats its base protocol so the
 host checks can inspect them, but do not poll; this also prevents the previous
 API from assigning work before it knows the new claim field. A runner with a
 pending/failed marker therefore cannot take work even during a cold-start API
@@ -1384,29 +1383,58 @@ exact labelled container. Only an inspection on that owning Docker daemon that
 proves the expected container/data-root is gone may transition the context to
 `LOST`; never create a blank replacement on another host.
 
-**One runner runs one job at a time.** It claims, runs the job to completion,
-then claims the next — so the replica count *is* how many jobs the deployment
-can run concurrently, and everything else waits in the queue. With one
-replica, two users are serialised; a job that runs to its hour-long timeout
-holds up everyone behind it.
+**Concurrency is a limit, set from the admin page.** The runner container runs
+one service per host. It enrolls, heartbeats and samples capacity — the things
+a machine does once — and it claims a turn only while it is under its limit,
+starting a process for that turn as it claims it. That process runs the turn to
+completion and exits. So the limit *is* how many turns the host runs at once,
+and everything else waits in the queue. Each turn's sandbox is capped at
+4g / 2 cpus, so budget roughly that per concurrent turn.
 
-Set it with `AGENT_RUNNER_REPLICAS` (default 3). Replicas need no
-coordination — `claim_job` uses `FOR UPDATE SKIP LOCKED`, so they share one
-queue with no leader and no sharding — and each job's sandbox is capped at
-4g / 2 cpus, so budget roughly that per replica.
+Set it on the Servers page (*Execution slots*, the field under the numbers), or
+with `PUT /admin/agent/runner-hosts/<host>/slots` and `{"slots": N}`; `null`
+returns the host to its `AGENT_HOST_SLOTS` default. Nothing is started or
+stopped to apply it: the host reads the number off its next heartbeat answer
+and serves it from then on.
 
-`AGENT_HOST_SLOTS` must not exceed the replica count and both values must be at
-least two. The deployment check also counts the actually running replicas
-before declaring the host ready; a configured scale is not proof that its
-containers stayed up.
+**Saving is not applying, and the page distinguishes them.** The heartbeat
+reports the limit the host is serving back as `slots_total`, and the claim
+admits against the lower of that and the saved number. Lowering therefore takes
+effect immediately, before the host has heard about it, and turns already
+running are untouched — they finish, and the host claims nothing more until it
+is under the new limit; the page counts those as *finishing*. Raising takes
+effect when the host confirms, one heartbeat away, and until then the row says
+*applying N*. A host that is offline says *N not applied*, and one whose runner
+predates remote limits says *redeploy to change*.
 
-Do not scale with an ad-hoc `--scale` flag: it survives only until the next
-`docker compose up` without that flag. Set `AGENT_RUNNER_REPLICAS` instead;
-the Compose file's `deploy.replicas` keeps the desired fleet size on every
-subsequent deploy.
+The bounds are two through 128. Two is the shared-live floor; 128 is a typo
+guard the host checks again, and neither is a statement about what the machine
+can carry — the CPU and memory on the same page are. The saved number survives
+heartbeats, restarts and re-enrolment: it is a decision about the named
+machine, and only *Host default* returns it to the environment.
+
+**A turn that never started goes back to the queue; one that started does
+not.** When the host cannot start a turn's process, or that process exits
+without taking delivery, the turn provably never began and the host returns it
+with `POST /v1/agent/worker/jobs/<job>/release` — no attempt spent and no wait
+for a lease nothing is holding. The control plane refuses that release once the
+turn has been admitted to the CLI, because replaying an admitted prompt runs
+the same instruction twice; from there the lease expires and the
+retained-session rules decide, which can end a conversation rather than retry
+it. Consecutive launch failures stop the host claiming, back off, and are
+reported on the heartbeat, so the page can say why a machine with room is
+taking no work.
+
+`AGENT_HOST_SLOTS` is the limit until an admin sets one, and the only number
+the deployment reads. There is no replica count any more: one runner container
+per host, and scaling the service would enroll the same host twice. The
+deployment check starts a turn process with nothing on its standard input and
+requires it to preflight and then decline cleanly, which is the whole path a
+turn takes up to the moment it would begin — so an image that cannot run turns
+fails the deploy rather than the queue.
 
 Queue order is global FIFO with no per-user fairness yet, so one user
-submitting a batch can occupy every replica. Per-user concurrency quotas are
+submitting a batch can occupy every slot. Per-user concurrency quotas are
 P1 work.
 
 The script validates the required environment before starting and surfaces
@@ -1423,7 +1451,7 @@ docker build -f deploy/sandbox/Dockerfile.agent-sandbox \
              -t freeinference-cloud-agent-job:latest .
 
 AGENT_SANDBOX_IMAGE=freeinference-cloud-agent-job:latest \
-AGENT_HOST_SLOTS=4 AGENT_RUNNER_REPLICAS=4 \
+AGENT_HOST_SLOTS=4 \
   docker compose -f deploy/host/docker-compose.sandbox.yml \
                up -d
 ```
@@ -1433,8 +1461,8 @@ AGENT_HOST_SLOTS=4 AGENT_RUNNER_REPLICAS=4 \
 it per environment (`…-job:staging`, `…-job:prod`) so a rebuild on one side
 cannot replace the other's image.
 
-`claim_job` uses `FOR UPDATE SKIP LOCKED`, so the configured runner replicas
-share one queue with no leader and no sharding.
+`claim_job` uses `FOR UPDATE SKIP LOCKED`, so every host shares one queue
+with no leader and no sharding.
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -1446,9 +1474,9 @@ share one queue with no leader and no sharding.
 | `AGENT_EGRESS_NETWORK_*` | — | Network per tier. A tier with no network is an error when a phase selects it, never a fall back to a more open one |
 | `AGENT_EGRESS_CHAT_NETWORK_POOL` | `10.240.0.0/16` | Non-overlapping private IPv4 pool split into daemon-arbitrated `/29` chat/phase bridges. Bridges are removed at phase transition or stop and rebuilt on wake |
 | `AGENT_EGRESS_ALLOWLIST` | — | Checked at startup: it may not contain an agent vendor's telemetry domain, which would let a "closed" sandbox report on the repository it was given |
-| `AGENT_RUNNER_HOST` | host name | Enrolled execution environment, shared by its replicas — the unit the admin placement switch picks between. `deploy/host/sandbox_host.sh` fills it from the host's own name. Never derived inside the container, where the hostname is a container id. After enrolment the persisted credential is authoritative, so editing this renames nothing. Unset keeps the environment out of the pool and changes nothing else. Distinct from `AGENT_PHYSICAL_HOST`, which is the display-only inventory name grouping environments that share one server |
+| `AGENT_RUNNER_HOST` | host name | Enrolled execution environment, shared by every turn it runs — the unit the admin placement switch picks between. `deploy/host/sandbox_host.sh` fills it from the host's own name. Never derived inside the container, where the hostname is a container id. After enrolment the persisted credential is authoritative, so editing this renames nothing. Unset keeps the environment out of the pool and changes nothing else. Distinct from `AGENT_PHYSICAL_HOST`, which is the display-only inventory name grouping environments that share one server |
 | `AGENT_PHYSICAL_HOST` | host name | Physical server this environment runs on, reported at enrolment as the `physical_host` label and used to group the admin inventory. `sandbox_host.sh` defaults it to `hostname -s`; set it explicitly when invoking Compose directly. Never a container hostname or a runtime suffix |
-| `AGENT_HOST_SLOTS` / `AGENT_RUNNER_REPLICAS` | `3` / `3` | Concurrent turn capacity and synchronous executors. Both must be at least two and slots may not exceed replicas |
+| `AGENT_HOST_SLOTS` | `3` | Turns at once until an admin sets a number on the Servers page; at least two, at most 128. `AGENT_RUNNER_REPLICAS` is no longer read |
 | `AGENT_RETAINED_DOCKER_DATA_ROOT` | `/var/lib/docker` | Expected daemon `DockerRootDir`; provision this root on durable storage. It is verified by the host and broker and is never mounted into a chat container |
 | `AGENT_SANDBOX_UID` / `_GID` | `10001` | Only for a custom sandbox image; must match its user |
 | `AGENT_REPO_ALLOWLIST` | — | Comma-separated `owner/name`, or `owner/*`, for the single-tenant dogfood. Users who connect the App themselves do not need it; unset simply means the only entitlement is a user's own connection |

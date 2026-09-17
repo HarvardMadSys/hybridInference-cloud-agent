@@ -25,6 +25,8 @@ HOST_COLUMN_NAMES = (
     "capabilities",
     "slots_total",
     "slots_used",
+    "slots_desired",
+    "launch_error",
     "runner_version",
     "broker_url",
     "last_heartbeat_at",
@@ -63,6 +65,29 @@ CAPACITY_COLUMN_NAMES = (
 
 
 HOST_CAPACITY_COLUMNS = ", ".join(CAPACITY_COLUMN_NAMES)
+
+
+def host_claim_ceiling(slots_total: int | None, slots_desired: int | None) -> int | None:
+    """The concurrency a host may be asked for: the lower of its two numbers.
+
+    ``slots_total`` is the limit the host says it is serving, rewritten by
+    every heartbeat, and ``slots_desired`` is what an operator asked for on the
+    admin page. Either may be unset, and ``None`` here means unmetered.
+
+    Taking the lower one is what makes a change safe in both directions. A
+    number the host has not yet confirmed admits only what the host has said it
+    will run, so a raise can never put work on a machine that has not agreed to
+    it; and a number that was lowered stops admitting immediately, without
+    waiting for the host to hear about it.
+    """
+    bounds = [bound for bound in (slots_total, slots_desired) if bound is not None]
+    return min(bounds) if bounds else None
+
+
+def host_slots_exhausted(row: Any) -> bool:
+    """Whether a host row holds every slot its effective ceiling allows."""
+    ceiling = host_claim_ceiling(row.get("slots_total"), row.get("slots_desired"))
+    return ceiling is not None and row["slots_used"] >= ceiling
 
 
 async def release_host_slot(conn: Any, host: str | None) -> None:
