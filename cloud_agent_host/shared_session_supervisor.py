@@ -226,8 +226,8 @@ class _Member:
     lease_owner: str | None = None
     # Only the last completed activation can replay its acknowledgement.
     settlement_receipt: tuple[str, SharedSessionDescriptor] | None = field(default=None, repr=False)
-    transport: ResidentTransport | None = None
-    current_turn: ResidentTurn | None = None
+    transport: ResidentTransport[Any] | None = None
+    current_turn: ResidentTurn[Any] | None = None
     activation_processes: tuple[tuple[int, int], ...] | None = None
     observer_cursor: GuestObserverCursor | None = None
     tool_mark_reader: ToolMarkReader | None = None
@@ -275,7 +275,7 @@ class _Group:
 
 
 NativeForker = Callable[
-    [ChatSandboxSpec, ResidentTransport, str, ResidentLaunch, int],
+    [ChatSandboxSpec, ResidentTransport[Any], str, ResidentLaunch, int],
     str,
 ]
 
@@ -649,7 +649,7 @@ class SharedChatSessionSupervisor:
         prompt: str,
         model: str,
         reasoning_effort: str | None,
-    ) -> ResidentTurn:
+    ) -> ResidentTurn[Any]:
         """Send a prompt to one member without taking a group-wide turn lock."""
         with self._lock:
             group, member = self._leased_member(thread_id, token)
@@ -804,7 +804,7 @@ class SharedChatSessionSupervisor:
         self,
         thread_id: str,
         token: str,
-        turn: ResidentTurn,
+        turn: ResidentTurn[Any],
     ) -> SharedTurnTelemetry:
         """Close observation, then enforce and release the activation boundary."""
         with self._lock:
@@ -1304,7 +1304,7 @@ class SharedChatSessionSupervisor:
         self,
         thread_id: str,
         token: str,
-        turn: ResidentTurn,
+        turn: ResidentTurn[Any],
     ) -> SharedTurnTelemetry:
         """Fence a turn whose broker stream disappeared before its result.
 
@@ -1597,7 +1597,7 @@ class SharedChatSessionSupervisor:
         # happens under the supervisor-wide metadata lock, so sibling turns
         # and terminals continue while this source is being prepared.
         self._ensure_running(group)
-        stale_transport: ResidentTransport | None = None
+        stale_transport: ResidentTransport[Any] | None = None
         with self._lock:
             self._require_mutation_admission(group)
             fork_lifecycle_generation = group.lifecycle_generation
@@ -1899,7 +1899,7 @@ class SharedChatSessionSupervisor:
 
     def status(self, thread_id: str) -> SharedSessionDescriptor:
         """Return fresh Docker and member process state."""
-        stale_transport: ResidentTransport | None = None
+        stale_transport: ResidentTransport[Any] | None = None
         with self._lock:
             group, member = self._member(thread_id)
             current = self._manager.inspect(group.spec.container_name)
@@ -1918,7 +1918,7 @@ class SharedChatSessionSupervisor:
     def list(self) -> builtins.list[SharedSessionDescriptor]:
         """Return one observation per known membership."""
         self.reconcile()
-        stale_transports: builtins.list[ResidentTransport] = []
+        stale_transports: builtins.list[ResidentTransport[Any]] = []
         with self._lock:
             for group in self._groups.values():
                 for member in group.members.values():
@@ -2165,7 +2165,7 @@ class SharedChatSessionSupervisor:
             group.idle_deadline = None
 
     @staticmethod
-    def _detach_dead_transport(member: _Member) -> ResidentTransport | None:
+    def _detach_dead_transport(member: _Member) -> ResidentTransport[Any] | None:
         # The turn-lock owner controls transport replacement. Native fork
         # deliberately closes the source while copying its private state,
         # then resumes it under the same residency fence. A concurrent
