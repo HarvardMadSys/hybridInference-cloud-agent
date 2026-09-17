@@ -98,6 +98,18 @@ function capacity(over: Record<string, unknown> = {}) {
     memory_used_bytes: 42 * GIB,
     memory_used_percent: 32.8,
     memory_missing_reason: null,
+    // A measured storage block, so the Storage column has something to render
+    // in the fixtures that do not override it. The byte figures are consistent
+    // the way the control plane derives them: used = total - free, and the
+    // percentage is used / (used + available).
+    storage_total_bytes: 1000 * GIB,
+    storage_free_bytes: 665 * GIB,
+    storage_available_bytes: 650 * GIB,
+    storage_used_bytes: 335 * GIB,
+    storage_used_percent: 100 * (335 / (335 + 650)),
+    storage_source: 'linux_overlay_root_statvfs',
+    storage_target: '/mnt/agent-docker',
+    storage_missing_reason: null,
     inventory: inventory(),
     received_at: '2026-09-11T12:34:31Z',
     sampled_at: '2026-09-11T12:34:01Z',
@@ -479,6 +491,11 @@ describe('capacity columns', () => {
     expect(within(row).getByText('32 logical CPUs')).toBeInTheDocument();
     expect(within(row).getByText('33% · 42 / 128 GiB')).toBeInTheDocument();
     expect(within(row).getByText('86 GiB available')).toBeInTheDocument();
+    // Storage sits between memory and the sandbox count, on the same
+    // observation: 335 / (335 + 650) is 34.01%, and the table rounds it up
+    // where the two figures beside it round to nearest.
+    expect(within(row).getByText('35% · 335 / 1000 GiB')).toBeInTheDocument();
+    expect(within(row).getByText('650 GiB available')).toBeInTheDocument();
     expect(within(row).getByText('3 running · 7 stopped')).toBeInTheDocument();
     expect(within(row).getByText('12s ago')).toBeInTheDocument();
     // The poll-time column it replaced is gone.
@@ -489,6 +506,54 @@ describe('capacity columns', () => {
     expect(
       within(row).getByText('37%').closest('div')!.querySelector('span[aria-hidden] > span'),
     ).toHaveStyle({ width: '37.24%' });
+    expect(
+      within(row)
+        .getByText('35% · 335 / 1000 GiB')
+        .closest('div')!
+        .querySelector('span[aria-hidden] > span'),
+    ).toHaveStyle({ width: `${100 * (335 / 985)}%` });
+  });
+
+  it('names Storage in the header and spans the full width when a row opens', async () => {
+    mocked.list.mockResolvedValue(pool([host({ capacity: capacity() })]));
+    render(<AdminHostsPage />);
+    await openPanel();
+
+    const headers = screen.getAllByRole('columnheader').map((cell) => cell.textContent);
+    expect(headers).toEqual([
+      'Server',
+      'Status',
+      'Execution slots',
+      'CPU',
+      'Memory',
+      'Storage',
+      'Sandboxes',
+      'Observed',
+      'Actions',
+    ]);
+    // The expanded band is one cell across all nine columns; an eight-column
+    // span leaves the last one outside the tinted band.
+    expect(document.querySelectorAll('td[colspan]')).toHaveLength(1);
+    expect(document.querySelector('td[colspan]')).toHaveAttribute('colspan', '9');
+  });
+
+  it('reads a control plane older than the storage block as not measured', async () => {
+    // The page may ship before the collector does. An older control plane
+    // omits the storage keys entirely, and the column has to say so rather
+    // than print the 0% an undefined percentage would round to.
+    const legacy = capacity();
+    for (const key of Object.keys(legacy)) {
+      if (key.startsWith('storage_')) delete (legacy as Record<string, unknown>)[key];
+    }
+    mocked.list.mockResolvedValue(pool([host({ capacity: legacy })]));
+    render(<AdminHostsPage />);
+
+    const row = (await screen.findByRole('rowheader', { name: 'runner-a' })).closest('tr')!;
+    // CPU and memory are still measured; only Storage is missing.
+    expect(within(row).getByText('33% · 42 / 128 GiB')).toBeInTheDocument();
+    expect(within(row).getAllByText('Not measured').length).toBeGreaterThanOrEqual(1);
+    expect(within(row).queryByText(/^0%/)).not.toBeInTheDocument();
+    expect(within(row).queryByText('0 GiB available')).not.toBeInTheDocument();
   });
 
   it('asks a host for a number of turns and reports it as saved, not applied', async () => {

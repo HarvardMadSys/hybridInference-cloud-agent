@@ -67,6 +67,20 @@ function ResultState({ step }: { step: TrajectoryStep }) {
       </>
     );
   }
+  if (step.outputPreview) {
+    return (
+      <>
+        <p className="text-[11px] text-gray-500 dark:text-gray-400">
+          Recorded output so far; no final result was recorded.
+        </p>
+        <TextBlock
+          text={stripAnsi(step.outputPreview).text}
+          what="Output so far"
+          maxHeight="max-h-40"
+        />
+      </>
+    );
+  }
   if (step.status === 'waiting') {
     return <EmptyNote>Waiting for result…</EmptyNote>;
   }

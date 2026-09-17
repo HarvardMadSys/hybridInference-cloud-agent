@@ -23,7 +23,7 @@ export interface TrajectoryRow {
   seq: number;
   eventType: string;
   /** Who or what this row is, in the vocabulary the reader sees. */
-  actor: 'user' | 'assistant' | 'tool' | 'context' | 'system';
+  actor: 'user' | 'assistant' | 'tool' | 'context' | 'system' | 'runtime';
   lane: TrajectoryLane;
   /** One-line label: the tool's name, the lifecycle phase, the event type. */
   label: string;
@@ -41,7 +41,9 @@ export interface TrajectoryRow {
 const LANE_BY_TYPE: Record<string, TrajectoryLane> = {
   message: 'model',
   thinking: 'model',
-  usage: 'model',
+  usage: 'other',
+  context: 'input',
+  system: 'input',
   tool_use: 'tools',
   tool_result: 'tools',
   diff: 'tools',
@@ -56,10 +58,12 @@ const ACTOR_BY_TYPE: Record<string, TrajectoryRow['actor']> = {
   tool_use: 'assistant',
   tool_result: 'tool',
   diff: 'tool',
-  usage: 'context',
-  lifecycle: 'system',
-  error: 'system',
-  raw: 'system',
+  usage: 'runtime',
+  context: 'context',
+  system: 'system',
+  lifecycle: 'runtime',
+  error: 'runtime',
+  raw: 'runtime',
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -141,7 +145,7 @@ export function toTrajectory(events: (AgentJobEventApi | AgentThreadEventApi)[])
       attemptId: event.attempt_id,
       seq: event.seq,
       eventType,
-      actor: ACTOR_BY_TYPE[eventType] ?? 'system',
+      actor: ACTOR_BY_TYPE[eventType] ?? 'runtime',
       lane: LANE_BY_TYPE[eventType] ?? 'other',
       label: labelOf(eventType, payload),
       detail: detailOf(eventType, payload),

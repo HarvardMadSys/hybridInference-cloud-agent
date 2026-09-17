@@ -5,7 +5,7 @@ pushes: it emits a patch, and this module validates it, applies it to a
 throwaway clone, and pushes to the conversation's stable
 ``agent/<thread-id>`` branch.
 
-Ordering is the whole point: :func:`~cloud_agent_host.patch_gate.validate_patch`
+Ordering is the whole point: :func:`~cloud_agent_git.patch_gate.validate_patch`
 runs *before* the bytes reach a worktree, and the push refspec is pinned to
 the single computed branch — so neither a hostile patch nor a bug in the apply
 step can write to ``dev``/``main`` or execute a workflow with repository
@@ -27,13 +27,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cloud_agent.logging_utils import get_logger
-from cloud_agent_host.patch_gate import (
+from cloud_agent_git.patch_gate import (
     PatchGateResult,
     branch_name_for,
     validate_change_set,
     validate_patch,
 )
-from cloud_agent_host.source_archive import build_base_bundle
+from cloud_agent_git.source_archive import build_base_bundle
 
 logger = get_logger(__name__)
 

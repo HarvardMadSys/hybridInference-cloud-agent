@@ -7,8 +7,8 @@ import base64
 
 import pytest
 
-from cloud_agent_host import workspace_broker_client
-from cloud_agent_host.workspace_broker_client import WorkspaceBrokerClient
+from cloud_agent import workspace_broker_client
+from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
 
 
 def _shared_snapshot() -> dict:

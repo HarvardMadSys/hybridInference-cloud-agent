@@ -22,8 +22,11 @@ import {
   formatGib,
   formatGibPair,
   formatPercent,
+  formatPercentCeil,
   formatPercentTenth,
   formatPointTooltip,
+  formatStoragePair,
+  formatStorageSize,
   formatUtcAxisTick,
   formatUtcTimestamp,
   gapSpans,
@@ -37,11 +40,13 @@ import {
   nearestPointIndex,
   observedPointCount,
   reasonLabel,
+  storageCell,
   summarizeSandboxes,
   svgXFromClientX,
 } from './capacity';
 
 const GIB = 1024 ** 3;
+const TIB = 1024 ** 4;
 
 function inventory(over: Partial<AgentHostCapacityInventory> = {}): AgentHostCapacityInventory {
   return {
@@ -57,6 +62,15 @@ function inventory(over: Partial<AgentHostCapacityInventory> = {}): AgentHostCap
   };
 }
 
+/**
+ * An observation with no storage block, because that is what most of these
+ * tests are about.
+ *
+ * The storage fields are left off rather than set to null on purpose: it is
+ * the shape a control plane older than this client sends, and every caller
+ * that does not care about storage is then also asserting that its absence
+ * does not disturb CPU, memory or the sandbox counts.
+ */
 function capacity(over: Partial<AgentHostCapacity> = {}): AgentHostCapacity {
   return {
     schema_version: 1,
@@ -79,6 +93,28 @@ function capacity(over: Partial<AgentHostCapacity> = {}): AgentHostCapacity {
     freshness: 'fresh',
     ...over,
   };
+}
+
+/**
+ * The same observation with a measured storage block on it.
+ *
+ * The three byte figures are mutually consistent the way the control plane's
+ * derivation leaves them: used = total - free, and the 15 GiB between `free`
+ * and `available` is the root reserve that is still free — counted by neither
+ * figure, and the reason the pair does not add up to the total.
+ */
+function storageCapacity(over: Partial<AgentHostCapacity> = {}): AgentHostCapacity {
+  return capacity({
+    storage_total_bytes: 1000 * GIB,
+    storage_free_bytes: 665 * GIB,
+    storage_available_bytes: 650 * GIB,
+    storage_used_bytes: 335 * GIB,
+    storage_used_percent: 100 * (335 / (335 + 650)),
+    storage_source: 'linux_overlay_root_statvfs',
+    storage_target: '/mnt/agent-docker',
+    storage_missing_reason: null,
+    ...over,
+  });
 }
 
 function host(over: Partial<AgentRunnerHost> = {}): AgentRunnerHost {
@@ -143,6 +179,19 @@ describe('number formatting', () => {
     expect(formatPercentTenth(Number.NaN)).toBeNull();
   });
 
+  it('rounds the storage figure up, the way df does', () => {
+    // The direction is the point: a disk with a third of a percent free is
+    // full to the reader deciding whether to clear space, and df says 100%.
+    expect(formatPercentCeil(99.4)).toBe('100%');
+    expect(formatPercentCeil(0.1)).toBe('1%');
+    expect(formatPercentCeil(0)).toBe('0%');
+    expect(formatPercentCeil(null)).toBeNull();
+    expect(formatPercentCeil(Number.NaN)).toBeNull();
+    // Where it disagrees with the nearest-rounding helper beside it.
+    expect(formatPercent(74.2)).toBe('74%');
+    expect(formatPercentCeil(74.2)).toBe('75%');
+  });
+
   it('reports GiB at a precision a reader can act on', () => {
     expect(formatGib(128 * GIB)).toBe('128');
     expect(formatGib(42 * GIB)).toBe('42');
@@ -161,6 +210,19 @@ describe('number formatting', () => {
     expect(missingReasonLabel('something_new')).toBe('Not measured');
     expect(reasonLabel('docker_timeout')).toBe('The Docker container listing timed out');
     expect(reasonLabel('brand_new_reason')).toBe('brand_new_reason');
+  });
+
+  it('says why storage is absent, and which of the reasons need an operator', () => {
+    // The two the page already had: a sample that could not be taken and one
+    // that failed validation are both gaps, not faults to be explained.
+    expect(missingReasonLabel('source_unavailable')).toBe('Not measured');
+    expect(missingReasonLabel('invalid_sample')).toBe('Invalid sample');
+    // The four storage adds. `disabled` and `unsupported` are decisions, and
+    // `unverified` is work the deployment has not finished.
+    expect(missingReasonLabel('not_reported')).toBe('Not measured');
+    expect(missingReasonLabel('disabled')).toBe('Storage measurement disabled');
+    expect(missingReasonLabel('unsupported')).toBe('Storage not supported on this host');
+    expect(missingReasonLabel('unverified')).toBe('Storage not verified');
   });
 });
 
@@ -311,6 +373,235 @@ describe('cells', () => {
       memoryCell(capacity({ memory_used_percent: null, memory_missing_reason: 'invalid_sample' }))
         .text,
     ).toBe('Invalid sample');
+  });
+});
+
+describe('storage cell', () => {
+  it('states the share, the pair and what is still writable', () => {
+    const cell = storageCell(storageCapacity());
+    // 100 × 335 / (335 + 650) = 34.01%, and the table rounds up where CPU and
+    // memory round to nearest.
+    expect(cell.text).toBe('35% · 335 / 1000 GiB');
+    // 650 GiB, not 665: `available` excludes the root reserve that is still
+    // free, and it is the number a writer can actually use.
+    expect(cell.note).toBe('650 GiB available');
+  });
+
+  it('draws no cell at all when no observation has ever arrived', () => {
+    const cell = storageCell(null);
+    expect(cell).toEqual({
+      text: 'Not measured',
+      note: null,
+      title: 'No capacity observation has arrived from this host.',
+    });
+  });
+
+  it('tells a genuinely empty disk from a disk nobody measured', () => {
+    // 0% is a reading: every byte of the denominator is free, and the cell
+    // says so rather than falling back to a reason.
+    const empty = storageCell(
+      storageCapacity({
+        storage_total_bytes: 500 * GIB,
+        storage_free_bytes: 500 * GIB,
+        storage_available_bytes: 500 * GIB,
+        storage_used_bytes: 0,
+        storage_used_percent: 0,
+        storage_missing_reason: null,
+      }),
+    );
+    // The used figure is a real zero and not a gap, which is the whole point.
+    // It prints as `0` and not `0.0`: storage reads at formatGib's precision,
+    // so a whole number of units carries no trailing tenth here any more than
+    // memory's `42 / 128 GiB` does.
+    expect(empty.text).toBe('0% · 0 / 500 GiB');
+    expect(empty.note).toBe('500 GiB available');
+    // The absence of a measurement is not that reading. This is the case an
+    // older control plane produces, and `0%` here would be an empty disk
+    // reported for a machine nobody asked about.
+    const missing = storageCell(capacity({ storage_missing_reason: 'not_reported' }));
+    expect(missing.text).toBe('Not measured');
+    expect(missing.note).toBeNull();
+    expect(missing.text).not.toBe('0%');
+  });
+
+  it('reads a control plane that predates the storage block as not measured', () => {
+    // The UI ships independently of the collector: an older control plane
+    // omits the keys entirely rather than sending nulls, so `undefined` has to
+    // land on the same branch as null. A `0%` here would invent a full answer
+    // from a field that was never sent.
+    const legacy = capacity();
+    expect(legacy.storage_used_percent).toBeUndefined();
+    const cell = storageCell(legacy);
+    expect(cell.text).toBe('Not measured');
+    expect(cell.note).toBeNull();
+    expect(cell.title).toBe('Storage is not measured: reason not reported.');
+    // Half a payload is still not a reading: a percentage whose bytes did not
+    // arrive renders as the percentage alone, as memory does.
+    expect(storageCell(storageCapacity({ storage_used_bytes: undefined })).text).toBe('35%');
+    expect(storageCell(storageCapacity({ storage_total_bytes: undefined })).note).toBe(
+      '650 GiB available',
+    );
+  });
+
+  it('names every missing reason rather than printing a zero', () => {
+    const reasons: [AgentHostCapacity['storage_missing_reason'], string][] = [
+      ['not_reported', 'Not measured'],
+      ['disabled', 'Storage measurement disabled'],
+      ['unsupported', 'Storage not supported on this host'],
+      ['unverified', 'Storage not verified'],
+      ['source_unavailable', 'Not measured'],
+      ['invalid_sample', 'Invalid sample'],
+    ];
+    for (const [reason, label] of reasons) {
+      const cell = storageCell(
+        storageCapacity({ storage_used_percent: null, storage_missing_reason: reason }),
+      );
+      expect(cell.text).toBe(label);
+      expect(cell.note).toBeNull();
+      expect(cell.title).toBe(
+        `Storage is not measured: ${reason}.${reason === 'unverified' ? ' The filesystem has not been verified as the one the retained sandboxes write to; a successful deployment verification would confirm it.' : ''}`,
+      );
+      expect(cell.text).not.toBe('0%');
+    }
+    // The reason is not a fact the wire requires; a null one still says the
+    // right thing rather than showing an empty cell.
+    expect(storageCell(storageCapacity({ storage_used_percent: null })).title).toBe(
+      'Storage is not measured: reason not reported.',
+    );
+  });
+
+  it('reads disks in GiB below a tebibyte and in TiB at it', () => {
+    // 1023 GiB is still GiB — and reads as a fraction of a TiB, which is the
+    // unit the next disk up will be read in.
+    const below = storageCell(
+      storageCapacity({
+        storage_total_bytes: 1023 * GIB,
+        storage_free_bytes: 512 * GIB,
+        storage_available_bytes: 512 * GIB,
+        storage_used_bytes: 511 * GIB,
+        storage_used_percent: 100 * (511 / 1023),
+      }),
+    );
+    expect(below.text).toBe('50% · 511 / 1023 GiB');
+    expect(below.note).toBe('512 GiB available');
+    // At 1 TiB the unit changes, and the boundary itself is the first TiB
+    // reading rather than the last GiB one.
+    const at = storageCell(
+      storageCapacity({
+        storage_total_bytes: TIB,
+        storage_free_bytes: 512 * GIB,
+        storage_available_bytes: 500 * GIB,
+        storage_used_bytes: 512 * GIB,
+        storage_used_percent: 100 * (512 / 1012),
+      }),
+    );
+    expect(at.text).toBe('51% · 0.5 / 1 TiB');
+    expect(at.note).toBe('500 GiB available');
+    // Above ten units the tenth is noise, as it is for memory.
+    const large = storageCell(
+      storageCapacity({
+        storage_total_bytes: 24 * TIB,
+        storage_free_bytes: 6 * TIB,
+        storage_available_bytes: 6 * TIB,
+        storage_used_bytes: 18 * TIB,
+        storage_used_percent: 75,
+      }),
+    );
+    expect(large.text).toBe('75% · 18 / 24 TiB');
+    expect(large.note).toBe('6 TiB available');
+  });
+
+  it('chooses the available figure’s unit independently of the total’s', () => {
+    // A terabyte disk with 40 GiB left. In the total's unit that is `0 TiB`,
+    // which reads as none — the reading an operator most needs to act on.
+    const cell = storageCell(
+      storageCapacity({
+        storage_total_bytes: 2 * TIB,
+        storage_free_bytes: 104 * GIB,
+        storage_available_bytes: 40 * GIB,
+        storage_used_bytes: 2 * TIB - 104 * GIB,
+        storage_used_percent: 100 * ((2 * TIB - 104 * GIB) / (2 * TIB - 64 * GIB)),
+      }),
+    );
+    expect(cell.text).toBe('98% · 1.9 / 2 TiB');
+    expect(cell.note).toBe('40 GiB available');
+    // The available figure is fitted to its own magnitude, not to 1 TiB: the
+    // two formatters are not the same call with a different argument.
+    expect(formatStorageSize(40 * GIB)).toBe('40 GiB');
+    expect(formatStorageSize(1.5 * TIB)).toBe('1.5 TiB');
+    expect(formatStorageSize(2 * TIB)).toBe('2 TiB');
+    // A hair over a tenth still reads as that tenth: the figure is rounded to
+    // the tenth once, so 1.2499 TiB is `1.2` and not `1.3`.
+    expect(formatStorageSize(1.2499 * TIB)).toBe('1.2 TiB');
+    expect(formatStorageSize(null)).toBeNull();
+    expect(formatStorageSize(undefined)).toBeNull();
+    expect(formatStorageSize(Number.NaN)).toBeNull();
+  });
+
+  it('keeps the pair in one unit so the two halves compare', () => {
+    expect(formatStoragePair(335 * GIB, 1000 * GIB)).toBe('335 / 1000 GiB');
+    // Below ten units a fractional figure keeps its tenth; at or above ten the
+    // tenth is rounded away — the same rule, in the same function, that
+    // formatGib applies to memory, so a whole number of units prints without a
+    // trailing `.0`. Both halves are read in the total's unit, so `used` is
+    // never printed on a scale its total is not on.
+    expect(formatStoragePair(0.5 * TIB, TIB)).toBe('0.5 / 1 TiB');
+    expect(formatStoragePair(512 * GIB, 2 * TIB)).toBe('0.5 / 2 TiB');
+    // Half an answer is not an answer, and neither is half a payload.
+    expect(formatStoragePair(null, TIB)).toBeNull();
+    expect(formatStoragePair(335 * GIB, undefined)).toBeNull();
+  });
+
+  it('explains the metric, the denominator and the filesystem it came from', () => {
+    const title = storageCell(storageCapacity()).title ?? '';
+    // What was measured, and where — the mount root, spelled as one.
+    expect(title).toContain('writable layers');
+    expect(title).toContain('the filesystem mounted at /mnt/agent-docker');
+    // The definition, in the same words the figure is computed with, plus the
+    // reserved-block caveat that keeps the two lines from being read as a
+    // partition of the total.
+    expect(title).toContain('used / (used + available)');
+    // The caveat has to say what `used` *is* (total minus free), not that it
+    // counts the reserve: it does not, and a reader who acts on the wrong
+    // version concludes the disk is fuller than it is.
+    expect(title).toContain('used is total minus free');
+    expect(title).toContain('reserved blocks that are still free');
+    expect(title).not.toContain('used counts the blocks');
+    expect(title).toContain('Source: linux_overlay_root_statvfs.');
+    // No target: the sentence is still grammatical rather than leaving a
+    // dangling preposition.
+    const targetless = storageCell(storageCapacity({ storage_target: null })).title ?? '';
+    expect(targetless).not.toContain('mounted at');
+    expect(targetless).toContain('writable layers.');
+    // The probe's own identifier, not the payload's collector source.
+    expect(storageCell(storageCapacity({ storage_source: null })).title).not.toContain('Source:');
+  });
+
+  it('says an unverified measurement needs a deployment to confirm it', () => {
+    const unverified = storageCell(
+      storageCapacity({ storage_used_percent: null, storage_missing_reason: 'unverified' }),
+    );
+    expect(unverified.text).toBe('Storage not verified');
+    expect(unverified.title).toContain('a successful deployment verification');
+    // The same sentence rides along on a measured cell: a verified figure can
+    // go back to unverified when the filesystem is resized under it, and the
+    // reader of the number needs to know that as much as the reader of the gap.
+    const since = storageCell(storageCapacity({ storage_missing_reason: 'unverified' }));
+    expect(since.text).toBe('35% · 335 / 1000 GiB');
+    expect(since.title).toContain('a successful deployment verification');
+    // No other reason gets the sentence: `disabled` is a decision, not a
+    // verification still owed.
+    expect(storageCell(storageCapacity()).title).not.toContain('confir');
+  });
+
+  it('derives the same percentage the tooltip explains', () => {
+    // Section 9 of the design asks for the current value and the tooltip to
+    // come from one formula. The cell prints the ceil of the DTO's own figure,
+    // and the tenth is that figure unchanged.
+    const observation = storageCapacity();
+    const percent = observation.storage_used_percent as number;
+    expect(storageCell(observation).text).toContain(`${Math.ceil(percent)}%`);
+    expect(formatPercentTenth(percent)).toBe('34.0%');
   });
 });
 

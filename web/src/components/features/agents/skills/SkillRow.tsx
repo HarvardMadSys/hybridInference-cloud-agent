@@ -9,7 +9,7 @@ export const SOURCE_LABELS = {
   uploaded: 'Uploaded file',
   github: 'GitHub',
 };
-export type SkillAction = 'view' | 'edit' | 'copy' | 'remove';
+export type SkillAction = 'view' | 'edit' | 'remove';
 
 function addedLabel(iso: string): string | null {
   const date = new Date(iso);
@@ -60,7 +60,6 @@ export function SkillRow({
   const actions: { action: SkillAction; label: string }[] = [
     { action: 'view', label: 'View details' },
     ...(skill.source === 'github' ? [] : [{ action: 'edit' as const, label: 'Edit skill' }]),
-    { action: 'copy', label: 'Create a copy' },
     { action: 'remove', label: 'Remove skill' },
   ];
 

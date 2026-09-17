@@ -38,7 +38,7 @@ from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.publisher import PublishError, fetch_base_bundle, publish_patch
 from cloud_agent.schemas import BASE_REF_METADATA_KEY
-from cloud_agent_host.patch_gate import branch_name_for
+from cloud_agent_git.patch_gate import branch_name_for
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -242,10 +242,7 @@ async def retry_snapshot_base_import(
     app_credentials: Any | None,
 ) -> bool:
     """Retry one durable post-publish object import after a broker outage."""
-    getter = getattr(store, "pending_snapshot_base_import", None)
-    if getter is None:
-        return False
-    snapshot = await getter()
+    snapshot = await store.snapshot.pending_snapshot_base_import()
     if snapshot is None:
         return False
     try:

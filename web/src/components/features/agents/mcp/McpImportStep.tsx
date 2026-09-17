@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import {
   previewMcpImport,
   saveMcpImport,
@@ -95,6 +95,7 @@ export function McpImportStep({
   initialText?: string;
 }) {
   const inputId = useId();
+  const submission = useRef(false);
   const [text, setText] = useState(initialText);
   const [preview, setPreview] = useState<McpImportPreviewApi | null>(null);
   const [locations, setLocations] = useState<Record<string, McpLocation>>({});
@@ -147,7 +148,8 @@ export function McpImportStep({
     ) ?? [];
 
   async function save() {
-    if (!preview?.drafts.length || saving) return;
+    if (!preview?.drafts.length || submission.current) return;
+    submission.current = true;
     setSaving(true);
     onBusyChange?.(true);
     setError(null);
@@ -164,6 +166,7 @@ export function McpImportStep({
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : 'Could not save this configuration.');
     } finally {
+      submission.current = false;
       setSaving(false);
       onBusyChange?.(false);
     }

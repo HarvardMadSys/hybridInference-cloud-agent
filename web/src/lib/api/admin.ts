@@ -37,6 +37,27 @@ export type CpuMissingReason =
 /** Why a memory figure is absent. Memory has no warm-up: it is instantaneous. */
 export type MemoryMissingReason = 'source_unavailable' | 'invalid_sample';
 
+/**
+ * Why a storage figure is absent.
+ *
+ * Wider than the memory vocabulary because storage has a *deployment* half:
+ * the host agent samples one filesystem and the deploy script attests that the
+ * filesystem it sampled is the one retained sandboxes actually write to.
+ * `unverified` is that attestation missing or stale and is not a fault in the
+ * measurement itself — the numbers may be perfectly good and still not be
+ * reported, because nobody has proven yet which disk they describe.
+ *
+ * `not_reported` is the control plane's word for a runner that never sent the
+ * sub-block at all, which is also what an old snapshot reads back as.
+ */
+export type StorageMissingReason =
+  | 'not_reported'
+  | 'disabled'
+  | 'unsupported'
+  | 'unverified'
+  | 'source_unavailable'
+  | 'invalid_sample';
+
 export type CapacityInventoryStatus = 'available' | 'partial' | 'unavailable';
 
 /**
@@ -69,6 +90,13 @@ export interface AgentHostCapacityInventory {
  * A null `capacity` on a host means no usable observation has ever arrived,
  * which is not the same as an idle machine. Nothing here is ever defaulted to
  * zero on the way to the screen.
+ *
+ * The `storage_*` block is **optional**, and every field in it may be absent
+ * as well as null: the UI ships independently of the collector, so a control
+ * plane older than this page omits the keys entirely instead of sending nulls.
+ * `undefined` therefore has to read as "not measured" everywhere — it is not
+ * zero full, and rendering it as `0%` would report an empty disk on a machine
+ * nobody has asked about the disk at all.
  */
 export interface AgentHostCapacity {
   schema_version: number;
@@ -88,6 +116,39 @@ export interface AgentHostCapacity {
   /** 0..100. */
   memory_used_percent: number | null;
   memory_missing_reason: MemoryMissingReason | null;
+  /**
+   * Block space of the filesystem that holds the sandboxes' writable layers,
+   * in `df` terms: `statvfs` on the runner's own overlay root, whose reported
+   * capacity is the filesystem carrying the upper layer.
+   */
+  storage_total_bytes?: number | null;
+  /**
+   * `f_bfree`. Includes the blocks the filesystem reserves for root, which is
+   * why it is *not* the same number as `storage_available_bytes` and why used
+   * space may never be computed as `total - available`.
+   */
+  storage_free_bytes?: number | null;
+  /** `f_bavail`: what an unprivileged writer may still use. Excludes reserved blocks. */
+  storage_available_bytes?: number | null;
+  /**
+   * `total - free`: the blocks actually in use. The reserved-but-unused
+   * blocks are in neither this figure nor `available` — they are free, just
+   * not to an unprivileged writer — which is why used plus available need
+   * not add up to the total.
+   */
+  storage_used_bytes?: number | null;
+  /**
+   * `100 × used / (used + available)`, the denominator GNU `df` prints, and
+   * left unrounded by the API so that a cell can round it and a tooltip can
+   * keep a tenth.
+   */
+  storage_used_percent?: number | null;
+  /** Probe identifier, e.g. `linux_overlay_root_statvfs`. A string, never an enum. */
+  storage_source?: string | null;
+  /** Host mount root the numbers came from, e.g. `/mnt/agent-docker`. Tooltip only. */
+  storage_target?: string | null;
+  /** Null when a figure was measured; see `StorageMissingReason` otherwise. */
+  storage_missing_reason?: StorageMissingReason | null;
   inventory: AgentHostCapacityInventory | null;
   /** ISO-8601 UTC; when the control plane accepted the block. */
   received_at: string;

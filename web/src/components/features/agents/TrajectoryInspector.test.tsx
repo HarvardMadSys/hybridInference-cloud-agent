@@ -37,6 +37,29 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
+it('lets a grouped runtime log expose every stored notification in Raw', () => {
+  const events = [
+    event({
+      id: 91,
+      event_type: 'raw',
+      payload: { text: '{"method":"thread/started","params":{"thread":{"id":"native-a"}}}' },
+    }),
+    event({
+      id: 92,
+      event_type: 'raw',
+      payload: { text: '{"method":"item/agentMessage/delta","params":{"delta":"partial text"}}' },
+    }),
+  ];
+  const [step] = buildTrajectorySteps(events);
+  render(<Harness events={events} initial={{ kind: 'step', stepKey: step.key, tab: 'summary' }} />);
+
+  expect(screen.getByText('Records')).toBeInTheDocument();
+  expect(screen.getByText(/all 2 stored records/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('tab', { name: 'Raw' }));
+  expect(screen.getByText('#91 · raw · seq 91 · attempt 1')).toBeInTheDocument();
+  expect(screen.getByText('#92 · raw · seq 92 · attempt 1')).toBeInTheDocument();
+});
+
 function event(over: Partial<AgentThreadEventApi> & { id: number }): AgentThreadEventApi {
   return {
     attempt_id: 1,

@@ -14,7 +14,10 @@
 //     the same namespace reported twice must not double, and two Docker hosts
 //     behind one physical name must not merge;
 //   * an age advances with local monotonic time, never with the browser's wall
-//     clock, so a clock adjustment cannot make an hour-old reading look new.
+//     clock, so a clock adjustment cannot make an hour-old reading look new;
+//   * a field this client has no schema for is missing, not zero — the storage
+//     block arrived after the page did, so a control plane older than it sends
+//     neither the numbers nor a reason, and both must read as "not measured".
 //
 // The server's contract is in `cloud_agent/capacity_protocol.py`; where a name
 // here differs from that module it is deliberate (the chart's `value` is the
@@ -35,11 +38,28 @@ import { isReporting } from './format';
 // ── Numbers ────────────────────────────────────────────────────────────
 
 const BYTES_PER_GIB = 1024 ** 3;
+const BYTES_PER_TIB = 1024 ** 4;
 
 /** Whole percent, for the table. A tenth here is false precision. */
 export function formatPercent(value: number | null): string | null {
   if (value === null || !Number.isFinite(value)) return null;
   return `${Math.round(value)}%`;
+}
+
+/**
+ * Whole percent, rounded **up** — the one figure on this page that does not
+ * round to nearest.
+ *
+ * GNU `df` rounds its capacity percentage up, and this cell is the page's
+ * rendering of the same number, so an operator comparing the two must not find
+ * them a point apart. The direction is also the safer one for the only
+ * question the column answers: 99.4% full is 100% full to anyone deciding
+ * whether to clear space, and rounding it down would say there is room for
+ * another round of builds on a disk that has none.
+ */
+export function formatPercentCeil(value: number | null): string | null {
+  if (value === null || !Number.isFinite(value)) return null;
+  return `${Math.ceil(value)}%`;
 }
 
 /** One decimal, for tooltips, where the reader is comparing two nearby points. */
@@ -49,16 +69,25 @@ export function formatPercentTenth(value: number | null): string | null {
 }
 
 /**
- * Bytes as GiB, at the precision a reader can act on.
+ * A figure in some size unit, at the precision a reader can act on.
  *
- * Above ten GiB the tenth is noise and the integer is what an operator
+ * Above ten units the tenth is noise and the integer is what an operator
  * compares against a machine's nameplate; below it, the tenth is the
  * difference between a snug machine and a comfortable one.
+ *
+ * One function rather than one rule per unit, because the Memory and the
+ * Storage cells sit side by side on a single table row: two spellings of this
+ * rule would print the same quantity two ways on that row, and a reader would
+ * be left working out which of the two was the real reading.
  */
+function unitNumber(value: number): string {
+  return value >= 10 ? `${Math.round(value)}` : `${Math.round(value * 10) / 10}`;
+}
+
+/** Bytes as GiB, at `unitNumber`'s precision. */
 export function formatGib(bytes: number | null): string | null {
   if (bytes === null || !Number.isFinite(bytes)) return null;
-  const gib = bytes / BYTES_PER_GIB;
-  return gib >= 10 ? `${Math.round(gib)}` : `${Math.round(gib * 10) / 10}`;
+  return unitNumber(bytes / BYTES_PER_GIB);
 }
 
 /** `42 / 128 GiB`, or null when either half is unknown. */
@@ -73,10 +102,22 @@ const MISSING_REASONS: Record<string, string> = {
   counter_reset: 'Counter reset',
   source_unavailable: 'Not measured',
   invalid_sample: 'Invalid sample',
+  not_reported: 'Not measured',
+  disabled: 'Storage measurement disabled',
+  unsupported: 'Storage not supported on this host',
+  unverified: 'Storage not verified',
 };
 
 /**
  * A bounded missing-measurement reason as words.
+ *
+ * One table serves CPU, memory and storage: the three vocabularies overlap
+ * (`source_unavailable` and `invalid_sample` mean the same gap whichever
+ * metric hit them) and the keys that do not overlap cannot collide, so a
+ * single lookup cannot pick the wrong sentence. Only the storage entries are
+ * about a deployment rather than a failed sample — `disabled` is a setting,
+ * `unsupported` is a topology the probe refused, and `unverified` is an
+ * attestation that has not happened yet.
  *
  * An unrecognized reason reads as "Not measured" rather than as itself: a raw
  * identifier is not an explanation, and inventing one for a value this client
@@ -286,6 +327,189 @@ export function memoryCell(capacity: AgentHostCapacity | null): CapacityCell {
     note: available === null ? null : `${available} GiB available`,
     title: `Used is total minus available, as reported by the Docker host. Source: ${capacity.source}.`,
   };
+}
+
+// ── Storage ────────────────────────────────────────────────────────────
+
+/**
+ * The size unit a figure is read in.
+ *
+ * Tie-break at 1 TiB, so a thousand-gigabyte disk reads `0.98 TiB` rather than
+ * `1000 GiB`: four digits are read a digit at a time, and the point of the
+ * column is comparing disks to each other at a glance. GiB below it is the
+ * unit an operator quotes build sizes and image layers in.
+ */
+const STORAGE_TIB_THRESHOLD = BYTES_PER_TIB;
+
+/**
+ * The unit a total is read in, and the divisor that expresses any other byte
+ * figure in the same unit.
+ */
+function storageUnit(total: number): readonly [string, number] {
+  return total >= STORAGE_TIB_THRESHOLD
+    ? (['TiB', BYTES_PER_TIB] as const)
+    : (['GiB', BYTES_PER_GIB] as const);
+}
+
+/**
+ * A byte figure as a bare number in `unit`.
+ *
+ * The precision rule is literally `formatGib`'s, applied one exponent up, and
+ * it is decided on the figure itself: below ten units the tenth distinguishes
+ * a snug disk from a comfortable one, at or above ten it is noise — which is
+ * what keeps a four-digit disk readable. It is the same `unitNumber` memory
+ * goes through rather than a second statement of the rule, so that a Memory
+ * and a Storage cell on one row cannot round the same quantity differently.
+ */
+function storageNumber(bytes: number, unitDivisor: number): string {
+  return unitNumber(bytes / unitDivisor);
+}
+
+/**
+ * A byte figure in the largest unit it fits, or null when there is none.
+ *
+ * Used for the *available* figure, which is small when the disk is nearly full
+ * and would otherwise be printed in the total's unit as `0 TiB`.
+ */
+export function formatStorageSize(bytes: number | null | undefined): string | null {
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return null;
+  const [unit, divisor] = storageUnit(bytes);
+  return `${storageNumber(bytes, divisor)} ${unit}`;
+}
+
+/**
+ * `used / total`, in the unit the **total** is read in.
+ *
+ * Both halves are forced into the total's unit so the pair stays comparable:
+ * `0.4 / 2 TiB` is a ratio a reader can take in, where `410 / 2` is two
+ * scales wearing one label. Each half keeps its own precision, because the
+ * precision rule is about how many digits a reader has to take in and 500 GiB
+ * is not a coarser reading than 0.5 TiB — it is the same one in the unit the
+ * total chose.
+ */
+export function formatStoragePair(
+  used: number | null | undefined,
+  total: number | null | undefined,
+): string | null {
+  if (used === null || used === undefined || total === null || total === undefined) return null;
+  if (!Number.isFinite(used) || !Number.isFinite(total)) return null;
+  const [unit, divisor] = storageUnit(total);
+  return `${storageNumber(used, divisor)} / ${storageNumber(total, divisor)} ${unit}`;
+}
+
+/**
+ * One optional storage field, with absence and null collapsed into "missing".
+ *
+ * The DTO's storage fields are optional because the page ships on its own
+ * schedule; a control plane older than this client omits them rather than
+ * sending nulls. Every read below goes through here, so "not measured" has one
+ * spelling instead of two, and the null checks stay honest without a `?? null`
+ * on each of them.
+ */
+function optionalBytes(value: number | null | undefined): number | null {
+  return value === undefined ? null : value;
+}
+
+/**
+ * Storage load: `74% · 742 / 1000 GiB` and how much room is still writable.
+ *
+ * Deliberately not the memory cell with different field names. Both figures
+ * are block space in `df` terms, and the differences are the ones a reader has
+ * to be told about rather than left to infer:
+ *
+ *   * `used` is `total - free`, and the root reserve that is still free sits
+ *     outside both it and `available` — free, but not to an unprivileged
+ *     writer. The two lines are therefore not a partition, and the tooltip
+ *     says so: computing used as `total - available` would count that unused
+ *     reserve as written space;
+ *   * the percentage is GNU `df`'s, and rounds up, unlike CPU and memory;
+ *   * available space picks its own unit, so a nearly full terabyte disk does
+ *     not report `0 TiB` still writable when the answer is 40 GiB.
+ */
+export function storageCell(capacity: AgentHostCapacity | null): CapacityCell {
+  if (capacity === null) {
+    return {
+      text: 'Not measured',
+      note: null,
+      title: 'No capacity observation has arrived from this host.',
+    };
+  }
+  const percent = formatPercentCeil(optionalBytes(capacity.storage_used_percent));
+  if (percent === null) {
+    return {
+      text: missingReasonLabel(capacity.storage_missing_reason ?? null),
+      note: null,
+      title: `Storage is not measured: ${
+        capacity.storage_missing_reason ?? 'reason not reported'
+      }.${unverifiedNote(capacity)}`,
+    };
+  }
+  const total = optionalBytes(capacity.storage_total_bytes);
+  const used = optionalBytes(capacity.storage_used_bytes);
+  const pair = formatStoragePair(used, total);
+  // The available figure is fitted with its own unit rather than the pair's:
+  // on a 2 TiB disk with 40 GiB left, "0 TiB available" is a number nobody can
+  // act on and reading it as zero would be worse than the number itself.
+  const available = formatStorageSize(optionalBytes(capacity.storage_available_bytes));
+  return {
+    text: pair === null ? percent : `${percent} · ${pair}`,
+    note: available === null ? null : `${available} available`,
+    title: storageTitle(capacity),
+  };
+}
+
+/**
+ * The extra sentence a missing cell owes a reader when the reason is
+ * `unverified`.
+ *
+ * Only that reason: `disabled` is a decision somebody made and `unsupported` a
+ * topology the probe refused, while `unverified` is work the deployment still
+ * owes and will finish on its own — a `check` run, or the next `up`. The
+ * sentence names the verification rather than promising a first one, because
+ * the reason covers both "never attested" and "attested, but the filesystem is
+ * no longer the size it was" — the control plane reports no figures either way,
+ * so a reader must not be told the numbers on screen are merely unconfirmed.
+ */
+function unverifiedNote(capacity: AgentHostCapacity): string {
+  if (capacity.storage_missing_reason !== 'unverified') return '';
+  return (
+    ' The filesystem has not been verified as the one the retained sandboxes write to; ' +
+    'a successful deployment verification would confirm it.'
+  );
+}
+
+/**
+ * The storage tooltip: what was measured, in which terms, and where.
+ *
+ * A cell can only carry a percentage and a pair, and storage needs three facts
+ * the two lines cannot hold — the reserved-block caveat, which filesystem the
+ * numbers describe, and who measured them. `target` is the host mount root and
+ * is spelled as such, because the value on its own (`/mnt/agent-docker`) reads
+ * as a path the reader is expected to recognize.
+ */
+function storageTitle(capacity: AgentHostCapacity): string {
+  const target = capacity.storage_target;
+  const sentences = [
+    `Block space of the filesystem holding the sandboxes' writable layers${
+      target ? `, the filesystem mounted at ${target}` : ''
+    }.`,
+    // One sentence on purpose: the reader's question is why the two lines do
+    // not add up to the total, and the answer is a third quantity — the
+    // reserve — that neither line counts.
+    'The percentage is used / (used + available), as GNU df prints it: used is total minus free, and ' +
+      'the reserved blocks that are still free are in neither figure, so used plus available need ' +
+      'not equal the total.',
+    // The same fact the CPU and memory charts state in the panel, said here
+    // because this metric has no chart of its own: the column is a reading of
+    // now, not a trend, and a disk filling over days is not something a
+    // minutes-long window would show.
+    'Like memory, it is an instantaneous observation rather than an average.',
+  ];
+  // The probe's own name, not the payload's: `source` describes the collector,
+  // and only `storage_source` says which filesystem was actually measured.
+  const source = capacity.storage_source;
+  if (source) sentences.push(`Source: ${source}.`);
+  return `${sentences.join(' ')}${unverifiedNote(capacity)}`;
 }
 
 // ── Retained sandboxes ─────────────────────────────────────────────────

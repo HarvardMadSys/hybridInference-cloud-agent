@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from cloud_agent import app as control_plane
-from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
+from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 from tests.support.storage import OneFake
 
 pytestmark = pytest.mark.asyncio

@@ -146,7 +146,7 @@ class PostgresSkillRepository:
                 if current["source"] == "github" and any(
                     key != "default_enabled" for key in values
                 ):
-                    raise SkillError("Create a copy to customize an imported GitHub skill.")
+                    raise SkillError("Imported GitHub skills are read-only.")
                 merged = {**dict(current), **values}
                 await self._check_defaults(conn, user_id, merged, skill_id)
                 row = await conn.fetchrow(

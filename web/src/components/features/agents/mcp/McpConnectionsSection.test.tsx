@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { McpConnectionsSection } from './McpConnectionsSection';
 import type { McpConnectionApi, McpConnectionsApi } from '@/lib/api/mcp';
@@ -87,6 +87,54 @@ afterEach(() => {
 });
 
 describe('McpConnectionsSection', () => {
+  it('resumes an existing pending connection without adding a second card', async () => {
+    vi.mocked(previewMcpImport).mockResolvedValue({
+      dialect: 'json',
+      rejected: [],
+      drafts: [
+        {
+          label: connection.label,
+          transport: 'streamable-http',
+          location: 'remote',
+          url: connection.url,
+          argv: [],
+          env_names: [],
+          headers: [],
+          secrets: [],
+          paths: [],
+          package: null,
+          warnings: [],
+        },
+      ],
+    });
+    vi.mocked(saveMcpImport).mockResolvedValue({
+      dialect: 'json',
+      rejected: [],
+      drafts: [],
+      saved: [connection],
+    });
+    let finish!: (value: { needs_client_id: boolean; message: string }) => void;
+    mockedAuthorize.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    render(<McpConnectionsSection />);
+    await screen.findByText(connection.label);
+    fireEvent.click(screen.getByRole('button', { name: 'Add with JSON' }));
+    fireEvent.change(screen.getByLabelText('MCP configuration'), {
+      target: { value: JSON.stringify({ mcpServers: { wiki: { url: connection.url } } }) },
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Add 1 server' }));
+    await waitFor(() => expect(mockedAuthorize).toHaveBeenCalledWith(connection.id, undefined));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getAllByText(connection.label)).toHaveLength(1);
+    await act(async () => {
+      finish({ needs_client_id: true, message: 'Enter client ID' });
+    });
+  });
+
   it('renders what a connection is, where it runs and what it offers', async () => {
     render(<McpConnectionsSection />);
 

@@ -1,89 +1,62 @@
-"""Version fence shared by the control plane and shared-sandbox runners.
+"""Re-export of :mod:`cloud_agent_contracts.shared_protocol`.
 
-The runner image deliberately ships only :mod:`cloud_agent_host`.  Protocol
-constants used while polling must therefore live on this side of the package
-boundary; the control plane already ships the host package for shared patch
-validation and imports the same values so the two claim gates cannot drift.
+The constants and helpers moved to the ``cloud_agent_contracts`` package, which
+the runner image ships on its own. This module stays so existing host-side
+importers keep working: ``from cloud_agent_host.shared_protocol import ...``
+resolves to the very same objects, not copies.
+
+**When this module goes away.** Delete it when no ``cloud_agent_host`` module
+and no test imports it. That is exactly the set a scan of
+``cloud_agent_host/**`` and ``tests/**`` for
+``cloud_agent_host.shared_protocol`` returns today: the host modules
+``runner.py``, ``host_runtime.py``, ``resources.py`` and
+``candidate_check.py``, plus the eight test files
+``tests/unit/test_candidate_check.py``,
+``tests/unit/test_cross_artifact_contracts.py``,
+``tests/unit/test_deploy_readiness.py``,
+``tests/unit/test_execution_profiles.py``,
+``tests/unit/test_runtime_version_selection.py``,
+``tests/integration/servers/test_agent_jobs_lifecycle.py``,
+``tests/integration/storage/test_agent_grant_store.py`` and
+``tests/integration/storage/test_agent_job_store.py``. The control plane is
+not in that set: it already imports
+``cloud_agent_contracts.shared_protocol`` directly, which is the path every
+one of these callers is meant to end up on. The boundary test's
+contracts-isolation test is what keeps the new path honest while the old one
+still has callers.
 """
 
-from __future__ import annotations
+from cloud_agent_contracts.shared_protocol import (
+    ENV_DEPLOYMENT_SHA,
+    HOST_CONCURRENCY_CAPABILITY,
+    HOST_CONCURRENCY_MAX_SLOTS,
+    HOST_CONCURRENCY_MIN_SLOTS,
+    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+    SHARED_DEPLOYMENT_CAPABILITY_PREFIX,
+    SHARED_MEMBER_ACCOUNTING_VERSION,
+    SHARED_SANDBOX_CAPABILITY,
+    SHARED_SANDBOX_HELPER_PINS,
+    SHARED_SANDBOX_PROTOCOL,
+    SHARED_SANDBOX_RUNTIME_PINS,
+    SHARED_SANDBOX_V1_HELPER_PINS,
+    has_shared_deployment_capability,
+    shared_deployment_capability,
+)
 
-SHARED_SANDBOX_CAPABILITY = "shared-sandbox-v1"
-NATIVE_FORK_AT_ANCHOR_CAPABILITY = "native-fork-at-anchor-v1"
-#: Advertised by a runner that takes its concurrency limit from the control
-#: plane's ``slots_desired`` rather than from the count it was deployed with.
-#: The admin page reads it to tell "this host will apply your number" from
-#: "this host needs a redeploy to change".
-HOST_CONCURRENCY_CAPABILITY = "host-concurrency-v1"
-#: How many turns at once an operator may ask a host for. Two is the
-#: shared-live floor — a fork's sibling runs beside its parent, not behind it —
-#: and 128 is a typo guard, checked again by the host that would act on it.
-#: Neither bound is a statement about what a machine can carry; that is what
-#: the load the same page reports is for.
-HOST_CONCURRENCY_MIN_SLOTS = 2
-HOST_CONCURRENCY_MAX_SLOTS = 128
-SHARED_DEPLOYMENT_CAPABILITY_PREFIX = "shared-sandbox-deployment:"
-ENV_DEPLOYMENT_SHA = "AGENT_DEPLOYMENT_SHA"
-#: Stored in the legacy-named ``sampler_version`` field for a current retained
-#: member turn.  Sharing this value with the control-plane schema makes the
-#: no-container-attribution invariant a wire-level contract, not a convention
-#: that a buggy runner can accidentally violate.
-SHARED_MEMBER_ACCOUNTING_VERSION = "shared-member-v1"
-# v2 adds the provider-transcript anchor carried by native fork requests.  A
-# v1 retained container may still serve ordinary follow-up turns, but must not
-# be asked to interpret a historical anchor that its bundled helpers ignore.
-SHARED_SANDBOX_PROTOCOL = "v2"
-SHARED_SANDBOX_RUNTIME_PINS = {
-    "claude-code": "2.1.220",
-    "codex": "0.145.0",
-    "pi": "0.73.1",
-    "opencode": "1.18.9",
-    "kilo": "7.4.17",
-}
-SHARED_SANDBOX_HELPER_PINS = {
-    "claude-agent-sdk": "0.2.148",
-    # The host's OpenCode/Kilo reply collector requires message-role metadata.
-    "http-agent-live-bridge": "2",
-    # Bumped with the observer's own protocol: the image that carries a v2
-    # observer publishes v2 here, and a host whose pin still said v1 refused to
-    # attest at all rather than reporting a mismatch.
-    "guest-observer": "2",
-    "tool-mark": "1",
-}
-# Protocol v1 predates guest-kernel accounting. Those helpers are not needed
-# to continue an ordinary turn in an already-owned retained container; the
-# SDK pin is the reviewed compatibility floor for that old replica.
-SHARED_SANDBOX_V1_HELPER_PINS = {"claude-agent-sdk": "0.2.148"}
-
-
-def shared_deployment_capability(deployment_sha: str) -> str:
-    """Return the host-ready fence for one exact deployed commit."""
-    normalized = deployment_sha.strip()
-    if not normalized:
-        raise ValueError("deployment SHA must not be empty")
-    return f"{SHARED_DEPLOYMENT_CAPABILITY_PREFIX}{normalized}"
-
-
-def has_shared_deployment_capability(
-    capabilities: object,
-    *,
-    expected_deployment_sha: str | None = None,
-) -> bool:
-    """Whether one replica proved a completed, optionally exact deployment.
-
-    Requiring at least one deployment capability even when the control plane
-    has no configured target keeps direct/partially configured deployments
-    fail-closed. Production additionally supplies its own exact target SHA, so
-    a marker from a previous rollout cannot authorize a new sandbox.
-    """
-    if not isinstance(capabilities, list):
-        return False
-    expected = (expected_deployment_sha or "").strip()
-    if expected:
-        return shared_deployment_capability(expected) in capabilities
-    return any(
-        isinstance(capability, str)
-        and capability.startswith(SHARED_DEPLOYMENT_CAPABILITY_PREFIX)
-        and len(capability) > len(SHARED_DEPLOYMENT_CAPABILITY_PREFIX)
-        for capability in capabilities
-    )
+#: The whole surface of the moved module, so the re-export reads as one.
+__all__ = [
+    "ENV_DEPLOYMENT_SHA",
+    "HOST_CONCURRENCY_CAPABILITY",
+    "HOST_CONCURRENCY_MAX_SLOTS",
+    "HOST_CONCURRENCY_MIN_SLOTS",
+    "NATIVE_FORK_AT_ANCHOR_CAPABILITY",
+    "SHARED_DEPLOYMENT_CAPABILITY_PREFIX",
+    "SHARED_MEMBER_ACCOUNTING_VERSION",
+    "SHARED_SANDBOX_CAPABILITY",
+    "SHARED_SANDBOX_HELPER_PINS",
+    "SHARED_SANDBOX_PROTOCOL",
+    "SHARED_SANDBOX_RUNTIME_PINS",
+    "SHARED_SANDBOX_V1_HELPER_PINS",
+    "has_shared_deployment_capability",
+    "shared_deployment_capability",
+]

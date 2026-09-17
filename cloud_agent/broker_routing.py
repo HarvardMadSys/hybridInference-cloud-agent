@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from cloud_agent_host.workspace_broker_client import (
+from cloud_agent.workspace_broker_client import (
     WorkspaceBrokerClient,
     WorkspaceBrokerError,
 )

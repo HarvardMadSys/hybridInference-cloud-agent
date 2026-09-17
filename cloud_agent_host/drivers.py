@@ -861,11 +861,24 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
         item = params.get("item")
         item = item if isinstance(item, dict) else {}
         item_type = str(item.get("type") or "")
+        # Keep the app-server item identity separate from provider message/usage
+        # identity. Trajectory can join deltas to this item without inventing a
+        # provider request or attributing turn-wide usage to one reply.
+        identity = {"native_item_id": str(item["id"])} if item.get("id") else {}
+        raw_notification = HarnessEvent(
+            RAW,
+            {"text": line[:4000], "protocol": "codex-app-server", "notification": value},
+            raw_line=line,
+        )
         if method == "item/completed" and item_type == "agentMessage":
-            return HarnessEvent(MESSAGE, {"text": str(item.get("text") or "")}, raw_line=line)
+            return HarnessEvent(
+                MESSAGE,
+                {"text": str(item.get("text") or ""), **identity},
+                raw_line=line,
+            )
         if method == "item/completed" and item_type == "reasoning":
             text = "\n".join(str(value) for value in item.get("summary") or [])
-            return HarnessEvent(THINKING, {"text": text[:4000]}, raw_line=line)
+            return HarnessEvent(THINKING, {"text": text[:4000], **identity}, raw_line=line)
         if method in {"item/started", "item/updated"} and item_type in {
             "commandExecution",
             "mcpToolCall",
@@ -874,7 +887,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
             if (item_id and item_id in turn.reported_tools) or (
                 not item_id and method == "item/updated"
             ):
-                return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
+                return raw_notification
             if item_id:
                 turn.reported_tools.add(item_id)
             return HarnessEvent(
@@ -917,7 +930,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                 },
                 raw_line=line,
             )
-        return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
+        return raw_notification
 
     def interrupt_turn(self, turn: _JsonResidentTurn[CodexRuntime]) -> None:
         """Interrupt only the active Codex turn on the resident thread."""

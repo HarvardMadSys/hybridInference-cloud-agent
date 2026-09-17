@@ -38,6 +38,7 @@ class McpConnectionRepository(Protocol):
         connector_id: int | None = None,
         account_label: str | None = None,
         request_timeout_s: float | None = None,
+        reuse_pending: bool = False,
     ) -> dict[str, Any]:
         """Insert a connection and return it, at revision one.
 
@@ -45,6 +46,10 @@ class McpConnectionRepository(Protocol):
         and no capability has been discovered, and a connection that reads as
         active before either has happened is a lie the Integrations page would
         repeat.
+
+        ``reuse_pending`` resumes an identical remote setup without credentials
+        instead of inserting another row. Existing credentials, settings, and
+        approvals are never changed; authenticated accounts remain independent.
         """
         ...
 

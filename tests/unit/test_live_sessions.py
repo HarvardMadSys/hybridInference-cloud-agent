@@ -709,3 +709,46 @@ def test_every_bundled_driver_only_advertises_shared_live_after_wiring():
         assert capabilities.resident_transport == "supervisor_live"
         assert capabilities.concurrent_shared_workspace is True
         assert capabilities.fork == "at_anchor"
+
+
+def test_codex_trajectory_keeps_native_identity_and_structured_streams(tmp_path):
+    process = _LiveProcess()
+    context, _spawned = _protocol_context(process, tmp_path)
+    process.feed = _turn_lines(
+        {"id": "initialize-1", "result": {"userAgent": "codex"}},
+        {"id": "thread-2", "result": {"thread": {"id": "thread-a"}}},
+    )
+    session = CodexDriver(CodexRuntime()).launch_live(context)
+    session.ensure_started(model="gpt", reasoning_effort=None)
+    process.feed = _turn_lines({"id": "turn-3", "result": {"turn": {"id": "turn-a"}}})
+    turn = session.start_turn(TurnInput(prompt="read", model="gpt"))
+    delta = {"method": "item/agentMessage/delta", "params": {"itemId": "m", "delta": "x" * 5000}}
+    process.feed = _turn_lines(
+        {
+            "method": "item/started",
+            "params": {"item": {"type": "agentMessage", "id": "m", "text": ""}},
+        },
+        delta,
+        {
+            "method": "item/completed",
+            "params": {"item": {"type": "agentMessage", "id": "m", "text": "Done"}},
+        },
+        {
+            "method": "item/started",
+            "params": {"item": {"type": "commandExecution", "id": "c", "command": "ls"}},
+        },
+        {"method": "turn/completed", "params": {"turn": {"id": "turn-a", "status": "completed"}}},
+    )
+    events = list(turn.iter_events())
+    messages = [event for event in events if event.event_type == "message"]
+    assert len(messages) == 1
+    assert messages[0].payload == {"text": "Done", "native_item_id": "m"}
+    fragments = [event for event in events if event.event_type == "raw"]
+    assert len(fragments) == 2
+    assert fragments[1].payload["notification"] == delta
+    assert fragments[1].payload["protocol"] == "codex-app-server"
+    assert len(fragments[1].payload["text"]) == 4000
+    call = next(event for event in events if event.event_type == "tool_use")
+    assert "usage_id" not in call.payload
+    assert call.payload["id"] == "c"
+    assert turn.wait().final_output == "Done"

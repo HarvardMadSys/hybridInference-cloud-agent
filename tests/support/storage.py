@@ -23,6 +23,7 @@ _PORTS = pathlib.Path(__file__).resolve().parents[2] / "cloud_agent" / "ports"
 
 #: One name per port module, which is also the assembly's attribute name.
 CAPABILITIES = frozenset(p.stem for p in _PORTS.glob("*.py") if p.name != "__init__.py") | {
+    "admin_conversations",
     "admin_runs",
     "admin_usage",
 }

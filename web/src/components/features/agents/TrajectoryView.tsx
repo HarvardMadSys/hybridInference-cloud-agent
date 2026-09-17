@@ -3,8 +3,8 @@
 // The trajectory: every stored event of the conversation, projected into the
 // steps a reader can inspect.
 //
-// The chat tab beside this is a reading of the stream. This is the stream —
-// unfolded, undeduplicated, including the rows no view knows how to render.
+// Tool results join their calls; runtime notifications live in Run logs outside
+// the execution overview. Unknown events remain visible; export keeps every row.
 // Selecting a row no longer opens an inline panel: the detail goes to the
 // right-hand inspector, so the list keeps its place while a step is read.
 //
@@ -26,7 +26,7 @@ import {
 
 import type { AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { filterSteps, type TrajectoryStep } from './trajectorySteps';
-import { toSessionLog, type TrajectoryLane } from './trajectory';
+import { preview, toSessionLog, type TrajectoryLane } from './trajectory';
 import { formatDuration } from './TurnFooter';
 import {
   deriveTimeline,
@@ -62,8 +62,9 @@ const ACTOR_TONE: Record<TrajectoryStep['actor'], string> = {
   user: 'bg-sky-50 dark:bg-sky-500/10 text-sky-700 dark:text-sky-400',
   assistant: 'bg-violet-50 dark:bg-violet-500/10 text-violet-700 dark:text-violet-400',
   tool: 'bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400',
-  context: 'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400',
+  context: 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400',
   system: 'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400',
+  runtime: 'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400',
 };
 
 const STATUS_TONE: Partial<Record<TrajectoryStep['status'], string>> = {
@@ -659,7 +660,7 @@ function ExecutionOverview({
 
 export function TrajectoryView({
   events,
-  steps,
+  steps: allSteps,
   query,
   onQueryChange,
   selectedKey,
@@ -679,6 +680,9 @@ export function TrajectoryView({
 }) {
   const [mode, setMode] = useState<TimelineMode>('steps');
   const [range, setRange] = useState<DomainRange | null>(null);
+  const [showLogs, setShowLogs] = useState(false);
+  const steps = useMemo(() => allSteps.filter((step) => !step.diagnostic), [allSteps]);
+  const logs = useMemo(() => allSteps.filter((step) => step.diagnostic), [allSteps]);
   const visible = useMemo(() => filterSteps(steps, query), [steps, query]);
   const model = useMemo(() => deriveTimeline(steps, mode), [steps, mode]);
   const timed = useMemo(() => hasRecordedTiming(steps), [steps]);
@@ -687,6 +691,10 @@ export function TrajectoryView({
     [query, visible],
   );
   const focused = useMemo(() => (range === null ? null : focusKeys(model, range)), [model, range]);
+
+  useEffect(() => {
+    if (selectedKey && logs.some((step) => step.key === selectedKey)) setShowLogs(true);
+  }, [logs, selectedKey]);
 
   useEffect(() => {
     if (!focusJobId) return;
@@ -748,7 +756,7 @@ export function TrajectoryView({
     URL.revokeObjectURL(url);
   }
 
-  if (steps.length === 0) {
+  if (allSteps.length === 0) {
     return (
       <p className="py-8 text-center text-[13px] text-gray-500 dark:text-gray-400">
         This conversation stored no events. A thread that ran before event capture, or one whose
@@ -759,79 +767,122 @@ export function TrajectoryView({
 
   return (
     <section aria-label="Trajectory" className="space-y-3">
-      <div className="rounded-xl border border-gray-200 bg-white shadow-[0_1px_2px_rgba(17,24,39,0.025)] dark:border-white/10 dark:bg-gray-900">
-        <div className="flex items-center justify-between gap-3 border-b border-gray-100 px-4 py-3 dark:border-white/5">
-          <h2 className="flex items-center gap-2 text-[12px] font-medium text-gray-700 dark:text-gray-200">
-            <svg
-              aria-hidden="true"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.25"
-              strokeLinecap="round"
-              className="h-3.5 w-3.5 text-gray-400 dark:text-gray-500"
-            >
-              <path d="M2.5 2.5v11h11M5.5 5h3M9.5 8h3M5.5 11h2" />
-            </svg>
-            Execution overview
-          </h2>
-          <span className="rounded-md bg-gray-50 px-2 py-0.5 text-[10px] tabular-nums text-gray-500 dark:bg-white/5 dark:text-gray-400">
-            {steps.length} {steps.length === 1 ? 'step' : 'steps'}
-          </span>
+      <div
+        className="sticky top-0 z-10 space-y-2 bg-white pb-2 dark:bg-gray-900"
+        data-testid="trajectory-overview-toolbar"
+      >
+        <div className="rounded-xl border border-gray-200 bg-white shadow-[0_1px_2px_rgba(17,24,39,0.025)] dark:border-white/10 dark:bg-gray-900">
+          <div className="flex items-center justify-between gap-3 border-b border-gray-100 px-4 py-3 dark:border-white/5">
+            <h2 className="flex items-center gap-2 text-[12px] font-medium text-gray-700 dark:text-gray-200">
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.25"
+                strokeLinecap="round"
+                className="h-3.5 w-3.5 text-gray-400 dark:text-gray-500"
+              >
+                <path d="M2.5 2.5v11h11M5.5 5h3M9.5 8h3M5.5 11h2" />
+              </svg>
+              Execution overview
+            </h2>
+            <span className="rounded-md bg-gray-50 px-2 py-0.5 text-[10px] tabular-nums text-gray-500 dark:bg-white/5 dark:text-gray-400">
+              {steps.length} {steps.length === 1 ? 'step' : 'steps'}
+            </span>
+          </div>
+          <div className="px-4 pb-3 pt-3.5">
+            <ExecutionOverview
+              model={model}
+              mode={mode}
+              onModeChange={(next) => {
+                if (next === mode) return;
+                setMode(next);
+                // The two projections count different things — operations and
+                // milliseconds — so an interval chosen in one means nothing in
+                // the other and must not survive the switch.
+                setRange(null);
+              }}
+              timed={timed}
+              range={range}
+              onRangeChange={setRange}
+              selectedKey={selectedKey}
+              searchMatchKeys={searchMatchKeys}
+              onSelect={onSelectStep}
+            />
+          </div>
         </div>
-        <div className="px-4 pb-3 pt-3.5">
-          <ExecutionOverview
-            model={model}
-            mode={mode}
-            onModeChange={(next) => {
-              if (next === mode) return;
-              setMode(next);
-              // The two projections count different things — operations and
-              // milliseconds — so an interval chosen in one means nothing in
-              // the other and must not survive the switch.
-              setRange(null);
-            }}
-            timed={timed}
-            range={range}
-            onRangeChange={setRange}
-            selectedKey={selectedKey}
-            searchMatchKeys={searchMatchKeys}
-            onSelect={onSelectStep}
+
+        <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
+          <input
+            type="search"
+            value={query}
+            onChange={(event) => onQueryChange(event.target.value)}
+            placeholder="Search steps"
+            aria-label="Search steps"
+            className="min-w-0 basis-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-[13px] text-gray-900 outline-none focus:border-gray-300 dark:border-white/10 dark:bg-gray-950 dark:text-gray-100 sm:flex-1 sm:basis-auto"
           />
+          {focused !== null ? (
+            <button
+              type="button"
+              onClick={() => setRange(null)}
+              className="shrink-0 rounded-lg border border-gray-200 px-2.5 py-1.5 text-[12px] text-gray-600 transition-colors hover:border-gray-300 hover:text-gray-900 dark:border-white/10 dark:text-gray-400 dark:hover:border-white/20 dark:hover:text-gray-100"
+            >
+              {focused.size} of {steps.length} · Clear
+            </button>
+          ) : visible.length !== steps.length ? (
+            <span className="shrink-0 text-[12px] tabular-nums text-gray-500 dark:text-gray-400">
+              {visible.length} of {steps.length}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            aria-expanded={showLogs}
+            aria-controls="trajectory-run-logs"
+            onClick={() => setShowLogs((value) => !value)}
+            className="shrink-0 rounded-lg border border-gray-200 px-2.5 py-1.5 text-[12px] text-gray-600 dark:border-white/10 dark:text-gray-400"
+          >
+            Run logs ({logs.reduce((count, step) => count + step.sourceEvents.length, 0)})
+          </button>
+          <button
+            type="button"
+            onClick={download}
+            title="Download session log"
+            className="shrink-0 rounded-lg border border-gray-200 dark:border-white/10 px-2.5 py-1.5 text-[12px] text-gray-600 dark:text-gray-400 transition-colors hover:border-gray-300 dark:hover:border-white/20 hover:text-gray-900 dark:hover:text-gray-100"
+          >
+            Session log
+          </button>
         </div>
       </div>
 
-      <div className="flex items-center gap-2">
-        <input
-          type="search"
-          value={query}
-          onChange={(event) => onQueryChange(event.target.value)}
-          placeholder="Search steps"
-          aria-label="Search steps"
-          className="min-w-0 flex-1 rounded-lg border border-gray-200 dark:border-white/10 px-2.5 py-1.5 text-[13px] outline-none focus:border-gray-300"
-        />
-        {focused !== null ? (
-          <button
-            type="button"
-            onClick={() => setRange(null)}
-            className="shrink-0 rounded-lg border border-gray-200 px-2.5 py-1.5 text-[12px] text-gray-600 transition-colors hover:border-gray-300 hover:text-gray-900 dark:border-white/10 dark:text-gray-400 dark:hover:border-white/20 dark:hover:text-gray-100"
-          >
-            {focused.size} of {steps.length} · Clear
-          </button>
-        ) : visible.length !== steps.length ? (
-          <span className="shrink-0 text-[12px] tabular-nums text-gray-500 dark:text-gray-400">
-            {visible.length} of {steps.length}
-          </span>
-        ) : null}
-        <button
-          type="button"
-          onClick={download}
-          title="Download session log"
-          className="shrink-0 rounded-lg border border-gray-200 dark:border-white/10 px-2.5 py-1.5 text-[12px] text-gray-600 dark:text-gray-400 transition-colors hover:border-gray-300 dark:hover:border-white/20 hover:text-gray-900 dark:hover:text-gray-100"
+      {showLogs ? (
+        <div
+          id="trajectory-run-logs"
+          aria-label="Run logs"
+          className="max-h-64 overflow-y-auto rounded-lg border border-gray-200 dark:border-white/10"
         >
-          Session log
-        </button>
-      </div>
+          <p className="px-3 py-2 text-[12px] text-gray-500 dark:text-gray-400">
+            Runtime records are kept here and in Session log. They do not count as execution steps.
+          </p>
+          {logs.map((step) => (
+            <button
+              key={step.key}
+              type="button"
+              data-step-key={step.key}
+              onClick={() => onSelectStep(step.key)}
+              aria-current={selectedKey === step.key ? 'true' : undefined}
+              className="flex w-full gap-3 border-t border-gray-100 px-3 py-2 text-left text-[12px] hover:bg-gray-50 dark:border-white/5 dark:hover:bg-white/5"
+            >
+              <span className="shrink-0">
+                Turn {step.turnNo} · Attempt {step.attemptId}
+              </span>
+              <span className="min-w-0 truncate">
+                {step.label} · {step.detail}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-white/10">
         {visible.map((step, index) => {
@@ -847,10 +898,10 @@ export function TrajectoryView({
                 outside ? 'opacity-25' : ''
               }`}
             >
-              {startsTurn && steps.some((other) => other.turnNo !== step.turnNo) ? (
+              {startsTurn ? (
                 <div
                   data-turn-job={step.jobId}
-                  className="flex items-center gap-2 bg-gray-50 px-3 py-1 dark:bg-gray-950"
+                  className="flex scroll-mt-80 items-center gap-2 bg-gray-50 px-3 py-1 dark:bg-gray-950"
                 >
                   <span className="text-[11px] font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">
                     Turn {step.turnNo}
@@ -869,30 +920,65 @@ export function TrajectoryView({
               <button
                 type="button"
                 data-step-key={step.key}
+                data-parent-key={step.parentKey}
                 onClick={() => onSelectStep(step.key)}
                 aria-current={open ? 'true' : undefined}
-                className={`flex w-full items-baseline gap-2 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-gray-50 dark:hover:bg-white/5 ${
+                className={`relative flex w-full scroll-mt-80 items-baseline gap-2 py-1.5 pl-5 pr-3 text-left text-[12px] transition-colors hover:bg-gray-50 dark:hover:bg-white/5 ${
                   open ? 'bg-gray-50 dark:bg-gray-950' : ''
                 }`}
               >
+                {step.kind === 'assistant' ? (
+                  <span
+                    aria-hidden="true"
+                    className="absolute left-1 top-4 h-1 w-1 rounded-full bg-gray-400 dark:bg-gray-500"
+                  />
+                ) : null}
+                <span className="flex w-[76px] shrink-0 justify-end" data-role-slot>
+                  <span
+                    className={`inline-flex h-[19px] items-center rounded px-1.5 text-[10px] font-semibold uppercase tracking-wide ${step.actor === 'assistant' ? 'w-full justify-center' : ''} ${ACTOR_TONE[step.actor]}`}
+                  >
+                    {step.actor}
+                  </span>
+                </span>
+                {step.kind === 'tool' || step.kind === 'event' ? (
+                  <span
+                    title={step.toolName ?? step.label}
+                    className={`max-w-48 shrink-0 truncate font-medium ${labelTone}`}
+                  >
+                    {step.label}
+                  </span>
+                ) : null}
                 <span
-                  className={`w-16 shrink-0 rounded px-1.5 py-0.5 text-center text-[10px] font-medium uppercase tracking-wide ${ACTOR_TONE[step.actor]}`}
+                  className={`min-w-0 flex-1 truncate ${step.kind === 'tool' || step.kind === 'event' ? 'font-mono text-gray-500 dark:text-gray-400' : 'text-gray-700 dark:text-gray-300'}`}
                 >
-                  {step.actor}
+                  {step.detail ||
+                    (step.kind === 'assistant'
+                      ? step.toolKeys?.length
+                        ? ''
+                        : step.streaming
+                          ? 'Generating…'
+                          : '(no text recorded)'
+                      : step.kind === 'user'
+                        ? '(no text recorded)'
+                        : '')}
                 </span>
-                <span className={`w-28 shrink-0 truncate font-medium ${labelTone}`}>
-                  {step.label}
-                </span>
-                <span className="min-w-0 flex-1 truncate font-mono text-gray-500 dark:text-gray-400">
-                  {step.detail}
-                </span>
+                {step.kind === 'tool' && (step.result || step.outputPreview) ? (
+                  <>
+                    <span aria-hidden="true" className="text-gray-400 dark:text-gray-500">
+                      →
+                    </span>
+                    <span className="min-w-0 flex-1 truncate font-mono text-gray-500 dark:text-gray-400">
+                      {preview(step.result?.text ?? step.outputPreview) || '(no output)'}
+                    </span>
+                  </>
+                ) : null}
                 {step.status === 'failed' ? (
                   <span className="shrink-0 text-[11px] text-rose-600 dark:text-rose-400">
                     Failed
                   </span>
                 ) : step.status === 'waiting' ? (
                   <span className="shrink-0 text-[11px] text-amber-600 dark:text-amber-400">
-                    Waiting
+                    {step.kind === 'assistant' ? 'Generating' : 'Waiting'}
                   </span>
                 ) : null}
                 {step.timing.durationMs !== null ? (
@@ -906,7 +992,9 @@ export function TrajectoryView({
         })}
         {visible.length === 0 ? (
           <p className="px-3 py-6 text-center text-[12px] text-gray-500 dark:text-gray-400">
-            No step matches “{query}”.
+            {steps.length === 0
+              ? 'No execution steps recorded yet. Runtime activity is available in Run logs.'
+              : `No step matches “${query}”.`}
           </p>
         ) : null}
       </div>

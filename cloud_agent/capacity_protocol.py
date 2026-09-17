@@ -1,6 +1,7 @@
 """The host-capacity block: its wire shape, and what the admin page may trust.
 
-A runner reports CPU, memory and its retained-container count as an **optional**
+A runner reports CPU, memory, the capacity of the filesystem holding sandbox
+writable layers, and its retained-container count as an **optional**
 ``capacity`` block on the heartbeat it already sends. Everything in this module
 exists to keep that optionality real in both directions:
 
@@ -29,11 +30,18 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Final, Literal, get_args
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictInt,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
-from cloud_agent_host.host_capacity import (
+from cloud_agent_contracts.host_capacity import (
     CPU_MISSING_COUNTER_RESET,
     CPU_MISSING_INVALID_SAMPLE,
     CPU_MISSING_SOURCE_UNAVAILABLE,
@@ -43,7 +51,13 @@ from cloud_agent_host.host_capacity import (
     OTHER_STATES,
     SCHEMA_VERSION,
     SOURCE,
+    STORAGE_MISSING_DISABLED,
+    STORAGE_MISSING_SOURCE_UNAVAILABLE,
+    STORAGE_MISSING_UNSUPPORTED,
+    STORAGE_MISSING_UNVERIFIED,
     memory_usage,
+    storage_bytes_in_range,
+    storage_usage,
 )
 
 if TYPE_CHECKING:
@@ -100,6 +114,28 @@ CpuMissingReason = Literal[
     "invalid_sample",
 ]
 MemoryMissingReason = Literal["source_unavailable", "invalid_sample"]
+StorageMissingReason = Literal[
+    "disabled",
+    "unsupported",
+    "unverified",
+    "source_unavailable",
+    "invalid_sample",
+]
+
+#: The two reasons the control plane produces rather than relays. ``invalid_sample``
+#: is written here when a storage sub-block arrived but did not validate;
+#: ``not_reported`` is what a runner that has no storage capability at all reads
+#: as — including every snapshot stored before this field existed.
+STORAGE_MISSING_INVALID_SAMPLE: Final = "invalid_sample"
+STORAGE_MISSING_NOT_REPORTED: Final = "not_reported"
+StorageAdminMissingReason = Literal[
+    "disabled",
+    "unsupported",
+    "unverified",
+    "source_unavailable",
+    "invalid_sample",
+    "not_reported",
+]
 
 # A Literal has to spell its members, so the runner's constants and this type
 # are two statements of one fact. Tied together here rather than left to drift:
@@ -115,6 +151,23 @@ assert set(get_args(MemoryMissingReason)) == {
     MEMORY_MISSING_SOURCE_UNAVAILABLE,
     MEMORY_MISSING_INVALID_SAMPLE,
 }
+assert set(get_args(StorageMissingReason)) == {
+    STORAGE_MISSING_DISABLED,
+    STORAGE_MISSING_UNSUPPORTED,
+    STORAGE_MISSING_UNVERIFIED,
+    STORAGE_MISSING_SOURCE_UNAVAILABLE,
+    STORAGE_MISSING_INVALID_SAMPLE,
+}
+assert set(get_args(StorageAdminMissingReason)) == set(get_args(StorageMissingReason)) | {
+    STORAGE_MISSING_NOT_REPORTED
+}
+
+#: The vocabulary a runner's ``missing.storage`` may name, as a set. The
+#: validator below checks membership itself rather than letting the field's
+#: `Literal` do it, because a `Literal` failure is a *model* failure: it would
+#: take the CPU, the memory and the inventory down with a storage reason this
+#: control plane happens not to know.
+STORAGE_MISSING_REASONS = frozenset(get_args(StorageMissingReason))
 InventoryStatus = Literal["available", "partial", "unavailable"]
 Freshness = Literal["fresh", "stale", "unavailable"]
 
@@ -212,10 +265,69 @@ class HostCapacityInventory(BaseModel):
 
 
 class HostCapacityMissing(BaseModel):
-    """Why the CPU and memory halves are absent, independently of each other."""
+    """Why each measurement is absent, independently of the others.
+
+    ``storage`` is absent as well as null on a runner that predates the
+    sub-block: silence about a capability that does not exist is not the same
+    statement as a runner that has the capability and reported a gap, and the
+    admin view is where those two are told apart (``not_reported``).
+    """
 
     cpu: CpuMissingReason | None = None
     memory: MemoryMissingReason | None = None
+    storage: StorageMissingReason | None = None
+
+
+class HostCapacityStorage(BaseModel):
+    """The filesystem that holds sandbox writable layers, as one runner read it.
+
+    Block space in the ``df`` sense: ``total`` is the filesystem's size,
+    ``free`` includes the blocks reserved for root, ``available`` excludes
+    them. All three are kept because the percentage is taken over
+    ``used + available`` — collapsing ``free`` into ``total - available`` would
+    report every healthy filesystem as partly full with blocks nobody wrote.
+
+    Strict integers on purpose: a JSON ``true`` or ``"1024"`` coerced to a
+    number would put a figure on an operator's screen that no machine ever
+    measured, and the coercion is invisible by the time it is rendered.
+    """
+
+    source: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z0-9_]{1,64}$",
+        description=(
+            "Identifier of the method that produced the reading, e.g. "
+            "'linux_overlay_root_statvfs'. Deliberately not an enum: a new "
+            "probe must not require a control-plane release, and the page "
+            "never branches on this value."
+        ),
+    )
+    target: str | None = Field(
+        None,
+        max_length=256,
+        pattern=_NO_CONTROL_CHARACTERS,
+        description=(
+            "Human-readable label for the filesystem measured — the host mount "
+            "root the deployment attested, not the Docker data root, which can "
+            "be a different disk. Tooltip only; no logic reads it."
+        ),
+    )
+    total_bytes: StrictInt = Field(..., ge=0, le=_MAX_JSON_INT)
+    free_bytes: StrictInt = Field(..., ge=0, le=_MAX_JSON_INT)
+    available_bytes: StrictInt = Field(..., ge=0, le=_MAX_JSON_INT)
+
+    @model_validator(mode="after")
+    def _bytes_are_ordered(self) -> HostCapacityStorage:
+        """Require the one relation a real filesystem always satisfies."""
+        if not storage_bytes_in_range(
+            total_bytes=self.total_bytes,
+            free_bytes=self.free_bytes,
+            available_bytes=self.available_bytes,
+        ):
+            raise ValueError("storage bytes are outside available <= free <= total")
+        return self
 
 
 class HostCapacityReport(BaseModel):
@@ -275,6 +387,15 @@ class HostCapacityReport(BaseModel):
     )
     memory_total_bytes: int | None = Field(None, gt=0, le=_MAX_JSON_INT)
     memory_available_bytes: int | None = Field(None, ge=0, le=_MAX_JSON_INT)
+    storage: HostCapacityStorage | None = Field(
+        None,
+        description=(
+            "Capacity of the filesystem holding sandbox writable layers. Null "
+            "means no reading was published this round, and missing.storage "
+            "says why. Validated locally: a wrong sub-block costs this field, "
+            "never the CPU and memory beside it."
+        ),
+    )
     inventory: HostCapacityInventory
     missing: HostCapacityMissing
 
@@ -294,6 +415,79 @@ class HostCapacityReport(BaseModel):
         except (ValueError, AttributeError, TypeError) as exc:
             raise ValueError("not a UUID") from exc
 
+    @model_validator(mode="before")
+    @classmethod
+    def _degrade_unusable_storage(cls, data: Any) -> Any:
+        """Turn any storage-shaped fault into an explicit missing sample.
+
+        The storage half is validated *here* rather than by the model's own
+        field validation, and the difference is what an operator sees.
+        Rejecting the whole report over one bad sub-block would cost that host
+        its CPU, its memory and its container count — three independent facts
+        about a machine that is, after all, still alive and still claiming
+        work.
+
+        Every way storage can be wrong is caught here, not just an unparsable
+        number, because a fault the model's own validation sees is a fault that
+        takes the whole block with it:
+
+        * a sub-block that does not validate;
+        * a sub-block and a ``missing.storage`` at the same time — the two
+          statements contradict each other, and the block cannot say which is
+          true;
+        * a ``missing.storage`` outside the closed vocabulary. A newer runner
+          inventing a reason must not cost this control plane the CPU figures
+          it does understand; the page would show the unknown string as
+          "Not measured" either way.
+
+        All three become ``storage = null`` plus ``missing.storage =
+        "invalid_sample"``: a runner that sent something wrong is a different
+        thing from a runner that cannot measure at all, and the page says so.
+
+        The storage field is also the limit of what this hook owns. A block
+        whose ``missing`` map is itself absent or is not an object has nothing
+        wrong with its *storage*; it is missing a required field, and ordinary
+        field validation drops it exactly as it drops the same block with a
+        perfectly good storage sub-block. Substituting a map of this control
+        plane's own invention would make whether the report is accepted at all
+        depend on whether its storage half happened to be malformed.
+        """
+        if not isinstance(data, dict):
+            return data
+        storage = data.get("storage")
+        missing = data.get("missing")
+        reason: Any = None
+        if isinstance(missing, dict):
+            reason = missing.get("storage")
+        elif isinstance(missing, HostCapacityMissing):
+            reason = missing.storage
+        if storage is None:
+            # Nothing to publish: either the runner said nothing about storage
+            # at all — an older runner — or it named a gap from the closed
+            # vocabulary. Anything else is the fault handled below.
+            if reason is None or (isinstance(reason, str) and reason in STORAGE_MISSING_REASONS):
+                return data
+        else:
+            try:
+                HostCapacityStorage.model_validate(storage)
+            except ValidationError:
+                pass
+            else:
+                if reason is None:
+                    return data
+        if isinstance(missing, dict):
+            degraded = dict(missing)
+        elif isinstance(missing, HostCapacityMissing):
+            degraded = missing.model_dump()
+        else:
+            # Nothing about the storage field is repairable from here: there is
+            # no map to write the reason into. ``missing`` is required, so the
+            # block is dropped by ordinary field validation, and it is left
+            # untouched so that it is dropped for that reason alone.
+            return data
+        degraded["storage"] = STORAGE_MISSING_INVALID_SAMPLE
+        return {**data, "storage": None, "missing": degraded}
+
     @model_validator(mode="after")
     def _measurements_agree_with_their_reasons(self) -> HostCapacityReport:
         """Check the fields against the reasons the runner gave for them."""
@@ -301,6 +495,8 @@ class HostCapacityReport(BaseModel):
             raise ValueError("cpu_percent and missing.cpu disagree")
         if (self.memory_total_bytes is None) != (self.missing.memory is not None):
             raise ValueError("memory_total_bytes and missing.memory disagree")
+        if self.storage is not None and self.missing.storage is not None:
+            raise ValueError("a storage sample and missing.storage disagree")
         if self.memory_total_bytes is None and self.memory_available_bytes is not None:
             raise ValueError("memory_available_bytes without memory_total_bytes")
         if (
@@ -334,6 +530,9 @@ def parse_capacity_block(raw: object) -> HostCapacityReport | None:
     Returns:
         The validated block, or ``None`` when it must be dropped: absent, not
         an object, too large, an unknown version, or internally inconsistent.
+        A storage sub-block that fails validation does not drop the block —
+        it is replaced by ``missing.storage = "invalid_sample"`` so the CPU,
+        the memory and the inventory beside it survive.
     """
     if raw is None:
         return None
@@ -394,6 +593,14 @@ class AgentHostCapacity(BaseModel):
     memory_used_bytes: int | None = None
     memory_used_percent: float | None = None
     memory_missing_reason: str | None = None
+    storage_total_bytes: int | None = None
+    storage_free_bytes: int | None = None
+    storage_available_bytes: int | None = None
+    storage_used_bytes: int | None = None
+    storage_used_percent: float | None = None
+    storage_source: str | None = None
+    storage_target: str | None = None
+    storage_missing_reason: StorageAdminMissingReason | None = None
     inventory: HostCapacityInventory | None = None
     received_at: datetime
     sampled_at: datetime
@@ -437,6 +644,29 @@ def admin_capacity_view(
     usage = memory_usage(
         total_bytes=report.memory_total_bytes, available_bytes=report.memory_available_bytes
     )
+    storage = report.storage
+    storage_figures = (
+        None
+        if storage is None
+        else storage_usage(
+            total_bytes=storage.total_bytes,
+            free_bytes=storage.free_bytes,
+            available_bytes=storage.available_bytes,
+        )
+    )
+    if storage is not None and storage_figures is None:
+        # Present and well-formed enough to store, but with no denominator to
+        # take a percentage of. That is a bad sample, not a missing one, and
+        # the page says so rather than drawing a 0% filesystem.
+        storage = None
+        storage_missing_reason: StorageAdminMissingReason | None = STORAGE_MISSING_INVALID_SAMPLE
+    elif storage is None:
+        # A runner that reported a gap keeps its own reason; one that has no
+        # storage capability at all — including every snapshot written before
+        # the field existed — reads as not reported.
+        storage_missing_reason = report.missing.storage or STORAGE_MISSING_NOT_REPORTED
+    else:
+        storage_missing_reason = None
     age = max(0.0, (_as_utc(now) - _as_utc(sampled_at)).total_seconds())
     return AgentHostCapacity(
         schema_version=report.schema_version,
@@ -452,6 +682,14 @@ def admin_capacity_view(
         memory_used_bytes=None if usage is None else usage.used_bytes,
         memory_used_percent=None if usage is None else usage.used_percent,
         memory_missing_reason=report.missing.memory,
+        storage_total_bytes=None if storage is None else storage.total_bytes,
+        storage_free_bytes=None if storage is None else storage.free_bytes,
+        storage_available_bytes=None if storage is None else storage.available_bytes,
+        storage_used_bytes=None if storage_figures is None else storage_figures.used_bytes,
+        storage_used_percent=None if storage_figures is None else storage_figures.used_percent,
+        storage_source=None if storage is None else storage.source,
+        storage_target=None if storage is None else storage.target,
+        storage_missing_reason=storage_missing_reason,
         inventory=report.inventory,
         received_at=received_at,
         sampled_at=sampled_at,
@@ -610,6 +848,7 @@ __all__ = [
     "HostCapacityInventory",
     "HostCapacityMissing",
     "HostCapacityReport",
+    "HostCapacityStorage",
     "admin_capacity_view",
     "bucket_for",
     "history_point_grid",

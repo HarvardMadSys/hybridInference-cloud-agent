@@ -16,8 +16,8 @@
 // ── Capacity ──────────────────────────────────────────────────────────
 //
 // Each host now also reports what its Docker host is actually doing: CPU,
-// memory, and how many sandboxes are retained. Three rules govern how it is
-// shown, and each is the difference between a number and a claim:
+// memory, storage and how many sandboxes are retained. Three rules govern how
+// it is shown, and each is the difference between a number and a claim:
 //
 //   * a missing measurement is never rendered as zero, and a stale one is
 //     never rendered as current;
@@ -28,6 +28,14 @@
 //   * a poll that was issued before an action cannot overwrite the action's
 //     answer, and a history response is dropped unless it still matches the
 //     host, epoch and range it was requested for.
+//
+// Storage is the third indicator on the row and the same kind of fact as
+// memory: one instantaneous observation of the filesystem the sandboxes write
+// to, taken alongside the CPU and memory in the same 30-second sample. It gets
+// no curve of its own — a disk fills over days, and the minutes-long history
+// the panel already holds would show noise — and its cell therefore reads the
+// observation `groupCapacityFacts` picked for CPU and memory, never a source
+// of its own.
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -65,6 +73,7 @@ import {
   memoryCell,
   monotonicNow,
   reasonLabel,
+  storageCell,
 } from './capacity';
 import { curveSource, curveSourceHosts, formatAge, runtimeMenu, serverInventory } from './format';
 import { AdminNavigation } from '../AdminNavigation';
@@ -814,7 +823,7 @@ function HostsView() {
             <p className="mt-4 text-sm text-gray-500 dark:text-gray-400">No servers available.</p>
           ) : (
             <div className="mt-4 overflow-x-auto rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 shadow-sm">
-              <table className="min-w-[1080px] w-full text-left text-sm">
+              <table className="min-w-[1220px] w-full text-left text-sm">
                 <thead className="border-b border-gray-100 bg-gray-50/60 text-xs text-gray-500 dark:border-white/5 dark:bg-white/[0.02] dark:text-gray-400">
                   <tr>
                     <th className="px-6 py-3 font-medium">Server</th>
@@ -822,6 +831,7 @@ function HostsView() {
                     <th className="px-3 py-3 font-medium whitespace-nowrap">Execution slots</th>
                     <th className="px-3 py-3 font-medium">CPU</th>
                     <th className="px-3 py-3 font-medium">Memory</th>
+                    <th className="px-3 py-3 font-medium">Storage</th>
                     <th className="px-3 py-3 font-medium whitespace-nowrap">Sandboxes</th>
                     <th className="px-3 py-3 font-medium whitespace-nowrap">Observed</th>
                     <th className="px-6 py-3 text-right font-medium">Actions</th>
@@ -976,6 +986,13 @@ function HostsView() {
                               meter={facts.capacity?.memory_used_percent ?? null}
                             />
                           </td>
+                          <td className="px-3 py-4">
+                            <CapabilityCell
+                              cell={storageCell(facts.capacity)}
+                              muted={facts.stale}
+                              meter={facts.capacity?.storage_used_percent ?? null}
+                            />
+                          </td>
                           <td className="px-3 py-4" title={sandboxTitle || undefined}>
                             <span
                               className={`block whitespace-nowrap ${
@@ -1050,7 +1067,7 @@ function HostsView() {
                           // detail surface, and the panel draws on it directly
                           // at the table's own first-column padding.
                           <tr className="bg-gray-50/70 dark:bg-white/[0.03]">
-                            <td colSpan={8} className="px-6 pb-6 pt-4">
+                            <td colSpan={9} className="px-6 pb-6 pt-4">
                               <CapacityPanel
                                 id={panelId}
                                 name={name}
@@ -1179,7 +1196,7 @@ function HostsView() {
 function TableSkeleton() {
   return (
     <div className="mt-4 overflow-hidden rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 shadow-sm">
-      <table className="min-w-[1080px] w-full text-left text-sm">
+      <table className="min-w-[1220px] w-full text-left text-sm">
         <thead className="border-b border-gray-100 dark:border-white/5 text-xs text-gray-500 dark:text-gray-400">
           <tr>
             <th className="px-6 py-3 font-medium">Server</th>
@@ -1187,6 +1204,7 @@ function TableSkeleton() {
             <th className="px-3 py-3 font-medium whitespace-nowrap">Execution slots</th>
             <th className="px-3 py-3 font-medium">CPU</th>
             <th className="px-3 py-3 font-medium">Memory</th>
+            <th className="px-3 py-3 font-medium">Storage</th>
             <th className="px-3 py-3 font-medium whitespace-nowrap">Sandboxes</th>
             <th className="px-3 py-3 font-medium whitespace-nowrap">Observed</th>
             <th className="px-6 py-3 text-right font-medium">Actions</th>
@@ -1201,7 +1219,7 @@ function TableSkeleton() {
               <td className="px-3 py-4">
                 <div className="h-5 w-16 animate-pulse rounded-full bg-gray-100 dark:bg-white/5" />
               </td>
-              {[0, 1, 2, 3, 4, 5].map((cell) => (
+              {[0, 1, 2, 3, 4, 5, 6].map((cell) => (
                 <td key={cell} className="px-3 py-4">
                   <div className="h-4 w-20 animate-pulse rounded bg-gray-100 dark:bg-white/5" />
                 </td>

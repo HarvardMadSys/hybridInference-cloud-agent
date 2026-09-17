@@ -23,6 +23,10 @@ work tracks in this repository's issues and pull requests.
 cloud_agent/            control plane (FastAPI): API, auth adapter, scheduler,
                         source-control integrations, publishing, storage
 cloud_agent_host/       host agent: runner, sandbox, runtimes, workspace broker
+cloud_agent_contracts/  shared vocabulary both images ship: capability strings,
+                        protocol versions, pins, egress policy, shared errors
+cloud_agent_git/        shared Git algorithms both images ship: the patch gate
+                        and the source-archive builders
 web/                    Next.js user UI + admin dashboard
 contracts/              OpenAPI mirrors of the gateway contracts we consume
 migrations/             Alembic migrations (agent-owned database only)
@@ -52,7 +56,7 @@ database stamped with the chain that predates it.
 | `cloud_agent_host/enrollment.py` | Host registration and the persisted host credential |
 | `cloud_agent_host/runner.py` | Claims, executes one turn, heartbeats, drains on SIGTERM |
 | `cloud_agent_host/chat_sandbox.py`, `sandbox.py` | Retained group lifecycle and the Docker/Kata boundary |
-| `cloud_agent_host/egress.py`, `egress_proxy.py` | The two egress phases and the setup allowlist proxy |
+| `cloud_agent_contracts/egress.py`, `cloud_agent_host/egress_proxy.py` | The two egress phases and the setup allowlist proxy |
 | `cloud_agent_host/runtimes.py`, `shared_protocol.py` | The five Agent CLI adapters and the version pins they attest |
 
 ## 3. Quality gates
@@ -124,7 +128,8 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   transcript-replay or platform-checkpoint recovery path. See the implemented
   [session design](docs/specs/2026-08-31-native-session-fork-shared-workspace-design.md).
   The group has **two egress phases**, enforced by the
-  code in `cloud_agent_host/egress.py` and `egress_proxy.py`:
+  code in `cloud_agent_contracts/egress.py` and
+  `cloud_agent_host/egress_proxy.py`:
   - *Setup phase* — dependency installation may reach package registries, but
     only through the Squid allowlist proxy, which permits CONNECT to an
     allowlisted host by name and refuses everything else.

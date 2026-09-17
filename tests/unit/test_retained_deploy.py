@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -36,6 +38,10 @@ def _host(
     broker_running: bool = True,
     broker_serving: bool = True,
     candidate_exit: int = 0,
+    storage_json: str | None = None,
+    storage_exit: int = 0,
+    storage_hang: bool = False,
+    storage_ignores_term: bool = False,
 ) -> dict[str, str]:
     app_dir = tmp_path / "app"
     app_dir.mkdir()
@@ -65,6 +71,27 @@ def _host(
     # separately from the attestation exec so a broker that is up but not yet
     # serving can be modelled.
     broker_probe_exit = 0 if broker_serving else 1
+    # Only modelled when a test asks for it: the storage probe's describe
+    # command is a second `docker exec`, and a fake that answered it by default
+    # would make every deployment test exercise the attestation path.
+    storage_case = ""
+    if storage_hang and storage_ignores_term:
+        # SIG_IGN survives `exec`, so this probe is the one GNU `timeout`'s
+        # `-k` exists for: it outlives SIGTERM and has to be SIGKILLed.
+        storage_case = "  exec*'host_capacity describe'*) trap '' TERM; exec sleep 300 ;;\n"
+    elif storage_hang:
+        # `exec` so the hang *is* this process: a killed `sleep` child would
+        # leave the pipe into the parser open, and the test would measure that
+        # instead of the bound.
+        storage_case = "  exec*'host_capacity describe'*) exec sleep 300 ;;\n"
+    elif storage_json is not None:
+        storage_case = (
+            "  exec*'host_capacity describe'*) printf '%s' '"
+            + storage_json
+            + "'; exit "
+            + str(storage_exit)
+            + " ;;\n"
+        )
     turn_probe = "declined no turn was delivered" if turn_starts else "ImportError: no module"
     turn_probe_exit = 0 if turn_starts else 1
     _write_executable(
@@ -80,7 +107,8 @@ def _host(
         f"  *' ps -q workspace-broker') printf '%s\\n' '{broker_id}' ;;\n"
         f"  *' logs --since 2m runner') echo '{rejection_log}' ;;\n"
         f"  exec*'_shared_live_host_capabilities'*) echo '{capability}'; exit {attest_exit} ;;\n"
-        f"  exec*8092/health*) exit {broker_probe_exit} ;;\n"
+        + storage_case
+        + f"  exec*8092/health*) exit {broker_probe_exit} ;;\n"
         # The realistic shape: the same preflight a real turn runs logs a Kata
         # measurement warning to stderr before the child answers on stdout,
         # and the script captures both. The verdict has to be read past it.
@@ -133,6 +161,8 @@ def _host(
         "AGENT_BROKER_REVERSE_BIND",
         "AGENT_BROKER_REVERSE_PORT",
         "AGENT_WORKSPACE_BROKER_ADVERTISE_URL",
+        "AGENT_HOST_STORAGE_PROBE",
+        "DOCKER_DAEMON_JSON",
     ):
         env.pop(name, None)
     return env
@@ -962,6 +992,872 @@ def test_host_deploy_reads_the_recorded_generation_before_it_overwrites_it() -> 
     )
     assert 'mark-ready "${recorded}"' in script
     assert "restore_recorded_generation" in script
+
+
+# ── Storage attestation ───────────────────────────────────────────────
+#
+# The runner refuses to publish a storage reading that the deployment has not
+# attested, so these tests are about two things at once: that a sound topology
+# produces a `verified` entry the runner will accept, and that nothing here can
+# fail a deployment. The second is why every assertion below also checks the
+# exit status.
+
+STORAGE_GIB = 1024**3
+STORAGE_UPPERDIR = "/var/lib/docker/overlay2/9f1c/diff"
+STORAGE_MOUNT_ROOT = "/var/lib/docker"
+STORAGE_SIZE = 100 * STORAGE_GIB
+
+
+def storage_document(
+    *,
+    upperdir: str = STORAGE_UPPERDIR,
+    total: int = STORAGE_SIZE,
+    free: int = 40 * STORAGE_GIB,
+    available: int = 35 * STORAGE_GIB,
+) -> str:
+    """What the runner's own describe command prints for a sound topology."""
+    return json.dumps(
+        {
+            "ok": True,
+            "reason": None,
+            "fstype": "overlay",
+            "upperdir": upperdir,
+            "total_bytes": total,
+            "free_bytes": free,
+            "available_bytes": available,
+        }
+    )
+
+
+def _write_fake_timeout(tmp_path: Path) -> None:
+    """A stand-in for coreutils' `timeout`, which this test machine lacks.
+
+    It implements the contract the deployment relies on — SIGTERM at the
+    budget, SIGKILL after `-k`'s grace, 124 or 137 on the way out — because a
+    double that killed outright would hide the one probe that matters most: the
+    one that ignores SIGTERM. It records what the script asked for beside
+    itself, and takes a `timeout.cap` override so a test can reach the bound
+    without waiting eight seconds.
+    """
+    _write_executable(
+        tmp_path / "bin/timeout",
+        "#!/bin/sh\n"
+        # Empty means no `-k` was given, and GNU `timeout` then waits for the
+        # child however long it takes. A default grace here would supply the
+        # guarantee the deployment script is supposed to ask for.
+        'kill_after=""\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        '  case "$1" in\n'
+        '    -k) kill_after="$2"; shift 2 ;;\n'
+        '    --kill-after=*) kill_after="${1#--kill-after=}"; shift ;;\n'
+        "    -s|--signal) shift 2 ;;\n"
+        "    --signal=*) shift ;;\n"
+        "    -*) shift ;;\n"
+        "    *) break ;;\n"
+        "  esac\n"
+        "done\n"
+        'budget="$1"\n'
+        "shift\n"
+        'requested="$budget"\n'
+        'cap="$(dirname "$0")/timeout.cap"\n'
+        'if [ -f "$cap" ]; then budget="$(cat "$cap")"; fi\n'
+        '"$@" &\n'
+        "child=$!\n"
+        "elapsed=0\n"
+        "signalled=0\n"
+        'forced=""\n'
+        # Polled in hundredths. The loop's first check usually finds the child
+        # alive because the fork has not been reaped yet, so the tick is the
+        # floor on every wrapped call, and a coarser one would be paid by every
+        # call in every test.
+        'while kill -0 "$child" 2>/dev/null; do\n'
+        '  if [ "$signalled" = "0" ] && [ "$elapsed" -ge $((budget * 100)) ]; then\n'
+        '    kill -TERM "$child" 2>/dev/null\n'
+        "    signalled=1\n"
+        "  fi\n"
+        '  if [ "$signalled" = "1" ] && [ -n "$kill_after" ] &&\n'
+        '     [ "$elapsed" -ge $(((budget + kill_after) * 100)) ]; then\n'
+        '    kill -9 "$child" 2>/dev/null\n'
+        '    forced="+kill"\n'
+        "    break\n"
+        "  fi\n"
+        "  sleep 0.01\n"
+        "  elapsed=$((elapsed + 1))\n"
+        "done\n"
+        "status=0\n"
+        'wait "$child" 2>/dev/null || status=$?\n'
+        'if [ "$signalled" = "1" ]; then\n'
+        '  if [ -n "$forced" ]; then status=137; else status=124; fi\n'
+        "fi\n"
+        'printf \'%s %s%s\\n\' "$requested" "${kill_after:-none}" "$forced" >>"$(dirname "$0")/timeout.log"\n'
+        'exit "$status"\n',
+    )
+
+
+def _cap_fake_timeout(tmp_path: Path, seconds: int) -> None:
+    """Shorten the fake `timeout`'s budget so a bounded call is cheap to test."""
+    (tmp_path / "bin/timeout.cap").write_text(str(seconds))
+
+
+def _budgets_the_script_asked_for(tmp_path: Path) -> set[str]:
+    """The `budget kill-after[+kill]` lines the fake recorded, one per call.
+
+    Empty when the log is absent: the script skips the attestation outright
+    when the fence has nothing left, and a caller asserting on the budgets
+    should fail saying that, not with a file-not-found from in here.
+    """
+    log = tmp_path / "bin/timeout.log"
+    return set(log.read_text().splitlines()) if log.exists() else set()
+
+
+def _add_storage_host_tools(
+    tmp_path: Path,
+    *,
+    upper_size: int | None = None,
+    used: int = 60 * STORAGE_GIB,
+    available: int = 35 * STORAGE_GIB,
+    findmnt_fails: bool = False,
+    df_upper_hangs: bool = False,
+    upperdir: str = STORAGE_UPPERDIR,
+) -> None:
+    """Fake the two host tools the attestation shells out to.
+
+    ``findmnt`` and ``df`` do not exist on the machine these tests run on, and
+    the values they answer with *are* the thing under test — a mount root, an
+    upper directory that reports a quota, a df that disagrees with the
+    container, a df that never answers. Faking them is the only way to exercise
+    the comparison at all.
+    """
+    upper_answer = (
+        # `exec` so the hang is this process: the bounded call has to be the
+        # thing that ends it, and the header this line may already have printed
+        # is exactly what must not be mistaken for a size.
+        "exec sleep 300"
+        if df_upper_hangs
+        else f"echo {STORAGE_SIZE if upper_size is None else upper_size}"
+    )
+    sizes = {STORAGE_MOUNT_ROOT: f"echo {STORAGE_SIZE}", upperdir: upper_answer}
+    size_arms = "\n".join(f"      '{path}') {answer} ;;" for path, answer in sizes.items())
+    _write_executable(
+        tmp_path / "bin/df",
+        "#!/bin/sh\n"
+        'path=""; for arg in "$@"; do path="$arg"; done\n'
+        'case "$*" in\n'
+        "  *--output=size*)\n"
+        '    echo "1B-blocks"\n'
+        '    case "$path" in\n'
+        f"{size_arms}\n"
+        "      *) exit 1 ;;\n"
+        "    esac ;;\n"
+        "  *--output=used,avail*)\n"
+        '    echo "1B-blocks 1B-blocks"\n'
+        '    case "$path" in\n'
+        f"      '{STORAGE_MOUNT_ROOT}') echo '{used} {available}' ;;\n"
+        "      *) exit 1 ;;\n"
+        "    esac ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+    )
+    _write_fake_timeout(tmp_path)
+    _write_executable(
+        tmp_path / "bin/findmnt",
+        "#!/bin/sh\n"
+        'field=""; expect=""\n'
+        'for arg in "$@"; do\n'
+        '  case "$expect" in\n'
+        '    field) field="$arg"; expect=""; continue ;;\n'
+        "  esac\n"
+        '  case "$arg" in\n'
+        '    -o) expect="field" ;;\n'
+        "  esac\n"
+        "done\n"
+        f"if [ '{1 if findmnt_fails else 0}' = '1' ]; then exit 1; fi\n"
+        'case "$field" in\n'
+        f"  FSTYPE,TARGET) echo 'xfs {STORAGE_MOUNT_ROOT}' ;;\n"
+        f"  TARGET) echo '{STORAGE_MOUNT_ROOT}' ;;\n"
+        "  FSTYPE) echo 'xfs' ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+    )
+
+
+def _storage_host(
+    tmp_path: Path,
+    *,
+    describe: str | None = None,
+    storage_exit: int = 0,
+    storage_hang: bool = False,
+    storage_ignores_term: bool = False,
+    capability: str = "shared-sandbox-v1,native-fork-at-anchor-v1",
+    probe: str | None = None,
+    findmnt_fails: bool = False,
+    df_upper_hangs: bool = False,
+    upper_size: int | None = None,
+    used: int = 60 * STORAGE_GIB,
+    available: int = 35 * STORAGE_GIB,
+    running_containers: int = 1,
+    host_upperdir: str = STORAGE_UPPERDIR,
+) -> dict[str, str]:
+    """A host whose storage attestation inputs the caller controls.
+
+    One runner container by default, which is what a host now runs: its
+    concurrency is the container's own slot limit, not a count of replicas.
+    A test that needs to see per-container behaviour asks for more; the rest
+    are spared paying the same per-attempt cost once per container.
+    """
+    env = _host(
+        tmp_path,
+        capability=capability,
+        running_containers=running_containers,
+        storage_json=storage_document() if describe is None else describe,
+        storage_exit=storage_exit,
+        storage_hang=storage_hang,
+        storage_ignores_term=storage_ignores_term,
+    )
+    env["AGENT_DEPLOYMENT_SHA"] = "target-sha"
+    _add_storage_host_tools(
+        tmp_path,
+        upper_size=upper_size,
+        used=used,
+        available=available,
+        findmnt_fails=findmnt_fails,
+        df_upper_hangs=df_upper_hangs,
+        upperdir=host_upperdir,
+    )
+    if probe is not None:
+        with (Path(env["APP_DIR"]) / ".env").open("a") as dotenv:
+            dotenv.write(f"AGENT_HOST_STORAGE_PROBE={probe}\n")
+    return env
+
+
+def _verdict(env: dict[str, str]) -> dict:
+    return json.loads((Path(env["APP_DIR"]) / ".storage-probe" / "verdict.json").read_text())
+
+
+def test_a_sound_topology_becomes_a_verified_entry(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert f"storage verified against {STORAGE_MOUNT_ROOT} (xfs," in result.stdout
+    document = _verdict(env)
+    assert document["schema_version"] == 1
+    assert document["deployment_sha"] == "target-sha"
+    entry = document["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "verified"
+    assert entry["mount_root"] == STORAGE_MOUNT_ROOT
+    assert entry["fstype"] == "xfs"
+    assert entry["size_bytes"] == STORAGE_SIZE
+
+
+def test_a_writable_layer_path_with_a_blank_is_still_attested(tmp_path: Path) -> None:
+    """The kernel escapes blanks in a mount table; host tools want the bytes.
+
+    The runner keeps its upper directory escaped because that string is the key
+    it looks its own verdict up by. Handing the same string to `findmnt -T`,
+    `df` or `docker --mount` names nothing at all, so a host whose storage root
+    contains a space could never be attested — permanently unverified, with a
+    warning blaming the host's permissions.
+    """
+    escaped = "/var/lib/my\\040docker/overlay2/9f1c/diff"
+    env = _storage_host(
+        tmp_path,
+        describe=storage_document(upperdir=escaped),
+        host_upperdir="/var/lib/my docker/overlay2/9f1c/diff",
+    )
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entries = _verdict(env)["entries"]
+    # The key keeps its escapes: it is what the runner will look itself up by.
+    assert entries[escaped]["verdict"] == "verified"
+    assert entries[escaped]["mount_root"] == STORAGE_MOUNT_ROOT
+
+
+@pytest.mark.parametrize("value", ["OFF", "0", "false", "disabled", "overlay-root", "zfs_dataset"])
+def test_a_probe_name_neither_side_agrees_on_is_refused(tmp_path: Path, value: str) -> None:
+    """One spelling, refused at configuration time rather than diverging.
+
+    The runner normalises this variable and its vocabulary is wider than the
+    script's, so a value only one side recognises used to produce a rollout log
+    reading "storage verified" beside a page reading "switched off" — or
+    "not supported" — with nothing to say which had it right.
+    """
+    env = _storage_host(tmp_path, probe=value)
+
+    result = _run(env, "check")
+
+    assert result.returncode != 0
+    assert "AGENT_HOST_STORAGE_PROBE must be" in result.stderr
+
+
+def test_a_quota_on_the_upper_directory_is_reported_as_unsupported(tmp_path: Path) -> None:
+    """The whole reason the comparison is against the mount root.
+
+    `df <upperdir>` returns the project quota, so an attestation that compared
+    the container against that path would agree with a container reading the
+    quota — and call a 10 GiB ceiling the machine's capacity.
+    """
+    env = _storage_host(tmp_path, upper_size=10 * STORAGE_GIB)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unsupported"
+    assert "project quota" in entry["reason"]
+
+
+def test_a_daemon_configured_with_overlay2_size_is_unsupported(tmp_path: Path) -> None:
+    """Checked even when the sizes happen to agree: the config is the tell."""
+    env = _storage_host(tmp_path)
+    daemon_json = tmp_path / "daemon.json"
+    daemon_json.write_text('{"storage-opts": ["overlay2.size=10G"]}')
+    env["DOCKER_DAEMON_JSON"] = str(daemon_json)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unsupported"
+    assert "overlay2.size" in entry["reason"]
+
+
+def test_a_failing_helper_is_named_instead_of_findmnt(tmp_path: Path) -> None:
+    """The tool that failed is the tool the operator is sent to.
+
+    `findmnt` failing is the *normal* state on a host whose storage root the
+    deployment user cannot traverse — it is why the helper exists. Reporting
+    the helper's own failure as findmnt's sends the reader after a permission
+    problem they have already worked around, and the helper's account of
+    itself goes to a stream nothing else prints.
+    """
+    env = _storage_host(tmp_path, findmnt_fails=True)
+    _add_storage_helper(tmp_path, exit_code=3, complaint="mounted directory does not match")
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unverified"
+    assert "storage helper exited 3" in entry["reason"]
+    assert "storage helper exited 3" in result.stderr
+    assert "mounted directory does not match" in result.stderr
+
+
+def test_a_helper_that_answers_without_a_mount_root_is_unverified(tmp_path: Path) -> None:
+    """The findmnt wording belongs to the case where nothing failed outright."""
+    env = _storage_host(tmp_path, findmnt_fails=True)
+    _add_storage_helper(tmp_path, record="{}")
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unverified"
+    assert "could not locate" in entry["reason"]
+    assert "storage helper exited" not in entry["reason"]
+
+
+def test_a_size_disagreement_between_container_and_host_is_unsupported(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path, describe=storage_document(total=200 * STORAGE_GIB))
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unsupported"
+    assert str(STORAGE_SIZE) in entry["reason"]
+
+
+def test_occupancy_that_never_agrees_is_unverified_and_names_the_deltas(tmp_path: Path) -> None:
+    """Used and available are a diagnostic band, never a topology verdict.
+
+    This branch also records the filesystem type, and it is the host's: inside
+    the container every root is an `overlay`, which names nothing an operator
+    can act on.
+    """
+    env = _storage_host(tmp_path, used=60 * STORAGE_GIB + 8 * STORAGE_GIB)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unverified"
+    assert "differs by" in entry["reason"]
+
+
+def test_a_runner_that_cannot_describe_its_filesystem_gets_no_entry(tmp_path: Path) -> None:
+    """The runner reaches the same conclusion itself; no entry is written for it."""
+    env = _storage_host(tmp_path, describe='{"ok": false, "reason": "unsupported"}')
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert _verdict(env)["entries"] == {}
+    assert "cannot describe its storage filesystem" in result.stderr
+
+
+def test_storage_measurement_switched_off_clears_the_verdict(tmp_path: Path) -> None:
+    """`off` has to reach the replicas that are already running.
+
+    Their environment was fixed when they were created, so they keep the
+    overlay probe until an `up` replaces them. Left with the verdict that
+    verified them, they would go on publishing capacity for a host the operator
+    has just switched off; emptied, they report `unverified` on their next
+    sample and the figures stop at once.
+    """
+    env = _storage_host(tmp_path)
+    assert _run(env, "check").returncode == 0
+    assert _verdict(env)["entries"][STORAGE_UPPERDIR]["verdict"] == "verified"
+    env["AGENT_HOST_STORAGE_PROBE"] = "off"
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert "switched off" in result.stdout
+    assert _verdict(env)["entries"] == {}
+
+
+def test_a_failed_rollout_still_writes_a_fail_closed_verdict(tmp_path: Path) -> None:
+    """A runner that starts before the checks finish must read `unverified`.
+
+    The capability failure stops the deployment before storage verification
+    runs, which is exactly the window the empty entry set exists for.
+    """
+    env = _storage_host(tmp_path, capability="")
+    _add_required_host_paths(env, tmp_path)
+    env["DEFER_SHARED_READY_MARKER"] = "1"
+    _write_executable(tmp_path / "bin/sleep", "#!/bin/sh\nexit 0\n")
+
+    result = _run(env, "up")
+
+    assert result.returncode != 0
+    document = _verdict(env)
+    assert document["entries"] == {}
+    assert document["schema_version"] == 1
+    assert document["deployment_sha"] == "target-sha"
+    assert document["written_at"].endswith("Z")
+
+
+def test_the_verdict_is_replaced_without_disturbing_the_bound_directory(tmp_path: Path) -> None:
+    """The directory is what runners bind; the file inside it is swapped.
+
+    Swapped, not truncated: a replica samples every thirty seconds and opens
+    the current directory entry each time, so a writer that emptied the file
+    first would hand whoever arrived mid-write a document it can only read as
+    `unverified` — a host reported unmeasured moments after it passed.
+    """
+    env = _storage_host(tmp_path)
+    first = _run(env, "check")
+    assert first.returncode == 0, first.stderr
+    verdict_file = Path(env["APP_DIR"]) / ".storage-probe" / "verdict.json"
+    inode = verdict_file.stat().st_ino
+    directory_inode = verdict_file.parent.stat().st_ino
+
+    second = _run(env, "check")
+
+    assert second.returncode == 0, second.stderr
+    assert verdict_file.stat().st_ino != inode
+    assert verdict_file.parent.stat().st_ino == directory_inode
+    assert verdict_file.stat().st_mode & 0o777 == 0o644
+    assert not list(verdict_file.parent.glob("*.tmp"))
+
+
+def test_check_refreshes_a_verdict_without_a_redeploy(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path)
+    verdict_file = Path(env["APP_DIR"]) / ".storage-probe" / "verdict.json"
+    verdict_file.parent.mkdir()
+    verdict_file.write_text('{"schema_version":1,"entries":{}}')
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert _verdict(env)["entries"][STORAGE_UPPERDIR]["verdict"] == "verified"
+
+
+def test_check_recreates_a_deleted_verdict_in_the_same_bound_directory(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path)
+    assert _run(env, "check").returncode == 0
+    verdict_file = Path(env["APP_DIR"]) / ".storage-probe" / "verdict.json"
+    directory_inode = verdict_file.parent.stat().st_ino
+    verdict_file.unlink()
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert _verdict(env)["entries"][STORAGE_UPPERDIR]["verdict"] == "verified"
+    assert verdict_file.parent.stat().st_ino == directory_inode
+    assert verdict_file.stat().st_mode & 0o777 == 0o644
+
+
+def test_check_does_not_fail_when_the_verdict_directory_cannot_be_created(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path)
+    (Path(env["APP_DIR"]) / ".storage-probe").write_text("a file blocks the directory")
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert "could not prepare the storage-probe directory" in result.stderr
+
+
+def test_no_storage_failure_path_can_end_the_deployment() -> None:
+    """The one exception is the bind-mount source, and it is a separate function."""
+    script = SANDBOX_HOST.read_text()
+    verify = script[
+        script.index("verify_storage_probe() {") : script.index("probe_sandbox_relay() {")
+    ]
+    check = script[script.index("check_shared_live_stack() {") : script.index("# ── Isolation")]
+
+    assert "die " not in verify
+    assert "verify_storage_probe " in check
+    # The non-fatal contract is why the fatal verdict list is built before it.
+    assert check.index("verdicts+=(") < check.index("verify_storage_probe ")
+    # And why the attestation runs after every check that can refuse the host.
+    # Those checks retry against this same deadline, so seconds spent measuring
+    # a disk first are seconds they do not get: the attestation cannot end a
+    # deployment by its own exit status, but running before them it can end one
+    # by leaving them no time. Last, it can only spend what they did not need.
+    assert check.rindex("die ") < check.index("verify_storage_probe ")
+    assert check.index("cannot reach the control-plane health endpoint") < check.index(
+        "verify_storage_probe "
+    )
+
+
+def test_the_verdict_marker_is_prepared_before_the_containers_start() -> None:
+    """The runner containers bind it, so it has to exist before `compose up`.
+
+    In `activate`, which is the half of a phased deployment that starts
+    containers: `prepare` may run in a separate process, and a bind source
+    written there would not be this one.
+    """
+    script = SANDBOX_HOST.read_text()
+    activate = script[script.index("cmd_activate() {") : script.index("cmd_up() {")]
+
+    assert activate.index("prepare_storage_verdict") < activate.index("compose up -d")
+    assert activate.index("prepare_shared_live_marker") < activate.index("prepare_storage_verdict")
+
+
+# ── Storage attestation: it must not be able to hold a rollout open ────
+
+
+def test_a_rollout_fence_with_no_room_left_skips_the_attestation(tmp_path: Path) -> None:
+    """A spent fence is not a reason to spend thirty more seconds.
+
+    The readiness deadline is a promise to the control plane, and a rollout
+    whose probes have already eaten it cannot be saved by measuring storage
+    late. The attestation must notice that it has no budget and make no call at
+    all — not make an eight-second call and then notice.
+    """
+    env = _storage_host(tmp_path, storage_hang=True)
+    _add_required_host_paths(env, tmp_path)
+    with (Path(env["APP_DIR"]) / ".env").open("a") as dotenv:
+        dotenv.write("SHARED_READY_TIMEOUT=2\n")
+
+    started = time.monotonic()
+    result = _run(env, "up")
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == 0, result.stderr
+    # The rollout published its readiness marker, which is the thing a hang
+    # would have prevented.
+    assert (Path(env["APP_DIR"]) / ".shared-live-ready").read_text().strip() == "target-sha"
+    # And no number was published for a filesystem nobody managed to measure.
+    assert _verdict(env)["entries"] == {}
+    assert "no room left for a storage attestation" in result.stderr
+    # Not one probe call was made, and the whole rollout finished well inside
+    # what a single bounded call would have cost.
+    assert not (tmp_path / "bin/timeout.log").exists()
+    assert elapsed < 6, f"storage spent {elapsed:.1f}s inside a two-second fence"
+
+
+def test_a_hung_storage_probe_is_bounded_on_a_manual_check(tmp_path: Path) -> None:
+    """`check` has no rollout fence to borrow, so the per-call bound is it."""
+    env = _storage_host(tmp_path, storage_hang=True)
+    _cap_fake_timeout(tmp_path, 1)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert _verdict(env)["entries"] == {}
+    assert "did not answer the storage probe description within its budget" in result.stderr
+    # Every call was bounded at the script's own budget, with a force-kill
+    # grace behind it.
+    assert _budgets_the_script_asked_for(tmp_path) == {"8 2"}
+
+
+def test_a_probe_that_ignores_sigterm_is_still_cut_off(tmp_path: Path) -> None:
+    """SIGTERM alone is not a bound: GNU `timeout` waits for a process that
+    ignores it, which is what `-k` exists for. Without the force-kill this test
+    never finishes — and neither would the rollout it stands for."""
+    env = _storage_host(tmp_path, storage_hang=True, storage_ignores_term=True)
+    _cap_fake_timeout(tmp_path, 1)
+
+    started = time.monotonic()
+    result = _run(env, "check")
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == 0, result.stderr
+    assert _verdict(env)["entries"] == {}
+    # The probe had to be killed, which is the fact the budget depends on.
+    assert any(line.endswith("+kill") for line in _budgets_the_script_asked_for(tmp_path))
+    assert elapsed < 20, f"an ignored SIGTERM held the check for {elapsed:.1f}s"
+
+
+def test_a_storage_attestation_that_cannot_be_bounded_does_not_run() -> None:
+    """Without coreutils `timeout` there is no bound, so there is no attestation.
+
+    Structural on purpose: every host this script supports carries coreutils,
+    which is exactly why the branch cannot be reached by running it here — and
+    why the guard has to be checked rather than assumed. It must also come
+    before the first probe call, or an unbounded call happens anyway.
+    """
+    script = SANDBOX_HOST.read_text()
+    verify = script[
+        script.index("verify_storage_probe() {") : script.index("probe_sandbox_relay() {")
+    ]
+    guard = verify.index("command -v timeout")
+    first_call = verify.index('storage_bounded "$storage_deadline" docker exec')
+
+    assert guard < first_call
+    assert "return 0" in verify[guard:first_call]
+
+
+def test_the_storage_budget_comes_from_the_fence_not_from_beside_it() -> None:
+    """A rollout's fence caps the attestation; a manual check has no fence."""
+    script = SANDBOX_HOST.read_text()
+    verify = script[
+        script.index("verify_storage_probe() {") : script.index("probe_sandbox_relay() {")
+    ]
+    bounded = script[script.index("storage_bounded() {") : script.index("storage_verdict_file() {")]
+
+    # The fence flag distinguishes the two callers: an expired rollout fence
+    # must not be read as "no fence, take the full budget".
+    assert "local fenced=0" in script
+    assert 'check_shared_live_stack "$deadline" "$fenced"' in script
+    assert 'verify_storage_probe "$ATTEST_DIR" "$runner_ids" "$deadline" "$fenced"' in script
+    assert "if (( fenced )); then" in verify
+    assert 'storage_deadline="$deadline"' in verify
+    assert "if (( storage_deadline - SECONDS <= STORAGE_KILL_AFTER_S )); then" in verify
+    # Each call may only spend what is left: the per-call bound is recomputed
+    # from the deadline rather than handed out at a fixed eight seconds.
+    assert "remaining=$(( deadline - SECONDS - STORAGE_KILL_AFTER_S ))" in bounded
+    assert 'timeout -k "$STORAGE_KILL_AFTER_S" "$remaining" "$@"' in bounded
+    assert 'storage_bounded "$storage_deadline" docker exec' in verify
+    assert 'storage_bounded "$storage_deadline" findmnt' in verify
+    assert 'storage_df_size "$mount_root" "$storage_deadline"' in verify
+
+
+def test_a_partly_spent_fence_shrinks_the_call_bound(tmp_path: Path) -> None:
+    """The per-call bound is what is left of the fence, not a flat eight seconds.
+
+    A rollout with a few seconds of fence left cannot afford an eight-second
+    call, and making one is how the fence is missed even though every single
+    call is "bounded". This is the case the first version of the fix got wrong:
+    it bounded each call at eight seconds and only checked the budget between
+    phases, so a two-second fence still cost eight.
+
+    The fence is wide enough that the checks running before the attestation
+    cannot consume all of it. At four seconds this test asserted nothing
+    whenever the machine was loaded: the script would correctly skip the
+    attestation, and the assertions would be about calls that never happened.
+    """
+    env = _storage_host(tmp_path, storage_hang=True)
+    _add_required_host_paths(env, tmp_path)
+    with (Path(env["APP_DIR"]) / ".env").open("a") as dotenv:
+        dotenv.write("SHARED_READY_TIMEOUT=6\n")
+
+    started = time.monotonic()
+    result = _run(env, "up")
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == 0, result.stderr
+    assert _verdict(env)["entries"] == {}
+    budgets = [int(line.split()[0]) for line in _budgets_the_script_asked_for(tmp_path)]
+    assert budgets, "the attestation made no call, so this asserts nothing"
+    assert max(budgets) < 8, f"a call was handed the flat bound: {budgets}"
+    assert elapsed < 10, f"the attestation took {elapsed:.1f}s inside a six-second fence"
+
+
+def test_a_df_that_cannot_size_the_upper_directory_is_unverified(tmp_path: Path) -> None:
+    """No answer is not a different answer.
+
+    A `df <upperdir>` that is cut short prints nothing, and comparing that
+    nothing with the mount root's size "disagrees" with it — which used to be
+    recorded as a project quota: a statement about the host's configuration
+    that nobody established, on the one metric whose whole purpose is to avoid
+    exactly that kind of claim. It is a missing measurement, and the page says
+    so.
+    """
+    env = _storage_host(tmp_path, df_upper_hangs=True)
+    _cap_fake_timeout(tmp_path, 1)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unverified"
+    assert "could not size" in entry["reason"]
+    assert "quota" not in entry["reason"]
+
+
+def test_a_quota_on_the_upper_directory_is_still_unsupported(tmp_path: Path) -> None:
+    """The answer that *is* a real disagreement keeps its verdict.
+
+    The empty case must not swallow the one the comparison exists for: two
+    valid sizes that differ are a project quota, and the attestation has to go
+    on saying so.
+    """
+    env = _storage_host(tmp_path, upper_size=10 * STORAGE_GIB)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unsupported"
+    assert "project quota" in entry["reason"]
+
+
+def _add_storage_helper(
+    tmp_path: Path,
+    *,
+    record: str | None = None,
+    exit_code: int = 0,
+    hangs: bool = False,
+    complaint: str = "",
+) -> None:
+    """Model Docker's metadata helper separately from the inaccessible host path."""
+    if record is None:
+        record = json.dumps(
+            {
+                "mount_root": STORAGE_MOUNT_ROOT,
+                "fstype": "xfs",
+                "total_bytes": STORAGE_SIZE,
+                "upper_total_bytes": STORAGE_SIZE,
+                "used_bytes": 60 * STORAGE_GIB,
+                "available_bytes": 35 * STORAGE_GIB,
+            }
+        )
+    (tmp_path / "helper-response.json").write_text(record)
+    docker = tmp_path / "bin/docker"
+    original = docker.read_text()
+    answer = "exec sleep 300" if hangs else 'cat "$test_dir/helper-response.json"'
+    if complaint:
+        answer = f"printf '%s\\n' '{complaint}' >&2; {answer}"
+    prefix = (
+        '#!/bin/sh\ntest_dir="$(dirname "$(dirname "$0")")"\n'
+        'case "$*" in\n'
+        "  'inspect --format {{.Image}} '*) echo 'sha256:" + "a" * 64 + "'; exit 0 ;;\n"
+        "  run*'cloud_agent_host.storage_attestation'*)\n"
+        '    printf \'%s\\n\' "$@" >>"$test_dir/helper-args"\n'
+        f"    {answer}; exit {exit_code} ;;\n"
+        "  'rm -f agent-storage-attest-'*) echo cleanup >>\"$test_dir/helper-cleanup\"; exit 0 ;;\n"
+        "esac\n"
+    )
+    docker.write_text(prefix + original.removeprefix("#!/bin/sh\n"))
+    findmnt = tmp_path / "bin/findmnt"
+    mounts = json.dumps(
+        {
+            "filesystems": [
+                {"target": STORAGE_MOUNT_ROOT, "fstype": "xfs", "maj:min": "8:2", "fsroot": "/"}
+            ]
+        }
+    )
+    (tmp_path / "mount-plan.json").write_text(mounts)
+    findmnt.write_text(
+        '#!/bin/sh\ncase "$*" in *--json*) cat "$(dirname "$(dirname "$0")")/mount-plan.json"; exit 0 ;; esac\n'
+        + findmnt.read_text().removeprefix("#!/bin/sh\n")
+    )
+
+
+def test_inaccessible_host_path_uses_the_read_only_helper(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path, findmnt_fails=True)
+    _add_storage_helper(tmp_path)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "verified"
+    assert entry["mount_root"] == STORAGE_MOUNT_ROOT
+    assert entry["fstype"] == "xfs"
+    args = (tmp_path / "helper-args").read_text().splitlines()
+    for flag, value in (
+        ("--network", "none"),
+        ("--cap-drop", "ALL"),
+        ("--security-opt", "no-new-privileges:true"),
+        ("--entrypoint", "python"),
+        (
+            "--mount",
+            f"type=bind,src={STORAGE_MOUNT_ROOT},dst=/disk,readonly,bind-recursive=disabled,bind-propagation=rslave",
+        ),
+        # Pinned because the helper needs no privilege it does not have as
+        # `nobody`, and because nothing else would notice it regaining one.
+        ("--user", "65534:65534"),
+    ):
+        assert args[args.index(flag) + 1] == value
+    assert "sha256:" + "a" * 64 in args
+    assert "--read-only" in args and "--pull=never" in args and "--rm" in args
+    assert "--privileged" not in args and "--pid=host" not in args and "--cap-add" not in args
+    assert (
+        f"type=bind,src={STORAGE_UPPERDIR},dst=/upper,readonly,bind-recursive=disabled,bind-propagation=rslave"
+        in args
+    )
+    # Not the pre-25 spelling: a current CLI does not accept it at all. Docker
+    # 29.2.1 answers `bind-nonrecursive=true` with "invalid argument ... use
+    # bind-recursive=disabled instead" and exits 125, so reaching for the older
+    # key to support older hosts takes the feature away from every host that is
+    # not one.
+    assert "bind-nonrecursive" not in " ".join(args)
+
+
+def test_helper_still_rejects_a_real_project_quota(tmp_path: Path) -> None:
+    env = _storage_host(tmp_path, findmnt_fails=True)
+    _add_storage_helper(tmp_path)
+    response = tmp_path / "helper-response.json"
+    value = json.loads(response.read_text())
+    value["upper_total_bytes"] = 10 * STORAGE_GIB
+    response.write_text(json.dumps(value))
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    entry = _verdict(env)["entries"][STORAGE_UPPERDIR]
+    assert entry["verdict"] == "unsupported"
+    assert "project quota" in entry["reason"]
+
+
+@pytest.mark.parametrize("record,exit_code", [("{}", 0), ("null", 0), ("{", 0), (None, 125)])
+def test_failed_or_malformed_helper_does_not_publish_capacity(
+    tmp_path: Path, record: str | None, exit_code: int
+) -> None:
+    env = _storage_host(tmp_path, findmnt_fails=True)
+    _add_storage_helper(tmp_path, record=record, exit_code=exit_code)
+
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert _verdict(env)["entries"][STORAGE_UPPERDIR]["verdict"] == "unverified"
+    if exit_code:
+        assert (tmp_path / "helper-cleanup").exists()
+
+
+def test_hung_helper_is_bounded_and_cleaned_up(tmp_path: Path) -> None:
+    # Two containers: the cleanup this asserts is per container, and one
+    # container cannot tell "each helper is removed" from "the last one is".
+    env = _storage_host(tmp_path, findmnt_fails=True, running_containers=2)
+    _add_storage_helper(tmp_path, hangs=True)
+    _cap_fake_timeout(tmp_path, 1)
+
+    started = time.monotonic()
+    result = _run(env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert time.monotonic() - started < 12
+    assert _verdict(env)["entries"][STORAGE_UPPERDIR]["verdict"] == "unverified"
+    assert (tmp_path / "helper-cleanup").read_text().splitlines() == ["cleanup", "cleanup"]
 
 
 def test_every_command_that_reads_configuration_reads_the_resolved_one(

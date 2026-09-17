@@ -29,7 +29,7 @@ import asyncpg
 
 from cloud_agent.broker_routing import ENV_BROKER_TOKEN, probe_broker
 from cloud_agent.host_pool import HOST_ONLINE
-from cloud_agent_host.shared_protocol import (
+from cloud_agent_contracts.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     shared_deployment_capability,

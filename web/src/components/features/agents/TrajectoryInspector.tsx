@@ -30,8 +30,14 @@ import {
   type ToolCallTelemetry,
   type ToolTab,
 } from './ToolStepDetails';
-import { STATUS_LABEL, type StoredEvent, type TrajectoryStep } from './trajectorySteps';
+import {
+  STATUS_LABEL,
+  stepSearchText,
+  type StoredEvent,
+  type TrajectoryStep,
+} from './trajectorySteps';
 import type { AgentJob } from './types';
+import { Markdown } from '@/components/ui/Markdown';
 
 export type EventTab = 'summary' | 'raw';
 export type StepTab = AssistantTab | ToolTab | EventTab | HarnessTab;
@@ -136,10 +142,23 @@ function EventStepDetails({
   tab: EventTab;
   idPrefix: string;
 }) {
+  const payload = step.sourceEvents[0]?.payload ?? {};
+  const truncationPayload = step.runtimeNotifications ? { truncated: step.truncated } : payload;
   if (tab === 'raw') {
     return (
       <TabPanel idPrefix={idPrefix} tab="raw">
-        <TruncationNote payload={step.sourceEvents[0]?.payload ?? {}} />
+        {step.kind === 'user' && step.sourceEvents.length === 0 ? (
+          <>
+            <p className="text-[12px] text-gray-500 dark:text-gray-400">
+              This input is recorded on the turn, rather than as a runtime event.
+            </p>
+            <ValueBlock
+              value={{ job_id: step.jobId, task_prompt: step.inputText }}
+              what="User input"
+            />
+          </>
+        ) : null}
+        <TruncationNote payload={truncationPayload} />
         <div className="space-y-1.5">
           {step.sourceEvents.map((event) => (
             <StoredRecord
@@ -152,22 +171,43 @@ function EventStepDetails({
       </TabPanel>
     );
   }
-  const payload = step.sourceEvents[0]?.payload ?? {};
   return (
     <TabPanel idPrefix={idPrefix} tab="summary">
       <DetailRows>
         <DetailRow label="Event type">
-          <span className="font-mono">{step.sourceEvents[0]?.event_type ?? step.label}</span>
+          <span className="font-mono">
+            {step.kind === 'user'
+              ? 'User input'
+              : step.runtimeNotifications
+                ? 'Runtime log'
+                : (step.sourceEvents[0]?.event_type ?? step.label)}
+          </span>
         </DetailRow>
         <DetailRow label="Status" tone={step.status === 'failed' ? 'error' : 'muted'}>
           {STATUS_LABEL[step.status]}
         </DetailRow>
         <DetailRow label="Recorded at">{recordedAt(step.at)}</DetailRow>
-        <DetailRow label="Seq">{step.sourceEvents[0]?.seq ?? 'Not recorded'}</DetailRow>
-        <DetailRow label="Attempt">{step.attemptId}</DetailRow>
+        {step.kind !== 'user' ? (
+          <>
+            <DetailRow label="Seq">{step.sourceEvents[0]?.seq ?? 'Not recorded'}</DetailRow>
+            <DetailRow label="Attempt">{step.attemptId}</DetailRow>
+          </>
+        ) : null}
+        {step.runtimeNotifications ? (
+          <DetailRow label="Records">{step.sourceEvents.length}</DetailRow>
+        ) : null}
       </DetailRows>
-      <TruncationNote payload={payload} />
-      <ValueBlock value={payload} what="Payload" />
+      <TruncationNote payload={truncationPayload} />
+      {step.kind === 'user' ? (
+        <Markdown text={step.inputText ?? ''} />
+      ) : step.runtimeNotifications ? (
+        <p className="text-[12px] text-gray-500 dark:text-gray-400">
+          Runtime notifications are grouped for this attempt. Open Raw to inspect all{' '}
+          {step.sourceEvents.length} stored records.
+        </p>
+      ) : (
+        <ValueBlock value={payload} what="Payload" />
+      )}
     </TabPanel>
   );
 }
@@ -266,17 +306,25 @@ export function TrajectoryInspector({
     .filter((item): item is TrajectoryStep => Boolean(item));
   const parent = step.parentKey ? byKey.get(step.parentKey) : undefined;
   const kindLabel =
-    step.kind === 'assistant' ? 'Assistant' : step.kind === 'tool' ? 'Tool' : 'Event';
-  const hiddenByQuery = !`${step.label} ${step.detail} ${step.kind}`
-    .toLowerCase()
-    .includes(query.trim().toLowerCase());
+    step.kind === 'user'
+      ? 'User'
+      : step.kind === 'assistant'
+        ? 'Assistant'
+        : step.kind === 'tool'
+          ? 'Tool'
+          : step.diagnostic
+            ? 'Runtime log'
+            : 'Event';
+  const hiddenByQuery =
+    !step.diagnostic && !stepSearchText(step).includes(query.trim().toLowerCase());
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="flex items-start gap-2 border-b border-gray-200 px-4 py-3 dark:border-white/10">
         <div className="min-w-0 flex-1">
           <p className="text-[10px] font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">
-            {kindLabel} · Turn {step.turnNo} · Step {step.stepNo}
+            {kindLabel} · Turn {step.turnNo}
+            {step.diagnostic ? '' : ` · Step ${step.stepNo}`}
           </p>
           <h2 className="truncate text-[13px] font-semibold text-gray-900 dark:text-gray-50">
             {step.label}

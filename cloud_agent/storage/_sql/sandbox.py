@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from cloud_agent_host.shared_protocol import NATIVE_FORK_AT_ANCHOR_CAPABILITY
+from cloud_agent_contracts.shared_protocol import NATIVE_FORK_AT_ANCHOR_CAPABILITY
 
 # Every runnable chat is a member of a retained shared-live group: one
 # ``agent_sandboxes`` row per container, one membership row per chat. This is

@@ -12,6 +12,7 @@ identical on a chart and mean opposite things.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import time
 from typing import Any
@@ -47,17 +48,32 @@ from cloud_agent_host.host_capacity import (
     REASON_NAMESPACE_UNSET,
     REASON_UNKNOWN_STATE,
     REASON_UNSCOPED_LEGACY_CONTAINERS,
+    STORAGE_MISSING_SOURCE_UNAVAILABLE,
+    STORAGE_MISSING_UNSUPPORTED,
+    STORAGE_MISSING_UNVERIFIED,
+    VERDICT_MAX_BYTES,
     CommandResult,
     CommandStatus,
     HostCapacityCollector,
+    OverlayRootStorageProbe,
+    StorageMissing,
+    StorageSample,
     build_inventory,
+    build_storage_probe,
     capacity_enabled,
+    describe_storage_probe,
     docker_list_argv,
+    find_root_mount,
+    main,
     parse_boot_id,
     parse_cpu_stat,
     parse_docker_rows,
     parse_meminfo,
+    parse_storage_verdict,
+    root_overlay_upperdir,
     run_bounded_command,
+    storage_bytes_in_range,
+    storage_usage,
 )
 
 NAMESPACE = "staging-agent"
@@ -538,7 +554,11 @@ def test_the_payload_carries_the_v1_shape() -> None:
     assert payload["source"] == "linux_host_proc_and_docker_list"
     assert payload["linux_boot_id"] == BOOT_ID
     assert payload["inventory"]["namespace"] == NAMESPACE
-    assert set(payload["missing"]) == {"cpu", "memory"}
+    assert set(payload["missing"]) == {"cpu", "memory", "storage"}
+    # No probe was declared on this collector, which is what "storage is off"
+    # looks like on the wire: no sub-block, and a reason the page can explain.
+    assert payload["storage"] is None
+    assert payload["missing"]["storage"] == "disabled"
     assert json.loads(json.dumps(payload)) == payload
 
 
@@ -713,3 +733,495 @@ def test_a_file_that_cannot_be_opened_is_missing(tmp_path) -> None:
     assert sample.linux_boot_id is None
     assert sample.cpu_missing_reason == CPU_MISSING_SOURCE_UNAVAILABLE
     assert sample.memory_missing_reason == MEMORY_MISSING_SOURCE_UNAVAILABLE
+
+
+# ── Storage: the probe, its verdict, and the numbers it will not invent ──
+
+GIB = 1024**3
+UPPERDIR = "/mnt/agent-docker/overlay2/9f1c/diff"
+MOUNT_ROOT = "/mnt/agent-docker"
+
+
+def overlay_mountinfo(upperdir: str | None = UPPERDIR, *, fstype: str = "overlay") -> str:
+    """A mount table whose ``/`` record is an overlay with the given upper layer."""
+    options = "rw,lowerdir=/mnt/agent-docker/overlay2/l/AAAA"
+    if upperdir is not None:
+        options += f",upperdir={upperdir},workdir={upperdir.rsplit('/', 1)[0]}/work"
+    return (
+        "# a second mount, to prove the lookup is by mount point\n"
+        "24 30 0:22 / /proc rw,nosuid - proc proc rw\n"
+        f"36 35 98:0 / / rw,relatime - {fstype} overlay {options}\n"
+    )
+
+
+def verdict_document(entries: dict[str, dict], *, schema_version: int = 1) -> str:
+    """The deployment's attestation document, in the shape the script writes."""
+    return json.dumps(
+        {
+            "schema_version": schema_version,
+            "written_at": "2026-09-16T08:00:00Z",
+            "deployment_sha": "3a191e5",
+            "entries": entries,
+        }
+    )
+
+
+class FakeStatvfs:
+    """A ``statvfs`` result built from the four fields the probe reads."""
+
+    def __init__(
+        self,
+        *,
+        size: int = 100 * GIB,
+        free: int = 40 * GIB,
+        available: int = 35 * GIB,
+        frsize: int = 4096,
+    ) -> None:
+        self.f_frsize = frsize
+        self.f_blocks = size // frsize
+        self.f_bfree = free // frsize
+        self.f_bavail = available // frsize
+
+
+def storage_probe(
+    *,
+    mountinfo: str | None = None,
+    verdict: str | None = None,
+    statvfs: Any = None,
+) -> OverlayRootStorageProbe:
+    """A probe over the three inputs a container's own readings come from."""
+    return OverlayRootStorageProbe(
+        mountinfo_reader=lambda: overlay_mountinfo() if mountinfo is None else mountinfo,
+        verdict_reader=lambda: verdict,
+        statvfs=statvfs if statvfs is not None else (lambda path: FakeStatvfs()),
+    )
+
+
+def verified_verdict(*, size: int = 100 * GIB, upperdir: str = UPPERDIR) -> str:
+    return verdict_document(
+        {
+            upperdir: {
+                "verdict": "verified",
+                "mount_root": MOUNT_ROOT,
+                "fstype": "xfs",
+                "size_bytes": size,
+                "reason": None,
+            }
+        }
+    )
+
+
+def test_the_root_record_is_selected_by_mount_point_not_by_position() -> None:
+    """One lookup, not a mount-table parser: ``/`` is the only record asked for."""
+    mount = find_root_mount(overlay_mountinfo())
+
+    assert mount is not None
+    assert mount.mount_point == "/"
+    assert mount.fstype == "overlay"
+    assert mount.upperdir == UPPERDIR
+    assert root_overlay_upperdir(overlay_mountinfo()) == UPPERDIR
+
+
+def test_a_root_that_is_not_an_overlay_cannot_be_measured() -> None:
+    assert storage_probe(mountinfo=overlay_mountinfo(fstype="ext4")).sample() == StorageMissing(
+        reason=STORAGE_MISSING_UNSUPPORTED
+    )
+
+
+def test_an_overlay_without_an_upper_layer_cannot_be_measured() -> None:
+    assert storage_probe(mountinfo=overlay_mountinfo(upperdir=None)).sample() == StorageMissing(
+        reason=STORAGE_MISSING_UNSUPPORTED
+    )
+
+
+def test_a_mount_table_that_cannot_be_read_is_source_unavailable() -> None:
+    """Not knowing the conditions is a different statement from knowing they fail."""
+    probe = OverlayRootStorageProbe(
+        mountinfo_reader=lambda: None,
+        verdict_reader=lambda: verified_verdict(),
+        statvfs=lambda path: FakeStatvfs(),
+    )
+
+    assert probe.sample() == StorageMissing(reason=STORAGE_MISSING_SOURCE_UNAVAILABLE)
+
+
+def test_a_failing_statvfs_is_source_unavailable() -> None:
+    def explode(path: str) -> Any:
+        raise OSError("device is gone")
+
+    assert storage_probe(verdict=verified_verdict(), statvfs=explode).sample() == StorageMissing(
+        reason=STORAGE_MISSING_SOURCE_UNAVAILABLE
+    )
+
+
+def test_a_reading_outside_the_wire_range_is_source_unavailable() -> None:
+    """``available`` above ``free`` cannot happen; it is not forwarded anyway."""
+    impossible = FakeStatvfs(size=100 * GIB, free=10 * GIB, available=20 * GIB)
+
+    assert storage_probe(verdict=verified_verdict(), statvfs=lambda path: impossible).sample() == (
+        StorageMissing(reason=STORAGE_MISSING_SOURCE_UNAVAILABLE)
+    )
+
+
+def test_a_verified_reading_is_published_with_the_attested_mount_root() -> None:
+    sample = storage_probe(verdict=verified_verdict()).sample()
+
+    assert isinstance(sample, StorageSample)
+    assert sample.total_bytes == 100 * GIB
+    assert sample.free_bytes == 40 * GIB
+    assert sample.available_bytes == 35 * GIB
+    assert sample.target == MOUNT_ROOT
+
+
+def test_a_missing_verdict_withholds_the_number() -> None:
+    """The failure direction of a monitoring field is silence, never a number."""
+    assert storage_probe(verdict=None).sample() == StorageMissing(reason=STORAGE_MISSING_UNVERIFIED)
+
+
+def test_each_sample_reopens_the_verdict_after_unlink_and_replacement(tmp_path) -> None:
+    """A long-lived probe must observe the current file, not cache a verdict or FD."""
+    verdict_file = tmp_path / "verdict.json"
+    verdict_file.write_text(verified_verdict())
+    probe = OverlayRootStorageProbe(
+        verdict_path=verdict_file,
+        mountinfo_reader=lambda: overlay_mountinfo(),
+        statvfs=lambda path: FakeStatvfs(),
+    )
+    reading = probe.sample()
+    assert isinstance(reading, StorageSample)
+
+    verdict_file.unlink()
+    assert probe.sample() == StorageMissing(reason=STORAGE_MISSING_UNVERIFIED)
+    verdict_file.write_text(verdict_document({}))
+    assert probe.sample() == StorageMissing(reason=STORAGE_MISSING_UNVERIFIED)
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text(verified_verdict())
+    replacement.replace(verdict_file)
+    assert probe.sample() == reading
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "",
+        "not json at all",
+        "[]",
+        '{"schema_version":2,"entries":{}}',
+        '{"schema_version":1}',
+        '{"schema_version":1,"entries":[]}',
+    ],
+)
+def test_an_unusable_verdict_document_withholds_the_number(document: str) -> None:
+    assert parse_storage_verdict(document) is None
+    assert storage_probe(verdict=document).sample() == StorageMissing(
+        reason=STORAGE_MISSING_UNVERIFIED
+    )
+
+
+def test_an_entry_that_is_not_an_object_is_skipped_not_believed() -> None:
+    """A corrupt sibling row must not be read as a verdict, or take one away."""
+    document = verdict_document({UPPERDIR: "verified"})  # type: ignore[dict-item]
+
+    assert parse_storage_verdict(document) == {}
+    assert storage_probe(verdict=document).sample() == StorageMissing(
+        reason=STORAGE_MISSING_UNVERIFIED
+    )
+
+
+def test_an_oversized_verdict_file_is_refused(tmp_path) -> None:
+    """The ceiling is what stops a corrupt file from being read every cycle."""
+    verdict_file = tmp_path / "verdict"
+    verdict_file.write_text(verified_verdict() + " " * VERDICT_MAX_BYTES)
+    probe = OverlayRootStorageProbe(
+        verdict_path=verdict_file,
+        mountinfo_reader=lambda: overlay_mountinfo(),
+        statvfs=lambda path: FakeStatvfs(),
+    )
+
+    assert probe.sample() == StorageMissing(reason=STORAGE_MISSING_UNVERIFIED)
+
+
+def test_a_verdict_for_another_container_does_not_apply() -> None:
+    """A rebuilt container gets a new upper directory, so the old entry expires."""
+    document = verified_verdict(upperdir="/mnt/agent-docker/overlay2/other/diff")
+
+    assert storage_probe(verdict=document).sample() == StorageMissing(
+        reason=STORAGE_MISSING_UNVERIFIED
+    )
+
+
+def test_an_entry_that_says_unsupported_is_reported_as_unsupported() -> None:
+    document = verdict_document(
+        {
+            UPPERDIR: {
+                "verdict": "unsupported",
+                "mount_root": MOUNT_ROOT,
+                "fstype": "xfs",
+                "size_bytes": 100 * GIB,
+                "reason": "df reports a quota",
+            }
+        }
+    )
+
+    assert storage_probe(verdict=document).sample() == StorageMissing(
+        reason=STORAGE_MISSING_UNSUPPORTED
+    )
+
+
+def test_an_entry_that_says_unverified_stays_unverified() -> None:
+    document = verdict_document({UPPERDIR: {"verdict": "unverified", "size_bytes": 100 * GIB}})
+
+    assert storage_probe(verdict=document).sample() == StorageMissing(
+        reason=STORAGE_MISSING_UNVERIFIED
+    )
+
+
+def test_an_unknown_verdict_value_withholds_the_number() -> None:
+    """A docment from a newer script is not a licence to publish anything."""
+    document = verdict_document({UPPERDIR: {"verdict": "probably-fine", "size_bytes": 100 * GIB}})
+
+    assert storage_probe(verdict=document).sample() == StorageMissing(
+        reason=STORAGE_MISSING_UNVERIFIED
+    )
+
+
+def test_a_resized_filesystem_needs_a_new_verdict() -> None:
+    """Resizing or replacing the backend changes the size the host attested."""
+    growing = verified_verdict(size=200 * GIB)
+
+    assert storage_probe(verdict=growing).sample() == StorageMissing(
+        reason=STORAGE_MISSING_UNVERIFIED
+    )
+
+
+def test_a_malformed_sibling_entry_does_not_take_this_containers_entry_away() -> None:
+    document = json.loads(verified_verdict())
+    document["entries"]["/other/diff"] = "not-an-object"
+    document["entries"]["/third/diff"] = {"mount_root": MOUNT_ROOT}
+
+    entries = parse_storage_verdict(json.dumps(document))
+
+    assert entries is not None
+    assert set(entries) == {UPPERDIR}
+    assert storage_probe(verdict=json.dumps(document)).sample() == StorageSample(
+        total_bytes=100 * GIB,
+        free_bytes=40 * GIB,
+        available_bytes=35 * GIB,
+        target=MOUNT_ROOT,
+    )
+
+
+def test_storage_usage_keeps_the_reserved_blocks_out_of_used() -> None:
+    """``used = total - free``, over ``used + available`` — GNU df's own ratio."""
+    usage = storage_usage(total_bytes=100 * GIB, free_bytes=40 * GIB, available_bytes=35 * GIB)
+
+    assert usage is not None
+    assert usage.used_bytes == 60 * GIB
+    assert usage.used_percent == pytest.approx(100 * 60 / 95)
+
+
+@pytest.mark.parametrize(
+    ("total", "free", "available"),
+    [
+        (None, 1, 1),
+        (100, None, 1),
+        (100, 1, None),
+        (100, 20, 30),  # available above free
+        (100, 200, 10),  # free above total
+        (100, 100, 0),  # every block reserved and none written: no denominator
+        (0, 0, 0),  # an empty filesystem has no percentage either
+    ],
+)
+def test_storage_usage_refuses_a_triple_it_cannot_turn_into_a_ratio(
+    total: int | None, free: int | None, available: int | None
+) -> None:
+    assert storage_usage(total_bytes=total, free_bytes=free, available_bytes=available) is None
+
+
+def test_storage_usage_reports_a_full_and_an_empty_filesystem() -> None:
+    full = storage_usage(total_bytes=100, free_bytes=0, available_bytes=0)
+    empty = storage_usage(total_bytes=100, free_bytes=100, available_bytes=100)
+
+    assert full is not None and full.used_bytes == 100 and full.used_percent == 100.0
+    assert empty is not None and empty.used_bytes == 0 and empty.used_percent == 0.0
+
+
+def test_the_wire_range_admits_zero_and_the_json_integer_ceiling() -> None:
+    assert storage_bytes_in_range(total_bytes=0, free_bytes=0, available_bytes=0)
+    assert storage_bytes_in_range(
+        total_bytes=2**53 - 1, free_bytes=2**53 - 1, available_bytes=2**53 - 1
+    )
+    assert not storage_bytes_in_range(total_bytes=2**53, free_bytes=0, available_bytes=0)
+    assert not storage_bytes_in_range(total_bytes=10, free_bytes=-1, available_bytes=0)
+
+
+def test_the_probe_switch_defaults_to_the_root_overlay_and_off_means_off() -> None:
+    assert isinstance(build_storage_probe({}), OverlayRootStorageProbe)
+    assert isinstance(
+        build_storage_probe({"AGENT_HOST_STORAGE_PROBE": "overlay_root"}), OverlayRootStorageProbe
+    )
+    assert build_storage_probe({"AGENT_HOST_STORAGE_PROBE": "off"}) is None
+    assert build_storage_probe({"AGENT_HOST_STORAGE_PROBE": "OFF"}) is None
+
+
+def test_an_unknown_probe_name_reports_unsupported_instead_of_measuring_root() -> None:
+    probe = build_storage_probe({"AGENT_HOST_STORAGE_PROBE": "zfs_dataset"})
+
+    assert probe is not None
+    assert probe.sample() == StorageMissing(reason=STORAGE_MISSING_UNSUPPORTED)
+
+
+def test_the_describe_command_reports_the_same_reading_the_probe_would(tmp_path) -> None:
+    """The deployment attests with this document; a second implementation would drift."""
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(overlay_mountinfo())
+    described = describe_storage_probe(mountinfo_path=mountinfo, statvfs=lambda path: FakeStatvfs())
+    probe = OverlayRootStorageProbe(
+        mountinfo_path=mountinfo,
+        verdict_reader=lambda: verified_verdict(),
+        statvfs=lambda path: FakeStatvfs(),
+    )
+    sampled = probe.sample()
+
+    assert described["ok"] is True
+    assert described["fstype"] == "overlay"
+    assert described["upperdir"] == UPPERDIR
+    assert described["total_bytes"] == 100 * GIB
+    assert isinstance(sampled, StorageSample)
+    assert sampled.total_bytes == described["total_bytes"]
+    assert sampled.free_bytes == described["free_bytes"]
+    assert sampled.available_bytes == described["available_bytes"]
+
+
+@pytest.mark.parametrize(
+    "trailer",
+    [
+        pytest.param(b"\xe9\n", id="a byte no UTF-8 decoder accepts"),
+        pytest.param(b"#" * PROC_MAX_BYTES, id="a mount table past the size ceiling"),
+    ],
+)
+def test_a_mount_table_the_probe_refuses_is_one_the_deployment_refuses(
+    tmp_path, trailer: bytes
+) -> None:
+    """Both readers, one answer.
+
+    The deployment writes a `verified` entry for whatever `describe` reports,
+    and the runner publishes whatever it can sample. When one reader tolerates
+    a mount table the other rejects, the rollout log says the disk was verified
+    while the page says it was never measured, and nothing on either side
+    explains the difference.
+    """
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_bytes(overlay_mountinfo().encode() + trailer)
+    described = describe_storage_probe(mountinfo_path=mountinfo, statvfs=lambda path: FakeStatvfs())
+    probe = OverlayRootStorageProbe(
+        mountinfo_path=mountinfo,
+        verdict_reader=lambda: verified_verdict(),
+        statvfs=lambda path: FakeStatvfs(),
+    )
+
+    assert described["ok"] is False
+    assert described["reason"] == STORAGE_MISSING_SOURCE_UNAVAILABLE
+    assert probe.sample() == StorageMissing(reason=STORAGE_MISSING_SOURCE_UNAVAILABLE)
+
+
+def test_the_module_command_line_runs_with_every_definition_it_needs() -> None:
+    """`python -m` stops at the `__main__` block, so its position is behavior.
+
+    Run as a subprocess, because importing this module for a test defines the
+    whole of it either way: only the real command proves that nothing the
+    describe path reaches is defined after the block that starts it.
+    """
+    completed = subprocess.run(
+        [sys.executable, "-m", "cloud_agent_host.host_capacity", "describe"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert isinstance(json.loads(completed.stdout)["ok"], bool)
+
+
+def test_the_describe_command_says_why_when_the_topology_is_not_supported(tmp_path) -> None:
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(overlay_mountinfo(fstype="ext4"))
+    described = describe_storage_probe(mountinfo_path=mountinfo, statvfs=lambda path: FakeStatvfs())
+
+    assert described["ok"] is False
+    assert described["reason"] == STORAGE_MISSING_UNSUPPORTED
+    assert described["fstype"] == "ext4"
+
+
+def test_the_describe_cli_prints_json_and_refuses_unknown_arguments(capsys) -> None:
+    assert main(["describe"]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] in (True, False)
+    assert main([]) == 2
+    assert "usage:" in capsys.readouterr().err
+
+
+# ── Storage in the collector ──────────────────────────────────────────
+
+
+def test_the_collector_publishes_the_probe_reading_with_its_source() -> None:
+    host = FakeHost(files=healthy_files(), stdout=listing_row("a" * 64))
+    collector = HostCapacityCollector(
+        namespace=NAMESPACE,
+        reader=host.read,
+        command_runner=host.run,
+        storage_probe=storage_probe(verdict=verified_verdict()),
+        clock=lambda: host.now,
+    )
+
+    payload = collector.sample().as_payload()
+    storage = payload["storage"]
+
+    assert storage["source"] == "linux_overlay_root_statvfs"
+    assert storage["target"] == MOUNT_ROOT
+    assert storage["total_bytes"] == 100 * GIB
+    assert storage["free_bytes"] == 40 * GIB
+    assert storage["available_bytes"] == 35 * GIB
+    assert payload["missing"]["storage"] is None
+
+
+def test_a_round_without_a_sample_carries_the_reason_and_no_numbers() -> None:
+    host = FakeHost(files=healthy_files(), stdout=listing_row("a" * 64))
+    collector = HostCapacityCollector(
+        namespace=NAMESPACE,
+        reader=host.read,
+        command_runner=host.run,
+        storage_probe=storage_probe(verdict=None),
+        clock=lambda: host.now,
+    )
+
+    payload = collector.sample().as_payload()
+
+    assert payload["storage"] is None
+    assert payload["missing"]["storage"] == STORAGE_MISSING_UNVERIFIED
+    # A missing storage reading is not a missing host: memory is instantaneous
+    # and the container count came from the same round.
+    assert payload["memory_total_bytes"] is not None
+    assert payload["inventory"]["status"] == "available"
+
+
+def test_a_probe_that_raises_costs_only_its_own_field() -> None:
+    class Exploding:
+        source = "exploding"
+
+        def sample(self) -> StorageSample:
+            raise RuntimeError("probe is broken")
+
+    host = FakeHost(files=healthy_files(), stdout=listing_row("a" * 64))
+    collector = HostCapacityCollector(
+        namespace=NAMESPACE,
+        reader=host.read,
+        command_runner=host.run,
+        storage_probe=Exploding(),
+        clock=lambda: host.now,
+    )
+
+    sample = collector.sample()
+
+    assert sample.storage_missing_reason == STORAGE_MISSING_SOURCE_UNAVAILABLE
+    assert sample.memory_total_bytes is not None
+    assert sample.inventory.status == INVENTORY_AVAILABLE

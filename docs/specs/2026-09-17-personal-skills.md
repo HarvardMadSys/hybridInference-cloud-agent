@@ -2,13 +2,13 @@
 
 Skills are an owner's reusable Markdown instructions. Integrations places the
 library below MCP servers, using the existing card, button, and dark-mode styles.
-Owners can create, edit, inspect, copy, remove, and choose defaults. Import accepts
+Owners can create, edit, inspect, remove, and choose defaults. Import accepts
 a GitHub repository/folder/SKILL.md URL or an uploaded SKILL.md with YAML `name`
 and `description` frontmatter. The body must contain Markdown instructions.
 
 Library rows show the name, a single-line description, and when the skill was
 added. The Auto-use switch controls account defaults for new chats; the overflow
-menu opens details, editing, copying, and removal. Conversation pickers show only
+menu opens details, editing, and removal. Conversation pickers show only
 names and switches, with Apply/Cancel for session-specific changes. Full descriptions
 remain in the library details, and selection-limit warnings appear when needed.
 
@@ -79,7 +79,7 @@ probe. Their requests reuse the configured GitHub API and pooled client. Other
 public repositories remain importable through an anonymous read. Confirmation refetches
 and compares the SHA-256 digest of the exact previewed file; changed content
 requires a new preview. The GitHub blob SHA is retained as source metadata.
-Imported GitHub content is customized by creating a local copy. For branch names
+Imported GitHub content is read-only. For branch names
 containing `/`, use a commit permalink or encode the branch segment in the URL.
 
 ## Rollout

@@ -60,7 +60,7 @@ def capacity_block(**overrides: object) -> dict:
             "other_states": dict.fromkeys(OTHER_STATES, 0),
             "reason": None,
         },
-        "missing": {"cpu": None, "memory": None},
+        "missing": {"cpu": None, "memory": None, "storage": None},
     }
     block.update(overrides)
     return block
@@ -519,3 +519,249 @@ def test_a_report_round_trips_through_the_stored_shape() -> None:
     report = HostCapacityReport.model_validate(capacity_block())
     stored = json.loads(json.dumps(report.model_dump(mode="json")))
     assert HostCapacityReport.model_validate(stored).inventory.running == 3
+
+
+# ── Storage: a sub-block that can fail without taking the host with it ──
+
+GIB = 1024**3
+
+
+def storage_block(**overrides: object) -> dict:
+    """A well-formed storage sub-block, with named fields replaceable."""
+    block: dict = {
+        "source": "linux_overlay_root_statvfs",
+        "target": "/mnt/agent-docker",
+        "total_bytes": 100 * GIB,
+        "free_bytes": 40 * GIB,
+        "available_bytes": 35 * GIB,
+    }
+    block.update(overrides)
+    return block
+
+
+def stored_view(block: dict, *, now: datetime | None = None):
+    """Run one block through the parse/store/read path the pool actually uses."""
+    read_at = datetime(2026, 9, 16, 8, 0, 0, tzinfo=UTC) if now is None else now
+    report = parse_capacity_block(block)
+    assert report is not None
+    stored = json.loads(json.dumps(report.model_dump(mode="json")))
+    return admin_capacity_view(
+        snapshot=stored,
+        received_at=read_at,
+        sampled_at=read_at - timedelta(seconds=5),
+        now=read_at,
+    )
+
+
+def test_a_storage_sub_block_is_stored_and_read_back_with_its_derivation() -> None:
+    view = stored_view(capacity_block(storage=storage_block()))
+
+    assert view is not None
+    assert view.storage_source == "linux_overlay_root_statvfs"
+    assert view.storage_target == "/mnt/agent-docker"
+    assert view.storage_total_bytes == 100 * GIB
+    assert view.storage_free_bytes == 40 * GIB
+    assert view.storage_available_bytes == 35 * GIB
+    assert view.storage_used_bytes == 60 * GIB
+    # df's ratio: used over used + available, not over total.
+    assert view.storage_used_percent == pytest.approx(100 * 60 / 95)
+    assert view.storage_missing_reason is None
+
+
+def test_a_runner_that_reports_a_gap_keeps_its_own_reason() -> None:
+    for reason in ("disabled", "unsupported", "unverified", "source_unavailable"):
+        view = stored_view(
+            capacity_block(storage=None, missing={"cpu": None, "memory": None, "storage": reason})
+        )
+        assert view is not None
+        assert view.storage_total_bytes is None
+        assert view.storage_missing_reason == reason
+
+
+def test_a_runner_with_no_storage_capability_reads_as_not_reported() -> None:
+    """An older runner, and every snapshot written before the field existed."""
+    view = stored_view(capacity_block(missing={"cpu": None, "memory": None}))
+
+    assert view is not None
+    assert view.storage_missing_reason == "not_reported"
+    assert view.storage_used_percent is None
+    # The rest of the observation is untouched by the older runner's silence.
+    assert view.memory_used_percent is not None
+    assert view.inventory is not None
+
+
+def test_an_older_snapshot_without_the_missing_map_member_reads_as_not_reported() -> None:
+    """The stored document predates the key, not just the sub-block."""
+    block = capacity_block()
+    del block["missing"]["storage"]
+    view = stored_view(block)
+
+    assert view is not None
+    assert view.storage_missing_reason == "not_reported"
+    assert view.storage_source is None
+
+
+@pytest.mark.parametrize(
+    "storage",
+    [
+        storage_block(total_bytes=True),
+        storage_block(total_bytes="107374182400"),
+        storage_block(total_bytes=-1),
+        storage_block(total_bytes=2**53),
+        storage_block(available_bytes=50 * GIB),  # above free
+        storage_block(free_bytes=200 * GIB),  # above total
+        storage_block(source="Overlay Root"),
+        storage_block(source=""),
+        storage_block(source="x" * 65),
+        storage_block(target="bad\x00target"),
+        storage_block(target="t" * 257),
+        {"source": "linux_overlay_root_statvfs", "total_bytes": 100 * GIB},
+        "not-an-object",
+    ],
+)
+def test_a_malformed_storage_sub_block_costs_only_the_storage_field(storage: object) -> None:
+    """CPU, memory and the inventory are independent facts about a live host."""
+    report = parse_capacity_block(capacity_block(storage=storage))
+
+    assert report is not None
+    assert report.storage is None
+    assert report.missing.storage == "invalid_sample"
+    assert report.cpu_percent == pytest.approx(37.2)
+    assert report.memory_total_bytes == 137_438_953_472
+    assert report.inventory.running == 3
+
+
+def block_without_the_missing_map(**overrides: object) -> dict:
+    """A block that carries no ``missing`` map at all, not merely an empty one."""
+    block = capacity_block(**overrides)
+    del block["missing"]
+    return block
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        block_without_the_missing_map(storage=storage_block(total_bytes="lots")),
+        capacity_block(storage=storage_block(total_bytes="lots"), missing="garbage"),
+    ],
+)
+def test_a_storage_fault_does_not_rescue_an_unusable_missing_map(block: object) -> None:
+    """Degrading the storage field must not make an unrelated block acceptable.
+
+    ``missing`` is required, and a block whose map is absent or is not an
+    object is dropped whatever its storage says. A map this control plane
+    invented in its place would buy the report an acceptance that the runner's
+    own CPU and memory reasons never paid for.
+    """
+    assert parse_capacity_block(block) is None
+
+
+def test_a_malformed_storage_sub_block_does_not_refuse_the_heartbeat() -> None:
+    request = HostHeartbeatRequest.model_validate(
+        heartbeat_body(capacity_block(storage=storage_block(total_bytes="lots")))
+    )
+
+    assert request.capacity is not None
+    assert request.capacity.storage is None
+    assert request.capacity.missing.storage == "invalid_sample"
+    assert request.slots_total == 3
+
+
+def test_a_sample_and_a_missing_reason_together_cost_only_the_storage() -> None:
+    """A contradiction in the storage half is not a malformed heartbeat.
+
+    The two statements cannot both be true, so neither is published — but the
+    CPU, the memory and the inventory beside them are facts about a live host,
+    and a monitoring field does not get to take them down.
+    """
+    block = capacity_block(
+        storage=storage_block(), missing={"cpu": None, "memory": None, "storage": "unverified"}
+    )
+
+    report = parse_capacity_block(block)
+
+    assert report is not None
+    assert report.storage is None
+    assert report.missing.storage == "invalid_sample"
+    assert report.cpu_percent == pytest.approx(37.2)
+    assert report.inventory.stopped == 7
+
+
+@pytest.mark.parametrize("reason", ["teleported", "DISABLED", 42, ["unverified"], {"a": 1}])
+def test_a_reason_outside_the_vocabulary_costs_only_the_storage(reason: object) -> None:
+    """A newer runner's new reason must not cost an older control plane the CPU.
+
+    The page would render an unknown string as "Not measured" anyway, so the
+    closed vocabulary is enforced by degrading the field rather than by failing
+    the model — which would take three unrelated measurements down with it.
+    """
+    report = parse_capacity_block(
+        capacity_block(storage=None, missing={"cpu": None, "memory": None, "storage": reason})
+    )
+
+    assert report is not None
+    assert report.storage is None
+    assert report.missing.storage == "invalid_sample"
+    assert report.memory_total_bytes == 137_438_953_472
+
+
+def test_a_storage_fault_never_refuses_the_heartbeat() -> None:
+    request = HostHeartbeatRequest.model_validate(
+        heartbeat_body(capacity_block(storage=storage_block(), missing={"storage": "warped"}))
+    )
+
+    assert request.capacity is not None
+    assert request.capacity.missing.storage == "invalid_sample"
+    assert request.slots_total == 3
+
+
+def test_an_unknown_source_is_accepted_as_long_as_it_fits_the_format() -> None:
+    """A new probe must not need a control-plane release to be readable."""
+    view = stored_view(capacity_block(storage=storage_block(source="windows_volume_statvfs")))
+
+    assert view is not None
+    assert view.storage_source == "windows_volume_statvfs"
+
+
+def test_a_filesystem_with_no_denominator_is_an_invalid_sample() -> None:
+    """Every block reserved and none written: no ratio exists, so none is drawn."""
+    view = stored_view(
+        capacity_block(storage=storage_block(free_bytes=100 * GIB, available_bytes=0))
+    )
+
+    assert view is not None
+    assert view.storage_missing_reason == "invalid_sample"
+    assert view.storage_used_bytes is None
+    assert view.storage_used_percent is None
+    assert view.storage_total_bytes is None
+    assert view.storage_source is None
+
+
+def test_the_storage_sub_block_stays_inside_the_eight_kib_ceiling() -> None:
+    block = capacity_block(storage=storage_block(target="/" + "m" * 254))
+    encoded = json.dumps(block, ensure_ascii=False).encode("utf-8")
+
+    assert len(encoded) < MAX_CAPACITY_BYTES
+    assert parse_capacity_block(block) is not None
+
+
+def test_history_ignores_the_storage_sub_block() -> None:
+    """No migration and no new columns: the scalar projection reads fixed paths."""
+    report = parse_capacity_block(capacity_block(storage=storage_block()))
+    assert report is not None
+    row = {
+        "capacity_sampled_at": datetime(2026, 9, 16, 8, 0, 0, tzinfo=UTC),
+        "capacity_sample_id": SAMPLE_ID,
+        "linux_boot_id": BOOT_ID,
+        "cpu_percent": 37.2,
+        "cpu_logical_count": 32,
+        "cpu_window_seconds": 30.0,
+        "memory_total_bytes": 137_438_953_472,
+        "memory_available_bytes": 92_341_796_864,
+    }
+
+    point = history_point_write_from_row(row)
+
+    assert point is not None
+    assert point.memory_total_bytes == 137_438_953_472
+    assert not hasattr(point, "storage_total_bytes")

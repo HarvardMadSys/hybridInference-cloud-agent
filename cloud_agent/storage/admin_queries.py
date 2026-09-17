@@ -28,8 +28,8 @@ from cloud_agent.storage._sql.attempts import NEXT_ATTEMPT_START_SQL
 from cloud_agent.storage._sql.ledger import LEDGER_WINDOW_UNTIL_SQL
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.thread_stats import _TOKEN_KEY_GROUPS
-from cloud_agent_host.event_payloads import MAX_EVENT_PAYLOAD_BYTES, bound_event_payload
-from cloud_agent_host.turn_resources import summarize_run_resources
+from cloud_agent_contracts.event_payloads import MAX_EVENT_PAYLOAD_BYTES, bound_event_payload
+from cloud_agent_contracts.turn_resources import summarize_run_resources
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

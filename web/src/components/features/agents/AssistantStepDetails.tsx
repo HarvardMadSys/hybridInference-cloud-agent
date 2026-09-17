@@ -112,10 +112,8 @@ export function AssistantStepDetails({
             </div>
           ),
         )}
-        {!hasContent && blocks.length === 0 ? (
-          <EmptyNote>
-            {tools.length ? '(tool call only)' : 'No message content was recorded for this step.'}
-          </EmptyNote>
+        {!hasContent && !tools.length ? (
+          <EmptyNote>No message content was recorded for this step.</EmptyNote>
         ) : null}
         {tools.length ? (
           <DetailSection title="Tool calls">
@@ -173,8 +171,8 @@ export function AssistantStepDetails({
     <TabPanel idPrefix={idPrefix} tab="summary">
       <DetailRows>
         <DetailRow label="Source">
-          {step.nativeMessageId ? (
-            <span className="font-mono">{step.nativeMessageId}</span>
+          {step.nativeMessageId || step.nativeItemId ? (
+            <span className="font-mono">{step.nativeMessageId ?? step.nativeItemId}</span>
           ) : (
             <span className="text-gray-400 dark:text-gray-500">Not recorded</span>
           )}
@@ -197,17 +195,20 @@ export function AssistantStepDetails({
           request id, and no Gateway request was recorded for it.
         </p>
       ) : null}
+      {step.nativeItemId ? (
+        <p className="text-[11px] text-gray-400 dark:text-gray-500">
+          Source is the recorded Codex item ID. It does not identify a provider request.
+        </p>
+      ) : null}
 
       <DetailSection title="Preview" onOpen={() => onSelectTab('preview')}>
         {hasContent ? (
           <div className="max-h-40 overflow-hidden text-[12px] leading-relaxed text-gray-700 dark:text-gray-300">
             <Markdown text={blocks.find((block) => block.type === 'text')?.text ?? ''} />
           </div>
-        ) : (
-          <EmptyNote>
-            {tools.length ? '(tool call only)' : 'No message content was recorded.'}
-          </EmptyNote>
-        )}
+        ) : !tools.length ? (
+          <EmptyNote>No message content was recorded.</EmptyNote>
+        ) : null}
         {blocks.some((block) => block.type === 'thinking') ? (
           <p className="text-[11px] text-gray-400 dark:text-gray-500">
             {blocks.filter((block) => block.type === 'thinking').length} recorded thinking block

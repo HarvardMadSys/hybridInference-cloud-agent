@@ -27,8 +27,8 @@ from cloud_agent.skills.models import (
     SelectedSkill,
     SkillLimits,
 )
-from cloud_agent_host.event_payloads import bound_event_payload
-from cloud_agent_host.shared_protocol import (
+from cloud_agent_contracts.event_payloads import bound_event_payload
+from cloud_agent_contracts.shared_protocol import (
     HOST_CONCURRENCY_MAX_SLOTS,
     HOST_CONCURRENCY_MIN_SLOTS,
     SHARED_MEMBER_ACCOUNTING_VERSION,

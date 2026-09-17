@@ -17,24 +17,16 @@ import {
 
 export function SkillEditor({
   skill,
-  copy = false,
   onClose,
   onSaved,
 }: {
   skill?: SkillApi;
-  copy?: boolean;
   onClose: () => void;
   onSaved: (skill: SkillApi) => void;
 }) {
-  const editing = Boolean(skill && !copy);
+  const editing = Boolean(skill);
   const formId = useId();
-  const [name, setName] = useState(
-    skill
-      ? copy
-        ? `${skill.name.slice(0, DEFAULT_SKILL_LIMITS.max_name_length - 5)} copy`
-        : skill.name
-      : '',
-  );
+  const [name, setName] = useState(skill?.name ?? '');
   const [description, setDescription] = useState(skill?.description ?? '');
   const [instructions, setInstructions] = useState(skill?.instructions ?? '');
   const [defaultEnabled, setDefaultEnabled] = useState(editing ? !!skill?.default_enabled : false);
@@ -71,7 +63,7 @@ export function SkillEditor({
 
   return (
     <SkillDialog
-      title={editing ? 'Edit skill' : copy ? 'Create a copy' : 'Create skill'}
+      title={editing ? 'Edit skill' : 'Create skill'}
       description="Turn a repeatable workflow into reusable instructions."
       busy={busy}
       onClose={onClose}

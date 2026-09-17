@@ -28,6 +28,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent_contracts.errors import SandboxError
 from cloud_agent_host.egress import (
     PHASES,
     EgressPolicy,
@@ -181,10 +182,6 @@ def _split_menu(menu: str | None, default: str) -> list[str]:
         # what a job with no selection runs, so it is always available.
         offered.insert(0, default)
     return offered
-
-
-class SandboxError(Exception):
-    """Raised when a sandbox cannot be created or configured."""
 
 
 class TerminalNotSupportedError(SandboxError):

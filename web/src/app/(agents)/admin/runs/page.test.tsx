@@ -69,7 +69,7 @@ import {
   getAdminLlmRequestSources,
   getAdminLlmRequests,
 } from '@/lib/api/adminRuns';
-import AdminRunsPageComponent from './page';
+import AdminRunsPageComponent from './AllRuns';
 import AdminRunPage from './[jobId]/page';
 import {
   collectingSentence,
@@ -437,7 +437,10 @@ describe('admin runs list', () => {
       expect(screen.queryByLabelText(label)).not.toBeInTheDocument();
     }
     const nav = screen.getByRole('navigation', { name: 'Admin sections' });
-    expect(within(nav).getByRole('link', { name: 'Runs' })).toHaveAttribute('aria-current', 'page');
+    expect(within(nav).getByRole('link', { name: 'Conversations' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
     expect(within(nav).getByRole('link', { name: 'Servers' })).toHaveAttribute(
       'href',
       '/admin/hosts',

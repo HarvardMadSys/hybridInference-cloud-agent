@@ -156,6 +156,7 @@ class PostgresMcpConnectionRepository:
         connector_id: int | None = None,
         account_label: str | None = None,
         request_timeout_s: float | None = None,
+        reuse_pending: bool = False,
     ) -> dict[str, Any]:
         """Insert a connection and return it, at revision one.
 
@@ -163,8 +164,52 @@ class PostgresMcpConnectionRepository:
         and no capability has been discovered, and a connection that reads as
         active before either has happened is a lie the Integrations page would
         repeat.
+
+        ``reuse_pending`` resumes an identical remote setup without credentials
+        instead of inserting another row. Existing credentials, settings, and
+        approvals are never changed; authenticated accounts remain independent.
         """
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            if (
+                reuse_pending
+                and location == "remote"
+                and transport in {"streamable-http", "http-sse"}
+                and url is not None
+                and launch_spec is None
+                and auth_kind in {"none", "oauth"}
+                and not auth_config
+            ):
+                # Serialize setup retries across API workers, even before the
+                # first row exists. The owner scope also keeps tenants apart.
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended('agent-mcp-setup:' || $1, 0))",
+                    user_id,
+                )
+                existing = await conn.fetchrow(
+                    f"""
+                    SELECT {self._MCP_CONNECTION_COLUMNS}
+                    FROM agent_mcp_connections
+                    WHERE user_id = $1 AND label = $2 AND transport = $3
+                      AND location = $4 AND url = $5 AND launch_spec IS NULL
+                      AND connector_id IS NOT DISTINCT FROM $6::bigint
+                      AND account_label IS NOT DISTINCT FROM $7::text
+                      AND request_timeout_s IS NOT DISTINCT FROM $8::double precision
+                      AND auth_kind IN ('none', 'oauth')
+                      AND access_token_ciphertext IS NULL AND refresh_token_ciphertext IS NULL
+                      AND deleted_at IS NULL AND status <> 'disabled'
+                    ORDER BY id LIMIT 1 FOR UPDATE
+                    """,
+                    user_id,
+                    label,
+                    transport,
+                    location,
+                    url,
+                    connector_id,
+                    account_label,
+                    request_timeout_s,
+                )
+                if existing is not None:
+                    return self._mcp_connection(existing)
             row = await conn.fetchrow(
                 f"""
                 INSERT INTO agent_mcp_connections

@@ -49,7 +49,6 @@ import { TerminalWorkspace } from './TerminalWorkspace';
 import { ThreadStatsBar } from './ThreadStatsBar';
 import { ThreadActions } from './ThreadActions';
 import { McpSessionPanel } from './mcp/McpSessionPanel';
-import { McpApprovalNotice } from './mcp/McpApprovalNotice';
 import type { AgentJob } from './types';
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { AttemptTurnFooter } from './AttemptTurnFooter';
@@ -84,7 +83,7 @@ import {
   HistoryTurn,
 } from './ChatMessages';
 
-type WorkspaceTab = 'git' | 'terminal' | 'files' | 'tools' | 'side-chat';
+type WorkspaceTab = 'git' | 'terminal' | 'files' | 'side-chat';
 
 export const WORKSPACE_WIDTH_STORAGE_KEY = 'agents.workspace.width';
 const WORKSPACE_DEFAULT_WIDTH = 560;
@@ -114,10 +113,6 @@ const WORKSPACE_TABS: Array<{ key: WorkspaceTab; label: string }> = [
   { key: 'git', label: 'Git' },
   { key: 'terminal', label: 'Terminal' },
   { key: 'files', label: 'Files' },
-  // MCP selection and approvals are per conversation, so they belong beside
-  // the workspace rather than on the account-wide Integrations page: a held
-  // call is decided against this session's rules, not the user's.
-  { key: 'tools', label: 'Tools' },
   { key: 'side-chat', label: 'Side Chat' },
 ];
 
@@ -311,10 +306,6 @@ function GitPanel({ job, active }: { job: AgentJob; active: boolean }) {
       setSelectedPath(files[0].path);
     }
   }, [files, selectedPath]);
-  const showWorkspacePublicationStatus =
-    job.workspaceShared &&
-    Boolean(job.workspacePublicationState) &&
-    job.workspacePublicationState !== 'published';
 
   return (
     <div className="space-y-4" aria-label="Git workspace">
@@ -330,19 +321,6 @@ function GitPanel({ job, active }: { job: AgentJob; active: boolean }) {
         {error || !live?.available ? (
           <span className="rounded bg-gray-100 dark:bg-white/5 px-2 py-1 text-[11px] text-gray-500 dark:text-gray-400">
             {error ? 'Unavailable' : loading ? 'Loading…' : 'Unavailable'}
-          </span>
-        ) : null}
-        {showWorkspacePublicationStatus ? (
-          <span
-            className={`rounded px-2 py-1 text-[11px] ${
-              job.workspacePublicationState === 'failed'
-                ? 'bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-300'
-                : 'bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300'
-            }`}
-          >
-            {job.workspacePublicationState === 'failed'
-              ? 'Shared snapshot needs review'
-              : 'Shared snapshot pending'}
           </span>
         ) : null}
         <button
@@ -560,10 +538,24 @@ export function JobDetail({
   const [trajectoryQuery, setTrajectoryQuery] = useState('');
   const [focusJobId, setFocusJobId] = useState<string | null>(null);
   const inspectorTriggerRef = useRef<HTMLElement | null>(null);
-  const trajectorySteps = useMemo(
-    () => buildTrajectorySteps(events, turnContextFromJobs(threadJobs)),
-    [events, threadJobs],
-  );
+  const trajectorySteps = useMemo(() => {
+    const context = turnContextFromJobs(threadJobs);
+    if (
+      !context.inputs?.some((input) => input.jobId === job.id) &&
+      typeof job.prompt === 'string'
+    ) {
+      context.inputs = [
+        ...(context.inputs ?? []),
+        {
+          jobId: job.id,
+          turnNo: job.turnNo ?? 1,
+          text: job.prompt,
+          at: job.createdAt ?? null,
+        },
+      ];
+    }
+    return buildTrajectorySteps(events, context);
+  }, [events, threadJobs, job.id, job.prompt, job.turnNo, job.createdAt]);
   const [followUp, setFollowUp] = useState('');
   const [chosenSkills, setChosenSkills] = useState<SelectedSkillApi[] | null>(null);
   // Follow-ups append to the thread's latest turn, even from an older URL.
@@ -1441,13 +1433,11 @@ export function JobDetail({
                 ref={scroll.composerRef}
                 className="sticky bottom-0 z-10 -mx-2 mt-10 bg-gradient-to-t from-gray-50 via-gray-50/95 px-2 pb-2 pt-8 dark:from-gray-950 dark:via-gray-950/95"
               >
-                <McpApprovalNotice
+                <McpSessionPanel
                   jobId={job.id}
+                  threadId={job.threadId ?? job.id}
                   active={isActive}
-                  onReview={() => {
-                    setWorkspaceOpen(true);
-                    setWorkspaceTab('tools');
-                  }}
+                  approvalsOnly
                 />
                 {isArchived ? (
                   <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-gray-900">
@@ -1709,19 +1699,6 @@ export function JobDetail({
             className="min-h-0 flex-1 overflow-y-auto p-5"
           >
             <WorkspaceFiles job={job} active={workspaceOpen && workspaceTab === 'files'} />
-          </div>
-          <div
-            id="workspace-panel-tools"
-            role="tabpanel"
-            aria-labelledby="workspace-tab-tools"
-            hidden={workspaceTab !== 'tools'}
-            className="min-h-0 flex-1 overflow-y-auto p-5"
-          >
-            <McpSessionPanel
-              jobId={job.id}
-              threadId={job.threadId ?? job.id}
-              active={workspaceOpen && workspaceTab === 'tools'}
-            />
           </div>
           <div
             id="workspace-panel-side-chat"

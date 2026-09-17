@@ -579,6 +579,158 @@ describe('buildTrajectorySteps', () => {
     expect(steps[2].label).toBe('mystery');
   });
 
+  it('counts hundreds of Codex streaming notifications as one inspectable log', () => {
+    const notifications = Array.from({ length: 400 }, (_, index) =>
+      event({
+        id: index + 1,
+        job_id: 'a',
+        turn_no: 1,
+        event_type: 'raw',
+        payload: {
+          text: JSON.stringify({
+            method: 'item/agentMessage/delta',
+            params: { itemId: 'message-a', delta: `fragment ${index}` },
+          }),
+          ...(index === 399 ? { truncated: true } : {}),
+        },
+      }),
+    );
+    const events = [
+      ...notifications.slice(0, 200),
+      event({ id: 401, job_id: 'a', turn_no: 1, payload: { text: 'Done' } }),
+      ...notifications.slice(200),
+      event({
+        id: 402,
+        job_id: 'a',
+        turn_no: 1,
+        event_type: 'tool_use',
+        payload: { id: 't', name: 'commandExecution', input: 'ls' },
+      }),
+      event({
+        id: 403,
+        job_id: 'a',
+        turn_no: 1,
+        event_type: 'tool_result',
+        payload: { tool_use_id: 't', content: 'README.md' },
+      }),
+    ];
+    const steps = buildTrajectorySteps(events);
+
+    expect(steps.map((step) => step.label)).toEqual(['Run logs', 'Assistant message', 'Shell']);
+    expect(steps[0].sourceEvents).toEqual(notifications);
+    expect(steps[0].detail).toContain('400 runtime records');
+    expect(steps[0].diagnostic).toBe(true);
+    expect(steps[0].truncated).toBe(true);
+    expect(steps[2].result?.text).toBe('README.md');
+    expect(steps[2].parentKey).toBeUndefined();
+    expect(steps.filter((step) => step.actor === 'assistant')).toHaveLength(1);
+    expect(steps.map((step) => step.stepNo)).toEqual([0, 1, 2]);
+    expect(
+      steps
+        .flatMap((step) => step.sourceEvents)
+        .map((entry) => entry.id)
+        .sort((a, b) => a - b),
+    ).toEqual(events.map((entry) => entry.id).sort((a, b) => a - b));
+  });
+
+  it('keeps protocol log identity stable across backfill and separate across jobs and retries', () => {
+    const notification = (id: number, job_id = 'a', attempt_id = 1) =>
+      event({
+        id,
+        job_id,
+        attempt_id,
+        turn_no: 1,
+        event_type: 'raw',
+        payload: {
+          line: '{"method":"thread/status/changed","params":{"status":{"type":"active"}}}',
+        },
+      });
+    const [before] = buildTrajectorySteps([notification(2)]);
+    const steps = buildTrajectorySteps([
+      notification(1),
+      notification(2),
+      notification(3, 'a', 2),
+      notification(4, 'b'),
+    ]);
+
+    expect(steps).toHaveLength(3);
+    expect(steps[0].key).toBe(before.key);
+    expect(steps.map((step) => step.sourceEvents.map((entry) => entry.id))).toEqual([
+      [1, 2],
+      [3],
+      [4],
+    ]);
+  });
+
+  it.each([
+    ['thread/started', { thread: { id: 'thread-a' } }],
+    ['turn/started', { turn: { id: 'turn-a' } }],
+    ['remoteControl/status/changed', { status: 'disabled' }],
+    ['thread/tokenUsage/updated', { tokenUsage: {} }],
+    ['item/reasoning/summaryTextDelta', { delta: 'thinking' }],
+    ['item/commandExecution/outputDelta', { delta: 'output' }],
+    ['item/started', { item: { type: 'agentMessage' } }],
+    ['item/updated', { item: { type: 'commandExecution' } }],
+  ])('groups known progress notification %s', (method, params) => {
+    const [step] = buildTrajectorySteps([
+      event({
+        id: 1,
+        job_id: 'a',
+        turn_no: 1,
+        event_type: 'raw',
+        payload: { text: JSON.stringify({ method, params }) },
+      }),
+    ]);
+    expect(step.runtimeNotifications).toBe(true);
+  });
+
+  it.each([
+    'plain output from a raw-only runtime',
+    '{"method":"item/agentMessage/delta","params":',
+    '{"method":"future/notification","params":{}}',
+    '{"method":"item/completed","params":{"item":{"type":"fileChange"}}}',
+    '{"method":"item/started","params":{"item":{"type":"futureTool"}}}',
+    '{"method":"item/agentMessage/delta","id":1,"params":{}}',
+    '{"method":"configWarning","params":{"summary":"Missing bubblewrap"}}',
+    '{"method":"warning","params":{"message":"Model metadata not found"}}',
+    '{"method":"error","params":{"error":{"message":"Disconnected"}}}',
+    '{"method":"thread/status/changed","params":{"status":{"type":"error"}}}',
+    '{"method":"item/updated","params":{"item":{"type":"mcpToolCall","error":"Failed"}}}',
+  ])('keeps warnings, errors and unrecognized raw records visible: %s', (text) => {
+    const source = event({ id: 1, job_id: 'a', turn_no: 1, event_type: 'raw', payload: { text } });
+    const [step] = buildTrajectorySteps([source]);
+    expect(step.runtimeNotifications).toBeUndefined();
+    expect(step.sourceEvents).toEqual([source]);
+  });
+
+  it('gives raw protocol warnings and errors readable labels and error status', () => {
+    const steps = buildTrajectorySteps([
+      event({
+        id: 1,
+        job_id: 'a',
+        turn_no: 1,
+        event_type: 'raw',
+        payload: {
+          text: '{"method":"configWarning","params":{"summary":"Missing bubblewrap"}}',
+        },
+      }),
+      event({
+        id: 2,
+        job_id: 'a',
+        turn_no: 1,
+        event_type: 'raw',
+        payload: {
+          text: '{"method":"error","params":{"message":"Disconnected"}}',
+        },
+      }),
+    ]);
+    expect(steps[0].label).toBe('configWarning');
+    expect(steps[0].detail).toBe('Missing bubblewrap');
+    expect(steps[1].detail).toBe('Disconnected');
+    expect(steps[1].status).toBe('failed');
+    expect(steps[1].isError).toBe(true);
+  });
+
   it('numbers steps inside a turn and restarts for the next one', () => {
     const steps = buildTrajectorySteps(
       [

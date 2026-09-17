@@ -166,7 +166,7 @@ type EventTab = 'summary' | 'raw';
 - 面向阅读的已存消息内容，Markdown 使用现有安全渲染方式。归一化器可能只保留 native response 的部分内容块，不能声称还原了未保存的全部响应。
 - 已记录 thinking 按独立折叠区显示，不与最终回复拼成一个段落。
 - 工具调用显示工具名和简短参数，点击进入对应 Tool 的 Summary。
-- 有可靠 native message ID、但消息只携带工具调用时，显示 `(tool call only)`。
+- 有可靠 native message ID、但消息只携带工具调用时，保留 ASSISTANT 标签并列出工具调用，不增加占位文案。
 - 不把 Raw JSON 当成 Preview，不用 `detail` 的截断单行替代完整内容。
 
 ### 5.3 Raw
@@ -339,7 +339,7 @@ interface TrajectoryStep {
 
 - 优先使用明确的 native message ID、parent message ID 等已记录关联。
 - Claude 的部分归一化 payload 保留 `usage_id`，其来自 native `message.id`；在已验证同一 message 的范围内，可将正文、thinking 与 tool-call blocks 组织成一个 Assistant step。
-- 同一 message 的 tools 仍各自有 Tool step，其 Hierarchy 指向该 Assistant；message 只有工具调用时可呈现 `(tool call only)`，前提是 native message 身份确有记录。
+- 同一 message 的 tools 仍各自有 Tool step，其 Hierarchy 指向该 Assistant；message 只有工具调用时仍呈现为 ASSISTANT 行，不增加占位文案，前提是 native message 身份确有记录。
 - Codex / pi 等记录中若没有保留下来的 message 关联，就按单条 message/thinking 展示，Tool Hierarchy 显示 `Not recorded`。
 - 不使用“最近一条 Assistant”、时间接近、文本相似或工具名作为父子关联依据。
 - 不将两个不同 native messages 的重复文本去重为一个消息，不将整个 turn 合成一个 Assistant。
@@ -530,3 +530,22 @@ npm run build
 实现时从最新 `dev` 开始，保留本文标注的当前数据边界；先检查是否已有其他 PR 改动上述组件。实际落地若需要修改身份采集/用量归属契约，清楚拆出它的范围，不把未经验证的数据猜测写进前端。
 
 最终交付包括可运行的交互、测试与构建结果、真实数据缺项说明及 PR。实现见同一 PR：新增 trajectorySteps.ts 投影、TrajectoryInspector / AssistantStepDetails / ToolStepDetails / RunDetails 组件，以及 JobDetail 的单一右侧区域；未改动后端采集契约。
+
+
+## 16. 2026-09-17：消息轨迹与运行日志分离
+
+PR #264 参考 DSH 的消息归属逻辑，将主列表的阅读单位调整为 User / Assistant / Tool：
+
+- 每轮输入来自 job 的 `task_prompt`；原生 userMessage 回显作为同一输入的来源，不另计步骤。没有 job 输入时使用原生记录。重试不重复用户输入。
+- Codex adapter 为完成的消息保留 `native_item_id`，为原始通知保留结构化内容。开始、流式片段和完成记录按 job / attempt / item 更新同一条 Assistant；完成快照替换片段，不重复显示或改变 Chat 的最终回复。
+- ASSISTANT 表示一条模型消息，可以包含思考、正文和多个工具请求；只有工具请求的消息仍属于 ASSISTANT，无正文时不填占位文案。按已记录的消息 ID 归并，同一消息发出的多个请求共用一个父行，工具调用与结果按 call ID 配对。每个请求都保留在父消息的 Raw 来源中。
+- Codex 的工具 item ID 只标识工具，当前采集未记录它所属的 provider message ID。因此保留独立 TOOL，不按每个工具补造 ASSISTANT，也不按相邻位置、token 用量通知或同一用户轮次猜测消息归属。已有真实 `usage_id` 的记录可以建立消息与工具的父子关系。
+- Tool 在列表显示名称、参数 → 结果；未完成输出可预览，但有输出不等于成功。详情继续保留调用与结果的配对证据。
+- 正常 lifecycle 和已识别的协议通知进入 Run logs，保留 Raw 和完整 Session log 下载，排除在主列表、步骤编号和 overview 之外。流式片段保留在对应消息/工具的 Raw 来源中。
+- CONTEXT 只用于明确记录的上下文输入，SYSTEM 只用于明确记录的系统提示内容。token 用量不是上下文消息：有真实消息归属的用量附在对应 ASSISTANT，取最新快照，不累加同一消息重复出现的计数；轮次总量、未匹配用量进入 Run logs，不增加模型消息数。当前 adapter 没有采集到的上下文或系统提示不补造。
+- 错误、警告和未知记录仍直接可见；运行时记录标记为 Runtime，不将后台通知称为 System prompt。harness 初始化配置进入 Run logs，保留原来的工具清单与 MCP 详情入口。
+- 空的已结束 Assistant 进入 Run logs；仍在生成的 Assistant 保留位置。每轮有 Turn 边界，overview 与搜索栏随列表滚动保持在顶部。
+
+参考源码：[Assistant 消息组装](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-trajectory/src/client/trajectory-assistant-definition.ts)、[User / Context 来源分类](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-trajectory/src/client/trajectory-message-definitions.ts)、[工具调用与结果配对](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-trajectory/src/client/trajectory-tool-definition.ts)。DSH 以真实 turn / step 和消息内容块组装 ASSISTANT，以输入来源区分 USER 与 CONTEXT；角色颜色不决定这些语义。
+
+兼容性：旧记录缺少完成消息的 native item ID 时，不能可靠还原流式片段与最终回复的对应关系，因此旧片段仍在 Run logs，最终消息照常显示。新 host 采集生效后才有完整的流式关联。Codex 工具所属模型消息仍是采集缺项；本次没有将 item ID 冒充 message ID。此改动对齐已记录消息的处理规则，不声明与 DSH 的完整消息采集、Duration / Turns / Calls、provider 调用计量及虚拟列表完全一致。

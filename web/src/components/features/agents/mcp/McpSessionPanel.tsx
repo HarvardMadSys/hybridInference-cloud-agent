@@ -243,6 +243,7 @@ interface McpSessionPanelProps {
   jobId: string;
   threadId: string;
   active: boolean;
+  approvalsOnly?: boolean;
 }
 
 export function McpSessionPanel(props: McpSessionPanelProps) {
@@ -250,12 +251,23 @@ export function McpSessionPanel(props: McpSessionPanelProps) {
   return <McpSessionPanelContent key={`${props.threadId}:${props.jobId}`} {...props} />;
 }
 
-function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProps) {
+function McpSessionPanelContent({
+  jobId,
+  threadId,
+  active,
+  approvalsOnly = false,
+}: McpSessionPanelProps) {
   const [bindings, setBindings] = useState<McpBindingApi[]>([]);
   const [selections, setSelections] = useState<Record<number, Selection>>({});
   const [invocations, setInvocations] = useState<McpInvocationApi[]>([]);
+  const reviewedInvocations = useRef(new Set<number>());
   const pending = invocations.filter((call) => call.status === 'pending');
-  const decided = invocations.filter((call) => call.status !== 'pending');
+  const decided = invocations
+    .filter(
+      (call) =>
+        call.status !== 'pending' && (!approvalsOnly || reviewedInvocations.current.has(call.id)),
+    )
+    .slice(0, approvalsOnly ? 1 : 50);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [decidingId, setDecidingId] = useState<number | null>(null);
@@ -271,7 +283,7 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
     setError(null);
     try {
       const [bindingResponse, invocationResponse] = await Promise.all([
-        getMcpThreadBindings(threadId),
+        approvalsOnly ? Promise.resolve({ bindings: [] }) : getMcpThreadBindings(threadId),
         readInvocations(jobId),
       ]);
       const uniqueBindings = uniqueBindingAliases(bindingResponse.bindings);
@@ -294,7 +306,7 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
       selectionOperation.current = false;
       setLoading(false);
     }
-  }, [jobId, threadId]);
+  }, [jobId, threadId, approvalsOnly]);
 
   useEffect(() => {
     if (!active) return;
@@ -410,6 +422,7 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
   }
 
   async function decide(invocation: McpInvocationApi, approve: boolean) {
+    reviewedInvocations.current.add(invocation.id);
     setDecidingId(invocation.id);
     setError(null);
     try {
@@ -425,6 +438,7 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
   }
 
   if (!active && !loaded) {
+    if (approvalsOnly) return null;
     return (
       <p className="text-sm text-gray-500 dark:text-gray-400">Open this panel to load tools.</p>
     );
@@ -432,8 +446,16 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
 
   return (
     <div>
+      {approvalsOnly && error ? (
+        <p role="alert" className="mb-3 text-sm text-red-600 dark:text-red-400">
+          {error}
+        </p>
+      ) : null}
       {pending.length || decided.length ? (
-        <section aria-labelledby="mcp-approvals">
+        <section
+          aria-labelledby="mcp-approvals"
+          className={approvalsOnly ? 'mb-4 max-h-80 overflow-y-auto' : undefined}
+        >
           <h3
             id="mcp-approvals"
             className="text-[11px] font-semibold uppercase tracking-[0.08em] text-gray-400 dark:text-gray-500"
@@ -495,143 +517,148 @@ function McpSessionPanelContent({ jobId, threadId, active }: McpSessionPanelProp
         </section>
       ) : null}
 
-      <fieldset
-        aria-labelledby="mcp-selection"
-        className="mt-6 min-w-0"
-        disabled={loading || saving}
-      >
-        <div className="flex items-center justify-between gap-3">
-          <h3 id="mcp-selection" className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-            MCP servers
-          </h3>
-          <div className="flex gap-3 text-xs text-gray-500 dark:text-gray-400">
-            <Link href="/integrations" className="hover:underline">
-              Manage servers
-            </Link>
-            <button
-              type="button"
-              onClick={() => void load()}
-              disabled={loading}
-              className="hover:underline disabled:opacity-60"
+      {!approvalsOnly ? (
+        <fieldset
+          aria-labelledby="mcp-selection"
+          className="mt-6 min-w-0"
+          disabled={loading || saving}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <h3
+              id="mcp-selection"
+              className="text-sm font-semibold text-gray-900 dark:text-gray-100"
             >
-              {loading ? 'Refreshing…' : 'Refresh'}
-            </button>
-          </div>
-        </div>
-        <p className="mt-2 text-xs leading-5 text-gray-500 dark:text-gray-400">
-          Connected servers are available automatically. Your agent chooses tools as needed and asks
-          before calling them, unless you allow a tool below.
-        </p>
-        {notice ? (
-          <p role="status" className="mt-3 text-sm text-emerald-700 dark:text-emerald-400">
-            {notice}
-          </p>
-        ) : null}
-        {error ? (
-          <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">
-            {error}
-          </p>
-        ) : null}
-        {loading && !loaded ? (
-          <p role="status" className="mt-3 text-sm text-gray-500 dark:text-gray-400">
-            Loading servers…
-          </p>
-        ) : null}
-        {loaded && bindings.length === 0 ? (
-          <div className="mt-4 rounded-xl border border-dashed border-gray-200 p-5 text-center dark:border-white/10">
-            <p className="text-sm text-gray-600 dark:text-gray-400">
-              Connect a server to give your agent access to your tools and data.
-            </p>
-            <Link
-              href="/integrations"
-              className="mt-3 inline-block text-sm font-medium text-gray-900 underline dark:text-gray-100"
-            >
-              Add MCP server
-            </Link>
-          </div>
-        ) : null}
-        {bindings.map((binding) => {
-          const selection = selections[binding.connection_id] ?? draftSelection(binding);
-          return (
-            <div
-              key={binding.connection_id}
-              className="mt-3 rounded-xl border border-gray-200 p-3 dark:border-white/10"
-            >
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="font-medium text-gray-900 dark:text-gray-50">
-                    {binding.connection_label}
-                  </p>
-                  <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                    {!binding.enabled
-                      ? 'Off for this conversation'
-                      : !binding.available
-                        ? 'Needs attention'
-                        : `${binding.capabilities.filter((item) => item.kind === 'tool').length} tools · Enabled`}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-label={`Use ${binding.connection_label} in this conversation`}
-                  aria-checked={binding.enabled}
-                  onClick={() => toggle(binding)}
-                  className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${binding.enabled ? 'bg-gray-900 dark:bg-gray-100' : 'bg-gray-200 dark:bg-white/20'}`}
-                >
-                  <span
-                    className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform dark:bg-gray-900 ${binding.enabled ? 'left-0.5 translate-x-5' : 'left-0.5'}`}
-                  />
-                </button>
-              </div>
-              {!binding.available ? (
-                <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
-                  {binding.error ?? 'This server is currently unavailable.'}{' '}
-                  <Link href="/integrations" className="underline">
-                    Manage connection
-                  </Link>
-                </p>
-              ) : null}
-              {binding.capabilities.length ? (
-                <details className="mt-3">
-                  <summary className="w-fit cursor-pointer text-xs text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100">
-                    Tools and permissions
-                  </summary>
-                  <CapabilityList
-                    capabilities={binding.capabilities}
-                    selection={selection}
-                    onPolicy={(kind, name, policy) =>
-                      setPolicy(binding.connection_id, kind, name, policy)
-                    }
-                  />
-                  <div className="mt-3 flex flex-wrap gap-3">
-                    <button
-                      type="button"
-                      onClick={() => savePermissions(binding)}
-                      className="rounded-lg bg-gray-900 px-3 py-1.5 text-xs font-medium text-white dark:bg-gray-100 dark:text-gray-900"
-                    >
-                      Save permissions
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => savePermissions(binding, true)}
-                      className="text-xs text-gray-500 hover:underline dark:text-gray-400"
-                    >
-                      Reset to ask before each call
-                    </button>
-                  </div>
-                </details>
-              ) : binding.available ? (
-                <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                  No tools discovered yet.{' '}
-                  <Link href="/integrations" className="underline">
-                    Refresh the connection
-                  </Link>
-                </p>
-              ) : null}
+              MCP servers
+            </h3>
+            <div className="flex gap-3 text-xs text-gray-500 dark:text-gray-400">
+              <Link href="/integrations" className="hover:underline">
+                Manage servers
+              </Link>
+              <button
+                type="button"
+                onClick={() => void load()}
+                disabled={loading}
+                className="hover:underline disabled:opacity-60"
+              >
+                {loading ? 'Refreshing…' : 'Refresh'}
+              </button>
             </div>
-          );
-        })}
-      </fieldset>
+          </div>
+          <p className="mt-2 text-xs leading-5 text-gray-500 dark:text-gray-400">
+            Connected servers are available automatically. Your agent chooses tools as needed and
+            asks before calling them, unless you allow a tool below.
+          </p>
+          {notice ? (
+            <p role="status" className="mt-3 text-sm text-emerald-700 dark:text-emerald-400">
+              {notice}
+            </p>
+          ) : null}
+          {error ? (
+            <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">
+              {error}
+            </p>
+          ) : null}
+          {loading && !loaded ? (
+            <p role="status" className="mt-3 text-sm text-gray-500 dark:text-gray-400">
+              Loading servers…
+            </p>
+          ) : null}
+          {loaded && bindings.length === 0 ? (
+            <div className="mt-4 rounded-xl border border-dashed border-gray-200 p-5 text-center dark:border-white/10">
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                Connect a server to give your agent access to your tools and data.
+              </p>
+              <Link
+                href="/integrations"
+                className="mt-3 inline-block text-sm font-medium text-gray-900 underline dark:text-gray-100"
+              >
+                Add MCP server
+              </Link>
+            </div>
+          ) : null}
+          {bindings.map((binding) => {
+            const selection = selections[binding.connection_id] ?? draftSelection(binding);
+            return (
+              <div
+                key={binding.connection_id}
+                className="mt-3 rounded-xl border border-gray-200 p-3 dark:border-white/10"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="font-medium text-gray-900 dark:text-gray-50">
+                      {binding.connection_label}
+                    </p>
+                    <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                      {!binding.enabled
+                        ? 'Off for this conversation'
+                        : !binding.available
+                          ? 'Needs attention'
+                          : `${binding.capabilities.filter((item) => item.kind === 'tool').length} tools · Enabled`}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-label={`Use ${binding.connection_label} in this conversation`}
+                    aria-checked={binding.enabled}
+                    onClick={() => toggle(binding)}
+                    className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${binding.enabled ? 'bg-gray-900 dark:bg-gray-100' : 'bg-gray-200 dark:bg-white/20'}`}
+                  >
+                    <span
+                      className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform dark:bg-gray-900 ${binding.enabled ? 'left-0.5 translate-x-5' : 'left-0.5'}`}
+                    />
+                  </button>
+                </div>
+                {!binding.available ? (
+                  <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
+                    {binding.error ?? 'This server is currently unavailable.'}{' '}
+                    <Link href="/integrations" className="underline">
+                      Manage connection
+                    </Link>
+                  </p>
+                ) : null}
+                {binding.capabilities.length ? (
+                  <details className="mt-3">
+                    <summary className="w-fit cursor-pointer text-xs text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100">
+                      Tools and permissions
+                    </summary>
+                    <CapabilityList
+                      capabilities={binding.capabilities}
+                      selection={selection}
+                      onPolicy={(kind, name, policy) =>
+                        setPolicy(binding.connection_id, kind, name, policy)
+                      }
+                    />
+                    <div className="mt-3 flex flex-wrap gap-3">
+                      <button
+                        type="button"
+                        onClick={() => savePermissions(binding)}
+                        className="rounded-lg bg-gray-900 px-3 py-1.5 text-xs font-medium text-white dark:bg-gray-100 dark:text-gray-900"
+                      >
+                        Save permissions
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => savePermissions(binding, true)}
+                        className="text-xs text-gray-500 hover:underline dark:text-gray-400"
+                      >
+                        Reset to ask before each call
+                      </button>
+                    </div>
+                  </details>
+                ) : binding.available ? (
+                  <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                    No tools discovered yet.{' '}
+                    <Link href="/integrations" className="underline">
+                      Refresh the connection
+                    </Link>
+                  </p>
+                ) : null}
+              </div>
+            );
+          })}
+        </fieldset>
+      ) : null}
     </div>
   );
 }
