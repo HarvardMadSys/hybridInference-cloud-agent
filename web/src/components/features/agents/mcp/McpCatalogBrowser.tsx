@@ -34,6 +34,8 @@ export function McpCatalogBrowser({
   const [option, setOption] = useState(0);
   const [busy, setBusy] = useState(false);
   const [useToken, setUseToken] = useState(false);
+  const [view, setView] = useState<'recommended' | 'all'>('recommended');
+  const recommended = !query.trim() && view === 'recommended';
 
   useEffect(() => {
     let cancelled = false;
@@ -41,7 +43,7 @@ export function McpCatalogBrowser({
     setError(false);
     const timer = setTimeout(
       () => {
-        void listMcpCatalog(query.trim(), offset)
+        void listMcpCatalog(query.trim(), offset, recommended)
           .then((response) => {
             if (!cancelled) setData(response);
           })
@@ -58,7 +60,7 @@ export function McpCatalogBrowser({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [query, offset, retry]);
+  }, [query, offset, retry, recommended]);
 
   const blocked = busy || disabled;
 
@@ -184,7 +186,7 @@ export function McpCatalogBrowser({
             setQuery(event.target.value);
             setOffset(0);
           }}
-          placeholder="Search by name, publisher or description"
+          placeholder="Search all servers by name, publisher or description"
           className="mt-2 w-full rounded-lg border border-gray-200 bg-transparent px-3 py-2 text-sm text-gray-900 dark:border-white/10 dark:text-gray-100"
         />
       </label>
@@ -203,6 +205,29 @@ export function McpCatalogBrowser({
           </span>
         ) : null}
       </div>
+      <nav aria-label="Directory view" className="mb-3 flex gap-2">
+        {(
+          [
+            ['recommended', 'Recommended'],
+            ['all', 'All servers'],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            disabled={blocked}
+            aria-pressed={!query.trim() && view === value}
+            className={`${BUTTON} ${!query.trim() && view === value ? 'bg-gray-100 font-medium dark:bg-white/10' : ''}`}
+            onClick={() => {
+              setView(value);
+              setQuery('');
+              setOffset(0);
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
       {data?.stale && available ? (
         <p role="status" className="mb-3 text-xs text-amber-700 dark:text-amber-300">
           Showing saved directory results while the next sync completes.
@@ -233,7 +258,9 @@ export function McpCatalogBrowser({
       ) : (
         <>
           <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
-            {data?.total.toLocaleString()} servers
+            {recommended
+              ? 'Selected for common coding workflows. Search or browse all servers for more.'
+              : `${data?.total.toLocaleString()} ${query.trim() ? 'matching servers' : 'servers'}`}
           </p>
           <div className="grid gap-3 sm:grid-cols-2">
             {data?.entries.map((entry) => (
@@ -267,7 +294,9 @@ export function McpCatalogBrowser({
           </div>
           {!data?.entries.length ? (
             <p className="py-4 text-sm text-gray-500 dark:text-gray-400">
-              No matching servers. Try another name or add a server in the JSON tab.
+              {recommended
+                ? 'No recommended servers available. Browse all servers or add a server in the JSON tab.'
+                : 'No matching servers. Try another name or add a server in the JSON tab.'}
             </p>
           ) : null}
           {offset > 0 || data?.next_offset != null ? (

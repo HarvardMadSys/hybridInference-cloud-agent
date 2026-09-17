@@ -27,14 +27,29 @@ REGISTRY_URL = "https://registry.modelcontextprotocol.io"
 SYNC_INTERVAL = 3600
 RETRY_INTERVAL = 300
 _OFFICIAL = "io.modelcontextprotocol.registry/official"
-# Familiar starting points, not a popularity score. All other entries are
-# included and searchable; metadata for these comes from the same live feed.
-_FIRST = (
+# An editorial shortlist for common coding workflows, not a download ranking.
+# Match publisher identifiers, never display names. Metadata still comes from
+# the live feed and every other active entry remains available in All servers.
+_RECOMMENDED = (
+    "io.github.github/github-mcp-server",
+    "io.github.upstash/context7",
+    "io.github.microsoft/playwright-mcp",
     "app.linear/linear",
     "com.notion/mcp",
-    "io.github.upstash/context7",
-    "io.github.github/github-mcp-server",
+    "com.figma.mcp/mcp",
+    "com.supabase/mcp",
+    "io.github.getsentry/sentry-mcp",
 )
+_RECOMMENDED_RANK = {name: index for index, name in enumerate(_RECOMMENDED)}
+
+
+def _sort_key(entry: dict[str, Any]) -> tuple[int, bool, str, str]:
+    return (
+        _RECOMMENDED_RANK.get(entry["name"], len(_RECOMMENDED)),
+        not bool(entry["configurations"]),
+        entry["label"].casefold(),
+        entry["name"],
+    )
 
 
 def _https(value: Any) -> str | None:
@@ -247,15 +262,7 @@ async def fetch_catalog(client: httpx.AsyncClient) -> list[dict[str, Any]]:
             if not cursor:
                 if not entries:
                     raise ValueError("Registry returned an empty directory")
-                return sorted(
-                    entries.values(),
-                    key=lambda e: (
-                        _FIRST.index(e["name"]) if e["name"] in _FIRST else len(_FIRST),
-                        not bool(e["configurations"]),
-                        e["label"].casefold(),
-                        e["name"],
-                    ),
-                )
+                return sorted(entries.values(), key=_sort_key)
             if not isinstance(cursor, str) or cursor in cursors:
                 raise ValueError("Registry pagination did not advance")
             cursors.add(cursor)
@@ -301,7 +308,9 @@ class McpCatalog:
                 delay = RETRY_INTERVAL
             await asyncio.sleep(delay)
 
-    def search(self, query: str = "", offset: int = 0, limit: int = 24) -> dict[str, Any]:
+    def search(
+        self, query: str = "", offset: int = 0, limit: int = 24, *, recommended: bool = False
+    ) -> dict[str, Any]:
         """Search only local metadata; requests never depend on Registry availability."""
         snapshot = self.snapshot
         terms = query.casefold().split()
@@ -309,11 +318,15 @@ class McpCatalog:
         matches = [
             entry
             for entry in entries
-            if all(
+            if (not recommended or (entry["name"] in _RECOMMENDED_RANK and entry["configurations"]))
+            and all(
                 term in f"{entry['name']} {entry['label']} {entry['description']}".casefold()
                 for term in terms
             )
         ]
+        # Apply the current editorial order even to snapshots cached by an
+        # earlier release, before slicing so every page has a stable order.
+        matches.sort(key=_sort_key)
         synced_at = snapshot["synced_at"] if snapshot else None
         return {
             "entries": matches[offset : offset + limit],

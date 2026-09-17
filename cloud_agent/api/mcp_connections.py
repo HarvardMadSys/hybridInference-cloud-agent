@@ -543,13 +543,14 @@ async def list_catalog(
     search: str = Query(default="", max_length=200),
     offset: int = Query(default=0, ge=0, le=100000),
     limit: int = Query(default=24, ge=1, le=100),
+    recommended: bool = Query(default=False),
     _owner: str = Depends(require_agent_owner),
 ) -> dict[str, Any]:
     """Browse the last complete official Registry sync without calling it live."""
     catalog = getattr(request.app.state, "mcp_catalog", None)
     if catalog is None:
         return {"entries": [], "total": 0, "next_offset": None, "synced_at": None, "stale": True}
-    return catalog.search(search, offset, limit)
+    return catalog.search(search, offset, limit, recommended=recommended)
 
 
 @router.get("/templates", response_model=list[dict[str, Any]])

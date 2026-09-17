@@ -102,10 +102,31 @@ it('keeps endpoint selection and token configuration explicit', async () => {
 
 it('paginates and resets to the first page for a new search', async () => {
   show();
+  await waitFor(() => expect(listMcpCatalog).toHaveBeenCalledWith('', 0, true));
+  fireEvent.click(screen.getByRole('button', { name: 'All servers' }));
+  await waitFor(() => expect(listMcpCatalog).toHaveBeenLastCalledWith('', 0, false));
   fireEvent.click(await screen.findByRole('button', { name: 'Next' }));
-  await waitFor(() => expect(listMcpCatalog).toHaveBeenLastCalledWith('', 24));
+  await waitFor(() => expect(listMcpCatalog).toHaveBeenLastCalledWith('', 24, false));
   fireEvent.change(screen.getByLabelText('Search MCP servers'), { target: { value: 'knowledge' } });
-  await waitFor(() => expect(listMcpCatalog).toHaveBeenLastCalledWith('knowledge', 0));
+  await waitFor(() => expect(listMcpCatalog).toHaveBeenLastCalledWith('knowledge', 0, false));
+});
+
+it('searches the whole directory from Recommended and restores recommendations on clear', async () => {
+  show();
+  await waitFor(() => expect(listMcpCatalog).toHaveBeenLastCalledWith('', 0, true));
+  expect(screen.getByRole('button', { name: 'Recommended' })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+  expect(screen.getByText(/Selected for common coding workflows/)).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText('Search MCP servers'), {
+    target: { value: 'unlisted service' },
+  });
+  await waitFor(() =>
+    expect(listMcpCatalog).toHaveBeenLastCalledWith('unlisted service', 0, false),
+  );
+  fireEvent.change(screen.getByLabelText('Search MCP servers'), { target: { value: '' } });
+  await waitFor(() => expect(listMcpCatalog).toHaveBeenLastCalledWith('', 0, true));
 });
 
 it('ignores an older search completing after a newer one', async () => {
@@ -119,7 +140,7 @@ it('ignores an older search completing after a newer one', async () => {
   });
   show();
   fireEvent.change(screen.getByLabelText('Search MCP servers'), { target: { value: 'old' } });
-  await waitFor(() => expect(listMcpCatalog).toHaveBeenCalledWith('old', 0));
+  await waitFor(() => expect(listMcpCatalog).toHaveBeenCalledWith('old', 0, false));
   fireEvent.change(screen.getByLabelText('Search MCP servers'), { target: { value: 'new' } });
   await screen.findByText(/No matching servers/);
   resolveOld(catalog);

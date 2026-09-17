@@ -316,8 +316,16 @@ export async function listMcpTemplates(): Promise<McpTemplateApi[]> {
 }
 
 /** Search our durable directory cache; this does not contact a listed server. */
-export async function listMcpCatalog(search = '', offset = 0): Promise<McpCatalogApi> {
-  const query = new URLSearchParams({ search, offset: String(offset) });
+export async function listMcpCatalog(
+  search = '',
+  offset = 0,
+  recommended = false,
+): Promise<McpCatalogApi> {
+  const query = new URLSearchParams({
+    search,
+    offset: String(offset),
+    recommended: String(recommended),
+  });
   return jsonOrThrow(await fetchWithAuth(API_BASE, `/v1/agent/mcp/catalog?${query}`));
 }
 

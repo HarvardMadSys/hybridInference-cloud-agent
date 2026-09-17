@@ -38,6 +38,36 @@ def test_missing_title_uses_publisher_for_generic_mcp_name():
     assert entry["name"] == "com.notion/mcp"
 
 
+def test_recommended_view_uses_exact_publishers_and_current_order_on_cached_data():
+    def entry(name, title="Docs", *, supported=True):
+        remotes = [{"type": "streamable-http", "url": "https://docs.example.com/mcp"}]
+        return catalog_entry(record(name, title=title, remotes=remotes if supported else []))
+
+    catalog = McpCatalog(AsyncMock(), AsyncMock())
+    # Deliberately in the old/alphabetical order, with a copycat display name
+    # and a known publisher whose current recipe cannot be generated.
+    catalog.snapshot = {
+        "entries": [
+            entry("com.example/github", "GitHub"),
+            entry("app.linear/linear", "Linear"),
+            entry("io.github.upstash/context7", "Context7"),
+            entry("io.github.github/github-mcp-server", "GitHub"),
+            entry("com.notion/mcp", "Notion", supported=False),
+        ],
+        "synced_at": datetime.now(timezone.utc),
+    }
+    first = catalog.search(limit=2, recommended=True)
+    assert [e["name"] for e in first["entries"]] == [
+        "io.github.github/github-mcp-server",
+        "io.github.upstash/context7",
+    ]
+    assert first["total"] == 3
+    assert first["next_offset"] == 2
+    assert catalog.search(offset=2, recommended=True)["entries"][0]["name"] == "app.linear/linear"
+    assert catalog.search()["total"] == 5
+    assert catalog.search("com.example/github")["total"] == 1
+
+
 def test_remote_choices_and_secret_headers_round_trip_through_importer():
     entry = catalog_entry(
         record(
@@ -243,5 +273,14 @@ def test_catalog_route_requires_owner_and_validates_pagination():
     assert client.get("/v1/agent/mcp/catalog").json()["synced_at"] is None
     assert client.get("/v1/agent/mcp/catalog?offset=-1").status_code == 422
     assert client.get("/v1/agent/mcp/catalog?limit=101").status_code == 422
+    assert client.get("/v1/agent/mcp/catalog?recommended=unknown").status_code == 422
+    catalog = McpCatalog(AsyncMock(), AsyncMock())
+    catalog.snapshot = {
+        "entries": [catalog_entry(record())],
+        "synced_at": datetime.now(timezone.utc),
+    }
+    app.state.mcp_catalog = catalog
+    assert client.get("/v1/agent/mcp/catalog?recommended=true").json()["total"] == 0
+    assert client.get("/v1/agent/mcp/catalog?recommended=false").json()["total"] == 1
     app.dependency_overrides.clear()
     assert client.get("/v1/agent/mcp/catalog").status_code == 401

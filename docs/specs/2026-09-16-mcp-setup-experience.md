@@ -12,8 +12,11 @@ action after adding a server or returning from OAuth.
 
 - Integrations lists MCP servers with a connection state and tool count. Protocol,
   runtime and credential metadata are available under Server details.
-- Add server opens a searchable MCP directory synchronized from the official
-  Registry. Cards show the publisher identifier as well as the display name.
+- Add server opens Recommended: a small editorial shortlist of GitHub, Context7,
+  Playwright, Linear, Notion, Figma, Supabase and Sentry for common coding workflows.
+  All servers opens the full synchronized directory; typing in search always searches
+  the full directory, including when starting from Recommended. Cards show the
+  publisher identifier as well as the display name.
   Select an endpoint or package, review its generated JSON, then add it. Remote
   endpoints can use automatic authorization discovery or a Bearer access token.
   Linear, Notion, Context7 and GitHub presets remain available as a fallback when
@@ -76,9 +79,14 @@ request. Fresh database snapshots are reused after restart. The relay listener
 does not run this task, and application readiness never waits for a sync.
 
 This is a directory, not a popularity ranking or a guarantee that a listed
-service is online. A small familiar-first ordering is independent of metadata
-updates. The feed can update descriptions, endpoints and pinned package versions
-for new connections. It never modifies existing connections or credentials.
+service is online. The Registry API has no download counts or popularity sort.
+The editorial shortlist matches exact publisher identifiers, includes only active
+entries with supported configurations, and stays small instead of padding the
+home view with arbitrary listings. The same entries appear first in All servers.
+Ranking is applied when reading cached snapshots so an update takes effect without
+waiting for the next sync. Metadata updates remain independent of this shortlist.
+The feed can update descriptions, endpoints and pinned package versions for new
+connections. It never modifies existing connections or credentials.
 
 Generated configurations cover public HTTPS streamable HTTP/SSE endpoints,
 single credential headers, and simple pinned npm/PyPI stdio packages. Multiple
