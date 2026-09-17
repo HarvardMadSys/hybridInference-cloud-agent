@@ -14,7 +14,8 @@ credentials are not accepted.
 
 The pin decides *which* enrolled host may claim a chat with no sandbox; the pool
 lifecycle (drain, undrain, remove) decides whether a host is allowed to claim at
-all.
+all; the requested slot count decides how many turns it runs at once, which
+the host applies to itself on its next heartbeat.
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ from cloud_agent.schemas import (
     IssueHostEnrollTokenResponse,
     ListAgentRunnerHostsResponse,
     SetActiveAgentRunnerHostRequest,
+    SetHostSlotsRequest,
     SetRuntimeVersionRequest,
 )
 
@@ -119,6 +121,8 @@ def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunner
         capabilities=row.get("capabilities") or [],
         slots_total=row.get("slots_total"),
         slots_used=row.get("slots_used") or 0,
+        slots_desired=row.get("slots_desired"),
+        launch_error=row.get("launch_error"),
         runner_version=row.get("runner_version"),
         broker_url=row.get("broker_url"),
         last_heartbeat_at=row.get("last_heartbeat_at"),
@@ -500,6 +504,60 @@ async def remove_agent_runner_host(
         "agent.runner_host.remove",
         None,
         {"host": host, "force": force},
+        actor_id=_admin_id,
+    )
+    return await _snapshot(job_store.host_pool)
+
+
+@router.put("/agent/runner-hosts/{host}/slots", response_model=ListAgentRunnerHostsResponse)
+async def set_agent_runner_host_slots(
+    request: Request,
+    host: str,
+    payload: SetHostSlotsRequest,
+    _admin_id: str = Depends(verify_admin_access),
+    store: _AdminHostsStorage | None = Depends(get_storage),
+) -> ListAgentRunnerHostsResponse:
+    """Ask one host to run this many turns at once, without touching its deployment.
+
+    The host runs one long-lived service and starts a process per turn as it
+    claims one, so this is a limit rather than a fleet size: nothing is started
+    or stopped when it changes. The host reads it off its next heartbeat answer
+    and serves it from then on, reporting it back as ``slots_total``.
+
+    The claim admits against the lower of the requested and reported numbers.
+    Lowering therefore takes effect immediately, before the host has even heard
+    about it, and turns already running are untouched — they finish, and the
+    host simply claims nothing more until it is under the new limit. Raising
+    takes effect when the host confirms, which is one heartbeat away.
+
+    **Saving is not applying.** This stores the number and says so; the page
+    shows whether the host has confirmed it, and says when a host is offline or
+    when its runner predates remote sizing and needs a redeploy to change.
+    ``null`` returns the host to its own ``AGENT_HOST_SLOTS`` default.
+    """
+    job_store = _require_store(store)
+    before = await job_store.host_pool.get_host(host=host)
+    if before is None:
+        raise HTTPException(status_code=404, detail=f"Unknown runner host: {host}")
+
+    outcome = await job_store.host_pool.set_host_slots_desired(host=host, slots=payload.slots)
+    if outcome == "unknown":
+        # Forgotten between the read above and the write: a name that no
+        # longer exists cannot be sized, and saying so beats a snapshot that
+        # silently omits it.
+        raise HTTPException(status_code=404, detail=f"Unknown runner host: {host}")
+
+    await log_admin_action(
+        job_store,
+        get_client_ip(request),
+        "agent.runner_host.set_slots",
+        None,
+        {
+            "host": host,
+            "old_slots": before.get("slots_desired"),
+            "new_slots": payload.slots,
+            "reported": before.get("slots_total"),
+        },
         actor_id=_admin_id,
     )
     return await _snapshot(job_store.host_pool)

@@ -126,6 +126,20 @@ export interface AgentRunnerHost {
   capabilities: string[];
   slots_total: number | null;
   slots_used: number;
+  /**
+   * Turns at once an operator asked this host to run, set from the Servers
+   * page, or null when the host runs its own default. The host takes it up on
+   * its next heartbeat and reports it back as `slots_total`; the scheduler
+   * admits against the lower of the two meanwhile. Absent from a control plane
+   * older than this field; the page reads it as null.
+   */
+  slots_desired?: number | null;
+  /**
+   * Why this host is claiming nothing despite having room — it could not start
+   * the process a turn runs in, repeatedly. Empty means nothing is wrong; null
+   * means this host does not report it.
+   */
+  launch_error?: string | null;
   runner_version: string | null;
   broker_url: string | null;
   last_heartbeat_at: string | null;
@@ -309,6 +323,48 @@ export async function drainAgentRunnerHost(host: string): Promise<AgentRunnerHos
 export async function undrainAgentRunnerHost(host: string): Promise<AgentRunnerHostPool> {
   const resp = await fetchWithAuth(API_BASE, `${HOSTS}/${encodeURIComponent(host)}/undrain`, {
     method: 'POST',
+  });
+  return jsonOrThrow<AgentRunnerHostPool>(resp);
+}
+
+/**
+ * Advertised on the heartbeat by a runner that takes its limit from
+ * `slots_desired`. Mirrors `HOST_CONCURRENCY_CAPABILITY` in
+ * `cloud_agent_host/shared_protocol.py`; a host without it keeps the number it
+ * was deployed with until it is redeployed.
+ */
+export const HOST_CONCURRENCY_CAPABILITY = 'host-concurrency-v1';
+
+/**
+ * The limit an operator may ask for. Two is the shared-live floor — a fork's
+ * sibling runs beside its parent — and 128 is a typo guard; both mirror
+ * `HOST_CONCURRENCY_MIN_SLOTS` / `HOST_CONCURRENCY_MAX_SLOTS` on the server,
+ * which refuses anything outside them. Neither says what a machine can carry.
+ */
+export const MIN_HOST_SLOTS = 2;
+export const MAX_HOST_SLOTS = 128;
+
+/**
+ * Ask one host to run this many turns at once; pass null to return it to its
+ * own default.
+ *
+ * Nothing here starts or stops anything: the host reads the number off its
+ * next heartbeat answer and serves it as its limit, starting a process per
+ * turn as it claims one. Turns already running always finish. The scheduler
+ * admits against the lower of the saved and reported numbers meanwhile, so a
+ * lowered number takes effect at once and a raised one when the host confirms.
+ *
+ * **Resolving is not applying.** The response says the number was saved; the
+ * host row in it says whether the host has taken it up.
+ */
+export async function setAgentRunnerHostSlots(
+  host: string,
+  slots: number | null,
+): Promise<AgentRunnerHostPool> {
+  const resp = await fetchWithAuth(API_BASE, `${HOSTS}/${encodeURIComponent(host)}/slots`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slots }),
   });
   return jsonOrThrow<AgentRunnerHostPool>(resp);
 }

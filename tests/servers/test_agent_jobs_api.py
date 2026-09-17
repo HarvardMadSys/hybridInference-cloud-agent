@@ -1173,12 +1173,21 @@ class FakeStorage(AllCapabilities):
         return True
 
     async def release_claim(
-        self, *, job_id: str, attempt_id: int, lease_generation: int | None = None
+        self,
+        *,
+        job_id: str,
+        attempt_id: int,
+        lease_generation: int | None = None,
+        reason: str = "credential_unavailable",
     ) -> bool:
         job = self.jobs.get(job_id)
         if job is None or job.get("current_attempt_id") != attempt_id:
             return False
-        self.released.append((job_id, attempt_id))
+        # Mirrors the store's own guard: a turn whose prompt reached the CLI is
+        # not releasable, because replaying it runs the instruction twice.
+        if job.get("admitted"):
+            return False
+        self.released.append((job_id, attempt_id, reason))
         job["state"] = "queued"
         job["current_attempt_id"] = None
         self.live_fence = None
@@ -6560,3 +6569,94 @@ async def test_a_new_key_still_runs_the_checks_that_can_refuse_it(
     fresh = await client.post("/v1/agent/jobs", json=body, headers={"Idempotency-Key": "submit-2"})
     assert fresh.status_code == 400, fresh.text
     assert len(store.jobs) == 1
+
+
+# ── Returning a turn that never started ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_never_started_goes_back_to_the_queue(store: FakeStorage):
+    """The host could not start the process; nobody should wait out its lease."""
+    app = _build_app(store)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        job_id = await _create_job(client)
+        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "worker-1"})
+        auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
+
+        released = await client.post(
+            f"/v1/agent/worker/jobs/{job_id}/release",
+            json={"reason": "launch_failed"},
+            headers=auth,
+        )
+
+    assert released.status_code == 200
+    assert released.json() == {"ok": True, "state": "queued"}
+    assert store.jobs[job_id]["state"] == "queued"
+    # And the reason travels, because "this host cannot start turns" is what an
+    # operator reads the trail for.
+    assert store.released[-1][2] == "launch_failed"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_started_cannot_be_returned(store: FakeStorage):
+    """The refusal is the store's, not the caller's account of what happened.
+
+    Replaying an admitted prompt executes a user's instruction a second time.
+    A host that is wrong about what its child did must not be able to cause
+    that, so the check lives where the evidence is.
+    """
+    app = _build_app(store)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        job_id = await _create_job(client)
+        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "worker-1"})
+        auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
+        store.jobs[job_id]["admitted"] = True
+
+        refused = await client.post(
+            f"/v1/agent/worker/jobs/{job_id}/release",
+            json={"reason": "launch_failed"},
+            headers=auth,
+        )
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["error"]["type"] == "turn_not_releasable"
+    assert store.jobs[job_id]["state"] == "running", "nothing was changed"
+
+
+@pytest.mark.asyncio
+async def test_returning_a_turn_needs_that_turn_own_worker_token(store: FakeStorage):
+    app = _build_app(store)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        job_id = await _create_job(client)
+        await client.post("/v1/agent/worker/claim", json={"worker_id": "worker-1"})
+
+        unauthenticated = await client.post(
+            f"/v1/agent/worker/jobs/{job_id}/release", json={"reason": "launch_failed"}
+        )
+
+    assert unauthenticated.status_code == 401
+    assert store.jobs[job_id]["state"] == "running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["", "Launch Failed", "launch failed", "x" * 65])
+async def test_a_release_reason_outside_the_audit_vocabulary_is_refused(
+    store: FakeStorage, reason: str
+):
+    """The reason lands in an append-only trail; it is a token, not free text."""
+    app = _build_app(store)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        job_id = await _create_job(client)
+        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "worker-1"})
+        auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
+
+        refused = await client.post(
+            f"/v1/agent/worker/jobs/{job_id}/release", json={"reason": reason}, headers=auth
+        )
+
+    assert refused.status_code == 422
+    assert store.jobs[job_id]["state"] == "running"

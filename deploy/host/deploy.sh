@@ -20,7 +20,6 @@
 #                 runs as a user without write access to /srv) and a wrong
 #                 guess would deploy into a directory nobody is serving from.
 #   SOURCE_REPO   a local clone holding <sha> (default: $GITHUB_WORKSPACE)
-#   REPLICAS      runner count (default: whatever .env says, else the script's)
 #   COMPOSE_PROJECT  this stack's compose project (default: from the deploy root's .env)
 #   AGENT_DEPLOY_MODE=artifacts uses AGENT_RELEASE_MANIFEST and the packaged
 #   recipe; DEPLOY_ROOT remains the persistent deployment/configuration root.
@@ -256,11 +255,7 @@ restore_recorded_generation() {
   git reset --hard --quiet "${recorded}" || return 1
   AGENT_DEPLOYMENT_SHA="${recorded}"
   export AGENT_DEPLOYMENT_SHA
-  if [ -n "${REPLICAS:-}" ]; then
-    DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" up "${REPLICAS}" || return 1
-  else
-    DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" up || return 1
-  fi
+  DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" up || return 1
   printf '%s\n' "${recorded}" > .deployed-sha || return 1
   bash "$SANDBOX_HOST_SCRIPT" mark-ready "${recorded}"
 }
@@ -271,11 +266,7 @@ restore_recorded_generation() {
 # broken tunnel into a red deploy instead of jobs that claim and then fail.
 log "handing over to sandbox_host.sh up"
 ROLLOUT_STATUS=0
-if [ -n "${REPLICAS:-}" ]; then
-  DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" up "${REPLICAS}" || ROLLOUT_STATUS=$?
-else
-  DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" up || ROLLOUT_STATUS=$?
-fi
+DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" up || ROLLOUT_STATUS=$?
 
 if [ "${ROLLOUT_STATUS}" -ne 0 ]; then
   if advertises_a_generation; then

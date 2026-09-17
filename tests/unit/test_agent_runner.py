@@ -44,7 +44,6 @@ def _stamp() -> dict:
 
 def _configure_host(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_HOST_SLOTS", "3")
-    monkeypatch.setenv("AGENT_RUNNER_REPLICAS", "3")
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "8")
     monkeypatch.setenv("AGENT_WORKSPACE_BROKER_URL", "http://broker:8092")
     monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "broker-token")
@@ -112,8 +111,7 @@ def test_pending_deployment_heartbeats_but_does_not_poll(monkeypatch, tmp_path):
     [
         ("AGENT_HOST_SLOTS", "1"),
         ("AGENT_HOST_SLOTS", "nope"),
-        ("AGENT_RUNNER_REPLICAS", "1"),
-        ("AGENT_RUNNER_REPLICAS", "nope"),
+        ("AGENT_HOST_SLOTS", "129"),
         ("AGENT_SHARED_RESIDENT_CAPACITY", "1"),
         ("AGENT_SHARED_RESIDENT_CAPACITY", "129"),
     ],
@@ -777,6 +775,10 @@ def test_run_forever_refuses_to_enroll_a_host_that_cannot_attest(monkeypatch):
 def test_runner_source_contains_no_push_or_legacy_execution_path():
     source = __import__("inspect").getsource(runner_mod)
     assert "git push" not in source
+    # The executor count is the supervisor's pool, sized from the control
+    # plane; a replica count read from the environment would be a second,
+    # stale answer to the same question.
+    assert "AGENT_RUNNER_REPLICAS" not in source
     assert "def _run_retained_attempt" not in source
     assert "def run_agent" not in source
     assert "AGENT_RESTARTABLE_SANDBOX" not in source

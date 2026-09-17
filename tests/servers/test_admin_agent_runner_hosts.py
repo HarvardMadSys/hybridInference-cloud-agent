@@ -90,6 +90,19 @@ class FakeHostStore(AllCapabilities):
             return "active"
         return "deleted" if self.rows.pop(host, None) is not None else "unknown"
 
+    async def get_host(self, *, host: str) -> dict[str, Any] | None:
+        row = self.rows.get(host)
+        return None if row is None else dict(row)
+
+    async def set_host_slots_desired(self, *, host: str, slots: int | None) -> str:
+        # Mirrors the store: the row decides, and any size the schema let
+        # through is stored — the host grows into it.
+        row = self.rows.get(host)
+        if row is None:
+            return "unknown"
+        row["slots_desired"] = slots
+        return "ok"
+
 
 def _admin_app(store: FakeHostStore | None) -> FastAPI:
     """Mount the admin router over one store, with E7's gate stood in for."""
@@ -349,3 +362,89 @@ async def test_an_admin_action_is_recorded_against_the_administrator(admin_clien
     assert entry["action"] == "agent.runner_host.forget"
     assert isinstance(entry["actor_id"], str) and entry["actor_id"]
     assert entry["details"] == {"host": "old-box"}
+
+
+# ── Requested executor count ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sizing_a_host_returns_the_pool_with_the_requested_count(admin_client):
+    client, store = admin_client
+    store.seed("runner-a")
+    store.rows["runner-a"].update(slots_total=3, slots_used=1)
+
+    response = await client.put(
+        "/admin/agent/runner-hosts/runner-a/slots", json={"slots": 8}, headers=ADMIN
+    )
+
+    assert response.status_code == 200
+    row = next(item for item in response.json()["hosts"] if item["host"] == "runner-a")
+    assert row["slots_desired"] == 8
+    # The reported count is untouched: the heartbeat owns it, and the page
+    # shows the two side by side while the host grows into the request.
+    assert row["slots_total"] == 3
+    assert store.rows["runner-a"]["slots_desired"] == 8
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_request_returns_the_host_to_its_default(admin_client):
+    client, store = admin_client
+    store.seed("runner-a")
+    store.rows["runner-a"].update(slots_total=4, slots_desired=2)
+
+    response = await client.put(
+        "/admin/agent/runner-hosts/runner-a/slots", json={"slots": None}, headers=ADMIN
+    )
+
+    assert response.status_code == 200
+    row = next(item for item in response.json()["hosts"] if item["host"] == "runner-a")
+    assert row["slots_desired"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slots", [1, 0, 129, "three"])
+async def test_a_size_outside_the_pools_bounds_is_refused_before_the_store_is_asked(
+    admin_client, slots
+):
+    """One executor would run a fork's sibling behind its parent; 129 is a typo."""
+    client, store = admin_client
+    store.seed("runner-a")
+    store.rows["runner-a"].update(slots_total=3)
+
+    response = await client.put(
+        "/admin/agent/runner-hosts/runner-a/slots", json={"slots": slots}, headers=ADMIN
+    )
+
+    assert response.status_code == 422
+    assert store.rows["runner-a"].get("slots_desired") is None
+
+
+@pytest.mark.asyncio
+async def test_sizing_an_unknown_host_is_a_404(admin_client):
+    client, _ = admin_client
+
+    response = await client.put(
+        "/admin/agent/runner-hosts/nope/slots", json={"slots": 2}, headers=ADMIN
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_size_change_is_audited_with_both_values(admin_client):
+    """The trail answers 'who resized this host, from what' without a diff."""
+    client, store = admin_client
+    store.seed("runner-a")
+    store.rows["runner-a"].update(slots_total=4, slots_desired=3)
+
+    await client.put("/admin/agent/runner-hosts/runner-a/slots", json={"slots": 6}, headers=ADMIN)
+
+    entry = store.audit[-1]
+    assert entry["action"] == "agent.runner_host.set_slots"
+    assert isinstance(entry["actor_id"], str) and entry["actor_id"]
+    assert entry["details"] == {
+        "host": "runner-a",
+        "old_slots": 3,
+        "new_slots": 6,
+        "reported": 4,
+    }

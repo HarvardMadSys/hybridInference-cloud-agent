@@ -39,12 +39,14 @@ import type {
   AgentRunnerHostPool,
   CapacityRange,
 } from '@/lib/api/admin';
+import { MAX_HOST_SLOTS, MIN_HOST_SLOTS } from '@/lib/api/admin';
 import {
   drainAgentRunnerHost,
   getAgentRunnerHostCapacityHistory,
   getAgentRunnerHosts,
   removeAgentRunnerHost,
   setActiveAgentRunnerHost,
+  setAgentRunnerHostSlots,
   setAgentRuntimeVersion,
   undrainAgentRunnerHost,
 } from '@/lib/api/admin';
@@ -54,6 +56,7 @@ import CapacityPanel from './CapacityPanel';
 import {
   type CapacityCell,
   type HostGroupCapacity,
+  concurrencyFacts,
   cpuCell,
   executionSlotsCell,
   formatUtcTimestamp,
@@ -215,6 +218,10 @@ function normalizeHosts(hosts: AgentRunnerHost[]): AgentRunnerHost[] {
     ...host,
     capacity: host.capacity ?? null,
     capacity_epoch: host.capacity_epoch ?? null,
+    // The requested executor count arrived later still, and "never sent"
+    // must read as "not set" rather than leave the cell and its control to
+    // disagree.
+    slots_desired: host.slots_desired ?? null,
   }));
 }
 
@@ -589,6 +596,16 @@ function HostsView() {
         : `${runtime} is back on each host's image default.`,
     );
 
+  const handleSlots = (host: string, name: string, slots: number | null) =>
+    run(
+      () => setAgentRunnerHostSlots(host, slots),
+      // Saved, which is all this can honestly claim. Whether the host has
+      // taken the number up is on the row, where it keeps being true.
+      slots === null
+        ? `Saved: ${name} goes back to its own default. Turns already running finish.`
+        : `Saved: ${name} runs at most ${slots} turns at once. Lowering applies immediately; raising applies when the host next reports in. Turns already running finish.`,
+    );
+
   const handleRemove = (host: string, slotsUsed: number) => {
     // The unforced call 409s on a busy host, and the operator would then have
     // to decide anyway — with the consequence stated, before the request.
@@ -820,6 +837,7 @@ function HostsView() {
                         : liveAgeSeconds(facts.oldestSampleAgeSeconds, elapsedMs);
                     const open = expanded === name;
                     const panelId = panelIdFor(name);
+                    const concurrency = concurrencyFacts(host);
                     const sandboxTitle = [
                       facts.sandboxes.explanation,
                       ...facts.sandboxes.reasons.map(reasonLabel),
@@ -864,6 +882,85 @@ function HostsView() {
                           </td>
                           <td className="px-3 py-4">
                             <CapabilityCell cell={executionSlotsCell(host)} muted={facts.stale} />
+                            {/* The control sits under the number it changes.
+                                It asks for a limit, not a fleet size: the host
+                                starts a process per turn as it claims one, so
+                                the input is bounded only by the protocol's
+                                floor and a typo guard, and no machine capacity
+                                is implied by either.
+
+                                The field is uncontrolled and re-keyed on the
+                                saved value, so a poll landing mid-edit does not
+                                overwrite what the operator is typing, and a
+                                saved change does replace it.
+
+                                Saving is not applying, and the line below says
+                                which happened: a host takes a new limit up on
+                                its next heartbeat, an offline one takes it up
+                                when it returns, and one whose runner predates
+                                remote limits never does. */}
+                            <form
+                              className="mt-1.5 flex items-center gap-1.5"
+                              onSubmit={(event) => {
+                                event.preventDefault();
+                                const value = Number(
+                                  new FormData(event.currentTarget).get('slots'),
+                                );
+                                if (
+                                  !Number.isInteger(value) ||
+                                  value < MIN_HOST_SLOTS ||
+                                  value > MAX_HOST_SLOTS
+                                ) {
+                                  return;
+                                }
+                                void handleSlots(host.host, name, value);
+                              }}
+                            >
+                              <input
+                                key={`${host.host}:${concurrency.requested ?? 'default'}`}
+                                name="slots"
+                                type="number"
+                                min={MIN_HOST_SLOTS}
+                                max={MAX_HOST_SLOTS}
+                                step={1}
+                                defaultValue={
+                                  concurrency.requested ?? host.slots_total ?? MIN_HOST_SLOTS
+                                }
+                                aria-label={`Turns at once for ${name}`}
+                                disabled={busy}
+                                className="w-16 rounded-md border border-gray-200 bg-white px-1.5 py-0.5 text-[11px] tabular-nums text-gray-700 shadow-sm disabled:opacity-40 dark:border-white/10 dark:bg-gray-900 dark:text-gray-200"
+                              />
+                              <button
+                                type="submit"
+                                disabled={busy}
+                                className="rounded-md border border-gray-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 dark:border-white/10 dark:bg-transparent dark:text-gray-200 dark:hover:bg-white/5"
+                              >
+                                Apply
+                              </button>
+                              {concurrency.requested !== null && (
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => void handleSlots(host.host, name, null)}
+                                  className="text-[11px] text-gray-500 underline-offset-2 hover:underline disabled:opacity-40 dark:text-gray-400"
+                                >
+                                  Host default
+                                </button>
+                              )}
+                            </form>
+                            {concurrency.explanation !== null && (
+                              <span className="mt-1 block max-w-[15rem] text-[11px] text-amber-700 dark:text-amber-300">
+                                {concurrency.explanation}
+                              </span>
+                            )}
+                            {concurrency.launchError !== null && (
+                              <span
+                                role="alert"
+                                className="mt-1 block max-w-[15rem] text-[11px] text-red-600 dark:text-red-400"
+                              >
+                                {concurrency.launchError}
+                              </span>
+                            )}
                           </td>
                           <td className="px-3 py-4">
                             <CapabilityCell
