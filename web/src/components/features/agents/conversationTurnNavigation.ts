@@ -342,7 +342,9 @@ export function describeCurrentTurn(
       ...(job.turnNo === undefined ? {} : { turnNo: job.turnNo }),
       messages,
       events,
-      fallbackResponses: [],
+      fallbackResponses: events.some((event) => event.kind === 'message')
+        ? []
+        : messages.filter((message) => message.role === 'assistant'),
       promptCard: job.prompt || job.title,
       forkable: false,
       toolCalls: toolCallsIn(events),
@@ -376,7 +378,9 @@ export function describeCurrentTurn(
     ...(job.turnNo === undefined ? {} : { turnNo: job.turnNo }),
     messages,
     events,
-    fallbackResponses: [],
+    fallbackResponses: events.some((event) => event.kind === 'message')
+      ? []
+      : messages.filter((message) => message.role === 'assistant'),
     promptCard,
     forkable: false,
     toolCalls: toolCallsIn(events),

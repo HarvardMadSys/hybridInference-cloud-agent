@@ -2137,7 +2137,9 @@ async def create_agent_follow_up(
         if replayed is not None:
             if replayed.get("error") == "client_request_conflict":
                 raise _idempotency_conflict()
-            return _job_response(replayed)
+            return _job_response(
+                await _owned_job(job_store.conversation_queries, str(replayed["id"]), user)
+            )
     if parent.get("archived_at") is not None:
         raise _session_archived_error()
     retained = parent.get("thread_sandbox")
@@ -2249,7 +2251,9 @@ async def create_agent_follow_up(
             "parent_job_id": job.get("parent_job_id"),
         },
     )
-    return _job_response(job)
+    # Command rows omit retained membership joins. Return the same owner read
+    # as GET /jobs/{id}, including the sandbox and native fork provenance.
+    return _job_response(await _owned_job(job_store.conversation_queries, str(job["id"]), user))
 
 
 @router.post("/jobs/{job_id}/fork", response_model=AgentJobResponse, status_code=201)
@@ -2323,6 +2327,10 @@ async def fork_agent_job(
     error = operation.get("error")
     if error:
         error_contract = {
+            "session_archived": (
+                "session_archived",
+                "This conversation is archived. Restore it before creating a side chat.",
+            ),
             "idempotency_conflict": (
                 "idempotency_conflict",
                 "This Idempotency-Key was already used for a different fork source.",

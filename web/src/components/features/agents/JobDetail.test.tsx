@@ -11,6 +11,9 @@ import {
   getAgentAttemptTelemetry,
   followUpAgentJob,
   forkAgentJob,
+  getAgentJob,
+  getAgentJobThread,
+  listAllAgentThreadEvents,
   getAgentConfig,
   getAgentJobFiles,
   getAgentJobGit,
@@ -26,6 +29,7 @@ import {
   streamAgentTerminal,
   writeAgentTerminalInput,
   writeAgentJobFile,
+  type AgentJobApi,
   type AgentJobFilesApi,
   type AgentJobUsageApi,
 } from '@/lib/api/agents';
@@ -33,6 +37,7 @@ import {
 import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { decideMcpInvocation, listMcpInvocations, type McpInvocationApi } from '@/lib/api/mcp';
 
+import { installSideChatLocks } from './sideChatTestSupport';
 import { JobDetail, WORKSPACE_WIDTH_STORAGE_KEY } from './JobDetail';
 import type { AgentJob } from './types';
 
@@ -59,6 +64,10 @@ vi.mock('@/lib/api/agents', () => ({
   deleteAgentTerminal: vi.fn(),
   followUpAgentJob: vi.fn(),
   forkAgentJob: vi.fn(),
+  getAgentJob: vi.fn(),
+  getAgentJobThread: vi.fn(),
+  listAllAgentThreadEvents: vi.fn(),
+  streamAgentJob: vi.fn().mockResolvedValue(undefined),
   getAgentConfig: vi.fn(),
   getAgentJobFiles: vi.fn(),
   getAgentJobGit: vi.fn(),
@@ -195,6 +204,85 @@ const HISTORY = [
 ];
 
 describe('JobDetail', () => {
+  it('lazily prepares a real side session and isolates Escape on the tab button', async () => {
+    installSideChatLocks();
+    const source = {
+      id: 'real-main',
+      thread_id: 'main-contract',
+      sandbox_id: 'group',
+      workspace_shared: true,
+      native_state: 'ready',
+      native_fork_available: true,
+      turn_no: 1,
+      state: 'succeeded',
+      conversation_state: 'idle',
+      task_prompt: 'Main',
+      runtime: 'codex',
+      model: 'qwen-test',
+      repo: 'owner/repository',
+      current_attempt_id: null,
+    } as AgentJobApi;
+    const child = {
+      ...source,
+      id: 'real-side',
+      thread_id: 'child-contract',
+      forked_from_job_id: source.id,
+      fork_anchor_job_id: source.id,
+    };
+    vi.mocked(getAgentJob).mockImplementation(async (id) => (id === source.id ? source : child));
+    vi.mocked(getAgentJobThread).mockResolvedValue({
+      thread_id: child.thread_id,
+      jobs: [child],
+      messages: [],
+    });
+    vi.mocked(listAllAgentThreadEvents).mockResolvedValue([]);
+    vi.mocked(forkAgentJob).mockResolvedValue(child);
+    const job = makeJob({
+      id: source.id,
+      state: 'running',
+      threadId: source.thread_id!,
+      sandboxId: source.sandbox_id!,
+      workspaceShared: true,
+    });
+    render(<JobDetail job={job} userId="integration-owner" threadJobs={[source]} />);
+    expect(getAgentJob).not.toHaveBeenCalled();
+    openWorkspace();
+    expect(forkAgentJob).not.toHaveBeenCalled();
+    const tab = screen.getByRole('tab', { name: 'Side Chat' });
+    fireEvent.click(tab);
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1));
+    fireEvent.keyDown(tab, { key: 'Escape' });
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('tab', { name: 'Files' }));
+    fireEvent.click(tab);
+    expect(forkAgentJob).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps Side Chat in the existing workspace without handling its Escape as a main stop', async () => {
+    render(<JobDetail job={makeJob()} />);
+    openWorkspace();
+    const workspace = screen.getByRole('region', { name: 'Job workspace' });
+    const tabs = within(
+      within(workspace).getByRole('tablist', { name: 'Workspace views' }),
+    ).getAllByRole('tab');
+    expect(tabs.map((tab) => tab.textContent?.replace(/\d+$/, '').trim())).toEqual([
+      'Git',
+      'Terminal',
+      'Files',
+      'Side Chat',
+    ]);
+    fireEvent.click(within(workspace).getByRole('tab', { name: 'Side Chat' }));
+    expect(screen.getByRole('textbox', { name: 'Message side chat' })).toBeVisible();
+    fireEvent.keyDown(screen.getByRole('region', { name: 'Side chat messages' }), {
+      key: 'Escape',
+    });
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+    fireEvent.click(within(workspace).getByRole('tab', { name: /^Git/ }));
+    expect(screen.queryByRole('textbox', { name: 'Message side chat' })).not.toBeInTheDocument();
+    expect(forkAgentJob).not.toHaveBeenCalled();
+  });
+
   it('approves a tool call directly in the conversation without a Tools workspace tab', async () => {
     const invocation: McpInvocationApi = {
       id: 11,

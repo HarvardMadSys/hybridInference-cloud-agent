@@ -81,6 +81,7 @@ function AgentJobContent({ jobId, userId }: { jobId: string; userId?: string }) 
     <JobDetail
       key={job.threadId ?? job.id}
       job={job}
+      userId={userId}
       events={events}
       threadJobs={threadJobs}
       onReload={reload}

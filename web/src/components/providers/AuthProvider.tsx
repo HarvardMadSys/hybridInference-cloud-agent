@@ -9,6 +9,7 @@
 // calling `/v1/session/me`.
 //
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import { clearSideChatDrafts } from '@/components/features/agents/sideChatStorage';
 import { AUTH_EXPIRED_EVENT } from '@/lib/api/client';
 import { APIError } from '@/lib/utils/errors';
 import {
@@ -99,18 +100,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [refreshUser]);
 
   useEffect(() => {
-    const handleAuthExpired = () => setState(SIGNED_OUT);
+    const handleAuthExpired = () => {
+      clearSideChatDrafts(state.user?.id);
+      setState(SIGNED_OUT);
+    };
     window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
-  }, []);
+  }, [state.user?.id]);
 
   const logout = useCallback(async () => {
     try {
       await endSession();
     } finally {
+      clearSideChatDrafts(state.user?.id);
       setState(SIGNED_OUT);
     }
-  }, []);
+  }, [state.user?.id]);
 
   const value: AuthContextValue = { state, logout, refreshUser };
 

@@ -6741,6 +6741,49 @@ async def test_a_release_reason_outside_the_audit_vocabulary_is_refused(
     assert store.jobs[job_id]["state"] == "running"
 
 
+async def test_follow_up_receipts_include_retained_membership_on_create_and_replay(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """Commands return bare SQL job rows; the HTTP receipt must use the owner read."""
+    parent_id = await _create_job(client)
+    sandbox = {
+        "sandbox_id": "asbx_side_contract",
+        "shared_live": True,
+        "fork_anchor_job_id": "ajob_main_anchor",
+        "native_state": "ready",
+        "origin_thread_id": "athread_main",
+    }
+    store.jobs[parent_id]["thread_sandbox"] = sandbox
+    create = store.create_follow_up
+    replay = store.replayed_submission
+
+    async def bare_create(**kwargs):
+        job = await create(**kwargs)
+        store.jobs[job["id"]]["thread_sandbox"] = sandbox
+        return {**job, "thread_sandbox": None}
+
+    async def bare_replay(**kwargs):
+        job = await replay(**kwargs)
+        return {**job, "thread_sandbox": None} if job else None
+
+    monkeypatch.setattr(store, "create_follow_up", bare_create)
+    monkeypatch.setattr(store, "replayed_submission", bare_replay)
+    path = f"/v1/agent/jobs/{parent_id}/follow-ups"
+    first = await client.post(
+        path, json={"prompt": "side reply"}, headers={"Idempotency-Key": "side-send"}
+    )
+    again = await client.post(
+        path, json={"prompt": "side reply"}, headers={"Idempotency-Key": "side-send"}
+    )
+    for response in (first, again):
+        assert response.status_code == 201, response.text
+        assert response.json()["sandbox_id"] == sandbox["sandbox_id"]
+        assert response.json()["fork_anchor_job_id"] == sandbox["fork_anchor_job_id"]
+        assert response.json()["workspace_shared"] is True
+    assert first.json()["id"] == again.json()["id"]
+    assert len(store.jobs) == 2
+
+
 @pytest.mark.parametrize("runtime", ["codex", "kilo", "claude-code", "opencode", "pi"])
 async def test_claim_loads_current_default_servers_and_skips_unavailable_ones(
     client: AsyncClient, store: FakeStorage, runtime

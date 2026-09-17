@@ -5691,3 +5691,93 @@ async def test_conversations_activity_counts_a_publication_of_an_earlier_turn(
     after = await store.conversation_queries.list_conversations(user_id="user-1")
     assert [item["job"]["id"] for item in after["conversations"]] == [child["id"], other["id"]]
     assert after["conversations"][0]["last_activity_at"] == published_at
+
+
+async def test_side_chat_follow_up_http_receipt_matches_retained_owner_read(
+    pool, store, monkeypatch
+):
+    """Pin the browser's receipt contract through the real SQL command and HTTP route.
+
+    The INSERT command deliberately returns JOB_SELECT without membership
+    columns. Serializing it directly used to commit a turn but leave every
+    side-chat send looking like a rejected workspace identity on the client.
+    """
+    from unittest.mock import AsyncMock
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from cloud_agent.api import routes
+
+    job, _claim_row, sandbox = await _reserve_shared_chat(store)
+    origin = await _create_job(store)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_thread_sandbox_memberships SET fork_anchor_job_id = $1, forked_from_thread_id = $3 WHERE thread_id = $2",
+            origin["id"],
+            job["thread_id"],
+            origin["thread_id"],
+        )
+    command_rows = []
+    create_follow_up = store.conversation_commands.create_follow_up
+
+    async def capture_command_row(**kwargs):
+        row = await create_follow_up(**kwargs)
+        command_rows.append(row)
+        return row
+
+    monkeypatch.setattr(store.conversation_commands, "create_follow_up", capture_command_row)
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[routes.require_agent_owner] = lambda: {"user_id": job["user_id"]}
+    app.dependency_overrides[routes.get_storage] = lambda: store
+    app.dependency_overrides[routes.get_agent_app_credentials] = lambda: None
+    app.dependency_overrides[routes.get_gateway_client] = lambda: None
+    monkeypatch.setattr(routes, "require_entitled_repo", AsyncMock())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        path = f"/v1/agent/jobs/{job['id']}/follow-ups"
+        headers = {"Idempotency-Key": "side-receipt-contract"}
+        response = await client.post(path, json={"prompt": "side question"}, headers=headers)
+        assert response.status_code == 201, response.text
+        receipt = response.json()
+        assert len(command_rows) == 1
+        assert command_rows[0]["thread_sandbox"] is None
+        replay = await client.post(path, json={"prompt": "side question"}, headers=headers)
+        assert replay.status_code == 201, replay.text
+        assert replay.json()["id"] == receipt["id"]
+        for body in (receipt, replay.json()):
+            assert body["sandbox_id"] == sandbox["sandbox_id"]
+            assert body["fork_anchor_job_id"] == origin["id"]
+            assert body["thread_id"] == job["thread_id"]
+            assert body["workspace_shared"] is True
+        # This fixture is consumed by SideChat.test.tsx as well. Normalize only
+        # generated IDs, preserving the real HTTP membership projection.
+        import json
+        from pathlib import Path
+
+        contract = json.loads(
+            (Path(__file__).parents[2] / "fixtures/side_chat_job_receipt.json").read_text()
+        )
+        normalized_ids = {
+            sandbox["sandbox_id"]: "shared",
+            job["thread_id"]: "side",
+            origin["id"]: "main-2",
+        }
+        assert {key: normalized_ids.get(receipt[key], receipt[key]) for key in contract} == contract
+        async with pool.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    "SELECT count(*) FROM agent_jobs WHERE thread_id = $1", job["thread_id"]
+                )
+                == 2
+            )
+
+    await store.conversation_commands.set_thread_archived(
+        job_id=job["id"], user_id=job["user_id"], archived=True
+    )
+    refused = await store.session_fork.prepare_session_fork(
+        source_job_id=job["id"],
+        user_id=job["user_id"],
+        idempotency_key="archived-side",
+    )
+    assert refused == {"error": "session_archived"}

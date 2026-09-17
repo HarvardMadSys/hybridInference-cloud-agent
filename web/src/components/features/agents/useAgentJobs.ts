@@ -25,6 +25,7 @@ import { toDisplayJob } from './adapt';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import type { AgentJob } from './types';
 import { getConversationState } from './conversationState';
+import { isActiveJobState, isActiveConversationState } from './conversationJob';
 
 const ACTIVE_ATTEMPT_PHASES = new Set([
   'started',
@@ -313,7 +314,13 @@ export function useProjectJobs(limit = 200): {
 }
 
 /** One job, its event log, and its patch — kept live over SSE. */
-export function useAgentJob(jobId: string): {
+export function useAgentJob(
+  jobId: string,
+  {
+    active = true,
+    hideForkedHistory = false,
+  }: { active?: boolean; hideForkedHistory?: boolean } = {},
+): {
   job: AgentJob | null;
   /** Every turn's stored stream, unfolded — what the trajectory view reads. */
   events: AgentThreadEventApi[];
@@ -348,6 +355,7 @@ export function useAgentJob(jobId: string): {
   useEffect(
     () =>
       onAgentSessionsChanged((change) => {
+        if (!active || !jobId) return;
         // Until this job resolves, its conversation identity is unknown. A job
         // ID cannot be compared with thread IDs, so invalidate any pending load.
         const threadId = api?.id === jobId ? api.thread_id : undefined;
@@ -355,11 +363,11 @@ export function useAgentJob(jobId: string): {
         if (change.deleted) setApi(null);
         reload();
       }),
-    [api?.id, api?.thread_id, jobId, reload],
+    [active, api?.id, api?.thread_id, jobId, reload],
   );
 
   useEffect(() => {
-    if (!jobId) return undefined;
+    if (!active || !jobId) return undefined;
     let cancelled = false;
     const requestGeneration = generation.current;
     seen.current = new Set();
@@ -388,7 +396,7 @@ export function useAgentJob(jobId: string): {
     return () => {
       cancelled = true;
     };
-  }, [jobId, tick]);
+  }, [active, jobId, tick]);
 
   // Diff state belongs to the retained group workspace, not to a per-turn
   // artifact uploaded by the runner. Fork siblings therefore see the same
@@ -398,7 +406,7 @@ export function useAgentJob(jobId: string): {
   // Do not open the new stream with that turn's attempt or event identity.
   const state = api?.id === jobId ? api.state : undefined;
   useEffect(() => {
-    if (!jobId || !state) return undefined;
+    if (!active || !jobId || !state) return undefined;
     let cancelled = false;
     getAgentJobGit(jobId)
       .then((workspace) => {
@@ -410,15 +418,15 @@ export function useAgentJob(jobId: string): {
     return () => {
       cancelled = true;
     };
-  }, [jobId, state, tick]);
+  }, [active, jobId, state, tick]);
 
   // Live events. Terminal jobs have nothing more to say, so no stream is
   // opened for them at all.
-  const isLive = state === 'running' || state === 'queued' || state === 'publishing';
+  const isLive = isActiveJobState(state);
   const currentTurnNo =
     api?.turn_no ?? thread?.jobs.find((threadJob) => threadJob.id === jobId)?.turn_no ?? 1;
   useEffect(() => {
-    if (!jobId || !isLive) return undefined;
+    if (!active || !jobId || !isLive) return undefined;
     const controller = new AbortController();
     void streamAgentJob(jobId, {
       signal: controller.signal,
@@ -443,7 +451,7 @@ export function useAgentJob(jobId: string): {
       if (!controller.signal.aborted) reload();
     });
     return () => controller.abort();
-  }, [currentTurnNo, jobId, isLive, reload]);
+  }, [active, currentTurnNo, jobId, isLive, reload]);
 
   // Title generation runs alongside the first attempt. Refresh just its metadata
   // briefly, so a long-running task does not keep its temporary title until SSE ends.
@@ -453,7 +461,7 @@ export function useAgentJob(jobId: string): {
     api.turn_no === 1 &&
     (state === 'running' || state === 'publishing' || state === 'succeeded');
   useEffect(() => {
-    if (!awaitingTitle) return;
+    if (!active || !awaitingTitle) return;
     let cancelled = false;
     let requests = 0;
     let pending = false;
@@ -482,19 +490,18 @@ export function useAgentJob(jobId: string): {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [awaitingTitle, jobId, tick]);
+  }, [active, awaitingTitle, jobId, tick]);
 
   // A queued or terminal turn's stream cannot report another turn finishing.
   // Refresh shared activity until this turn takes over or the conversation
   // and its publication have both settled.
   const publicationActive = hasActiveWorkspacePublication(api);
-  const conversationActive =
-    api?.conversation_state === 'running' || api?.conversation_state === 'queued';
+  const conversationActive = isActiveConversationState(api?.conversation_state);
   const metadataActive =
     api?.id === jobId &&
     (publicationActive || (state !== 'running' && state !== 'publishing' && conversationActive));
   useEffect(() => {
-    if (!jobId || !metadataActive) return undefined;
+    if (!active || !jobId || !metadataActive) return undefined;
     let cancelled = false;
     let pending = false;
     const version = generation.current;
@@ -520,9 +527,22 @@ export function useAgentJob(jobId: string): {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [jobId, metadataActive, tick]);
+  }, [active, jobId, metadataActive, tick]);
 
-  const job = api ? toDisplayJob(api, { events, patch, thread, threadEvents }) : null;
+  const visibleThread = useMemo(() => {
+    if (!hideForkedHistory || !thread) return thread;
+    const jobs = thread.jobs.filter((row) => !row.forked_from_job_id);
+    const own = new Set(jobs.map((row) => row.id));
+    return {
+      ...thread,
+      jobs,
+      messages: thread.messages.filter((message) => own.has(message.job_id)),
+    };
+  }, [hideForkedHistory, thread]);
+  const job = useMemo(
+    () => (api ? toDisplayJob(api, { events, patch, thread: visibleThread, threadEvents }) : null),
+    [api, events, patch, visibleThread, threadEvents],
+  );
   // The turn rows come from the thread read, which is a snapshot: a live
   // attempt replacement updates `api` and would otherwise leave the inspector
   // reading the attempt that is already gone. The current turn is therefore
