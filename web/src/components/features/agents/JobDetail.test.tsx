@@ -192,6 +192,31 @@ const HISTORY = [
 ];
 
 describe('JobDetail', () => {
+  it('adds Side Chat after Tools in the existing workspace without handling its Escape as a main stop', async () => {
+    render(<JobDetail job={makeJob()} />);
+    openWorkspace();
+    const workspace = screen.getByRole('region', { name: 'Job workspace' });
+    const tabs = within(
+      within(workspace).getByRole('tablist', { name: 'Workspace views' }),
+    ).getAllByRole('tab');
+    expect(tabs.map((tab) => tab.textContent?.replace(/\d+$/, '').trim())).toEqual([
+      'Git',
+      'Terminal',
+      'Files',
+      'Tools',
+      'Side Chat',
+    ]);
+    fireEvent.click(within(workspace).getByRole('tab', { name: 'Side Chat' }));
+    expect(screen.getByRole('textbox', { name: 'Message side chat' })).toBeVisible();
+    fireEvent.keyDown(screen.getByRole('region', { name: 'Side chat messages' }), {
+      key: 'Escape',
+    });
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+    fireEvent.click(within(workspace).getByRole('tab', { name: /^Git/ }));
+    expect(screen.queryByRole('textbox', { name: 'Message side chat' })).not.toBeInTheDocument();
+    expect(forkAgentJob).not.toHaveBeenCalled();
+  });
+
   it('opens the pending tool decision from the conversation and approves it', async () => {
     const invocation: McpInvocationApi = {
       id: 11,

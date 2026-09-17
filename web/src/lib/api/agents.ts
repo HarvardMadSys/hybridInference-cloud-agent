@@ -1168,8 +1168,14 @@ async function forkFailureType(resp: Response): Promise<string | null> {
   }
 }
 
-export async function forkAgentJob(jobId: string): Promise<AgentJobApi> {
-  const requestId = pendingForkRequestId(jobId);
+export async function forkAgentJob(
+  jobId: string,
+  options: { requestScope?: string } = {},
+): Promise<AgentJobApi> {
+  // Separate entry points can fork the same anchor for different purposes.
+  // A side chat's recovery must not consume an Edit & rewind request's child.
+  const scope = options.requestScope ? `${options.requestScope}:${jobId}` : jobId;
+  const requestId = pendingForkRequestId(scope);
   try {
     const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/fork`, {
       method: 'POST',
@@ -1181,10 +1187,10 @@ export async function forkAgentJob(jobId: string): Promise<AgentJobApi> {
     // its key can only return the same failure forever, so allow the next user
     // click to start a new, independently fenced operation after reconciliation.
     if ((await forkFailureType(resp)) === 'native_fork_failed') {
-      clearPendingForkRequest(jobId);
+      clearPendingForkRequest(scope);
     }
     const result = await jsonOrThrow<AgentJobApi>(resp);
-    clearPendingForkRequest(jobId);
+    clearPendingForkRequest(scope);
     return result;
   } catch (cause) {
     // A lost response may hide a committed fork. Keep the same key so the

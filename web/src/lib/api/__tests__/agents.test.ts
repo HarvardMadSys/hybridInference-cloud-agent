@@ -303,6 +303,24 @@ describe('agents api', () => {
     expect(secondHeaders['Idempotency-Key']).toBe(firstHeaders['Idempotency-Key']);
   });
 
+  it('keeps side chat recovery separate from another fork of the same anchor', async () => {
+    fetchWithAuth
+      .mockRejectedValueOnce(new Error('Response lost'))
+      .mockResolvedValueOnce(jsonResponse({ id: 'manual-fork', state: 'succeeded' }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'side-recovered', state: 'succeeded' }));
+    const options = { requestScope: 'side-chat:user:main-thread' };
+    await expect(forkAgentJob('shared-anchor', options)).rejects.toThrow('Response lost');
+    await forkAgentJob('shared-anchor');
+    await expect(forkAgentJob('shared-anchor', options)).resolves.toMatchObject({
+      id: 'side-recovered',
+    });
+    const headers = fetchWithAuth.mock.calls.map(
+      (call: Parameters<typeof client.fetchWithAuth>) => call[2]?.headers as Record<string, string>,
+    );
+    expect(headers[0]['Idempotency-Key']).not.toBe(headers[1]['Idempotency-Key']);
+    expect(headers[2]['Idempotency-Key']).toBe(headers[0]['Idempotency-Key']);
+  });
+
   it('rotates the fork idempotency key after a durably failed saga', async () => {
     fetchWithAuth
       .mockResolvedValueOnce(
