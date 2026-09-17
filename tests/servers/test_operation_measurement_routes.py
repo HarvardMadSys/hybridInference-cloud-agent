@@ -101,8 +101,8 @@ def _clean_measurement_state(monkeypatch, tmp_path):
 
 @pytest.fixture
 def store() -> FakeStorage:
-    """Provide a fresh in-memory store."""
-    return FakeStorage()
+    """Provide a fresh in-memory store that keeps what it is asked to store."""
+    return _PersistingStorage()
 
 
 @pytest.fixture
@@ -1483,3 +1483,94 @@ async def test_a_job_scoped_run_continues_the_interaction_it_started(
         != (first.json()["profiling"]["measurement_id"])
     )
     assert len(records()) == 2
+
+
+# ---------------------------------------------------------------------------
+# The control plane stores what it roots, without calling itself
+# ---------------------------------------------------------------------------
+
+
+class _PersistingStorage(FakeStorage):
+    """The route fake, plus the measurement capability the store reaches for."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[dict[str, Any]] = []
+        self.runs: list[dict[str, Any]] = []
+
+    async def record_operation_measurement(self, *, measurement: Any, run: Any = None) -> str:
+        """Keep one row, as the repository would."""
+        if run is not None:
+            self.runs.append(run)
+        self.rows.append(dict(measurement))
+        return "stored"
+
+
+async def test_a_file_read_is_stored_by_the_control_plane(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """The record a browser's request produced reaches the table.
+
+    The control plane roots these operations itself, so it persists them
+    in-process: routing them through its own endpoint would be an HTTP call
+    from a service to itself, with a second failure mode and a second
+    serialization of a record it already holds.
+    """
+    _enable(monkeypatch, target={"sandbox_id": SANDBOX_ID})
+    broker = _RecordingClient()
+    _use_broker(monkeypatch, broker)
+    job_id = await _ready_job(client, store)
+
+    response = await client.get(f"/v1/agent/jobs/{job_id}/files", params={"path": "README.md"})
+
+    assert response.status_code == 200
+    assert len(store.rows) == 1
+    row = store.rows[0]
+    # The same identity the client was handed, not a second one minted for
+    # storage.
+    assert row["measurement_id"] == response.json()["profiling"]["measurement_id"]
+    assert row["operation"] == "files.open"
+    assert row["request_kind"] == "files.open"
+    assert row["coverage_scope"] == "server_request"
+    assert row["job_id"] == job_id
+    assert row["owner_id"] == store.jobs[job_id]["user_id"]
+    # The experiment travels with it, so the catalogue can explain the sample.
+    assert store.runs and store.runs[0]["run_id"] == "cp-run-1"
+
+
+async def test_a_terminal_open_is_stored_once_per_request(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """A list and a create are two records, each with its own request kind."""
+    _enable(monkeypatch)
+    broker = _RecordingClient()
+    _use_broker(monkeypatch, broker)
+    job_id = await _ready_job(client, store)
+
+    listing = await client.get(f"/v1/agent/jobs/{job_id}/terminals")
+    interaction = listing.json()["profiling"]["interaction_id"]
+    await client.post(
+        f"/v1/agent/jobs/{job_id}/terminals",
+        json={"rows": 24, "cols": 80},
+        headers={INTERACTION_HEADER: interaction},
+    )
+
+    assert [row["request_kind"] for row in store.rows] == ["terminal.list", "terminal.create"]
+    assert {row["operation"] for row in store.rows} == {"terminal.open"}
+    # One interaction, two records, two measurements.
+    assert len({row["measurement_id"] for row in store.rows}) == 2
+
+
+async def test_a_request_that_was_not_selected_stores_nothing(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """Off means no row, not an empty one."""
+    broker = _RecordingClient()
+    _use_broker(monkeypatch, broker)
+    job_id = await _ready_job(client, store)
+
+    response = await client.get(f"/v1/agent/jobs/{job_id}/files")
+
+    assert response.status_code == 200
+    assert store.rows == []
+    assert store.runs == []

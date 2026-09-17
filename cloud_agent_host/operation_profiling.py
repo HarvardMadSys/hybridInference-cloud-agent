@@ -963,6 +963,11 @@ def measurement_context(
         "facts": dict(measurement.facts),
         "call_id": call_id or "",
         "expires_at": time.time() + max(0.0, measurement.deadline_mono - time.monotonic()),
+        # The parent's own start, in nanoseconds. A child on the same host
+        # shares this monotonic clock, so a turn it runs can be timed from the
+        # claim rather than from whenever the child happened to start --
+        # otherwise every sample silently loses the queueing it exists to show.
+        "started_mono_ns": measurement.started_mono_ns,
     }
 
 
@@ -999,13 +1004,20 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
     deadline = min(run.deadline_mono, inherited)
     if time.monotonic() > deadline:
         return None
+    started = context.get("started_mono_ns")
+    try:
+        started_mono_ns = int(started) if started is not None else time.monotonic_ns()
+    except (TypeError, ValueError):
+        started_mono_ns = time.monotonic_ns()
     measurement = Measurement(
         operation=operation,
         run_id=run.run_id,
         # The same id the parent minted, so the child's record and the parent's
         # selection are one measurement rather than two that look related.
         measurement_id=str(context.get("measurement_id") or f"msm_{uuid.uuid4().hex[:16]}"),
-        started_mono_ns=time.monotonic_ns(),
+        # The parent's start when it was handed over -- the claim it already
+        # paid for is part of the startup a user waits through.
+        started_mono_ns=started_mono_ns,
         deadline_mono=deadline,
         producer=str(context.get("producer") or producer),
         coverage_scope=str(
@@ -1424,6 +1436,25 @@ def _stages(measurement: Measurement) -> list[dict[str, Any]]:
     return stages
 
 
+def frozen_record(
+    measurement: Measurement | None, outcome: str, failure_stage: str | None = None
+) -> dict[str, Any] | None:
+    """Return the record this measurement would emit, without emitting it.
+
+    For a root that persists in-process rather than delivering: it needs the
+    same bytes the exporter would write, and building a second version of them
+    beside the exporter is how two descriptions of one measurement start to
+    disagree. Returns ``None`` when nothing would be emitted, so a caller can
+    treat "not selected" and "nothing to store" the same way.
+    """
+    if measurement is None or not measurement.selected:
+        return None
+    # The boundary has to be frozen first, or this would report a completeness
+    # that ``finish`` is about to re-decide from a later clock.
+    finalize(measurement, outcome)
+    return to_record(measurement, outcome=measurement.frozen_outcome, failure_stage=failure_stage)
+
+
 def finalize(measurement: Measurement | None, outcome: str) -> None:
     """Freeze this measurement's end boundary and completeness, once.
 
@@ -1591,6 +1622,12 @@ def to_record(
     record["interaction_id"] = str(
         measurement.facts.get("interaction_id") or measurement.measurement_id
     )
+    # The run's configured expiry travels with the record because the producer
+    # that delivers it also states the manifest, and a manifest built without
+    # this would have to re-derive an instant that is the experiment's
+    # identity -- the one thing it must not guess at.
+    if measurement.run_expires_at is not None:
+        record["run_expires_at"] = measurement.run_expires_at.isoformat()
     if measurement.operation == STARTUP_OPERATION:
         # A v1 consumer reads this field by name. It is written only where the
         # name is true -- for the runner's own startup operation -- so a file
@@ -1909,6 +1946,7 @@ __all__ = [
     "finish",
     "flush_sink",
     "fragment_truncated",
+    "frozen_record",
     "mark",
     "measurement_context",
     "parse_context",

@@ -913,6 +913,14 @@ def test_a_poll_that_claimed_nothing_spends_no_slot(monkeypatch):
 # ── The exporter runtime ───────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _clean_delivery_state():
+    """Every test starts having delivered nothing."""
+    runner_mod.reset_delivery_state()
+    yield
+    runner_mod.reset_delivery_state()
+
+
 def _sink_with(monkeypatch: Any, tmp_path: Any, records: list[dict[str, Any]]) -> str:
     """Point profiling at a sink holding these frozen records."""
     import json
@@ -980,7 +988,6 @@ class _StubControl:
 
 def test_a_frozen_measurement_is_delivered_after_the_turn(monkeypatch, tmp_path):
     """The record the exporter wrote reaches the control plane."""
-    import json
 
     sink = _sink_with(monkeypatch, tmp_path, [_frozen()])
     control = _StubControl([(200, {"result": "stored"})])
@@ -995,10 +1002,12 @@ def test_a_frozen_measurement_is_delivered_after_the_turn(monkeypatch, tmp_path)
     # The manifest travels with the record, derived from the same descriptor.
     assert body["run"]["run_id"] == "run-1"
     assert body["run"]["operations"] == ["attempt.startup"]
-    # The sink is this process's outbox: a delivered record leaves it, or the
-    # next turn sends it again.
+    # The sink is append-only and may be shared, so the record stays in it
+    # and this process remembers it was delivered. Rewriting the file to
+    # remove it would race another process appending to the same path.
     with open(sink) as handle:
-        assert json.loads(handle.read() or "null") is None
+        assert len([line for line in handle if line.strip()]) == 1
+    assert {"msm_1"} == runner_mod._DELIVERED_MEASUREMENT_IDS
 
 
 def test_a_duplicate_is_counted_as_such(monkeypatch, tmp_path):

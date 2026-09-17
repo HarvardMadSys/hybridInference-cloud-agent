@@ -88,12 +88,10 @@ from cloud_agent.mcp.binding_aliases import binding_aliases
 from cloud_agent.mcp.models import ALIAS_PATTERN, ConnectionStatus, ToolPolicy
 from cloud_agent.mcp.registry import resolve_connection, resolve_for_thread
 from cloud_agent.measurement_ingest import (
-    MeasurementRejected,
+    CONTROL_PLANE_PRODUCER,
     Owner,
-    require_record_matches_its_experiment,
-    validate_measurement,
-    validate_run,
 )
+from cloud_agent.measurement_persistence import manifest_for_run, persist_measurement
 from cloud_agent.operation_measurement import (
     FILE_CANDIDATES,
     FILES_LIST,
@@ -105,6 +103,7 @@ from cloud_agent.operation_measurement import (
     TERMINAL_STREAM,
     Selection,
     continuation,
+    current_run,
     operation as measured_operation,
     root_scope,
 )
@@ -239,7 +238,7 @@ from cloud_agent_host.workspace_browser import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.ports import (
@@ -2971,6 +2970,74 @@ async def _terminal_owner_workspace(
 #: What one measured broker call returns: a response body, or a live stream.
 _T = TypeVar("_T")
 
+
+def _schedule_measurement_store(
+    background_tasks: Any,
+    *,
+    capability: Any,
+    scope: Any,
+    job: Mapping[str, Any],
+    measure: Selection | None,
+) -> None:
+    """Queue this request's measurement for storage after the response.
+
+    Scheduled rather than awaited: the record is frozen by the time the
+    response is built, and the database write must not be part of the latency
+    this measurement exists to report. Nothing here blocks the request, and a
+    store that fails costs coverage rather than the file or terminal.
+    """
+    if measure is None:
+        return
+    record = measure.frozen_record()
+    if not record:
+        return
+    owner = Owner(
+        owner_id=str(job.get("user_id") or "") or None,
+        job_id=str(job.get("id") or "") or None,
+        thread_id=str(job.get("thread_id") or "") or None,
+        sandbox_id=str((job.get("thread_sandbox") or {}).get("sandbox_id") or "") or None,
+        host_id=str((job.get("thread_sandbox") or {}).get("host") or "") or None,
+    )
+    background_tasks.add_task(
+        _store_measurement_in_background,
+        capability=capability,
+        record=record,
+        owner=owner,
+        run=manifest_for_run(current_run()),
+    )
+
+
+async def _store_measurement_in_background(
+    *,
+    capability: Any,
+    record: Mapping[str, Any],
+    owner: Owner,
+    run: Any,
+) -> None:
+    """Store a measurement this process rooted, after the response is sent.
+
+    A background write has no caller left to fail: the file was read and the
+    terminal answered before this runs, so a store that is down costs coverage
+    and nothing else. It is logged rather than raised, because an exception
+    here would surface as an unhandled task error long after the request that
+    caused it.
+    """
+    try:
+        await persist_measurement(
+            capability=capability,
+            record=record,
+            owner=owner,
+            run=run,
+            now=datetime.now(UTC),
+        )
+    except Exception:
+        logger.warning(
+            "operation_measurement_store_failed",
+            exc_info=True,
+            extra={"event": "operation_measurement_store_failed"},
+        )
+
+
 #: The local stage one workspace read is timed as. Fixed before the call and
 #: not renamed afterwards: a file path is a candidate over listing and opening
 #: until its result arrives, and the request's whole duration belongs to the
@@ -3105,6 +3172,7 @@ async def _measured_call(
 async def get_agent_job_workspace_file(
     job_id: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     path: str = Query("", max_length=4096),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _RoutesStorage | None = Depends(get_storage),
@@ -3211,7 +3279,18 @@ async def get_agent_job_workspace_file(
                 measure.measurement.facts["content_truncated"] = bool(body.get("truncated"))
                 measure.measurement.facts["binary"] = bool(body.get("binary"))
             measure.outcome = "completed"
-        return _measured_response(AgentWorkspaceResponse, measure, body)
+        response = _measured_response(AgentWorkspaceResponse, measure, body)
+        # Scheduled after the response is built, so the record stored is the
+        # one the client was told about and the write is outside the latency
+        # this measurement exists to report.
+        _schedule_measurement_store(
+            background_tasks,
+            capability=_require_store(store).operation_measurements,
+            scope=scope,
+            job=job,
+            measure=measure,
+        )
+        return response
 
 
 @router.put("/jobs/{job_id}/files", response_model=AgentWorkspaceResponse)
@@ -3310,6 +3389,7 @@ async def run_agent_job_terminal_command(
 async def create_agent_job_terminal(
     job_id: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     body: AgentTerminalSessionCreateRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _RoutesStorage | None = Depends(get_storage),
@@ -3345,7 +3425,15 @@ async def create_agent_job_terminal(
             raise _terminal_broker_http_error(exc) from exc
         if measure is not None:
             measure.outcome = "completed"
-        return _measured_response(AgentTerminalSessionResponse, measure, payload)
+        response = _measured_response(AgentTerminalSessionResponse, measure, payload)
+        _schedule_measurement_store(
+            background_tasks,
+            capability=_require_store(store).operation_measurements,
+            scope=scope,
+            job=job,
+            measure=measure,
+        )
+        return response
 
 
 @router.get(
@@ -3355,6 +3443,7 @@ async def create_agent_job_terminal(
 async def list_agent_job_terminals(
     job_id: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _RoutesStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
@@ -3387,7 +3476,15 @@ async def list_agent_job_terminals(
         if measure is not None:
             measure.outcome = "completed"
             measure.measurement.facts["terminal_count"] = len(payload.get("terminals") or [])
-        return _measured_response(AgentTerminalSessionListResponse, measure, payload)
+        response = _measured_response(AgentTerminalSessionListResponse, measure, payload)
+        _schedule_measurement_store(
+            background_tasks,
+            capability=_require_store(store).operation_measurements,
+            scope=scope,
+            job=job,
+            measure=measure,
+        )
+        return response
 
 
 @router.get("/jobs/{job_id}/terminals/{terminal_id}/stream")
@@ -4372,35 +4469,52 @@ async def worker_record_measurement(
         attempt_id=int(attempt_id),
         lease_generation=int(generation),
     )
-    try:
-        measurement = validate_measurement(body.record, owner=owner)
-        run = validate_run(body.run) if body.run is not None else None
-        require_record_matches_its_experiment(record=body.record, run=run, now=datetime.now(UTC))
-    except MeasurementRejected as exc:
-        # 422: the producer sent something this deployment does not store. It
-        # is terminal -- the same bytes would be refused identically -- so the
-        # delivery policy must not retry it.
+    producer = str(body.record.get("producer") or "")
+    if body.run is None and producer != CONTROL_PLANE_PRODUCER:
+        # A producer that is not this process must state its experiment. The
+        # checks below compare the record against the manifest, so a missing
+        # one would skip the scope, the selected operations and the deadline
+        # together -- requiring it is what makes any of them bind. This
+        # process's own producers are exempt because they persist in-process,
+        # where the descriptor is already trusted.
         raise HTTPException(
             status_code=422,
-            detail={"error": {"type": "measurement_rejected", "message": str(exc)}},
-        ) from exc
-
-    result = await job_store.operation_measurements.record_operation_measurement(
-        measurement=measurement.as_row(), run=run
+            detail={
+                "error": {
+                    "type": "measurement_rejected",
+                    "message": "a producer must state its experiment manifest with its record",
+                }
+            },
+        )
+    result, reason = await persist_measurement(
+        capability=job_store.operation_measurements,
+        record=body.record,
+        owner=owner,
+        run=body.run,
+        now=datetime.now(UTC),
     )
     if result in {"conflict", "run_conflict"}:
         # The id is taken by different contents, or the experiment id names a
         # different experiment. Neither is retryable and neither overwrites.
         return WorkerMeasurementResponse(
             result=result,
-            measurement_id=measurement.measurement_id,
+            measurement_id=str(body.record.get("measurement_id") or ""),
             reason=(
                 "this measurement id already names different contents"
                 if result == "conflict"
                 else "this run id already names a different experiment"
             ),
         )
-    return WorkerMeasurementResponse(result=result, measurement_id=measurement.measurement_id)
+    if result == "rejected":
+        # Terminal, and answered as such: the same bytes would be refused
+        # identically, so the delivery policy must not retry them.
+        raise HTTPException(
+            status_code=422,
+            detail={"error": {"type": "measurement_rejected", "message": reason}},
+        )
+    return WorkerMeasurementResponse(
+        result=result, measurement_id=str(body.record.get("measurement_id") or "")
+    )
 
 
 @router.post("/worker/jobs/{job_id}/continuity", response_model=WorkerAckResponse)

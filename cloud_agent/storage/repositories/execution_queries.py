@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 
 if TYPE_CHECKING:
     from typing import Any
@@ -211,7 +212,7 @@ class PostgresExecutionQueries:
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                """
+                f"""
                 SELECT a.id AS attempt_id, a.job_id, a.attempt_no, a.lease_generation,
                        a.host_id, a.status, a.started_at, a.finished_at,
                        to_jsonb(s) AS thread_sandbox

@@ -155,6 +155,7 @@ KNOWN_RECORD_KEYS: Final = frozenset(
         # decoration: offsets from two domains must never be compared.
         "clock_domain_id",
         "boundary_frozen",
+        "run_expires_at",
         "container_action",
         "resident_action",
         "context_status",
@@ -193,6 +194,12 @@ KNOWN_MILESTONE_KEYS: Final = frozenset({"name", "offset_us", "source"})
 #: Longest nesting a stage list may reach. A record is bounded in bytes too,
 #: but a deeply nested one can be small and still expensive to walk.
 MAX_STAGE_DEPTH: Final = 4
+
+
+#: The producer name this process writes when it roots an operation itself.
+#: Named here because two places have to agree on it: the ingest, which exempts
+#: it from stating a manifest, and the control plane, which writes it.
+CONTROL_PLANE_PRODUCER: Final = "control-plane"
 
 
 class MeasurementRejected(ValueError):
@@ -612,6 +619,7 @@ def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "ALLOWED_FACTS",
+    "CONTROL_PLANE_PRODUCER",
     "DELIVERY_GRACE_S",
     "KNOWN_MILESTONE_KEYS",
     "KNOWN_OPERATIONS",

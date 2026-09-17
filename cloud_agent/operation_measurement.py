@@ -361,6 +361,18 @@ class Selection:
         """
         operation_profiling.finalize(self.measurement, self.outcome)
 
+    def frozen_record(self, *, failure_stage: str | None = None) -> dict[str, Any] | None:
+        """Return the record this request would persist, or ``None`` if none would.
+
+        The same bytes the exporter would write, so an in-process store and a
+        delivered one cannot describe the same measurement differently.
+        """
+        return operation_profiling.frozen_record(
+            self.measurement,
+            self.outcome,
+            failure_stage or self.failure_stage,
+        )
+
     def metadata(self) -> dict[str, Any] | None:
         """Return the block a response carries, or ``None`` when unselected.
 

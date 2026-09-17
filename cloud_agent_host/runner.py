@@ -80,6 +80,7 @@ from cloud_agent_host.host_runtime import (
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
 from cloud_agent_host.measurement_delivery import (
     DELIVERY_ATTEMPTS_MAX,
+    DELIVERY_DRAIN_S,
     DELIVERY_TIMEOUT_S,
     attempts_exhausted,
     classify_exception,
@@ -2401,21 +2402,48 @@ def run_turn(
         )
     finally:
         if measurement is not None:
-            control = ControlPlane(base_url, job.worker_token)
-            try:
-                deliver_measurements(
-                    control=control,
-                    job_id=job.job_id,
-                    measurement_ids=[measurement.measurement_id],
-                )
-            except Exception:
-                logger.warning(
-                    "agent_measurement_delivery_failed",
-                    exc_info=True,
-                    extra={"event": "agent_measurement_delivery_failed"},
-                )
-            finally:
-                control.close()
+            # On its own thread, waited for only briefly. Delivery talks to the
+            # network, and a control plane that is slow or unreachable must not
+            # hold this process open: the turn is over and its answer given.
+            # Whatever the thread has not finished by the drain bound is simply
+            # not delivered, which the delivery counts already report.
+            _deliver_in_background(job=job, base_url=base_url, measurement=measurement)
+
+
+def _deliver_in_background(
+    *, job: ClaimedJob, base_url: str, measurement: operation_profiling.Measurement
+) -> None:
+    """Send this turn's measurement without holding the turn open."""
+
+    def _send() -> None:
+        control = ControlPlane(base_url, job.worker_token)
+        try:
+            deliver_measurements(
+                control=control,
+                job_id=job.job_id,
+                measurement_ids=[measurement.measurement_id],
+            )
+        except Exception:
+            logger.warning(
+                "agent_measurement_delivery_failed",
+                exc_info=True,
+                extra={"event": "agent_measurement_delivery_failed"},
+            )
+        finally:
+            control.close()
+
+    thread = threading.Thread(target=_send, name="agent-measurement-delivery", daemon=True)
+    try:
+        thread.start()
+    except RuntimeError as exc:  # pragma: no cover - thread limit reached
+        logger.warning(
+            "agent_measurement_delivery_unstarted",
+            extra={"event": "agent_measurement_delivery_unstarted", "error": str(exc)},
+        )
+        return
+    # A bounded wait, not a join: the thread outlives this call if the control
+    # plane is slow, and the process may exit with it still running.
+    thread.join(timeout=DELIVERY_DRAIN_S)
 
 
 def _run_turn(
@@ -3159,6 +3187,8 @@ def deliver_measurements(
         measurement_id = str(record.get("measurement_id") or "")
         if wanted and measurement_id not in wanted:
             continue
+        if measurement_id in _DELIVERED_MEASUREMENT_IDS:
+            continue
         body: dict[str, Any] = {"record": record}
         descriptor = _profiling_descriptor()
         if descriptor:
@@ -3203,7 +3233,11 @@ def deliver_measurements(
                 break
             time.sleep(min(2.0, 0.25 * attempt))
 
-    _forget_delivered(sink, lines, delivered)
+    # Remembered in this process rather than erased from the file. The sink can
+    # be shared -- several runners on one host pointed at one state directory --
+    # and a read-modify-write of it would silently drop whatever another
+    # process appended between this call's read and its write.
+    _DELIVERED_MEASUREMENT_IDS.update(delivered)
     return counts
 
 
@@ -3219,31 +3253,16 @@ def _profiling_descriptor() -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _forget_delivered(sink: str, lines: list[str], delivered: set[str]) -> None:
-    """Rewrite the sink without the records whose fate is decided.
+#: Measurements this process has already decided the fate of. Held in memory
+#: because the sink is append-only and may be shared: rewriting it would race
+#: another process's append, and losing a record that was never delivered is
+#: exactly the failure the delivery counts exist to make visible.
+_DELIVERED_MEASUREMENT_IDS: set[str] = set()
 
-    The sink is this process's outbox. A record that was delivered or refused
-    will never be sent again, so leaving it would mean sending it on the next
-    turn -- and a refused one would be refused again, once per turn, forever.
-    A record still in flight, or one this call did not select, stays.
-    """
-    remaining: list[str] = []
-    for line in lines:
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        if str(record.get("measurement_id") or "") in delivered:
-            continue
-        remaining.append(line)
-    try:
-        with open(sink, "w", encoding="utf-8") as handle:
-            handle.writelines(remaining)
-    except OSError as exc:  # pragma: no cover - depends on the filesystem
-        logger.warning(
-            "agent_measurement_sink_unwritable",
-            extra={"event": "agent_measurement_sink_unwritable", "error": str(exc)},
-        )
+
+def reset_delivery_state() -> None:
+    """Forget which measurements this process delivered. Tests call this."""
+    _DELIVERED_MEASUREMENT_IDS.clear()
 
 
 def _bound_measurement(
@@ -3325,9 +3344,14 @@ def _hand_over_turn(
         )
         result = LaunchResult(LAUNCH_UNCERTAIN, None, f"{type(exc).__name__}: {exc}")
     if result.outcome == LAUNCH_STARTED:
-        # The child owns the record now. Emitting here as well would report one
-        # attempt twice, from two processes that measured different halves.
-        operation_profiling.discard(measurement)
+        # The child owns the record now, and with it the budget slot: the
+        # selection was handed over, so refunding it here would let one
+        # experiment spend its whole allowance on launches that were measured.
+        # Marking it finished without emitting is what releases the parent's
+        # hold on the record while keeping the slot spent.
+        if measurement is not None:
+            measurement.finished = True
+            measurement.reserved = False
         return
     if result.outcome == LAUNCH_UNCERTAIN:
         # Nothing observed the turn's fate, and the child may or may not have
