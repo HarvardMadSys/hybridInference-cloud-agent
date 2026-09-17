@@ -35,12 +35,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from cloud_agent.api.deps import get_storage
-
 # The owner guard lives beside the other agent routes. Imported rather than
 # reimplemented, and deliberately one-directional: this module depends on
-# ``routes`` and never the reverse, so there is no cycle to reason about.
-from cloud_agent.api.routes import require_agent_owner
+# ``_owner_auth`` and never the reverse, so there is no cycle to reason about.
+from cloud_agent.api._owner_auth import require_agent_owner
+from cloud_agent.api.deps import get_storage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import config_import, launch, oauth
 from cloud_agent.mcp.authorization import binding_from_selection

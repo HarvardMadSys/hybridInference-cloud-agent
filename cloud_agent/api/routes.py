@@ -30,24 +30,29 @@ import asyncio
 import contextlib
 import json
 import os
-import re
 import secrets
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Path, Query, Request
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+)
 from fastapi.responses import StreamingResponse
 
 from cloud_agent.api.deps import (
-    bearer_token,
     get_agent_app_credentials,
     get_agent_gitlab_oauth,
-    get_current_user,
     get_gateway_client,
     get_grant_client,
     get_log_store,
     get_storage,
-    looks_like_agent_token,
 )
 from cloud_agent.api.hosts import RESIDENCY_TTL_S, _mint_residency_grant
 from cloud_agent.broker_routing import (
@@ -64,24 +69,14 @@ from cloud_agent.entitlement import (
     repos_for_user,
     require_entitled_repo,
 )
-from cloud_agent.execution_profiles import (
-    RESERVED_EXECUTION_METADATA_KEYS,
-    default_execution_profile,
-)
 from cloud_agent.gateway import GatewayError
 from cloud_agent.github_app import AppNotInstalled, GitHubAppError
 from cloud_agent.host_pool import hash_secret
-from cloud_agent.identity import SESSION_COOKIE
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.mcp.binding_aliases import binding_aliases
-from cloud_agent.mcp.models import ALIAS_PATTERN, ConnectionStatus, ToolPolicy
+from cloud_agent.mcp.models import ConnectionStatus
 from cloud_agent.mcp.registry import resolve_connection, resolve_for_thread
 from cloud_agent.schemas import (
-    BASE_REF_METADATA_KEY,
-    EVENT_TYPE_PATTERN,
-    PLATFORM_REASONING_EFFORTS,
     RESET_REASONING_EFFORT,
-    AgentAttemptSummary,
     AgentAttemptTelemetry,
     AgentConfigResponse,
     AgentConversation,
@@ -90,7 +85,6 @@ from cloud_agent.schemas import (
     AgentGitWorkspaceResponse,
     AgentJobCancelResponse,
     AgentJobCreate,
-    AgentJobEvent,
     AgentJobEventsResponse,
     AgentJobListResponse,
     AgentJobResponse,
@@ -121,21 +115,17 @@ from cloud_agent.schemas import (
     AgentThreadStatsResponse,
     AgentWorkspaceResponse,
     AgentWorkspaceWriteRequest,
-    AttemptResources,
     GitHubConnectionResponse,
     GitHubConnectRequest,
     HostResidencyEstablishResponse,
-    McpBindingSummary,
     McpConnectionSummary,
     McpIntegrationResponse,
     OAuthConnectRequest,
-    ProcessObservation,
     RepoBranchesResponse,
     SourceControlAccount,
     SourceControlIntegrationsResponse,
     SourceControlProviderResponse,
     SourceControlRepository,
-    ToolCallResources,
     WorkerAckResponse,
     WorkerClaimRequest,
     WorkerClaimResponse,
@@ -158,8 +148,7 @@ from cloud_agent.schemas import (
     WorkerThreadSandbox,
     WorkerTurnResourcesRequest,
 )
-from cloud_agent.skills.models import SkillError
-from cloud_agent.skills.selection import prompt_with_skills, resolve_skills
+from cloud_agent.skills.selection import prompt_with_skills
 from cloud_agent.source_control import (
     OAuthStateError,
     SourceControlError,
@@ -179,24 +168,9 @@ from cloud_agent.tokens import (
     parse_host_token,
     parse_worker_token,
 )
-from cloud_agent.visible_models import (
-    agent_canonical_model,
-    agent_model_reasoning_efforts,
-    agent_visible_models,
-)
-from cloud_agent.workspace_broker_client import (
-    WorkspaceBrokerClient,
-    WorkspaceBrokerError,
-)
-from cloud_agent_contracts.egress import (
-    EgressPolicyError,
-    build_policy_from_env as build_egress_policy,
-)
-from cloud_agent_contracts.workspace_browser import (
-    WorkspacePathError,
-    normalize_workspace_path,
-)
-from cloud_agent_git.patch_gate import branch_name_for
+from cloud_agent.visible_models import agent_model_reasoning_efforts, agent_visible_models
+from cloud_agent.workspace_broker_client import WorkspaceBrokerClient, WorkspaceBrokerError
+from cloud_agent_contracts.workspace_browser import WorkspacePathError, normalize_workspace_path
 from cloud_agent_host.runtimes import (
     registered_runtimes,
     runtime_reasoning_efforts,
@@ -206,7 +180,6 @@ from cloud_agent_host.runtimes import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from cloud_agent.gateway import GatewayClient
     from cloud_agent.ports import (
         AttemptCommands,
         ConversationCommands,
@@ -222,16 +195,50 @@ if TYPE_CHECKING:
         SourceControlRepository as SourceControlPort,
     )
 
+
+# The shared helpers moved to their own modules (R3-a of #225). The aggregator
+# keeps binding the same objects, so a test, a ``Depends`` key or an importer
+# that still says ``routes.X`` resolves to the identity it always did. These
+# aliases exist for the transition; R5 deletes them once every caller imports
+# the new home.
+from cloud_agent.api._job_admission import (
+    ENV_SANDBOX_MCP_URL,
+    _binding_alias,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _create_job_as,
+    _idempotency_conflict,
+    _JobCreationStorage,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _require_offered_effort,
+    _require_registered_runtime,
+    _require_resolvable_model,
+    _resolve_mcp_bindings,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _resolve_skill_selection,
+)
+from cloud_agent.api._job_views import (
+    _EVENT_PAGE_SIZE,
+    _SAFE_EVENT_TYPE,
+    _attempt_duration_ms,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _attempt_resources,
+    _attempt_summary_response,
+    _egress_tiers,
+    _event_response,
+    _iso,
+    _job_response,
+)
+from cloud_agent.api._owner_auth import (
+    _owned_job,
+    authenticate_agent_owner,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    require_agent_owner,
+)
+from cloud_agent.api._workspace_access import (
+    _TERMINAL_ID_PATTERN,
+    _workspace_broker_for_job,
+    _workspace_broker_http_error,
+    _workspace_id,
+    _workspace_not_materialized,
+    _workspace_not_ready,
+)
+
 logger = get_logger(__name__)
-
-
-class _JobCreationStorage(Protocol):
-    """What creating a job reaches for: the write surface, and MCP resolution."""
-
-    conversation_commands: ConversationCommands
-    mcp: McpConnectionRepository
-    skills: SkillRepository
-    source_control: SourceControlPort
 
 
 class _RoutesStorage(Protocol):
@@ -255,12 +262,6 @@ class _RoutesStorage(Protocol):
     source_control: SourceControlPort
 
 
-#: The MCP relay's address **as a sandbox can reach it** — a host-local relay,
-#: not this process's own bind address, which is why it is configured rather
-#: than derived. Unset means this deployment offers no MCP: the claim carries
-#: no address, and a runtime asked for servers anyway refuses rather than
-#: resolving them against the inference gateway, which does not answer for MCP.
-ENV_SANDBOX_MCP_URL = "AGENT_SANDBOX_MCP_URL"
 # The host fork request is bounded to 180s. Keep one short recovery margin so
 # a second API worker cannot take over while the first is still recording its
 # receipt; a crashed worker becomes retryable without waiting for the 15-minute
@@ -281,14 +282,7 @@ _SSE_HEADERS = {
 
 _POLL_INTERVAL_S = 1.0
 _KEEPALIVE_EVERY_N_POLLS = 15
-_EVENT_PAGE_SIZE = 500
 
-# The schema constrains event_type on the way in, but the SSE writer must be
-# safe on its own: rows written before that constraint existed (or by any
-# future non-HTTP writer) must not be able to break out of the ``event:`` field
-# and inject frames into the owner's stream.
-_SAFE_EVENT_TYPE = re.compile(EVENT_TYPE_PATTERN)
-_TERMINAL_ID_PATTERN = r"^term_[A-Za-z0-9_-]{1,80}$"
 
 # The clone credential is narrowed at the point it is minted, not merely by
 # convention: the App also holds `contents: write` for the publisher, and an
@@ -303,73 +297,6 @@ _CLONE_SCOPE = {"contents": "read"}
 #: report it claims to be. Enforced on the raw body before parsing so an
 #: oversized post cannot allocate a model first.
 MAX_TURN_RESOURCES_BODY_BYTES = 16 * 1024
-
-
-async def authenticate_agent_owner(
-    request: Request,
-    authorization: str | None = Header(None),
-) -> dict[str, Any]:
-    """Authenticate an Agent owner from this service's session.
-
-    There is **one** owner credential here: the session token
-    :mod:`cloud_agent.identity` mints, carried either in the ``HttpOnly``
-    cookie ``/v1/session/login`` sets — which is all the web app holds — or as
-    a bearer, for a programmatic caller that has one. ``get_current_user``
-    accepts both, preferring the cookie.
-
-    **The API-key branch was deleted on 2026-08-04**, not merely disabled. It
-    resolved an ``hyi-*`` key through the gateway's ``api_keys`` table, which
-    did not move; nothing in this repository ever set the store it read, and
-    ``GatewayClient`` answers "may this user sign in", never "who owns this
-    key". A branch with no producer answers 503 in every real deployment while
-    looking implemented, and invites a later reader to "fix" it by reaching
-    back into the gateway's database — the coupling this split exists to
-    remove. Its ported test is recorded in MIGRATION.md's discarded register.
-    Restoring a programmatic owner credential means adding a gateway contract
-    under ``contracts/``, not resurrecting this.
-
-    One namespace is still refused **before** the session verifier sees it: a
-    worker capability token (``ajt.*``) is the sandbox's credential, and a
-    credential that escaped the sandbox must be told apart from an unknown one
-    rather than reported as a missing session. The gateway spelled this as an
-    allowlist of inference paths because the same dependency also guarded
-    ``/v1/chat/completions``; this service serves no inference route, so it
-    collapses to a flat 403 ``insufficient_scope``. The cookie still wins when
-    both are present, which is the precedence ``session_token`` documents.
-    """
-    presented = bearer_token(authorization)
-    if not request.cookies.get(SESSION_COOKIE) and looks_like_agent_token(presented):
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": {
-                    "type": "insufficient_scope",
-                    "message": "This credential may only be used for model inference.",
-                }
-            },
-        )
-
-    return await get_current_user(request=request, authorization=authorization)
-
-
-async def require_agent_owner(
-    request: Request,
-    user: dict[str, Any] = Depends(authenticate_agent_owner),
-    gateway: GatewayClient = Depends(get_gateway_client),
-) -> dict[str, Any]:
-    """Require current Gateway admission for every owner read and write.
-
-    Identity selects the owner; the Gateway's explicit agent.use permission
-    admits the request. Local ownership checks still fence every resource.
-    """
-    from cloud_agent.api.deps import require_agent_access
-
-    decision = await require_agent_access(gateway, user["user_id"])
-    return {
-        **user,
-        "agent_access": decision.public().model_dump(),
-        "is_admin": decision.permits("agent.admin"),
-    }
 
 
 def _sse_frame(event: dict[str, Any]) -> str:
@@ -399,11 +326,6 @@ def _require_store(store: _RoutesStorage | None) -> _RoutesStorage:
     return store
 
 
-def _iso(value: Any) -> str | None:
-    """Render a timestamp column as ISO-8601 (or None)."""
-    return value.isoformat() if value is not None else None
-
-
 async def _job_usage(log_store: Any, job_id: str) -> dict[str, Any]:
     """Read one job's spend and token totals from the billing ledger.
 
@@ -425,186 +347,6 @@ async def _job_usage(log_store: Any, job_id: str) -> dict[str, Any]:
             usage["tokens_out"] = int(totals.get("tokens_out", 0))
             usage["model_calls"] = int(totals.get("calls", 0))
     return usage
-
-
-def _egress_tiers() -> tuple[str | None, str | None]:
-    """Report the deployment's per-phase egress posture, if it has one."""
-    try:
-        policy = build_egress_policy()
-    except EgressPolicyError:
-        # A misconfigured policy is the runner's problem to refuse at preflight,
-        # not a reason to fail an owner reading their own job.
-        return None, None
-    return policy.tier_for("setup").value, policy.tier_for("agent").value
-
-
-def _attempt_duration_ms(telemetry: dict[str, Any] | None) -> int | None:
-    """How long the selected attempt ran, or None while it still is."""
-    if not telemetry:
-        return None
-    started, finished = telemetry.get("started_at"), telemetry.get("finished_at")
-    if started is None or finished is None:
-        return None
-    return max(0, int((finished - started).total_seconds() * 1000))
-
-
-def _attempt_resources(telemetry: dict[str, Any] | None) -> AttemptResources | None:
-    """Shape the resource rollup, or None when no accounting record was reported.
-
-    A row whose counters are all null is still returned: it carries
-    ``coverage`` and is how a reader learns the turn was not measured, which
-    is a different statement from a turn that used nothing.
-    """
-    if not telemetry or telemetry.get("sampler_version") is None:
-        return None
-    return AttemptResources(
-        cpu_usec=telemetry.get("cpu_usec"),
-        mem_peak_bytes=telemetry.get("mem_peak_bytes"),
-        mem_avg_bytes=telemetry.get("mem_avg_bytes"),
-        io_read_bytes=telemetry.get("io_read_bytes"),
-        io_write_bytes=telemetry.get("io_write_bytes"),
-        net_rx_bytes=telemetry.get("net_rx_bytes"),
-        net_tx_bytes=telemetry.get("net_tx_bytes"),
-        sample_count=telemetry.get("sample_count") or 0,
-        coverage=float(telemetry.get("coverage") or 0.0),
-        sampler_version=telemetry.get("sampler_version"),
-        tool_time_ms=telemetry.get("tool_time_ms"),
-        tool_calls=[ToolCallResources(**call) for call in telemetry.get("tool_calls") or []],
-        tool_calls_truncated=bool(telemetry.get("tool_calls_truncated")),
-        process_observer=telemetry.get("process_observer"),
-        process_observation_complete=bool(telemetry.get("process_observation_complete")),
-        process_events_lost=int(telemetry.get("process_events_lost") or 0),
-        processes_truncated=bool(telemetry.get("processes_truncated")),
-        processes=[ProcessObservation(**process) for process in telemetry.get("processes") or []],
-    )
-
-
-def _attempt_summary_response(telemetry: dict[str, Any]) -> AgentAttemptSummary:
-    """Shape one attempt without losing its identity at the API boundary."""
-    return AgentAttemptSummary(
-        attempt_id=telemetry["attempt_id"],
-        attempt_no=telemetry["attempt_no"],
-        continuity_mode=telemetry.get("continuity_mode"),
-        context_status=telemetry.get("context_status"),
-        duration_ms=_attempt_duration_ms(telemetry),
-    )
-
-
-def _job_response(
-    job: dict[str, Any],
-    usage: dict[str, Any] | None = None,
-    telemetry: dict[str, Any] | None = None,
-    attempt_telemetry: list[dict[str, Any]] | None = None,
-) -> AgentJobResponse:
-    """Shape a store job row for the owner-facing API."""
-    usage = usage or {}
-    setup_tier, agent_tier = _egress_tiers()
-    metadata = dict(job.get("metadata") or {})
-    base_ref = metadata.pop(BASE_REF_METADATA_KEY, None)
-    if not isinstance(base_ref, str):
-        base_ref = None
-    sandbox = job.get("thread_sandbox") or {}
-    native_fork_available = bool(
-        sandbox.get("shared_live") is True
-        and sandbox.get("native_fork_capable") is True
-        and sandbox.get("native_state") == "ready"
-        and sandbox.get("fork_operation_id") is None
-        and sandbox.get("active_attempt_id") is None
-        and bool(sandbox.get("last_settled_job_id"))
-        and job.get("state") == SUCCEEDED
-        and isinstance(job.get("native_turn_no"), int)
-        and not isinstance(job.get("native_turn_no"), bool)
-        and int(job["native_turn_no"]) > 0
-    )
-    return AgentJobResponse(
-        id=job["id"],
-        thread_id=job.get("thread_id"),
-        parent_job_id=job.get("parent_job_id"),
-        turn_no=job.get("turn_no") or 1,
-        repo=job["repo"],
-        task_prompt=job["task_prompt"],
-        title=job.get("title"),
-        title_source=job.get("title_source"),
-        runtime=job["runtime"],
-        model=job["model"],
-        execution_profile=job.get("execution_profile", "trusted-v1"),
-        reasoning_effort=job.get("reasoning_effort"),
-        base_ref=base_ref,
-        base_sha=job["base_sha"],
-        output_branch=branch_name_for(
-            sandbox.get("origin_thread_id") or job.get("thread_id") or job["id"]
-        ),
-        state=job["state"],
-        conversation_state=job.get("conversation_state"),
-        cancel_requested=job["cancel_requested"],
-        current_attempt_id=job["current_attempt_id"],
-        published_pr_url=job["published_pr_url"],
-        published_commit_sha=job.get("published_commit_sha"),
-        detail=job["detail"],
-        forked_from_job_id=job.get("fork_source_job_id"),
-        metadata=metadata or None,
-        mcp_bindings=[McpBindingSummary(**entry) for entry in (job.get("mcp_bindings") or [])],
-        skills=job.get("skills") or [],
-        created_at=_iso(job["created_at"]),
-        updated_at=_iso(job["updated_at"]),
-        pinned_at=_iso(job.get("pinned_at")),
-        archived_at=_iso(job.get("archived_at")),
-        spent_usd=usage.get("spent_usd"),
-        tokens_in=usage.get("tokens_in"),
-        tokens_out=usage.get("tokens_out"),
-        model_calls=usage.get("model_calls"),
-        setup_egress_tier=setup_tier,
-        agent_egress_tier=agent_tier,
-        telemetry_attempt_id=(telemetry or {}).get("attempt_id"),
-        continuity_mode=(telemetry or {}).get("continuity_mode"),
-        context_status=(telemetry or {}).get("context_status"),
-        resident_state=sandbox.get("resident_state"),
-        sandbox_id=sandbox.get("sandbox_id"),
-        workspace_shared=bool(sandbox.get("shared_live")),
-        native_state=sandbox.get("native_state"),
-        fork_anchor_job_id=sandbox.get("fork_anchor_job_id"),
-        native_fork_available=native_fork_available,
-        workspace_publication_state=sandbox.get("workspace_publication_state"),
-        workspace_epoch=sandbox.get("workspace_epoch"),
-        started_at=_iso((telemetry or {}).get("started_at")),
-        finished_at=_iso((telemetry or {}).get("finished_at")),
-        duration_ms=_attempt_duration_ms(telemetry),
-        resources=_attempt_resources(telemetry),
-        attempt_telemetry=[
-            _attempt_summary_response(attempt) for attempt in (attempt_telemetry or [])
-        ],
-    )
-
-
-def _event_response(event: dict[str, Any]) -> AgentJobEvent:
-    """Shape a store event row for the API."""
-    return AgentJobEvent(
-        id=event["id"],
-        attempt_id=event["attempt_id"],
-        seq=event["seq"],
-        event_type=event["event_type"],
-        payload=event["payload"],
-        created_at=_iso(event["created_at"]),
-    )
-
-
-async def _owned_job(
-    store: ConversationQueries,
-    job_id: str,
-    user: dict[str, Any],
-) -> dict[str, Any]:
-    """Fetch a job the caller owns, or raise 404.
-
-    A job owned by someone else is reported as 404 rather than 403 so job ids
-    cannot be probed for existence across accounts.
-    """
-    job = await store.get_job(job_id)
-    if job is None or job["user_id"] != user["user_id"] or job.get("deleted_at") is not None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
-        )
-    return job
 
 
 # ── Owner endpoints ────────────────────────────────────────────────────
@@ -1157,44 +899,6 @@ async def list_repo_branches(
     return RepoBranchesResponse(default=found.get("default"), branches=found.get("branches", []))
 
 
-async def _require_resolvable_model(
-    model: str,
-    *,
-    gateway: Any,
-    user: dict[str, Any],
-) -> str:
-    """Resolve the requested model to its canonical id, or refuse the job.
-
-    Fail-fast on a model the job's first call would 404 on: rejecting here
-    costs a 400, while accepting costs a claim, a clone and an attempt before
-    the sandbox's first model call dies with an error that reads like a broken
-    model.
-
-    **Returns the canonical id, and the caller stores that.** Validating an
-    alias and then recording the alias was the bug this signature exists to
-    prevent: the gateway mints a grant against canonical ids, so a job carrying
-    `claude-3-opus-latest` produced a grant whose `allowed_models` matched
-    nothing. The job was created, and died at its first inference call with a
-    404 from a model that plainly exists.
-    """
-    canonical = await agent_canonical_model(model, gateway, user_id=user["user_id"])
-    if canonical is not None:
-        return canonical
-    visible = await agent_visible_models(gateway, user_id=user["user_id"])
-    raise HTTPException(
-        status_code=400,
-        detail={
-            "error": {
-                "type": "model_not_available",
-                "message": (
-                    f"Model {model!r} is not available to agent jobs on this deployment. "
-                    f"Available: {', '.join(visible[:20]) or 'none'}."
-                ),
-            }
-        },
-    )
-
-
 async def _mcp_connections_for_user(store: _RoutesStorage, user_id: str) -> list[dict[str, Any]]:
     """The MCP connections *this user* has added, for the composer.
 
@@ -1228,424 +932,6 @@ async def _mcp_connections_for_user(store: _RoutesStorage, user_id: str) -> list
             }
         )
     return summaries
-
-
-async def _resolve_mcp_bindings(
-    requested: list[Any] | None, *, runtime: str, store: McpConnectionRepository, user_id: str
-) -> list[dict[str, Any]]:
-    """Settle which MCP connections a new session may use, or refuse to create it.
-
-    Resolved against the *creating user's* connections. That is the signature
-    this whole feature turns on: a connection somebody else added is unknown
-    here, and there is no deployment-wide list to fall back from.
-
-    Omitted choices inherit the owner's connected servers at claim time with
-    confirmation required. Entries supplied here are explicit conversation
-    overrides and remain authoritative when defaults are synchronized.
-
-    Every failure is a refusal rather than a silent drop: a job is submitted
-    because someone wants a task done, and a task written around a tool the
-    agent turns out not to have does not fail -- it quietly produces the wrong
-    work, having spent the budget.
-    """
-    if not requested:
-        return []
-    if runtime not in runtimes_supporting_mcp():
-        supported = ", ".join(runtimes_supporting_mcp()) or "none"
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": {
-                    "type": "invalid_request",
-                    "message": (
-                        f"the {runtime!r} runtime cannot be given MCP connections on this "
-                        f"deployment. Runtimes that can: {supported}."
-                    ),
-                }
-            },
-        )
-    prepared: list[dict[str, Any]] = []
-    aliases: list[tuple[int, str | None, str]] = []
-    for entry in requested:
-        connection_id = int(getattr(entry, "connection_id", 0) or 0)
-        row = await store.get_mcp_connection(connection_id=connection_id, user_id=user_id)
-        if row is None:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": f"you have no MCP connection with id {connection_id}.",
-                    }
-                },
-            )
-        resolved = await resolve_connection(store, row=row)
-        if not resolved.usable:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": (
-                            f"the {resolved.connection.label!r} MCP connection cannot be "
-                            f"used: {resolved.error}"
-                        ),
-                    }
-                },
-            )
-        snapshot = resolved.snapshot
-        available = {capability.name for capability in (snapshot.tools if snapshot else ())}
-        selected = {
-            str(name): str(policy) for name, policy in (getattr(entry, "tools", None) or {}).items()
-        }
-        unknown = sorted(set(selected) - available)
-        if unknown:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": (
-                            f"{resolved.connection.label!r} does not offer: "
-                            f"{', '.join(unknown)}. Run a connection test to refresh what "
-                            "it advertises."
-                        ),
-                    }
-                },
-            )
-        rules: dict[str, Any] = {}
-        for name, policy in selected.items():
-            try:
-                parsed = ToolPolicy(policy)
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": {
-                            "type": "invalid_request",
-                            "message": (
-                                f"unknown tool policy {policy!r}; use deny, confirm or allow."
-                            ),
-                        }
-                    },
-                ) from exc
-            capability = next(
-                (item for item in (snapshot.tools if snapshot else ()) if item.name == name),
-                None,
-            )
-            rules[name] = {
-                "policy": parsed.value,
-                "fingerprint": capability.fingerprint() if capability else "",
-            }
-        try:
-            other_rules = {
-                kind: {
-                    str(name): ToolPolicy(str(policy)).value
-                    for name, policy in (getattr(entry, kind, None) or {}).items()
-                }
-                for kind in ("resources", "prompts")
-            }
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": "Unknown MCP capability policy; use deny, confirm or allow.",
-                    }
-                },
-            ) from exc
-        has_selection = any(rule["policy"] != "deny" for rule in rules.values()) or any(
-            policy != "deny" for policies in other_rules.values() for policy in policies.values()
-        )
-        prepared.append(
-            {
-                "connection_id": connection_id,
-                "alias": "",
-                "enabled": bool(getattr(entry, "enabled", True)) and has_selection,
-                "config_revision": resolved.connection.config_revision,
-                "authorization_epoch": resolved.connection.authorization_epoch,
-                "capability_revision": resolved.connection.capability_revision,
-                "policy_revision": 1,
-                "rules": rules,
-                "resource_rules": other_rules["resources"],
-                "prompt_rules": other_rules["prompts"],
-            }
-        )
-        aliases.append((connection_id, getattr(entry, "alias", None), _binding_alias(row)))
-    try:
-        for binding, alias in zip(prepared, binding_aliases(aliases), strict=True):
-            binding["alias"] = alias
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"type": "invalid_request", "message": str(exc)}},
-        ) from exc
-    return prepared
-
-
-def _binding_alias(row: dict[str, Any]) -> str:
-    """A stable, displayable prefix for one connection's tool names.
-
-    Derived from the template when there is one, and from the connection id
-    otherwise. Never from the label: a label is free text the owner can edit,
-    and an alias that changed under a rename would look to a running session
-    like its tools had disappeared.
-    """
-    template = str(row.get("template") or "").strip()
-    if template and re.fullmatch(ALIAS_PATTERN, template):
-        return template
-    return f"mcp{row['id']}"
-
-
-def _require_registered_runtime(runtime: str) -> None:
-    """400 unless ``runtime`` names a registered harness.
-
-    The registry is the trust boundary (design D2): what may run is what this
-    deployment registered, never whatever string a request carried.
-    """
-    known = registered_runtimes()
-    if runtime not in known:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": {
-                    "type": "invalid_request",
-                    "message": (
-                        f"unknown runtime {runtime!r}; this deployment registers: "
-                        + ", ".join(known)
-                    ),
-                }
-            },
-        )
-
-
-async def _require_offered_effort(
-    effort: str | None,
-    *,
-    runtime: str,
-    model: str,
-    gateway: Any,
-    user: dict[str, Any],
-) -> str | None:
-    """400 unless ``effort`` is one this runtime *and* this model both accept.
-
-    The offered set is the intersection, and it is checked rather than clamped.
-    Clamping looks kinder and is worse: glm-5.3 has no ``medium``, so a
-    ``medium`` quietly served as ``high`` would bill and behave as a depth
-    nobody chose while reporting the one they did — the same lie as a flag that
-    resolves to nothing, which is what this whole control exists to end.
-
-    Args:
-        effort: The requested level, or ``None`` for Auto.
-        runtime: The harness this turn will run on.
-        model: The canonical model id, already resolved.
-        gateway: Client for the gateway's internal contracts.
-        user: The authenticated owner.
-
-    Returns:
-        The value to store: ``None`` for Auto, else the validated level.
-
-    Raises:
-        HTTPException: 400 when the pair does not offer this value.
-    """
-    if effort is None or effort == RESET_REASONING_EFFORT:
-        # The sentinel means unset wherever it appears. On a follow-up it also
-        # has to be told apart from "inherit" (that caller checks it before
-        # getting here); on a create there is nothing to inherit, so the two
-        # spellings are the same answer and neither is a 400.
-        return None
-    runtime_levels = runtime_reasoning_efforts().get(runtime, [])
-    # The model's entry is read as a yes/no — does it take the parameter at
-    # all — and not for its contents. Per-model domains were tried and
-    # withdrawn: the providers' documented lists disagreed with what their
-    # APIs accept, so the levels are this platform's and the same everywhere.
-    takes_effort = bool(
-        (await agent_model_reasoning_efforts(gateway, user_id=user["user_id"])).get(model)
-    )
-    offered = (
-        [level for level in PLATFORM_REASONING_EFFORTS if level in runtime_levels]
-        if takes_effort
-        else []
-    )
-    if effort in offered:
-        return effort
-    raise HTTPException(
-        status_code=400,
-        detail={
-            "error": {
-                "type": "reasoning_effort_not_available",
-                "message": (
-                    f"Reasoning effort {effort!r} is not available for {runtime!r} "
-                    f"with {model!r}. Available: {', '.join(offered) or 'none'}."
-                ),
-            }
-        },
-    )
-
-
-async def _resolve_skill_selection(
-    store: SkillRepository, *, user_id: str, skill_ids: list[int] | None
-) -> list[dict[str, Any]] | None:
-    """Resolve owned instruction snapshots before persisting a submission."""
-    try:
-        return await resolve_skills(store, user_id=user_id, skill_ids=skill_ids)
-    except SkillError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"type": "invalid_skill_selection", "message": str(exc)}},
-        ) from exc
-
-
-async def _create_job_as(
-    body: AgentJobCreate,
-    user: dict[str, Any],
-    *,
-    job_store: _JobCreationStorage,
-    app_credentials: Any | None,
-    gateway: Any,
-    reserved_metadata: dict[str, Any] | None = None,
-    client_request_id: str | None = None,
-) -> dict[str, Any]:
-    """Create one job for ``user``, shared by the owner and service doors.
-
-    Extracted so the on-call service surface (``api/service_jobs.py``) creates
-    jobs through exactly the checks the owner route runs — model resolution,
-    repo entitlement, ref pinning — rather than through a parallel path that
-    drifts. ``reserved_metadata`` is stamped *after* caller metadata for the
-    same reason ``BASE_REF_METADATA_KEY`` is popped first: a display fact the
-    platform asserts must not be spoofable by the request body.
-    """
-    # A resend is answered before the checks below, every one of which can
-    # change between two sends of one submission: a model can be retired, an
-    # entitlement revoked, a tool server disconnected. They held when the first
-    # send created the job, and running them again on the resend is how a lost
-    # response became a 4xx instead of the job it had already made.
-    fingerprint = (
-        request_fingerprint(
-            "create",
-            body.model_dump(mode="json"),
-        )
-        if client_request_id is not None
-        else None
-    )
-    if client_request_id is not None:
-        replayed = await job_store.conversation_commands.replayed_submission(
-            user_id=user["user_id"],
-            client_request_id=client_request_id,
-            fingerprint=fingerprint,
-        )
-        if replayed is not None:
-            if replayed.get("error") == "client_request_conflict":
-                raise _idempotency_conflict()
-            return replayed
-    # Fail here, not at claim time. An unregistered runtime used to travel all
-    # the way into a queued row and burn a claim before anything noticed —
-    # the composer only offers registered ids, so an arbitrary string can only
-    # arrive from a direct API caller, and it deserves a 400, not a dead job.
-    # The check lives in the helper rather than in the owner route because the
-    # service door creates jobs through here too: a check only one door runs
-    # is precisely the drift this extraction exists to prevent.
-    _require_registered_runtime(body.runtime)
-    # Canonical from here on. The grant the gateway mints names canonical
-    # ids, so a job that stored the alias would carry a scope matching
-    # nothing — created successfully, dead at its first inference call.
-    model = await _require_resolvable_model(body.model, gateway=gateway, user=user)
-    # Checked against the *resolved* model, not the requested spelling: the
-    # domain belongs to the model the turn will actually call.
-    reasoning_effort = await _require_offered_effort(
-        body.reasoning_effort, runtime=body.runtime, model=model, gateway=gateway, user=user
-    )
-    # The requester chooses the repository and the platform later mints a real
-    # installation token for it. Without this the two combine into a confused
-    # deputy: name any repository the App reaches, and read it back through
-    # your own job's events and patch.
-    try:
-        await require_entitled_repo(
-            body.repo,
-            user["user_id"],
-            store=job_store.source_control,
-            app_credentials=app_credentials,
-        )
-    except RepoNotAllowed as exc:
-        raise HTTPException(
-            status_code=403,
-            detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
-        ) from exc
-    # A branch is resolved to the commit it points at *now*. The job stores the
-    # sha: a branch moves, so a job that recorded "dev" would silently mean a
-    # different tree by the time it ran, and the publisher applies its patch
-    # onto a pinned commit.
-    base_sha = body.base_sha
-    if base_sha is None and body.base_ref and app_credentials is not None:
-        try:
-            base_sha = await app_credentials.resolve_ref(body.repo, body.base_ref)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": f"could not resolve {body.base_ref!r} in {body.repo}: {exc}",
-                    }
-                },
-            ) from exc
-
-    metadata = dict(body.metadata or {})
-    # Reserved display fact: caller metadata must not be able to claim the
-    # job was pinned from a different branch than the one the API resolved.
-    metadata.pop(BASE_REF_METADATA_KEY, None)
-    # Execution policy and its evidence are server-owned facts. Opaque
-    # metadata must not be able to manufacture a contradictory audit trail.
-    for key in RESERVED_EXECUTION_METADATA_KEYS:
-        metadata.pop(key, None)
-    if body.base_ref:
-        metadata[BASE_REF_METADATA_KEY] = body.base_ref
-    for key, value in (reserved_metadata or {}).items():
-        metadata[key] = value
-    # Shared-live is enforced globally at claim time, not represented as an
-    # optional per-job requirement. Job metadata therefore remains caller data
-    # plus server-owned execution facts, without a hidden rollout switch.
-    mcp_bindings = await _resolve_mcp_bindings(
-        body.mcp_bindings, runtime=body.runtime, store=job_store.mcp, user_id=user["user_id"]
-    )
-    try:
-        execution_profile = default_execution_profile().value
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": {"type": "invalid_configuration", "message": str(exc)}},
-        ) from exc
-    skills = await _resolve_skill_selection(
-        job_store.skills, user_id=user["user_id"], skill_ids=body.skill_ids
-    )
-    job = await job_store.conversation_commands.create_job(
-        user_id=user["user_id"],
-        repo=body.repo,
-        task_prompt=body.task_prompt,
-        runtime=body.runtime,
-        model=model,
-        execution_profile=execution_profile,
-        reasoning_effort=reasoning_effort,
-        base_sha=base_sha,
-        setup_script=body.setup_script,
-        metadata=metadata or None,
-        mcp_bindings=mcp_bindings,
-        **({"skills": skills} if skills is not None else {}),
-        client_request_id=client_request_id,
-        # Over the request as sent, not as resolved: a branch that moved
-        # between two sends of one submission is still one submission. The
-        # same value the replay lookup above used, so the pre-check and the
-        # unique index cannot disagree about what was sent.
-        client_request_fingerprint=fingerprint,
-    )
-    if job.get("error") == "client_request_conflict":
-        raise _idempotency_conflict()
-    logger.info(
-        "agent_job_created",
-        extra={"event": "agent_job_created", "job_id": job["id"], "runtime": body.runtime},
-    )
-    return job
 
 
 @router.post("/jobs", response_model=AgentJobResponse, status_code=201)
@@ -2064,18 +1350,6 @@ def _sandbox_context_lost_error() -> HTTPException:
                     "This chat's retained sandbox has an indeterminate or lost "
                     "context and cannot safely accept another message."
                 ),
-            }
-        },
-    )
-
-
-def _idempotency_conflict() -> HTTPException:
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "idempotency_conflict",
-                "message": "This Idempotency-Key was already used for a different submission.",
             }
         },
     )
@@ -2752,56 +2026,6 @@ async def list_agent_job_events(
     )
 
 
-def _workspace_id(job: dict[str, Any]) -> str:
-    """Address the chat member inside its retained shared container."""
-    thread_id = job.get("thread_id")
-    if not thread_id:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": "This chat has no retained workspace.",
-                }
-            },
-        )
-    return str(thread_id)
-
-
-def _workspace_broker_http_error(exc: WorkspaceBrokerError) -> HTTPException:
-    """Map private broker failures onto bounded owner-facing errors."""
-    missing_workspace = _workspace_not_materialized(exc)
-    status = (
-        409
-        if missing_workspace
-        else exc.status_code
-        if exc.status_code in {400, 404, 408, 409, 413, 429}
-        else 503
-    )
-    message = "This chat has no retained workspace." if missing_workspace else exc.message
-    return HTTPException(
-        status_code=status,
-        detail={"error": {"type": "workspace_unavailable", "message": message}},
-    )
-
-
-def _workspace_not_materialized(exc: WorkspaceBrokerError) -> bool:
-    """Recognize the shared-only broker's missing-workspace response."""
-    return exc.status_code == 404 and exc.message == "shared chat workspace is not materialized"
-
-
-async def _workspace_broker_for_job(
-    store: _RoutesStorage,
-    job: dict[str, Any],
-) -> WorkspaceBrokerClient | None:
-    """Resolve the owning broker and restore shared aliases before use."""
-    broker = await broker_for_job(store.host_pool, job["id"])
-    try:
-        return await hydrate_shared_broker(job, broker)
-    except WorkspaceBrokerError as exc:
-        raise _workspace_broker_http_error(exc) from exc
-
-
 def _terminal_broker_http_error(exc: WorkspaceBrokerError) -> HTTPException:
     """Preserve terminal errors while presenting a missing workspace as a conflict."""
     if _workspace_not_materialized(exc):
@@ -2815,18 +2039,6 @@ def _terminal_broker_http_error(exc: WorkspaceBrokerError) -> HTTPException:
             },
         )
     return _workspace_broker_http_error(exc)
-
-
-def _workspace_not_ready() -> HTTPException:
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "workspace_not_ready",
-                "message": "The workspace is temporarily locked while the agent prepares or saves it.",
-            }
-        },
-    )
 
 
 async def _require_mutable_workspace_ready(

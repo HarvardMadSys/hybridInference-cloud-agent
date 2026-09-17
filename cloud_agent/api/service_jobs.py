@@ -40,6 +40,13 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
+from cloud_agent.api._job_admission import _create_job_as
+from cloud_agent.api._job_views import (
+    _EVENT_PAGE_SIZE,
+    _event_response,
+    _job_response,
+)
+from cloud_agent.api._owner_auth import _owned_job
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
@@ -47,13 +54,6 @@ from cloud_agent.api.deps import (
     require_agent_access,
     require_store,
     verify_admin_access,
-)
-from cloud_agent.api.routes import (
-    _EVENT_PAGE_SIZE,
-    _create_job_as,
-    _event_response,
-    _job_response,
-    _owned_job,
 )
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (

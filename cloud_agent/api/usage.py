@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends
 
+from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
 from cloud_agent.api.deps import get_storage, require_store
-from cloud_agent.api.routes import _owned_job, require_agent_owner
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.ledger import (
     JobUsageResponse,
