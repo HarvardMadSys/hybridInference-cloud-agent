@@ -1,13 +1,13 @@
 """Persist the official MCP directory without touching existing connections.
 
-Revision ID: 0012_mcp_catalog_cache
-Revises: 0011_mcp_rolling_compat
+Revision ID: 0013_mcp_catalog_cache
+Revises: 0012_host_concurrency
 """
 
 from alembic import op
 
-revision = "0012_mcp_catalog_cache"
-down_revision = "0011_mcp_rolling_compat"
+revision = "0013_mcp_catalog_cache"
+down_revision = "0012_host_concurrency"
 branch_labels = None
 depends_on = None
 

@@ -96,7 +96,7 @@ listed with a documentation path to manual JSON; required fields are never
 silently omitted. Importing still uses the existing target validation, encrypted
 credential storage, execution-location choice and per-conversation permissions.
 
-Migration 0012 adds a standalone cache table and does not alter the connection
+Migration 0013 adds a standalone cache table and does not alter the connection
 schema or old API projections. No feature flag or external API key is required.
 
 Validation includes real full-feed synchronization, round-tripping generated
