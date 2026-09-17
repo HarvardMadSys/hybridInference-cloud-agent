@@ -292,31 +292,56 @@ if runs_phase prepare-database; then
   compose run --rm --no-deps control-plane \
     python -m cloud_agent.identity_namespace --check
 
-  # Heartbeats are HTTP calls to the control plane, not direct database writes.
-  # Preserve the old API on an ordinary rolling deploy.  Only when no API
-  # container is running may this target generation be started early so a host
-  # coming up in parallel can enroll/heartbeat and release the compatibility
-  # fence.  There is no older service to replace in this branch; user work stays
-  # queued until an eligible host appears.
-  #
-  # **In this phase, not in `activate`.** Review found the phase split had moved
-  # it: with the host activating before the control plane, a cold machine
-  # deadlocked — the database was prepared, the host replaced its runners, and
-  # then waited for an API and an MCP relay that only a later phase would have
-  # started. The design says the same thing in its own words (§8.2 constraint
-  # 6): keep the controlled bootstrap of missing listeners so a first
-  # deployment does not hang waiting for a host heartbeat. Starting a service
-  # that is not running replaces nothing, which is what lets it live here.
+fi
+
+# Heartbeats are HTTP calls to the control plane, not direct database writes.
+# Preserve the old API on an ordinary rolling deploy. Only when no API container
+# is running may this target generation be started early, so a host coming up in
+# parallel can enroll and heartbeat and release the compatibility fence. There is
+# no older service to replace in that branch; user work stays queued until an
+# eligible host appears.
+#
+# **Called by both phases, and idempotent.** The database phase runs it so a cold
+# machine has listeners before the host replaces its runners — the design's
+# constraint 6, and the deadlock the phase split first introduced. Activation
+# runs it again because a *previous* activation may have failed and the trap
+# below may have stopped exactly these services: review found that a retry then
+# went straight to a fence which requires a heartbeat newer than the check, with
+# no API running to accept one. The transient failure was gone and the retry
+# still timed out.
+#
+# **The record only grows.** It names the services this deployment started, and
+# it is what lets a failure stop those and not a service that was already
+# serving. Finding them running is not a reason to forget them — they may be
+# running *because* an earlier phase of this same deployment started them, which
+# is what a repeated `prepare-database` does. Only the gate and the cleanup
+# clear it.
+ensure_bootstrap_listeners() {
+  if [ "${#BOOTSTRAP_SERVICES[@]}" -eq 0 ] && [ -f "${BOOTSTRAP_RECORD}" ]; then
+    while IFS= read -r bootstrapped; do
+      [ -n "${bootstrapped}" ] && BOOTSTRAP_SERVICES+=("${bootstrapped}")
+    done < "${BOOTSTRAP_RECORD}"
+    [ "${#BOOTSTRAP_SERVICES[@]}" -eq 0 ] \
+      || log "this deployment already started: ${BOOTSTRAP_SERVICES[*]}"
+  fi
+
+  # Spelled out rather than looped: `tests/unit/deploy/test_artifact_mode_invariants.py`
+  # and `test_control_plane_deploy.py` pin these two probes by their exact text,
+  # and a fence in this script is worth more as a line somebody can grep for than
+  # as two iterations of a loop.
+  local missing=()
   RUNNING_CONTROL_ID="$(compose ps --status running -q control-plane 2>/dev/null || true)"
   RUNNING_MCP_ID="$(compose ps --status running -q mcp-relay 2>/dev/null || true)"
   if [ -z "${RUNNING_CONTROL_ID}" ]; then
+    missing+=(control-plane)
     BOOTSTRAP_SERVICES+=(control-plane)
   fi
   if [ -z "${RUNNING_MCP_ID}" ]; then
+    missing+=(mcp-relay)
     BOOTSTRAP_SERVICES+=(mcp-relay)
   fi
-  if [ "${#BOOTSTRAP_SERVICES[@]}" -gt 0 ]; then
-    log "starting missing target services for parallel host readiness: ${BOOTSTRAP_SERVICES[*]}"
+  if [ "${#missing[@]}" -gt 0 ]; then
+    log "starting missing target services for parallel host readiness: ${missing[*]}"
     # Host readiness probes both fixed sandbox relays. Starting only the API on
     # a clean machine, or assuming MCP is running merely because the API is,
     # deadlocks deployment: the host cannot publish its exact-SHA marker while
@@ -324,20 +349,23 @@ if runs_phase prepare-database; then
     # marker. The MCP app exposes only the scoped relay surface and both services
     # are loopback-bound; browser-facing web remains stopped until the gate.
     compose up -d --no-deps "${BOOTSTRAP_SERVICES[@]}"
-    # Which services this deployment started, for the phase that has to undo
-    # them. The two phases are two processes, so a shell variable does not
-    # reach `activate`, and stopping a service the deployment found already
-    # running would be this repository taking down something it did not start.
     printf '%s\n' "${BOOTSTRAP_SERVICES[@]}" > "${BOOTSTRAP_RECORD}"
-  else
-    rm -f "${BOOTSTRAP_RECORD}"
+    if [ -z "${RUNNING_CONTROL_ID}" ]; then
+      wait_for "bootstrap control plane" "http://127.0.0.1:${CP_PORT}/healthz"
+    fi
+    if [ -z "${RUNNING_MCP_ID}" ]; then
+      wait_for "bootstrap MCP relay" "http://127.0.0.1:${MCP_PORT}/healthz"
+    fi
   fi
-  if [ -z "${RUNNING_CONTROL_ID}" ]; then
-    wait_for "bootstrap control plane" "http://127.0.0.1:${CP_PORT}/healthz"
-  fi
-  if [ -z "${RUNNING_MCP_ID}" ]; then
-    wait_for "bootstrap MCP relay" "http://127.0.0.1:${MCP_PORT}/healthz"
-  fi
+}
+
+# The database phase ends with the listeners a cold machine needs, and the
+# probes above therefore run after the identity check exactly as they did when
+# this script was one pass. A second guard rather than a call inside the block:
+# a function defined above `compose build` would put its text before every fence
+# this repository pins by position.
+if runs_phase prepare-database; then
+  ensure_bootstrap_listeners
 fi
 
 if ! runs_phase activate; then
@@ -352,17 +380,10 @@ fi
 # root pass their local checks; this reverse probe then waits for that fact and
 # proves the control plane can dial every eligible broker before replacing live
 # API containers. It is a compatibility fence, not a feature switch.
-# What the database phase started, if that was a different process. Adopted
-# before the fence so the trap above covers them: a failure here has to leave
-# the machine as it found it, and "as it found it" is a fact only the phase
-# that started them knows.
-if [ "${#BOOTSTRAP_SERVICES[@]}" -eq 0 ] && [ -f "${BOOTSTRAP_RECORD}" ]; then
-  while IFS= read -r bootstrapped; do
-    [ -n "${bootstrapped}" ] && BOOTSTRAP_SERVICES+=("${bootstrapped}")
-  done < "${BOOTSTRAP_RECORD}"
-  [ "${#BOOTSTRAP_SERVICES[@]}" -eq 0 ] \
-    || log "adopting services the database phase started: ${BOOTSTRAP_SERVICES[*]}"
-fi
+# Adopt what an earlier phase of this deployment started, and restore anything a
+# previous attempt's cleanup stopped. Both before the fence, because the fence
+# wants a heartbeat that only a running API can accept.
+ensure_bootstrap_listeners
 
 log "waiting for target ${SHA} host readiness and reverse broker probes"
 READINESS_CONTAINER="${COMPOSE_PROJECT}-readiness-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}"

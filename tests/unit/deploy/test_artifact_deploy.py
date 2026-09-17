@@ -629,3 +629,78 @@ def test_a_successful_activation_stops_adopting_them(tmp_path: Path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert not (Path(env["DEPLOY_ROOT"]) / ".bootstrapped-services").exists()
+
+
+def test_retrying_a_failed_activation_restores_what_its_cleanup_stopped(tmp_path: Path):
+    """The retry path the phases make reachable, and the one review found dead.
+
+    A failed fence leaves the trap stopping the listeners this deployment
+    started. Going straight back to the fence then waits for a heartbeat newer
+    than the check, with no API running to accept one: the transient failure is
+    gone and the retry still times out.
+    """
+    script, env = deployment(tmp_path, "control-plane")
+    env["TEST_RUNNING"] = "0"
+    run(script, env, "--phase", "prepare-database", COMMIT)
+
+    env["TEST_READINESS_EXIT"] = "9"
+    failed, first = run(script, env, "--phase", "activate", COMMIT)
+    assert failed.returncode != 0
+    assert any("stop" in call["args"] for call in first)
+    assert not (Path(env["DEPLOY_ROOT"]) / ".bootstrapped-services").exists()
+
+    del env["TEST_READINESS_EXIT"]
+    retried, second = run(script, env, "--phase", "activate", COMMIT)
+
+    assert retried.returncode == 0, retried.stdout + retried.stderr
+    restarted = next(
+        call for call in second if "up" in call["args"] and "--no-deps" in call["args"]
+    )
+    assert "control-plane" in restarted["args"] and "mcp-relay" in restarted["args"]
+    fence = next(i for i, c in enumerate(second) if "cloud_agent.deploy_readiness" in c["args"])
+    started = next(
+        i for i, c in enumerate(second) if "up" in c["args"] and "--no-deps" in c["args"]
+    )
+    assert started < fence, "the API has to be accepting heartbeats before the fence waits for one"
+    assert (Path(env["DEPLOY_ROOT"]) / ".deployed-sha").read_text().strip() == COMMIT
+
+
+def test_repeating_the_database_phase_keeps_this_deployments_bootstrap_record(
+    tmp_path: Path,
+):
+    """Finding them running is not a reason to forget them: they may be running
+    *because* an earlier run of this same phase started them."""
+    script, env = deployment(tmp_path, "control-plane")
+    env["TEST_RUNNING"] = "0"
+    first, _ = run(script, env, "--phase", "prepare-database", COMMIT)
+    assert first.returncode == 0, first.stdout + first.stderr
+    record = Path(env["DEPLOY_ROOT"]) / ".bootstrapped-services"
+    assert record.read_text().split() == ["control-plane", "mcp-relay"]
+
+    env["TEST_RUNNING"] = "1"
+    again, _ = run(script, env, "--phase", "prepare-database", COMMIT)
+
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert record.read_text().split() == ["control-plane", "mcp-relay"], (
+        "the second run found them running and must not disown them"
+    )
+
+    env["TEST_READINESS_EXIT"] = "9"
+    failed, calls = run(script, env, "--phase", "activate", COMMIT)
+    assert failed.returncode != 0
+    stopped = next(call for call in calls if "stop" in call["args"])
+    assert "control-plane" in stopped["args"] and "mcp-relay" in stopped["args"]
+
+
+def test_a_warm_machine_never_records_the_generation_that_is_serving(tmp_path: Path):
+    """The other direction, and the one that matters more: a failure must not
+    stop an API this deployment found already serving."""
+    script, env = deployment(tmp_path, "control-plane")
+    run(script, env, "--phase", "prepare-database", COMMIT)
+    assert not (Path(env["DEPLOY_ROOT"]) / ".bootstrapped-services").exists()
+
+    env["TEST_READINESS_EXIT"] = "9"
+    failed, calls = run(script, env, "--phase", "activate", COMMIT)
+
+    assert failed.returncode != 0
+    assert not any("stop" in call["args"] for call in calls), [c["args"] for c in calls]

@@ -307,6 +307,11 @@ replace nothing that is serving.
 Passing no `--phase` runs every phase of that side in order, which is what a
 deployer that does not need to interleave the two should do.
 
+Every phase is safe to run again. Re-running `prepare-database` does not disown
+the listeners an earlier run of it started, and re-running `activate` after a
+failure restarts anything that failure's cleanup stopped — a fence waits for a
+heartbeat, and only a running API can accept one.
+
 The manifest supplies the commit and all owned image references. Any conflicting
 effective Compose configuration is refused before pulling or replacing services.
 Remove old image/commit overrides when switching to artifact mode. The default
