@@ -237,7 +237,7 @@ async def test_library_and_job_reads_exclude_bodies_while_inheritance_keeps_them
 
 async def test_github_content_immutability_is_enforced_by_storage(store):
     row = await create(store, source="github", source_revision="a" * 40)
-    with pytest.raises(SkillError, match="Create a copy"):
+    with pytest.raises(SkillError, match=r"^Imported GitHub skills are read-only\.$"):
         await store.skills.update_skill(
             user_id="user-1",
             skill_id=row["id"],
