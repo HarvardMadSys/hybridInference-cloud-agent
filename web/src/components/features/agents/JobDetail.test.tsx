@@ -195,7 +195,7 @@ const HISTORY = [
 ];
 
 describe('JobDetail', () => {
-  it('opens the pending tool decision from the conversation and approves it', async () => {
+  it('approves a tool call directly in the conversation without a Tools workspace tab', async () => {
     const invocation: McpInvocationApi = {
       id: 11,
       job_id: 'ajob_1',
@@ -219,8 +219,10 @@ describe('JobDetail', () => {
       return approved;
     });
     render(<JobDetail job={makeJob()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Review tools' }));
     expect(await screen.findByText('Issue tracker wants to call get_issue')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Review tools' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Tools', hidden: true })).not.toBeInTheDocument();
+    expect(screen.queryByText('MCP servers')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(decideMcpInvocation).toHaveBeenCalledWith(11, true));
     expect(await screen.findByText('get_issue · approved')).toBeVisible();

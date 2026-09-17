@@ -105,6 +105,35 @@ afterEach(() => {
 });
 
 describe('McpSessionPanel', () => {
+  it('shows inline approvals without loading server settings or filling the chat with history', async () => {
+    mockedBindings.mockRejectedValue(new Error('Server settings unavailable'));
+    mockedInvocations.mockImplementation(({ pendingOnly }) =>
+      Promise.resolve({
+        invocations: pendingOnly
+          ? [invocation]
+          : [{ ...invocation, id: 12, capability_name: 'older_call', status: 'completed' }],
+      }),
+    );
+    mockedDecide.mockResolvedValue({ ...invocation, status: 'denied' });
+    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active approvalsOnly />);
+    expect(await screen.findByText('Team wiki wants to call search')).toBeInTheDocument();
+    expect(mockedBindings).not.toHaveBeenCalled();
+    expect(screen.queryByText('MCP servers')).not.toBeInTheDocument();
+    expect(screen.queryByText('older_call · completed')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Deny' }));
+    expect(await screen.findByText('search · denied')).toBeInTheDocument();
+    expect(mockedDecide).toHaveBeenCalledWith(11, false);
+  });
+
+  it('shows a failed inline decision where the user can retry it', async () => {
+    mockedInvocations.mockResolvedValue({ invocations: [invocation] });
+    mockedDecide.mockRejectedValue(new Error('Please retry this decision.'));
+    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active approvalsOnly />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Please retry this decision.');
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled();
+  });
+
   it('shows connected servers automatically without an attach step or save requirement', async () => {
     render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
     expect(await screen.findByRole('switch', { name: /Use Team wiki/ })).toBeChecked();
