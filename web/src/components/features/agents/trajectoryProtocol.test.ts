@@ -76,8 +76,15 @@ describe('Codex trajectory projection', () => {
     expect(steps).toHaveLength(2);
     expect(steps[0].blocks?.[0].text).toBe('partial');
     expect(steps[0].status).toBe('recorded');
+    expect(steps[0].streaming).toBe(false);
     expect(steps[1].blocks?.[0].text).toBe('retry reply');
     expect(steps[1].status).toBe('completed');
+    const [empty] = buildTrajectorySteps([
+      notification(3, 'item/started', { item: { type: 'agentMessage', id: 'empty', text: '' } }),
+    ]);
+    expect(empty.streaming).toBe(false);
+    expect(empty.diagnostic).toBe(true);
+    expect(empty.sourceEvents).toHaveLength(1);
   });
 
   it('settles streamed reasoning and preserves separate summary and full-text channels', () => {

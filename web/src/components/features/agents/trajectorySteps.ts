@@ -840,6 +840,9 @@ export function buildTrajectorySteps(
     step.sourceEvents = step.sourceEvents.map((event) => originals.get(event.id) ?? event);
     if (step.diagnostic) continue;
     if (step.kind !== 'assistant') continue;
+    if (step.streaming && !context.isAttemptActive(step.jobId, step.attemptId)) {
+      step.streaming = false;
+    }
     if (
       !step.streaming &&
       !step.blocks?.some((block) => block.text.trim()) &&
