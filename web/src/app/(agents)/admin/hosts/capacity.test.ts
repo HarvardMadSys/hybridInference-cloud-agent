@@ -9,13 +9,15 @@ import type {
 
 import {
   CAPACITY_FRESH_SECONDS,
-  CHART_VIEW,
   capacitySeries,
+  CHART_VIEW,
   chartGeometry,
   chartSummaryText,
   chartXForTime,
   chartYForValue,
+  concurrencyFacts,
   cpuCell,
+  executionCeiling,
   executionSlotsCell,
   formatGib,
   formatGibPair,
@@ -163,18 +165,120 @@ describe('number formatting', () => {
 });
 
 describe('cells', () => {
-  it('states the execution quota without inventing a ceiling', () => {
-    expect(executionSlotsCell({ slots_used: 2, slots_total: 3 })).toMatchObject({
+  it('states the concurrency quota without inventing a ceiling', () => {
+    const plain = { capabilities: ['host-concurrency-v1'], status: 'online' as const };
+    expect(executionSlotsCell({ ...plain, slots_used: 2, slots_total: 3 })).toMatchObject({
       text: '2 / 3 in use',
       note: '1 free',
+      title: null,
     });
-    // Over-subscribed is clamped, never negative.
-    expect(executionSlotsCell({ slots_used: 5, slots_total: 3 }).note).toBe('0 free');
-    // No declared ceiling: the used count is a fact, the free count is not.
-    expect(executionSlotsCell({ slots_used: 2, slots_total: null })).toMatchObject({
+    // Over-subscribed is clamped, never negative — and named as finishing,
+    // because those turns were admitted before the limit came down.
+    expect(executionSlotsCell({ ...plain, slots_used: 5, slots_total: 3 }).note).toBe(
+      '0 free · 2 finishing',
+    );
+    // No report and no saved number: the running count is a fact, the free
+    // count is not.
+    expect(executionSlotsCell({ ...plain, slots_used: 2, slots_total: null })).toMatchObject({
       text: 'Limit not set',
       note: '2 in use',
     });
+  });
+
+  it('counts against what is enforced, never against what was merely saved', () => {
+    const host = { capabilities: ['kata', 'host-concurrency-v1'], status: 'online' as const };
+    // Saved below what the host reports: the lower number is the denominator
+    // at once, before the host has even heard about it.
+    expect(
+      executionSlotsCell({ ...host, slots_used: 1, slots_total: 4, slots_desired: 2 }),
+    ).toMatchObject({ text: '1 / 2 in use', note: '1 free · applying 2' });
+    // Saved above: the host's own number still bounds it until it confirms.
+    expect(
+      executionSlotsCell({ ...host, slots_used: 1, slots_total: 2, slots_desired: 5 }),
+    ).toMatchObject({ text: '1 / 2 in use', note: '1 free · applying 5' });
+    // Confirmed: nothing to say beyond the numbers.
+    expect(
+      executionSlotsCell({ ...host, slots_used: 1, slots_total: 4, slots_desired: 4 }),
+    ).toMatchObject({ text: '1 / 4 in use', note: '3 free', title: null });
+    // Lowered while full: the surplus turns finish, they are not cut short.
+    expect(
+      executionSlotsCell({ ...host, slots_used: 5, slots_total: 5, slots_desired: 2 }),
+    ).toMatchObject({ text: '5 / 2 in use', note: '0 free · applying 2 · 3 finishing' });
+    // Nothing reported but a number saved: that number is the only bound.
+    expect(
+      executionSlotsCell({ ...host, slots_used: 1, slots_total: null, slots_desired: 3 }),
+    ).toMatchObject({ text: '1 / 3 in use', note: '2 free · applying 3' });
+  });
+
+  it('separates a number a host will apply from one it never will', () => {
+    // An offline host cannot confirm anything until it reports in.
+    const offline = executionSlotsCell({
+      capabilities: ['kata', 'host-concurrency-v1'],
+      status: 'offline',
+      slots_used: 0,
+      slots_total: 3,
+      slots_desired: 6,
+    });
+    expect(offline.note).toBe('3 free · 6 not applied');
+    expect(offline.title).toContain('offline');
+
+    // A runner that predates remote limits never will, and says so instead of
+    // looking like a host that is merely slow to confirm.
+    const legacy = executionSlotsCell({
+      capabilities: ['kata'],
+      status: 'online',
+      slots_used: 0,
+      slots_total: 3,
+      slots_desired: 6,
+    });
+    expect(legacy.note).toBe('3 free · redeploy to change');
+    expect(legacy.title).toContain('redeployed');
+  });
+
+  it('says when a host with room is claiming nothing, and why', () => {
+    const stuck = executionSlotsCell({
+      capabilities: ['kata', 'host-concurrency-v1'],
+      status: 'online',
+      slots_used: 0,
+      slots_total: 3,
+      slots_desired: null,
+      launch_error: '3 turns in a row could not be started (image is broken)',
+    });
+
+    // Free capacity and no work is the state an operator most needs a reason
+    // for; the reason is the host's own words, not an inference from silence.
+    expect(stuck.note).toBe('3 free · not claiming');
+    expect(stuck.title).toContain('image is broken');
+  });
+
+  it('reports the facts behind the cell separately', () => {
+    const facts = concurrencyFacts({
+      capabilities: ['kata', 'host-concurrency-v1'],
+      status: 'online',
+      slots_used: 5,
+      slots_total: 5,
+      slots_desired: 2,
+      launch_error: '',
+    });
+
+    expect(facts).toMatchObject({
+      state: 'pending',
+      requested: 2,
+      reported: 5,
+      enforced: 2,
+      running: 5,
+      free: 0,
+      finishing: 3,
+      launchError: null,
+    });
+  });
+
+  it('derives the enforced ceiling from the lower of the two counts', () => {
+    expect(executionCeiling(4, 2)).toBe(2);
+    expect(executionCeiling(2, 4)).toBe(2);
+    expect(executionCeiling(null, 3)).toBe(3);
+    expect(executionCeiling(3, null)).toBe(3);
+    expect(executionCeiling(null, null)).toBeNull();
   });
 
   it('never renders an unmeasured CPU as zero', () => {

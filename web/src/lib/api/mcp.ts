@@ -341,6 +341,7 @@ export async function saveMcpImport(
   locations: Record<string, McpLocation> = {},
   envSecrets: Record<string, string> = {},
   formatHint?: string,
+  serverSecrets?: Record<string, Record<string, string>>,
 ): Promise<McpImportSavedApi> {
   const resp = await fetchWithAuth(API_BASE, '/v1/agent/mcp/connections/import', {
     method: 'POST',
@@ -351,6 +352,7 @@ export async function saveMcpImport(
       save: true,
       locations,
       env_secrets: envSecrets,
+      server_secrets: serverSecrets,
     }),
   });
   return jsonOrThrow(resp);
@@ -368,6 +370,20 @@ export async function testMcpConnection(connectionId: number): Promise<McpTestRe
     method: 'POST',
   });
   return jsonOrThrow(resp);
+}
+
+/** Opt into browser sign-in after a pasted URL reports that it needs authorization. */
+export async function enableMcpOAuth(connection: McpConnectionApi): Promise<McpConnectionApi> {
+  return jsonOrThrow(
+    await fetchWithAuth(API_BASE, `/v1/agent/mcp/connections/${connection.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_config_revision: connection.config_revision,
+        auth_kind: 'oauth',
+      }),
+    }),
+  );
 }
 
 /** Turn a connection off, keeping a tombstone and clearing its credential. */

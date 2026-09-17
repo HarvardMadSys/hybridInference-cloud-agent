@@ -135,10 +135,9 @@ give it a second opinion about whether the host may run untrusted code.
 There is no topology feature flag. Local, staging, and production builds all
 contain only the retained shared-session path. Safety remains fail-closed:
 
-- `STAGING_HOST_SLOTS` defaults to `3` and drives both `AGENT_HOST_SLOTS` and
-  `AGENT_RUNNER_REPLICAS`. One runner executes one turn synchronously, so the
-  host refuses readiness when declared slots exceed configured executors or
-  when fewer than the configured replicas are actually running.
+- `STAGING_HOST_SLOTS` defaults to `3` and sets `AGENT_HOST_SLOTS`: how many
+  turns the host runs at once until an admin sets a number on the Servers page.
+  The host refuses readiness until it can start a turn process.
 - `STAGING_RETAINED_DOCKER_DATA_ROOT` defaults to `/var/lib/docker`. Override it
   when the daemon uses a dedicated durable data-root; this is a daemon path,
   never a bind mount into a chat container.
@@ -389,7 +388,7 @@ To finish it:
    `PROD_CONTROL_DEPLOY_ROOT`, `PROD_SANDBOX_DEPLOY_ROOT` and
    `PROD_SANDBOX_COMPOSE_PROJECT`. `PROD_CONTROL_COMPOSE_PROJECT` only if that
    machine runs another stack of this service. `PROD_HOST_SLOTS` defaults to
-   three and drives both scheduler slots and runner replicas;
+   three and is the concurrency limit until an admin sets one;
    `PROD_RETAINED_DOCKER_DATA_ROOT` defaults to `/var/lib/docker` and must name
    the daemon's actual durable data root. If multiple sibling stacks remain on
    that machine during a migration, set `PROD_SIBLING_COMPOSE_PROJECTS` to their

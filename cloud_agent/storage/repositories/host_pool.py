@@ -217,6 +217,7 @@ class PostgresHostPoolRepository:
         capacity_sample_age_ms: int | None = None,
         physical_host: str | None = None,
         slots_total: int | None = None,
+        launch_error: str | None = None,
         runner_version: str | None = None,
         broker_url: str | None = None,
         capabilities: list[str] | None = None,
@@ -258,7 +259,11 @@ class PostgresHostPoolRepository:
             capacity: The validated, normalized capacity block to store.
             capacity_sample_age_ms: How old the observation was when sent.
             physical_host: Admin grouping label; never an identity.
-            slots_total: Claim ceiling this host now reports.
+            slots_total: The concurrency limit this host currently applies.
+            launch_error: Why it is not claiming, or ``""`` when nothing is
+                wrong. ``None`` is a host that does not report this at all and
+                leaves whatever is stored in place, the same way an unreported
+                runtime does.
             runner_version: Runner build the host is running.
             broker_url: Address the control plane reaches this host's broker.
             capabilities: What this host can run.
@@ -289,7 +294,11 @@ class PostgresHostPoolRepository:
                     runtime_versions = COALESCE($8::jsonb, runtime_versions),
                     runtime_versions_available =
                         COALESCE($9::jsonb, runtime_versions_available),
-                    labels = COALESCE(labels, '{{}}'::jsonb) || $10::jsonb
+                    labels = COALESCE(labels, '{{}}'::jsonb) || $10::jsonb,
+                    -- "" survives COALESCE for the same reason an empty
+                    -- sandbox runtime does: it is the host saying nothing is
+                    -- wrong, which has to be able to clear a stale reason.
+                    launch_error = COALESCE($11, launch_error)
                 WHERE host = $1
                 RETURNING {HOST_COLUMNS}
                 """,
@@ -309,6 +318,7 @@ class PostgresHostPoolRepository:
                     else json.dumps(runtime_versions_available)
                 ),
                 json.dumps({"physical_host": physical_host} if physical_host is not None else {}),
+                launch_error,
             )
             if row is None:
                 return None
@@ -347,6 +357,30 @@ class PostgresHostPoolRepository:
                 "UPDATE agent_runner_hosts SET status = $2 WHERE host = $1", host, status
             )
         return "ok"
+
+    async def set_host_slots_desired(self, *, host: str, slots: int | None) -> str:
+        """Ask a host to run ``slots`` turns at once, or with ``None`` its default.
+
+        Returns ``"ok"`` or ``"unknown"``. Nothing here starts or stops
+        anything: the host reads the value off its next heartbeat answer,
+        serves it as its limit, and reports it back as ``slots_total``. The
+        claim honours the lower of the two from the next poll on, so a number
+        the host has not confirmed admits nothing extra and a lowered one takes
+        effect at once. Turns already running are never touched.
+
+        The value survives heartbeats and re-enrollment on purpose. It is a
+        decision about the named machine, and neither the heartbeat's
+        ``COALESCE`` nor the registration upsert names this column. Bounds are
+        the request schema's business; the column refuses only a non-positive
+        size, which is not a size.
+        """
+        async with self._pool.acquire() as conn:
+            updated = await conn.fetchval(
+                "UPDATE agent_runner_hosts SET slots_desired = $2 WHERE host = $1 RETURNING host",
+                host,
+                slots,
+            )
+        return "ok" if updated is not None else "unknown"
 
     async def remove_host(self, *, host: str, force: bool = False) -> str:
         """Revoke a host's credential and take it out of the pool.

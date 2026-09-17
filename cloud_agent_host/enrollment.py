@@ -119,6 +119,11 @@ class HostIdentity:
     #: Seconds between heartbeats, as the control plane last reported them.
     interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S
     slots_total: int | None = None
+    #: How many turns at once the control plane last asked this host to run —
+    #: an operator's number from the admin page — or ``None`` when it has not
+    #: said, in which case the host's own default applies. Reset on every
+    #: heartbeat: a cleared request must not linger as the old number.
+    slots_desired: int | None = None
     capabilities: list[str] = field(default_factory=list)
 
 
@@ -288,6 +293,7 @@ def heartbeat(
     base_url: str,
     identity: HostIdentity,
     slots_total: int | None = None,
+    launch_error: str | None = None,
     broker_url: str | None = None,
     capabilities: list[str] | None = None,
     runner_version: str | None = None,
@@ -327,6 +333,7 @@ def heartbeat(
         f"{base_url.rstrip('/')}/v1/agent/host/heartbeat",
         {
             "slots_total": slots_total,
+            "launch_error": launch_error,
             "broker_url": broker_url,
             "capabilities": capabilities,
             "runner_version": runner_version,
@@ -358,6 +365,10 @@ def heartbeat(
         identity.interval_s = float(interval)
     reported = answer.get("slots_total")
     identity.slots_total = int(reported) if isinstance(reported, int) else identity.slots_total
+    desired = answer.get("slots_desired")
+    identity.slots_desired = (
+        int(desired) if isinstance(desired, int) and not isinstance(desired, bool) else None
+    )
     return identity
 
 
@@ -467,7 +478,8 @@ class HostHeartbeat:
         *,
         base_url: str,
         identity: HostIdentity,
-        slots_total: int | None = None,
+        slots_total: int | Callable[[], int | None] | None = None,
+        launch_error: str | Callable[[], str] | None = None,
         broker_url: str | None = None,
         capabilities: list[str] | Callable[[], list[str]] | None = None,
         runner_version: str | None = None,
@@ -484,7 +496,14 @@ class HostHeartbeat:
     ) -> None:
         self._base_url = base_url
         self._identity = identity
+        # A callable when the number can move: the host's limit is read fresh
+        # on every beat, so one that has just been lowered is never reported
+        # as the capacity it no longer offers.
         self._slots_total = slots_total
+        # Why this host is not claiming, when it is not. Read per beat for the
+        # same reason, and ``""`` is a positive "nothing wrong" rather than an
+        # absent field that would leave a stale reason on the page.
+        self._launch_error = launch_error
         self._broker_url = broker_url
         self._capabilities = capabilities
         self._runner_version = runner_version
@@ -518,6 +537,10 @@ class HostHeartbeat:
         self._on_residencies_lost = on_residencies_lost
         self._on_retained_sandboxes_stop = on_retained_sandboxes_stop
         self._stop = threading.Event()
+        #: Set to cut the wait between beats short. The supervisor pulls it
+        #: when its executor count changes, so the control plane learns the
+        #: new capacity now rather than up to an interval later.
+        self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         #: Set when the control plane says this host is gone. The runner reads
         #: it to stop claiming; it does not abandon work already in flight,
@@ -561,8 +584,13 @@ class HostHeartbeat:
     def stop(self) -> None:
         """Stop heartbeating and join."""
         self._stop.set()
+        self._wake.set()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
+
+    def wake(self) -> None:
+        """Send the next beat as soon as the thread is free, not on the timer."""
+        self._wake.set()
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -573,7 +601,12 @@ class HostHeartbeat:
                 heartbeat(
                     base_url=self._base_url,
                     identity=self._identity,
-                    slots_total=self._slots_total,
+                    slots_total=(
+                        self._slots_total() if callable(self._slots_total) else self._slots_total
+                    ),
+                    launch_error=(
+                        self._launch_error() if callable(self._launch_error) else self._launch_error
+                    ),
                     broker_url=self._broker_url,
                     capabilities=capabilities,
                     runner_version=self._runner_version,
@@ -634,7 +667,12 @@ class HostHeartbeat:
             self._wait_for_next_beat()
 
     def _wait_for_next_beat(self) -> None:
-        """Sleep one interval, waking early when the readiness marker moves.
+        """Sleep one interval, waking early for a marker move or a nudge.
+
+        Two things cut the wait short. :meth:`wake` is the supervisor saying
+        its executor count changed, and the control plane admits claims
+        against that count, so it should hear the new one now rather than up
+        to an interval later. The readiness marker is the other:
 
         A deployment publishes the exact target SHA by rewriting the marker
         file every runner already mounts, and the control plane's rollout fence
@@ -647,15 +685,19 @@ class HostHeartbeat:
         a deployment rewrites the marker at most twice, and a missed wake-up
         costs exactly what the runner pays today.
         """
+        # ``_wake`` is the one event both a nudge and ``stop`` set, so a single
+        # wait covers both; ``_stop`` itself is re-read by the loop above.
         if self._readiness_marker is None:
-            self._stop.wait(self._identity.interval_s)
+            self._wake.wait(self._identity.interval_s)
+            self._wake.clear()
             return
         deadline = time.monotonic() + self._identity.interval_s
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return
-            if self._stop.wait(min(READINESS_MARKER_POLL_S, remaining)):
+            if self._wake.wait(min(READINESS_MARKER_POLL_S, remaining)):
+                self._wake.clear()
                 return
             if self._readiness_marker_moved():
                 return

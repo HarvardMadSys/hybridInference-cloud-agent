@@ -18,16 +18,16 @@ Every column is additive. Nothing existing is renamed, dropped or backfilled,
 and a deployment that never enables persistence keeps exactly the schema it
 had.
 
-Revision ID: 0012_operation_measurements
-Revises: 0011_mcp_rolling_compat
+Revision ID: 0013_operation_measurements
+Revises: 0012_host_concurrency
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "0012_operation_measurements"
-down_revision = "0011_mcp_rolling_compat"
+revision = "0013_operation_measurements"
+down_revision = "0012_host_concurrency"
 branch_labels = None
 depends_on = None
 

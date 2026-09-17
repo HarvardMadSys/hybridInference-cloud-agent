@@ -443,6 +443,33 @@ describe('McpSessionPanel', () => {
     );
   });
 
+  it('applies approval or disable to the server without enabling automatic calls', async () => {
+    mockedBindings.mockResolvedValue({ bindings: [{ ...binding, selection_pending: false }] });
+    mockedInvocations.mockResolvedValue({ invocations: [] });
+    mockedReplace.mockResolvedValue({ bindings: [binding] });
+    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Disable all' }));
+    for (const group of screen.getAllByRole('radiogroup')) {
+      expect(within(group).getByRole('radio', { name: 'Deny' })).toBeChecked();
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Ask before each call' }));
+    for (const group of screen.getAllByRole('radiogroup')) {
+      expect(within(group).getByRole('radio', { name: 'Confirm' })).toBeChecked();
+      expect(within(group).getByRole('radio', { name: 'Allow' })).not.toBeChecked();
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Save selection' }));
+    await waitFor(() =>
+      expect(mockedReplace).toHaveBeenCalledWith('thread-1', [
+        expect.objectContaining({
+          enabled: true,
+          tools: { search: 'confirm' },
+          resources: { 'page://{slug}': 'confirm' },
+          prompts: { summarize: 'confirm' },
+        }),
+      ]),
+    );
+  });
+
   it('waits to be opened before reading anything', () => {
     render(<McpSessionPanel jobId="job-1" threadId="thread-1" active={false} />);
 

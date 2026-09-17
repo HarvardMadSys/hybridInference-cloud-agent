@@ -28,7 +28,7 @@ import json
 import sys
 import time
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
 
 from cloud_agent_host.runtimes import (
     DIFF,
@@ -41,6 +41,12 @@ from cloud_agent_host.runtimes import (
     TOOL_RESULT,
     TOOL_USE,
     AgentRuntime,
+    ClaudeCodeRuntime,
+    CodexRuntime,
+    KiloRuntime,
+    NormalizedEvent,
+    OpencodeRuntime,
+    PiRuntime,
     RuntimeMCPConfig,
     get_runtime,
 )
@@ -51,6 +57,55 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from cloud_agent_host.sandbox import SandboxProcess
+
+
+class DialectRuntime(Protocol):
+    """The dialect surface the driver, session and turn layers actually use.
+
+    Narrower than :class:`AgentRuntime` on purpose: a runtime that speaks a
+    dialect but cannot hold a resident live process stays describable without
+    being typed as one that can.
+    """
+
+    name: str
+
+    def parse_event(self, line: str) -> NormalizedEvent | None:
+        """Map one output line to its normalized event, or ``None``."""
+        ...
+
+
+class ResidentLiveRuntime(DialectRuntime, Protocol):
+    """The narrow live contract the four JSON-resident runtimes share.
+
+    Claude is absent deliberately: its ``prepare_live`` takes ``config_dir``
+    where Codex, pi, OpenCode and Kilo take ``session_state_dir`` and
+    ``activation_dir``, so Claude's sessions name :class:`ClaudeCodeRuntime`
+    directly rather than pretending the signatures are the same.
+    """
+
+    session_id: str | None
+
+    def prepare_live(
+        self,
+        *,
+        workdir: str,
+        model: str,
+        gateway_base_url: str,
+        credential: str,
+        provides_isolation: bool = False,
+        mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
+        reasoning_effort: str | None = None,
+        session_state_dir: str | None = None,
+        resume_session_id: str | None = None,
+        activation_dir: str | None = None,
+    ) -> tuple[list[str], dict[str, str]]:
+        """Build the argv and environment a resident live process starts with."""
+        ...
+
+
+_RuntimeT = TypeVar("_RuntimeT", bound=DialectRuntime)
+_RuntimeT_co = TypeVar("_RuntimeT_co", bound=DialectRuntime, covariant=True)
+_LiveRuntimeT = TypeVar("_LiveRuntimeT", bound=ResidentLiveRuntime)
 
 # Floor events (design D9): the minimum any driver must yield around a turn,
 # synthesized here so a dialect adapter cannot forget them. They are the
@@ -187,10 +242,10 @@ class LaunchContext:
     install_tool_hooks: Callable[[dict[str, Any]], None] | None = None
 
 
-class HarnessTurn:
+class HarnessTurn(Generic[_RuntimeT]):
     """One executing turn: its event stream, cancellation, and result."""
 
-    def __init__(self, session: HarnessSession, process: SandboxProcess) -> None:
+    def __init__(self, session: HarnessSession[_RuntimeT], process: SandboxProcess) -> None:
         self._session = session
         self._process = process
         self._runtime = session.runtime
@@ -269,17 +324,17 @@ class HarnessTurn:
         return TurnResult(status="completed", final_output=final, exit_code=exit_code)
 
 
-class HarnessSession:
+class HarnessSession(Generic[_RuntimeT]):
     """Common state for a live Agent CLI session."""
 
-    def __init__(self, driver: HarnessDriver, context: LaunchContext) -> None:
+    def __init__(self, driver: HarnessDriver[_RuntimeT], context: LaunchContext) -> None:
         self._driver = driver
         self._context = context
         self._closed = False
         self.retire_after_turn = False
 
     @property
-    def runtime(self) -> AgentRuntime:
+    def runtime(self) -> _RuntimeT:
         """The dialect adapter this session speaks through."""
         return self._driver.runtime
 
@@ -305,11 +360,16 @@ class HarnessSession:
         return None
 
 
-class HarnessDriver:
+class HarnessDriver(Generic[_RuntimeT_co]):
     """Base metadata for one registered live harness."""
 
-    def __init__(self, runtime: AgentRuntime) -> None:
-        self.runtime = runtime
+    def __init__(self, runtime: _RuntimeT_co) -> None:
+        self._runtime = runtime
+
+    @property
+    def runtime(self) -> _RuntimeT_co:
+        """The dialect adapter this driver speaks through."""
+        return self._runtime
 
     @property
     def id(self) -> str:
@@ -321,7 +381,7 @@ class HarnessDriver:
         raise NotImplementedError
 
 
-class CodexDriver(HarnessDriver):
+class CodexDriver(HarnessDriver[CodexRuntime]):
     """Codex app-server over its persisted rollout files."""
 
     def capabilities(self) -> HarnessCapabilities:
@@ -348,7 +408,7 @@ class CodexDriver(HarnessDriver):
         return CodexAppServerSession(self, context, resume_session_id=session_id)
 
 
-class PiDriver(HarnessDriver):
+class PiDriver(HarnessDriver[PiRuntime]):
     """pi RPC over its persisted JSONL session tree."""
 
     def capabilities(self) -> HarnessCapabilities:
@@ -373,7 +433,7 @@ class PiDriver(HarnessDriver):
         return PiRpcSession(self, context, resume_session_id=session_id)
 
 
-class OpenCodeDriver(HarnessDriver):
+class OpenCodeDriver(HarnessDriver[OpencodeRuntime]):
     """OpenCode serve over its XDG data store."""
 
     def capabilities(self) -> HarnessCapabilities:
@@ -400,7 +460,7 @@ class OpenCodeDriver(HarnessDriver):
         return HttpAgentLiveSession(self, context, resume_session_id=session_id)
 
 
-class KiloDriver(HarnessDriver):
+class KiloDriver(HarnessDriver[KiloRuntime]):
     """Kilo serve over its XDG data store."""
 
     def capabilities(self) -> HarnessCapabilities:
@@ -427,11 +487,14 @@ class KiloDriver(HarnessDriver):
         return HttpAgentLiveSession(self, context, resume_session_id=session_id)
 
 
-class _JsonResidentTurn(HarnessTurn):
+class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
     """One framed activation on a process whose stdout survives the turn."""
 
-    def __init__(self, session: _JsonResidentSession, process: SandboxProcess) -> None:
+    def __init__(
+        self, session: _JsonResidentSession[_LiveRuntimeT], process: SandboxProcess
+    ) -> None:
         super().__init__(session, process)
+        self._session: _JsonResidentSession[_LiveRuntimeT] = session
         self._saw_result = False
         self._saw_native_result = False
         self._protocol_failed = False
@@ -488,12 +551,12 @@ class _JsonResidentTurn(HarnessTurn):
         return self._result
 
 
-class _JsonResidentSession(HarnessSession):
+class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]):
     """Common process lifetime and framing for exact native JSON protocols."""
 
     def __init__(
         self,
-        driver: HarnessDriver,
+        driver: HarnessDriver[_LiveRuntimeT],
         context: LaunchContext,
         *,
         resume_session_id: str | None = None,
@@ -508,7 +571,7 @@ class _JsonResidentSession(HarnessSession):
         self._lines: Iterator[str] | None = None
         self._model: str | None = None
         self._reasoning_effort: str | None = None
-        self._live_turn: _JsonResidentTurn | None = None
+        self._live_turn: _JsonResidentTurn[_LiveRuntimeT] | None = None
         self._request_sequence = 0
         self._prefetched: list[str] = []
 
@@ -604,11 +667,11 @@ class _JsonResidentSession(HarnessSession):
     def _initialize_protocol(self) -> None:
         raise NotImplementedError
 
-    def _new_turn(self) -> _JsonResidentTurn:
+    def _new_turn(self) -> _JsonResidentTurn[_LiveRuntimeT]:
         assert self._process is not None
-        return _JsonResidentTurn(self, self._process)
+        return _JsonResidentTurn[_LiveRuntimeT](self, self._process)
 
-    def start_turn(self, turn_input: TurnInput) -> HarnessTurn:
+    def start_turn(self, turn_input: TurnInput) -> HarnessTurn[_LiveRuntimeT]:
         if self._closed:
             raise DriverError("session is closed")
         if self._live_turn is not None and self._live_turn._result is None:
@@ -622,26 +685,32 @@ class _JsonResidentSession(HarnessSession):
         self._live_turn = turn
         return turn
 
-    def _start_protocol_turn(self, turn_input: TurnInput, turn: _JsonResidentTurn) -> None:
+    def _start_protocol_turn(
+        self, turn_input: TurnInput, turn: _JsonResidentTurn[_LiveRuntimeT]
+    ) -> None:
         raise NotImplementedError
 
-    def turn_lines(self, turn: _JsonResidentTurn) -> Iterator[str]:
+    def turn_lines(self, turn: _JsonResidentTurn[_LiveRuntimeT]) -> Iterator[str]:
         while self._prefetched:
             yield self._prefetched.pop(0)
         while True:
             yield self._next_line()
 
-    def line_settles_turn(self, line: str, turn: _JsonResidentTurn) -> tuple[bool, bool, bool]:
+    def line_settles_turn(
+        self, line: str, turn: _JsonResidentTurn[_LiveRuntimeT]
+    ) -> tuple[bool, bool, bool]:
         """Return terminal, failed, and proof of a native turn boundary."""
         raise NotImplementedError
 
-    def event_for_protocol_line(self, line: str, turn: _JsonResidentTurn) -> HarnessEvent:
+    def event_for_protocol_line(
+        self, line: str, turn: _JsonResidentTurn[_LiveRuntimeT]
+    ) -> HarnessEvent:
         event = self.runtime.parse_event(line)
         if event is None:
             return HarnessEvent(LINE, raw_line=line)
         return HarnessEvent(event.event_type, dict(event.payload or {}), raw_line=line)
 
-    def interrupt_turn(self, turn: _JsonResidentTurn) -> None:
+    def interrupt_turn(self, turn: _JsonResidentTurn[_LiveRuntimeT]) -> None:
         raise NotImplementedError
 
     def turn_finished(self) -> None:
@@ -666,7 +735,7 @@ class _JsonResidentSession(HarnessSession):
             self._process.wait()
 
 
-class CodexAppServerSession(_JsonResidentSession):
+class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
     """Codex 0.145.0 app-server, one persisted thread per live process."""
 
     _PROVIDER = "hybridinference"
@@ -737,7 +806,9 @@ class CodexAppServerSession(_JsonResidentSession):
             if status.get("error") or not session or not session.get("serverInfo"):
                 raise DriverError("Codex could not initialize the session MCP relay")
 
-    def _start_protocol_turn(self, turn_input: TurnInput, turn: _JsonResidentTurn) -> None:
+    def _start_protocol_turn(
+        self, turn_input: TurnInput, turn: _JsonResidentTurn[CodexRuntime]
+    ) -> None:
         request_id = self._request_id("turn")
         self._write_json(
             {
@@ -761,7 +832,9 @@ class CodexAppServerSession(_JsonResidentSession):
             raise DriverError("Codex turn/start returned no turn id")
         turn.protocol_turn_id = str(turn_id)
 
-    def line_settles_turn(self, line: str, turn: _JsonResidentTurn) -> tuple[bool, bool, bool]:
+    def line_settles_turn(
+        self, line: str, turn: _JsonResidentTurn[CodexRuntime]
+    ) -> tuple[bool, bool, bool]:
         """Recognize the completion notification for this exact Codex turn."""
         value = self._object(line)
         if value is None or value.get("method") != "turn/completed":
@@ -773,7 +846,9 @@ class CodexAppServerSession(_JsonResidentSession):
         status = str(completed.get("status") or "").lower()
         return True, status not in {"completed", "interrupted"}, True
 
-    def event_for_protocol_line(self, line: str, turn: _JsonResidentTurn) -> HarnessEvent:
+    def event_for_protocol_line(
+        self, line: str, turn: _JsonResidentTurn[CodexRuntime]
+    ) -> HarnessEvent:
         """Normalize one Codex app-server notification for the active turn."""
         value = self._object(line)
         if value is None:
@@ -844,7 +919,7 @@ class CodexAppServerSession(_JsonResidentSession):
             )
         return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
 
-    def interrupt_turn(self, turn: _JsonResidentTurn) -> None:
+    def interrupt_turn(self, turn: _JsonResidentTurn[CodexRuntime]) -> None:
         """Interrupt only the active Codex turn on the resident thread."""
         if not turn.protocol_turn_id:
             raise DriverError("Codex turn id is not available for interrupt")
@@ -935,12 +1010,12 @@ class CodexAppServerSession(_JsonResidentSession):
         return str(child_id)
 
 
-class PiRpcSession(_JsonResidentSession):
+class PiRpcSession(_JsonResidentSession[PiRuntime]):
     """pi 0.73.1 RPC mode with an explicit native session locator."""
 
     def __init__(
         self,
-        driver: HarnessDriver,
+        driver: HarnessDriver[PiRuntime],
         context: LaunchContext,
         *,
         resume_session_id: str | None = None,
@@ -982,12 +1057,16 @@ class PiRpcSession(_JsonResidentSession):
             raise DriverError("pi resumed a different native session")
         self.runtime.session_id = str(session_id)
 
-    def _start_protocol_turn(self, turn_input: TurnInput, turn: _JsonResidentTurn) -> None:
+    def _start_protocol_turn(
+        self, turn_input: TurnInput, turn: _JsonResidentTurn[PiRuntime]
+    ) -> None:
         request_id = self._request_id("prompt")
         turn.protocol_turn_id = request_id
         self._write_json({"id": request_id, "type": "prompt", "message": turn_input.prompt})
 
-    def line_settles_turn(self, line: str, turn: _JsonResidentTurn) -> tuple[bool, bool, bool]:
+    def line_settles_turn(
+        self, line: str, turn: _JsonResidentTurn[PiRuntime]
+    ) -> tuple[bool, bool, bool]:
         """Recognize Pi's response failure or terminal agent-end event."""
         value = self._object(line)
         if value is None:
@@ -1002,14 +1081,16 @@ class PiRpcSession(_JsonResidentSession):
             return True, self.runtime.agent_error(value) is not None, True
         return False, False, False
 
-    def event_for_protocol_line(self, line: str, turn: _JsonResidentTurn) -> HarnessEvent:
+    def event_for_protocol_line(
+        self, line: str, turn: _JsonResidentTurn[PiRuntime]
+    ) -> HarnessEvent:
         """Normalize one Pi RPC protocol event for the active turn."""
         event = self.runtime.parse_event(line)
         if event is None:
             return HarnessEvent(LINE, raw_line=line)
         return HarnessEvent(event.event_type, dict(event.payload or {}), raw_line=line)
 
-    def interrupt_turn(self, turn: _JsonResidentTurn) -> None:
+    def interrupt_turn(self, turn: _JsonResidentTurn[PiRuntime]) -> None:
         """Abort the active Pi RPC turn without closing its session process."""
         self._write_json({"id": self._request_id("abort"), "type": "abort"})
 
@@ -1082,7 +1163,7 @@ class PiRpcSession(_JsonResidentSession):
         return child_id
 
 
-class HttpAgentLiveTurn(_JsonResidentTurn):
+class HttpAgentLiveTurn(_JsonResidentTurn[ResidentLiveRuntime]):
     """One OpenCode/Kilo activation, deduplicating mutable part updates."""
 
     def __init__(self, session: HttpAgentLiveSession, process: SandboxProcess) -> None:
@@ -1091,7 +1172,7 @@ class HttpAgentLiveTurn(_JsonResidentTurn):
         self.message_roles: dict[str, str] = {}
 
 
-class HttpAgentLiveSession(_JsonResidentSession):
+class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
     """OpenCode/Kilo serve hidden behind the private loopback bridge."""
 
     def _initialize_protocol(self) -> None:
@@ -1109,12 +1190,16 @@ class HttpAgentLiveSession(_JsonResidentSession):
         assert self._process is not None
         return HttpAgentLiveTurn(self, self._process)
 
-    def _start_protocol_turn(self, turn_input: TurnInput, turn: _JsonResidentTurn) -> None:
+    def _start_protocol_turn(
+        self, turn_input: TurnInput, turn: _JsonResidentTurn[ResidentLiveRuntime]
+    ) -> None:
         request_id = self._request_id("turn")
         turn.protocol_turn_id = request_id
         self._write_json({"id": request_id, "type": "turn", "prompt": turn_input.prompt})
 
-    def line_settles_turn(self, line: str, turn: _JsonResidentTurn) -> tuple[bool, bool, bool]:
+    def line_settles_turn(
+        self, line: str, turn: _JsonResidentTurn[ResidentLiveRuntime]
+    ) -> tuple[bool, bool, bool]:
         """Recognize the bridge settlement or command failure for this turn."""
         value = self._object(line)
         if value is None:
@@ -1128,7 +1213,9 @@ class HttpAgentLiveSession(_JsonResidentSession):
                 return True, True, False
         return False, False, False
 
-    def event_for_protocol_line(self, line: str, turn: _JsonResidentTurn) -> HarnessEvent:
+    def event_for_protocol_line(
+        self, line: str, turn: _JsonResidentTurn[ResidentLiveRuntime]
+    ) -> HarnessEvent:
         """Normalize one OpenCode/Kilo bridge event for the active turn."""
         assert isinstance(turn, HttpAgentLiveTurn)
         value = self._object(line)
@@ -1214,7 +1301,7 @@ class HttpAgentLiveSession(_JsonResidentSession):
             )
         return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
 
-    def interrupt_turn(self, turn: _JsonResidentTurn) -> None:
+    def interrupt_turn(self, turn: _JsonResidentTurn[ResidentLiveRuntime]) -> None:
         """Interrupt only the active bridge turn on the resident session."""
         self._write_json(
             {
@@ -1281,7 +1368,7 @@ CLAUDE_STATE_CONFIG_DIR = f"{STATE_MOUNT_TARGET}/claude"
 CLAUDE_TOOL_MARKS = f"{STATE_MOUNT_TARGET}/{TOOL_MARK_FILE}"
 
 
-class ClaudeCodeDriver(HarnessDriver):
+class ClaudeCodeDriver(HarnessDriver[ClaudeCodeRuntime]):
     """Claude Code native live transport, resume, and immediate fork."""
 
     def capabilities(self) -> HarnessCapabilities:
@@ -1316,11 +1403,12 @@ class ClaudeCodeDriver(HarnessDriver):
         return ClaudeCodeLiveSession(self, context, resume_session_id=session_id)
 
 
-class ClaudeCodeLiveTurn(HarnessTurn):
+class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
     """One turn on a resident process: borrows the shared stdout, ends at result."""
 
     def __init__(self, session: ClaudeCodeLiveSession, process: SandboxProcess) -> None:
         super().__init__(session, process)
+        self._session: ClaudeCodeLiveSession = session
         self._saw_result = False
         self._error_result = False
         self._saw_api_retry = False
@@ -1394,7 +1482,7 @@ class ClaudeCodeLiveTurn(HarnessTurn):
         self._session.interrupt_turn()
 
 
-class ClaudeCodeLiveSession(HarnessSession):
+class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
     """A stdin-fed multi-turn session: the process survives between turns.
 
     Measured against the pinned CLI (2.1.220, headless stream-json; see
@@ -1412,7 +1500,7 @@ class ClaudeCodeLiveSession(HarnessSession):
 
     def __init__(
         self,
-        driver: HarnessDriver,
+        driver: HarnessDriver[ClaudeCodeRuntime],
         context: LaunchContext,
         *,
         resume_session_id: str | None = None,
@@ -1457,7 +1545,7 @@ class ClaudeCodeLiveSession(HarnessSession):
         assert self._lines is not None
         return self._lines
 
-    def start_turn(self, turn_input: TurnInput) -> HarnessTurn:
+    def start_turn(self, turn_input: TurnInput) -> HarnessTurn[ClaudeCodeRuntime]:
         """Feed one user turn to the resident process, spawning it lazily.
 
         The first turn fixes the session's model — a resident process reads
@@ -1604,7 +1692,7 @@ class ClaudeCodeLiveSession(HarnessSession):
             self._process.wait()
 
 
-_DRIVER_TYPES: dict[str, type[HarnessDriver]] = {
+_DRIVER_TYPES: dict[str, type[HarnessDriver[Any]]] = {
     "claude-code": ClaudeCodeDriver,
     "codex": CodexDriver,
     "pi": PiDriver,
@@ -1613,12 +1701,12 @@ _DRIVER_TYPES: dict[str, type[HarnessDriver]] = {
 }
 
 
-def get_driver(runtime_id: str) -> HarnessDriver:
+def get_driver(runtime_id: str) -> HarnessDriver[Any]:
     """Resolve a registry id to its driver. Raises ``KeyError`` like get_runtime."""
     return driver_for(get_runtime(runtime_id))
 
 
-def driver_for(runtime: AgentRuntime) -> HarnessDriver:
+def driver_for(runtime: AgentRuntime) -> HarnessDriver[Any]:
     """The driver for an already-resolved dialect adapter.
 
     Only the five live-session drivers are executable. A dialect adapter with

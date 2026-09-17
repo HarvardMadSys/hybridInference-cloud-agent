@@ -32,7 +32,7 @@ from cloud_agent.execution_profiles import (
 )
 from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
 from cloud_agent.storage._sql.events import insert_event
-from cloud_agent.storage._sql.hosts import release_host_slot
+from cloud_agent.storage._sql.hosts import host_slots_exhausted, release_host_slot
 from cloud_agent.storage._sql.jobs import (
     QUALIFIED_JOB_COLUMNS,
     fail_discontinuous_follow_ups,
@@ -104,7 +104,8 @@ class PostgresAttemptCommands:
         groups whose immutable ``host`` is that old host.
 
         **The pool gate (G4) sits after the pin and answers the same way.**
-        A reported host must be ``online`` and have a free slot, and the job it
+        A reported host must be ``online`` and have a free slot under the lower
+        of its reported executor count and the size an operator asked for, and the job it
         takes must require nothing the host did not declare. All three refusals
         return ``None`` — the same "nothing for you" a drained or unpinned
         runner already gets — because a runner has no useful different
@@ -152,7 +153,7 @@ class PostgresAttemptCommands:
             )
             pin_allows_new_sandbox = active_host is None or host == active_host
             host_row = await conn.fetchrow(
-                "SELECT status, capabilities, slots_total, slots_used, "
+                "SELECT status, capabilities, slots_total, slots_used, slots_desired, "
                 "(credential_hash IS NOT NULL AND credential_hash = $2) "
                 "AS credential_matches "
                 "FROM agent_runner_hosts WHERE host = $1",
@@ -164,10 +165,7 @@ class PostgresAttemptCommands:
             # revocation, and re-enrollment races.
             if host_row is None or host_row["status"] not in CLAIMABLE_STATUSES:
                 return None
-            if (
-                host_row["slots_total"] is not None
-                and host_row["slots_used"] >= host_row["slots_total"]
-            ):
+            if host_slots_exhausted(host_row):
                 return None
             capabilities = host_row["capabilities"]
             credential_matches = bool(host_row["credential_matches"])
@@ -247,6 +245,7 @@ class PostgresAttemptCommands:
                 WHERE host = $1
                   AND status = '{HOST_ONLINE}'
                   AND (slots_total IS NULL OR slots_used < slots_total)
+                  AND (slots_desired IS NULL OR slots_used < slots_desired)
                   AND credential_hash = $2
                 RETURNING slots_used
                 """,
@@ -348,22 +347,38 @@ class PostgresAttemptCommands:
         return claim
 
     async def release_claim(
-        self, *, job_id: str, attempt_id: int, lease_generation: int | None = None
+        self,
+        *,
+        job_id: str,
+        attempt_id: int,
+        lease_generation: int | None = None,
+        reason: str = "credential_unavailable",
     ) -> bool:
         """Hand a just-claimed job back to the queue without spending a retry.
 
-        For the case where the *platform* could not go through with a claim it
-        already made — it could not mint the repository credential, say. The
-        job never got its turn, so making it pay for the attempt is wrong twice
-        over: it waits out a lease it will never use, and after
-        ``max_attempts`` such failures the reaper fails it outright. A brief
-        GitHub outage would terminally fail every queued private-repo job
-        without an agent ever starting.
+        For the case where the claim was made and the turn then provably never
+        began — the platform could not mint the repository credential, or the
+        host could not start the process that would have run it. The job never
+        got its turn, so making it pay for the attempt is wrong twice over: it
+        waits out a lease it will never use, and after ``max_attempts`` such
+        failures the reaper fails it outright. A brief GitHub outage would
+        terminally fail every queued private-repo job without an agent ever
+        starting.
+
+        **Only before execution, and the database is what decides that.** A
+        turn whose prompt reached the CLI is not releasable here at any
+        caller's request: an admitted turn that is replayed is a second
+        execution of the same instruction, which is the outcome the retained
+        session rules exist to prevent. The membership's ``admitted_job_id`` is
+        that proof, checked in the statement rather than by the caller, so a
+        host that is wrong about what its child did cannot requeue work that
+        ran. A caller whose turn has been admitted gets ``False`` and the lease
+        decides, exactly as it would have.
 
         The attempt row stays, marked ``aborted``, with a control event saying
-        why: history is append-only, and "the platform dropped this one" is
-        exactly the kind of thing an operator later needs to see. It simply
-        does not count — see the retry budget in :meth:`reap_expired`.
+        why: history is append-only, and "this one never started" is exactly
+        the kind of thing an operator later needs to see. It simply does not
+        count — see the retry budget in :meth:`reap_expired`.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             released_row = await conn.fetchrow(
@@ -373,6 +388,10 @@ class PostgresAttemptCommands:
                 WHERE id = $1 AND status = 'running'
                   AND ($3::bigint IS NULL OR lease_generation = $3)
                   AND lease_expires_at > NOW()
+                  AND NOT EXISTS (
+                        SELECT 1 FROM agent_thread_sandbox_memberships m
+                        WHERE m.admitted_job_id = agent_attempts.job_id
+                  )
                 RETURNING job_id, host_id
                 """,
                 attempt_id,
@@ -391,7 +410,7 @@ class PostgresAttemptCommands:
                 job_id=released,
                 attempt_id=attempt_id,
                 event_type=EVENT_ATTEMPT_ABORTED,
-                payload={"reason": "credential_unavailable"},
+                payload={"reason": reason},
             )
             # Fenced on this attempt still being the current one, so a job that
             # has since moved on is never dragged back to `queued`.

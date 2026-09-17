@@ -54,7 +54,9 @@ _SECRET_NAME = re.compile(
     r"|(?:^|[^A-Za-z0-9])pat(?:$|[^A-Za-z0-9])|cookie",
     re.I,
 )
-_ENV_REFERENCE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
+_ENV_REFERENCE = re.compile(
+    r"\$\{(?:(?:env|input):)?([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)"
+)
 _PATH_LIKE = re.compile(r"^(/|~[/\\]|[A-Za-z]:[\\/])")
 _PATH_FLAGS = frozenset({"--directory", "--cwd", "--root", "--workspace", "--path"})
 
@@ -394,6 +396,14 @@ def _headers(
 
     header_name = secrets[0].name
     scheme = ""
+    if (
+        header_name.lower() == "authorization"
+        and secrets[0].value is None
+        and isinstance(raw, Mapping)
+    ):
+        prefix, _, remainder = str(raw.get(header_name, "")).partition(" ")
+        if remainder and prefix.lower() in _AUTH_SCHEMES:
+            scheme = prefix
     if header_name.lower() == "authorization" and secrets[0].value:
         # ``Bearer ghp_x`` is split so the scheme is configuration and the
         # value is the secret. Storing the pair as one blob would make the
@@ -451,14 +461,14 @@ def _resolve_value(
     warnings: list[str],
 ) -> str | None:
     """Resolve a ``${...}`` reference, or report that the user must supply it."""
-    match = _ENV_REFERENCE.match(raw.strip())
+    match = _ENV_REFERENCE.search(raw)
     if not match:
         return raw
-    reference = match.group(1)
+    reference = match.group(1) or match.group(2)
     if reference in declared_inputs:
         declared = declared_inputs[reference]
         if isinstance(declared.get("value"), str):
-            return str(declared["value"])
+            return raw.replace(match.group(0), str(declared["value"]))
         warnings.append(f"{reference} is a value this configuration expected you to enter")
         return None
     warnings.append(f"{reference} is read from the environment; provide it here")

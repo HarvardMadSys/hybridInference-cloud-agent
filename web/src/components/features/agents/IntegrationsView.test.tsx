@@ -69,7 +69,7 @@ describe('IntegrationsView', () => {
 
     expect(screen.getByRole('heading', { level: 1, name: 'Integrations' })).toBeInTheDocument();
     expect(screen.queryByText('Integrations & MCP')).not.toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: 'MCP Servers' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'MCP servers' })).toBeInTheDocument();
     expect(
       await screen.findByText('Connected as HarvardMadSys · 2 repositories'),
     ).toBeInTheDocument();
@@ -80,8 +80,8 @@ describe('IntegrationsView', () => {
     // One: GitLab's. The MCP section is a real list now, not a "Coming soon"
     // placeholder, so it contributes a button instead.
     expect(screen.getAllByText('Coming soon')).toHaveLength(1);
-    expect(screen.getByText('Your own MCP servers')).toBeInTheDocument();
-    expect(await screen.findByRole('button', { name: 'Add connection' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add with JSON' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Add server' })).toBeInTheDocument();
   });
 
   it('marks providers that need operator configuration', async () => {

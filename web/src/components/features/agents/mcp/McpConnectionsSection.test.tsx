@@ -15,6 +15,10 @@ vi.mock('@/lib/api/mcp', async (importOriginal) => {
     testMcpConnection: vi.fn(),
     disconnectMcpConnection: vi.fn(),
     authorizeMcpConnection: vi.fn(),
+    enableMcpOAuth: vi.fn(),
+    createMcpConnection: vi.fn(),
+    previewMcpImport: vi.fn(),
+    saveMcpImport: vi.fn(),
   };
 });
 
@@ -23,6 +27,9 @@ import {
   disconnectMcpConnection,
   listMcpConnections,
   testMcpConnection,
+  enableMcpOAuth,
+  previewMcpImport,
+  saveMcpImport,
 } from '@/lib/api/mcp';
 
 const mockedList = listMcpConnections as unknown as ReturnType<typeof vi.fn>;
@@ -82,20 +89,19 @@ describe('McpConnectionsSection', () => {
     render(<McpConnectionsSection />);
 
     expect(await screen.findByText('Team wiki')).toBeInTheDocument();
-    expect(screen.getByText('Error')).toBeInTheDocument();
-    expect(
-      screen.getByText('Streamable HTTP · Remote server · https://wiki.example.com/mcp'),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText('wiki 2.1.0 · protocol 2025-06-18 · 4 tools · 1 resource · 2 prompts'),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText('needs_authorization: the server rejected the credential'),
-    ).toBeInTheDocument();
-    expect(screen.getByText('Not authorized yet.')).toBeInTheDocument();
+    expect(screen.getByText('Sign-in required')).toBeInTheDocument();
+    expect(screen.getByText('https://wiki.example.com/mcp', { selector: 'p' })).toBeInTheDocument();
+    expect(screen.getByText('the server rejected the credential')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Server details'));
+    expect(screen.getByText('wiki 2.1.0')).toBeVisible();
+    expect(screen.getByText('2025-06-18')).toBeVisible();
   });
 
-  it('tests a connection and reports the diagnosed server', async () => {
+  it('refreshes a connected server and reports discovered tools', async () => {
+    mockedList.mockResolvedValue({
+      ...api,
+      connections: [{ ...connection, status: 'active', error_kind: 'none', has_credential: true }],
+    });
     mockedTest.mockResolvedValue({
       ok: true,
       error_kind: 'none',
@@ -111,11 +117,11 @@ describe('McpConnectionsSection', () => {
     });
 
     render(<McpConnectionsSection />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Test' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Refresh tools' }));
 
     await waitFor(() => expect(mockedTest).toHaveBeenCalledWith(3));
     expect(await screen.findByRole('status')).toHaveTextContent(
-      'Team wiki answered as wiki 2.2.0. 6 tools · 1 resource · 2 prompts',
+      'Team wiki connected. 6 tools · 1 resource · 2 prompts.',
     );
     // A test records its outcome on the connection, so the list is read again.
     expect(mockedList).toHaveBeenCalledTimes(2);
@@ -134,12 +140,12 @@ describe('McpConnectionsSection', () => {
     });
 
     render(<McpConnectionsSection />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Authorize' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
 
     expect(
       await screen.findByText('this server does not register clients for us'),
     ).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('OAuth client id'), {
+    fireEvent.change(screen.getByLabelText('OAuth client ID'), {
       target: { value: 'client-abc' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
@@ -152,7 +158,8 @@ describe('McpConnectionsSection', () => {
     mockedDisconnect.mockResolvedValue(undefined);
 
     render(<McpConnectionsSection />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Disconnect' }));
+    fireEvent.click(await screen.findByText('Server details'));
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
 
     await waitFor(() => expect(mockedDisconnect).toHaveBeenCalledWith(3));
     expect(await screen.findByRole('status')).toHaveTextContent('Team wiki disconnected.');
@@ -165,7 +172,8 @@ describe('McpConnectionsSection', () => {
     );
 
     render(<McpConnectionsSection />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Disconnect' }));
+    fireEvent.click(await screen.findByText('Server details'));
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
 
     expect(mockedDisconnect).not.toHaveBeenCalled();
   });
@@ -177,9 +185,99 @@ describe('McpConnectionsSection', () => {
 
     expect(
       await screen.findByText(
-        'No MCP servers connected yet. Add one from a template, by pasting a configuration, or by filling in the address yourself.',
+        'Connect a popular service or paste an MCP JSON configuration to get started.',
       ),
     ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Add connection' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add server' })).toBeInTheDocument();
+  });
+
+  it('discovers tools automatically after returning from sign-in', async () => {
+    mockedList.mockResolvedValue({
+      ...api,
+      connections: [{ ...connection, has_credential: true }],
+    });
+    mockedTest.mockResolvedValue({ ok: true, tool_count: 4, resource_count: 0, prompt_count: 0 });
+    render(
+      <McpConnectionsSection
+        authorizationResult={{ ok: true, connectionId: '3', message: null }}
+      />,
+    );
+    expect(await screen.findByText('Team wiki connected. 4 tools.')).toBeInTheDocument();
+    expect(mockedTest).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not show a failed handshake as a success notice', async () => {
+    mockedList.mockResolvedValue({
+      ...api,
+      connections: [{ ...connection, auth_kind: 'none', error_kind: 'unreachable' }],
+    });
+    mockedTest.mockResolvedValue({ ok: false, message: 'Server is unavailable' });
+    render(<McpConnectionsSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry connection' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Server is unavailable');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('opts a pasted URL into OAuth only when the user chooses Sign in', async () => {
+    const pasted = { ...connection, auth_kind: 'none' as const };
+    mockedList.mockResolvedValue({ ...api, connections: [pasted] });
+    vi.mocked(enableMcpOAuth).mockResolvedValue({
+      ...pasted,
+      auth_kind: 'oauth',
+      config_revision: 2,
+    });
+    mockedAuthorize.mockResolvedValue({ needs_client_id: true, message: 'Enter client ID' });
+    render(<McpConnectionsSection />);
+    await screen.findByText('Team wiki');
+    expect(enableMcpOAuth).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    await waitFor(() => expect(enableMcpOAuth).toHaveBeenCalledWith(pasted));
+    expect(mockedAuthorize).toHaveBeenCalledWith(3, undefined);
+  });
+
+  it('connects imported servers automatically without another Test click', async () => {
+    const saved = { ...connection, auth_kind: 'none' as const, status: 'draft' as const };
+    mockedList.mockResolvedValueOnce({ connections: [], templates: [] }).mockResolvedValue({
+      connections: [{ ...saved, status: 'active', error_kind: 'none', error_detail: null }],
+      templates: [],
+    });
+    vi.mocked(previewMcpImport).mockResolvedValue({
+      dialect: 'json',
+      rejected: [],
+      drafts: [
+        {
+          label: 'Team wiki',
+          transport: 'streamable-http',
+          location: 'remote',
+          url: connection.url,
+          argv: [],
+          env_names: [],
+          headers: [],
+          secrets: [],
+          paths: [],
+          package: null,
+          warnings: [],
+        },
+      ],
+    });
+    vi.mocked(saveMcpImport).mockResolvedValue({
+      dialect: 'json',
+      rejected: [],
+      drafts: [],
+      saved: [saved],
+    });
+    mockedTest.mockResolvedValue({ ok: true, tool_count: 4, resource_count: 0, prompt_count: 0 });
+    render(<McpConnectionsSection />);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Add with JSON' })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Add with JSON' }));
+    fireEvent.change(screen.getByLabelText('MCP configuration'), {
+      target: { value: '{"mcpServers":{"wiki":{"url":"https://wiki.example.com/mcp"}}}' },
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Add 1 server' }));
+    expect(await screen.findByText('Team wiki connected. 4 tools.')).toBeInTheDocument();
+    expect(mockedTest).toHaveBeenCalledWith(3);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 });

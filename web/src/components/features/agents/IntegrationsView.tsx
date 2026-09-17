@@ -322,30 +322,8 @@ export function IntegrationsView({
         </div>
       </div>
 
-      <div className="mt-10">
-        <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">MCP Servers</h2>
-        <div className="mt-4 rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-6 py-5 shadow-sm">
-          <div className="flex items-center gap-4">
-            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gray-100 dark:bg-white/5 text-gray-500 dark:text-gray-400">
-              <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path
-                  d="M8 8.5 5.5 11a3.54 3.54 0 0 0 5 5l2.5-2.5m3-3L18.5 8a3.54 3.54 0 0 0-5-5L11 5.5m-3 6 8-8"
-                  stroke="currentColor"
-                  strokeWidth="1.7"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </span>
-            <div className="min-w-0 flex-1">
-              <h3 className="font-medium text-gray-900 dark:text-gray-50">Your own MCP servers</h3>
-              <p className="mt-0.5 text-sm text-gray-500 dark:text-gray-400">
-                Connect MCP servers with your own credentials to give your agents more tools.
-              </p>
-            </div>
-          </div>
-          <McpConnectionsSection authorizationResult={mcpAuthorization} />
-        </div>
+      <div className="mt-10 rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 p-6 shadow-sm">
+        <McpConnectionsSection authorizationResult={mcpAuthorization} />
       </div>
     </section>
   );
