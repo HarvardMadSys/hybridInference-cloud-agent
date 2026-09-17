@@ -2,7 +2,6 @@
 
 import { getErrorMessage } from '@/lib/utils/errors';
 
-import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
   deleteSkill,
@@ -37,7 +36,7 @@ function SkillDetails({
   action?: SkillAction;
   onSaved: (skill: SkillApi) => void;
   onClose: () => void;
-  onEdit: (skill: SkillApi, copy: boolean) => void;
+  onEdit: (skill: SkillApi) => void;
   onChanged: (skill: SkillApi) => void;
   onRemoved: (id: number) => void;
 }) {
@@ -98,10 +97,8 @@ function SkillDetails({
     }
   }
 
-  if (skill && (action === 'edit' || action === 'copy')) {
-    return (
-      <SkillEditor skill={skill} copy={action === 'copy'} onClose={onClose} onSaved={onSaved} />
-    );
+  if (skill && action === 'edit') {
+    return <SkillEditor skill={skill} onClose={onClose} onSaved={onSaved} />;
   }
 
   return (
@@ -145,14 +142,16 @@ function SkillDetails({
               >
                 Remove skill
               </button>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => onEdit(skill, skill.source === 'github')}
-                className={SKILL_BUTTON}
-              >
-                {skill.source === 'github' ? 'Create a copy' : 'Edit skill'}
-              </button>
+              {skill.source !== 'github' ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onEdit(skill)}
+                  className={SKILL_BUTTON}
+                >
+                  Edit skill
+                </button>
+              ) : null}
               <button type="button" disabled={busy} onClick={onClose} className={SKILL_PRIMARY}>
                 Done
               </button>
@@ -214,7 +213,7 @@ function SkillDetails({
 }
 
 type DialogState =
-  | { kind: 'create'; skill?: SkillApi; copy?: boolean }
+  | { kind: 'create'; skill?: SkillApi }
   | { kind: 'import' }
   | { kind: 'detail'; skill: SkillSummaryApi; action?: SkillAction }
   | null;
@@ -264,20 +263,12 @@ export function SkillsSection() {
   return (
     <section
       aria-labelledby="skills-heading"
-      className="mt-10 rounded-2xl border border-gray-200 bg-white px-6 pt-6 shadow-sm dark:border-white/10 dark:bg-gray-900"
+      className="mt-10 rounded-2xl border border-gray-200 bg-white px-6 pt-6 pb-2 shadow-sm dark:border-white/10 dark:bg-gray-900"
     >
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h2
-            id="skills-heading"
-            className="flex items-center gap-2 font-medium text-gray-900 dark:text-gray-50"
-          >
+          <h2 id="skills-heading" className="font-medium text-gray-900 dark:text-gray-50">
             Skills
-            {!loading && !error ? (
-              <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-normal text-gray-500 dark:bg-white/5 dark:text-gray-400">
-                {skills.length}
-              </span>
-            ) : null}
           </h2>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
             Save reusable instructions for your agents.
@@ -353,19 +344,8 @@ export function SkillsSection() {
           </p>
         </div>
       ) : null}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 py-4 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
-        <span>Choose skills for each conversation.</span>
-        <Link href="/" className="text-gray-700 hover:underline dark:text-gray-300">
-          New task <span aria-hidden="true">→</span>
-        </Link>
-      </div>
       {dialog?.kind === 'create' ? (
-        <SkillEditor
-          skill={dialog.skill}
-          copy={dialog.copy}
-          onClose={() => setDialog(null)}
-          onSaved={saved}
-        />
+        <SkillEditor skill={dialog.skill} onClose={() => setDialog(null)} onSaved={saved} />
       ) : null}
       {dialog?.kind === 'import' ? (
         <SkillImportDialog onClose={() => setDialog(null)} onSaved={saved} />
@@ -376,7 +356,7 @@ export function SkillsSection() {
           action={dialog.action}
           onSaved={saved}
           onClose={() => setDialog(null)}
-          onEdit={(skill, copy) => setDialog({ kind: 'create', skill, copy })}
+          onEdit={(skill) => setDialog({ kind: 'create', skill })}
           onChanged={changed}
           onRemoved={(id) => {
             setSkills((rows) => rows.filter((row) => row.id !== id));

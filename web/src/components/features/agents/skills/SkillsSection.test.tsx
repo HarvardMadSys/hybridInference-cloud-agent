@@ -86,27 +86,6 @@ it('requires explicit removal and sends the inspected revision', async () => {
   expect(api.deleteSkill).toHaveBeenCalledWith(1, 1);
 });
 
-it('copies imported instructions into a custom skill and leaves the source unchanged', async () => {
-  vi.mocked(api.listSkills).mockResolvedValue([{ ...skill, source: 'github' }]);
-  vi.mocked(api.getSkill).mockResolvedValue({ ...skill, source: 'github' });
-  vi.mocked(api.createSkill).mockResolvedValue({ ...skill, id: 2, name: 'Code review copy' });
-  render(<SkillsSection />);
-  fireEvent.click(await screen.findByRole('button', { name: 'Manage Code review' }));
-  expect(screen.queryByRole('menuitem', { name: 'Edit skill' })).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole('menuitem', { name: 'Create a copy' }));
-  expect(await screen.findByLabelText('Name')).toHaveValue('Code review copy');
-  fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Create skill' }));
-  await screen.findByRole('button', { name: 'View Code review copy' });
-  expect(api.updateSkill).not.toHaveBeenCalled();
-  expect(api.createSkill).toHaveBeenCalledWith(
-    expect.objectContaining({
-      source: 'created',
-      instructions: skill.instructions,
-      default_enabled: false,
-    }),
-  );
-});
-
 it('opens the current instructions for editing from the menu', async () => {
   render(<SkillsSection />);
   fireEvent.click(await screen.findByRole('button', { name: 'Manage Code review' }));

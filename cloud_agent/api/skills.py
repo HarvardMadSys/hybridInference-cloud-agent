@@ -254,7 +254,7 @@ async def update_skill(
     if not values or any(value is None for value in values.values()):
         raise skill_http_error(SkillError("Provide nonempty changes to this skill."))
     if current["source"] == "github" and any(key != "default_enabled" for key in values):
-        raise skill_http_error(SkillError("Create a copy to customize an imported GitHub skill."))
+        raise skill_http_error(SkillError("Imported GitHub skills are read-only."))
     try:
         content = SkillContent.model_validate({**current, **values})
         values.update({key: value for key, value in content.model_dump().items() if key in values})

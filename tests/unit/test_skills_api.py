@@ -200,7 +200,7 @@ async def test_private_import_checks_entitlement_before_minting_credentials(monk
     assert fetch.await_count == 1
 
 
-def test_github_content_is_customized_via_copy_not_in_place(api):
+def test_github_content_is_read_only(api):
     client, repository, _ = api
     repository.get_skill.side_effect = None
     repository.get_skill.return_value = {**ROW, "source": "github"}
