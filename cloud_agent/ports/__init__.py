@@ -26,6 +26,7 @@ from cloud_agent.ports.operation_measurements import (
 from cloud_agent.ports.residency import ResidencyRepository
 from cloud_agent.ports.sandbox import SandboxRepository
 from cloud_agent.ports.session_fork import SessionForkRepository
+from cloud_agent.ports.skills import SkillRepository
 from cloud_agent.ports.snapshot import SnapshotRepository
 from cloud_agent.ports.source_control import SourceControlRepository
 
@@ -46,6 +47,7 @@ __all__ = [
     "ResidencyRepository",
     "SandboxRepository",
     "SessionForkRepository",
+    "SkillRepository",
     "SnapshotRepository",
     "SourceControlRepository",
 ]

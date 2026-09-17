@@ -1,3 +1,4 @@
+import type { SelectedSkillApi } from './skills';
 // Cloud agent sandbox API (issue #1041).
 //
 // Two things here are shaped by the backend's design rather than by
@@ -351,6 +352,7 @@ export interface AgentJobUsageApi {
 }
 
 export interface AgentJobApi {
+  skills?: SelectedSkillApi[];
   title?: string | null;
   title_source?: 'fallback' | 'generated' | 'manual' | 'inherited' | null;
   id: string;
@@ -526,6 +528,7 @@ export interface AgentJobSymlinkApi {
 export type AgentJobFilesApi = AgentJobDirectoryApi | AgentJobFileApi | AgentJobSymlinkApi;
 
 export interface AgentConfigApi {
+  skill_limits?: import('@/lib/skillLimits').SkillLimits;
   repos: string[];
   runtimes: string[];
   /** Models an agent job can actually call — the create endpoint's own list. */
@@ -669,6 +672,8 @@ export async function listRepoBranches(repo: string): Promise<RepoBranchesApi> {
 }
 
 export interface CreateAgentJobRequest {
+  /** Omitted uses personal defaults; an empty list selects none. */
+  skill_ids?: number[];
   repo: string;
   task_prompt: string;
   model: string;
@@ -1003,6 +1008,8 @@ export async function cancelAgentJob(
 }
 
 export interface FollowUpAgentJobRequest {
+  /** Omitted inherits saved content; explicit ids snapshot the current library. */
+  skill_ids?: number[];
   prompt: string;
   /** Omitted values inherit the parent run's harness and model. */
   runtime?: string;

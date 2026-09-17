@@ -45,6 +45,8 @@ import { highestEffort, offeredEfforts } from './effort';
 import { LedgerUsage, useLedgerUsage } from './LedgerUsage';
 import { PaneResizer } from './PaneResizer';
 import { Picker } from './Picker';
+import { SkillPicker } from './skills/SkillPicker';
+import type { SelectedSkillApi } from '@/lib/api/skills';
 import { BackToBottom, TurnRail } from './TurnNavigator';
 import { TerminalWorkspace } from './TerminalWorkspace';
 import { ThreadStatsBar } from './ThreadStatsBar';
@@ -1052,6 +1054,16 @@ export function JobDetail({
     [events, threadJobs],
   );
   const [followUp, setFollowUp] = useState('');
+  const [chosenSkills, setChosenSkills] = useState<SelectedSkillApi[] | null>(null);
+  // Follow-ups append to the thread's latest turn, even from an older URL.
+  const inheritedSkills = threadJobs.reduce(
+    (latest, turn) =>
+      (turn.turn_no ?? 1) > latest.turnNo
+        ? { turnNo: turn.turn_no ?? 1, skills: turn.skills ?? [] }
+        : latest,
+    { turnNo: job.turnNo ?? 1, skills: job.skills ?? [] },
+  ).skills;
+  useEffect(() => setChosenSkills(null), [job.id]);
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
   const [models, setModels] = useState<string[]>([]);
   const [model, setModel] = useState(job.model);
@@ -1358,6 +1370,7 @@ export function JobDetail({
     try {
       const child = await followUpAgentJob(job.id, {
         prompt,
+        ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
         // Only an actual switch is sent. Omitted, the turn inherits the
         // parent's model, which was validated when it was chosen.
         ...(model && model !== job.model ? { model } : {}),
@@ -1984,7 +1997,7 @@ export function JobDetail({
                       aria-label="Add a follow-up"
                       className="w-full resize-none rounded-t-xl border-0 bg-transparent px-4 pt-3 text-sm leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
                     />
-                    <div className="flex items-center gap-1.5 px-3 pb-2.5">
+                    <div className="flex flex-wrap items-center gap-1.5 px-3 pb-2.5">
                       {modelOptions.length > 0 ? (
                         <>
                           {/* The harness stays the thread's; the model is offered
@@ -2026,6 +2039,12 @@ export function JobDetail({
                           {isActive ? ' · queued after this run' : ''}
                         </span>
                       )}
+                      <SkillPicker
+                        limits={config?.skill_limits}
+                        selected={chosenSkills ?? inheritedSkills}
+                        onChange={setChosenSkills}
+                        disabled={contextLost || submitting}
+                      />
                       <button
                         type="submit"
                         disabled={contextLost || !followUp.trim() || submitting}

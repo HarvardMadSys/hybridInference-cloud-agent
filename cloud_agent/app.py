@@ -1046,6 +1046,7 @@ def create_app() -> FastAPI:
         routes,
         service_jobs,
         session,
+        skills,
         usage,
     )
 
@@ -1062,6 +1063,7 @@ def create_app() -> FastAPI:
     # match a connection-management path and answer it as an MCP request. The
     # listener separation matters more: adding a connection or approving a call
     # is owner-facing work, and a sandbox must not be able to reach it at all.
+    app.include_router(skills.router)
     app.include_router(mcp_connections.router)
     app.include_router(mcp_relay.router)
     app.include_router(hosts.router)

@@ -50,6 +50,9 @@ vi.mock('@/lib/api/mcp', async (importOriginal) => ({
   listMcpConnections: vi.fn().mockResolvedValue({ connections: [] }),
 }));
 
+import { listSkills } from '@/lib/api/skills';
+vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
+
 vi.mock('@/lib/api/agents', () => ({
   cancelAgentJob: vi.fn(),
   createAgentTerminal: vi.fn(),
@@ -275,6 +278,81 @@ describe('JobDetail', () => {
   });
 
   afterEach(() => cleanup());
+
+  it('shows the latest turn selection when following up from an older URL', () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          skills: [{ id: 7, name: 'Review', description: 'Review changes', revision: 1 }],
+        })}
+        threadJobs={[
+          {
+            id: 'ajob_later',
+            repo: 'owner/repository',
+            base_sha: 'abcdef1',
+            cancel_requested: false,
+            current_attempt_id: null,
+            published_pr_url: null,
+            detail: null,
+            metadata: null,
+            created_at: null,
+            updated_at: null,
+            spent_usd: null,
+            tokens_in: null,
+            tokens_out: null,
+            model_calls: null,
+            setup_egress_tier: 'trusted',
+            agent_egress_tier: 'platform_only',
+            turn_no: 2,
+            state: 'queued',
+            task_prompt: 'Later',
+            runtime: 'claude-code',
+            model: 'qwen-test',
+            skills: [],
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByRole('button', { name: /0 selected/ })).toBeInTheDocument();
+  });
+
+  it('allows clearing saved skills for the next follow-up', async () => {
+    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+    vi.mocked(listSkills).mockResolvedValue([
+      {
+        id: 7,
+        name: 'Review',
+        description: 'Review changes',
+        revision: 2,
+        source: 'created',
+        source_url: null,
+        source_revision: null,
+        default_enabled: true,
+        created_at: '',
+        updated_at: '',
+      },
+    ]);
+    render(
+      <JobDetail
+        job={makeJob({
+          skills: [{ id: 7, name: 'Review', description: 'Review changes', revision: 1 }],
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /1 selected/ }));
+    fireEvent.click(await screen.findByRole('checkbox'));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), {
+      target: { value: 'Continue without skills' },
+    });
+    fireEvent.keyDown(screen.getByLabelText('Add a follow-up'), { key: 'Enter' });
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+        prompt: 'Continue without skills',
+        skill_ids: [],
+      }),
+    );
+  });
 
   it('replaces duplicate header metadata with a keyboard-accessible task menu', () => {
     render(<JobDetail job={makeJob({ turnNo: 3 })} />);

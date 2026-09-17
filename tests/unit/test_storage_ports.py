@@ -77,14 +77,8 @@ def _implementations() -> dict[str, tuple[str, str, str, str]]:
 
 
 def test_the_ports_directory_is_not_empty() -> None:
-    """A scan that silently matches nothing would pass every test below.
-
-    The count is a literal on purpose: it is what makes a port that quietly
-    stopped being scanned visible here rather than as a suite that passes for
-    having nothing to check. Adding a capability means updating it, which is
-    the moment to confirm the new file really is one port.
-    """
-    assert len(_port_files()) == 17
+    """A scan that silently matches nothing would pass every test below."""
+    assert len(_port_files()) == 18
 
 
 @pytest.mark.parametrize("path", _port_files(), ids=lambda p: p.stem)

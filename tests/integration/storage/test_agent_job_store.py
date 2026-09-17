@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -838,6 +839,21 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
 ):
     """The durable saga creates a second session alias, never a Docker clone."""
     job, claim, sandbox = await _reserve_shared_chat(store)
+    saved_skills = [
+        {
+            "id": 42,
+            "name": "Review",
+            "description": "Review changes",
+            "revision": 3,
+            "instructions": "Retain this exact version.",
+        }
+    ]
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET skills = $2::jsonb WHERE id = $1",
+            job["id"],
+            json.dumps(saved_skills),
+        )
     fence = {
         "thread_id": job["thread_id"],
         "attempt_id": claim["attempt_id"],
@@ -1088,6 +1104,17 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert child["title_source"] == "inherited"
     assert child["title"] == f"{job['title']} (fork)"
     assert child["execution_profile"] == job["execution_profile"]
+    assert child["skills"] == [
+        {key: value for key, value in skill.items() if key != "instructions"}
+        for skill in saved_skills
+    ]
+    async with pool.acquire() as conn:
+        assert (
+            json.loads(
+                await conn.fetchval("SELECT skills FROM agent_jobs WHERE id = $1", child["id"])
+            )
+            == saved_skills
+        )
     child_sandbox = await store.sandbox.thread_sandbox(thread_id=child["thread_id"])
     source_sandbox = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert child_sandbox is not None and source_sandbox is not None
@@ -1167,6 +1194,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         prompt="continue child",
     )
     assert source_follow_up is not None and source_follow_up["state"] == "queued"
+    assert source_follow_up["skills"] == child_follow_up["skills"] == saved_skills
     assert child_follow_up is not None and child_follow_up["state"] == "queued"
     first_claim = await _claim(
         store,
