@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from 'react';
 import { McpImportStep } from './McpImportStep';
+import { McpServerIcon } from './McpServerIcon';
 import {
   listMcpCatalog,
   type McpCatalogApi,
@@ -90,8 +91,9 @@ export function McpCatalogBrowser({
         >
           Back to servers
         </button>
-        <h3 className="mt-4 text-base font-semibold text-gray-900 dark:text-gray-100">
-          {selected.label}
+        <h3 className="mt-4 flex items-center gap-3 text-base font-semibold text-gray-900 dark:text-gray-100">
+          <McpServerIcon name={selected.name} label={selected.label} iconUrl={selected.icon_url} />
+          <span>{selected.label}</span>
         </h3>
         <p className="mt-1 break-all text-xs text-gray-500 dark:text-gray-400">{selected.name}</p>
         <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">{selected.description}</p>
@@ -199,11 +201,6 @@ export function McpCatalogBrowser({
         >
           Official MCP Registry ↗
         </a>
-        {data?.synced_at ? (
-          <span title={new Date(data.synced_at).toLocaleString()}>
-            Synced {new Date(data.synced_at).toLocaleDateString()}
-          </span>
-        ) : null}
       </div>
       <nav aria-label="Directory view" className="mb-3 flex gap-2">
         {(
@@ -273,15 +270,16 @@ export function McpCatalogBrowser({
                   setOption(0);
                   setUseToken(false);
                 }}
-                className="min-w-0 rounded-xl border border-gray-200 p-4 text-left hover:bg-gray-50 dark:border-white/10 dark:hover:bg-white/5"
+                className="flex min-w-0 flex-col items-start rounded-xl border border-gray-200 p-4 text-left hover:bg-gray-50 dark:border-white/10 dark:hover:bg-white/5"
               >
-                <span className="block text-sm font-semibold text-gray-900 dark:text-gray-100">
-                  {entry.label}
+                <span className="flex items-center gap-3 text-sm font-semibold text-gray-900 dark:text-gray-100">
+                  <McpServerIcon name={entry.name} label={entry.label} iconUrl={entry.icon_url} />
+                  <span>{entry.label}</span>
                 </span>
                 <span className="mt-1 block break-all text-[11px] text-gray-500 dark:text-gray-400">
                   {entry.name}
                 </span>
-                <span className="mt-2 line-clamp-2 block text-xs leading-5 text-gray-500 dark:text-gray-400">
+                <span className="mt-2 line-clamp-2 text-xs leading-5 text-gray-500 dark:text-gray-400">
                   {entry.description}
                 </span>
                 {!entry.configurations.length ? (

@@ -192,6 +192,33 @@ def _package_option(label: str, package: dict[str, Any]) -> dict[str, str] | Non
     return _config(label, body, f"{kind} · {package['identifier']}@{version}")
 
 
+def _icon_url(icons: Any) -> str | None:
+    """Choose a public image suitable for the directory's light icon tile."""
+    if not isinstance(icons, list):
+        return None
+    candidates = [
+        icon
+        for icon in icons
+        if isinstance(icon, dict)
+        and _https(icon.get("src"))
+        and icon.get("mimeType")
+        in {None, "image/png", "image/jpeg", "image/jpg", "image/svg+xml", "image/webp"}
+    ]
+    candidates = [icon for icon in candidates if icon.get("theme") != "dark"] or candidates
+    for icon in candidates:
+        sizes = icon.get("sizes")
+        if not isinstance(sizes, list) or not sizes or "any" in sizes:
+            return str(icon["src"])
+        if any(
+            isinstance(size, str)
+            and (match := re.fullmatch(r"(\d{1,4})x(\d{1,4})", size))
+            and min(int(match[1]), int(match[2])) >= 48
+            for size in sizes
+        ):
+            return str(icon["src"])
+    return str(candidates[0]["src"]) if candidates else None
+
+
 def catalog_entry(record: dict[str, Any]) -> dict[str, Any] | None:
     """Normalize one active latest record, preserving its publisher identifier."""
     official = record.get("_meta", {}).get(_OFFICIAL, {})
@@ -219,6 +246,7 @@ def catalog_entry(record: dict[str, Any]) -> dict[str, Any] | None:
         "label": label,
         "description": str(server.get("description") or "")[:2000],
         "version": str(server.get("version") or "")[:100],
+        "icon_url": _icon_url(server.get("icons")),
         "website_url": _https(server.get("websiteUrl"))
         or _https((server.get("repository") or {}).get("url")),
         "configurations": list({option["json"]: option for option in options}.values()),

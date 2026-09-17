@@ -29,7 +29,7 @@ import secrets
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
@@ -150,8 +150,30 @@ _TEMPLATES: tuple[dict[str, Any], ...] = (
 
 
 def _public_base_url() -> str:
-    """The deployment's browser-facing base URL, or an empty string."""
-    return os.environ.get(ENV_MCP_PUBLIC_BASE_URL, "").rstrip("/")
+    """Reuse the configured public API address unless MCP has an explicit override."""
+    explicit = os.environ.get(ENV_MCP_PUBLIC_BASE_URL, "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    # Session sign-in already needs the public API callback, including its
+    # proxy prefix. Reuse that operator-controlled URL, never Host/Forwarded
+    # headers or the web origin (which may live on a different host).
+    callback = os.environ.get("AGENT_SESSION_REDIRECT_URI", "").strip()
+    suffix = "/v1/session/callback"
+    try:
+        parsed = urlsplit(callback)
+        if (
+            parsed.scheme not in {"https", "http"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or not parsed.path.endswith(suffix)
+        ):
+            return ""
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path[: -len(suffix)], "", ""))
+    except ValueError:
+        return ""
 
 
 def _policy() -> EgressPolicy:
@@ -1082,8 +1104,8 @@ async def authorize_connection(
                 "error": {
                     "type": "server_error",
                     "message": (
-                        f"this deployment has no {ENV_MCP_PUBLIC_BASE_URL}, so it cannot "
-                        "complete a browser authorization"
+                        "Server sign-in is unavailable because this deployment's public "
+                        "callback address is not configured. Please contact the administrator."
                     ),
                 }
             },

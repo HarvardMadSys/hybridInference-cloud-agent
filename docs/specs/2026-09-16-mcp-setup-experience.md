@@ -88,6 +88,17 @@ waiting for the next sync. Metadata updates remain independent of this shortlist
 The feed can update descriptions, endpoints and pinned package versions for new
 connections. It never modifies existing connections or credentials.
 
+Directory cards display publisher-provided HTTPS icons. Common services without
+Registry artwork use their own official icon URLs, with an initial as the fallback
+if an image fails to load. The sync timestamp stays in the API for cache handling
+and is not displayed in the setup dialog.
+
+Browser authorization reuses the public API prefix from the deployment's existing
+`AGENT_SESSION_REDIRECT_URI` unless `AGENT_MCP_PUBLIC_BASE_URL` explicitly overrides
+it. Registration, authorization and token exchange share the same MCP callback;
+request headers never select its host. This avoids requiring another address
+setting for deployments that already support account sign-in.
+
 Generated configurations cover public HTTPS streamable HTTP/SSE endpoints,
 single credential headers, and simple pinned npm/PyPI stdio packages. Multiple
 endpoints remain explicit choices. Recipes needing unsupported header combinations,

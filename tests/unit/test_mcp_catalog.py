@@ -38,6 +38,22 @@ def test_missing_title_uses_publisher_for_generic_mcp_name():
     assert entry["name"] == "com.notion/mcp"
 
 
+def test_catalog_preserves_a_usable_public_icon_and_ignores_invalid_metadata():
+    entry = catalog_entry(
+        record(
+            icons=[
+                {"src": "https://127.0.0.1/private.svg"},
+                {"src": "data:image/svg+xml,untrusted"},
+                {"src": "https://example.com/dark.svg", "theme": "dark"},
+                {"src": "https://example.com/tiny.png", "sizes": ["16x16"]},
+                {"src": "https://example.com/icon.png", "sizes": ["96x96"]},
+            ]
+        )
+    )
+    assert entry["icon_url"] == "https://example.com/icon.png"
+    assert catalog_entry(record(icons="invalid"))["icon_url"] is None
+
+
 def test_recommended_view_uses_exact_publishers_and_current_order_on_cached_data():
     def entry(name, title="Docs", *, supported=True):
         remotes = [{"type": "streamable-http", "url": "https://docs.example.com/mcp"}]

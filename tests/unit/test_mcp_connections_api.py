@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -704,6 +705,105 @@ class TestConnectionManagement:
 
 class TestAuthorization:
     """Starting a browser flow, including the client a server expects us to bring."""
+
+    @pytest.mark.parametrize(
+        "session_base,override,expected_base",
+        [
+            ("https://agents.example.com/api", "", "https://agents.example.com/api"),
+            ("https://example.com/agents/api", "", "https://example.com/agents/api"),
+            ("http://127.0.0.1:13002/api", "", "http://127.0.0.1:13002/api"),
+            (
+                "https://agents.example.com/api",
+                "https://mcp.example.com/api/",
+                "https://mcp.example.com/api",
+            ),
+        ],
+    )
+    def test_sign_in_reuses_the_public_session_callback_through_token_exchange(
+        self, monkeypatch, session_base, override, expected_base
+    ) -> None:
+        """Registration, authorization and redemption agree without a second URL setting."""
+        from cloud_agent.mcp import oauth
+
+        monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", override)
+        monkeypatch.setenv("AGENT_SESSION_REDIRECT_URI", f"{session_base}/v1/session/callback")
+        monkeypatch.setenv("AGENT_WEB_BASE_URL", "https://web.example.com/agents")
+        metadata = oauth.AuthorizationServerMetadata(
+            issuer="https://mcp.notion.com",
+            authorization_endpoint="https://mcp.notion.com/authorize",
+            token_endpoint="https://mcp.notion.com/token",
+            registration_endpoint="https://mcp.notion.com/register",
+            scopes_supported=("default",),
+        )
+        monkeypatch.setattr(
+            oauth, "discover_authorization_server", AsyncMock(return_value=(None, metadata))
+        )
+        register = AsyncMock(
+            return_value={"client_id": "notion-client", "token_endpoint_auth_method": "none"}
+        )
+        exchange = AsyncMock(
+            return_value={
+                "access_token": "notion-token",
+                "refresh_token": "refresh",
+                "expires_in": 3600,
+            }
+        )
+        monkeypatch.setattr(mcp_connections, "_post_json", register)
+        monkeypatch.setattr(mcp_connections, "_post_form", exchange)
+        store = FakeStore()
+        connection_id = _seed(
+            store, url="https://mcp.notion.com/mcp", auth_kind="oauth", auth_config={}
+        )
+
+        async def save_flow(**kwargs):
+            store.oauth_flow = kwargs
+            store.oauth_state_hash = kwargs["state_hash"]
+            store.connections[connection_id]["oauth_generation"] = kwargs["oauth_generation"]
+
+        monkeypatch.setattr(store, "create_mcp_oauth_flow", save_flow, raising=False)
+        expected = f"{expected_base}/v1/agent/mcp/oauth/callback/{connection_id}"
+        with _client(store) as client:
+            response = client.post(
+                f"/v1/agent/mcp/connections/{connection_id}/authorize",
+                headers={"Host": "untrusted.example", "X-Forwarded-Host": "untrusted.example"},
+            )
+            assert response.status_code == 200, response.text
+            query = parse_qs(urlsplit(response.json()["authorization_url"]).query)
+            assert query["redirect_uri"] == [expected]
+            assert query["code_challenge_method"] == ["S256"]
+            assert register.call_args.args[2]["redirect_uris"] == [expected]
+            callback = client.get(
+                f"/v1/agent/mcp/oauth/callback/{connection_id}",
+                params={"state": query["state"][0], "code": "authorization-code"},
+                follow_redirects=False,
+            )
+        assert callback.status_code == 302
+        assert callback.headers["location"].startswith(
+            "https://web.example.com/agents/integrations?"
+        )
+        assert parse_qs(urlsplit(callback.headers["location"]).query)["mcp_authorized"] == ["1"]
+        assert exchange.call_args.args[0].form()["redirect_uri"] == expected
+        assert (
+            mcp_cipher(_ENCRYPTION_KEY).decrypt(
+                store.connections[connection_id]["access_token_ciphertext"]
+            )
+            == "notion-token"
+        )
+
+    @pytest.mark.parametrize(
+        "callback",
+        [
+            "",
+            "https://example.com/integrations",
+            "https://example.com/v1/session/callback?next=other",
+        ],
+    )
+    def test_missing_or_unrecognized_callback_does_not_guess_an_address(
+        self, monkeypatch, callback
+    ):
+        monkeypatch.delenv("AGENT_MCP_PUBLIC_BASE_URL", raising=False)
+        monkeypatch.setenv("AGENT_SESSION_REDIRECT_URI", callback)
+        assert mcp_connections._public_base_url() == ""
 
     def test_a_client_id_can_be_supplied_before_the_flow(self) -> None:
         """Some servers expect the user to bring one, and it has to persist.

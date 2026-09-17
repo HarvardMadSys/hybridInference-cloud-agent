@@ -83,6 +83,7 @@ export interface McpCatalogEntryApi {
   description: string;
   version: string;
   website_url: string | null;
+  icon_url?: string | null;
   configurations: { label: string; json: string }[];
 }
 

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { McpImportStep } from './McpImportStep';
 import { McpCatalogBrowser } from './McpCatalogBrowser';
+import { McpServerIcon } from './McpServerIcon';
 import {
   createMcpConnection,
   type McpAuthKind,
@@ -183,12 +184,7 @@ export function McpAddDialog({
                         className={`rounded-xl border p-4 text-left transition-colors ${selected?.name === template.name ? 'border-gray-800 bg-gray-50 dark:border-gray-300 dark:bg-white/5' : 'border-gray-200 hover:bg-gray-50 dark:border-white/10 dark:hover:bg-white/5'}`}
                       >
                         <span className="flex items-center gap-3">
-                          <span
-                            aria-hidden="true"
-                            className="flex h-8 w-8 items-center justify-center rounded-lg bg-gray-100 text-sm font-semibold text-gray-700 dark:bg-white/10 dark:text-gray-200"
-                          >
-                            {template.label.slice(0, 1)}
-                          </span>
+                          <McpServerIcon name={template.name} label={template.label} />
                           <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">
                             {template.label}
                           </span>
