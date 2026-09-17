@@ -35,6 +35,70 @@ function notification(id: number, method: string, params: Record<string, unknown
 }
 const active = turnContextFromJobs([{ id: 'job', state: 'running', current_attempt_id: 1 }]);
 
+describe('Claude runtime telemetry', () => {
+  const counter = {
+    type: 'system',
+    subtype: 'thinking_tokens',
+    estimated_tokens: 1,
+    estimated_tokens_delta: 1,
+  };
+
+  it.each(['text', 'line'])(
+    'keeps historical %s counters in logs without adding steps or token usage',
+    (field) => {
+      const records = [
+        event(1, 'raw', {
+          [field]: JSON.stringify(counter),
+          reason: "unclassified system subtype 'thinking_tokens'",
+        }),
+        event(2, 'raw', { [field]: JSON.stringify({ ...counter, estimated_tokens: 2 }) }),
+        event(3, 'raw', { [field]: JSON.stringify(counter) }, 2),
+        event(4, 'message', { text: 'Inspecting the repo', usage_id: 'm' }),
+      ];
+      const steps = buildTrajectorySteps(records);
+      const visible = steps.filter((step) => !step.diagnostic);
+      expect(visible.map((step) => step.actor)).toEqual(['assistant']);
+      expect(visible[0].stepNo).toBe(1);
+      expect(visible[0].usage?.reasoningTokens).toBeNull();
+      const logs = steps.filter((step) => step.diagnostic);
+      expect(logs.map((step) => step.sourceEvents.map((source) => source.id))).toEqual([
+        [1, 2],
+        [3],
+      ]);
+      expect(logs.every((step) => step.stepNo === 0 && step.label === 'Run logs')).toBe(true);
+      expect(logs.flatMap((step) => step.sourceEvents)).toEqual(records.slice(0, 3));
+      expect(
+        toSessionLog(records)
+          .split('\n')
+          .map((line) => JSON.parse(line)),
+      ).toEqual(records);
+    },
+  );
+
+  it.each([
+    { error: 'Counter failed' },
+    { is_error: true },
+    { status: 'failed' },
+    { status: 'error' },
+  ])('does not hide explicit failures on a recognized counter: %j', (failure) => {
+    const steps = buildTrajectorySteps([
+      event(1, 'raw', { text: JSON.stringify({ ...counter, ...failure }) }),
+      event(2, 'raw', { text: JSON.stringify(counter), ...failure }),
+    ]);
+    expect(steps.every((step) => !step.diagnostic && step.actor === 'runtime')).toBe(true);
+  });
+
+  it('does not mistake unknown system records, invalid JSON or reasoning content for counters', () => {
+    const steps = buildTrajectorySteps([
+      event(1, 'raw', { text: JSON.stringify({ type: 'system', subtype: 'new_subtype' }) }),
+      event(2, 'raw', { text: '{"type":"system","subtype":"thinking_tokens"' }),
+      event(3, 'thinking', { text: JSON.stringify(counter) }),
+    ]);
+    expect(steps.every((step) => !step.diagnostic)).toBe(true);
+    expect(steps[2].actor).toBe('assistant');
+  });
+});
+
 describe('Codex trajectory projection', () => {
   it('updates one assistant row through start, deltas and final snapshot without changing its key or raw records', () => {
     const start = notification(1, 'item/started', {

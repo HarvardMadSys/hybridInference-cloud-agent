@@ -182,6 +182,33 @@ describe('TrajectoryView', () => {
     expect(screen.getByText('the build passes')).toBeInTheDocument();
   });
 
+  it('keeps Claude counters out of the Other lane while retaining selectable run logs', () => {
+    const onSelect = vi.fn();
+    const counters = [10, 11].map((id) =>
+      event({
+        id,
+        event_type: 'raw',
+        payload: {
+          text: JSON.stringify({
+            type: 'system',
+            subtype: 'thinking_tokens',
+            estimated_tokens: id,
+          }),
+          reason: "unclassified system subtype 'thinking_tokens'",
+        },
+      }),
+    );
+    render(<Harness events={[...counters, ...EVENTS]} onSelectStep={onSelect} />);
+    expect(screen.getByText('2 steps')).toBeInTheDocument();
+    expect(screen.queryByText('Other')).not.toBeInTheDocument();
+    expect(screen.queryByText('runtime')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Run logs (2)' }));
+    fireEvent.click(screen.getByText(/Run logs · 2 runtime records/));
+    expect(onSelect).toHaveBeenCalledWith('runtime:ajob_1:1');
+    expect(screen.getByText('2 steps')).toBeInTheDocument();
+    expect(screen.queryByText('Other')).not.toBeInTheDocument();
+  });
+
   it('lists every stored event as a step, including the one chat folds away', () => {
     render(<Harness events={EVENTS} />);
 

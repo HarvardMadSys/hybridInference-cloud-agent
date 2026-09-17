@@ -1,5 +1,5 @@
-// Interpret only recorded Codex item identities. The returned events are a
-// display projection; callers must retain the original records for Raw/export.
+// Project recorded Codex item identities and recognize runtime-only notices.
+// Callers must retain the original records for Raw/export.
 import type { StoredEvent } from './trajectorySteps';
 
 export function record(value: unknown): Record<string, unknown> {
@@ -8,7 +8,7 @@ export function record(value: unknown): Record<string, unknown> {
     : {};
 }
 
-export function rawNotification(event: StoredEvent): Record<string, unknown> | null {
+function rawRecord(event: StoredEvent): Record<string, unknown> | null {
   if (event.event_type !== 'raw') return null;
   const payload = record(event.payload);
   let value = record(payload.notification);
@@ -21,7 +21,28 @@ export function rawNotification(event: StoredEvent): Record<string, unknown> | n
       return null;
     }
   }
-  return typeof value.method === 'string' && value.method && value.id === undefined ? value : null;
+  return value;
+}
+
+export function rawNotification(event: StoredEvent): Record<string, unknown> | null {
+  const value = rawRecord(event);
+  return value && typeof value.method === 'string' && value.method && value.id === undefined
+    ? value
+    : null;
+}
+
+/** Claude retains its first counter as a raw diagnostic, including in old runs. */
+export function isRuntimeTelemetry(event: StoredEvent): boolean {
+  const value = rawRecord(event);
+  if (value?.type !== 'system' || value.subtype !== 'thinking_tokens') return false;
+  // An explicit failure must remain visible even on an otherwise known counter.
+  return ![record(event.payload), value].some(
+    (payload) =>
+      Boolean(payload.error) ||
+      payload.is_error === true ||
+      payload.status === 'failed' ||
+      payload.status === 'error',
+  );
 }
 
 export function notificationHasError(notification: Record<string, unknown>): boolean {

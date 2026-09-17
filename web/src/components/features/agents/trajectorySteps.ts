@@ -18,6 +18,7 @@ import {
   rawNotification,
   notificationHasError,
   isRuntimeNotification,
+  isRuntimeTelemetry,
   projectProtocolEvents,
 } from './trajectoryProtocol';
 
@@ -744,6 +745,7 @@ export function buildTrajectorySteps(
         payload.phase === 'failed');
     const runtimeNotification =
       (notification !== null && isRuntimeNotification(notification)) ||
+      isRuntimeTelemetry(event) ||
       event.event_type === 'tool_output';
     const diagnostic =
       runtimeNotification ||
