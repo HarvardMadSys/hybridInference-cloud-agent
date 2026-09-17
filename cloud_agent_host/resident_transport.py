@@ -34,7 +34,7 @@ from cloud_agent_host.drivers import (
     get_driver,
 )
 from cloud_agent_host.runtimes import RuntimeMCPConfig
-from cloud_agent_host.sandbox import SANDBOX_PATH, runtime_bin_dir
+from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -458,7 +458,7 @@ class ResidentTransportFactory:
 
         reaped = False
 
-        def spawn_live(argv: list[str], env: dict[str, str]):
+        def spawn_live(argv: list[str], env: dict[str, str]) -> SandboxProcess:
             nonlocal reaped
             if not reaped:
                 # A broker restart cannot reattach Docker-exec pipes. Remove

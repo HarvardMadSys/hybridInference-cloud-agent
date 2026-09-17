@@ -48,6 +48,7 @@ from cloud_agent_host.guest_observer import (
     GuestObserverController,
     GuestObserverCursor,
     GuestObserverRuntimeError,
+    GuestObserverSnapshot,
 )
 from cloud_agent_host.sandbox import (
     KATA_RUNTIME,
@@ -61,6 +62,7 @@ from cloud_agent_host.sandbox import (
 from cloud_agent_host.tool_windows import MAX_TOOL_MARK_BYTES, TOOL_MARK_FILE, ToolMarkReader
 
 if TYPE_CHECKING:
+    import builtins
     from collections.abc import Iterator, Sequence
 
 
@@ -451,7 +453,7 @@ class ChatSandboxManager:
         configs = (network.get("IPAM") or {}).get("Config") or []
         if not isinstance(configs, list):
             return False
-        ipv4_subnets: list[ipaddress.IPv4Network] = []
+        ipv4_subnets: builtins.list[ipaddress.IPv4Network] = []
         for config in configs:
             if not isinstance(config, dict) or not config.get("Subnet"):
                 continue
@@ -664,7 +666,7 @@ class ChatSandboxManager:
         *,
         network: str,
         container_id: str,
-        aliases: list[str],
+        aliases: builtins.list[str],
     ) -> None:
         existing = self._container_network_aliases(container_id, network)
         if existing is not None:
@@ -1173,7 +1175,7 @@ class ChatSandboxManager:
         age = (datetime.now(UTC) - created.astimezone(UTC)).total_seconds()
         return age >= CHAT_NETWORK_PRUNE_GRACE_S
 
-    def prune_orphan_networks(self, specs: list[ChatSandboxSpec]) -> None:
+    def prune_orphan_networks(self, specs: builtins.list[ChatSandboxSpec]) -> None:
         """Remove stale owned bridges without racing a create or phase transition."""
         result = self._run(
             [
@@ -1412,7 +1414,7 @@ class ChatSandboxManager:
         *,
         image: str | None = None,
         network_phase: Literal["setup", "agent"] = "setup",
-    ) -> list[str]:
+    ) -> builtins.list[str]:
         """Compose a no-secret, no-chat-volume ``docker create`` command."""
         self._validate_extra_args()
         if (
@@ -1635,7 +1637,7 @@ class ChatSandboxManager:
                 return True
         return False
 
-    def list(self) -> list[ChatSandboxInspection]:
+    def list(self) -> builtins.list[ChatSandboxInspection]:
         """List retained containers owned by this deployment namespace."""
         result = self._run(
             [
@@ -1653,7 +1655,7 @@ class ChatSandboxManager:
         )
         if result.returncode != 0:
             raise SandboxError("chat sandbox listing failed: " + result.stderr.strip()[:300])
-        found: list[ChatSandboxInspection] = []
+        found: builtins.list[ChatSandboxInspection] = []
         for line in result.stdout.splitlines():
             try:
                 row = json.loads(line)
@@ -1828,7 +1830,7 @@ class ChatSandboxManager:
     def build_exec_command(
         self,
         spec: ChatSandboxSpec,
-        argv: list[str],
+        argv: builtins.list[str],
         *,
         env: dict[str, str] | None = None,
         workdir: str = CHAT_WORKDIR,
@@ -1836,7 +1838,7 @@ class ChatSandboxManager:
         tty: bool = False,
         user_uid: int | None = None,
         user_gid: int | None = None,
-    ) -> list[str]:
+    ) -> builtins.list[str]:
         """Compose ``docker exec`` after identity/running checks at spawn time."""
         if not argv:
             raise ValueError("a retained sandbox exec needs an argv")
@@ -1869,7 +1871,7 @@ class ChatSandboxManager:
     def spawn(
         self,
         spec: ChatSandboxSpec,
-        argv: list[str],
+        argv: builtins.list[str],
         *,
         env: dict[str, str] | None = None,
         workdir: str = CHAT_WORKDIR,
@@ -2168,7 +2170,7 @@ class ChatSandboxManager:
             text = payload.decode("ascii")
         except UnicodeDecodeError as exc:
             raise SandboxError("member process census is not ASCII") from exc
-        found: list[tuple[int, int]] = []
+        found: builtins.list[tuple[int, int]] = []
         seen: set[int] = set()
         for line in text.splitlines():
             fields = line.split()
@@ -2283,7 +2285,7 @@ class ChatSandboxManager:
         self,
         spec: ChatSandboxSpec,
         *,
-        slot_ids: list[int],
+        slot_ids: builtins.list[int],
         token: str,
     ) -> str:
         """Stop every existing shared-workspace writer for one short capture.
@@ -2335,7 +2337,7 @@ class ChatSandboxManager:
             'printf "%s %s %s\\n" "$pid" "$expected_uid" "$started"; done; '
             "committed=1"
         )
-        frozen: list[tuple[int, int, int]] = []
+        frozen: builtins.list[tuple[int, int, int]] = []
         try:
             for uid in target_uids:
                 result = self.exec_capture(
@@ -2390,7 +2392,7 @@ class ChatSandboxManager:
         self,
         spec: ChatSandboxSpec,
         *,
-        slot_ids: list[int],
+        slot_ids: builtins.list[int],
         manifest: str,
         require_exact_census: bool = True,
     ) -> None:
@@ -2448,13 +2450,13 @@ class ChatSandboxManager:
         payload: bytes,
         *,
         allowed_uids: set[int],
-    ) -> list[tuple[int, int, int]]:
+    ) -> builtins.list[tuple[int, int, int]]:
         """Validate the private PID/start-time receipt before any signal."""
         try:
             text = payload.decode("ascii")
         except UnicodeDecodeError as exc:
             raise SandboxError("shared snapshot writer census is not ASCII") from exc
-        frozen: list[tuple[int, int, int]] = []
+        frozen: builtins.list[tuple[int, int, int]] = []
         seen: set[int] = set()
         for line in text.splitlines():
             fields = line.split()
@@ -2470,7 +2472,7 @@ class ChatSandboxManager:
         return frozen
 
     @staticmethod
-    def _encode_frozen_processes(frozen: list[tuple[int, int, int]]) -> bytes:
+    def _encode_frozen_processes(frozen: builtins.list[tuple[int, int, int]]) -> bytes:
         """Encode a deterministic, private manifest for the later thaw."""
         return "".join(f"{pid} {uid} {started}\n" for pid, uid, started in sorted(frozen)).encode(
             "ascii"
@@ -2480,8 +2482,8 @@ class ChatSandboxManager:
         self,
         spec: ChatSandboxSpec,
         *,
-        target_uids: list[int],
-        frozen: list[tuple[int, int, int]],
+        target_uids: builtins.list[int],
+        frozen: builtins.list[tuple[int, int, int]],
         require_exact_census: bool,
     ) -> None:
         """Resume each receipt as its owner and report any changed census."""
@@ -2506,7 +2508,7 @@ class ChatSandboxManager:
             '[ "$uid" = "$expected_uid" ] && [ "$current" = "$started" ] '
             '&& kill -CONT "$pid" 2>/dev/null || :; done; [ "$unknown" = 0 ]'
         )
-        errors: list[str] = []
+        errors: builtins.list[str] = []
         for uid in target_uids:
             expected = [f"{pid}:{started}" for pid, started in by_uid[uid]]
             try:
@@ -2714,7 +2716,7 @@ class ChatSandboxManager:
     def exec_capture(
         self,
         spec: ChatSandboxSpec,
-        argv: list[str],
+        argv: builtins.list[str],
         *,
         env: dict[str, str] | None = None,
         workdir: str = CHAT_WORKDIR,
@@ -2756,7 +2758,7 @@ class ChatSandboxManager:
     def _kata_privileged_exec(
         self,
         spec: ChatSandboxSpec,
-        argv: list[str],
+        argv: builtins.list[str],
         *,
         detach: bool = False,
         timeout_s: float = 30,
@@ -3002,7 +3004,7 @@ class ChatSandboxManager:
     def _observer_privileged_exec(
         self,
         spec: ChatSandboxSpec,
-        argv: list[str],
+        argv: builtins.list[str],
         *,
         detach: bool = False,
         timeout_s: float = 30,
@@ -3020,7 +3022,7 @@ class ChatSandboxManager:
         spec: ChatSandboxSpec,
         *,
         after_poll_seq: int | None = None,
-    ):
+    ) -> GuestObserverSnapshot:
         """Read an atomic status/size/guest-clock tuple from the root journal."""
         try:
             return self._guest_observer_controller(spec).snapshot(after_poll_seq=after_poll_seq)
@@ -3102,7 +3104,7 @@ class ChatSandboxManager:
     def member_window_request(
         self,
         spec: ChatSandboxSpec,
-        argv: list[str],
+        argv: builtins.list[str],
         *,
         timeout_s: float,
     ) -> subprocess.CompletedProcess[bytes]:
@@ -3128,7 +3130,9 @@ class ChatSandboxManager:
     def _guest_observer_controller(self, spec: ChatSandboxSpec) -> GuestObserverController:
         """Bind the shared observer contract to this label-verified container."""
 
-        def capture(argv: list[str], timeout_s: float):
+        def capture(
+            argv: builtins.list[str], timeout_s: float
+        ) -> subprocess.CompletedProcess[bytes]:
             return self.exec_capture(
                 spec,
                 argv,
@@ -3138,7 +3142,9 @@ class ChatSandboxManager:
                 user_gid=0,
             )
 
-        def privileged(argv: list[str], detach: bool, timeout_s: float):
+        def privileged(
+            argv: builtins.list[str], detach: bool, timeout_s: float
+        ) -> subprocess.CompletedProcess[str]:
             return self._observer_privileged_exec(
                 spec,
                 argv,
@@ -3565,7 +3571,7 @@ class ChatSandboxManager:
             raise ValueError("container archive path must be absolute")
 
     @staticmethod
-    def _run(argv: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+    def _run(argv: builtins.list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
         try:
             return subprocess.run(
                 argv,
@@ -3580,7 +3586,7 @@ class ChatSandboxManager:
 
     @staticmethod
     def _run_bytes(
-        argv: list[str], *, timeout: float, input_bytes: bytes | None = None
+        argv: builtins.list[str], *, timeout: float, input_bytes: bytes | None = None
     ) -> subprocess.CompletedProcess[bytes]:
         try:
             return subprocess.run(
@@ -3614,7 +3620,7 @@ class _RetainedExecProcess(SandboxProcess):
         self._process_pidfile = process_pidfile
         self._user_uid = user_uid
         self._user_gid = user_gid
-        self._stderr_chunks: list[str] = []
+        self._stderr_chunks: builtins.list[str] = []
         self._stderr_thread: threading.Thread | None = None
         if process.stderr is not None:
             self._stderr_thread = threading.Thread(

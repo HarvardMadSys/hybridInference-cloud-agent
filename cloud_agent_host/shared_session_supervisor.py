@@ -61,6 +61,8 @@ from cloud_agent_host.session_lifecycle import (
 )
 
 if TYPE_CHECKING:
+    import builtins
+
     from cloud_agent_host.tool_windows import ToolMarkReader
 
 ContextStatus = Literal["new", "live", "restored", "lost"]
@@ -408,10 +410,10 @@ class SharedChatSessionSupervisor:
             with contextlib.suppress(RuntimeError):
                 turn_lock.release()
 
-    def reconcile(self) -> list[SharedSessionDescriptor]:
+    def reconcile(self) -> builtins.list[SharedSessionDescriptor]:
         """Discover only containers labelled for the shared-live protocol."""
-        found: list[SharedSessionDescriptor] = []
-        specs: list[ChatSandboxSpec] = []
+        found: builtins.list[SharedSessionDescriptor] = []
+        specs: builtins.list[ChatSandboxSpec] = []
         for inspection in self._manager.list():
             if inspection.labels.get(CHAT_SHARED_LABEL) != "true":
                 continue
@@ -448,10 +450,10 @@ class SharedChatSessionSupervisor:
     def register_manifest(
         self,
         spec: ChatSandboxSpec,
-        members: list[SharedMemberManifest],
+        members: builtins.list[SharedMemberManifest],
         *,
         expected_container_id: str | None = None,
-    ) -> list[SharedSessionDescriptor]:
+    ) -> builtins.list[SharedSessionDescriptor]:
         """Install the control plane's authoritative member aliases."""
         if not members:
             raise ValueError("a shared sandbox manifest cannot be empty")
@@ -569,7 +571,7 @@ class SharedChatSessionSupervisor:
         owner: str,
         activation_generation: int,
         has_settled_context: bool,
-        manifest: list[SharedMemberManifest],
+        manifest: builtins.list[SharedMemberManifest],
         expected_container_id: str | None = None,
     ) -> SharedSessionLease:
         """Start one group if needed and lease only the addressed member."""
@@ -1044,7 +1046,7 @@ class SharedChatSessionSupervisor:
                 and member.window_sampler is not None
                 and member.window.baseline_taken
             ]
-            due: list[DueCensus] = []
+            due: builtins.list[DueCensus] = []
             for member in members:
                 window = member.window
                 sampler = member.window_sampler
@@ -1913,10 +1915,10 @@ class SharedChatSessionSupervisor:
                 stale_transport.close()
         return descriptor
 
-    def list(self) -> list[SharedSessionDescriptor]:
+    def list(self) -> builtins.list[SharedSessionDescriptor]:
         """Return one observation per known membership."""
         self.reconcile()
-        stale_transports: list[ResidentTransport] = []
+        stale_transports: builtins.list[ResidentTransport] = []
         with self._lock:
             for group in self._groups.values():
                 for member in group.members.values():
@@ -1970,7 +1972,7 @@ class SharedChatSessionSupervisor:
                 for member in group.members.values()
                 if member.observer_cursor is not None
             ]
-            interrupted_turn_locks: list[Any] = []
+            interrupted_turn_locks: builtins.list[Any] = []
             for member in group.members.values():
                 if member.current_turn is not None and member.turn_lock.locked():
                     interrupted_turn_locks.append(member.turn_lock)
@@ -2034,7 +2036,7 @@ class SharedChatSessionSupervisor:
             self._condition.notify_all()
             return descriptor
 
-    def sweep(self) -> list[SharedSessionDescriptor]:
+    def sweep(self) -> builtins.list[SharedSessionDescriptor]:
         """Stop groups whose single refreshed inactivity deadline elapsed."""
         now = self._clock()
         with self._lock:
@@ -2046,7 +2048,7 @@ class SharedChatSessionSupervisor:
                 and group.idle_deadline <= now
                 and self._is_quiescent(group)
             ]
-        stopped: list[SharedSessionDescriptor] = []
+        stopped: builtins.list[SharedSessionDescriptor] = []
         for thread_id, generation in candidates:
             with contextlib.suppress(SessionBusy, SessionLeaseLost):
                 stopped.append(
@@ -2228,7 +2230,7 @@ class SharedChatSessionSupervisor:
             resident_slot_id=member.resident_slot_id,
         )
 
-    def _descriptors(self, group: _Group) -> list[SharedSessionDescriptor]:
+    def _descriptors(self, group: _Group) -> builtins.list[SharedSessionDescriptor]:
         return [self._descriptor(group, member) for member in group.members.values()]
 
     @staticmethod

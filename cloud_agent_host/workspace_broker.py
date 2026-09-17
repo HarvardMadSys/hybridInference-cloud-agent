@@ -86,7 +86,7 @@ from cloud_agent_host.workspace_browser import (
 logger = get_logger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable, Iterator
 
 MAX_FILE_WRITE_BYTES = 2 * 1024 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 2 * 1024 * 1024
@@ -1254,7 +1254,7 @@ def create_app(
     )
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI):
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # Docker owns every chat workspace and provider state. The broker keeps
         # only an in-memory index reconstructed from container labels/PID files.
         sandbox.preflight()
@@ -1513,7 +1513,7 @@ def create_app(
             except Exception:
                 return None
 
-        def frames():
+        def frames() -> Iterator[str]:
             turn_boundary_closed = False
             tool_windows = ToolWindowTracker()
             resources: dict[str, Any] | None = None
@@ -2029,7 +2029,7 @@ def create_app(
         session = terminals.get(scope, terminal_id)
         session.open_stream()
 
-        async def event_stream():
+        async def event_stream() -> AsyncIterator[str]:
             cursor = after
             try:
                 while True:
