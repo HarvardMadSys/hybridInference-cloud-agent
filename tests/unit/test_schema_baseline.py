@@ -119,10 +119,17 @@ def _tables_created_by_every_revision() -> set[str]:
     schema has one owner, and a table added by a later revision is still a
     table the store may name. Checking only the baseline made every migration
     that follows it a hole in this test.
+
+    ``IF NOT EXISTS`` is matched too. It is how a revision that may run against
+    a database which already has the table is written, and a table created that
+    way is no less created -- missing it here would report the store's own
+    queries as naming a table no revision makes.
     """
     created: set[str] = set()
     for path in sorted(VERSIONS.glob("*.py")):
-        created.update(re.findall(r"CREATE TABLE (\w+)", path.read_text(encoding="utf-8")))
+        created.update(
+            re.findall(r"CREATE TABLE (?:IF NOT EXISTS )?(\w+)", path.read_text(encoding="utf-8"))
+        )
     return created
 
 

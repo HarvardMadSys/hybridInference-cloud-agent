@@ -19,6 +19,10 @@ from cloud_agent.ports.host_capacity import HostCapacityRepository
 from cloud_agent.ports.host_pool import HostPoolRepository
 from cloud_agent.ports.ledger import LedgerRepository
 from cloud_agent.ports.mcp import McpConnectionRepository
+from cloud_agent.ports.operation_measurements import (
+    MeasurementWriteResult,
+    OperationMeasurements,
+)
 from cloud_agent.ports.residency import ResidencyRepository
 from cloud_agent.ports.sandbox import SandboxRepository
 from cloud_agent.ports.session_fork import SessionForkRepository
@@ -37,6 +41,8 @@ __all__ = [
     "HostPoolRepository",
     "LedgerRepository",
     "McpConnectionRepository",
+    "MeasurementWriteResult",
+    "OperationMeasurements",
     "ResidencyRepository",
     "SandboxRepository",
     "SessionForkRepository",
