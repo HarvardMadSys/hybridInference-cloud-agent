@@ -8,12 +8,10 @@ and `description` frontmatter. The body must contain Markdown instructions.
 
 ## Selection and execution
 
-- A default switch affects new conversations. The task composer starts with the
-  owner's defaults; its Skills picker can change or clear the selection. Unchanged
-  defaults are resolved by the server and excluded from the submission fingerprint.
-  Loading or failing to load the library does not block task creation: the
-  composer shows that account defaults will apply and omits `skill_ids` so the
-  server resolves them. A failed load offers a retry.
+- A default switch in Integrations affects new conversations. The new-task
+  composer uses those account defaults without displaying a Skills control or
+  fetching the library. Defaults are resolved by the server and excluded from
+  the submission fingerprint.
 - `POST /v1/agent/jobs` accepts `skill_ids`: omitted/null means account defaults;
   an empty array explicitly selects none.
 - Follow-ups accept the same field: omitted/null inherits the latest turn's exact

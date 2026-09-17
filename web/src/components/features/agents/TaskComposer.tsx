@@ -9,9 +9,6 @@ import { ConnectSourceControl } from './ConnectSourceControl';
 import { highestEffort, offeredEfforts } from './effort';
 import { useT } from '@/components/providers';
 import { Picker } from './Picker';
-import { SkillPicker } from './skills/SkillPicker';
-import { useSkillLibrary } from './skills/useSkillLibrary';
-import type { SelectedSkillApi } from '@/lib/api/skills';
 
 // New-task composer (the /agents index state). Runtime × model are first-class
 // controls — BYOA × BYOM is the product, not an advanced option.
@@ -33,12 +30,6 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   const router = useRouter();
   const t = useT();
   const [task, setTask] = useState('');
-  const skillLibrary = useSkillLibrary();
-  const [chosenSkills, setChosenSkills] = useState<SelectedSkillApi[] | null>(null);
-  const selectedSkills =
-    chosenSkills ?? skillLibrary.skills.filter((skill) => skill.default_enabled);
-  const pendingSkillDefaults =
-    chosenSkills === null && (skillLibrary.loading || !!skillLibrary.error);
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
   const [models, setModels] = useState<string[]>([]);
   const [repo, setRepo] = useState('');
@@ -142,9 +133,6 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
       const job = await createAgentJob({
         repo,
         task_prompt: task.trim(),
-        // Defaults are resolved by the server. Only an explicit picker change
-        // belongs in the request, so retries are independent of library edits.
-        ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
         runtime,
         model,
         // Sent as a ref; the platform pins it to a commit at creation, because
@@ -262,18 +250,6 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
                 options={efforts}
                 onChange={setEffort}
               />
-              {pendingSkillDefaults ? (
-                <span className="text-xs text-gray-500 dark:text-gray-400">
-                  Skills · account defaults
-                </span>
-              ) : (
-                <SkillPicker
-                  limits={config?.skill_limits}
-                  selected={selectedSkills}
-                  onChange={setChosenSkills}
-                  disabled={submitting}
-                />
-              )}
             </>
           )}
 
@@ -299,15 +275,6 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           </button>
         </div>
       </div>
-
-      {skillLibrary.error ? (
-        <div className="mt-3 text-center text-sm text-red-600 dark:text-red-400" role="alert">
-          {skillLibrary.error} You can still start a task with your account defaults.{' '}
-          <button type="button" onClick={() => void skillLibrary.reload()} className="underline">
-            Retry loading skills
-          </button>
-        </div>
-      ) : null}
 
       {error ? (
         <p className="mt-3 text-center text-[13px] text-red-600 dark:text-red-400" role="alert">
