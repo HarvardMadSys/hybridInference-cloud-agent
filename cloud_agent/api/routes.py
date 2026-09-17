@@ -74,7 +74,7 @@ from cloud_agent.host_pool import hash_secret
 from cloud_agent.identity import SESSION_COOKIE
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.binding_aliases import binding_aliases
-from cloud_agent.mcp.models import ALIAS_PATTERN, ToolPolicy
+from cloud_agent.mcp.models import ALIAS_PATTERN, ConnectionStatus, ToolPolicy
 from cloud_agent.mcp.registry import resolve_connection, resolve_for_thread
 from cloud_agent.schemas import (
     BASE_REF_METADATA_KEY,
@@ -1239,11 +1239,9 @@ async def _resolve_mcp_bindings(
     this whole feature turns on: a connection somebody else added is unknown
     here, and there is no deployment-wide list to fall back from.
 
-    ``None`` means none, which is deliberately different from the old
-    name-based resolution: connecting a server is a decision about what is
-    *available*, and letting a task call it is a separate decision the caller
-    has to make. A job that silently received every connected tool because it
-    did not say otherwise is the shape this model removes.
+    Omitted choices inherit the owner's connected servers at claim time with
+    confirmation required. Entries supplied here are explicit conversation
+    overrides and remain authoritative when defaults are synchronized.
 
     Every failure is a refusal rather than a silent drop: a job is submitted
     because someone wants a task done, and a task written around a tool the
@@ -2202,36 +2200,9 @@ async def create_agent_follow_up(
             status_code=403,
             detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
         ) from exc
-    # A thread's MCP servers are inherited by every turn, so a turn can end up
-    # with tools it will not get a turn after the user disconnected a server
-    # since the thread started. Refuse it rather than run a turn whose tools
-    # silently vanish — the follow-up prompt was very likely written expecting
-    # them. Runtime is fixed above; the optional field can only echo that value.
-    #
-    # **Checked on every turn.** Resolution now also
-    # answers "is this still connected", which changes on its own, from the
-    # Integrations page, between turns — leaving a plain follow-up to return 201
-    # and fail at its first tool call, which is exactly the fail-fast this
-    # function exists to provide.
-    # Bindings are read fresh rather than carried on the job, so a turn always
-    # runs against what its session currently allows: a connection removed
-    # between turns stops being offered instead of failing at its first call.
-    for resolved, binding in await resolve_for_thread(
-        job_store.mcp, thread_id=str(parent["thread_id"])
-    ):
-        if binding.enabled and not resolved.usable:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": (
-                            f"this conversation uses the {resolved.connection.label!r} MCP "
-                            f"connection, which is not usable: {resolved.error}"
-                        ),
-                    }
-                },
-            )
+    # An unavailable account integration must not prevent unrelated conversation
+    # work. The runner receives only usable servers, resolved when it claims
+    # this turn, and Tools retains each connection's diagnosis.
     skills = (
         await _resolve_skill_selection(
             job_store.skills, user_id=user["user_id"], skill_ids=body.skill_ids
@@ -3911,6 +3882,20 @@ async def worker_claim(
                 },
             ) from exc
 
+    # Resolve at every claim, including existing conversations and native
+    # resumes. Loading the bindings adds newly connected servers while retaining
+    # explicit opt-outs, independently of whether anyone opened the Tools UI.
+    mcp_aliases = []
+    if claim["runtime"] in runtimes_supporting_mcp():
+        mcp_aliases = [
+            binding.alias
+            for resolved, binding in await resolve_for_thread(
+                job_store.mcp, thread_id=str(claim["thread_id"])
+            )
+            if binding.enabled
+            and resolved.usable
+            and resolved.connection.status is not ConnectionStatus.ERROR
+        ]
     response = WorkerClaimResponse(
         job_id=claim["id"],
         thread_id=str(claim["thread_id"]),
@@ -3939,7 +3924,7 @@ async def worker_claim(
         # Aliases, because that is what the runtime config addresses: the relay
         # path segment is the binding alias, and the runner learns nothing about
         # where the connection points.
-        mcp_bindings=[str(entry["alias"]) for entry in claim.get("mcp_bindings") or []],
+        mcp_bindings=mcp_aliases,
         metadata=claim["metadata"],
     )
     if claim.get("title_generation_pending") is True:

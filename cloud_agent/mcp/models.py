@@ -340,6 +340,7 @@ class McpConnection:
     #: required: a connection with no template is a first-class connection.
     template: str | None = None
     status: ConnectionStatus = ConnectionStatus.DRAFT
+    enabled: bool = True
     error_kind: ConnectionErrorKind = ConnectionErrorKind.NONE
     error_detail: str | None = None
     #: The connector a ``user-connector`` connection routes through.
@@ -360,7 +361,7 @@ class McpConnection:
     @property
     def usable(self) -> bool:
         """Whether this connection may currently authorize anything."""
-        return self.status in (ConnectionStatus.ACTIVE, ConnectionStatus.DRAFT)
+        return self.enabled and self.status in (ConnectionStatus.ACTIVE, ConnectionStatus.DRAFT)
 
     def revision_tuple(self) -> tuple[int, int, int, int, int]:
         """Every version that a decision must be fenced against, in order.
@@ -496,9 +497,9 @@ class ToolRule:
 class ThreadBinding:
     """One conversation's use of one connection.
 
-    Holds the exact capabilities allowed, so a server that later advertises a
-    new tool does not silently acquire access: the new name is simply not in
-    :attr:`rules`, and a name that is absent is denied rather than confirmed.
+    Explicit capability rules override the server's default. Automatically
+    connected servers ask before each call; manually restricted selections
+    deny omitted capabilities. Neither mode silently approves a new tool.
     """
 
     thread_id: str
@@ -511,12 +512,9 @@ class ThreadBinding:
     capability_revision: int
     policy_revision: int = 1
     enabled: bool = True
-    #: Set on a binding migrated from the old provider-name list, whose owner
-    #: has not chosen capabilities for it yet. Such a binding advertises what
-    #: the server offers and holds every call for a decision, which is how a
-    #: session that predates this model keeps working without inheriting an
-    #: approval nobody ever gave. Cleared the first time its owner saves a
-    #: selection.
+    #: Use the default policy: advertise discovered capabilities and ask before
+    #: each call. Explicit per-capability choices override this default. Also
+    #: used by legacy bindings whose owners have not chosen specific tools.
     selection_pending: bool = False
     rules: Mapping[str, ToolRule] = field(default_factory=dict)
     resource_rules: Mapping[str, ToolPolicy] = field(default_factory=dict)
@@ -525,15 +523,7 @@ class ThreadBinding:
     updated_at: datetime | None = None
 
     def policy_for(self, kind: CapabilityKind, name: str) -> ToolPolicy:
-        """The policy for one capability, defaulting to deny.
-
-        Deny rather than confirm, because "absent" has two causes that must not
-        behave the same way: a name the owner deliberately left out, and a name
-        the server invented after the owner last looked. Neither is a reason to
-        interrupt somebody with a prompt they did not ask for -- and a server
-        that adds forty tools would otherwise produce forty prompts in a
-        session that asked for none of them.
-        """
+        """Read an explicit override, then the binding's confirmation or deny default."""
         match kind:
             case CapabilityKind.RESOURCE | CapabilityKind.RESOURCE_TEMPLATE:
                 rules = self.resource_rules
@@ -544,9 +534,8 @@ class ThreadBinding:
         policy = rules.get(name)
         if policy is not None:
             return policy
-        # A migrated binding has no rules yet and must not be read as "nothing
-        # is enabled": its owner is being asked, which is a prompt, not a
-        # refusal. Every other binding means exactly what it says.
+        # Default access advertises capabilities without approving execution.
+        # Explicit selections keep their original deny-by-default semantics.
         return ToolPolicy.CONFIRM if self.selection_pending else ToolPolicy.DENY
 
     def rule_for(self, kind: CapabilityKind, name: str) -> ToolRule | None:

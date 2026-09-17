@@ -5045,15 +5045,10 @@ async def test_disconnecting_clears_the_secret_and_bumps_the_epoch(
     assert len(await store.mcp.list_mcp_connections(user_id=_OWNER, include_deleted=True)) == 1
 
 
-async def test_a_follow_up_is_refused_when_its_thread_s_connection_was_disconnected(
+async def test_a_follow_up_runs_when_an_account_connection_was_disconnected(
     client: AsyncClient, store: FakeStorage
 ):
-    """Fail fast, on **every** turn -- not only when the caller switches runtime.
-
-    Whether a thread's connection is still usable changes on its own, between
-    turns. A plain "keep going" follow-up that returned 201 would discover at
-    its first tool call that the tools the prompt was written around are gone.
-    """
+    """One disconnected integration must not prevent unrelated conversation work."""
     row = store.connect_mcp(user_id=_OWNER, label="GitHub")
     created = await client.post(
         "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
@@ -5065,8 +5060,10 @@ async def test_a_follow_up_is_refused_when_its_thread_s_connection_was_disconnec
 
     follow_up = await client.post(f"/v1/agent/jobs/{job_id}/follow-ups", json={"prompt": "again"})
 
-    assert follow_up.status_code == 400
-    assert "GitHub" in follow_up.text
+    assert follow_up.status_code == 201
+    from cloud_agent.mcp.registry import servers_for_thread
+
+    assert await servers_for_thread(store.mcp, thread_id=created.json()["thread_id"]) == {}
 
 
 async def test_a_follow_up_still_runs_while_its_thread_s_connection_is_connected(
@@ -6742,3 +6739,47 @@ async def test_a_release_reason_outside_the_audit_vocabulary_is_refused(
 
     assert refused.status_code == 422
     assert store.jobs[job_id]["state"] == "running"
+
+
+@pytest.mark.parametrize("runtime", ["codex", "kilo", "claude-code", "opencode", "pi"])
+async def test_claim_loads_current_default_servers_and_skips_unavailable_ones(
+    client: AsyncClient, store: FakeStorage, runtime
+):
+    """Every CLI receives the live, usable set without a composer selection."""
+    working = store.connect_mcp(user_id=_OWNER, label="Wiki")
+    expired = store.connect_mcp(
+        user_id=_OWNER,
+        label="Expired",
+        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+    paused = store.connect_mcp(user_id=_OWNER, label="Paused")
+    store.mcp_connections[paused["id"]]["enabled"] = False
+    created = await client.post("/v1/agent/jobs", json=_job_body(runtime=runtime))
+    assert created.status_code == 201
+    thread = created.json()["thread_id"]
+    # The real repository creates these defaults on list; storage tests exercise
+    # that owner-scoped insert against Postgres. Keep the route fake explicit.
+    store.mcp_bindings[thread] = [
+        store._thread_binding(
+            thread,
+            {
+                "connection_id": row["id"],
+                "alias": f"mcp{row['id']}",
+                "enabled": True,
+                "selection_pending": True,
+                "rules": {},
+                "config_revision": row["config_revision"],
+                "authorization_epoch": row["authorization_epoch"],
+                "capability_revision": row["capability_revision"],
+            },
+        )
+        for row in (working, expired, paused)
+    ]
+    app = _build_app(store, claim_auth=True)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as runner:
+        claimed = await runner.post(
+            "/v1/agent/worker/claim", json={"worker_id": "w-1", "lease_ttl_seconds": 60}
+        )
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["mcp_bindings"] == [f"mcp{working['id']}"]
+    assert claimed.json()["mcp_token"]

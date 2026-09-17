@@ -29,6 +29,36 @@ export function SkillIcon({ className = 'h-4 w-4' }: { className?: string }) {
   );
 }
 
+export function SkillSwitch({
+  label,
+  checked,
+  onChange,
+  disabled = false,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (value: boolean) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-label={label}
+      aria-checked={checked}
+      title={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={`inline-flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-crimson disabled:opacity-50 ${checked ? 'bg-gray-900 dark:bg-gray-100' : 'bg-gray-200 dark:bg-gray-700'}`}
+    >
+      <span
+        aria-hidden="true"
+        className={`h-4 w-4 rounded-full bg-white shadow-sm transition-transform dark:bg-gray-900 ${checked ? 'translate-x-4' : ''}`}
+      />
+    </button>
+  );
+}
+
 /** One accessible surface for skill editing, review, and conversation selection. */
 export function SkillDialog({
   title,

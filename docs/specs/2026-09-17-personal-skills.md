@@ -6,12 +6,20 @@ Owners can create, edit, inspect, copy, remove, and choose defaults. Import acce
 a GitHub repository/folder/SKILL.md URL or an uploaded SKILL.md with YAML `name`
 and `description` frontmatter. The body must contain Markdown instructions.
 
+Library rows show the name, a single-line description, and when the skill was
+added. The Auto-use switch controls account defaults for new chats; the overflow
+menu opens details, editing, copying, and removal. Conversation pickers show only
+names and switches, with Apply/Cancel for session-specific changes. Full descriptions
+remain in the library details, and selection-limit warnings appear when needed.
+
 ## Selection and execution
 
-- A default switch in Integrations affects new conversations. The new-task
-  composer uses those account defaults without displaying a Skills control or
-  fetching the library. Defaults are resolved by the server and excluded from
-  the submission fingerprint.
+- A default switch affects new conversations. The task composer starts with the
+  owner's defaults; its Skills picker can change or clear the selection. Unchanged
+  defaults are resolved by the server and excluded from the submission fingerprint.
+  Loading or failing to load the library does not block task creation: the
+  composer shows that account defaults will apply and omits `skill_ids` so the
+  server resolves them. A failed load offers a retry.
 - `POST /v1/agent/jobs` accepts `skill_ids`: omitted/null means account defaults;
   an empty array explicitly selects none.
 - Follow-ups accept the same field: omitted/null inherits the latest turn's exact

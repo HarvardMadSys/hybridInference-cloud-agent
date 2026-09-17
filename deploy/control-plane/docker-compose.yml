@@ -163,6 +163,8 @@ services:
       # from whatever host a request arrived on would differ per proxy and fail
       # that registration. Unset means a connection can still use a static
       # credential, and only the browser flow is refused.
+      # Optional override; otherwise MCP reuses the public API prefix from
+      # AGENT_SESSION_REDIRECT_URI, which this deployment already requires.
       AGENT_MCP_PUBLIC_BASE_URL: ${AGENT_MCP_PUBLIC_BASE_URL:-}
 
       # Both widen what a user-added MCP connection may dial, and both are off

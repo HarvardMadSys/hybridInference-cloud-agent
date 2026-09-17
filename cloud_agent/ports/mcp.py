@@ -91,6 +91,12 @@ class McpConnectionRepository(Protocol):
         """
         ...
 
+    async def set_mcp_connection_enabled(
+        self, *, connection_id: int, user_id: str, enabled: bool
+    ) -> dict[str, Any] | None:
+        """Toggle account-wide availability without deleting credentials or tool choices."""
+        ...
+
     async def set_mcp_connection_status(
         self,
         *,
@@ -323,15 +329,16 @@ class McpConnectionRepository(Protocol):
         ...
 
     async def list_mcp_bindings(self, *, thread_id: str) -> list[dict[str, Any]]:
-        """Every connection this conversation may use, with its rules."""
+        """Ensure default bindings for the owner's servers and return all overrides."""
         ...
 
-    async def replace_mcp_bindings(self, *, thread_id: str, bindings: list[dict[str, Any]]) -> None:
+    async def replace_mcp_bindings(
+        self, *, thread_id: str, bindings: list[dict[str, Any]], merge: bool = False
+    ) -> None:
         """Replace a conversation's selection wholesale.
 
-        Wholesale rather than per-row, because a selection is a decision about
-        the *set*: leaving an unmentioned binding in place would mean removing a
-        connection from the dialog did not remove its tools from the session.
+        With merge=True only named servers change. Otherwise unmentioned
+        existing bindings become disabled opt-outs instead of disappearing.
         """
         ...
 

@@ -340,7 +340,7 @@ describe('JobDetail', () => {
       />,
     );
     fireEvent.click(screen.getByRole('button', { name: /1 selected/ }));
-    fireEvent.click(await screen.findByRole('checkbox'));
+    fireEvent.click(await screen.findByRole('switch'));
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
     fireEvent.change(screen.getByLabelText('Add a follow-up'), {
       target: { value: 'Continue without skills' },
