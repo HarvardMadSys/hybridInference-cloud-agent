@@ -29,6 +29,7 @@ export function McpAddDialog({
   onAdded: (connections: McpConnectionApi[]) => void;
 }) {
   const panel = useRef<HTMLDivElement>(null);
+  const submission = useRef(false);
   const [mode, setMode] = useState<McpAddMode>(initialMode);
   const [selected, setSelected] = useState<McpTemplateApi | null>(null);
   const [authKind, setAuthKind] = useState<McpAuthKind>('oauth');
@@ -43,7 +44,8 @@ export function McpAddDialog({
   }, []);
 
   async function connect() {
-    if (!selected || saving) return;
+    if (!selected || submission.current) return;
+    submission.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -62,6 +64,7 @@ export function McpAddDialog({
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : 'Could not add this server.');
     } finally {
+      submission.current = false;
       setSaving(false);
     }
   }

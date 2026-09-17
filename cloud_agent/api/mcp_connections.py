@@ -647,6 +647,7 @@ async def create_connection(
         connector_id=body.connector_id,
         account_label=body.account_label,
         request_timeout_s=body.request_timeout_s,
+        reuse_pending=not body.secret and not body.env_secrets,
     )
     if body.secret:
         await _store_static_secret(
@@ -734,6 +735,7 @@ async def import_connections(
             auth_kind=auth_kind.value,
             auth_config=auth_config,
             template=None,
+            reuse_pending=not draft.secrets,
         )
         secrets = {secret.name: secret.value for secret in draft.secrets if secret.value}
         supplied = body.server_secrets.get(draft.label, {})

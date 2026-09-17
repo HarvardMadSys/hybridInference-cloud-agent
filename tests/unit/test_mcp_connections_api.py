@@ -513,6 +513,74 @@ class TestRouting:
 class TestConnectionManagement:
     """Adding, listing, editing and disconnecting a connection."""
 
+    @pytest.mark.parametrize("importing", [False, True])
+    def test_retry_resumes_oauth_without_resetting_the_connection(self, monkeypatch, importing):
+        store = FakeStore()
+        connection_id = _seed(
+            store, auth_kind="oauth", access_token_ciphertext=None, status="error"
+        )
+        existing = store._row(connection_id)
+        create = AsyncMock(return_value=existing)
+        monkeypatch.setattr(store, "create_mcp_connection", create)
+        with _client(store) as client:
+            if importing:
+                response = client.post(
+                    "/v1/agent/mcp/connections/import",
+                    json={
+                        "save": True,
+                        "text": json.dumps({"mcpServers": {"GitHub": {"url": existing["url"]}}}),
+                    },
+                )
+                result = response.json()["saved"][0]
+            else:
+                response = client.post(
+                    "/v1/agent/mcp/connections",
+                    json={"label": "GitHub", "url": existing["url"], "auth_kind": "none"},
+                )
+                result = response.json()
+        assert response.is_success
+        assert create.await_args.kwargs["reuse_pending"] is True
+        assert result["id"] == connection_id
+        assert result["auth_kind"] == "oauth"
+        assert store.connections[connection_id] == existing
+        assert store.credential_writes == []
+
+    @pytest.mark.parametrize("importing", [False, True])
+    def test_saving_credentials_never_reuses_another_connection(self, monkeypatch, importing):
+        store = FakeStore()
+        create = AsyncMock(wraps=store.create_mcp_connection)
+        monkeypatch.setattr(store, "create_mcp_connection", create)
+        with _client(store) as client:
+            if importing:
+                response = client.post(
+                    "/v1/agent/mcp/connections/import",
+                    json={
+                        "save": True,
+                        "text": json.dumps(
+                            {
+                                "mcpServers": {
+                                    "GitHub": {
+                                        "url": "https://mcp.example.com/mcp",
+                                        "headers": {"Authorization": "Bearer new-account-token"},
+                                    }
+                                }
+                            }
+                        ),
+                    },
+                )
+            else:
+                response = client.post(
+                    "/v1/agent/mcp/connections",
+                    json={
+                        "label": "GitHub",
+                        "url": "https://mcp.example.com/mcp",
+                        "auth_kind": "static",
+                        "secret": "new-account-token",
+                    },
+                )
+        assert response.is_success
+        assert create.await_args.kwargs["reuse_pending"] is False
+
     def test_templates_are_offered_but_decide_nothing(self) -> None:
         """A template prefills a form; it is not an eligibility list."""
         with _client(FakeStore()) as client:

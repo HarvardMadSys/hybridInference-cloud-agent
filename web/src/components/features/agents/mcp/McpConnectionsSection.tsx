@@ -182,7 +182,12 @@ export function McpConnectionsSection({
   async function added(connections: McpConnectionApi[]) {
     setAdding(null);
     setData((current) => ({
-      connections: [...connections, ...(current?.connections ?? [])],
+      connections: [
+        ...connections,
+        ...(current?.connections ?? []).filter(
+          (existing) => !connections.some((connection) => connection.id === existing.id),
+        ),
+      ],
       templates: current?.templates ?? [],
     }));
     if (

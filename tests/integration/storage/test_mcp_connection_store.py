@@ -186,6 +186,106 @@ async def _invocation(
     )
 
 
+async def test_concurrent_setup_retries_resume_one_pending_connection(store):
+    values = {
+        "user_id": _OWNER,
+        "label": "Notion",
+        "transport": "streamable-http",
+        "location": "remote",
+        "url": _URL,
+        "launch_spec": None,
+        "auth_kind": "none",
+        "auth_config": {},
+        "reuse_pending": True,
+    }
+    results = await asyncio.gather(*(store.mcp.create_mcp_connection(**values) for _ in range(8)))
+    assert len({row["id"] for row in results}) == 1
+    assert len(await store.mcp.list_mcp_connections(user_id=_OWNER)) == 1
+
+    first = results[0]
+    updated = await store.mcp.update_mcp_connection(
+        connection_id=first["id"],
+        user_id=_OWNER,
+        expected_config_revision=1,
+        auth_kind="oauth",
+        auth_config={"client_id": "registered-client"},
+        reset_status=True,
+    )
+    assert await store.mcp.set_mcp_credential(
+        connection_id=first["id"],
+        expected_authorization_epoch=updated["authorization_epoch"],
+        access_token_ciphertext=None,
+        client_secret_ciphertext="registered-client-secret",
+    )
+    assert await store.mcp.set_mcp_connection_status(
+        connection_id=first["id"], status="error", error_kind="needs_authorization"
+    )
+    await store.mcp.set_mcp_connection_enabled(
+        connection_id=first["id"], user_id=_OWNER, enabled=False
+    )
+    before = await store.mcp.get_mcp_connection(connection_id=first["id"])
+    # Re-importing the original no-auth URL keeps OAuth registration and pause
+    # state, instead of resetting the connection or enabling a duplicate.
+    assert await store.mcp.create_mcp_connection(**values) == before
+
+
+@pytest.mark.parametrize(
+    "different",
+    [
+        {"user_id": _OTHER},
+        {"label": "Work Notion"},
+        {"account_label": "work"},
+        {"url": "https://other.example.com/mcp"},
+        {"transport": "http-sse"},
+        {"request_timeout_s": 120},
+    ],
+)
+async def test_pending_setup_reuse_keeps_distinct_connections_separate(store, different):
+    values = {
+        "user_id": _OWNER,
+        "label": "Notion",
+        "transport": "streamable-http",
+        "location": "remote",
+        "url": _URL,
+        "launch_spec": None,
+        "auth_kind": "oauth",
+        "auth_config": {},
+        "reuse_pending": True,
+    }
+    first = await store.mcp.create_mcp_connection(**values)
+    second = await store.mcp.create_mcp_connection(**{**values, **different})
+    assert second["id"] != first["id"]
+    assert await store.mcp.create_mcp_connection(**values) == first
+
+
+@pytest.mark.parametrize("state", ["authenticated", "disconnected", "static"])
+async def test_setup_reuse_does_not_replace_an_account_or_revive_a_disconnect(store, state):
+    values = {
+        "user_id": _OWNER,
+        "label": "Notion",
+        "transport": "streamable-http",
+        "location": "remote",
+        "url": _URL,
+        "launch_spec": None,
+        "auth_kind": "static" if state == "static" else "oauth",
+        "auth_config": {},
+        "reuse_pending": True,
+    }
+    first = await store.mcp.create_mcp_connection(**values)
+    if state == "authenticated":
+        assert await store.mcp.set_mcp_credential(
+            connection_id=first["id"],
+            expected_authorization_epoch=1,
+            access_token_ciphertext="account-one-token",
+        )
+    elif state == "disconnected":
+        assert await store.mcp.disconnect_mcp_connection(connection_id=first["id"], user_id=_OWNER)
+    before = await store.mcp.get_mcp_connection(connection_id=first["id"])
+    second = await store.mcp.create_mcp_connection(**values)
+    assert second["id"] != first["id"]
+    assert await store.mcp.get_mcp_connection(connection_id=first["id"]) == before
+
+
 # -- owner scope -------------------------------------------------------
 
 
