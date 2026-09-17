@@ -1308,7 +1308,7 @@ def test_a_v1_reader_can_still_find_a_startups_outcome(monkeypatch, caplog):
     profiling.finish(measurement, outcome="dispatched")
 
     record = _records(caplog)[0]
-    assert record["schema_version"] == 2
+    assert record["schema_version"] == 3
     assert record["outcome"] == "dispatched"
     assert record["startup_outcome"] == "dispatched"
     assert record["producer"] == "runner"
@@ -1431,3 +1431,34 @@ def test_an_unusable_context_is_refused_rather_than_guessed(monkeypatch):
         )
         is None
     )
+
+
+def test_a_record_states_the_boundaries_and_coverage_it_reached(monkeypatch, caplog):
+    """A reader must not have to infer how far a measurement reaches."""
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    _enable(monkeypatch, operations=["attempt.startup"])
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+
+    profiling.finish(measurement, outcome="dispatched")
+
+    record = _records(caplog)[0]
+    assert record["schema_version"] == 3
+    # The runner's boundary starts before the claim and ends at prompt
+    # handoff: a host startup, not the user's wait.
+    assert record["coverage_scope"] == "host_startup"
+    assert record["boundary_version"] == profiling.BOUNDARY_VERSION
+    assert record["end_to_end_complete"] is False
+
+
+def test_a_root_that_states_no_coverage_claims_none(monkeypatch, caplog):
+    """An unstated scope is reported empty, never assumed to be the widest."""
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    _enable(monkeypatch, operations=["sandbox.wake"])
+    measurement = profiling.start_operation(operation="sandbox.wake", producer="control-plane")
+    assert profiling.bind(measurement, job_id="ajob_1")
+
+    profiling.finish(measurement, outcome="completed")
+
+    record = _records(caplog)[0]
+    assert record["coverage_scope"] == ""
+    assert record["end_to_end_complete"] is False

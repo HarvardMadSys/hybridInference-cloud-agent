@@ -87,7 +87,23 @@ ENV_PROFILING_SINK = "AGENT_OPERATION_PROFILING_SINK"
 #: ``startup_outcome``, and ``producer`` names whichever producer rooted the
 #: operation instead of always the runner. A v1 reader can still consume a v2
 #: record for ``attempt.startup`` by ignoring fields it does not know.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+#: Version of the *boundaries* this record's operation measured. Bumped when a
+#: start or end point moves, so two records with the same operation name are
+#: never compared as if they measured the same span.
+BOUNDARY_VERSION = 1
+
+#: How far the measured span reaches. A server-side record never covers the
+#: user's own wait, and saying so in the data is what stops a reader from
+#: presenting it as end to end.
+COVERAGE_HOST_STARTUP = "host_startup"
+COVERAGE_SERVER_REQUEST = "server_request"
+COVERAGE_BROWSER_INTERACTION = "browser_interaction"
+
+#: The coverage each root operation's boundaries actually reach. Filled in
+#: below, once the operation names themselves are declared.
+COVERAGE_BY_OPERATION: dict[str, str] = {}
 
 #: The runner's root operation. Only this operation keeps the v1
 #: ``startup_outcome`` alias, because that name is a claim about a startup.
@@ -96,6 +112,8 @@ STARTUP_OPERATION = "attempt.startup"
 #: Alias carrying the same value as ``outcome``, written only for
 #: ``attempt.startup``. A file read is not a startup and must not say it is.
 STARTUP_OUTCOME_ALIAS = "startup_outcome"
+
+COVERAGE_BY_OPERATION[STARTUP_OPERATION] = COVERAGE_HOST_STARTUP
 
 #: Producer name for a record whose root is the runner process.
 DEFAULT_PRODUCER = "runner"
@@ -273,6 +291,9 @@ class Measurement:
     #: owner and the source of its local milestones. Declared among the
     #: defaulted fields because :func:`start_operation` sets it by keyword.
     producer: str = DEFAULT_PRODUCER
+    #: How far these boundaries reach. Empty means the root never stated it,
+    #: and the record then claims no coverage rather than assuming the widest.
+    coverage_scope: str = ""
     facts: dict[str, Any] = field(default_factory=dict)
     spans: list[_SpanRecord] = field(default_factory=list)
     marks: list[tuple[str, int]] = field(default_factory=list)
@@ -542,6 +563,7 @@ def start_operation(
     host: str | None = None,
     worker_id: str | None = None,
     producer: str = DEFAULT_PRODUCER,
+    coverage_scope: str = "",
 ) -> Measurement | None:
     """Begin timing a root operation, or return ``None`` when not selected.
 
@@ -571,6 +593,7 @@ def start_operation(
         started_mono_ns=time.monotonic_ns(),
         deadline_mono=run.deadline_mono,
         producer=producer,
+        coverage_scope=coverage_scope or COVERAGE_BY_OPERATION.get(operation, ""),
         facts={"operation": operation},
     )
     if host:
@@ -1388,6 +1411,12 @@ def to_record(
         "measurement_id": measurement.measurement_id,
         "profiling_run_id": measurement.run_id,
         "operation": measurement.operation,
+        "boundary_version": BOUNDARY_VERSION,
+        "coverage_scope": measurement.coverage_scope,
+        # A server-side record never covers the user's own wait. It becomes true
+        # only when a browser interaction is joined to it, which this slice does
+        # not do -- so it is stated, not left to a reader to infer.
+        "end_to_end_complete": False,
         "producer": root,
         "producer_instance_id": PRODUCER_INSTANCE_ID,
         "clock_domain_id": CLOCK_DOMAIN_ID,
@@ -1684,7 +1713,12 @@ def reset_cache() -> None:
 
 
 __all__ = [
+    "BOUNDARY_VERSION",
     "CLOCK_DOMAIN_ID",
+    "COVERAGE_BROWSER_INTERACTION",
+    "COVERAGE_BY_OPERATION",
+    "COVERAGE_HOST_STARTUP",
+    "COVERAGE_SERVER_REQUEST",
     "DEFAULT_PRODUCER",
     "DEFAULT_ROOT_STAGE",
     "ENV_PROFILING_ENABLED",

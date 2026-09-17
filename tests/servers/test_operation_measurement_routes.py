@@ -434,8 +434,13 @@ async def test_a_selected_file_read_is_measured_with_its_broker_fragment(
     emitted = records()
     assert len(emitted) == 1
     record = emitted[0]
-    assert record["schema_version"] == 2
+    assert record["schema_version"] == 3
     assert record["operation"] == "files.open"
+    # The record states how far its own boundaries reach, so a reader cannot
+    # present a server request as the user's whole wait.
+    assert record["coverage_scope"] == "server_request"
+    assert record["boundary_version"] == 1
+    assert record["end_to_end_complete"] is False
     assert record["producer"] == "control-plane"
     assert record["producers"] == ["control-plane", "broker"]
     assert record["outcome"] == "completed"

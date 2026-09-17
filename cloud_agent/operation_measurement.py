@@ -513,6 +513,10 @@ def _root(operation: str, scope: Root, *, interaction_id: str | None) -> Selecti
         operation=min(allowed),
         producer=PRODUCER,
         host=scope.facts.get("host"),
+        # These boundaries start after the route's own authentication and
+        # end when the response object is built: a server request, never the
+        # user's wait, which is what the record has to say about itself.
+        coverage_scope=operation_profiling.COVERAGE_SERVER_REQUEST,
     )
     if measurement is None:
         return None
