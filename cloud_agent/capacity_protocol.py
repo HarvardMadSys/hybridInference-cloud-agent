@@ -41,7 +41,7 @@ from pydantic import (
     model_validator,
 )
 
-from cloud_agent_host.host_capacity import (
+from cloud_agent_contracts.host_capacity import (
     CPU_MISSING_COUNTER_RESET,
     CPU_MISSING_INVALID_SAMPLE,
     CPU_MISSING_SOURCE_UNAVAILABLE,

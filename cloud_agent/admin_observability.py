@@ -23,7 +23,7 @@ from cloud_agent.schemas import (
 from cloud_agent.session_statistics import (
     SessionStatistics,  # noqa: TC001 — Pydantic resolves this at runtime.
 )
-from cloud_agent_host.event_payloads import MAX_EVENT_PAYLOAD_BYTES
+from cloud_agent_contracts.event_payloads import MAX_EVENT_PAYLOAD_BYTES
 
 
 class AdminRun(BaseModel):

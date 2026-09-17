@@ -184,9 +184,13 @@ from cloud_agent.visible_models import (
     agent_model_reasoning_efforts,
     agent_visible_models,
 )
-from cloud_agent_host.egress import (
+from cloud_agent_contracts.egress import (
     EgressPolicyError,
     build_policy_from_env as build_egress_policy,
+)
+from cloud_agent_contracts.workspace_browser import (
+    WorkspacePathError,
+    normalize_workspace_path,
 )
 from cloud_agent_host.patch_gate import branch_name_for
 from cloud_agent_host.runtimes import (
@@ -197,10 +201,6 @@ from cloud_agent_host.runtimes import (
 from cloud_agent_host.workspace_broker_client import (
     WorkspaceBrokerClient,
     WorkspaceBrokerError,
-)
-from cloud_agent_host.workspace_browser import (
-    WorkspacePathError,
-    normalize_workspace_path,
 )
 
 if TYPE_CHECKING:

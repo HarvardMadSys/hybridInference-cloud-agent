@@ -3,7 +3,9 @@
 ``cloud_agent_contracts`` is the one package both images ship, so it must not
 import either implementation package. The control plane may still reach into
 ``cloud_agent_host`` for what has not moved yet, but only through a transition
-allowlist that may shrink and never grow.
+allowlist that may shrink and never grow. In the other direction the host may
+not reach into ``cloud_agent`` at all: the runner image does not ship it, so
+such an import fails at run time rather than at review time.
 """
 
 from __future__ import annotations
@@ -14,6 +16,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTROL_PLANE_ROOT = REPO_ROOT / "cloud_agent"
 CONTRACTS_ROOT = REPO_ROOT / "cloud_agent_contracts"
+HOST_ROOT = REPO_ROOT / "cloud_agent_host"
+
+#: The control-plane package, which the runner image does not ship. This is the
+#: one direction of the boundary no compatibility shim can bridge.
+CONTROL_PLANE_PACKAGE = "cloud_agent"
 
 #: Top-level packages that depend on the host side of the deployment; a shared
 #: contracts package can never import one of these.
@@ -24,20 +31,6 @@ IMPLEMENTATION_PACKAGES = frozenset({"cloud_agent", "cloud_agent_host"})
 #: one entry per name that moves to ``cloud_agent_contracts``.
 HOST_IMPORT_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
     {
-        ("cloud_agent_host.egress", "EgressPolicyError"),
-        ("cloud_agent_host.egress", "build_policy_from_env"),
-        ("cloud_agent_host.event_payloads", "MAX_EVENT_PAYLOAD_BYTES"),
-        ("cloud_agent_host.event_payloads", "bound_event_payload"),
-        ("cloud_agent_host.host_capacity", "CPU_MISSING_COUNTER_RESET"),
-        ("cloud_agent_host.host_capacity", "CPU_MISSING_INVALID_SAMPLE"),
-        ("cloud_agent_host.host_capacity", "CPU_MISSING_SOURCE_UNAVAILABLE"),
-        ("cloud_agent_host.host_capacity", "CPU_MISSING_WARMING_UP"),
-        ("cloud_agent_host.host_capacity", "MEMORY_MISSING_INVALID_SAMPLE"),
-        ("cloud_agent_host.host_capacity", "MEMORY_MISSING_SOURCE_UNAVAILABLE"),
-        ("cloud_agent_host.host_capacity", "OTHER_STATES"),
-        ("cloud_agent_host.host_capacity", "SCHEMA_VERSION"),
-        ("cloud_agent_host.host_capacity", "SOURCE"),
-        ("cloud_agent_host.host_capacity", "memory_usage"),
         ("cloud_agent_host.patch_gate", "PatchGateResult"),
         ("cloud_agent_host.patch_gate", "branch_name_for"),
         ("cloud_agent_host.patch_gate", "validate_change_set"),
@@ -47,12 +40,8 @@ HOST_IMPORT_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
         ("cloud_agent_host.runtimes", "runtimes_supporting_mcp"),
         ("cloud_agent_host.sandbox", "KATA_RUNTIME"),
         ("cloud_agent_host.source_archive", "build_base_bundle"),
-        ("cloud_agent_host.turn_resources", "summarize_run_resources"),
-        ("cloud_agent_host.turn_resources", "summarize_turn_resources"),
         ("cloud_agent_host.workspace_broker_client", "WorkspaceBrokerClient"),
         ("cloud_agent_host.workspace_broker_client", "WorkspaceBrokerError"),
-        ("cloud_agent_host.workspace_browser", "WorkspacePathError"),
-        ("cloud_agent_host.workspace_browser", "normalize_workspace_path"),
     }
 )
 
@@ -124,3 +113,34 @@ def test_contracts_package_imports_no_implementation_package() -> None:
         if imported:
             offenders[str(path.relative_to(REPO_ROOT))] = imported
     assert offenders == {}
+
+
+def test_host_package_imports_no_control_plane_package() -> None:
+    """``cloud_agent_host`` must never import the control plane.
+
+    The runner image ships the host package and the contracts package only, so
+    a control-plane import works in this checkout and fails in the image that
+    runs untrusted work. That is a run-time ``ImportError`` on a host, which is
+    why the count is zero and not "zero for now": there is no compatibility
+    shim this direction could go through. ``TYPE_CHECKING`` blocks are walked
+    like any other node, because the annotation that needs them is exactly the
+    kind of dependency this boundary is about.
+    """
+    offenders: set[str] = set()
+    scanned = sorted(HOST_ROOT.rglob("*.py"))
+    assert scanned, f"no Python sources found under {HOST_ROOT}"
+    for path in scanned:
+        for node in ast.walk(_parse(path)):
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                modules = [node.module]
+            else:
+                continue
+            for module in modules:
+                if module.split(".", 1)[0] == CONTROL_PLANE_PACKAGE:
+                    relative = path.relative_to(REPO_ROOT)
+                    offenders.add(f"{relative}:{node.lineno} imports {module}")
+    assert offenders == set(), "cloud_agent_host imports the control plane:\n" + "\n".join(
+        sorted(offenders)
+    )

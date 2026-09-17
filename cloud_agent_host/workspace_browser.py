@@ -1,32 +1,27 @@
-"""Safe path helpers for the owner-facing retained workspace browser."""
+"""Re-export of :mod:`cloud_agent_contracts.workspace_browser`.
 
-from __future__ import annotations
+The path rules the control plane validates owner-supplied paths with moved to
+the ``cloud_agent_contracts`` package, which the runner image ships on its
+own. This module stays so existing host-side importers keep working: ``from
+cloud_agent_host.workspace_browser import ...`` resolves to the very same
+objects, not copies.
 
-from pathlib import PurePosixPath
+**When this module goes away.** Delete it when no ``cloud_agent_host`` module
+and no test imports ``cloud_agent_host.workspace_browser``. The control plane
+is already off this path — it imports ``cloud_agent_contracts.workspace_browser``
+directly — so the remaining callers are what the boundary test's
+contracts-isolation test keeps honest until they follow.
+"""
 
-MAX_FILE_PREVIEW_BYTES = 512 * 1024
+from cloud_agent_contracts.workspace_browser import (
+    MAX_FILE_PREVIEW_BYTES,
+    WorkspacePathError,
+    normalize_workspace_path,
+)
 
-
-class WorkspacePathError(ValueError):
-    """A workspace path is not a safe canonical repository-relative path."""
-
-
-def normalize_workspace_path(raw: str | None) -> str:
-    """Validate and return a canonical POSIX path, or ``""`` for the root."""
-    if raw is None or raw == "":
-        return ""
-    if (
-        len(raw) > 4096
-        or "\x00" in raw
-        or "\\" in raw
-        or raw.startswith("/")
-        or (len(raw) >= 3 and raw[0].isalpha() and raw[1:3] == ":/")
-    ):
-        raise WorkspacePathError("path must be a safe repository-relative path")
-    parts = raw.split("/")
-    if any(not part or part in {".", ".."} or part.casefold() == ".git" for part in parts):
-        raise WorkspacePathError("path must be a safe repository-relative path")
-    path = PurePosixPath(*parts).as_posix()
-    if path != raw:
-        raise WorkspacePathError("path must use canonical POSIX encoding")
-    return path
+#: The moved public surface, so the re-export reads as one.
+__all__ = [
+    "MAX_FILE_PREVIEW_BYTES",
+    "WorkspacePathError",
+    "normalize_workspace_path",
+]

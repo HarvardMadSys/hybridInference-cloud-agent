@@ -34,7 +34,7 @@ import shlex
 from dataclasses import dataclass, field
 from typing import Any
 
-from cloud_agent_host.event_payloads import bound_event_payload
+from cloud_agent_contracts.event_payloads import bound_event_payload
 
 # Normalized event kinds. Kept in lockstep with agent_job_events.event_type and
 # the frontend's types.ts; anything else must be reported as ``raw``.

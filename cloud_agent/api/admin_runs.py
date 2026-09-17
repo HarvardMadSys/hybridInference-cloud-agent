@@ -34,7 +34,7 @@ from cloud_agent.ledger import summarize_job_usage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import AgentAttemptTelemetry, AttemptResources, TurnResourceSummary
 from cloud_agent.session_statistics import summarize_session_statistics
-from cloud_agent_host.turn_resources import summarize_turn_resources
+from cloud_agent_contracts.turn_resources import summarize_turn_resources
 
 if TYPE_CHECKING:
     from cloud_agent.ports import AuditRepository, LedgerRepository
