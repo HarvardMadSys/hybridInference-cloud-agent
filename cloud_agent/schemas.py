@@ -10,7 +10,7 @@ import binascii
 # model, so hiding this one behind TYPE_CHECKING leaves `AgentRunnerHost`
 # silently unbuilt and raises at the first request instead of at import.
 from datetime import datetime  # noqa: TC003
-from typing import Any, Final, Literal
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -23,6 +23,10 @@ from cloud_agent.capacity_protocol import (
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.execution_profiles import ExecutionProfile
 from cloud_agent.host_pool import ENROLL_TOKEN_TTL_S
+from cloud_agent.skills.models import (
+    SelectedSkill,
+    SkillLimits,
+)
 from cloud_agent_host.event_payloads import bound_event_payload
 from cloud_agent_host.shared_protocol import (
     HOST_CONCURRENCY_MAX_SLOTS,
@@ -128,6 +132,11 @@ class AgentJobCreate(BaseModel):
         # trusted process that holds the repository credential.
         pattern=r"^[0-9a-fA-F]{7,64}$",
         description="Commit SHA to work from.",
+    )
+    skill_ids: list[Annotated[int, Field(gt=0, strict=True)]] | None = Field(
+        None,
+        max_length=16,
+        description="Owned skills for this chat. Omitted uses library defaults; [] selects none.",
     )
     mcp_bindings: list[McpBindingInput] | None = Field(
         None,
@@ -579,6 +588,7 @@ class AgentJobResponse(BaseModel):
     # Labels and revisions only. The owner never sees a connection's address or
     # credential — those are the two things this service's MCP relay keeps off
     # the sandbox-facing wire.
+    skills: list[SelectedSkill] = Field(default_factory=list)
     mcp_bindings: list[McpBindingSummary] = Field(default_factory=list)
     created_at: str | None = None
     updated_at: str | None = None
@@ -839,6 +849,11 @@ class AgentFollowUpRequest(BaseModel):
     """A new user turn appended to an existing task thread."""
 
     prompt: str = Field(..., min_length=1, max_length=100_000)
+    skill_ids: list[Annotated[int, Field(gt=0, strict=True)]] | None = Field(
+        None,
+        max_length=16,
+        description="Omitted inherits the previous turn's skill snapshots; [] clears the selection.",
+    )
     runtime: str | None = Field(
         None,
         description=(
@@ -1739,6 +1754,8 @@ class AgentConfigResponse(BaseModel):
     static labels while submitting different hardcoded values — so the UI
     described a job nobody was running. These are the real answers.
     """
+
+    skill_limits: SkillLimits = Field(default_factory=SkillLimits)
 
     repos: list[str] = Field(
         default_factory=list,

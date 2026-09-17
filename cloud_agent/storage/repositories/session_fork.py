@@ -678,10 +678,10 @@ class PostgresSessionForkRepository:
                             id, thread_id, parent_job_id, turn_no, native_turn_no, user_id,
                             base_sha, task_prompt, runtime, model, reasoning_effort, state,
                             published_pr_url, published_commit_sha, detail, metadata,
-                            fork_source_job_id, created_at, updated_at
+                            fork_source_job_id, skills, created_at, updated_at
                         ) VALUES (
                             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                            $13, $14, $15, $16::jsonb, $17,
+                            $13, $14, $15, $16::jsonb, $17, $18::jsonb,
                             clock_timestamp(), clock_timestamp()
                         )
                         """,
@@ -704,6 +704,9 @@ class PostgresSessionForkRepository:
                         if turn["metadata"] is not None
                         else None,
                         turn["id"],
+                        json.dumps(load_json(turn["skills"]))
+                        if turn["skills"] is not None
+                        else None,
                     )
                     previous_copy = copy_id
                 await conn.executemany(

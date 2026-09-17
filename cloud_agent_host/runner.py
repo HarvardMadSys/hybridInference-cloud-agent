@@ -773,7 +773,7 @@ def _run_git(
     cwd: str | None = None,
     env_extra: dict[str, str] | None = None,
     input_text: str | None = None,
-):
+) -> subprocess.CompletedProcess[str]:
     """Run one git command hermetically and return the completed process."""
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **_GIT_ENV, **(env_extra or {})}
     return subprocess.run(

@@ -5,6 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IntegrationsView } from './IntegrationsView';
 import type { AgentIntegrationsApi } from '@/lib/api/agents';
 
+import { listSkills } from '@/lib/api/skills';
+vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
+
 vi.mock('@/lib/api/agents', () => ({
   getAgentIntegrations: vi.fn(),
   disconnectAgentIntegration: vi.fn(),
@@ -53,6 +56,7 @@ const integrations: AgentIntegrationsApi = {
 };
 
 beforeEach(() => {
+  vi.mocked(listSkills).mockResolvedValue([]);
   mockedListMcpConnections.mockResolvedValue({ connections: [], templates: [] });
 });
 

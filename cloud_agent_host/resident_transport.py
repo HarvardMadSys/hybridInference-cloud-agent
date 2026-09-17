@@ -13,7 +13,7 @@ import hashlib
 import json
 import secrets
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from cloud_agent_host.chat_sandbox import (
     CHAT_STATE_DIR,
@@ -24,6 +24,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
 )
 from cloud_agent_host.drivers import (
+    DialectRuntime,
     DriverError,
     HarnessEvent,
     HarnessSession,
@@ -34,10 +35,14 @@ from cloud_agent_host.drivers import (
     get_driver,
 )
 from cloud_agent_host.runtimes import RuntimeMCPConfig
-from cloud_agent_host.sandbox import SANDBOX_PATH, runtime_bin_dir
+from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+#: The dialect a resident transport is speaking; the transport itself only uses
+#: the base session surface, so the concrete runtime stays the caller's type.
+_RuntimeT = TypeVar("_RuntimeT", bound=DialectRuntime)
 
 
 # Provider homes contain files on which the owning CLI performs owner-only
@@ -89,10 +94,10 @@ class ResidentLaunch:
             raise ValueError("residency generation cannot be negative")
 
 
-class ResidentTurn:
+class ResidentTurn(Generic[_RuntimeT]):
     """One activation borrowing a live transport without owning its process."""
 
-    def __init__(self, turn: HarnessTurn) -> None:
+    def __init__(self, turn: HarnessTurn[_RuntimeT]) -> None:
         self._turn = turn
 
     def lines(self) -> Iterator[HarnessEvent]:
@@ -113,14 +118,14 @@ class ResidentTurn:
         return self._turn.stderr_text()
 
 
-class ResidentTransport:
+class ResidentTransport(Generic[_RuntimeT]):
     """A single live native session owned by the host supervisor."""
 
     def __init__(
         self,
         *,
         launch: ResidentLaunch,
-        session: HarnessSession,
+        session: HarnessSession[_RuntimeT],
     ) -> None:
         self.launch = launch
         self.session = session
@@ -184,7 +189,7 @@ class ResidentTransport:
         prompt: str,
         model: str,
         reasoning_effort: str | None,
-    ) -> ResidentTurn:
+    ) -> ResidentTurn[_RuntimeT]:
         """Send one prompt to this already-open native session."""
         return ResidentTurn(
             self.session.start_turn(
@@ -207,7 +212,7 @@ class ResidentTransportFactory:
     def __init__(self, manager: ChatSandboxManager) -> None:
         self._manager = manager
 
-    def open(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> ResidentTransport:
+    def open(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> ResidentTransport[Any]:
         """Start and probe a runtime's persistent transport."""
         if not launch.credential:
             raise DriverError("opening a resident transport requires a residency credential")
@@ -458,7 +463,7 @@ class ResidentTransportFactory:
 
         reaped = False
 
-        def spawn_live(argv: list[str], env: dict[str, str]):
+        def spawn_live(argv: list[str], env: dict[str, str]) -> SandboxProcess:
             nonlocal reaped
             if not reaped:
                 # A broker restart cannot reattach Docker-exec pipes. Remove
@@ -511,7 +516,7 @@ class ResidentTransportFactory:
     def fork_native(
         self,
         spec: ChatSandboxSpec,
-        source: ResidentTransport,
+        source: ResidentTransport[Any],
         operation_id: str,
         target_launch: ResidentLaunch,
         source_native_turn_no: int,

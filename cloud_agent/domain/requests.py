@@ -20,6 +20,12 @@ def request_fingerprint(kind: str, payload: dict[str, Any]) -> str:
     resend apart from the same key reused for different content. ``kind``
     keeps a create and a follow-up from ever fingerprinting alike.
     """
+    # Keep pre-skills hashes byte-compatible: existing nullable fields are part
+    # of their historical hash. New optional extensions must not change it when
+    # omitted. Centralize that rule instead of repeating it in endpoint callers.
+    payload = {
+        key: value for key, value in payload.items() if key != "skill_ids" or value is not None
+    }
     canonical = json.dumps(
         {"kind": kind, **payload}, sort_keys=True, separators=(",", ":"), default=str
     )

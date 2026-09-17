@@ -13,8 +13,8 @@ import json
 from typing import TYPE_CHECKING
 
 from cloud_agent.storage._sql.jobs import (
-    JOB_SELECT,
-    QUALIFIED_JOB_COLUMNS,
+    JOB_SUMMARY_SELECT,
+    QUALIFIED_JOB_SUMMARY_COLUMNS,
     SESSION_DELETE_BLOCK_SQL,
 )
 from cloud_agent.storage._sql.rows import job_row_to_dict, sandbox_row_to_dict
@@ -67,7 +67,7 @@ class PostgresConversationQueries:
                 thread["id"],
             )
             jobs = await conn.fetch(
-                f"{JOB_SELECT} WHERE j.thread_id = $1 ORDER BY j.turn_no",
+                f"{JOB_SUMMARY_SELECT} WHERE j.thread_id = $1 ORDER BY j.turn_no",
                 thread["id"],
             )
             sandbox = await conn.fetchrow(
@@ -97,7 +97,7 @@ class PostgresConversationQueries:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                SELECT {QUALIFIED_JOB_COLUMNS}, t.title, t.title_source, t.pinned_at, t.archived_at, t.deleted_at,
+                SELECT {QUALIFIED_JOB_SUMMARY_COLUMNS}, t.title, t.title_source, t.pinned_at, t.archived_at, t.deleted_at,
                        to_jsonb(s) AS thread_sandbox
                 FROM agent_jobs j
                 LEFT JOIN agent_threads t ON t.id = j.thread_id
@@ -124,7 +124,7 @@ class PostgresConversationQueries:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT {QUALIFIED_JOB_COLUMNS}, t.title, t.title_source, t.pinned_at, t.archived_at
+                SELECT {QUALIFIED_JOB_SUMMARY_COLUMNS}, t.title, t.title_source, t.pinned_at, t.archived_at
                 FROM agent_jobs j
                 JOIN agent_threads t ON t.id = j.thread_id AND t.user_id = $1
                 WHERE j.user_id = $1
@@ -214,7 +214,7 @@ class PostgresConversationQueries:
                     ORDER BY pinned_at DESC NULLS LAST, last_activity_at DESC, thread_id DESC
                     LIMIT $5
                 )
-                SELECT {QUALIFIED_JOB_COLUMNS}, page.title, page.pinned_at,
+                SELECT {QUALIFIED_JOB_SUMMARY_COLUMNS}, page.title, page.pinned_at,
                        page.archived, page.last_activity_at
                 FROM page
                 JOIN agent_threads t ON t.id = page.thread_id

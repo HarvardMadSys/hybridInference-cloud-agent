@@ -52,6 +52,7 @@ class PostgresConversationCommands:
         setup_script: str | None = None,
         metadata: dict[str, Any] | None = None,
         mcp_bindings: list[dict[str, Any]] | None = None,
+        skills: list[dict[str, Any]] | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any]:
@@ -106,8 +107,8 @@ class PostgresConversationCommands:
                     INSERT INTO agent_jobs
                         (id, thread_id, turn_no, user_id, base_sha, task_prompt,
                          runtime, model, reasoning_effort, metadata,
-                         client_request_id, client_request_fingerprint)
-                    VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
+                         client_request_id, client_request_fingerprint, skills)
+                    VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12::jsonb)
                     """,
                     job_id,
                     thread_id,
@@ -120,6 +121,9 @@ class PostgresConversationCommands:
                     json.dumps(metadata) if metadata is not None else None,
                     client_request_id,
                     client_request_fingerprint,
+                    # No earlier skill instructions exist in a new conversation.
+                    # An empty selection needs no clearing context in its prompt.
+                    json.dumps(skills) if skills else None,
                 )
                 row = await conn.fetchrow(f"{JOB_SELECT} WHERE j.id = $1", job_id)
                 await conn.execute(
@@ -159,6 +163,7 @@ class PostgresConversationCommands:
         model: str | None = None,
         reasoning_effort: str | None = None,
         reset_reasoning_effort: bool = False,
+        skills: list[dict[str, Any]] | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:
@@ -198,6 +203,7 @@ class PostgresConversationCommands:
                 model=model,
                 reasoning_effort=reasoning_effort,
                 reset_reasoning_effort=reset_reasoning_effort,
+                skills=skills,
                 client_request_id=client_request_id,
                 client_request_fingerprint=client_request_fingerprint,
             )
@@ -454,6 +460,7 @@ class PostgresConversationCommands:
         model: str | None,
         reasoning_effort: str | None,
         reset_reasoning_effort: bool,
+        skills: list[dict[str, Any]] | None,
         client_request_id: str | None,
         client_request_fingerprint: str | None,
     ) -> dict[str, Any] | None:
@@ -524,6 +531,10 @@ class PostgresConversationCommands:
                 # source from which the new runtime can fabricate continuity.
                 return {"error": "sandbox_context_lost"}
             turn_no = parent["turn_no"] + 1
+            previous_skills = load_json(parent["skills"]) if parent["skills"] is not None else None
+            selected_skills = previous_skills if skills is None else skills
+            if selected_skills == [] and previous_skills is None:
+                selected_skills = None
             # Repo, setup script, execution profile and tool servers are the
             # thread's, not copied per turn: the next turn of a conversation
             # runs with the surface the thread has been running with, and a
@@ -533,8 +544,8 @@ class PostgresConversationCommands:
                 INSERT INTO agent_jobs
                     (id, thread_id, parent_job_id, turn_no, user_id, base_sha,
                      task_prompt, runtime, model, reasoning_effort, state, metadata,
-                     client_request_id, client_request_fingerprint)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14)
+                     client_request_id, client_request_fingerprint, skills)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15::jsonb)
                 """,
                 job_id,
                 thread_id,
@@ -554,6 +565,7 @@ class PostgresConversationCommands:
                 else None,
                 client_request_id,
                 client_request_fingerprint,
+                json.dumps(selected_skills) if selected_skills is not None else None,
             )
             row = await conn.fetchrow(f"{JOB_SELECT} WHERE j.id = $1", job_id)
             await conn.execute(

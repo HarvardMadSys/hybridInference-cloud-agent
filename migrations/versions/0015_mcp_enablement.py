@@ -1,13 +1,13 @@
 """Keep account-wide MCP enablement separate from connection health.
 
-Revision ID: 0014_mcp_enablement
-Revises: 0013_mcp_catalog_cache
+Revision ID: 0015_mcp_enablement
+Revises: 0014_mcp_catalog_cache
 """
 
 from alembic import op
 
-revision = "0014_mcp_enablement"
-down_revision = "0013_mcp_catalog_cache"
+revision = "0015_mcp_enablement"
+down_revision = "0014_mcp_catalog_cache"
 branch_labels = None
 depends_on = None
 

@@ -10,6 +10,9 @@ from urllib.parse import quote
 import httpx
 
 if TYPE_CHECKING:
+    import builtins
+    from collections.abc import Iterator
+
     from cloud_agent_host.chat_sandbox import ChatSandboxSpec
     from cloud_agent_host.resident_transport import ResidentLaunch
 
@@ -20,7 +23,7 @@ class SharedTurnStream:
 
     _response: httpx.Response
 
-    def frames(self):
+    def frames(self) -> Iterator[dict[str, Any]]:
         """Yield validated object frames until result/error."""
         for line in self._response.iter_lines():
             if not line:
@@ -96,7 +99,7 @@ class SessionSupervisorClient:
             raise SessionSupervisorError(502, "shared Session Supervisor returned invalid data")
         return body
 
-    def list(self) -> list[dict[str, Any]]:
+    def list(self) -> builtins.list[dict[str, Any]]:
         """Observe every retained container owned by this host's broker."""
         try:
             response = self._client.get(f"{self._base_url}/sandboxes")
@@ -125,7 +128,7 @@ class SessionSupervisorClient:
         activation_generation: int,
         owner: str,
         has_settled_context: bool,
-        members: list[dict[str, Any]],
+        members: builtins.list[dict[str, Any]],
         expected_container_id: str | None = None,
     ) -> dict[str, Any]:
         """Lease one member without excluding turns on sibling members."""
