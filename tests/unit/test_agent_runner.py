@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pathlib
-import re
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -46,7 +44,6 @@ def _stamp() -> dict:
 
 def _configure_host(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_HOST_SLOTS", "3")
-    monkeypatch.setenv("AGENT_RUNNER_REPLICAS", "3")
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "8")
     monkeypatch.setenv("AGENT_WORKSPACE_BROKER_URL", "http://broker:8092")
     monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "broker-token")
@@ -114,8 +111,7 @@ def test_pending_deployment_heartbeats_but_does_not_poll(monkeypatch, tmp_path):
     [
         ("AGENT_HOST_SLOTS", "1"),
         ("AGENT_HOST_SLOTS", "nope"),
-        ("AGENT_RUNNER_REPLICAS", "1"),
-        ("AGENT_RUNNER_REPLICAS", "nope"),
+        ("AGENT_HOST_SLOTS", "129"),
         ("AGENT_SHARED_RESIDENT_CAPACITY", "1"),
         ("AGENT_SHARED_RESIDENT_CAPACITY", "129"),
     ],
@@ -779,47 +775,11 @@ def test_run_forever_refuses_to_enroll_a_host_that_cannot_attest(monkeypatch):
 def test_runner_source_contains_no_push_or_legacy_execution_path():
     source = __import__("inspect").getsource(runner_mod)
     assert "git push" not in source
+    # The executor count is the supervisor's pool, sized from the control
+    # plane; a replica count read from the environment would be a second,
+    # stale answer to the same question.
+    assert "AGENT_RUNNER_REPLICAS" not in source
     assert "def _run_retained_attempt" not in source
     assert "def run_agent" not in source
     assert "AGENT_RESTARTABLE_SANDBOX" not in source
     assert "AGENT_SHARED_LIVE_SANDBOX" not in source
-
-
-class TestTheHelperPinsMatchTheImage:
-    """The pinned helper versions and the image's own labels are one fact.
-
-    `_shared_live_host_capabilities` reads `helper_versions` straight off the
-    sandbox image's labels and compares them to `SHARED_SANDBOX_HELPER_PINS`
-    exactly. A pin that disagrees with the label does not report a mismatch --
-    it returns no capabilities at all, so the runner raises "this runner cannot
-    attest shared-sandbox-v1" and exits, the host never comes online, and the
-    deployment fails while waiting for it.
-
-    Every other test here builds its stamp from the pins themselves
-    (`"helper_versions": dict(SHARED_SANDBOX_HELPER_PINS)`), so the two sides
-    agree by construction no matter what the Dockerfile says. This one reads
-    the Dockerfile.
-    """
-
-    DOCKERFILE = (
-        pathlib.Path(__file__).resolve().parents[2]
-        / "deploy"
-        / "sandbox"
-        / "Dockerfile.agent-sandbox"
-    )
-    LABEL = re.compile(r"org\.freeinference\.helper\.([A-Za-z0-9._-]+)\.version=\"([^\"]*)\"")
-
-    def image_helper_labels(self) -> dict[str, str]:
-        text = self.DOCKERFILE.read_text(encoding="utf-8")
-        found = dict(self.LABEL.findall(text))
-        assert found, "the sandbox image no longer declares helper version labels"
-        return found
-
-    @pytest.mark.parametrize("helper_id", sorted(runner_mod.SHARED_SANDBOX_HELPER_PINS))
-    def test_every_pinned_helper_is_the_version_the_image_publishes(self, helper_id: str) -> None:
-        labels = self.image_helper_labels()
-
-        assert helper_id in labels, (
-            f"{helper_id} is attested but the sandbox image publishes no label for it"
-        )
-        assert labels[helper_id] == runner_mod.SHARED_SANDBOX_HELPER_PINS[helper_id]

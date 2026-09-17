@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -838,6 +839,21 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
 ):
     """The durable saga creates a second session alias, never a Docker clone."""
     job, claim, sandbox = await _reserve_shared_chat(store)
+    saved_skills = [
+        {
+            "id": 42,
+            "name": "Review",
+            "description": "Review changes",
+            "revision": 3,
+            "instructions": "Retain this exact version.",
+        }
+    ]
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET skills = $2::jsonb WHERE id = $1",
+            job["id"],
+            json.dumps(saved_skills),
+        )
     fence = {
         "thread_id": job["thread_id"],
         "attempt_id": claim["attempt_id"],
@@ -1088,6 +1104,17 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert child["title_source"] == "inherited"
     assert child["title"] == f"{job['title']} (fork)"
     assert child["execution_profile"] == job["execution_profile"]
+    assert child["skills"] == [
+        {key: value for key, value in skill.items() if key != "instructions"}
+        for skill in saved_skills
+    ]
+    async with pool.acquire() as conn:
+        assert (
+            json.loads(
+                await conn.fetchval("SELECT skills FROM agent_jobs WHERE id = $1", child["id"])
+            )
+            == saved_skills
+        )
     child_sandbox = await store.sandbox.thread_sandbox(thread_id=child["thread_id"])
     source_sandbox = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert child_sandbox is not None and source_sandbox is not None
@@ -1167,6 +1194,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         prompt="continue child",
     )
     assert source_follow_up is not None and source_follow_up["state"] == "queued"
+    assert source_follow_up["skills"] == child_follow_up["skills"] == saved_skills
     assert child_follow_up is not None and child_follow_up["state"] == "queued"
     first_claim = await _claim(
         store,
@@ -3730,6 +3758,75 @@ async def test_a_released_claim_costs_no_retry(pool, store: Storage):
 
     assert actions[0]["action"] == "queued", "aborted claims must not count as attempts"
     assert (await store.conversation_queries.get_job(job["id"]))["state"] == "queued"
+
+
+async def test_an_admitted_turn_is_never_handed_back_to_the_queue(store: Storage):
+    """The guard that keeps a user's instruction from running twice.
+
+    A host returns a turn it could not start, and the only thing standing
+    between "could not start" and "already running" is this check — which is
+    the database's, not the caller's, precisely because a host that is wrong
+    about what its child did must not be able to cause a replay. Once the
+    prompt has been admitted to the CLI, the lease and the retained-session
+    rules decide, and they may end the conversation rather than repeat it.
+    """
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence, container_id="release-guard-container", context_status="new"
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+
+    released = await store.attempt_commands.release_claim(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        reason="launch_failed",
+    )
+
+    assert released is False
+    # Nothing moved: the attempt is still the live one and the job still running.
+    assert (await store.conversation_queries.get_job(job["id"]))["state"] == "running"
+
+
+async def test_a_turn_reserved_but_not_admitted_can_still_be_handed_back(store: Storage):
+    """The window the release exists for, and the line it stops at.
+
+    A sandbox reserved for a turn is not the turn having started — the prompt
+    has not reached the CLI — so this is exactly the case a host that failed to
+    start its child is in, and requeueing costs the user nothing.
+    """
+    job, claim, _sandbox = await _reserve_shared_chat(store)
+
+    released = await store.attempt_commands.release_claim(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        reason="launch_failed",
+    )
+
+    assert released is True
+    assert (await store.conversation_queries.get_job(job["id"]))["state"] == "queued"
+
+
+async def test_a_release_records_the_reason_it_was_given(store: Storage):
+    """'This host cannot start turns' is what the trail is read for."""
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+
+    await store.attempt_commands.release_claim(
+        job_id=job["id"], attempt_id=claim["attempt_id"], reason="launch_failed"
+    )
+
+    events = await store.execution_queries.list_events_after(job_id=job["id"])
+    aborted = [e for e in events if e["event_type"] == "attempt_aborted"]
+    assert aborted and aborted[0]["payload"]["reason"] == "launch_failed"
 
 
 async def test_releasing_records_why_rather_than_erasing_the_attempt(store: Storage):

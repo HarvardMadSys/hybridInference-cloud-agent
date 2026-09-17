@@ -10,7 +10,7 @@ import binascii
 # model, so hiding this one behind TYPE_CHECKING leaves `AgentRunnerHost`
 # silently unbuilt and raises at the first request instead of at import.
 from datetime import datetime  # noqa: TC003
-from typing import Any, Final, Literal
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -23,8 +23,16 @@ from cloud_agent.capacity_protocol import (
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.execution_profiles import ExecutionProfile
 from cloud_agent.host_pool import ENROLL_TOKEN_TTL_S
+from cloud_agent.skills.models import (
+    SelectedSkill,
+    SkillLimits,
+)
 from cloud_agent_host.event_payloads import bound_event_payload
-from cloud_agent_host.shared_protocol import SHARED_MEMBER_ACCOUNTING_VERSION
+from cloud_agent_host.shared_protocol import (
+    HOST_CONCURRENCY_MAX_SLOTS,
+    HOST_CONCURRENCY_MIN_SLOTS,
+    SHARED_MEMBER_ACCOUNTING_VERSION,
+)
 
 # A lease is the only thing that lets the reaper take a job back from a stuck
 # or malicious worker. If the worker could pick the TTL, it could pick one long
@@ -124,6 +132,11 @@ class AgentJobCreate(BaseModel):
         # trusted process that holds the repository credential.
         pattern=r"^[0-9a-fA-F]{7,64}$",
         description="Commit SHA to work from.",
+    )
+    skill_ids: list[Annotated[int, Field(gt=0, strict=True)]] | None = Field(
+        None,
+        max_length=16,
+        description="Owned skills for this chat. Omitted uses library defaults; [] selects none.",
     )
     mcp_bindings: list[McpBindingInput] | None = Field(
         None,
@@ -575,6 +588,7 @@ class AgentJobResponse(BaseModel):
     # Labels and revisions only. The owner never sees a connection's address or
     # credential — those are the two things this service's MCP relay keeps off
     # the sandbox-facing wire.
+    skills: list[SelectedSkill] = Field(default_factory=list)
     mcp_bindings: list[McpBindingSummary] = Field(default_factory=list)
     created_at: str | None = None
     updated_at: str | None = None
@@ -835,6 +849,11 @@ class AgentFollowUpRequest(BaseModel):
     """A new user turn appended to an existing task thread."""
 
     prompt: str = Field(..., min_length=1, max_length=100_000)
+    skill_ids: list[Annotated[int, Field(gt=0, strict=True)]] | None = Field(
+        None,
+        max_length=16,
+        description="Omitted inherits the previous turn's skill snapshots; [] clears the selection.",
+    )
     runtime: str | None = Field(
         None,
         description=(
@@ -1616,6 +1635,24 @@ class WorkerResourcesRequest(BaseModel):
         return self
 
 
+class WorkerReleaseRequest(BaseModel):
+    """A claimed turn handed back because it provably never began."""
+
+    reason: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]*$",
+        description=(
+            "Why the turn was never started, in the audit trail's own "
+            "vocabulary — 'launch_failed' when the process that would have run "
+            "it could not be started or exited without taking delivery. This "
+            "is not a way to abandon a turn that is running: the control plane "
+            "refuses the release once the turn has been admitted."
+        ),
+    )
+
+
 class WorkerFinishRequest(BaseModel):
     """Terminal transition reported by a worker."""
 
@@ -1717,6 +1754,8 @@ class AgentConfigResponse(BaseModel):
     static labels while submitting different hardcoded values — so the UI
     described a job nobody was running. These are the real answers.
     """
+
+    skill_limits: SkillLimits = Field(default_factory=SkillLimits)
 
     repos: list[str] = Field(
         default_factory=list,
@@ -1914,9 +1953,26 @@ class AgentRunnerHost(BaseModel):
     )
     slots_total: int | None = Field(
         None,
-        description="Concurrent attempts this host accepts. Null means unmetered.",
+        description=("The concurrency limit this host says it is serving. Null means unmetered."),
     )
     slots_used: int = Field(0, description="Attempts currently holding one of this host's slots.")
+    slots_desired: int | None = Field(
+        None,
+        description=(
+            "Turns at once an operator asked this host to run, set from the "
+            "admin page; the host applies it on its next heartbeat and reports "
+            "it back as slots_total. The claim admits against the lower of the "
+            "two. Null means the host runs its own default."
+        ),
+    )
+    launch_error: str | None = Field(
+        None,
+        description=(
+            "Why this host is claiming nothing despite having room — it could "
+            "not start the process a turn runs in, repeatedly. Empty means "
+            "nothing is wrong; null means this host does not report it."
+        ),
+    )
     runner_version: str | None = None
     broker_url: str | None = Field(
         None,
@@ -2026,6 +2082,25 @@ class SetRuntimeVersionRequest(BaseModel):
             "A version some host in the pool offers, or null to return this "
             "runtime to the image default. Applies to new threads; a thread "
             "already running keeps the version it started on."
+        ),
+    )
+
+
+class SetHostSlotsRequest(BaseModel):
+    """Ask one host to run this many turns at once, or with ``null`` its default."""
+
+    slots: int | None = Field(
+        None,
+        ge=HOST_CONCURRENCY_MIN_SLOTS,
+        le=HOST_CONCURRENCY_MAX_SLOTS,
+        description=(
+            "Turns this host should run at once. At least two, because the "
+            "shared-live protocol needs a fork's sibling to run beside its "
+            "parent rather than behind it; at most 128, a typo guard the host "
+            "checks again. Neither bound says what a machine can carry. The "
+            "host applies the number on its next heartbeat, starts a process "
+            "per turn as it claims one, and never interrupts a turn already "
+            "running. Null returns the host to its AGENT_HOST_SLOTS default."
         ),
     )
 
@@ -2222,6 +2297,16 @@ class HostHeartbeatRequest(BaseModel):
         description="Physical server name for admin grouping only; never a scheduling or credential identity.",
     )
     slots_total: int | None = Field(None, gt=0, le=1024)
+    launch_error: str | None = Field(
+        None,
+        max_length=500,
+        description=(
+            "Why this host is claiming nothing despite having room. The empty "
+            "string is a positive report that nothing is wrong and clears what "
+            "is stored; omitting the field leaves it, the same way an "
+            "unreported runtime does."
+        ),
+    )
     runner_version: str | None = Field(None, max_length=128)
     broker_url: str | None = Field(None, max_length=2048)
     capabilities: list[str] | None = Field(None, max_length=64)
@@ -2333,6 +2418,15 @@ class HostHeartbeatResponse(BaseModel):
     status: str
     slots_total: int | None = None
     slots_used: int = 0
+    slots_desired: int | None = Field(
+        None,
+        description=(
+            "Turns at once an operator asked this host to run, or null for the "
+            "host's own default. The host serves it as its limit from here on; "
+            "the claim already admits against the lower of this and the limit "
+            "the host last reported."
+        ),
+    )
     residencies_lost: list[ResidencyBeat] = Field(
         default_factory=list,
         description=(

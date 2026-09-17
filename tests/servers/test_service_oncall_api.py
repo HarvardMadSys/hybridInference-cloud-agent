@@ -28,7 +28,7 @@ from cloud_agent.api.deps import (
     get_storage,
 )
 from cloud_agent.schemas import BASE_REF_METADATA_KEY
-from tests.support.storage import AllCapabilities
+from tests.support.storage import AllCapabilities, EmptySkillLibrary
 
 pytestmark = pytest.mark.asyncio
 
@@ -41,7 +41,7 @@ _ADMIN_TOKEN = "admin-secret-1"
 _TEST_MODELS = ("glm-5.2", "glm-5.1")
 
 
-class FakeOnCallStore(AllCapabilities):
+class FakeOnCallStore(EmptySkillLibrary, AllCapabilities):
     """In-memory stand-in for the slice of the storage layer this router uses."""
 
     def __init__(self) -> None:

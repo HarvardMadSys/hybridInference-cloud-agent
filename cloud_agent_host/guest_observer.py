@@ -228,7 +228,7 @@ class GuestObserverController:
         *,
         capture: Callable[[list[str], float], Any],
         privileged: Callable[[list[str], bool, float], Any],
-        lock: threading.Lock | None = None,
+        lock: threading.Lock | threading.RLock | None = None,
     ) -> None:
         self._capture = capture
         self._privileged = privileged
@@ -1137,7 +1137,9 @@ def attribute_processes(
     them. The process census is still returned, but its per-call links stay
     empty and the parent ``tool_calls_truncated`` flag carries the loss.
     """
-    error_s = max(0, observation.clock_error_ns if clock_error_ns is None else clock_error_ns)
+    error_s: float = max(
+        0, observation.clock_error_ns if clock_error_ns is None else clock_error_ns
+    )
     error_s /= 1_000_000_000
     counts = dict.fromkeys(range(1, len(windows) + 1), 0)
     rows: list[dict[str, Any]] = []
@@ -1212,7 +1214,10 @@ def _combined(rows: list[dict[str, Any]], name: str, *, peak: bool) -> int | Non
     values = [row.get(name) for row in rows]
     if not values or any(value is None for value in values):
         return None
-    numbers = [int(value) for value in values]
+    # The guard above already rejected a missing counter, so this only states
+    # the same fact where the conversion below reads each value.
+    present = [value for value in values if value is not None]
+    numbers = [int(value) for value in present]
     return max(numbers) if peak else sum(numbers)
 
 

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import IntegrationsPage from './page';
 import type { McpConnectionApi } from '@/lib/api/mcp';
@@ -9,6 +9,9 @@ const navigation = vi.hoisted(() => ({ search: '' }));
 vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(navigation.search),
 }));
+import { listSkills } from '@/lib/api/skills';
+vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
+
 vi.mock('@/lib/api/agents', () => ({
   getAgentIntegrations: vi.fn(),
   disconnectAgentIntegration: vi.fn(),
@@ -55,6 +58,7 @@ const connection: McpConnectionApi = {
 };
 
 beforeEach(() => {
+  vi.mocked(listSkills).mockResolvedValue([]);
   navigation.search = '';
   vi.mocked(getAgentIntegrations).mockResolvedValue({ providers: [] });
   vi.mocked(listMcpConnections).mockResolvedValue({ connections: [connection], templates: [] });
@@ -65,7 +69,7 @@ afterEach(() => {
 });
 
 describe('MCP authorization return', () => {
-  it('shows the authorized connection and lets the user continue with discovery', async () => {
+  it('discovers tools automatically after a verified authorization return', async () => {
     navigation.search = 'mcp_authorized=1&mcp_connection=3';
     vi.mocked(testMcpConnection).mockResolvedValue({
       ok: true,
@@ -81,11 +85,7 @@ describe('MCP authorization return', () => {
       capabilities: [],
     });
     render(<IntegrationsPage />);
-    expect(
-      await screen.findByText('Team wiki authorized. Run a test to discover what it offers.'),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Test' }));
-    expect(await screen.findByText('Team wiki answered as wiki 1. 2 tools')).toBeInTheDocument();
+    expect(await screen.findByText('Team wiki connected. 2 tools.')).toBeInTheDocument();
     expect(vi.mocked(testMcpConnection)).toHaveBeenCalledWith(3);
     await waitFor(() => expect(vi.mocked(listMcpConnections)).toHaveBeenCalledTimes(2));
     expect(screen.queryByText(/Team wiki authorized/)).not.toBeInTheDocument();
@@ -98,10 +98,8 @@ describe('MCP authorization return', () => {
       templates: [],
     });
     render(<IntegrationsPage />);
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'MCP authorization did not complete: access_denied',
-    );
-    expect(screen.getByRole('button', { name: 'Authorize' })).toBeEnabled();
+    expect(await screen.findByRole('alert')).toHaveTextContent('access_denied');
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled();
     expect(screen.queryByText(/Team wiki authorized/)).not.toBeInTheDocument();
   });
 
@@ -114,6 +112,6 @@ describe('MCP authorization return', () => {
     render(<IntegrationsPage />);
     await screen.findByText('Team wiki');
     expect(screen.queryByText(/Team wiki authorized/)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Authorize' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled();
   });
 });

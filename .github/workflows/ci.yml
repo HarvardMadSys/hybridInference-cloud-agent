@@ -486,6 +486,19 @@ jobs:
       - name: Pytest (dbtest tier)
         run: uv run pytest -q -n 4 --dist loadfile -m "dbtest" --junitxml="${RUNNER_TEMP}/dbtest.xml"
 
+      - name: Previous release survives the candidate migration
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="${PR_BASE_SHA:-${BEFORE_SHA:-HEAD^}}"
+          # Published tags follow a successful deployment. This also covers a
+          # dev commit whose preceding commit never reached staging. GitHub
+          # releases create lightweight tags, so include them with --tags.
+          previous="$(git describe --tags --first-parent --match 'agent-*' --abbrev=0 "$base")"
+          uv run python scripts/check_rolling_upgrade.py --base "$previous"
+
       # The second half of the same guard. A fixture that skips on a database
       # it cannot reach turns a broken service container into a passing job,
       # and a `pytest -m` that silently matches nothing exits 0 too. Neither is
@@ -1187,6 +1200,43 @@ jobs:
           PY
 
   # -------------------------------------------------------------------- gate
+  kata:
+    name: Candidate on real Kata
+    needs: changes
+    # This is the real sandbox machine. Only reviewed dev commits may execute
+    # here; pull requests remain covered by the hosted/static test suites.
+    if: >-
+      github.event_name != 'pull_request' && github.ref == 'refs/heads/dev' &&
+      (needs.changes.outputs.backend == 'true' || needs.changes.outputs.docker == 'true')
+    runs-on: [self-hosted, Linux, deploy-cloud-agent-sandbox-staging]
+    timeout-minutes: 30
+    concurrency:
+      group: cloud-agent-kata-ci
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+      - name: Isolate build configuration
+        run: |
+          mkdir -p "${RUNNER_TEMP}/kata-docker" "${RUNNER_TEMP}/kata-buildx"
+          echo "DOCKER_CONFIG=${RUNNER_TEMP}/kata-docker" >> "$GITHUB_ENV"
+          echo "BUILDX_CONFIG=${RUNNER_TEMP}/kata-buildx" >> "$GITHUB_ENV"
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Validate candidate without touching the deployed stack
+        run: |
+          set -euo pipefail
+          sandbox="cloud-agent-kata-check:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-sandbox"
+          runner="cloud-agent-kata-check:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-runner"
+          trap 'docker image rm "$sandbox" "$runner" >/dev/null 2>&1 || true' EXIT
+          docker build --provenance=false -f deploy/sandbox/Dockerfile.agent-sandbox -t "$sandbox" .
+          docker build --provenance=false -f deploy/host/Dockerfile.agent-runner -t "$runner" .
+          docker run --rm --network none \
+            -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            -e AGENT_SANDBOX_BACKEND=kata -e "AGENT_SANDBOX_IMAGE=$sandbox" \
+            "$runner" python -m cloud_agent_host.candidate_check
+
   ci-gate:
     name: CI Gate
     # The single job that says whether this commit is good. `deploy-staging.yml`
@@ -1203,6 +1253,7 @@ jobs:
       - gitleaks
       - artifacts
       - compose
+      - kata
     steps:
       - name: Every job succeeded or was deliberately skipped
         env:
@@ -1215,6 +1266,7 @@ jobs:
             gitleaks=${{ needs.gitleaks.result }}
             artifacts=${{ needs.artifacts.result }}
             compose=${{ needs.compose.result }}
+            kata=${{ needs.kata.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
         run: |
           set -euo pipefail

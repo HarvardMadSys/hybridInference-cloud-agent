@@ -912,6 +912,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
     from cloud_agent.ledger import collect_usage_snapshots
+    from cloud_agent.operational_health import monitor_queue
     from cloud_agent.storage.assembly import Storage
 
     dsn = os.environ.get(ENV_DATABASE_URL, "")
@@ -983,6 +984,9 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         app.state.snapshot_task = snapshot_coordinator
         app.state.ledger_task = ledger_collector
         app.state.capacity_task = capacity_history
+        app.state.queue_monitor_task = asyncio.create_task(monitor_queue(storage.host_pool))
+        _BACKGROUND_TASKS.add(app.state.queue_monitor_task)
+        app.state.queue_monitor_task.add_done_callback(_BACKGROUND_TASKS.discard)
         _start_publisher(app, storage)
         logger.info("cloud agent control plane started")
     else:
@@ -990,6 +994,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         app.state.snapshot_task = None
         app.state.ledger_task = None
         app.state.capacity_task = None
+        app.state.queue_monitor_task = None
         app.state.publish_task = None
         logger.info("cloud agent relay listener started")
 
@@ -1005,6 +1010,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.snapshot_task,
             app.state.ledger_task,
             app.state.capacity_task,
+            app.state.queue_monitor_task,
             app.state.publish_task,
         ):
             if task is None:
@@ -1039,6 +1045,7 @@ def create_app() -> FastAPI:
         routes,
         service_jobs,
         session,
+        skills,
         usage,
     )
 
@@ -1055,6 +1062,7 @@ def create_app() -> FastAPI:
     # match a connection-management path and answer it as an MCP request. The
     # listener separation matters more: adding a connection or approving a call
     # is owner-facing work, and a sandbox must not be able to reach it at all.
+    app.include_router(skills.router)
     app.include_router(mcp_connections.router)
     app.include_router(mcp_relay.router)
     app.include_router(hosts.router)

@@ -33,6 +33,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   deploy:
@@ -128,6 +129,10 @@ jobs:
 
       - name: Deploy
         env:
+          # The orchestrator watches this attempt's peer only during the
+          # read-only fence; the token is never passed into an API container.
+          DEPLOY_PEER_JOB: Deploy runner host
+          GITHUB_TOKEN: ${{ github.token }}
           # Unset falls back to the script's own default, which is this
           # machine's path. Named here so production and staging are configured
           # the same way rather than one by variable and one by default.
@@ -151,6 +156,12 @@ jobs:
           # releases the fence immediately. Never bypass the exact-SHA check.
           SHARED_READY_TIMEOUT: "900"
         run: bash .deploy-orchestrator/deploy/control-plane/deploy.sh "${{ steps.target.outputs.sha }}"
+
+      - name: Notify deployment failure
+        if: failure()
+        env:
+          AGENT_ALERT_WEBHOOK_URL: ${{ secrets.STAGING_ALERT_WEBHOOK_URL }}
+        run: python3 .deploy-orchestrator/deploy/notify_failure.py
 
       - name: What is running now
         if: always()
@@ -250,18 +261,22 @@ jobs:
           # Keep a failed local probe bounded; deploy.sh restores the previous
           # host generation if the replacement cannot advertise readiness.
           SHARED_READY_TIMEOUT: "120"
-          # One capacity value drives both the number of synchronous runner
-          # executors and the scheduler slots they advertise. Letting these
-          # drift can claim three simultaneous turns with only one process
-          # available to execute them, silently serialising fork siblings.
+          # Turns at once until an admin sets a number on the Servers page;
+          # the host takes that number up at runtime without a redeploy. Two
+          # is the floor, because fork siblings run beside each other.
           AGENT_HOST_SLOTS: ${{ vars.STAGING_HOST_SLOTS || '3' }}
-          AGENT_RUNNER_REPLICAS: ${{ vars.STAGING_HOST_SLOTS || '3' }}
           AGENT_CHAT_IDLE_TIMEOUT_S: "1800"
           # Docker, not a chat bind mount, owns retained writable layers. Set
           # the repository variable if this daemon uses a non-default data-root.
           AGENT_RETAINED_DOCKER_DATA_ROOT: ${{ vars.STAGING_RETAINED_DOCKER_DATA_ROOT || '/var/lib/docker' }}
           SOURCE_REPO: ${{ github.workspace }}/.deploy-target
         run: bash .deploy-orchestrator/deploy/host/deploy.sh "${{ steps.target.outputs.sha }}"
+
+      - name: Notify deployment failure
+        if: failure()
+        env:
+          AGENT_ALERT_WEBHOOK_URL: ${{ secrets.STAGING_ALERT_WEBHOOK_URL }}
+        run: python3 .deploy-orchestrator/deploy/notify_failure.py
 
       - name: What is running now
         if: always()

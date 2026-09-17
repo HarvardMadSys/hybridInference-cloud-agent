@@ -25,8 +25,8 @@ def _host(
     tmp_path: Path,
     *,
     slots: str | None = "3",
-    replicas: str = "3",
-    running_replicas: int = 3,
+    running_containers: int = 1,
+    turn_starts: bool = True,
     credential: bool = True,
     configured_root: str = "/var/lib/docker",
     daemon_root: str = "/var/lib/docker",
@@ -35,6 +35,7 @@ def _host(
     attest_exit: int = 0,
     broker_running: bool = True,
     broker_serving: bool = True,
+    candidate_exit: int = 0,
 ) -> dict[str, str]:
     app_dir = tmp_path / "app"
     app_dir.mkdir()
@@ -53,18 +54,19 @@ def _host(
     ]
     if slots is not None:
         dotenv.append(f"AGENT_HOST_SLOTS={slots}")
-    dotenv.append(f"AGENT_RUNNER_REPLICAS={replicas}")
     (app_dir / ".env").write_text("\n".join([*dotenv, ""]))
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     rejection_log = "agent_host_credential_rejected" if credential_rejected else ""
-    runner_ids = "\n".join(f"runner-{index}" for index in range(1, running_replicas + 1))
+    runner_ids = "\n".join(f"runner-{index}" for index in range(1, running_containers + 1))
     broker_id = "workspace-broker-1" if broker_running else ""
     # The readiness wait probes the broker with urllib; the fake answers it
     # separately from the attestation exec so a broker that is up but not yet
     # serving can be modelled.
     broker_probe_exit = 0 if broker_serving else 1
+    turn_probe = "declined no turn was delivered" if turn_starts else "ImportError: no module"
+    turn_probe_exit = 0 if turn_starts else 1
     _write_executable(
         fake_bin / "docker",
         "#!/bin/sh\n"
@@ -72,11 +74,18 @@ def _host(
         'case "$*" in\n'
         f"  'info --format {{{{.DockerRootDir}}}}') echo '{daemon_root}' ;;\n"
         "  'info') exit 0 ;;\n"
+        '  *\' config --format json\') echo \'{"name":"test-retained","services":{"runner":{"image":"test-candidate-runner"}}}\' ;;\n'
+        f"  run*'cloud_agent_host.candidate_check') exit {candidate_exit} ;;\n"
         f"  *' ps -q runner') printf '%s\\n' '{runner_ids}' ;;\n"
         f"  *' ps -q workspace-broker') printf '%s\\n' '{broker_id}' ;;\n"
         f"  *' logs --since 2m runner') echo '{rejection_log}' ;;\n"
         f"  exec*'_shared_live_host_capabilities'*) echo '{capability}'; exit {attest_exit} ;;\n"
         f"  exec*8092/health*) exit {broker_probe_exit} ;;\n"
+        # The realistic shape: the same preflight a real turn runs logs a Kata
+        # measurement warning to stderr before the child answers on stdout,
+        # and the script captures both. The verdict has to be read past it.
+        "  exec*--turn*) echo '2026-09-17 06:18:18,846 - cloud_agent_host.chat_sandbox - WARNING - Kata guest cannot measure part of a member window: storage_io' >&2; "
+        f"echo '{turn_probe}'; exit {turn_probe_exit} ;;\n"
         f"  exec*'retained_docker_data_root'*) echo '{daemon_root}' ;;\n"
         "  exec*'AGENT_CONTROL_PLANE_URL'*) echo '200' ;;\n"
         "  run*) printf '200' ;;\n"
@@ -399,26 +408,78 @@ def test_host_up_refuses_an_unsafe_reverse_broker_bind(tmp_path: Path, unsafe_bi
 
 
 def test_first_kata_deploy_builds_the_image_before_using_it_for_the_kernel_probe() -> None:
-    """A clean host has no previous sandbox image for ``docker run`` to use."""
+    """A clean host has no previous sandbox image for ``docker run`` to use.
+
+    Sliced from ``cmd_prepare`` rather than ``cmd_up``: the rollout is two named
+    halves since #270, and this ordering lives in the first of them. ``cmd_up``
+    is now the pair, so slicing it would read four lines and assert nothing.
+    """
     script = SANDBOX_HOST.read_text()
-    command = script[script.index("cmd_up() {") : script.index("cmd_check() {")]
+    command = script[script.index("cmd_prepare() {") : script.index("cmd_check() {")]
 
     assert command.index("docker build") < command.index("kata_smoke_test")
     assert command.index("kata_smoke_test") < command.index("compose up")
 
 
-def test_shared_live_refuses_more_slots_than_runner_executors(tmp_path: Path) -> None:
-    result = _run(_host(tmp_path, slots="3", replicas="2"), "preflight")
+def test_shared_live_refuses_a_default_pool_size_outside_the_bounds(tmp_path: Path) -> None:
+    """One executor would run a fork's sibling behind its parent."""
+    result = _run(_host(tmp_path, slots="1"), "preflight")
 
     assert result.returncode != 0
-    assert "overstates AGENT_RUNNER_REPLICAS=2" in result.stderr
+    assert "AGENT_HOST_SLOTS must be an integer from 2 through 128" in result.stderr
 
 
-def test_shared_live_check_requires_every_configured_runner_to_be_alive(tmp_path: Path) -> None:
-    result = _run(_host(tmp_path, replicas="3", running_replicas=1), "check")
+def test_a_leftover_replica_count_is_warned_about_not_read(tmp_path: Path) -> None:
+    env = _host(tmp_path)
+    with (Path(env["APP_DIR"]) / ".env").open("a") as dotenv:
+        dotenv.write("AGENT_RUNNER_REPLICAS=3\n")
+
+    result = _run(env, "preflight")
+
+    assert result.returncode == 0, result.stderr
+    assert "AGENT_RUNNER_REPLICAS is no longer read" in result.stderr
+
+
+def test_the_turn_probe_reads_its_answer_past_log_noise(tmp_path: Path) -> None:
+    """Staging, 2026-09-17: the probe's first rollout captured a preflight
+    warning on stderr ahead of the decline, judged the image unable to run
+    turns, and rolled the host back. The answer is a line, not the output."""
+    result = _run(_host(tmp_path), "check")
+
+    assert result.returncode == 0, result.stderr
+    assert "turn processes start: declined no turn was delivered" in result.stdout
+    assert "cannot run turns" not in result.stderr
+
+
+def test_shared_live_check_requires_the_image_to_start_a_turn(tmp_path: Path) -> None:
+    """A configured limit is not proof that a turn can be started at all.
+
+    A host that claims turns it cannot start takes the queue apart one claim at
+    a time, so the deployment proves the path a turn takes up to the moment it
+    would begin — and no further, since nothing is claimed by the probe.
+    """
+    result = _run(_host(tmp_path, turn_starts=False), "check")
 
     assert result.returncode != 0
-    assert "only 1 of 3 configured runner replicas are running" in result.stderr
+    assert "cannot start a turn process" in result.stderr
+
+
+def test_shared_live_check_does_not_count_runner_containers(tmp_path: Path) -> None:
+    """One container per host; its limit, not a container count, is the concurrency."""
+    result = _run(_host(tmp_path, running_containers=1), "check")
+
+    assert result.returncode == 0, result.stderr
+    assert "turn processes start" in result.stdout
+
+
+def test_up_no_longer_takes_a_replica_count(tmp_path: Path) -> None:
+    env = _host(tmp_path)
+    _add_required_host_paths(env, tmp_path)
+
+    result = _run(env, "up", "3")
+
+    assert result.returncode != 0
+    assert "no longer takes a replica count" in result.stderr
 
 
 def test_shared_live_check_runs_the_real_sandbox_preflight_before_attesting() -> None:
@@ -495,7 +556,7 @@ def test_host_readiness_probes_both_sandbox_relays() -> None:
 
 def test_host_up_waits_for_parallel_control_bootstrap_but_manual_check_is_immediate() -> None:
     script = SANDBOX_HOST.read_text()
-    up = script[script.index("cmd_up() {") : script.index("cmd_check() {")]
+    up = script[script.index("cmd_prepare() {") : script.index("cmd_check() {")]
     dispatch = script[script.rindex('case "${1:-}" in') :]
 
     assert 'readiness_wait="${readiness_wait:-900}"' in up
@@ -503,14 +564,16 @@ def test_host_up_waits_for_parallel_control_bootstrap_but_manual_check_is_immedi
     assert "check) cmd_check 0" in dispatch
 
 
-def test_every_failing_replica_is_reported_not_just_the_first(tmp_path: Path) -> None:
-    """Run together, all three answers exist at once; report all of them.
+def test_every_failing_container_is_reported_not_just_the_first(tmp_path: Path) -> None:
+    """Run together, all the answers exist at once; report all of them.
 
-    "All three failed" is a configuration problem and "one failed" is that
-    machine, and the serial loop could only ever surface the first — which is
+    A host runs one runner container, but a rollout lists the outgoing one
+    beside its replacement, so the check still asks every container it finds.
+    "They all failed" is a configuration problem and "one failed" is that
+    container, and a serial loop could only ever surface the first — which is
     the pattern the reader needs to tell them apart.
     """
-    result = _run(_host(tmp_path, capability=""), "check")
+    result = _run(_host(tmp_path, running_containers=3, capability=""), "check")
 
     assert result.returncode != 0
     for index in (1, 2, 3):
@@ -585,7 +648,7 @@ def test_host_up_probes_the_tunnels_instead_of_pausing_first() -> None:
     immediately after it.
     """
     script = SANDBOX_HOST.read_text()
-    up = script[script.index("cmd_up() {") : script.index("cmd_check() {")]
+    up = script[script.index("cmd_prepare() {") : script.index("cmd_check() {")]
     # Statements, not the word: the comment above the probe explains the pause
     # that was removed, and a substring search over the function would fail on
     # the strength of the sentence describing it.
@@ -899,3 +962,60 @@ def test_host_deploy_reads_the_recorded_generation_before_it_overwrites_it() -> 
     )
     assert 'mark-ready "${recorded}"' in script
     assert "restore_recorded_generation" in script
+
+
+def test_every_command_that_reads_configuration_reads_the_resolved_one(
+    tmp_path: Path,
+) -> None:
+    """The phase commands must parse `.env` the way `up` does, not the way a
+    hand-rolled reader would.
+
+    Review found `prepare` and `activate` missing from the list of commands that
+    load Compose's resolved environment after the phase split. Compose expands
+    `${VAR}` and strips an inline comment; the fallback reader does neither, so
+    the same file that `up` correctly refused was accepted by `prepare` — with a
+    state root that was the literal text `${STATE_BASE}/agent-host` and a
+    network name with ` # shared default` on the end of it.
+    """
+    dispatch = SANDBOX_HOST.read_text()
+    loads = dispatch[dispatch.index('case "${1:-}" in') :]
+    loads = loads[: loads.index("esac")]
+    assert "prepare" in loads and "activate" in loads, loads
+
+
+def _resolve_environment_with_real_compose(tmp_path: Path) -> None:
+    """Let the fixture's fake `docker` hand one subcommand to the real one.
+
+    `config --environment` is where interpolation and inline comments are
+    decided, and a fake that answers it cannot show which reader a command used.
+    Everything else stays recorded and synthetic: no pull, no run, no service.
+    """
+    real = shutil.which("docker")
+    if not real:
+        pytest.skip("Compose's own dotenv parser is what this compares against")
+    docker = tmp_path / "bin" / "docker"
+    lines = docker.read_text().splitlines(keepends=True)
+    lines[1:1] = [f'case " $* " in *" config --environment "*) exec "{real}" "$@";; esac\n']
+    docker.write_text("".join(lines))
+
+
+@pytest.mark.parametrize("command", ["up", "prepare"])
+def test_a_shared_default_is_refused_whichever_command_reads_it(
+    tmp_path: Path, command: str
+) -> None:
+    """Interpolation and an inline comment, through Compose, for both."""
+    env = _host(tmp_path)
+    _add_required_host_paths(env, tmp_path)
+    _resolve_environment_with_real_compose(tmp_path)
+    app = Path(env["APP_DIR"])
+    with (app / ".env").open("a") as stream:
+        stream.write("SIBLING_COMPOSE_PROJECTS=other-environment\n")
+        stream.write("STATE_BASE=/var/lib/hybridinference\n")
+        stream.write("AGENT_HOST_STATE_ROOT=${STATE_BASE}/agent-host\n")
+        stream.write("AGENT_ENROLL_TOKEN=synthetic-token\n")
+        stream.write("AGENT_EGRESS_NETWORK_PLATFORM_ONLY=agent-egress # shared default\n")
+
+    result = _run(env, command)
+
+    assert result.returncode != 0
+    assert "must be unique to this stack" in result.stderr, result.stdout + result.stderr

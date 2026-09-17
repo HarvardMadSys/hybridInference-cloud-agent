@@ -51,11 +51,25 @@ def test_private_repository_ci_uses_existing_self_hosted_pools() -> None:
         # One cell per artifact, each naming the pool it builds and starts on.
         "artifacts": "${{ fromJSON(matrix.artifact.runner) }}",
         "compose": ["self-hosted", "Linux", "ARM64", "image-verify-arm64"],
+        "kata": ["self-hosted", "Linux", "deploy-cloud-agent-sandbox-staging"],
     }
     assert special_runners.keys() <= jobs.keys()
     for name, job in jobs.items():
         expected = special_runners.get(name, ["self-hosted", "Linux", "ci-general"])
         assert job["runs-on"] == expected, f"{name} left its self-hosted CI pool"
+
+
+def test_kata_validation_cannot_run_pull_request_code_on_the_deployment_host() -> None:
+    workflow = yaml.safe_load((WORKFLOW_DIR / "ci.yml").read_text())
+    job = workflow["jobs"]["kata"]
+    assert "github.event_name != 'pull_request'" in job["if"]
+    assert "github.ref == 'refs/heads/dev'" in job["if"]
+    assert "kata" in workflow["jobs"]["ci-gate"]["needs"]
+    assert job["concurrency"]["group"] != "cloud-agent-host-deploy"
+    commands = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "cloud_agent_host.candidate_check" in commands
+    assert "compose up" not in commands
+    assert "deploy.sh" not in commands
 
 
 def test_ci_images_build_on_their_deployment_architecture() -> None:

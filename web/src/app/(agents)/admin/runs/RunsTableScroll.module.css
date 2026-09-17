@@ -1,0 +1,61 @@
+.scrollbar {
+  height: 13px;
+  overflow-x: scroll;
+  overflow-y: hidden;
+  border-radius: 6px;
+}
+
+.scrollbar:focus-visible {
+  outline: 2px solid #6b7280;
+  outline-offset: 2px;
+}
+
+.scrollbar::-webkit-scrollbar {
+  height: 12px;
+}
+
+.scrollbar::-webkit-scrollbar-track {
+  border: 3px solid transparent;
+  border-radius: 6px;
+  background-color: #f3f4f6;
+  background-clip: padding-box;
+}
+
+.scrollbar::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 6px;
+  background-color: #b6bdc8;
+  background-clip: padding-box;
+}
+
+.scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: #9099a8;
+}
+
+.scrollbar::-webkit-scrollbar-button {
+  display: none;
+}
+
+:global(.dark) .scrollbar::-webkit-scrollbar-track {
+  background-color: #1f2937;
+}
+
+:global(.dark) .scrollbar::-webkit-scrollbar-thumb {
+  background-color: #566174;
+}
+
+:global(.dark) .scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: #8893a5;
+}
+
+/* Firefox uses the standard scrollbar properties instead of WebKit parts. */
+@supports not selector(::-webkit-scrollbar) {
+  .scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: #b6bdc8 #f3f4f6;
+  }
+
+  :global(.dark) .scrollbar {
+    scrollbar-color: #566174 #1f2937;
+  }
+}

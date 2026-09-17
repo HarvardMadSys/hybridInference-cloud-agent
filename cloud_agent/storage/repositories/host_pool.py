@@ -26,6 +26,7 @@ from cloud_agent.storage._sql.hosts import (
 )
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
+from cloud_agent_host.sandbox import KATA_RUNTIME
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -216,6 +217,7 @@ class PostgresHostPoolRepository:
         capacity_sample_age_ms: int | None = None,
         physical_host: str | None = None,
         slots_total: int | None = None,
+        launch_error: str | None = None,
         runner_version: str | None = None,
         broker_url: str | None = None,
         capabilities: list[str] | None = None,
@@ -257,7 +259,11 @@ class PostgresHostPoolRepository:
             capacity: The validated, normalized capacity block to store.
             capacity_sample_age_ms: How old the observation was when sent.
             physical_host: Admin grouping label; never an identity.
-            slots_total: Claim ceiling this host now reports.
+            slots_total: The concurrency limit this host currently applies.
+            launch_error: Why it is not claiming, or ``""`` when nothing is
+                wrong. ``None`` is a host that does not report this at all and
+                leaves whatever is stored in place, the same way an unreported
+                runtime does.
             runner_version: Runner build the host is running.
             broker_url: Address the control plane reaches this host's broker.
             capabilities: What this host can run.
@@ -288,7 +294,11 @@ class PostgresHostPoolRepository:
                     runtime_versions = COALESCE($8::jsonb, runtime_versions),
                     runtime_versions_available =
                         COALESCE($9::jsonb, runtime_versions_available),
-                    labels = COALESCE(labels, '{{}}'::jsonb) || $10::jsonb
+                    labels = COALESCE(labels, '{{}}'::jsonb) || $10::jsonb,
+                    -- "" survives COALESCE for the same reason an empty
+                    -- sandbox runtime does: it is the host saying nothing is
+                    -- wrong, which has to be able to clear a stale reason.
+                    launch_error = COALESCE($11, launch_error)
                 WHERE host = $1
                 RETURNING {HOST_COLUMNS}
                 """,
@@ -308,6 +318,7 @@ class PostgresHostPoolRepository:
                     else json.dumps(runtime_versions_available)
                 ),
                 json.dumps({"physical_host": physical_host} if physical_host is not None else {}),
+                launch_error,
             )
             if row is None:
                 return None
@@ -346,6 +357,30 @@ class PostgresHostPoolRepository:
                 "UPDATE agent_runner_hosts SET status = $2 WHERE host = $1", host, status
             )
         return "ok"
+
+    async def set_host_slots_desired(self, *, host: str, slots: int | None) -> str:
+        """Ask a host to run ``slots`` turns at once, or with ``None`` its default.
+
+        Returns ``"ok"`` or ``"unknown"``. Nothing here starts or stops
+        anything: the host reads the value off its next heartbeat answer,
+        serves it as its limit, and reports it back as ``slots_total``. The
+        claim honours the lower of the two from the next poll on, so a number
+        the host has not confirmed admits nothing extra and a lowered one takes
+        effect at once. Turns already running are never touched.
+
+        The value survives heartbeats and re-enrollment on purpose. It is a
+        decision about the named machine, and neither the heartbeat's
+        ``COALESCE`` nor the registration upsert names this column. Bounds are
+        the request schema's business; the column refuses only a non-positive
+        size, which is not a size.
+        """
+        async with self._pool.acquire() as conn:
+            updated = await conn.fetchval(
+                "UPDATE agent_runner_hosts SET slots_desired = $2 WHERE host = $1 RETURNING host",
+                host,
+                slots,
+            )
+        return "ok" if updated is not None else "unknown"
 
     async def remove_host(self, *, host: str, force: bool = False) -> str:
         """Revoke a host's credential and take it out of the pool.
@@ -566,6 +601,65 @@ class PostgresHostPoolRepository:
             selected,
             {str(row["host"]) for row in owner_rows},
         )
+
+    async def queue_health(self, *, expected_deployment_sha: str) -> dict[str, int]:
+        """Observe ten-minute queue stalls without claiming or changing jobs.
+
+        Occupied slots are ordinary backpressure. Missing/stale/disabled hosts,
+        lost deployment markers and a wrong placement pin are not. Retained
+        members use their owner, independent of the pin for new conversations.
+        No user content, job identifiers or credentials leave this projection.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                WITH waiting AS (
+                    SELECT g.host AS owner, t.execution_profile,
+                           COALESCE(j.metadata->'requires', '[]'::jsonb) AS requires
+                    FROM agent_jobs j
+                    JOIN agent_threads t ON t.id = j.thread_id
+                    LEFT JOIN agent_thread_sandbox_memberships m ON m.thread_id = t.id
+                    LEFT JOIN agent_sandboxes g ON g.id = m.sandbox_id
+                    WHERE j.state = 'queued' AND NOT j.cancel_requested
+                      AND j.updated_at < NOW() - INTERVAL '10 minutes'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM agent_jobs earlier
+                          WHERE earlier.thread_id = j.thread_id AND earlier.turn_no < j.turn_no
+                            AND earlier.state IN ('queued', 'running')
+                      )
+                ), serving AS (
+                    SELECT h.* FROM agent_runner_hosts h
+                    WHERE h.status = 'online' AND h.credential_hash IS NOT NULL
+                      AND h.last_heartbeat_at >= NOW() - INTERVAL '90 seconds'
+                      AND h.capabilities @> '["shared-sandbox-v1"]'::jsonb
+                      AND COALESCE(h.slots_total, 1) > 0
+                      AND EXISTS (
+                          SELECT 1 FROM jsonb_array_elements_text(h.capabilities) c
+                          WHERE c LIKE 'shared-sandbox-deployment:%'
+                      )
+                )
+                SELECT COUNT(*) AS queued,
+                       COUNT(*) FILTER (WHERE NOT EXISTS (
+                           SELECT 1 FROM serving h
+                           WHERE waiting.requires <@ h.capabilities
+                             AND (waiting.execution_profile = 'trusted-v1' OR h.sandbox_runtime = $2)
+                             AND (
+                                 (waiting.owner IS NOT NULL AND h.host = waiting.owner)
+                                 OR (waiting.owner IS NULL
+                                     AND h.capabilities @> '["native-fork-at-anchor-v1"]'::jsonb
+                                     AND ($1 = '' OR h.capabilities ? ('shared-sandbox-deployment:' || $1))
+                                     AND ((SELECT active_host FROM agent_runner_policy WHERE id) IS NULL
+                                          OR h.host = (SELECT active_host FROM agent_runner_policy WHERE id)))
+                             )
+                       )) AS unavailable,
+                       (SELECT COUNT(*) FROM agent_jobs WHERE state = 'running') AS running
+                FROM waiting
+                """,
+                expected_deployment_sha,
+                KATA_RUNTIME,
+                timeout=10,
+            )
+        return {key: int(row[key]) for key in ("queued", "unavailable", "running")}
 
     async def list_runner_hosts(self) -> list[dict[str, Any]]:
         """Return every host seen polling, most recent poll first."""

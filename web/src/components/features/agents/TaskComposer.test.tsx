@@ -15,6 +15,9 @@ vi.mock('next/navigation', () => ({
   useRouter: () => navigation,
 }));
 
+import { listSkills } from '@/lib/api/skills';
+vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
+
 vi.mock('@/lib/api/agents', () => ({
   createAgentJob: vi.fn(),
   getAgentConfig: vi.fn(),
@@ -36,6 +39,7 @@ function config(overrides: Partial<AgentConfigApi> = {}): AgentConfigApi {
 
 describe('TaskComposer source-control onboarding', () => {
   beforeEach(() => {
+    vi.mocked(listSkills).mockReset();
     navigation.push.mockReset();
     vi.mocked(createAgentJob).mockReset();
     vi.mocked(getAgentConfig).mockReset();
@@ -113,6 +117,20 @@ describe('TaskComposer source-control onboarding', () => {
         base_ref: 'dev',
       }),
     );
+    expect(navigation.push).toHaveBeenCalledWith('/ajob_1');
+  });
+
+  it('uses account defaults without loading the skill library in the new-task composer', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
+    render(<TaskComposer />);
+    await screen.findByLabelText('Branch');
+    expect(screen.queryByRole('button', { name: /Skills/ })).not.toBeInTheDocument();
+    expect(listSkills).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Review the diff' } });
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('skill_ids');
     expect(navigation.push).toHaveBeenCalledWith('/ajob_1');
   });
 

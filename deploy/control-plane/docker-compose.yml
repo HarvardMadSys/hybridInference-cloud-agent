@@ -115,6 +115,7 @@ services:
       AGENT_TRUST_PROXY_HEADERS: ${AGENT_TRUST_PROXY_HEADERS:-false}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
+      AGENT_ALERT_WEBHOOK_URL: ${AGENT_ALERT_WEBHOOK_URL:-}
       AGENT_DEFAULT_EXECUTION_PROFILE: ${AGENT_DEFAULT_EXECUTION_PROFILE:-untrusted-kata-v1}
       # --- Publishing and source control ------------------------------------
       # The only component that holds a git credential, which is precisely what

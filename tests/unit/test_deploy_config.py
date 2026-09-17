@@ -681,7 +681,9 @@ def test_staging_deploy_runs_both_halves_in_parallel_with_a_runtime_fence() -> N
     assert ".deploy-orchestrator/deploy/host/deploy.sh" in host_deploy["run"]
     assert control_env["COMPOSE_PROJECT"] == "${{ vars.STAGING_CONTROL_COMPOSE_PROJECT }}"
     assert "STAGING_HOST_SLOTS" in host_env["AGENT_HOST_SLOTS"]
-    assert host_env["AGENT_RUNNER_REPLICAS"] == host_env["AGENT_HOST_SLOTS"]
+    # The executor count is sized at runtime from the admin page; a replica
+    # count here would be a second, stale answer to the same question.
+    assert "AGENT_RUNNER_REPLICAS" not in host_env
     assert "STAGING_RETAINED_DOCKER_DATA_ROOT" in host_env["AGENT_RETAINED_DOCKER_DATA_ROOT"]
 
 
@@ -703,7 +705,7 @@ def test_production_deploy_uses_the_same_parallel_topology() -> None:
     ):
         assert removed not in host_env
     assert "PROD_HOST_SLOTS" in host_env["AGENT_HOST_SLOTS"]
-    assert host_env["AGENT_RUNNER_REPLICAS"] == host_env["AGENT_HOST_SLOTS"]
+    assert "AGENT_RUNNER_REPLICAS" not in host_env
     assert "PROD_RETAINED_DOCKER_DATA_ROOT" in host_env["AGENT_RETAINED_DOCKER_DATA_ROOT"]
     assert host_env["SIBLING_COMPOSE_PROJECTS"] == (
         "${{ vars.PROD_SIBLING_COMPOSE_PROJECTS || vars.STAGING_SANDBOX_COMPOSE_PROJECT }}"
@@ -1645,18 +1647,24 @@ def test_kilo_wrapper_refuses_to_run_half_configured(tmp_path):
     assert "OPENAI_API_KEY" in result.stderr
 
 
-def test_concurrency_is_declared_not_typed_at_deploy_time(compose: dict):
-    """One runner takes one job at a time, so replicas *is* the concurrency.
+def test_concurrency_is_sized_at_runtime_not_by_replicas(compose: dict):
+    """One container supervises an executor pool sized from the admin page.
 
-    A `--scale` passed by hand survives until the next `docker compose up`
-    without it, which silently drops the fleet back to one — presenting as
-    "every user is queueing" long after anyone remembers scaling it. The count
-    therefore belongs in the file the deploy reads.
+    A replica count would be a second answer to the same question, fixed at
+    deploy time and stale the moment an operator resized the pool; and two
+    containers would enroll the same host twice. What the file may still
+    carry is the pool's *default*, so a fresh host has a size before anyone
+    has set one.
     """
     runner = compose["services"]["runner"]
-    replicas = (runner.get("deploy") or {}).get("replicas")
-    assert replicas, "runner declares no replica count, so a deploy resets concurrency to 1"
-    assert "AGENT_RUNNER_REPLICAS" in str(replicas), "the replica count is not operator-tunable"
+    assert "replicas" not in (runner.get("deploy") or {}), (
+        "the executor count is not a replica count"
+    )
+    environment = runner["environment"]
+    assert "AGENT_RUNNER_REPLICAS" not in environment
+    assert "AGENT_HOST_SLOTS" in str(environment["AGENT_HOST_SLOTS"]), (
+        "the default pool size is not operator-tunable"
+    )
 
 
 def test_replicas_are_distinguishable_in_the_lease_ledger(compose: dict):

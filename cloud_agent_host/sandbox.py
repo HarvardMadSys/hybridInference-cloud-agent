@@ -390,7 +390,7 @@ class _PopenProcess(SandboxProcess):
     that will never produce another line.
     """
 
-    def __init__(self, process: subprocess.Popen, *, container: str | None = None) -> None:
+    def __init__(self, process: subprocess.Popen[str], *, container: str | None = None) -> None:
         self._process = process
         self._container = container
         self._stderr_chunks: list[str] = []
@@ -942,6 +942,11 @@ class ContainerBackend(SandboxBackend):
         code, and "nobody configured this" must not be the same thing as "full
         internet".
         """
+        # Docker's built-in null network has Internal=false because it has no
+        # bridge at all. It is stricter than an internal bridge: no interfaces
+        # except loopback. Candidate preflight deliberately uses this network.
+        if network == "none":
+            return
         if self.allow_open_network:
             logger.warning(
                 "agent_sandbox_open_network",
