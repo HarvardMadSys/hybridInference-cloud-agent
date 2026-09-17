@@ -82,20 +82,28 @@ class DeliveryOutcome:
 def classify_response(status_code: int, body: Mapping[str, Any] | None = None) -> DeliveryOutcome:
     """Return what one HTTP response means for delivery.
 
-    A 2xx that reports the record was already stored is a success: idempotence
-    is the destination agreeing with us, not a failure to store. A refusal the
-    service will repeat -- a conflict, a rejected record, an unusable token --
-    is terminal on the first answer, because a second identical request cannot
+    Only ``stored`` and ``duplicate`` are success. A 2xx is the transport
+    saying the request was understood; the body says what was done with it, and
+    ``conflict``, ``run_conflict`` and ``rejected`` are refusals that arrive
+    with a perfectly good status code. A refusal the service will repeat is
+    terminal on the first answer, because a second identical request cannot
     change it.
     """
     if status_code in {200, 201, 202, 204}:
         stored = str((body or {}).get("result") or "stored")
-        if stored == "conflict":
-            # The id exists with different contents. The record is not stored
-            # and never will be under that id, so this is terminal -- and it is
-            # a real disagreement worth a log line rather than a silent drop.
-            return DeliveryOutcome("dropped", "conflict")
-        return DeliveryOutcome("delivered" if stored != "duplicate" else "duplicate")
+        if stored in {"conflict", "run_conflict", "rejected"}:
+            # The destination refused the record and will refuse it again. A
+            # 200 says the request was understood, not that the measurement was
+            # kept, and reporting a refusal as delivered is how a stored table
+            # silently acquires a gap nobody counted.
+            return DeliveryOutcome("dropped", stored)
+        if stored == "duplicate":
+            return DeliveryOutcome("duplicate")
+        if stored != "stored":
+            # An outcome this producer does not know cannot be assumed to mean
+            # the record is safe.
+            return DeliveryOutcome("dropped", f"unknown result {stored!r}")
+        return DeliveryOutcome("delivered")
     if status_code == 409:
         return DeliveryOutcome("dropped", "conflict")
     if status_code in RETRYABLE_STATUS:

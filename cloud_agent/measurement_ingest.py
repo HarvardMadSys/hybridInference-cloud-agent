@@ -28,7 +28,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Final
 
 from cloud_agent_host.operation_profiling import (
@@ -75,6 +75,8 @@ ALLOWED_FACTS: Final = frozenset(
         "sandbox_id",
         "interaction_id",
         "request_kind",
+        "coverage_scope",
+        "boundary_version",
         "kind",
         "entry_count",
         "content_truncated",
@@ -109,6 +111,88 @@ KNOWN_OUTCOMES: Final = frozenset(
         "superseded",
     }
 )
+
+
+#: Every top-level field a stored record may carry. A record is reduced to
+#: these, so a producer cannot add a field this deployment does not know -- and
+#: the reduction is what keeps the promise that no prompt, file body or
+#: credential reaches the table, however a future producer names it.
+KNOWN_RECORD_KEYS: Final = frozenset(
+    {
+        "schema_version",
+        "measurement_id",
+        "interaction_id",
+        "profiling_run_id",
+        "operation",
+        "request_kind",
+        "boundary_version",
+        "coverage_scope",
+        "producer",
+        "producer_instance_id",
+        "duration_us",
+        "outcome",
+        "collection_complete",
+        "end_to_end_complete",
+        "measurement_complete",
+        "startup_path",
+        "startup_outcome",
+        "failure_stage",
+        "observed_at",
+        "recorded_at",
+        "facts",
+        "stages",
+        "spans",
+        "milestones",
+        "missing_fragments",
+        "missing_producers",
+        "truncated_fragments",
+        "dropped_spans",
+        "truncated",
+        "profiling_stopped",
+        "producers",
+        "timing_sources",
+        # Which clock domain the record's offsets are stated in. Identity, not
+        # decoration: offsets from two domains must never be compared.
+        "clock_domain_id",
+        "boundary_frozen",
+        "container_action",
+        "resident_action",
+        "context_status",
+        "workspace_action",
+    }
+)
+
+#: Fields a *stage* or *span* may carry. A producer that puts a credential in
+#: a nested object is refused rather than having it silently dropped, because
+#: the two are different mistakes: an unknown top-level field is usually a
+#: newer producer, while an unknown nested one is usually something that
+#: should never have been serialized at all.
+KNOWN_SPAN_KEYS: Final = frozenset(
+    {
+        "span_id",
+        "parent_span_id",
+        "name",
+        "stage",
+        "ordinal",
+        "start_offset_us",
+        "duration_us",
+        "outcome",
+        "truncated",
+        "attributes",
+        "children",
+        "source",
+        "call_id",
+    }
+)
+
+#: Fields a *milestone* may carry. A milestone is a named instant on the
+#: producer's own timeline, so it has neither a duration nor children -- the
+#: separate list is what stops a stage-shaped object being accepted here.
+KNOWN_MILESTONE_KEYS: Final = frozenset({"name", "offset_us", "source"})
+
+#: Longest nesting a stage list may reach. A record is bounded in bytes too,
+#: but a deeply nested one can be small and still expensive to walk.
+MAX_STAGE_DEPTH: Final = 4
 
 
 class MeasurementRejected(ValueError):
@@ -213,6 +297,74 @@ def _bounded_count(record: Mapping[str, Any], key: str, limit: int) -> int:
     if value > limit:
         raise MeasurementRejected(f"{key} exceeds {limit}")
     return value
+
+
+def _from_either(record: Mapping[str, Any], key: str) -> Any:
+    """Return a field from the top level, or from facts when it is only there.
+
+    The collector states some fields both ways -- a startup path and a request
+    kind are facts about the operation *and* the dimensions a distribution is
+    grouped by -- and a reader that only looked at the top level would file
+    every startup path as null and every terminal request kind as empty. The
+    fallback is one-directional on purpose: facts never override a stated
+    top-level field.
+    """
+    value = record.get(key)
+    if value is not None and value != "":
+        return value
+    facts = record.get("facts")
+    if isinstance(facts, Mapping):
+        return facts.get(key)
+    return value
+
+
+def _strip_unknown(value: Any, allowed: frozenset[str], *, where: str, depth: int = 0) -> Any:
+    """Return ``value`` reduced to ``allowed`` keys, refusing unknown ones.
+
+    Refused rather than dropped. A field this deployment does not know is
+    either a producer newer than the schema -- which the version check already
+    caught -- or content that was never supposed to be serialized, and silently
+    discarding the second would leave the producer believing it had been
+    stored.
+    """
+    if not isinstance(value, Mapping):
+        return value
+    unknown = sorted(str(key) for key in value if str(key) not in allowed)
+    if unknown:
+        raise MeasurementRejected(f"unknown {where} field(s): {', '.join(unknown)}")
+    if depth >= MAX_STAGE_DEPTH:
+        raise MeasurementRejected(f"{where} nests deeper than {MAX_STAGE_DEPTH}")
+    reduced: dict[str, Any] = {}
+    for key, item in value.items():
+        if key == "children":
+            if item is None:
+                continue
+            if not isinstance(item, list):
+                raise MeasurementRejected("children must be a list")
+            reduced[key] = [
+                _strip_unknown(child, allowed, where=where, depth=depth + 1) for child in item
+            ]
+        elif key == "attributes":
+            # Attributes are free-form by design, but bounded: they are the
+            # one place a producer may attach a value whose name this
+            # deployment cannot enumerate.
+            if isinstance(item, Mapping):
+                reduced[key] = {
+                    str(name)[:MAX_ATTRIBUTE_CHARS]: _bounded_value(attribute)
+                    for name, attribute in item.items()
+                }
+        else:
+            reduced[key] = item
+    return reduced
+
+
+def _bounded_value(value: Any) -> Any:
+    """Return an attribute value this table has a shape for."""
+    if isinstance(value, str):
+        return value[:MAX_ATTRIBUTE_CHARS]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)[:MAX_ATTRIBUTE_CHARS]
 
 
 def _timestamp(record: Mapping[str, Any], key: str) -> datetime:
@@ -324,9 +476,24 @@ def validate_measurement(
     if not isinstance(end_to_end_complete, bool):
         raise MeasurementRejected("end_to_end_complete must be a boolean")
 
-    startup_path = record.get("startup_path")
+    startup_path = _from_either(record, "startup_path")
+    # Unknown top-level fields are refused, not dropped. Silently discarding
+    # one would leave the producer believing it had been stored, and the field
+    # it chose might be exactly the content this promise is about.
+    unknown = sorted(str(key) for key in record if str(key) not in KNOWN_RECORD_KEYS)
+    if unknown:
+        raise MeasurementRejected(f"unknown record field(s): {', '.join(unknown)}")
     sanitized = dict(record)
     sanitized["facts"] = sanitize_facts(record.get("facts"))
+    for key, allowed in (
+        ("stages", KNOWN_SPAN_KEYS),
+        ("spans", KNOWN_SPAN_KEYS),
+        ("milestones", KNOWN_MILESTONE_KEYS),
+    ):
+        if key in sanitized and isinstance(sanitized[key], list):
+            sanitized[key] = [
+                _strip_unknown(item, allowed, where=f"{key} entry") for item in sanitized[key]
+            ]
     resolved_owner = owner or Owner()
 
     return StoredMeasurement(
@@ -341,9 +508,9 @@ def validate_measurement(
         profiling_run_id=_require(record, "profiling_run_id", limit=MAX_RUN_ID_CHARS),
         schema_version=int(schema_version),
         operation=operation,
-        request_kind=str(record.get("request_kind") or "")[:MAX_ATTRIBUTE_CHARS],
+        request_kind=str(_from_either(record, "request_kind") or "")[:MAX_ATTRIBUTE_CHARS],
         boundary_version=int(boundary_version),
-        coverage_scope=str(record.get("coverage_scope") or "")[:MAX_ATTRIBUTE_CHARS],
+        coverage_scope=str(_from_either(record, "coverage_scope") or "")[:MAX_ATTRIBUTE_CHARS],
         producer=_require(record, "producer", limit=MAX_ATTRIBUTE_CHARS),
         producer_instance_id=str(record.get("producer_instance_id") or "")[:MAX_ATTRIBUTE_CHARS],
         duration_us=int(duration_us),
@@ -358,6 +525,52 @@ def validate_measurement(
         payload_hash=canonical_hash(sanitized),
         owner=resolved_owner,
     )
+
+
+#: How long after an experiment ends a producer may still deliver what it
+#: collected. Delivery is asynchronous, and the samples worth having are often
+#: from attempts that failed immediately -- so a short grace period is part of
+#: the contract rather than a loosening of it. It also bounds how long a
+#: stopped experiment can keep growing: past this, the record is refused.
+DELIVERY_GRACE_S: Final = 600
+
+
+def require_record_matches_its_experiment(
+    *, record: Mapping[str, Any], run: Mapping[str, Any] | None, now: datetime
+) -> None:
+    """Refuse a record that does not belong to the experiment it arrived with.
+
+    Two checks, both of which have to hold for a stored row to be readable
+    later:
+
+    * the record names the run it is being filed under, so a sample cannot
+      land in another experiment's distribution; and
+    * the operation is one that run selected, so a sample cannot appear in a
+      series the experiment never asked to measure.
+
+    The deadline is checked here rather than at the repository because it is a
+    property of the arrival, not of the row: a retry that arrives in time is
+    fine, and one that arrives after the grace period is refused however
+    often it is sent.
+    """
+    if run is None:
+        # A producer that sent no manifest is contributing to a run this
+        # deployment has no catalogue entry for; the repository stores it and
+        # the catalogue reports it as missing rather than inventing one.
+        return
+    named = str(record.get("profiling_run_id") or "").strip()
+    if named != str(run["run_id"]):
+        raise MeasurementRejected(
+            f"record belongs to run {named!r}, not the manifest's {run['run_id']!r}"
+        )
+    operation = str(_from_either(record, "operation") or "").strip()
+    if operation and operation not in {str(item) for item in run["operations"]}:
+        raise MeasurementRejected(f"run does not select operation {operation!r}")
+    expires_at = run["expires_at"]
+    if now > expires_at + timedelta(seconds=DELIVERY_GRACE_S):
+        raise MeasurementRejected(
+            f"experiment ended more than {DELIVERY_GRACE_S // 60} minutes before this delivery"
+        )
 
 
 def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:
@@ -399,14 +612,19 @@ def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "ALLOWED_FACTS",
+    "DELIVERY_GRACE_S",
+    "KNOWN_MILESTONE_KEYS",
     "KNOWN_OPERATIONS",
     "KNOWN_OUTCOMES",
+    "KNOWN_RECORD_KEYS",
+    "KNOWN_SPAN_KEYS",
     "MAX_RECORD_BYTES",
     "SUPPORTED_SCHEMA_VERSIONS",
     "MeasurementRejected",
     "Owner",
     "StoredMeasurement",
     "canonical_hash",
+    "require_record_matches_its_experiment",
     "sanitize_facts",
     "validate_measurement",
     "validate_run",

@@ -198,6 +198,32 @@ class PostgresExecutionQueries:
             )
             return [dict(row) for row in rows]
 
+    async def get_attempt(self, *, job_id: str, attempt_id: int) -> dict[str, Any] | None:
+        """Return one attempt of one job, by its exact id.
+
+        Bounded to the job on purpose: an attempt id is unique on its own, but
+        a caller that authenticated as this job has no business reading any
+        other job's attempt, and putting the constraint in the query means the
+        check cannot be forgotten by a caller.
+
+        The generation is included because a credential names one, and a
+        record that names it must be reporting on the attempt it belongs to.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT a.id AS attempt_id, a.job_id, a.attempt_no, a.lease_generation,
+                       a.host_id, a.status, a.started_at, a.finished_at,
+                       to_jsonb(s) AS thread_sandbox
+                FROM agent_attempts a
+                LEFT JOIN {THREAD_SANDBOX_SOURCE} ON s.thread_id = a.thread_id
+                WHERE a.id = $1 AND a.job_id = $2
+                """,
+                attempt_id,
+                job_id,
+            )
+        return dict(row) if row is not None else None
+
     async def job_turn_telemetry(
         self, *, job_id: str, attempt_id: int | None = None
     ) -> dict[str, Any] | None:

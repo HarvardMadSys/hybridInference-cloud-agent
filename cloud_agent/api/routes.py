@@ -33,6 +33,7 @@ import os
 import re
 import secrets
 from dataclasses import asdict
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from fastapi import (
@@ -89,6 +90,7 @@ from cloud_agent.mcp.registry import resolve_connection, resolve_for_thread
 from cloud_agent.measurement_ingest import (
     MeasurementRejected,
     Owner,
+    require_record_matches_its_experiment,
     validate_measurement,
     validate_run,
 )
@@ -4323,36 +4325,64 @@ async def worker_record_measurement(
     handling the broker gets -- a broker rule that swallowed every payload
     would make a malformed record indistinguishable from a stored one.
 
-    The token is checked as a scope and a job match, never as a lease. A
+    The token is checked as a scope and a job match, never as a live lease. A
     measurement is frequently delivered *after* its attempt ended -- the
     interesting startup samples are the ones from attempts that failed
     quickly -- so requiring a live lease would discard exactly the samples
-    this exists to collect. What protects the table is that the record is
-    filed under the attempt the credential names, and nothing in the payload
-    can change that.
+    this exists to collect. What protects the table is that the credential
+    names an attempt that really belongs to this job, that the credential's
+    generation is that attempt's, and that nothing in the payload can change
+    either.
+
+    The attempt is looked up rather than believed. A token is a signed
+    statement that some attempt exists; it is not evidence that the attempt
+    *this job* ran is the one it names, and a record filed under the wrong
+    attempt is attributed to the wrong host with no way to notice later.
     """
     job_store = _require_store(store)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
+    attempt_id = claims.get("attempt_id")
+    generation = claims.get("lease_generation")
+    if attempt_id is None or generation is None:
+        raise _lease_lost()
+    attempt = await job_store.execution_queries.get_attempt(
+        job_id=job_id, attempt_id=int(attempt_id)
+    )
+    if attempt is None or int(attempt["lease_generation"]) != int(generation):
+        # Either the attempt does not exist for this job, or the credential
+        # outlived the generation it was minted for. Both mean the record
+        # cannot be attributed, which is the one thing this write is for.
+        raise _lease_lost()
     job = await job_store.conversation_queries.get_job(job_id)
     if job is None:
         raise HTTPException(
             status_code=404,
             detail={"error": {"type": "not_found", "message": "No such job."}},
         )
-    thread_sandbox = job.get("thread_sandbox") or {}
+    # Attribution comes from the attempt's own row: the sandbox and host that
+    # served *that* attempt. Read from the job's current sandbox it would name
+    # whichever machine is serving now, which for a late record is a different
+    # one.
+    attempt_sandbox = attempt.get("thread_sandbox") or {}
     owner = Owner(
         owner_id=str(job.get("user_id") or "") or None,
         job_id=job_id,
-        thread_id=str(job.get("thread_id") or "") or None,
-        sandbox_id=str(thread_sandbox.get("sandbox_id") or "") or None,
-        host_id=str(thread_sandbox.get("host") or "") or None,
-        attempt_id=claims.get("attempt_id"),
-        lease_generation=claims.get("lease_generation"),
+        thread_id=str(attempt.get("thread_id") or job.get("thread_id") or "") or None,
+        sandbox_id=str(
+            attempt_sandbox.get("sandbox_id")
+            or (job.get("thread_sandbox") or {}).get("sandbox_id")
+            or ""
+        )
+        or None,
+        host_id=str(attempt.get("host_id") or "") or None,
+        attempt_id=int(attempt_id),
+        lease_generation=int(generation),
     )
     try:
         measurement = validate_measurement(body.record, owner=owner)
         run = validate_run(body.run) if body.run is not None else None
+        require_record_matches_its_experiment(record=body.record, run=run, now=datetime.now(UTC))
     except MeasurementRejected as exc:
         # 422: the producer sent something this deployment does not store. It
         # is terminal -- the same bytes would be refused identically -- so the

@@ -18,6 +18,7 @@ import json
 import os
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -41,6 +42,8 @@ from tests.servers.test_agent_jobs_api import (
 
 ADMIN = {"Authorization": "Bearer admin-e2e-test"}
 RUN_ID = "e2e-run-1"
+# Frozen for the module: a helper that re-derived it per call would state a
+# different experiment every time, and the repository compares the instant.
 EXPIRES_AT = (datetime.now(UTC) + timedelta(minutes=30)).replace(microsecond=0)
 
 
@@ -146,6 +149,22 @@ def _manifest() -> dict[str, object]:
         "config_version": 1,
         "admission_instances": [{"instance": "cp-e2e", "max_operations": 10}],
     }
+
+
+def _validated(record: dict[str, Any], *, owner: Owner | None = None, run: Any = None) -> Any:
+    """Validate a record the way the endpoint does, checks included.
+
+    Deliberately not a shortcut: the point of this file is the seam, and a
+    helper that ran fewer checks than the route would let a record pass here
+    that production refuses.
+    """
+    stored = measurement_ingest.validate_measurement(record, owner=owner)
+    measurement_ingest.require_record_matches_its_experiment(
+        record=record,
+        run=measurement_ingest.validate_run(run) if run is not None else None,
+        now=datetime.now(UTC),
+    )
+    return stored
 
 
 class _Stored:
@@ -275,9 +294,10 @@ async def test_one_file_read_travels_the_whole_chain(
     assert record["measurement_id"] == block["measurement_id"]
 
     # 3. Delivery validates it and stores it under the job the credential names.
-    stored = measurement_ingest.validate_measurement(
+    stored = _validated(
         record,
         owner=Owner(owner_id="user-1", job_id=job_id, thread_id=store.jobs[job_id]["thread_id"]),
+        run=_manifest(),
     )
     assert (
         await capability.record_operation_measurement(
@@ -297,8 +317,8 @@ async def test_one_file_read_travels_the_whole_chain(
     assert second["measurement_id"] != record["measurement_id"]
     assert (
         await capability.record_operation_measurement(
-            measurement=measurement_ingest.validate_measurement(
-                second, owner=Owner(owner_id="user-1", job_id=job_id)
+            measurement=_validated(
+                second, owner=Owner(owner_id="user-1", job_id=job_id), run=_manifest()
             ).as_row()
         )
         == "stored"

@@ -82,12 +82,34 @@ class _MeasuringStorage(FakeStorage):
     def __init__(self) -> None:
         super().__init__()
         self.measurements = _MeasurementStore()
+        #: Attempts this job is known to have run, by id. A token names one;
+        #: only this decides whether it exists and with which generation.
+        self.attempts: dict[int, dict[str, Any]] = {
+            1: {
+                "attempt_id": 1,
+                "job_id": "",
+                "attempt_no": 1,
+                "lease_generation": 1,
+                "host_id": "host-e2e",
+                "status": "running",
+                "thread_sandbox": {"sandbox_id": "asbx_e2e", "host": "host-e2e"},
+            }
+        }
 
     async def record_operation_measurement(self, *, measurement: Any, run: Any = None) -> str:
         """Delegate to the in-memory measurement store."""
         return await self.measurements.record_operation_measurement(
             measurement=measurement, run=run
         )
+
+    async def get_attempt(self, *, job_id: str, attempt_id: int) -> dict[str, Any] | None:
+        """Return the attempt this job ran, as the history query would.
+
+        A test states which attempts exist; a token naming one that does not is
+        exactly the case this lookup is here to refuse.
+        """
+        del job_id  # the fake holds one job's attempts; the real query scopes it
+        return self.attempts.get(attempt_id)
 
 
 @pytest.fixture
@@ -154,9 +176,11 @@ def _token_for(job: dict[str, Any], attempt_id: int = 1, generation: int = 1) ->
 
 
 async def _claimed_job(client: AsyncClient, store: FakeStorage) -> dict[str, Any]:
-    """Create a job and return it, as the store holds it."""
+    """Create a job and return it, with the attempt its tokens will name."""
     job_id = await _create_job(client)
-    return store.jobs[job_id]
+    job = store.jobs[job_id]
+    store.attempts[1]["job_id"] = job_id
+    return job
 
 
 # ---------------------------------------------------------------------------
@@ -188,11 +212,13 @@ async def test_a_measurement_is_stored_under_the_row_it_authenticated_against(
 
 
 async def test_a_payload_cannot_claim_a_different_owner(client: AsyncClient, store: FakeStorage):
-    """A field in the record naming someone else is ignored, not believed.
+    """A record naming its own owner is refused, not believed and not corrected.
 
-    The producer states what it measured. Only the row its credential resolved
-    says whose history the sample joins, which is what stops a valid token for
-    one job from filing a sample under another's.
+    The producer states what it measured; only the row its credential resolved
+    says whose history the sample joins. A record that carries those fields is
+    not one this deployment stores, so it is refused rather than silently
+    rewritten -- which would leave the producer believing its own values had
+    been kept.
     """
     job = await _claimed_job(client, store)
     other = store.jobs[await _create_job(client)]
@@ -209,11 +235,13 @@ async def test_a_payload_cannot_claim_a_different_owner(client: AsyncClient, sto
         headers={"Authorization": f"Bearer {_token_for(job)}"},
     )
 
-    assert response.status_code == 200
-    row = store.measurements.rows[0]
-    assert row["job_id"] == job["id"]
-    assert row["owner_id"] == job["user_id"]
-    assert row["thread_id"] == job["thread_id"]
+    # Refused outright rather than quietly rewritten: a record that names an
+    # owner is not one this deployment stores, and accepting it after
+    # correcting the fields would leave the producer believing its own values
+    # had been kept.
+    assert response.status_code == 422
+    assert "unknown record field" in response.json()["detail"]["error"]["message"]
+    assert store.measurements.rows == []
 
 
 async def test_a_retry_of_one_record_is_one_sample(client: AsyncClient, store: FakeStorage):
@@ -426,3 +454,245 @@ def test_a_stored_record_keeps_no_more_than_the_whitelist_allows():
     assert stored.payload_hash == measurement_ingest.canonical_hash(stored.record)
     assert "secret" in json.dumps(_record(facts={"kind": "file", "content": "secret"}))
     assert "secret" not in json.dumps(stored.record)
+
+
+# ---------------------------------------------------------------------------
+# The fields a distribution is grouped by have to survive the mapping
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("facts", "field", "expected"),
+    [
+        # The collector states these inside facts, and a reader that only
+        # looked at the top level would file every startup path as null...
+        ({"startup_path": "reuse_live"}, "startup_path", "reuse_live"),
+        ({"startup_path": "new_group"}, "startup_path", "new_group"),
+        # ...and every terminal request as the same empty string.
+        ({"request_kind": "terminal.create"}, "request_kind", "terminal.create"),
+        ({"request_kind": "terminal.stream_attach"}, "request_kind", "terminal.stream_attach"),
+        ({"coverage_scope": "host_startup"}, "coverage_scope", "host_startup"),
+    ],
+)
+def test_a_grouping_field_is_read_from_facts_when_it_is_only_there(
+    facts: dict[str, Any], field: str, expected: str
+):
+    """The four startup paths must not all collapse into one null group.
+
+    The record carries the field *only* in facts here, which is what the
+    collector emits: it states these as facts about the operation, and a reader
+    that looked only at the top level filed every startup path as null and
+    every terminal request as the same empty string.
+    """
+    record = _record(operation="attempt.startup", facts={"operation": "attempt.startup", **facts})
+    record.pop(field, None)
+
+    stored = measurement_ingest.validate_measurement(record)
+
+    assert getattr(stored, field) == expected
+
+
+def test_a_stated_top_level_field_wins_over_the_same_name_in_facts():
+    """The fallback never overrides evidence stated where it belongs."""
+    stored = measurement_ingest.validate_measurement(
+        _record(request_kind="terminal.list", facts={"request_kind": "terminal.create"})
+    )
+
+    assert stored.request_kind == "terminal.list"
+
+
+# ---------------------------------------------------------------------------
+# The content whitelist covers the whole record, not only facts
+# ---------------------------------------------------------------------------
+
+
+def test_a_top_level_field_this_deployment_does_not_know_is_refused():
+    """A prompt at the top level must not reach the table."""
+    with pytest.raises(MeasurementRejected, match="unknown record field"):
+        measurement_ingest.validate_measurement(_record(prompt="what the user typed"))
+
+
+def test_a_credential_inside_a_stage_is_refused():
+    """The promise is about what is stored, not about which object it hid in."""
+    record = _record(stages=[{"stage": "read", "duration_us": 5, "token": "ajt.secret.value"}])
+
+    with pytest.raises(MeasurementRejected, match="unknown stages entry field"):
+        measurement_ingest.validate_measurement(record)
+
+
+def test_an_attribute_may_still_hold_a_value_with_an_unknown_name():
+    """Attributes are the one place a producer names its own dimensions."""
+    stored = measurement_ingest.validate_measurement(
+        _record(
+            stages=[
+                {
+                    "stage": "read",
+                    "duration_us": 5,
+                    "attributes": {"bytes_bucket": "10k-100k"},
+                }
+            ]
+        )
+    )
+
+    assert stored.record["stages"][0]["attributes"] == {"bytes_bucket": "10k-100k"}
+
+
+def test_nested_children_are_walked_too():
+    """A credential one level deeper is still a credential."""
+    record = _record(
+        stages=[
+            {
+                "stage": "create",
+                "duration_us": 5,
+                "children": [{"stage": "admission", "duration_us": 1, "prompt": "x"}],
+            }
+        ]
+    )
+
+    with pytest.raises(MeasurementRejected, match="unknown stages entry field"):
+        measurement_ingest.validate_measurement(record)
+
+
+# ---------------------------------------------------------------------------
+# A record has to belong to the experiment it arrived with
+# ---------------------------------------------------------------------------
+
+
+def _now() -> Any:
+    """The instant these checks are evaluated at."""
+    return datetime.now(UTC)
+
+
+def test_a_record_from_another_run_is_refused():
+    """One experiment's samples must not land in another's distribution."""
+    with pytest.raises(MeasurementRejected, match="not the manifest's"):
+        measurement_ingest.require_record_matches_its_experiment(
+            record=_record(profiling_run_id="run-other"),
+            run=measurement_ingest.validate_run(_manifest()),
+            now=_now(),
+        )
+
+
+def test_a_record_for_an_operation_the_run_did_not_select_is_refused():
+    """A sample in a series the experiment never asked for is not evidence."""
+    with pytest.raises(MeasurementRejected, match="does not select operation"):
+        measurement_ingest.require_record_matches_its_experiment(
+            record=_record(operation="terminal.open"),
+            run=measurement_ingest.validate_run(_manifest(operations=["files.list"])),
+            now=_now(),
+        )
+
+
+def test_a_record_that_matches_its_run_is_accepted():
+    """The ordinary case is not refused by the checks above."""
+    measurement_ingest.require_record_matches_its_experiment(
+        record=_record(),
+        run=measurement_ingest.validate_run(_manifest()),
+        now=_now(),
+    )
+
+
+def test_a_record_delivered_long_after_the_experiment_ended_is_refused():
+    """A stopped experiment must not keep growing without bound."""
+    ended = _now() - timedelta(seconds=measurement_ingest.DELIVERY_GRACE_S + 60)
+
+    with pytest.raises(MeasurementRejected, match="ended more than"):
+        measurement_ingest.require_record_matches_its_experiment(
+            record=_record(),
+            run=measurement_ingest.validate_run(_manifest(expires_at=ended)),
+            now=_now(),
+        )
+
+
+def test_a_record_delivered_inside_the_grace_period_is_accepted():
+    """Delivery is asynchronous, so a short window is part of the contract."""
+    just_ended = _now() - timedelta(seconds=measurement_ingest.DELIVERY_GRACE_S - 60)
+
+    measurement_ingest.require_record_matches_its_experiment(
+        record=_record(),
+        run=measurement_ingest.validate_run(_manifest(expires_at=just_ended)),
+        now=_now(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# The attempt a credential names has to be one this job ran
+# ---------------------------------------------------------------------------
+
+
+async def test_a_token_naming_an_attempt_that_never_existed_is_refused(
+    client: AsyncClient, store: FakeStorage
+):
+    """A signed token is not evidence that the attempt it names is real."""
+    job = await _claimed_job(client, store)
+    store.attempts.pop(1)
+
+    response = await client.post(
+        f"/v1/agent/worker/jobs/{job['id']}/measurements",
+        json={"record": _record()},
+        headers={"Authorization": f"Bearer {_token_for(job)}"},
+    )
+
+    assert response.status_code == 409
+    assert store.measurements.rows == []
+
+
+async def test_a_token_from_a_superseded_generation_is_refused(
+    client: AsyncClient, store: FakeStorage
+):
+    """The generation is checked against the attempt, not taken on trust."""
+    job = await _claimed_job(client, store)
+    store.attempts[1]["lease_generation"] = 5
+
+    response = await client.post(
+        f"/v1/agent/worker/jobs/{job['id']}/measurements",
+        json={"record": _record()},
+        headers={"Authorization": f"Bearer {_token_for(job, generation=1)}"},
+    )
+
+    assert response.status_code == 409
+    assert store.measurements.rows == []
+
+
+async def test_attribution_comes_from_the_attempt_that_ran_it(
+    client: AsyncClient, store: FakeStorage
+):
+    """A late record names the machine that served it, not the current one.
+
+    The chat's sandbox has since moved to another host. Reading attribution
+    from the job's *current* sandbox would file this attempt's startup against
+    a machine that never ran it.
+    """
+    job = await _claimed_job(client, store)
+    store.attempts[1]["host_id"] = "host-that-ran-it"
+    store.jobs[job["id"]]["thread_sandbox"] = {
+        "sandbox_id": "asbx_current",
+        "host": "host-serving-now",
+    }
+
+    response = await client.post(
+        f"/v1/agent/worker/jobs/{job['id']}/measurements",
+        json={"record": _record()},
+        headers={"Authorization": f"Bearer {_token_for(job)}"},
+    )
+
+    assert response.status_code == 200
+    row = store.measurements.rows[0]
+    assert row["host_id"] == "host-that-ran-it"
+    assert row["sandbox_id"] == "asbx_e2e"
+
+
+async def test_a_record_for_another_run_is_refused_by_the_route(
+    client: AsyncClient, store: FakeStorage
+):
+    """The cross-check runs on the real path, not only in the unit above."""
+    job = await _claimed_job(client, store)
+
+    response = await client.post(
+        f"/v1/agent/worker/jobs/{job['id']}/measurements",
+        json={"record": _record(profiling_run_id="run-other"), "run": _manifest()},
+        headers={"Authorization": f"Bearer {_token_for(job)}"},
+    )
+
+    assert response.status_code == 422
+    assert store.measurements.rows == []

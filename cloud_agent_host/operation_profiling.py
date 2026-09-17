@@ -955,9 +955,72 @@ def measurement_context(
         "run_id": measurement.run_id,
         "measurement_id": measurement.measurement_id,
         "operation": measurement.operation,
+        "producer": measurement.producer,
+        "coverage_scope": measurement.coverage_scope,
+        # The facts travel so a process that continues this selection reports
+        # the same scope its parent proved. A child that re-derived them would
+        # be stating attribution it never authenticated.
+        "facts": dict(measurement.facts),
         "call_id": call_id or "",
         "expires_at": time.time() + max(0.0, measurement.deadline_mono - time.monotonic()),
     }
+
+
+def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measurement | None:
+    """Continue measuring a selection another process already made.
+
+    This is for the one case where a root operation outlives the process that
+    selected it: the host service claims a turn, then starts a child to run it,
+    and everything worth measuring happens in the child. The claim decided
+    *whether* to measure and paid for the slot; the child only times.
+
+    It therefore does **not** claim a budget slot -- the selection carries the
+    slot its parent already holds -- and it does **not** take a fresh run
+    reading, so a run that lapsed between the claim and the child's start is
+    refused rather than quietly re-sampled. Both of those are why this is not
+    simply :func:`start_operation`: called there, the launch would spend a
+    second slot for one attempt and could extend an experiment past its
+    deadline.
+
+    The inherited deadline can only shorten the local one, exactly as it does
+    for a downstream producer.
+    """
+    run = _load().run
+    if run is None or not isinstance(context, Mapping):
+        return None
+    if str(context.get("run_id") or "") != run.run_id:
+        return None
+    operation = str(context.get("operation") or "").strip()
+    if not operation or operation not in run.operations:
+        return None
+    inherited = _context_deadline(context)
+    if inherited is None:
+        return None
+    deadline = min(run.deadline_mono, inherited)
+    if time.monotonic() > deadline:
+        return None
+    measurement = Measurement(
+        operation=operation,
+        run_id=run.run_id,
+        # The same id the parent minted, so the child's record and the parent's
+        # selection are one measurement rather than two that look related.
+        measurement_id=str(context.get("measurement_id") or f"msm_{uuid.uuid4().hex[:16]}"),
+        started_mono_ns=time.monotonic_ns(),
+        deadline_mono=deadline,
+        producer=str(context.get("producer") or producer),
+        coverage_scope=str(
+            context.get("coverage_scope") or COVERAGE_BY_OPERATION.get(operation, "")
+        ),
+        run_expires_at=run.expires_at_utc,
+        facts={"operation": operation},
+        # The slot belongs to the parent, so discarding this must not return
+        # one this process never took.
+        reserved=False,
+    )
+    for key, value in (context.get("facts") or {}).items():
+        measurement.facts[str(key)] = _bounded(value)
+    measurement.bound = True
+    return measurement
 
 
 def _candidate_operations(context: Mapping[str, Any]) -> frozenset[str]:
@@ -1834,6 +1897,7 @@ __all__ = [
     "active_run",
     "answer_from_headers",
     "attach_remote_stages",
+    "attach_selection",
     "attributed_stage",
     "bind",
     "close_sink",

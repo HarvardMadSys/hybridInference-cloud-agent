@@ -62,6 +62,19 @@ class ExecutionQueries(Protocol):
         """Read lightweight attempt summaries without tool or process rows."""
         ...
 
+    async def get_attempt(self, *, job_id: str, attempt_id: int) -> dict[str, Any] | None:
+        """Return one attempt of one job, by its exact id.
+
+        Bounded to the job on purpose: an attempt id is unique on its own, but
+        a caller that authenticated as this job has no business reading any
+        other job's attempt, and putting the constraint in the query means the
+        check cannot be forgotten by a caller.
+
+        The generation is included because a credential names one, and a
+        record that names it must be reporting on the attempt it belongs to.
+        """
+        ...
+
     async def job_turn_telemetry(
         self, *, job_id: str, attempt_id: int | None = None
     ) -> dict[str, Any] | None:

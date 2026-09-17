@@ -2717,6 +2717,12 @@ def _serve_turn(
     # it did when a replica ran one job at a time.
     _drain_on_sigterm()
     write_handover(handover_fd, f"{HANDOVER_ACCEPTED} {job.job_id}")
+    # Everything worth measuring happens *below* the answer, so the selection
+    # the host made has to be reattached here and not before it: timing a turn
+    # this process then declines would report a startup that never ran. The
+    # slot belongs to the host, so an unusable selection simply means this
+    # child does not measure -- it never means the turn is refused.
+    measurement = operation_profiling.attach_selection(payload.get("_profiling"))
     return run_turn(
         job,
         base_url=base_url,
@@ -2726,6 +2732,7 @@ def _serve_turn(
         agent_timeout_s=agent_timeout_s,
         backend=backend,
         host=host,
+        measurement=measurement,
     )
 
 
@@ -2954,6 +2961,15 @@ def run_forever(
             # exactly when it is worth asking.
             claims += 1
             turn_worker_id = f"{worker_id}-{claims}"
+            # Selected before the request, exactly as the single-process path
+            # does: the wait for a claim is part of the startup a user feels.
+            # The slot is claimed here and not in the child, so one attempt
+            # costs one sample however the turn is actually executed.
+            measurement = operation_profiling.start_operation(
+                operation=STARTUP_OPERATION,
+                host=host,
+                worker_id=turn_worker_id,
+            )
             try:
                 payload = claim_payload(
                     base_url=base_url,
@@ -2963,6 +2979,7 @@ def run_forever(
                     attestation=_claim_attestation(backend),
                 )
             except ClaimUnreachable as exc:
+                operation_profiling.discard(measurement)
                 print(
                     f"agent runner: control plane unreachable, retrying: {exc}",
                     file=sys.stderr,
@@ -2971,6 +2988,7 @@ def run_forever(
                 time.sleep(idle_wait)
                 continue
             except Exception as exc:
+                operation_profiling.discard(measurement)
                 print(
                     f"agent runner: claim failed unexpectedly: {exc}", file=sys.stderr, flush=True
                 )
@@ -2978,10 +2996,19 @@ def run_forever(
                 continue
 
             if payload is None:
+                # Nothing was claimed, so there is no startup to measure and
+                # the poll must not spend a slot.
+                operation_profiling.discard(measurement)
                 time.sleep(idle_wait)
                 continue
 
-            _hand_over_turn(payload, turns=turns, base_url=base_url, worker_id=turn_worker_id)
+            _hand_over_turn(
+                payload,
+                turns=turns,
+                base_url=base_url,
+                worker_id=turn_worker_id,
+                measurement=_bound_measurement(measurement, payload),
+            )
     except KeyboardInterrupt:
         immediate = True
     turns.shutdown(immediate=immediate)
@@ -2989,8 +3016,47 @@ def run_forever(
     return 0
 
 
+def _bound_measurement(
+    measurement: operation_profiling.Measurement | None, payload: dict[str, Any]
+) -> operation_profiling.Measurement | None:
+    """Apply the target filter to a selection, now that the turn is known.
+
+    Job, thread, sandbox and runtime only exist once a claim has answered, so
+    the authoritative scope check happens here. A measurement that falls out of
+    scope returns ``None`` and emits nothing -- and its slot goes back, because
+    a target that never matched must not spend the experiment.
+    """
+    if measurement is None:
+        return None
+    try:
+        job = ClaimedJob.from_response(payload)
+    except (KeyError, TypeError, ValueError):
+        # A payload this process cannot read is the child's problem to decline;
+        # it is not a reason to report a measurement against facts nobody
+        # established.
+        operation_profiling.discard(measurement)
+        return None
+    if not operation_profiling.bind(
+        measurement,
+        attempt_id=job.attempt_id,
+        job_id=job.job_id,
+        thread_id=job.thread_id,
+        sandbox_id=str((job.thread_sandbox or {}).get("sandbox_id") or "") or None,
+        runtime=job.runtime,
+        execution_profile=job.execution_profile,
+    ):
+        operation_profiling.discard(measurement)
+        return None
+    return measurement
+
+
 def _hand_over_turn(
-    payload: dict[str, Any], *, turns: TurnPool, base_url: str, worker_id: str
+    payload: dict[str, Any],
+    *,
+    turns: TurnPool,
+    base_url: str,
+    worker_id: str,
+    measurement: operation_profiling.Measurement | None = None,
 ) -> None:
     """Give one claimed turn to a child, and requeue it only if it never began.
 
@@ -3005,7 +3071,16 @@ def _hand_over_turn(
     # name the claim recorded as this turn's lease owner. Stripped before
     # delivery, so the payload the child parses is the control plane's answer
     # and nothing this host added to it.
-    payload = {**payload, "_worker_id": worker_id}
+    # The selection rides beside the turn for the same reason the worker id
+    # does: the child runs the part worth measuring, and the parent holds the
+    # budget slot. It is discarded once the child is gone, because the child's
+    # record is the measurement -- this process only opened it.
+    context = operation_profiling.measurement_context(measurement)
+    payload = {
+        **payload,
+        "_worker_id": worker_id,
+        **({"_profiling": context} if context else {}),
+    }
     try:
         result = turns.launch(payload)
     except Exception as exc:
@@ -3020,8 +3095,18 @@ def _hand_over_turn(
         )
         result = LaunchResult(LAUNCH_UNCERTAIN, None, f"{type(exc).__name__}: {exc}")
     if result.outcome == LAUNCH_STARTED:
+        # The child owns the record now. Emitting here as well would report one
+        # attempt twice, from two processes that measured different halves.
+        operation_profiling.discard(measurement)
         return
     if result.outcome == LAUNCH_UNCERTAIN:
+        # Nothing observed the turn's fate, and the child may or may not have
+        # started. The selection is emitted as it stands -- incomplete, naming
+        # the boundary it reached -- rather than dropped, because "we do not
+        # know how far it got" is itself the observation.
+        operation_profiling.finish(
+            measurement, outcome="incomplete", failure_stage="handover_uncertain"
+        )
         logger.warning(
             "agent_turn_handover_uncertain",
             extra={
@@ -3033,6 +3118,7 @@ def _hand_over_turn(
         return
     # Provably never started: back to the queue, with no attempt spent and no
     # wait for a lease that nothing is holding.
+    operation_profiling.finish(measurement, outcome="incomplete", failure_stage="not_started")
     worker_token = str(payload.get("worker_token") or "")
     released = bool(worker_token) and release_turn(
         base_url=base_url,

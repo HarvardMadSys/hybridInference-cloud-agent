@@ -687,3 +687,224 @@ def test_turn_mode_without_a_handover_descriptor_is_refused(monkeypatch):
 
     with pytest.raises(SystemExit):
         runner_mod.main(["--turn", "--host", "host-a"])
+
+
+# ── The selection crossing the process boundary ────────────────────────
+
+
+def _descriptor(run_id: str = "run-1") -> dict[str, Any]:
+    """One experiment descriptor, as the deployment would set it."""
+    from datetime import UTC, datetime, timedelta
+
+    return {
+        "run_id": run_id,
+        "operations": ["attempt.startup"],
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=30)).isoformat(),
+        "max_operations": 10,
+    }
+
+
+def _run_descriptor(monkeypatch, **overrides: Any) -> dict[str, Any]:
+    """Turn profiling on in this process with one usable run."""
+    import json
+
+    from cloud_agent_host import operation_profiling
+
+    descriptor = {**_descriptor(), **overrides}
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_RUN, json.dumps(descriptor))
+    operation_profiling.reset_cache()
+    return descriptor
+
+
+def test_the_host_hands_its_selection_to_the_child(monkeypatch):
+    """The deployed path measures startups, not only the single-process one.
+
+    The host claims, then starts a child to run the turn -- so a selection made
+    in the parent is worthless unless it crosses that boundary. Without this
+    the whole feature is silent on the path production actually uses.
+    """
+    from cloud_agent_host import operation_profiling
+    from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult
+
+    _run_descriptor(monkeypatch)
+    payload = {
+        "job_id": "ajob_1",
+        "thread_id": "athr_1",
+        "attempt_id": 7,
+        "attempt_no": 1,
+        "repo": "o/n",
+        "base_sha": None,
+        "task_prompt": "do it",
+        "runtime": "claude-code",
+        "model": "m",
+        "worker_token": "ajt.a.b",
+        "sandbox_token": "grant",
+        "execution_profile": "default",
+    }
+    measurement = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+    assert measurement is not None
+    bound = runner_mod._bound_measurement(measurement, payload)
+    assert bound is not None
+
+    seen: list[dict[str, Any]] = []
+
+    class _Turns:
+        def launch(self, handed: dict[str, Any]) -> Any:
+            seen.append(handed)
+            return LaunchResult(LAUNCH_STARTED, None)
+
+    runner_mod._hand_over_turn(
+        payload,
+        turns=_Turns(),
+        base_url="http://control",
+        worker_id="runner-a-1",
+        measurement=bound,
+    )
+
+    assert seen, "the turn must be handed to a child"
+    context = seen[0].get("_profiling")
+    assert context is not None, "the child cannot measure what it was never told"
+    assert context["run_id"] == "run-1"
+    assert context["measurement_id"] == bound.measurement_id
+    assert context["facts"]["job_id"] == "ajob_1"
+    assert context["expires_at"] > 0
+    operation_profiling.reset_cache()
+
+
+def test_a_turn_process_reattaches_the_selection_it_was_handed(monkeypatch):
+    """The child times the turn; it does not select one or spend a slot."""
+    import io
+    import os
+
+    from cloud_agent_host import operation_profiling
+    from cloud_agent_host.host_runtime import encode_turn
+
+    _run_descriptor(monkeypatch)
+    read_fd, write_fd = os.pipe()
+    payload = {
+        "job_id": "ajob_1",
+        "thread_id": "athr_1",
+        "attempt_id": 7,
+        "attempt_no": 1,
+        "repo": "o/n",
+        "task_prompt": "do it",
+        "runtime": "claude-code",
+        "model": "m",
+        "worker_token": "ajt.a.b",
+        "sandbox_token": "grant",
+        "_profiling": {
+            "run_id": "run-1",
+            "measurement_id": "msm_handed",
+            "operation": "attempt.startup",
+            "producer": "runner",
+            "coverage_scope": "host_startup",
+            "facts": {"operation": "attempt.startup", "job_id": "ajob_1"},
+            "call_id": "",
+            "expires_at": __import__("time").time() + 600,
+        },
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(encode_turn(payload).decode()))
+    backend = ProcessBackend(acknowledged_unsafe=True)
+    monkeypatch.setattr(runner_mod, "build_backend_from_env", lambda: backend)
+
+    handed: list[Any] = []
+
+    def _capture(*_args: Any, **kwargs: Any) -> int:
+        handed.append(kwargs.get("measurement"))
+        return 0
+
+    monkeypatch.setattr(runner_mod, "run_turn", _capture)
+
+    code = runner_mod._serve_turn(
+        handover_fd=write_fd,
+        base_url="http://control",
+        gateway_url="http://gateway",
+        worker_id="runner-a",
+        lease_ttl=120.0,
+        agent_timeout_s=3600.0,
+        host="host-a",
+    )
+
+    assert code == 0
+    assert len(handed) == 1
+    measurement = handed[0]
+    assert measurement is not None, "the child must measure the turn it was given"
+    # The parent's identity and slot, not a second one of either.
+    assert measurement.measurement_id == "msm_handed"
+    assert measurement.run_id == "run-1"
+    assert measurement.reserved is False, "the slot belongs to the host that claimed it"
+    assert measurement.facts["job_id"] == "ajob_1"
+    assert measurement.coverage_scope == "host_startup"
+    os.close(read_fd)
+    operation_profiling.reset_cache()
+
+
+def test_a_child_never_refuses_a_turn_over_an_unusable_selection(monkeypatch):
+    """A measurement setting is not a reason to drop a user's turn."""
+    import io
+    import os
+
+    from cloud_agent_host.host_runtime import encode_turn
+
+    read_fd, write_fd = os.pipe()
+    payload = {
+        "job_id": "ajob_1",
+        "thread_id": "athr_1",
+        "attempt_id": 7,
+        "attempt_no": 1,
+        "repo": "o/n",
+        "task_prompt": "do it",
+        "runtime": "claude-code",
+        "model": "m",
+        "worker_token": "ajt.a.b",
+        "sandbox_token": "grant",
+        # A run this process is not configured for: nothing may be measured,
+        # and the turn still runs.
+        "_profiling": {"run_id": "another-run", "expires_at": 2**31},
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(encode_turn(payload).decode()))
+    backend = ProcessBackend(acknowledged_unsafe=True)
+    monkeypatch.setattr(runner_mod, "build_backend_from_env", lambda: backend)
+    handed: list[Any] = []
+    monkeypatch.setattr(
+        runner_mod, "run_turn", lambda *a, **k: handed.append(k.get("measurement")) or 0
+    )
+
+    code = runner_mod._serve_turn(
+        handover_fd=write_fd,
+        base_url="http://control",
+        gateway_url="http://gateway",
+        worker_id="runner-a",
+        lease_ttl=120.0,
+        agent_timeout_s=3600.0,
+        host="host-a",
+    )
+
+    assert code == 0
+    assert handed == [None], "the turn runs, unmeasured"
+    os.close(read_fd)
+
+
+def test_a_poll_that_claimed_nothing_spends_no_slot(monkeypatch):
+    """An idle poll is not a startup, so it must not consume the experiment."""
+    from cloud_agent_host import operation_profiling
+
+    _run_descriptor(monkeypatch, max_operations=1)
+
+    # The first selection is the experiment's only slot.
+    first = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+    assert first is not None
+    operation_profiling.discard(first)
+
+    # Discarded, so the slot came back and an idle poll can still be measured.
+    second = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+    assert second is not None
+    operation_profiling.discard(second)
+    operation_profiling.reset_cache()
