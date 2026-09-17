@@ -113,9 +113,11 @@ STORAGE_PROBE_OFF = "off"
 STORAGE_SOURCE_OVERLAY_ROOT: Final = "linux_overlay_root_statvfs"
 
 #: Where the deployment writes the topology verdict it reached, and what the
-#: runner reads instead of trusting its own reading. A file bind mount follows
-#: the inode, so the writer must overwrite in place. The path is a contract with
-#: the host compose file, exactly like ``DEFAULT_PROC_ROOT``.
+#: runner reads instead of trusting its own reading. The *directory* is the bind
+#: mount, so this name is resolved again on every sample: the deployment may
+#: replace, delete or recreate the file underneath a running replica and the
+#: next sample sees it. The path is a contract with the host compose file,
+#: exactly like ``DEFAULT_PROC_ROOT``.
 DEFAULT_STORAGE_VERDICT_PATH = "/run/cloud-agent/storage-probe/verdict.json"
 VERDICT_SCHEMA_VERSION: Final = 1
 VERDICT_VERIFIED: Final = "verified"
@@ -772,7 +774,7 @@ class OverlayRootStorageProbe:
         """Read the container's mount table, or ``None``."""
         if self._mountinfo_reader is not None:
             return self._mountinfo_reader()
-        return _read_text_file(self._mountinfo_path.parent, self._mountinfo_path.name)
+        return read_mountinfo_text(self._mountinfo_path)
 
     def _read_verdict(self) -> str | None:
         """Read the deployment's verdict file, or ``None``."""
@@ -809,6 +811,27 @@ class UnsupportedStorageProbe:
         return StorageMissing(reason=STORAGE_MISSING_UNSUPPORTED)
 
 
+def read_mountinfo_text(path: str | Path) -> str | None:
+    """Read a mount table, bounded and strictly decoded, or ``None``.
+
+    One function rather than one per caller, because the deployment attests
+    the reading the heartbeat will carry. A second reader with its own size
+    ceiling, or its own idea of what an undecodable byte means, can call a host
+    verified for a reading the runner then refuses to take: the log says the
+    disk was measured and the page says it was not, with nothing connecting the
+    two. A file this code cannot read whole and decode strictly is not the file
+    it asked for, on either path.
+
+    Args:
+        path: The mount table to read.
+
+    Returns:
+        The decoded contents, or ``None`` when it cannot be used.
+    """
+    mountinfo = Path(path)
+    return _read_text_file(mountinfo.parent, mountinfo.name)
+
+
 def describe_storage_probe(
     *,
     mountinfo_path: str | Path = MOUNTINFO_PATH,
@@ -820,6 +843,8 @@ def describe_storage_probe(
     The deployment has to compare the container's own reading against the
     host's ``df``, and it has to be *this* reading: a shell re-implementation
     could agree with itself while both differ from what the runner reports.
+    That is also why the mount table goes through :func:`read_mountinfo_text`,
+    the reader the sampling path uses, rather than a second one of its own.
     Deliberately independent of the verdict file — this is the reading the
     verdict is about to be derived from, so consulting it here would be
     circular.
@@ -836,10 +861,7 @@ def describe_storage_probe(
         failure, because that is the fact the operator needs in the log.
     """
     mount: RootMount | None = None
-    try:
-        mountinfo = Path(mountinfo_path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        mountinfo = None
+    mountinfo = read_mountinfo_text(mountinfo_path)
     if mountinfo is not None:
         mount = find_root_mount(mountinfo)
     if mountinfo is None:
@@ -933,10 +955,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     print(json.dumps(describe_storage_probe(), sort_keys=True))
     return 0
-
-
-if __name__ == "__main__":  # pragma: no cover - reached through the module CLI
-    raise SystemExit(main())
 
 
 class CommandStatus(StrEnum):
@@ -1713,3 +1731,10 @@ def _reason_for(status: CommandStatus) -> str:
     if status is CommandStatus.LINE_LIMIT:
         return REASON_DOCKER_LINE_LIMIT
     return REASON_DOCKER_UNAVAILABLE
+
+
+# Last in the file, not beside :func:`main`: this runs on import under
+# ``python -m``, so module execution stops here. Anything defined below it
+# would not exist yet when the command it starts goes looking for it.
+if __name__ == "__main__":  # pragma: no cover - reached through the module CLI
+    raise SystemExit(main())

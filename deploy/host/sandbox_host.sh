@@ -343,6 +343,16 @@ validate_retained_config() {
       "$default_pin is a source-level shared protocol pin, not a host override. Remove it and put ${default_pin%_VERSION}_EXTRA_VERSIONS=$configured_pin in this host's configuration, then select that version in Admin; or update the Dockerfile and SHARED_SANDBOX_RUNTIME_PINS together in a reviewed change."
   done
 
+  # One spelling, checked once. The runner normalises this value too, and its
+  # own vocabulary is wider than the script's; a value only one side recognises
+  # is how a rollout log comes to say "storage verified" for a host whose page
+  # says the metric is switched off. Refusing it here means neither side has to
+  # guess what the other made of it.
+  local storage_probe
+  storage_probe="$(storage_probe_name)"
+  [[ "$storage_probe" == "overlay_root" || "$storage_probe" == "off" ]] \
+    || die "AGENT_HOST_STORAGE_PROBE must be 'overlay_root' or 'off' (got '$storage_probe')"
+
   local slots resident_capacity chat_idle_timeout
   # The limit this host serves until an admin sets one. The Servers page sets
   # size afterwards; this only has to be a valid starting point. Two is the
@@ -560,6 +570,21 @@ storage_verdict_file() {
   printf '%s/.storage-probe/verdict.json' "${PWD%/}"
 }
 
+storage_host_path() {
+  # A mountinfo value escapes space, tab, newline, backslash and comma, and the
+  # runner keeps its upper directory in that escaped form on purpose: the
+  # string is the key its verdict is looked up by, so unescaping one side of
+  # that lookup would break it. Host tools want the real bytes — `findmnt -T`,
+  # `df` and `docker --mount src=` each stat the path they are handed, and a
+  # literal `\040` names nothing — so the translation happens here, at that
+  # boundary, and the key is never translated at all.
+  #
+  # Every backslash in such a value opens a three-digit octal escape, so
+  # turning each one into `\0NNN` is precisely what `%b` reads back.
+  local escaped="$1"
+  printf '%b' "${escaped//\\/\\0}"
+}
+
 storage_probe_name() {
   # The deployment declares the topology; the collector never guesses it. An
   # absent value takes the same default the compose file interpolates.
@@ -568,22 +593,86 @@ storage_probe_name() {
   printf '%s' "${probe:-overlay_root}"
 }
 
+write_storage_verdict() {
+  # Replace the verdict document with the entries listed in "$1".
+  #
+  # Written beside the document and renamed over it, never truncated in place.
+  # Runners bind the *directory* and open its current entry on every sample, so
+  # a rename is seen — while a truncating write leaves whoever samples during
+  # it holding an empty or half-written document. That reader has only one
+  # conclusion available, "unverified", which is a host that has just passed
+  # its attestation reported as unmeasured until its next cycle.
+  #
+  # Warns and returns non-zero rather than dying: both callers decide for
+  # themselves, because one of them is preparing a mount source and the other
+  # is refreshing a metric.
+  local entries_file="$1" verdict_file
+  verdict_file="$(storage_verdict_file)"
+  if ! mkdir -p "${verdict_file%/*}" || ! chmod 0755 "${verdict_file%/*}"; then
+    warn "could not prepare the storage-probe directory ${verdict_file%/*}; storage attestation not refreshed"
+    return 1
+  fi
+  if ! python3 - "$entries_file" "$verdict_file" "${AGENT_DEPLOYMENT_SHA:-}" <<'PY'
+import datetime
+import json
+import os
+import sys
+
+entries_file, verdict_file, deployment_sha = sys.argv[1:4]
+entries = {}
+with open(entries_file, encoding="utf-8") as handle:
+    for line in handle:
+        key, _, rest = line.rstrip("\n").partition("\t")
+        verdict, _, rest = rest.partition("\t")
+        mount_root, _, rest = rest.partition("\t")
+        fstype, _, rest = rest.partition("\t")
+        size, _, reason = rest.partition("\t")
+        if not key or not verdict:
+            continue
+        entries[key] = {
+            "verdict": verdict,
+            "mount_root": mount_root or None,
+            "fstype": fstype or None,
+            "size_bytes": int(size) if size.isdigit() else None,
+            "reason": reason or None,
+        }
+
+written_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+document = {
+    "schema_version": 1,
+    "written_at": written_at,
+    "deployment_sha": deployment_sha,
+    "entries": entries,
+}
+# Same directory, so the rename is atomic: a replica sampling at any instant
+# opens either the previous document or this one, and never a partial file.
+# The mode is set before the rename for the same reason -- the document must
+# not be readable-by-nobody for even the moment between the two.
+temporary = verdict_file + ".tmp"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, sort_keys=True)
+    handle.write("\n")
+os.chmod(temporary, 0o644)
+os.replace(temporary, verdict_file)
+PY
+  then
+    rm -f "${verdict_file}.tmp"
+    warn "could not write the storage verdict to ${verdict_file}; storage attestation not refreshed"
+    return 1
+  fi
+  log "storage verdict written to ${verdict_file} ($(wc -l <"$entries_file" | tr -d '[:space:]') entries)"
+}
+
 prepare_storage_verdict() {
   # Keep the bound directory itself in place across up/check. The file inside
   # it can be deleted or replaced: every sample opens its current directory
   # entry, rather than an inode pinned by a file bind.
   # Fail-closed on purpose — a runner that starts while the checks are still
-  # running reads "unverified", never the previous deployment's verdict.
-  local verdict_file written_at
-  verdict_file="$(storage_verdict_file)"
-  mkdir -p "${verdict_file%/*}" && chmod 0755 "${verdict_file%/*}" \
-    || die "could not prepare the storage-probe directory ${verdict_file%/*}"
-  written_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf '{"schema_version":1,"written_at":"%s","deployment_sha":"%s","entries":{}}\n' \
-    "$written_at" "${AGENT_DEPLOYMENT_SHA:-}" >"$verdict_file" \
-    || die "could not write the storage-probe verdict to $verdict_file"
-  chmod 0644 "$verdict_file" \
-    || die "could not make the storage-probe verdict readable by runner replicas"
+  # running reads "unverified", never the previous deployment's verdict. This
+  # one dies where the refresh only warns: the directory is a mount source, and
+  # without it the runner containers cannot start at all.
+  write_storage_verdict /dev/null \
+    || die "could not write the storage-probe verdict to $(storage_verdict_file)"
 }
 
 storage_quota_configured() {
@@ -676,6 +765,15 @@ storage_host_helper() {
   # path; the helper must independently prove the two actual binds match it.
   # Only those two directories are bound, non-recursively and read-only. No
   # host proc tree, capabilities, socket, credentials or network are passed.
+  #
+  # `bind-nonrecursive=true` rather than its modern spelling `bind-recursive=
+  # disabled`: the newer key is parsed by the CLI and only exists from Docker
+  # 25, so on an older host every helper call would fail — and the helper is
+  # the *normal* path wherever the deployment user cannot traverse the storage
+  # root. Both set the same thing. Nothing here requires root either: the
+  # helper opens its two binds with `O_PATH`, which needs no permission on the
+  # object, and answers with `fstatvfs`, so it runs as `nobody` and cannot read
+  # a host file that merely happens to share the bound filesystem.
   local id="$1" upperdir="$2" deadline="$3" image helper_name helper_seconds rc=0
   local plan_file target fstype device fsroot upper_root
   plan_file="$4/${id}.mount-plan.json"
@@ -698,7 +796,12 @@ try:
     if not path.startswith("/") or posixpath.normpath(path) != path:
         raise ValueError("non-canonical upperdir")
     candidates = [m for m in mounts if path == m["target"] or path.startswith(m["target"].rstrip("/") + "/")]
-    mount = max(candidates, key=lambda m: len(m["target"]))
+    # Later wins among equal-length targets: findmnt lists the mount table in
+    # creation order, so an over-mounted path appears twice and the second
+    # entry is the one a bind of that path actually resolves to. Taking the
+    # first would hand the helper a plan for the mount it cannot reach, and
+    # its identity check would then reject a sound host on every run.
+    mount = max(reversed(candidates), key=lambda m: len(m["target"]))
     target, root = mount["target"], mount["fsroot"]
     upper_root = posixpath.join(root, posixpath.relpath(path, target))
     fields = [target, mount["fstype"], mount["maj:min"], root, posixpath.normpath(upper_root)]
@@ -720,11 +823,11 @@ PY_PLAN
   helper_name="agent-storage-attest-${BASHPID:-$$}-${RANDOM}"
   storage_bounded "$deadline" docker run --rm --pull=never --name "$helper_name" \
     --label org.freeinference.storage-attestation=true \
-    --runtime runc --network none --read-only --user 0:0 \
+    --runtime runc --network none --read-only --user 65534:65534 \
     --cap-drop ALL --security-opt no-new-privileges:true \
     --pids-limit 16 --memory 64m --cpus 0.25 \
-    --mount "type=bind,src=${target},dst=/disk,readonly,bind-recursive=disabled,bind-propagation=rslave" \
-    --mount "type=bind,src=${upperdir},dst=/upper,readonly,bind-recursive=disabled,bind-propagation=rslave" \
+    --mount "type=bind,src=${target},dst=/disk,readonly,bind-nonrecursive=true,bind-propagation=rslave" \
+    --mount "type=bind,src=${upperdir},dst=/upper,readonly,bind-nonrecursive=true,bind-propagation=rslave" \
     --env PYTHONDONTWRITEBYTECODE=1 --entrypoint python "$image" \
     -m cloud_agent_host.storage_attestation "$target" "$device" "$fsroot" "$upper_root" "$fstype" "$helper_seconds" || rc=$?
   if (( rc != 0 )); then
@@ -760,6 +863,33 @@ print("\x1f".join(map(str, fields)))
 PY_HELPER
 }
 
+storage_occupancy_fields() {
+  # "used available" from a describe document, or nothing at all.
+  #
+  # Nothing rather than zeroes: a document that timed out, arrived empty or
+  # cannot be parsed must not read as a filesystem with nothing on it, which is
+  # a reading the comparison would happily accept.
+  python3 - "$1" <<'PY_OCCUPANCY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        reading = json.load(handle)
+except (OSError, ValueError):
+    raise SystemExit(0)
+if not isinstance(reading, dict):
+    raise SystemExit(0)
+size = reading.get("total_bytes")
+free = reading.get("free_bytes")
+available = reading.get("available_bytes")
+if not all(isinstance(value, int) and not isinstance(value, bool)
+           for value in (size, free, available)):
+    raise SystemExit(0)
+print(size - free, available)
+PY_OCCUPANCY
+}
+
 storage_usage_agrees() {
   # Compare the container's occupancy figures with the host's, up to three
   # times, and print a note describing the last discrepancy. Returns 0 when the
@@ -777,6 +907,9 @@ storage_usage_agrees() {
   local container_used container_avail host_used host_avail delta_used delta_avail
   local note="the reading could not be taken" container_line host_line
   local helper_upper="${5:-}" helper_file="${6:-}" helper_root helper_type helper_size helper_upper_size
+  # The document the parallel phase already saved for this replica. Retries
+  # overwrite it, so it always holds the most recent describe for this runner.
+  local describe_file="$7"
   tolerance=$(( size / 100 ))
   if (( tolerance < STORAGE_DIAGNOSTIC_FLOOR_BYTES )); then
     tolerance="$STORAGE_DIAGNOSTIC_FLOOR_BYTES"
@@ -786,25 +919,20 @@ storage_usage_agrees() {
       note="the attestation ran out of its budget before the occupancy could be compared"
       break
     fi
-    # An unused reading prints nothing rather than zeroes: a timed-out or
-    # unparsable document must not look like a filesystem with nothing on it,
-    # which is a reading the comparison below would happily accept.
-    container_line="$(
+    if (( attempt == 1 )) && [[ -s "$describe_file" ]]; then
+      # The parallel phase ran this exact command moments ago and kept what it
+      # said. Asking again costs a second interpreter start inside the
+      # container, charged to the same fence — and on a rollout with little
+      # left, that is the call that cannot be afforded, which leaves the host
+      # unverified over a reading already in hand. Seconds of drift are what
+      # the tolerance below exists for.
+      container_line="$(storage_occupancy_fields "$describe_file")"
+    else
       storage_bounded "$deadline" docker exec "$id" \
-        python -m cloud_agent_host.host_capacity describe 2>/dev/null \
-        | python3 -c 'import json, sys
-try:
-    reading = json.load(sys.stdin)
-except ValueError:
-    reading = {}
-size = reading.get("total_bytes")
-free = reading.get("free_bytes")
-available = reading.get("available_bytes")
-if not all(isinstance(value, int) and not isinstance(value, bool)
-           for value in (size, free, available)):
-    raise SystemExit(0)
-print(size - free, available)' || true
-    )"
+        python -m cloud_agent_host.host_capacity describe >"$describe_file" 2>/dev/null \
+        || : >"$describe_file"
+      container_line="$(storage_occupancy_fields "$describe_file")"
+    fi
     if [[ -n "$helper_upper" ]]; then
       # Refresh the independent host reading on retries as occupancy moves.
       if (( attempt > 1 )); then
@@ -879,13 +1007,21 @@ verify_storage_probe() {
   # "now", and it is the path the design gives operators to refresh a verdict,
   # so it gets the attestation's own budget.
   local attest_dir="$1" runner_ids="$2" deadline="${3:-$SECONDS}" fenced="${4:-0}"
-  local entries_file verdict_file id index storage_rc ok reason upperdir fstype
-  local total upper_size root_size host_fstype note verdict storage_deadline
+  local entries_file id index storage_rc ok reason upperdir fstype
+  local total upper_size root_size mount_root host_fstype host_upperdir helper_rc note storage_deadline
   local helper_upper helper_file helper_used helper_available
   local -a ids=() pids=()
 
   if [[ "$(storage_probe_name)" == "off" ]]; then
-    log "storage measurement is switched off; runners report it as disabled"
+    # Clear the entries rather than leaving the previous verdict in place. A
+    # replica started before the switch still carries `overlay_root` in its
+    # environment — an environment is fixed when the container is created — and
+    # against a stale verdict it would go on publishing capacity for a host the
+    # operator has just switched off. Emptying the document stops the figures
+    # now; the `up` that recreates the container stops the measuring.
+    log "storage measurement is switched off; clearing the verdict so replicas from before the switch stop publishing capacity"
+    : >"${attest_dir}/storage-entries.tsv"
+    write_storage_verdict "${attest_dir}/storage-entries.tsv" || true
     return 0
   fi
   if [[ -z "$runner_ids" ]]; then
@@ -969,41 +1105,62 @@ verify_storage_probe() {
       warn "runner $id cannot describe its storage filesystem (${reason:-no reason}); it will report no reading"
       continue
     fi
+    # Every use below hands this path to a host tool, which wants the real
+    # bytes. `$upperdir` keeps its escapes: it is the key the runner looks its
+    # own verdict up by, and a key translated on one side is not a key.
+    host_upperdir="$(storage_host_path "$upperdir")"
 
     # The mount root, not the upper directory: a project quota on the upper
     # directory's project returns the quota from both, so the two would agree
     # while neither describes the disk.
-    root_size=""; upper_size=""; helper_upper=""
+    root_size=""; upper_size=""; helper_upper=""; helper_rc=0
+    mount_root=""; host_fstype=""
     helper_file="${attest_dir}/${id}.host-storage.json"
-    mount_root="$(
-      storage_bounded "$storage_deadline" findmnt -n -o TARGET -T "$upperdir" 2>/dev/null \
+    # Both fields from one call, and the type first. Two separately bounded
+    # calls are two chances to be cut short and two reads of a mount table that
+    # moves, so the pair they return need not describe the same mount; and the
+    # type never contains a blank, which leaves the rest of the line — blanks
+    # and all — to the mount point.
+    #
+    # That type is the *host's*, not the container's: inside the container `/`
+    # is an overlay, and the entry names the filesystem the writable layers
+    # actually live on. When it cannot be established the entry says nothing,
+    # rather than repeating the `overlay` every container would report.
+    read -r host_fstype mount_root < <(
+      storage_bounded "$storage_deadline" findmnt -n -o FSTYPE,TARGET -T "$host_upperdir" 2>/dev/null \
         | head -n1 || true
-    )"
-    # The filesystem type recorded in the verdict is the *host's*, not the
-    # container's: inside the container `/` is an overlay, and the entry is
-    # meant to name the filesystem the writable layers actually live on.
-    host_fstype="$(
-      storage_bounded "$storage_deadline" findmnt -n -o FSTYPE -T "$upperdir" 2>/dev/null \
-        | head -n1 || true
-    )"
-    if [[ -z "$host_fstype" ]]; then
-      host_fstype="$fstype"
-    fi
+    ) || true
     if [[ -z "$mount_root" || "$mount_root" != /* ]]; then
       # The ordinary host-user path remains useful on accessible filesystems.
       # A permission failure needs independent metadata, not a guessed parent.
-      if storage_host_helper "$id" "$upperdir" "$storage_deadline" "$attest_dir" >"$helper_file" \
+      if storage_host_helper "$id" "$host_upperdir" "$storage_deadline" "$attest_dir" >"$helper_file" \
           2>"${attest_dir}/${id}.host-storage.stderr"; then
         IFS=$'\037' read -r mount_root host_fstype root_size upper_size helper_used helper_available \
           < <(storage_helper_fields "$helper_file") || true
-        if [[ -n "$root_size" ]]; then helper_upper="$upperdir"; fi
+        if [[ -n "$root_size" ]]; then helper_upper="$host_upperdir"; fi
+      else
+        helper_rc=$?
       fi
     fi
     if [[ -z "$mount_root" || "$mount_root" != /* ]]; then
-      verdict="unverified"
-      append_storage_entry "$upperdir" "$verdict" "" "$host_fstype" "$total" \
-        "the host could not locate the filesystem containing ${upperdir}" "$entries_file"
-      warn "runner $id: findmnt could not locate the filesystem containing ${upperdir}"
+      if (( helper_rc != 0 )); then
+        # Name the tool that failed. The helper exists exactly where findmnt
+        # cannot answer, so reporting its failure as findmnt's sends the reader
+        # to a permission problem that is not the one they have — and the
+        # helper's own diagnosis is on a stream nothing else ever prints.
+        append_storage_entry "$upperdir" "unverified" "" "$host_fstype" "$total" \
+          "the read-only storage helper exited ${helper_rc} instead of locating the filesystem containing ${host_upperdir}" \
+          "$entries_file"
+        warn "runner $id: the read-only storage helper exited ${helper_rc}; leaving its storage unverified"
+        if [[ -s "${attest_dir}/${id}.host-storage.stderr" ]]; then
+          printf '[sandbox-host] %s storage helper said:\n' "$id" >&2
+          tail -n 5 "${attest_dir}/${id}.host-storage.stderr" >&2 || true
+        fi
+      else
+        append_storage_entry "$upperdir" "unverified" "" "$host_fstype" "$total" \
+          "the host could not locate the filesystem containing ${host_upperdir}" "$entries_file"
+        warn "runner $id: findmnt could not locate the filesystem containing ${host_upperdir}"
+      fi
       continue
     fi
     if [[ -z "$helper_upper" ]]; then
@@ -1023,7 +1180,7 @@ verify_storage_probe() {
       continue
     fi
     if [[ -z "$helper_upper" ]]; then
-      upper_size="$(storage_df_size "$upperdir" "$storage_deadline")"
+      upper_size="$(storage_df_size "$host_upperdir" "$storage_deadline")"
     fi
     if [[ -z "$upper_size" ]]; then
       # "No answer" is not "a different answer". A `df` that was cut short, or
@@ -1032,13 +1189,13 @@ verify_storage_probe() {
       # how a missing measurement becomes a statement about the host's
       # configuration that nobody established.
       append_storage_entry "$upperdir" "unverified" "$mount_root" "$host_fstype" "$root_size" \
-        "df could not size ${upperdir} within the attestation's budget" "$entries_file"
-      warn "runner $id: df could not size ${upperdir}; leaving its storage unverified"
+        "df could not size ${host_upperdir} within the attestation's budget" "$entries_file"
+      warn "runner $id: df could not size ${host_upperdir}; leaving its storage unverified"
       continue
     fi
     if [[ "$upper_size" != "$root_size" ]]; then
       append_storage_entry "$upperdir" "unsupported" "$mount_root" "$host_fstype" "$root_size" \
-        "df reports ${upper_size} B for ${upperdir} but ${root_size} B for its mount root, which is a project quota" \
+        "df reports ${upper_size} B for ${host_upperdir} but ${root_size} B for its mount root, which is a project quota" \
         "$entries_file"
       warn "runner $id: the upper directory and its mount root disagree on size; treating the topology as unsupported"
       continue
@@ -1053,64 +1210,18 @@ verify_storage_probe() {
       warn "runner $id: the container and the host disagree on the filesystem's size; treating the topology as unsupported"
       continue
     fi
-    if note="$(storage_usage_agrees "$id" "$mount_root" "$root_size" "$storage_deadline" "$helper_upper" "$helper_file")"; then
+    if note="$(storage_usage_agrees "$id" "$mount_root" "$root_size" "$storage_deadline" \
+        "$helper_upper" "$helper_file" "${attest_dir}/${id}.storage.json")"; then
       append_storage_entry "$upperdir" "verified" "$mount_root" "$host_fstype" "$root_size" "" "$entries_file"
-      log "runner $id: storage verified against ${mount_root} (${fstype}, ${root_size} B)"
+      log "runner $id: storage verified against ${mount_root} (${host_fstype:-unknown filesystem}, ${root_size} B)"
     else
-      append_storage_entry "$upperdir" "unverified" "$mount_root" "$fstype" "$root_size" \
+      append_storage_entry "$upperdir" "unverified" "$mount_root" "$host_fstype" "$root_size" \
         "the container's occupancy never matched the host's: ${note}" "$entries_file"
       warn "runner $id: occupancy readings did not agree; ${note}"
     fi
   done
 
-  verdict_file="$(storage_verdict_file)"
-  if ! mkdir -p "${verdict_file%/*}" || ! chmod 0755 "${verdict_file%/*}"; then
-    warn "could not prepare the storage-probe directory ${verdict_file%/*}; storage attestation not refreshed"
-    return 0
-  fi
-  if ! python3 - "$entries_file" "$verdict_file" "${AGENT_DEPLOYMENT_SHA:-}" <<'PY'
-import datetime
-import json
-import sys
-
-entries_file, verdict_file, deployment_sha = sys.argv[1:4]
-entries = {}
-with open(entries_file, encoding="utf-8") as handle:
-    for line in handle:
-        key, _, rest = line.rstrip("\n").partition("\t")
-        verdict, _, rest = rest.partition("\t")
-        mount_root, _, rest = rest.partition("\t")
-        fstype, _, rest = rest.partition("\t")
-        size, _, reason = rest.partition("\t")
-        if not key or not verdict:
-            continue
-        entries[key] = {
-            "verdict": verdict,
-            "mount_root": mount_root or None,
-            "fstype": fstype or None,
-            "size_bytes": int(size) if size.isdigit() else None,
-            "reason": reason or None,
-        }
-
-written_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-document = {
-    "schema_version": 1,
-    "written_at": written_at,
-    "deployment_sha": deployment_sha,
-    "entries": entries,
-}
-# The parent directory is the bind source. Opening this path also recreates a
-# deleted verdict, and running replicas see the new file on their next sample.
-with open(verdict_file, "w", encoding="utf-8") as handle:
-    json.dump(document, handle, sort_keys=True)
-    handle.write("\n")
-PY
-  then
-    warn "could not write the storage verdict to ${verdict_file}; storage attestation not refreshed"
-    return 0
-  fi
-  chmod 0644 "$verdict_file" || warn "could not relax the storage verdict's permissions"
-  log "storage verdict written to ${verdict_file} ($(wc -l <"$entries_file" | tr -d '[:space:]') entries)"
+  write_storage_verdict "$entries_file" || return 0
 }
 
 probe_sandbox_relay() {
@@ -1309,13 +1420,6 @@ check_shared_live_stack() {
     done
     die "$(printf '%s\n' "${verdicts[@]}")"
   fi
-  # Storage attestation, after the capability verdicts and before the directory
-  # it uses is cleaned up. Deliberately not part of the fatal set above: see the
-  # section comment — a metric that cannot be established is not a reason to
-  # keep a working host out of the pool.
-  verify_storage_probe "$ATTEST_DIR" "$runner_ids" "$deadline" "$fenced"
-  cleanup_attest_dir
-
   # A host that claims turns it cannot start takes the queue apart one claim
   # at a time, so prove the image can start one. A turn process with nothing on
   # its standard input must come up, import everything a turn needs, pass the
@@ -1384,6 +1488,20 @@ check_shared_live_stack() {
   if grep -q "agent_host_credential_rejected" <<<"$recent_runner_logs"; then
     die "the control plane rejected this host's persisted credential; re-enrol the host before enabling retained chats"
   fi
+
+  # Storage attestation last, after every check that can refuse this host.
+  #
+  # It is not part of the fatal set — a metric that cannot be established is no
+  # reason to keep a working host out of the pool — but "not fatal" is a claim
+  # about its own exit status, not about its effect. The probes above retry
+  # against this same deadline, so seconds spent here are seconds they do not
+  # get: run before them, a slow `docker exec` for a disk figure can leave the
+  # control-plane dial one attempt where it had eight, and a deployment then
+  # rolls back over a number nobody needed. Running last, the attestation can
+  # only spend what the host did not need to prove itself, and running out
+  # costs exactly the metric.
+  verify_storage_probe "$ATTEST_DIR" "$runner_ids" "$deadline" "$fenced"
+  cleanup_attest_dir
 
   log "host-local shared-live ready: the runner attests shared-sandbox-v1 and native-fork-at-anchor-v1, can start a turn process, reaches the control plane, and broker storage is ${broker_root}"
 }

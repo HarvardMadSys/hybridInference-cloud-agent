@@ -350,4 +350,23 @@ Staging 验收：页面、admin API 和宿主 `df <挂载根>` 在同一时段�
 
 **2026-09-16 verdict 删除修复。** 补验确认单文件 bind 在宿主 unlink 后仍持有旧 inode，重建文件也不会被运行中 runner 看到。因此改为只读挂载专用 `.storage-probe/` 目录，每轮打开其中的 `verdict.json`，并保持目录本身不变。新增真实 Docker external 回归，直接使用 Compose 挂载配置验证同一运行中容器能观察删除、重建及 rename 替换；恢复单文件挂载时该回归在删除后的 unverified 断言处失败。目录权限、初始化、`check` 重建与写入失败隔离亦有单测；未改采样口径或 quota attestation。
 
+**2026-09-17 独立评审后的修订。** 一轮多视角评审在部署脚本这一段发现十余处问题，逐条核实后修复如下，均带回归测试：
+
+- **验证抢占就绪预算。** 存储验证原本排在三个致命探测之前、共用同一条 fence。它本身不致命，但花掉的秒数正是那些探测用来重试的；staging 的 120 秒 fence 下，控制面拨号可能只剩一次机会，失败即回滚整个部署。现改为在全部致命检查之后运行，并让第一次占用比较复用并行阶段已经取到的 describe 文档，不再为两个数字多跑一次 `docker exec`。
+- **helper 挂载参数要求 Docker 25。** `bind-recursive=disabled` 由 CLI 解析，v25 才引入；而 helper 恰是非 root 部署用户的正常路径，低于 25 的主机会永远 `unverified`。改用语义相同、19.03 起即有的 `bind-nonrecursive=true`。
+- **helper 失败被记成 findmnt 失败**，且它自己的 stderr 写进一个无人读取、随后即删的文件。现在按退出码分别归因，并把 helper 的最后几行原样打印。
+- **`AGENT_HOST_STORAGE_PROBE` 两侧词表不一致。** 脚本只认小写 `off`，runner 还认 `OFF/0/false/no/disabled`，于是同一份配置能让日志写“storage verified”而页面显示“已关闭”。现在只接受 `overlay_root` 和 `off`，在 `validate_retained_config` 里当场拒绝其它拼写；`off` 时 `check` 会清空 verdict，使切换前启动的副本立即停止发布容量（真正停止测量仍需 `up`）。
+- **转义路径无法验证。** runner 按设计保留内核的 `\040` 等转义（那是 verdict 的键），脚本却把这串东西直接交给 `findmnt`、`df` 和 `docker --mount`。现在只在交给宿主工具前反转义，键本身不变。
+- **挂载计划在同目标覆盖挂载时选错。** `max()` 取首个最长匹配，而 findmnt 按创建顺序输出，于是计划描述的是被遮住的那个挂载，helper 的身份核对必然失败。改为取最后一个。
+- **verdict 原地截断写入。** 目录挂载之后已无需保留 inode，改为同目录写临时文件再 rename，避免采样撞上写入窗口读到空文件。两个写入者合并为一个函数。
+- **verdict 里的文件系统类型。** 占用不一致分支和 verified 日志写的是容器内的 `overlay`；两次独立计时的 `findmnt` 中第二次失败时还会静默回退成它。现在一次调用取 `FSTYPE,TARGET`，取不到就记 `null`。
+- **helper 以 uid 0 运行**并挂载宿主挂载根（默认拓扑下即 `/`）。它只做 `O_PATH` 打开加 `fstatvfs`，两者都不需要权限，改为 `--user 65534:65534`。
+- **控制面的局部降级越界。** `missing` 缺失或非对象时会被伪造成空表，导致一份结构非法的心跳能否被接受取决于 storage 是否同时畸形。现在这种输入原样返回，由必填字段照常丢弃。
+- **页面数字两套取整规则。** Storage 与 Memory 并排却分别打印 `1.5 / 2.0 TiB` 和 `4 / 8 GiB`，且 1.2499 TiB 被显示成 1.3。两者现在共用一个函数，Memory 的显示不变。
+- **`describe` 与运行时探针读 mountinfo 的方式不同**（无上限、有损解码对有上限、严格解码），可能出现部署写下 verified 而心跳始终 `source_unavailable`。现在共用一个读取函数；模块中段的 `__main__` 块相应移到文件末尾，否则 `python -m` 会在定义之前停下。
+
+评审驳回两条候选，不作修改：`ps | grep -q` 在 `pipefail` 下的 SIGPIPE 误判（procps 的 `ps` 自带处理函数，以 0 退出）、以及浮点百分比向上取整多一个点（字节数都是块大小的整数倍，2^53 以内乘 100 精确）。
+
+**这些改动尚未在 staging 复验。** 上一轮验收记录的是 `5d0050f`；其中部署路径的部分需要在合并前按第 5 节和第 10.3 节重跑，尤其是 helper 以 `nobody` 运行、`bind-nonrecursive` 和新的调用顺序。
+
 **2026-09-16 unlink 真机复验通过（`5d0050f`）。** 实际 staging 的三个 runner 在宿主文件被真正删除后全部报告 unverified；新心跳和页面正确局部降级。`check` 重建 verdict 后，API 和页面恢复容量，三个容器的 ID／StartedAt 及挂载目录 inode 全程未变。此项不再是未测项；[最新验收记录](../acceptance/2026-09-16-admin-storage-capacity.md) 包含前后截图、时间和字段。off、stale 页面仍未在 staging 强制构造，沿用自动化覆盖。

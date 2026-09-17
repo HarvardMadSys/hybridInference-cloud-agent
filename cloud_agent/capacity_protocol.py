@@ -443,6 +443,14 @@ class HostCapacityReport(BaseModel):
         All three become ``storage = null`` plus ``missing.storage =
         "invalid_sample"``: a runner that sent something wrong is a different
         thing from a runner that cannot measure at all, and the page says so.
+
+        The storage field is also the limit of what this hook owns. A block
+        whose ``missing`` map is itself absent or is not an object has nothing
+        wrong with its *storage*; it is missing a required field, and ordinary
+        field validation drops it exactly as it drops the same block with a
+        perfectly good storage sub-block. Substituting a map of this control
+        plane's own invention would make whether the report is accepted at all
+        depend on whether its storage half happened to be malformed.
         """
         if not isinstance(data, dict):
             return data
@@ -472,7 +480,11 @@ class HostCapacityReport(BaseModel):
         elif isinstance(missing, HostCapacityMissing):
             degraded = missing.model_dump()
         else:
-            degraded = {}
+            # Nothing about the storage field is repairable from here: there is
+            # no map to write the reason into. ``missing`` is required, so the
+            # block is dropped by ordinary field validation, and it is left
+            # untouched so that it is dropped for that reason alone.
+            return data
         degraded["storage"] = STORAGE_MISSING_INVALID_SAMPLE
         return {**data, "storage": None, "missing": degraded}
 

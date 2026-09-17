@@ -631,6 +631,31 @@ def test_a_malformed_storage_sub_block_costs_only_the_storage_field(storage: obj
     assert report.inventory.running == 3
 
 
+def block_without_the_missing_map(**overrides: object) -> dict:
+    """A block that carries no ``missing`` map at all, not merely an empty one."""
+    block = capacity_block(**overrides)
+    del block["missing"]
+    return block
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        block_without_the_missing_map(storage=storage_block(total_bytes="lots")),
+        capacity_block(storage=storage_block(total_bytes="lots"), missing="garbage"),
+    ],
+)
+def test_a_storage_fault_does_not_rescue_an_unusable_missing_map(block: object) -> None:
+    """Degrading the storage field must not make an unrelated block acceptable.
+
+    ``missing`` is required, and a block whose map is absent or is not an
+    object is dropped whatever its storage says. A map this control plane
+    invented in its place would buy the report an acceptance that the runner's
+    own CPU and memory reasons never paid for.
+    """
+    assert parse_capacity_block(block) is None
+
+
 def test_a_malformed_storage_sub_block_does_not_refuse_the_heartbeat() -> None:
     request = HostHeartbeatRequest.model_validate(
         heartbeat_body(capacity_block(storage=storage_block(total_bytes="lots")))

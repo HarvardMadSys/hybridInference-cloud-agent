@@ -1571,7 +1571,9 @@ Compose binds only the dedicated `.storage-probe/` directory read-only at
 `/run/cloud-agent/storage-probe`. Each sample opens `verdict.json` by name, so
 deleting it reports `unverified` on the next sample; `sandbox_host.sh check`
 recreates it and sampling resumes without restarting replicas. Keep the bound
-directory itself in place. Upgrade from the old `.storage-probe-verdict` file
+directory itself in place. The file inside it is written beside itself and
+renamed over, never truncated first, so a replica sampling during a refresh
+reads either the old document or the new one and never an empty one. Upgrade from the old `.storage-probe-verdict` file
 bind with a normal `up`, which recreates runners with the new mount; `check`
 alone cannot change an existing container's mount configuration. The legacy
 file is ignored and is not used as a fallback.
@@ -1585,9 +1587,20 @@ operational consequences:
 # Re-run the checks without redeploying — this also refreshes the verdict.
 deploy/host/sandbox_host.sh check
 
-# Turn the metric off entirely (the rollback).
-echo 'AGENT_HOST_STORAGE_PROBE=off' >> deploy/host/.env
+# Turn the metric off entirely (the rollback). The `.env` is the deploy
+# checkout root's, beside `.deployed-sha`, which is where every reader looks.
+echo 'AGENT_HOST_STORAGE_PROBE=off' >> .env
+deploy/host/sandbox_host.sh up
 ```
+
+The `up` is not optional. A container's environment is fixed when it is
+created, so replicas started before the edit keep measuring until they are
+replaced; `up` replaces them. A `check` in between is still worth running — it
+rewrites the verdict with no entries, which stops those replicas publishing a
+figure on their next sample even though they are still measuring. The variable
+takes `overlay_root` or `off` and nothing else: any other spelling is refused
+at configuration time rather than leaving the script and the runner to disagree
+about what it meant.
 
 **What the number is not.** It is block space, so `available` does not promise
 that any particular container can still write — inodes, quotas and a read-only

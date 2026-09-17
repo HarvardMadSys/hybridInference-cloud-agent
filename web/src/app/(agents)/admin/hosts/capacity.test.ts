@@ -409,10 +409,11 @@ describe('storage cell', () => {
         storage_missing_reason: null,
       }),
     );
-    // The used figure is a real zero and not a gap, which is the whole point;
-    // it keeps a tenth because it is under ten units, where the 500 GiB total
-    // does not — the precision rule is per figure, not per line.
-    expect(empty.text).toBe('0% · 0.0 / 500 GiB');
+    // The used figure is a real zero and not a gap, which is the whole point.
+    // It prints as `0` and not `0.0`: storage reads at formatGib's precision,
+    // so a whole number of units carries no trailing tenth here any more than
+    // memory's `42 / 128 GiB` does.
+    expect(empty.text).toBe('0% · 0 / 500 GiB');
     expect(empty.note).toBe('500 GiB available');
     // The absence of a measurement is not that reading. This is the case an
     // older control plane produces, and `0%` here would be an empty disk
@@ -494,7 +495,7 @@ describe('storage cell', () => {
         storage_used_percent: 100 * (512 / 1012),
       }),
     );
-    expect(at.text).toBe('51% · 0.5 / 1.0 TiB');
+    expect(at.text).toBe('51% · 0.5 / 1 TiB');
     expect(at.note).toBe('500 GiB available');
     // Above ten units the tenth is noise, as it is for memory.
     const large = storageCell(
@@ -507,7 +508,7 @@ describe('storage cell', () => {
       }),
     );
     expect(large.text).toBe('75% · 18 / 24 TiB');
-    expect(large.note).toBe('6.0 TiB available');
+    expect(large.note).toBe('6 TiB available');
   });
 
   it('chooses the available figure’s unit independently of the total’s', () => {
@@ -522,13 +523,16 @@ describe('storage cell', () => {
         storage_used_percent: 100 * ((2 * TIB - 104 * GIB) / (2 * TIB - 64 * GIB)),
       }),
     );
-    expect(cell.text).toBe('98% · 1.9 / 2.0 TiB');
+    expect(cell.text).toBe('98% · 1.9 / 2 TiB');
     expect(cell.note).toBe('40 GiB available');
     // The available figure is fitted to its own magnitude, not to 1 TiB: the
     // two formatters are not the same call with a different argument.
     expect(formatStorageSize(40 * GIB)).toBe('40 GiB');
     expect(formatStorageSize(1.5 * TIB)).toBe('1.5 TiB');
-    expect(formatStorageSize(2 * TIB)).toBe('2.0 TiB');
+    expect(formatStorageSize(2 * TIB)).toBe('2 TiB');
+    // A hair over a tenth still reads as that tenth: the figure is rounded to
+    // the tenth once, so 1.2499 TiB is `1.2` and not `1.3`.
+    expect(formatStorageSize(1.2499 * TIB)).toBe('1.2 TiB');
     expect(formatStorageSize(null)).toBeNull();
     expect(formatStorageSize(undefined)).toBeNull();
     expect(formatStorageSize(Number.NaN)).toBeNull();
@@ -536,11 +540,13 @@ describe('storage cell', () => {
 
   it('keeps the pair in one unit so the two halves compare', () => {
     expect(formatStoragePair(335 * GIB, 1000 * GIB)).toBe('335 / 1000 GiB');
-    // Below ten units the tenth is kept; above it, rounded — the same rule
-    // formatGib applies to memory. Both halves are read in the total's unit,
-    // so `used` is never printed on a scale its total is not on.
-    expect(formatStoragePair(0.5 * TIB, TIB)).toBe('0.5 / 1.0 TiB');
-    expect(formatStoragePair(512 * GIB, 2 * TIB)).toBe('0.5 / 2.0 TiB');
+    // Below ten units a fractional figure keeps its tenth; at or above ten the
+    // tenth is rounded away — the same rule, in the same function, that
+    // formatGib applies to memory, so a whole number of units prints without a
+    // trailing `.0`. Both halves are read in the total's unit, so `used` is
+    // never printed on a scale its total is not on.
+    expect(formatStoragePair(0.5 * TIB, TIB)).toBe('0.5 / 1 TiB');
+    expect(formatStoragePair(512 * GIB, 2 * TIB)).toBe('0.5 / 2 TiB');
     // Half an answer is not an answer, and neither is half a payload.
     expect(formatStoragePair(null, TIB)).toBeNull();
     expect(formatStoragePair(335 * GIB, undefined)).toBeNull();

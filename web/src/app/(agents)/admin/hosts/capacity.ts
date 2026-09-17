@@ -69,16 +69,25 @@ export function formatPercentTenth(value: number | null): string | null {
 }
 
 /**
- * Bytes as GiB, at the precision a reader can act on.
+ * A figure in some size unit, at the precision a reader can act on.
  *
- * Above ten GiB the tenth is noise and the integer is what an operator
+ * Above ten units the tenth is noise and the integer is what an operator
  * compares against a machine's nameplate; below it, the tenth is the
  * difference between a snug machine and a comfortable one.
+ *
+ * One function rather than one rule per unit, because the Memory and the
+ * Storage cells sit side by side on a single table row: two spellings of this
+ * rule would print the same quantity two ways on that row, and a reader would
+ * be left working out which of the two was the real reading.
  */
+function unitNumber(value: number): string {
+  return value >= 10 ? `${Math.round(value)}` : `${Math.round(value * 10) / 10}`;
+}
+
+/** Bytes as GiB, at `unitNumber`'s precision. */
 export function formatGib(bytes: number | null): string | null {
   if (bytes === null || !Number.isFinite(bytes)) return null;
-  const gib = bytes / BYTES_PER_GIB;
-  return gib >= 10 ? `${Math.round(gib)}` : `${Math.round(gib * 10) / 10}`;
+  return unitNumber(bytes / BYTES_PER_GIB);
 }
 
 /** `42 / 128 GiB`, or null when either half is unknown. */
@@ -345,15 +354,15 @@ function storageUnit(total: number): readonly [string, number] {
 /**
  * A byte figure as a bare number in `unit`.
  *
- * The precision rule is `formatGib`'s, one exponent up, and it is decided on
- * the figure itself: below ten units the tenth distinguishes a snug disk from
- * a comfortable one, at or above ten it is noise — which is what keeps a
- * four-digit disk readable. The intermediate rounding exists so that a hair
- * over a unit does not print as the next one: 1.2499 TiB is `1.2`, not `1.3`.
+ * The precision rule is literally `formatGib`'s, applied one exponent up, and
+ * it is decided on the figure itself: below ten units the tenth distinguishes
+ * a snug disk from a comfortable one, at or above ten it is noise — which is
+ * what keeps a four-digit disk readable. It is the same `unitNumber` memory
+ * goes through rather than a second statement of the rule, so that a Memory
+ * and a Storage cell on one row cannot round the same quantity differently.
  */
 function storageNumber(bytes: number, unitDivisor: number): string {
-  const value = Math.round((bytes / unitDivisor) * 1000) / 1000;
-  return value >= 10 ? `${Math.round(value)}` : value.toFixed(1);
+  return unitNumber(bytes / unitDivisor);
 }
 
 /**
@@ -372,7 +381,7 @@ export function formatStorageSize(bytes: number | null | undefined): string | nu
  * `used / total`, in the unit the **total** is read in.
  *
  * Both halves are forced into the total's unit so the pair stays comparable:
- * `0.4 / 2.0 TiB` is a ratio a reader can take in, where `410 / 2.0` is two
+ * `0.4 / 2 TiB` is a ratio a reader can take in, where `410 / 2` is two
  * scales wearing one label. Each half keeps its own precision, because the
  * precision rule is about how many digits a reader has to take in and 500 GiB
  * is not a coarser reading than 0.5 TiB — it is the same one in the unit the

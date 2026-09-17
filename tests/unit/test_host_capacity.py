@@ -12,6 +12,7 @@ identical on a chart and mean opposite things.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import time
 from typing import Any
@@ -1075,11 +1076,71 @@ def test_the_describe_command_reports_the_same_reading_the_probe_would(tmp_path)
     mountinfo = tmp_path / "mountinfo"
     mountinfo.write_text(overlay_mountinfo())
     described = describe_storage_probe(mountinfo_path=mountinfo, statvfs=lambda path: FakeStatvfs())
+    probe = OverlayRootStorageProbe(
+        mountinfo_path=mountinfo,
+        verdict_reader=lambda: verified_verdict(),
+        statvfs=lambda path: FakeStatvfs(),
+    )
+    sampled = probe.sample()
 
     assert described["ok"] is True
     assert described["fstype"] == "overlay"
     assert described["upperdir"] == UPPERDIR
     assert described["total_bytes"] == 100 * GIB
+    assert isinstance(sampled, StorageSample)
+    assert sampled.total_bytes == described["total_bytes"]
+    assert sampled.free_bytes == described["free_bytes"]
+    assert sampled.available_bytes == described["available_bytes"]
+
+
+@pytest.mark.parametrize(
+    "trailer",
+    [
+        pytest.param(b"\xe9\n", id="a byte no UTF-8 decoder accepts"),
+        pytest.param(b"#" * PROC_MAX_BYTES, id="a mount table past the size ceiling"),
+    ],
+)
+def test_a_mount_table_the_probe_refuses_is_one_the_deployment_refuses(
+    tmp_path, trailer: bytes
+) -> None:
+    """Both readers, one answer.
+
+    The deployment writes a `verified` entry for whatever `describe` reports,
+    and the runner publishes whatever it can sample. When one reader tolerates
+    a mount table the other rejects, the rollout log says the disk was verified
+    while the page says it was never measured, and nothing on either side
+    explains the difference.
+    """
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_bytes(overlay_mountinfo().encode() + trailer)
+    described = describe_storage_probe(mountinfo_path=mountinfo, statvfs=lambda path: FakeStatvfs())
+    probe = OverlayRootStorageProbe(
+        mountinfo_path=mountinfo,
+        verdict_reader=lambda: verified_verdict(),
+        statvfs=lambda path: FakeStatvfs(),
+    )
+
+    assert described["ok"] is False
+    assert described["reason"] == STORAGE_MISSING_SOURCE_UNAVAILABLE
+    assert probe.sample() == StorageMissing(reason=STORAGE_MISSING_SOURCE_UNAVAILABLE)
+
+
+def test_the_module_command_line_runs_with_every_definition_it_needs() -> None:
+    """`python -m` stops at the `__main__` block, so its position is behavior.
+
+    Run as a subprocess, because importing this module for a test defines the
+    whole of it either way: only the real command proves that nothing the
+    describe path reaches is defined after the block that starts it.
+    """
+    completed = subprocess.run(
+        [sys.executable, "-m", "cloud_agent_host.host_capacity", "describe"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert isinstance(json.loads(completed.stdout)["ok"], bool)
 
 
 def test_the_describe_command_says_why_when_the_topology_is_not_supported(tmp_path) -> None:
