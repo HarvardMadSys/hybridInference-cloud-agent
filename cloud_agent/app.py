@@ -912,6 +912,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
     from cloud_agent.ledger import collect_usage_snapshots
+    from cloud_agent.mcp.catalog import McpCatalog
     from cloud_agent.operational_health import monitor_queue
     from cloud_agent.storage.assembly import Storage
 
@@ -961,7 +962,11 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     #
     # So this is a parameter of the lifespan rather than a property of it, and
     # `create_mcp_app` says no.
+    app.state.mcp_catalog = None
+    app.state.mcp_catalog_task = None
     if background:
+        app.state.mcp_catalog = McpCatalog(storage.mcp_catalog, http)
+        app.state.mcp_catalog_task = asyncio.create_task(app.state.mcp_catalog.run())
         reaper = asyncio.create_task(reap_expired_attempts(storage, grants=app.state.grants))
         snapshot_coordinator = asyncio.create_task(coordinate_shared_snapshots(storage))
         ledger_collector = asyncio.create_task(
@@ -1006,6 +1011,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     finally:
         for task in (
             app.state.mcp_maintenance_task,
+            app.state.mcp_catalog_task,
             app.state.reaper_task,
             app.state.snapshot_task,
             app.state.ledger_task,

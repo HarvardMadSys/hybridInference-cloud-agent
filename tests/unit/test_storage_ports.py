@@ -78,7 +78,7 @@ def _implementations() -> dict[str, tuple[str, str, str, str]]:
 
 def test_the_ports_directory_is_not_empty() -> None:
     """A scan that silently matches nothing would pass every test below."""
-    assert len(_port_files()) == 18
+    assert len(_port_files()) == 19
 
 
 @pytest.mark.parametrize("path", _port_files(), ids=lambda p: p.stem)

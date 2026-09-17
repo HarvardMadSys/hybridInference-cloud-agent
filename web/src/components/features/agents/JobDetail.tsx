@@ -8,7 +8,6 @@ import {
   useState,
   type CSSProperties,
   type FormEvent,
-  type ReactNode,
 } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -28,8 +27,7 @@ import {
   type AgentGitWorkspaceApi,
 } from '@/lib/api/agents';
 
-import { lifecyclePhaseLabel, ownerFailureMessage, toDiffFileDetails } from './adapt';
-import { isComposerSubmit } from './composerKeys';
+import { ownerFailureMessage, toDiffFileDetails } from './adapt';
 import {
   conversationNavigationScope,
   describeCurrentTurn,
@@ -38,7 +36,6 @@ import {
   messageBlockKey,
   sameNavigationEntries,
   toNavigationEntry,
-  type ConversationTurnDescription,
   type ConversationTurnNavigationEntry,
 } from './conversationTurnNavigation';
 import { highestEffort, offeredEfforts } from './effort';
@@ -53,7 +50,7 @@ import { ThreadStatsBar } from './ThreadStatsBar';
 import { ThreadActions } from './ThreadActions';
 import { McpSessionPanel } from './mcp/McpSessionPanel';
 import { McpApprovalNotice } from './mcp/McpApprovalNotice';
-import type { AgentEvent, AgentJob, AgentThreadMessage } from './types';
+import type { AgentJob } from './types';
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { AttemptTurnFooter } from './AttemptTurnFooter';
 import { TrajectoryView } from './TrajectoryView';
@@ -68,8 +65,26 @@ import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
 import { shouldHoldReading, useConversationScroll } from './useConversationScroll';
 import { useResizablePane } from './useResizablePane';
 import { WorkspaceFiles } from './WorkspaceFiles';
+import {
+  composerModels,
+  composerOverrides,
+  ComposerTextarea,
+  ComposerSendButton,
+} from './ConversationComposer';
+import { hasLostContext, ownerRunNote } from './conversationJob';
+import { SideChat } from './SideChat';
+import {
+  CopyIcon,
+  RewindIcon,
+  copyMessage,
+  MessageActionButton,
+  MessageActions,
+  ThreadTurn,
+  EventRow,
+  HistoryTurn,
+} from './ChatMessages';
 
-type WorkspaceTab = 'git' | 'terminal' | 'files' | 'tools';
+type WorkspaceTab = 'git' | 'terminal' | 'files' | 'tools' | 'side-chat';
 
 export const WORKSPACE_WIDTH_STORAGE_KEY = 'agents.workspace.width';
 const WORKSPACE_DEFAULT_WIDTH = 560;
@@ -103,6 +118,7 @@ const WORKSPACE_TABS: Array<{ key: WorkspaceTab; label: string }> = [
   // the workspace rather than on the account-wide Integrations page: a held
   // call is decided against this session's rules, not the user's.
   { key: 'tools', label: 'Tools' },
+  { key: 'side-chat', label: 'Side Chat' },
 ];
 
 const DIFF_LINE_CLASS = {
@@ -111,513 +127,6 @@ const DIFF_LINE_CLASS = {
   add: 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400',
   del: 'bg-red-50 dark:bg-red-500/10 text-red-700 dark:text-red-400',
 } as const;
-
-function Chevron({ className = '' }: { className?: string }) {
-  return (
-    <svg
-      aria-hidden="true"
-      className={`h-4 w-4 ${className}`}
-      fill="none"
-      viewBox="0 0 24 24"
-      stroke="currentColor"
-      strokeWidth={2}
-    >
-      <path strokeLinecap="round" strokeLinejoin="round" d="m9 18 6-6-6-6" />
-    </svg>
-  );
-}
-
-function ToolIcon({ tool }: { tool: string }) {
-  const normalized = tool.toLowerCase();
-  let path = 'M12 4v16m8-8H4';
-  if (normalized.includes('read') || normalized.includes('search')) {
-    path =
-      'M12 6.25c-2.5-2-6.5-2-9 0v12c2.5-2 6.5-2 9 0 2.5-2 6.5-2 9 0v-12c-2.5-2-6.5-2-9 0Zm0 0v12';
-  } else if (normalized.includes('bash') || normalized.includes('command')) {
-    path =
-      'm7 8 4 4-4 4m6 0h4M4 4h16a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z';
-  } else if (normalized.includes('edit') || normalized.includes('write')) {
-    path =
-      'M16.86 4.49a1.5 1.5 0 0 1 2.12 0l.53.53a1.5 1.5 0 0 1 0 2.12L8.53 18.12 4 19.5l1.38-4.53L16.86 4.49Z';
-  }
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-4 w-4 shrink-0 text-gray-400 dark:text-gray-500"
-      fill="none"
-      viewBox="0 0 24 24"
-      stroke="currentColor"
-      strokeWidth={2}
-    >
-      <path strokeLinecap="round" strokeLinejoin="round" d={path} />
-    </svg>
-  );
-}
-
-function LifecycleRow({ text, blockKey }: { text: string; blockKey?: string }) {
-  const { text: label, milestone } = lifecyclePhaseLabel(text);
-
-  // A phase this build does not recognise is a diagnostic, not an achievement:
-  // no tick, muted, and clearly a passthrough of what the runtime said.
-  if (!milestone) {
-    return (
-      <div
-        data-block-key={blockKey}
-        className="flex items-center gap-2.5 py-1 text-xs text-gray-400 dark:text-gray-500"
-      >
-        <span className="h-1 w-1 rounded-full bg-gray-300 dark:bg-gray-600" />
-        <span className="font-mono">{label}</span>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      data-block-key={blockKey}
-      className="flex items-center gap-2.5 py-2 text-[13px] text-gray-500 dark:text-gray-400"
-    >
-      <span className="flex h-4 w-4 items-center justify-center rounded-full bg-gray-100 dark:bg-white/5 text-gray-500 dark:text-gray-400">
-        <svg
-          aria-hidden="true"
-          className="h-3 w-3"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-          strokeWidth={2.5}
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" d="m6 12 4 4 8-9" />
-        </svg>
-      </span>
-      <span className="capitalize">{label}</span>
-    </div>
-  );
-}
-
-function ToolActivity({
-  event,
-  blockKey,
-}: {
-  event: Extract<AgentEvent, { kind: 'tool_use' }>;
-  blockKey?: string;
-}) {
-  return (
-    <details
-      data-block-key={blockKey}
-      className="group my-1 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900"
-    >
-      <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3 py-2 text-[13px] text-gray-700 dark:text-gray-300 marker:content-none">
-        <Chevron className="shrink-0 text-gray-400 dark:text-gray-500 transition-transform group-open:rotate-90" />
-        <ToolIcon tool={event.tool} />
-        <span className="font-medium">{event.tool}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-xs text-gray-500 dark:text-gray-400">
-          {event.detail}
-        </span>
-        {event.diffStat ? (
-          <span className="shrink-0 font-mono text-xs text-gray-500 dark:text-gray-400">
-            {event.diffStat}
-          </span>
-        ) : null}
-      </summary>
-      <div className="border-t border-gray-100 dark:border-white/5 px-3 py-2.5">
-        {event.output ? (
-          <pre
-            className={`max-h-72 overflow-auto whitespace-pre-wrap rounded-md px-3 py-2.5 font-mono text-xs leading-relaxed ${
-              event.outputIsError ? 'bg-red-950 text-red-100' : 'bg-gray-950 text-gray-200'
-            }`}
-          >
-            {event.output.join('\n')}
-          </pre>
-        ) : (
-          <p className="text-xs text-gray-400 dark:text-gray-500">Waiting for the tool result…</p>
-        )}
-      </div>
-    </details>
-  );
-}
-
-function CopyIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      viewBox="0 0 24 24"
-      stroke="currentColor"
-      strokeWidth={2}
-    >
-      <rect x="9" y="9" width="11" height="11" rx="2" />
-      <path strokeLinecap="round" d="M5 15V7a2 2 0 0 1 2-2h8" />
-    </svg>
-  );
-}
-
-function ForkIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      viewBox="0 0 24 24"
-      stroke="currentColor"
-      strokeWidth={2}
-    >
-      <circle cx="6" cy="5" r="2" />
-      <circle cx="18" cy="5" r="2" />
-      <circle cx="6" cy="19" r="2" />
-      <path strokeLinecap="round" d="M6 7v10m12-10v3a4 4 0 0 1-4 4h-4" />
-    </svg>
-  );
-}
-
-function RewindIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      viewBox="0 0 24 24"
-      stroke="currentColor"
-      strokeWidth={2}
-    >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M9 15 3 9l6-6M3 9h12a6 6 0 0 1 0 12h-3"
-      />
-    </svg>
-  );
-}
-
-async function copyMessage(content: string) {
-  try {
-    await navigator.clipboard.writeText(content);
-    toast.success('Message copied');
-  } catch {
-    toast.error('Could not copy the message');
-  }
-}
-
-function MessageActionButton({
-  label,
-  onClick,
-  disabled,
-  children,
-}: {
-  label: string;
-  onClick: () => void;
-  disabled?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={label}
-      title={label}
-      className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-700 dark:hover:text-gray-200 disabled:opacity-40"
-    >
-      {children}
-    </button>
-  );
-}
-
-/** Hover-revealed per-message actions; focus keeps them visible for keyboards. */
-function MessageActions({
-  align = 'start',
-  children,
-}: {
-  align?: 'start' | 'end';
-  children: ReactNode;
-}) {
-  return (
-    <div
-      className={`mt-1 flex gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 ${
-        align === 'end' ? 'justify-end' : ''
-      }`}
-    >
-      {children}
-    </div>
-  );
-}
-
-function AssistantMessage({
-  text,
-  extraActions,
-  footer,
-  blockKey,
-}: {
-  text: string;
-  extraActions?: ReactNode;
-  footer?: ReactNode;
-  /** Stable row identity, so a layout change never moves a reader off it. */
-  blockKey?: string;
-}) {
-  const actions = (
-    <MessageActions>
-      <MessageActionButton label="Copy message" onClick={() => void copyMessage(text)}>
-        <CopyIcon />
-        Copy
-      </MessageActionButton>
-      {extraActions}
-    </MessageActions>
-  );
-  return (
-    <div data-block-key={blockKey} className="group py-3 text-gray-800 dark:text-gray-200">
-      <Markdown text={text} />
-      {footer ? (
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
-          {footer}
-          {actions}
-        </div>
-      ) : (
-        actions
-      )}
-    </div>
-  );
-}
-
-function ThreadTurn({
-  message,
-  busy,
-  onFork,
-  onRewind,
-  footer,
-  blockKey,
-}: {
-  message: AgentThreadMessage;
-  footer?: ReactNode;
-  busy?: boolean;
-  onFork?: () => void;
-  onRewind?: () => void;
-  blockKey?: string;
-}) {
-  if (message.role === 'assistant') {
-    return (
-      <AssistantMessage
-        text={message.content}
-        footer={footer}
-        blockKey={blockKey}
-        extraActions={
-          onFork ? (
-            <MessageActionButton label="Fork from here" onClick={onFork} disabled={busy}>
-              <ForkIcon />
-              Fork from here
-            </MessageActionButton>
-          ) : undefined
-        }
-      />
-    );
-  }
-  return (
-    <div data-block-key={blockKey} className="group my-3 ml-auto w-fit max-w-[88%]">
-      <div className="rounded-2xl bg-gray-100 dark:bg-white/5 px-4 py-3 text-sm leading-relaxed text-gray-800 dark:text-gray-200">
-        <Markdown text={message.content} />
-      </div>
-      <MessageActions align="end">
-        <MessageActionButton label="Copy message" onClick={() => void copyMessage(message.content)}>
-          <CopyIcon />
-          Copy
-        </MessageActionButton>
-        {onRewind ? (
-          <MessageActionButton label="Edit & rewind" onClick={onRewind} disabled={busy}>
-            <RewindIcon />
-            Edit & rewind
-          </MessageActionButton>
-        ) : null}
-      </MessageActions>
-    </div>
-  );
-}
-
-function EventRow({
-  event,
-  onFork,
-  busy,
-  footer,
-  blockKey,
-}: {
-  event: AgentEvent;
-  onFork?: () => void;
-  busy?: boolean;
-  footer?: ReactNode;
-  /** Stable row identity, so a layout change never moves a reader off it. */
-  blockKey?: string;
-}) {
-  if (event.kind === 'lifecycle') return <LifecycleRow text={event.text} blockKey={blockKey} />;
-  if (event.kind === 'thinking') {
-    return (
-      <div
-        data-block-key={blockKey}
-        aria-label="Agent reasoning"
-        className="flex items-center gap-2.5 py-2 text-[13px] text-gray-400 dark:text-gray-500"
-      >
-        <span className="h-1.5 w-1.5 rounded-full bg-gray-300 dark:bg-gray-600" />
-        Agent is reasoning
-      </div>
-    );
-  }
-  if (event.kind === 'message') {
-    return (
-      <AssistantMessage
-        text={event.text}
-        footer={footer}
-        blockKey={blockKey}
-        extraActions={
-          onFork ? (
-            <MessageActionButton label="Fork from here" onClick={onFork} disabled={busy}>
-              <ForkIcon />
-              Fork from here
-            </MessageActionButton>
-          ) : undefined
-        }
-      />
-    );
-  }
-  if (event.kind === 'tool_use') return <ToolActivity event={event} blockKey={blockKey} />;
-  if (event.kind === 'tool_result') {
-    return (
-      <details
-        data-block-key={blockKey}
-        className="my-1 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900"
-      >
-        <summary className="cursor-pointer px-3 py-2 text-[13px] text-gray-500 dark:text-gray-400">
-          Unmatched tool result
-        </summary>
-        <pre className="m-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-gray-950 px-3 py-2.5 font-mono text-xs text-gray-200">
-          {event.text || 'Command completed with no output.'}
-        </pre>
-      </details>
-    );
-  }
-  if (event.kind === 'terminal') {
-    return (
-      <pre
-        data-block-key={blockKey}
-        className="my-1 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-gray-950 px-3 py-2.5 font-mono text-xs text-gray-200"
-      >
-        {event.text}
-      </pre>
-    );
-  }
-  if (event.kind === 'egress_denied') {
-    return (
-      <div
-        data-block-key={blockKey}
-        className="my-2 flex items-center gap-2 rounded-lg bg-red-50 dark:bg-red-500/10 px-3 py-2 text-[13px] text-red-700 dark:text-red-400"
-      >
-        <span className="font-medium">Network request blocked</span>
-        <span className="font-mono text-xs">{event.host}</span>
-        <span className="text-red-500 dark:text-red-400">× {event.attempts}</span>
-      </div>
-    );
-  }
-  return (
-    <p data-block-key={blockKey} className="py-1 text-[11px] text-gray-400 dark:text-gray-500">
-      {event.text}
-    </p>
-  );
-}
-
-function HistoryTurn({
-  turn,
-  rewindAnchorJobId,
-  busy,
-  onFork,
-  onRewind,
-  onOpenRun,
-}: {
-  turn: ConversationTurnDescription;
-  rewindAnchorJobId?: string;
-  busy: boolean;
-  onFork?: (jobId: string) => void;
-  onRewind?: (jobId: string, prompt: string) => void;
-  onOpenRun?: (jobId: string, turnNo: number) => void;
-}) {
-  // What the transcript renders is decided once, by the turn description the
-  // navigation rail also reads.
-  const { jobId } = turn;
-  const lastEventMessageIndex = turn.events.reduce(
-    (last, event, index) => (event.kind === 'message' ? index : last),
-    -1,
-  );
-  const lastFallbackMessageId = turn.fallbackResponses.at(-1)?.id;
-
-  return (
-    <section aria-label={`Turn ${turn.displayNo}`} data-turn-key={turn.key}>
-      {turn.messages
-        .filter((message) => message.role === 'user')
-        .map((message) => (
-          <ThreadTurn
-            key={message.id}
-            message={message}
-            blockKey={messageBlockKey(jobId, message.id)}
-            busy={busy}
-            onRewind={
-              rewindAnchorJobId && onRewind
-                ? () => onRewind(rewindAnchorJobId, message.content)
-                : undefined
-            }
-          />
-        ))}
-      <div aria-label={`Turn ${turn.displayNo} agent activity`} className="mt-2">
-        {turn.events.map((event, index) => (
-          <EventRow
-            key={eventBlockKey(jobId, event, index)}
-            event={event}
-            blockKey={eventBlockKey(jobId, event, index)}
-            busy={busy}
-            onFork={
-              event.kind === 'message' && index === lastEventMessageIndex && onFork
-                ? () => onFork(turn.jobId)
-                : undefined
-            }
-          />
-        ))}
-        {turn.fallbackResponses.map((message) => (
-          <ThreadTurn
-            key={message.id}
-            message={message}
-            blockKey={messageBlockKey(jobId, message.id)}
-            busy={busy}
-            onFork={
-              message.id === lastFallbackMessageId && onFork ? () => onFork(turn.jobId) : undefined
-            }
-          />
-        ))}
-      </div>
-      <div className="mb-6 mt-3 flex justify-end text-[11px] text-gray-400 dark:text-gray-500">
-        {onOpenRun ? (
-          <button
-            type="button"
-            onClick={() => onOpenRun(turn.jobId, turn.displayNo)}
-            className="rounded px-1.5 py-0.5 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-white/10 dark:hover:text-gray-100"
-          >
-            View execution
-          </button>
-        ) : null}
-      </div>
-    </section>
-  );
-}
-
-function hasLostContext(job: AgentJob): boolean {
-  return job.nativeState === 'lost' || job.contextStatus === 'lost';
-}
-
-function ownerRunNote(job: AgentJob): string | undefined {
-  // Success detail contains runner/publication bookkeeping, not the answer.
-  // The transcript carries the result; publication has its own status row.
-  if (job.state === 'done' || job.state === 'needs_review') return undefined;
-  // `stateNote` is already owner-facing: toDisplayJob translates `job.detail`
-  // through ownerFailureMessage before it reaches this display model.
-  return (
-    job.stateNote ||
-    (job.state === 'failed'
-      ? 'The run stopped before it could finish. No failure details were recorded.'
-      : undefined)
-  );
-}
 
 function RunGuidance({ job }: { job: AgentJob }) {
   if (hasLostContext(job)) {
@@ -1009,11 +518,13 @@ function GitPanel({ job, active }: { job: AgentJob; active: boolean }) {
 
 export function JobDetail({
   job,
+  userId,
   events = [],
   threadJobs = [],
   onReload,
 }: {
   job: AgentJob;
+  userId?: string;
   /** The stored stream, for the trajectory tab. Absent in fixtures. */
   events?: (AgentJobEventApi | AgentThreadEventApi)[];
   /** The conversation's turn rows, so Run details can describe a past turn. */
@@ -1140,7 +651,7 @@ export function JobDetail({
   // it, so the control cannot show one model while the turn would run another.
   const modelOptions = useMemo(() => {
     if (models.length === 0) return [];
-    return models.includes(job.model) ? models : [job.model, ...models];
+    return composerModels(models, job.model);
   }, [job.model, models]);
 
   // Against the model this turn would run — the switched-to one, or the
@@ -1371,13 +882,8 @@ export function JobDetail({
       const child = await followUpAgentJob(job.id, {
         prompt,
         ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
-        // Only an actual switch is sent. Omitted, the turn inherits the
-        // parent's model, which was validated when it was chosen.
-        ...(model && model !== job.model ? { model } : {}),
-        // Only an actual change is sent; an omitted field inherits the parent's
-        // level, which is what leaving the control alone means. A thread that
-        // carried no level and now shows one differs, so it is sent.
-        ...(effort && effort !== job.reasoningEffort ? { reasoning_effort: effort } : {}),
+        // Omitted controls inherit the parent's validated model and effort.
+        ...composerOverrides(job, model, effort),
       });
       // A router.push remounts the dynamic [jobId] segment even with
       // scroll:false and a stable JobDetail key. Native history updates Next's
@@ -1979,18 +1485,11 @@ export function JobDetail({
                     onSubmit={(event) => void submitFollowUp(event)}
                     className="rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 shadow-[0_16px_40px_-28px_rgba(17,24,39,0.55)] transition focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05]"
                   >
-                    <textarea
+                    <ComposerTextarea
                       rows={2}
                       value={followUp}
                       onChange={(event) => setFollowUp(event.target.value)}
                       disabled={contextLost}
-                      onKeyDown={(event) => {
-                        if (!isComposerSubmit(event)) return;
-                        event.preventDefault();
-                        // Through the form, so the keyboard and the button take the
-                        // same path and cannot drift apart.
-                        event.currentTarget.form?.requestSubmit();
-                      }}
                       placeholder={
                         contextLost ? 'Unable to reconnect this chat' : 'Add a follow-up'
                       }
@@ -2045,32 +1544,12 @@ export function JobDetail({
                         onChange={setChosenSkills}
                         disabled={contextLost || submitting}
                       />
-                      <button
-                        type="submit"
-                        disabled={contextLost || !followUp.trim() || submitting}
-                        className="ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-crimson text-white shadow-sm transition-colors hover:bg-crimson-dark disabled:cursor-not-allowed disabled:opacity-40"
-                        aria-label="Send follow-up"
+                      <ComposerSendButton
+                        label="Send follow-up"
                         title="Send follow-up — ⏎ to send, ⇧⏎ for a new line"
-                      >
-                        {submitting ? (
-                          <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-                        ) : (
-                          <svg
-                            aria-hidden="true"
-                            className="h-4 w-4"
-                            fill="none"
-                            viewBox="0 0 24 24"
-                            stroke="currentColor"
-                            strokeWidth={2}
-                          >
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              d="M12 19V5m0 0-6 6m6-6 6 6"
-                            />
-                          </svg>
-                        )}
-                      </button>
+                        disabled={contextLost || !followUp.trim() || submitting}
+                        busy={submitting}
+                      />
                     </div>
                   </form>
                 )}
@@ -2242,6 +1721,21 @@ export function JobDetail({
               jobId={job.id}
               threadId={job.threadId ?? job.id}
               active={workspaceOpen && workspaceTab === 'tools'}
+            />
+          </div>
+          <div
+            id="workspace-panel-side-chat"
+            role="tabpanel"
+            aria-labelledby="workspace-tab-side-chat"
+            hidden={workspaceTab !== 'side-chat'}
+            className="min-h-0 flex-1"
+          >
+            <SideChat
+              sourceJob={job}
+              sourceJobs={threadJobs}
+              userId={userId}
+              config={config}
+              active={workspaceOpen && workspaceTab === 'side-chat'}
             />
           </div>
         </aside>

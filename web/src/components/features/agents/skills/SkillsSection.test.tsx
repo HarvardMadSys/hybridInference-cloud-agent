@@ -78,21 +78,23 @@ it('uses revision fencing and refreshes a conflicting default without claiming s
 it('requires explicit removal and sends the inspected revision', async () => {
   vi.mocked(api.deleteSkill).mockResolvedValue(undefined);
   render(<SkillsSection />);
-  fireEvent.click(await screen.findByRole('button', { name: 'View Code review' }));
-  fireEvent.click(await screen.findByRole('button', { name: 'Remove skill' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Manage Code review' }));
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Remove skill' }));
   expect(api.deleteSkill).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole('button', { name: 'Confirm removal' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Confirm removal' }));
   await screen.findByText('Your workflows, ready to reuse');
   expect(api.deleteSkill).toHaveBeenCalledWith(1, 1);
 });
 
 it('copies imported instructions into a custom skill and leaves the source unchanged', async () => {
+  vi.mocked(api.listSkills).mockResolvedValue([{ ...skill, source: 'github' }]);
   vi.mocked(api.getSkill).mockResolvedValue({ ...skill, source: 'github' });
   vi.mocked(api.createSkill).mockResolvedValue({ ...skill, id: 2, name: 'Code review copy' });
   render(<SkillsSection />);
-  fireEvent.click(await screen.findByRole('button', { name: 'View Code review' }));
-  fireEvent.click(await screen.findByRole('button', { name: 'Create a copy' }));
-  expect(screen.getByLabelText('Name')).toHaveValue('Code review copy');
+  fireEvent.click(await screen.findByRole('button', { name: 'Manage Code review' }));
+  expect(screen.queryByRole('menuitem', { name: 'Edit skill' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Create a copy' }));
+  expect(await screen.findByLabelText('Name')).toHaveValue('Code review copy');
   fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Create skill' }));
   await screen.findByRole('button', { name: 'View Code review copy' });
   expect(api.updateSkill).not.toHaveBeenCalled();
@@ -103,6 +105,61 @@ it('copies imported instructions into a custom skill and leaves the source uncha
       default_enabled: false,
     }),
   );
+});
+
+it('opens the current instructions for editing from the menu', async () => {
+  render(<SkillsSection />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Manage Code review' }));
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Edit skill' }));
+  expect(await screen.findByLabelText(/^Instructions/)).toHaveValue(skill.instructions);
+  expect(api.getSkill).toHaveBeenCalledWith(skill.id);
+  expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+});
+
+it('supports keyboard menu navigation, dismissal, and returning focus', async () => {
+  render(<SkillsSection />);
+  const trigger = await screen.findByRole('button', { name: 'Manage Code review' });
+  fireEvent.click(trigger);
+  expect(screen.getByRole('menuitem', { name: 'View details' })).toHaveFocus();
+  fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+  expect(screen.getByRole('menuitem', { name: 'Edit skill' })).toHaveFocus();
+  fireEvent.keyDown(document.activeElement!, { key: 'End' });
+  expect(screen.getByRole('menuitem', { name: 'Remove skill' })).toHaveFocus();
+  fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+  expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  expect(trigger).toHaveFocus();
+  fireEvent.click(trigger);
+  fireEvent.pointerDown(document.body);
+  expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+});
+
+it('shows when a skill was added and keeps its complete description in details', async () => {
+  const added = new Date();
+  added.setDate(added.getDate() - 3);
+  vi.mocked(api.listSkills).mockResolvedValue([
+    { ...skill, created_at: added.toISOString(), updated_at: new Date().toISOString() },
+  ]);
+  render(<SkillsSection />);
+  expect((await screen.findAllByText('Added 3 days ago'))[0]).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'View Code review' }));
+  expect(within(screen.getByRole('dialog')).getByText(skill.description)).toBeInTheDocument();
+  expect(await screen.findByText(skill.instructions)).toBeInTheDocument();
+});
+
+it('shows only names and switches in the conversation picker without changing account defaults', async () => {
+  const changed = vi.fn();
+  render(<SkillPicker selected={[]} onChange={changed} />);
+  fireEvent.click(screen.getByRole('button', { name: /0 selected/ }));
+  const toggle = await screen.findByRole('switch', { name: skill.name });
+  expect(toggle).not.toBeChecked();
+  expect(screen.queryByText(skill.description)).not.toBeInTheDocument();
+  expect(screen.queryByText(/KB selected/)).not.toBeInTheDocument();
+  fireEvent.click(toggle);
+  expect(toggle).toBeChecked();
+  expect(changed).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+  expect(changed).toHaveBeenCalledWith([skill]);
+  expect(api.updateSkill).not.toHaveBeenCalled();
 });
 
 it('previews GitHub content before writing and confirms the reviewed digest', async () => {
@@ -166,12 +223,12 @@ it('keeps the current selection on cancel and applies an explicit empty selectio
   const changed = vi.fn();
   render(<SkillPicker selected={[skill]} onChange={changed} />);
   fireEvent.click(screen.getByRole('button', { name: /1 selected/ }));
-  fireEvent.click(await screen.findByRole('checkbox'));
+  fireEvent.click(await screen.findByRole('switch'));
   fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
   expect(changed).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: /1 selected/ }));
-  expect(await screen.findByRole('checkbox')).toBeChecked();
-  fireEvent.click(screen.getByRole('checkbox'));
+  expect(await screen.findByRole('switch')).toBeChecked();
+  fireEvent.click(screen.getByRole('switch'));
   fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
   expect(changed).toHaveBeenCalledWith([]);
 });
@@ -183,7 +240,7 @@ it('requires deselecting a removed saved skill before applying changes', async (
   fireEvent.click(screen.getByRole('button', { name: /1 selected/ }));
   await screen.findByText(/Removed from library/);
   expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled();
-  fireEvent.click(screen.getByRole('checkbox'));
+  fireEvent.click(screen.getByRole('switch'));
   fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
   expect(changed).toHaveBeenCalledWith([]);
 });
@@ -196,7 +253,7 @@ it('closes on Escape without letting the conversation shortcut handle it', async
     </div>,
   );
   fireEvent.click(screen.getByRole('button', { name: /0 selected/ }));
-  await screen.findByRole('checkbox');
+  await screen.findByRole('switch');
   fireEvent.keyDown(screen.getByRole('button', { name: 'Apply' }), { key: 'Escape' });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(outside).not.toHaveBeenCalled();
@@ -209,13 +266,13 @@ it('keeps inherited content when Apply leaves the selected IDs unchanged', async
   ]);
   render(<SkillPicker selected={[skill]} onChange={changed} />);
   fireEvent.click(screen.getByRole('button', { name: /1 selected/ }));
-  await screen.findByRole('checkbox');
+  await screen.findByRole('switch');
   fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
   expect(changed).not.toHaveBeenCalled();
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
 
-it('shows selected bytes and blocks oversized combinations before submission', async () => {
+it('blocks oversized combinations and allows a selection at the limit', async () => {
   const changed = vi.fn();
   vi.mocked(api.listSkills).mockResolvedValue([
     { ...skill, instruction_bytes: 64 * 1024 },
@@ -224,11 +281,16 @@ it('shows selected bytes and blocks oversized combinations before submission', a
   ]);
   render(<SkillPicker selected={[]} onChange={changed} />);
   fireEvent.click(screen.getByRole('button', { name: /0 selected/ }));
-  const checkboxes = await screen.findAllByRole('checkbox');
+  const checkboxes = await screen.findAllByRole('switch');
   for (const checkbox of checkboxes) fireEvent.click(checkbox);
   expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled();
   expect(screen.getByRole('alert')).toHaveTextContent('Unselect a skill');
   fireEvent.click(checkboxes[2]);
-  expect(screen.getByText('128.0 / 128 KB selected')).toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Apply' })).toBeEnabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+  expect(changed).toHaveBeenCalledWith([
+    expect.objectContaining({ id: 1 }),
+    expect.objectContaining({ id: 2 }),
+  ]);
 });

@@ -320,7 +320,11 @@ async def _resolve_binding(
     )
     if connection_row is None:
         raise _refused(503, "server_error", f"The {alias!r} MCP connection no longer exists.")
-    if connection_row.get("status") == "disabled" or connection_row.get("deleted_at") is not None:
+    if (
+        not connection_row.get("enabled", True)
+        or connection_row.get("status") in {"disabled", "error"}
+        or connection_row.get("deleted_at") is not None
+    ):
         raise _refused(503, "server_error", f"The {alias!r} MCP connection is not usable.")
     if str(connection_row.get("transport")) == "stdio":
         # A local process needs a worker or a connector to run it, and neither

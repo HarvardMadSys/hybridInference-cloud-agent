@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -370,10 +371,30 @@ class FakeStore(AllCapabilities):
             rows.append(row)
         return rows
 
-    async def replace_mcp_bindings(self, *, thread_id: str, bindings: list[dict[str, Any]]) -> None:
-        # ``selection_pending`` is written FALSE by the real store: saving a
-        # selection is exactly what ends the asking.
-        self.bindings[thread_id] = [{**binding, "selection_pending": False} for binding in bindings]
+    async def replace_mcp_bindings(
+        self, *, thread_id: str, bindings: list[dict[str, Any]], merge: bool = False
+    ) -> None:
+        supplied = {item["connection_id"] for item in bindings}
+        previous = self.bindings.get(thread_id, [])
+        self.bindings[thread_id] = [
+            {**binding, "selection_pending": binding.get("selection_pending", False)}
+            for binding in bindings
+        ] + [
+            row if merge else {**row, "enabled": False}
+            for row in previous
+            if row["connection_id"] not in supplied
+        ]
+
+    async def set_mcp_connection_enabled(
+        self, *, connection_id: int, user_id: str, enabled: bool
+    ) -> dict[str, Any] | None:
+        row = self.connections.get(connection_id)
+        if row is None or row["user_id"] != user_id or row["deleted_at"] is not None:
+            return None
+        if row.get("enabled", True) != enabled:
+            row["authorization_epoch"] += 1
+        row["enabled"] = enabled
+        return dict(row)
 
     async def get_thread(self, thread_id: str) -> dict[str, Any] | None:
         return self.threads.get(thread_id)
@@ -704,6 +725,105 @@ class TestConnectionManagement:
 
 class TestAuthorization:
     """Starting a browser flow, including the client a server expects us to bring."""
+
+    @pytest.mark.parametrize(
+        "session_base,override,expected_base",
+        [
+            ("https://agents.example.com/api", "", "https://agents.example.com/api"),
+            ("https://example.com/agents/api", "", "https://example.com/agents/api"),
+            ("http://127.0.0.1:13002/api", "", "http://127.0.0.1:13002/api"),
+            (
+                "https://agents.example.com/api",
+                "https://mcp.example.com/api/",
+                "https://mcp.example.com/api",
+            ),
+        ],
+    )
+    def test_sign_in_reuses_the_public_session_callback_through_token_exchange(
+        self, monkeypatch, session_base, override, expected_base
+    ) -> None:
+        """Registration, authorization and redemption agree without a second URL setting."""
+        from cloud_agent.mcp import oauth
+
+        monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", override)
+        monkeypatch.setenv("AGENT_SESSION_REDIRECT_URI", f"{session_base}/v1/session/callback")
+        monkeypatch.setenv("AGENT_WEB_BASE_URL", "https://web.example.com/agents")
+        metadata = oauth.AuthorizationServerMetadata(
+            issuer="https://mcp.notion.com",
+            authorization_endpoint="https://mcp.notion.com/authorize",
+            token_endpoint="https://mcp.notion.com/token",
+            registration_endpoint="https://mcp.notion.com/register",
+            scopes_supported=("default",),
+        )
+        monkeypatch.setattr(
+            oauth, "discover_authorization_server", AsyncMock(return_value=(None, metadata))
+        )
+        register = AsyncMock(
+            return_value={"client_id": "notion-client", "token_endpoint_auth_method": "none"}
+        )
+        exchange = AsyncMock(
+            return_value={
+                "access_token": "notion-token",
+                "refresh_token": "refresh",
+                "expires_in": 3600,
+            }
+        )
+        monkeypatch.setattr(mcp_connections, "_post_json", register)
+        monkeypatch.setattr(mcp_connections, "_post_form", exchange)
+        store = FakeStore()
+        connection_id = _seed(
+            store, url="https://mcp.notion.com/mcp", auth_kind="oauth", auth_config={}
+        )
+
+        async def save_flow(**kwargs):
+            store.oauth_flow = kwargs
+            store.oauth_state_hash = kwargs["state_hash"]
+            store.connections[connection_id]["oauth_generation"] = kwargs["oauth_generation"]
+
+        monkeypatch.setattr(store, "create_mcp_oauth_flow", save_flow, raising=False)
+        expected = f"{expected_base}/v1/agent/mcp/oauth/callback/{connection_id}"
+        with _client(store) as client:
+            response = client.post(
+                f"/v1/agent/mcp/connections/{connection_id}/authorize",
+                headers={"Host": "untrusted.example", "X-Forwarded-Host": "untrusted.example"},
+            )
+            assert response.status_code == 200, response.text
+            query = parse_qs(urlsplit(response.json()["authorization_url"]).query)
+            assert query["redirect_uri"] == [expected]
+            assert query["code_challenge_method"] == ["S256"]
+            assert register.call_args.args[2]["redirect_uris"] == [expected]
+            callback = client.get(
+                f"/v1/agent/mcp/oauth/callback/{connection_id}",
+                params={"state": query["state"][0], "code": "authorization-code"},
+                follow_redirects=False,
+            )
+        assert callback.status_code == 302
+        assert callback.headers["location"].startswith(
+            "https://web.example.com/agents/integrations?"
+        )
+        assert parse_qs(urlsplit(callback.headers["location"]).query)["mcp_authorized"] == ["1"]
+        assert exchange.call_args.args[0].form()["redirect_uri"] == expected
+        assert (
+            mcp_cipher(_ENCRYPTION_KEY).decrypt(
+                store.connections[connection_id]["access_token_ciphertext"]
+            )
+            == "notion-token"
+        )
+
+    @pytest.mark.parametrize(
+        "callback",
+        [
+            "",
+            "https://example.com/integrations",
+            "https://example.com/v1/session/callback?next=other",
+        ],
+    )
+    def test_missing_or_unrecognized_callback_does_not_guess_an_address(
+        self, monkeypatch, callback
+    ):
+        monkeypatch.delenv("AGENT_MCP_PUBLIC_BASE_URL", raising=False)
+        monkeypatch.setenv("AGENT_SESSION_REDIRECT_URI", callback)
+        assert mcp_connections._public_base_url() == ""
 
     def test_a_client_id_can_be_supplied_before_the_flow(self) -> None:
         """Some servers expect the user to bring one, and it has to persist.
@@ -1578,3 +1698,81 @@ class TestTheOAuthPostsAreBounded:
         with pytest.raises(TransportError):
             await mcp_connections._post_form(_Request(), policy=EgressPolicy(allow_private=True))
         assert stream.pulled < 64, "the whole token reply was read before the limit applied"
+
+
+class TestAutomaticServerAccess:
+    def test_connection_can_be_paused_without_losing_credentials(self) -> None:
+        store = FakeStore()
+        cid = _seed(store, access_token_ciphertext="encrypted-credential")
+        with _client(store) as client:
+            paused = client.put(f"/v1/agent/mcp/connections/{cid}/enabled", json={"enabled": False})
+            assert paused.status_code == 200
+            assert paused.json()["enabled"] is False
+            assert paused.json()["has_credential"] is True
+            assert "encrypted-credential" not in paused.text
+            resumed = client.put(f"/v1/agent/mcp/connections/{cid}/enabled", json={"enabled": True})
+        assert resumed.json()["enabled"] is True
+        assert store.connections[cid]["access_token_ciphertext"] == "encrypted-credential"
+
+    def test_cannot_toggle_another_owners_connection(self) -> None:
+        store = FakeStore()
+        cid = _seed(store, user_id="someone-else")
+        with _client(store) as client:
+            response = client.put(
+                f"/v1/agent/mcp/connections/{cid}/enabled", json={"enabled": False}
+            )
+        assert response.status_code == 404
+        assert store.connections[cid].get("enabled", True) is True
+
+    def test_default_access_can_be_enabled_before_discovery_and_disabled_again(self) -> None:
+        store = FakeStore()
+        cid = _seed(store)
+        store.threads["thread-1"] = {"id": "thread-1", "user_id": _OWNER}
+        with _client(store) as client:
+            for enabled in (True, False):
+                response = client.put(
+                    f"/v1/agent/mcp/threads/thread-1/bindings/{cid}",
+                    json={"connection_id": cid, "enabled": enabled, "use_defaults": True},
+                )
+                assert response.status_code == 200, response.text
+                row = response.json()["bindings"][0]
+                assert row["enabled"] is enabled
+                assert row["selection_pending"] is True
+                assert row["tools"] == {}
+
+    def test_editing_one_server_preserves_the_other_servers_fences_and_rules(self) -> None:
+        store = FakeStore()
+        first, second = _seed(store), _seed(store)
+        store.threads["thread-1"] = {"id": "thread-1", "user_id": _OWNER}
+        with _client(store) as client:
+            for cid in (first, second):
+                response = client.put(
+                    f"/v1/agent/mcp/threads/thread-1/bindings/{cid}",
+                    json={"connection_id": cid, "use_defaults": True},
+                )
+                assert response.status_code == 200
+            other = dict(
+                next(row for row in store.bindings["thread-1"] if row["connection_id"] == second)
+            )
+            store.connections[second]["authorization_epoch"] += 1
+            response = client.put(
+                f"/v1/agent/mcp/threads/thread-1/bindings/{first}",
+                json={"connection_id": first, "enabled": False, "use_defaults": True},
+            )
+        assert response.status_code == 200
+        assert (
+            next(row for row in store.bindings["thread-1"] if row["connection_id"] == second)
+            == other
+        )
+
+    def test_an_override_cannot_reuse_another_servers_alias(self) -> None:
+        store = FakeStore()
+        first, second = _seed(store), _seed(store)
+        store.threads["thread-1"] = {"id": "thread-1", "user_id": _OWNER}
+        with _client(store) as client:
+            for cid, expected in ((first, 200), (second, 400)):
+                response = client.put(
+                    f"/v1/agent/mcp/threads/thread-1/bindings/{cid}",
+                    json={"connection_id": cid, "alias": "wiki", "use_defaults": True},
+                )
+                assert response.status_code == expected

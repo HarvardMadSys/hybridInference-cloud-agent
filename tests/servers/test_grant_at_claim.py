@@ -96,6 +96,10 @@ class _ClaimStore(AllCapabilities):
             "metadata": {},
         }
 
+    async def list_mcp_bindings(self, *, thread_id: str) -> list[dict[str, Any]]:
+        """This grant-focused fixture has no account MCP connections."""
+        return []
+
     async def release_claim(
         self, *, job_id: str, attempt_id: int, lease_generation: int | None = None
     ) -> bool:

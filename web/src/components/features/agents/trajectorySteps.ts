@@ -1,3 +1,4 @@
+import { isActiveJobState } from './conversationJob';
 // The inspectable projection of the stored stream.
 //
 // `trajectory.ts` keeps one row per stored event and is deliberately literal:
@@ -167,10 +168,6 @@ export interface TurnContext {
   isAttemptActive: (jobId: string, attemptId: number) => boolean;
 }
 
-// Server-side job states that can still produce a record. A queued turn is one
-// that has not started yet; the rest are running or finishing.
-const ACTIVE_JOB_STATES = new Set(['running', 'queued', 'publishing']);
-
 /**
  * Build the default context from thread job rows: the attempt a live turn names
  * is active, everything else has already stopped.
@@ -187,7 +184,7 @@ export function turnContextFromJobs(
   return {
     isAttemptActive: (jobId, attemptId) => {
       const job = byId.get(jobId);
-      if (!job || !ACTIVE_JOB_STATES.has(job.state)) return false;
+      if (!job || !isActiveJobState(job.state)) return false;
       if (job.current_attempt_id === null) return false;
       if (job.current_attempt_id === undefined) return true;
       return job.current_attempt_id === attemptId;

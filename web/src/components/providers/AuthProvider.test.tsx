@@ -7,15 +7,17 @@ import type { AgentAccessApi } from '@/lib/api/session';
 
 vi.mock('@/lib/api/session', () => ({ getSessionUser: vi.fn(), endSession: vi.fn() }));
 
+import { sideChatKeys } from '@/components/features/agents/sideChatStorage';
 import { getSessionUser } from '@/lib/api/session';
 import { AuthProvider, hasAgentPermission, useAuth } from './AuthProvider';
 
 const getMe = vi.mocked(getSessionUser);
 
 function Consumer() {
-  const { state, refreshUser } = useAuth();
+  const { state, refreshUser, logout } = useAuth();
   return (
     <>
+      <button onClick={() => void logout()}>Sign out</button>
       <output data-testid="auth">{JSON.stringify(state)}</output>
       <button onClick={() => void refreshUser()}>Refresh</button>
     </>
@@ -149,4 +151,22 @@ it('does not retain profile fields from an older API response', async () => {
     id: 'u1',
     agent_access: { allowed: true, permissions: ['agent.use'] },
   });
+});
+
+it('clears only the signing-out user’s unsent side drafts', async () => {
+  getMe.mockResolvedValue({ id: 'draft-owner' });
+  const own = sideChatKeys('draft-owner', 'main').draft;
+  const other = sideChatKeys('other-owner', 'main').draft;
+  sessionStorage.setItem(own, 'private draft');
+  sessionStorage.setItem(other, 'other draft');
+  render(
+    <AuthProvider>
+      <Consumer />
+    </AuthProvider>,
+  );
+  await waitFor(() => expect(current().loading).toBe(false));
+  fireEvent.click(screen.getByText('Sign out'));
+  await waitFor(() => expect(current().isAuthenticated).toBe(false));
+  expect(sessionStorage.getItem(own)).toBeNull();
+  expect(sessionStorage.getItem(other)).toBe('other draft');
 });

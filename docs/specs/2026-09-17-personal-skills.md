@@ -6,6 +6,12 @@ Owners can create, edit, inspect, copy, remove, and choose defaults. Import acce
 a GitHub repository/folder/SKILL.md URL or an uploaded SKILL.md with YAML `name`
 and `description` frontmatter. The body must contain Markdown instructions.
 
+Library rows show the name, a single-line description, and when the skill was
+added. The Auto-use switch controls account defaults for new chats; the overflow
+menu opens details, editing, copying, and removal. Conversation pickers show only
+names and switches, with Apply/Cancel for session-specific changes. Full descriptions
+remain in the library details, and selection-limit warnings appear when needed.
+
 ## Selection and execution
 
 - A default switch affects new conversations. The task composer starts with the

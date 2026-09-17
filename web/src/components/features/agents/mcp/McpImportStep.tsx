@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import {
   previewMcpImport,
   saveMcpImport,
@@ -88,11 +88,14 @@ const EXAMPLES = {
 export function McpImportStep({
   onAdded,
   onBusyChange,
+  initialText = '',
 }: {
   onAdded: (connections: McpConnectionApi[]) => void;
   onBusyChange?: (busy: boolean) => void;
+  initialText?: string;
 }) {
-  const [text, setText] = useState('');
+  const inputId = useId();
+  const [text, setText] = useState(initialText);
   const [preview, setPreview] = useState<McpImportPreviewApi | null>(null);
   const [locations, setLocations] = useState<Record<string, McpLocation>>({});
   const [secrets, setSecrets] = useState<Record<string, Record<string, string>>>({});
@@ -169,15 +172,18 @@ export function McpImportStep({
   return (
     <div>
       <p className="text-sm text-gray-600 dark:text-gray-400">
-        Paste your <code className="text-xs">mcpServers</code> configuration to connect your tools
-        and data. You can add several servers at once.
+        {initialText ? (
+          'Review the configuration below. You can edit it before adding the server.'
+        ) : (
+          <>
+            Paste your <code className="text-xs">mcpServers</code> configuration to connect your
+            tools and data. You can add several servers at once.
+          </>
+        )}
       </p>
       <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 dark:border-white/10">
         <div className="flex items-center justify-between gap-3 border-b border-gray-200 bg-gray-50 px-3 py-2 dark:border-white/10 dark:bg-white/5">
-          <label
-            htmlFor="mcp-import-text"
-            className="font-mono text-xs text-gray-600 dark:text-gray-300"
-          >
+          <label htmlFor={inputId} className="font-mono text-xs text-gray-600 dark:text-gray-300">
             mcp.json
           </label>
           <div className="flex gap-3 text-xs text-gray-500 dark:text-gray-400">
@@ -200,7 +206,7 @@ export function McpImportStep({
           </div>
         </div>
         <textarea
-          id="mcp-import-text"
+          id={inputId}
           aria-label="MCP configuration"
           value={text}
           onChange={(event) => edit(event.target.value)}

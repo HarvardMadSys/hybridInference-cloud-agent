@@ -22,17 +22,20 @@ import {
 import { SkillEditor } from './SkillEditor';
 import { SkillImportDialog } from './SkillImportDialog';
 import { useSkillLibrary } from './useSkillLibrary';
-
-const SOURCE_LABELS = { created: 'Created by you', uploaded: 'Uploaded file', github: 'GitHub' };
+import { SkillRow, SOURCE_LABELS, type SkillAction } from './SkillRow';
 
 function SkillDetails({
   summary,
+  action = 'view',
+  onSaved,
   onClose,
   onEdit,
   onChanged,
   onRemoved,
 }: {
   summary: SkillSummaryApi;
+  action?: SkillAction;
+  onSaved: (skill: SkillApi) => void;
   onClose: () => void;
   onEdit: (skill: SkillApi, copy: boolean) => void;
   onChanged: (skill: SkillApi) => void;
@@ -41,7 +44,7 @@ function SkillDetails({
   const [skill, setSkill] = useState<SkillApi | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [removing, setRemoving] = useState(false);
+  const [removing, setRemoving] = useState(action === 'remove');
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
   useEffect(() => {
@@ -93,6 +96,12 @@ function SkillDetails({
     } finally {
       setBusy(false);
     }
+  }
+
+  if (skill && (action === 'edit' || action === 'copy')) {
+    return (
+      <SkillEditor skill={skill} copy={action === 'copy'} onClose={onClose} onSaved={onSaved} />
+    );
   }
 
   return (
@@ -207,7 +216,7 @@ function SkillDetails({
 type DialogState =
   | { kind: 'create'; skill?: SkillApi; copy?: boolean }
   | { kind: 'import' }
-  | { kind: 'detail'; skill: SkillSummaryApi }
+  | { kind: 'detail'; skill: SkillSummaryApi; action?: SkillAction }
   | null;
 
 /** Personal instruction library, directly below MCP on the Integrations page. */
@@ -312,56 +321,22 @@ export function SkillsSection() {
         <>
           <div className="mt-6 flex items-center justify-between border-b border-gray-100 pb-2 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
             <span>Your skills</span>
-            <span className="hidden pr-9 sm:inline">Default for new chats</span>
+            <span
+              className="mr-10 w-16 text-center sm:mr-11"
+              title="Automatically enable skills in new chats"
+            >
+              Auto-use
+            </span>
           </div>
           <div className="divide-y divide-gray-100 dark:divide-white/5">
             {skills.map((skill) => (
-              <div key={skill.id} className="flex flex-wrap items-center gap-x-4 gap-y-2 py-4">
-                <button
-                  type="button"
-                  onClick={() => setDialog({ kind: 'detail', skill })}
-                  aria-label={`View ${skill.name}`}
-                  className="group flex min-w-0 flex-1 basis-full items-start gap-3 text-left sm:basis-auto"
-                >
-                  <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-gray-200 text-gray-500 dark:border-white/10 dark:text-gray-400">
-                    <SkillIcon className="h-4 w-4" />
-                  </span>
-                  <span className="min-w-0">
-                    <span className="block break-words text-sm font-medium text-gray-900 group-hover:text-crimson dark:text-gray-100">
-                      {skill.name}
-                    </span>
-                    <span className="mt-0.5 block break-words text-sm text-gray-500 dark:text-gray-400">
-                      {skill.description}
-                    </span>
-                    <span className="mt-1 block text-xs text-gray-400 dark:text-gray-500">
-                      {SOURCE_LABELS[skill.source]}
-                    </span>
-                  </span>
-                </button>
-                <label className="ml-12 mr-auto flex cursor-pointer items-center gap-2 sm:ml-2 sm:mr-4">
-                  <input
-                    type="checkbox"
-                    role="switch"
-                    checked={skill.default_enabled}
-                    disabled={busyId !== null}
-                    onChange={() => void toggle(skill)}
-                    aria-label={`Use ${skill.name} by default in new chats`}
-                    className="peer sr-only"
-                  />
-                  <span className="relative inline-flex h-5 w-9 shrink-0 rounded-full bg-gray-200 transition peer-checked:bg-gray-900 peer-focus-visible:ring-2 peer-focus-visible:ring-crimson peer-focus-visible:ring-offset-2 peer-disabled:opacity-50 dark:bg-gray-700 dark:peer-checked:bg-gray-100 after:absolute after:left-0.5 after:top-0.5 after:h-4 after:w-4 after:rounded-full after:bg-white after:shadow-sm after:transition-transform peer-checked:after:translate-x-4 dark:after:bg-gray-900" />
-                  <span className="text-xs text-gray-500 sm:hidden dark:text-gray-400">
-                    Default for new chats
-                  </span>
-                </label>
-                <button
-                  type="button"
-                  onClick={() => setDialog({ kind: 'detail', skill })}
-                  aria-label={`Manage ${skill.name}`}
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-50 dark:text-gray-500 dark:hover:bg-white/5"
-                >
-                  <span aria-hidden="true">›</span>
-                </button>
-              </div>
+              <SkillRow
+                key={skill.id}
+                skill={skill}
+                disabled={busyId !== null}
+                onToggle={() => void toggle(skill)}
+                onAction={(action) => setDialog({ kind: 'detail', skill, action })}
+              />
             ))}
           </div>
         </>
@@ -398,6 +373,8 @@ export function SkillsSection() {
       {dialog?.kind === 'detail' ? (
         <SkillDetails
           summary={dialog.skill}
+          action={dialog.action}
+          onSaved={saved}
           onClose={() => setDialog(null)}
           onEdit={(skill, copy) => setDialog({ kind: 'create', skill, copy })}
           onChanged={changed}

@@ -86,6 +86,16 @@ class PostgresSessionForkRepository:
                     result["error"] = "idempotency_conflict"
                 return result
 
+            # Replay above may recover a committed child after archival. Only
+            # new operations are refused, under the source thread lock.
+            if (
+                await conn.fetchval(
+                    "SELECT archived_at FROM agent_threads WHERE id = $1", thread_id
+                )
+                is not None
+            ):
+                return {"error": "session_archived"}
+
             source = await conn.fetchrow(
                 f"{JOB_SELECT} WHERE j.id = $1 AND j.user_id = $2 FOR UPDATE OF j",
                 source_job_id,

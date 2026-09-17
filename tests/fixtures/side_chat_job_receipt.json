@@ -1,0 +1,6 @@
+{
+  "sandbox_id": "shared",
+  "thread_id": "side",
+  "fork_anchor_job_id": "main-2",
+  "workspace_shared": true
+}

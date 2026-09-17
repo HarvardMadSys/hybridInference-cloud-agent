@@ -11,6 +11,7 @@ import {
   SkillDialog,
   SkillErrorMessage,
   SkillIcon,
+  SkillSwitch,
   SKILL_BUTTON,
   SKILL_PRIMARY,
 } from './SkillDialog';
@@ -59,8 +60,8 @@ function SelectionDialog({
   const invalid = missing.some((skill) => checked.has(skill.id));
   return (
     <SkillDialog
-      title="Skills for this conversation"
-      description="The agent can use selected skills when they fit your task."
+      title="Skills"
+      description="For this conversation"
       onClose={onClose}
       footer={
         <>
@@ -104,31 +105,33 @@ function SelectionDialog({
       ) : (
         <div className="divide-y divide-gray-100 dark:divide-white/5">
           {[...skills, ...missing].map((skill) => (
-            <label key={skill.id} className="flex cursor-pointer items-start gap-3 py-3">
-              <input
-                type="checkbox"
+            <div key={skill.id} className="flex items-center justify-between gap-4 py-3">
+              <div className="min-w-0">
+                <span
+                  className="block truncate text-sm font-medium text-gray-900 dark:text-gray-100"
+                  title={skill.name}
+                >
+                  {skill.name}
+                </span>
+                {!available.has(skill.id) ? (
+                  <span className="mt-0.5 block text-xs text-gray-500 dark:text-gray-400">
+                    Removed from library. Turn off to continue.
+                  </span>
+                ) : null}
+              </div>
+              <SkillSwitch
+                label={skill.name}
                 checked={checked.has(skill.id)}
-                onChange={(event) =>
+                onChange={(enabled) =>
                   setChecked((old) => {
                     const next = new Set(old);
-                    if (event.target.checked) next.add(skill.id);
+                    if (enabled) next.add(skill.id);
                     else next.delete(skill.id);
                     return next;
                   })
                 }
-                className="mt-1 accent-gray-900 dark:accent-gray-100"
               />
-              <span className="min-w-0">
-                <span className="block break-words text-sm font-medium text-gray-900 dark:text-gray-100">
-                  {skill.name}
-                </span>
-                <span className="mt-0.5 block text-xs text-gray-500 dark:text-gray-400">
-                  {available.has(skill.id)
-                    ? `${skill.description}${'instruction_bytes' in skill && typeof skill.instruction_bytes === 'number' ? ` · ${(skill.instruction_bytes / 1024).toFixed(1)} KB` : ''}`
-                    : 'Removed from library. Unselect it to change this conversation’s skills.'}
-                </span>
-              </span>
-            </label>
+            </div>
           ))}
           {!skills.length && !missing.length ? (
             <p className="py-5 text-sm text-gray-500 dark:text-gray-400">
@@ -140,15 +143,10 @@ function SelectionDialog({
       {checked.size > limits.max_selected ? (
         <SkillErrorMessage message={`Select at most ${limits.max_selected} skills.`} />
       ) : null}
-      <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-        {(selectedBytes / 1024).toFixed(1)} / {limits.max_selection_bytes / 1024} KB selected
-      </p>
       {oversized ? (
         <SkillErrorMessage message="Unselect a skill to fit the combined instruction size limit." />
       ) : null}
-      <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-        Changes apply to the next message. Earlier messages keep their saved skill versions.
-      </p>
+      <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">Applies to your next message.</p>
     </SkillDialog>
   );
 }
