@@ -2,7 +2,7 @@
 
 ## Goal
 
-Make MCP servers easy to connect: choose a known service or paste its
+Make MCP servers easy to connect: search the official MCP directory or paste its
 `mcpServers` JSON, then see whether it connected and which tools it
 offers. The previous UI separated templates, import and manual configuration,
 exposed protocol and execution details up front, and required a separate Test
@@ -12,9 +12,12 @@ action after adding a server or returning from OAuth.
 
 - Integrations lists MCP servers with a connection state and tool count. Protocol,
   runtime and credential metadata are available under Server details.
-- Add server opens Popular servers: Linear, Notion, Context7 and GitHub. Connect
-  creates the connection and starts sign-in. GitHub also accepts a personal access
-  token; OAuth can request a client ID when the provider requires one.
+- Add server opens a searchable MCP directory synchronized from the official
+  Registry. Cards show the publisher identifier as well as the display name.
+  Select an endpoint or package, review its generated JSON, then add it. Remote
+  endpoints can use automatic authorization discovery or a Bearer access token.
+  Linear, Notion, Context7 and GitHub presets remain available as a fallback when
+  the directory has not synced or cannot be loaded.
 - Add with JSON opens a `mcp.json` editor. URL and command examples explain the
   accepted shape. Validation runs after typing stops and shows the servers that
   will be added, missing credential values and any rejected entries.
@@ -29,8 +32,8 @@ action after adding a server or returning from OAuth.
   available in the cloud merely by pasting a config.
 - Saving starts connection discovery automatically. Returning from successful
   OAuth also discovers tools, after checking that a credential was stored. A
-  pasted URL that requires OAuth offers Sign in. Failed discovery remains an
-  error and offers retry.
+  single newly added URL that requires OAuth starts sign-in. Existing connections
+  still offer Sign in explicitly. Failed discovery remains an error and offers retry.
 - Conversations still select their own servers and permissions. Ask before each
   call and Disable all apply to the server's currently discovered capabilities;
   Save selection commits that choice. Adding a server never silently grants its
@@ -61,3 +64,37 @@ preset selection, JSON add/discovery, invalid input, tab switching, Escape,
 mobile layout, dark mode and masked token fields. These checks do not authenticate
 real external provider accounts. Provider sign-in still needs a deployed callback
 URL and an authorized test account for end-to-end verification.
+
+## Official directory synchronization
+
+The control-plane background task fetches all latest Registry pages hourly. It
+keeps active records, follows opaque pagination cursors, and atomically replaces
+a durable Postgres snapshot only after the complete fetch succeeds. A failed or
+incomplete fetch retains the previous snapshot and retries after five minutes.
+The API searches the in-memory snapshot; it never calls the Registry on a user
+request. Fresh database snapshots are reused after restart. The relay listener
+does not run this task, and application readiness never waits for a sync.
+
+This is a directory, not a popularity ranking or a guarantee that a listed
+service is online. A small familiar-first ordering is independent of metadata
+updates. The feed can update descriptions, endpoints and pinned package versions
+for new connections. It never modifies existing connections or credentials.
+
+Generated configurations cover public HTTPS streamable HTTP/SSE endpoints,
+single credential headers, and simple pinned npm/PyPI stdio packages. Multiple
+endpoints remain explicit choices. Recipes needing unsupported header combinations,
+URL interpolation, runtime/package arguments or other package formats remain
+listed with a documentation path to manual JSON; required fields are never
+silently omitted. Importing still uses the existing target validation, encrypted
+credential storage, execution-location choice and per-conversation permissions.
+
+Migration 0012 adds a standalone cache table and does not alter the connection
+schema or old API projections. No feature flag or external API key is required.
+
+Validation includes real full-feed synchronization, round-tripping generated
+configurations through the importer, cached restart, interrupted pagination,
+deleted records, search races, pagination, endpoint selection, credentials,
+fallback/retry and automatic sign-in after adding a URL. Provider-account OAuth
+and real package execution remain outside the isolated UI smoke test.
+
+Source: [Official Registry aggregator API](https://modelcontextprotocol.io/registry/registry-aggregators).

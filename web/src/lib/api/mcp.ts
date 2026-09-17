@@ -76,6 +76,24 @@ export interface McpTemplateApi {
   notes: string[];
 }
 
+/** Public metadata from the official MCP Registry, never an installed connection. */
+export interface McpCatalogEntryApi {
+  name: string;
+  label: string;
+  description: string;
+  version: string;
+  website_url: string | null;
+  configurations: { label: string; json: string }[];
+}
+
+export interface McpCatalogApi {
+  entries: McpCatalogEntryApi[];
+  total: number;
+  next_offset: number | null;
+  synced_at: string | null;
+  stale: boolean;
+}
+
 /** One connection as its owner sees it. No field can hold a secret. */
 export interface McpConnectionApi {
   id: number;
@@ -295,6 +313,12 @@ export async function listMcpConnections(): Promise<McpConnectionsApi> {
 /** Templates alone, for a caller that needs presets before it needs a list. */
 export async function listMcpTemplates(): Promise<McpTemplateApi[]> {
   return jsonOrThrow(await fetchWithAuth(API_BASE, '/v1/agent/mcp/templates'));
+}
+
+/** Search our durable directory cache; this does not contact a listed server. */
+export async function listMcpCatalog(search = '', offset = 0): Promise<McpCatalogApi> {
+  const query = new URLSearchParams({ search, offset: String(offset) });
+  return jsonOrThrow(await fetchWithAuth(API_BASE, `/v1/agent/mcp/catalog?${query}`));
 }
 
 /** Add one connection after the platform validates its address and credential. */

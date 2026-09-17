@@ -83,6 +83,7 @@ export function McpConnectionsSection({
             return { connection, result };
           }),
         );
+        let authorizationNeeded: McpConnectionApi | null = null;
         const failures: string[] = [];
         const connected: string[] = [];
         for (let index = 0; index < results.length; index++) {
@@ -96,12 +97,20 @@ export function McpConnectionsSection({
               `${outcome.value.connection.label} connected. ${capabilitySummary(outcome.value.result)}.`,
             );
           } else {
+            if (
+              connections.length === 1 &&
+              outcome.value.connection.auth_kind === 'none' &&
+              outcome.value.result.error_kind === 'needs_authorization'
+            ) {
+              authorizationNeeded = outcome.value.connection;
+            }
             failures.push(`${outcome.value.connection.label}: ${outcome.value.result.message}`);
           }
         }
         if (connected.length) setNotice(connected.join(' '));
         if (failures.length) setError(failures.join(' '));
         await load();
+        return authorizationNeeded;
       } catch (cause: unknown) {
         setError(cause instanceof Error ? cause.message : 'Could not refresh your servers.');
       } finally {
@@ -182,7 +191,8 @@ export function McpConnectionsSection({
     ) {
       await authorize(connections[0]);
     } else {
-      await check(connections);
+      const authorizationNeeded = await check(connections);
+      if (authorizationNeeded) await authorize(authorizationNeeded);
     }
   }
 
@@ -278,7 +288,7 @@ export function McpConnectionsSection({
               Your tools, in every conversation
             </p>
             <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
-              Connect a popular service or paste an MCP JSON configuration to get started.
+              Browse MCP servers or paste an MCP JSON configuration to get started.
             </p>
           </div>
         ) : null}

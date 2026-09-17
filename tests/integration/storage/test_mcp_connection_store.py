@@ -1815,3 +1815,21 @@ async def test_the_ambiguous_quarantine_branch_cannot_be_reached_from_the_old_sc
         async with pool.acquire() as conn:
             await reset_agent_tables(conn)
         await pool.close()
+
+
+async def test_public_catalog_snapshot_survives_repository_restart_and_refuses_older_sync(pool):
+    """Replacing the directory is atomic and cannot overwrite newer metadata."""
+    from cloud_agent.storage.repositories.mcp_catalog import PostgresMcpCatalogRepository
+
+    catalog = PostgresMcpCatalogRepository(pool)
+    assert await catalog.load_mcp_catalog() is None
+    first = datetime.now(timezone.utc)
+    await catalog.save_mcp_catalog([{"name": "com.example/old"}], first)
+    newer = first + timedelta(hours=1)
+    await catalog.save_mcp_catalog([{"name": "com.example/new"}], newer)
+    await catalog.save_mcp_catalog([{"name": "com.example/stale"}], first)
+    restarted = PostgresMcpCatalogRepository(pool)
+    assert await restarted.load_mcp_catalog() == {
+        "entries": [{"name": "com.example/new"}],
+        "synced_at": newer,
+    }

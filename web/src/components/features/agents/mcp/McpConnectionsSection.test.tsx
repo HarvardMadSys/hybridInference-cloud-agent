@@ -185,7 +185,7 @@ describe('McpConnectionsSection', () => {
 
     expect(
       await screen.findByText(
-        'Connect a popular service or paste an MCP JSON configuration to get started.',
+        'Browse MCP servers or paste an MCP JSON configuration to get started.',
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add server' })).toBeInTheDocument();
@@ -235,49 +235,63 @@ describe('McpConnectionsSection', () => {
     expect(mockedAuthorize).toHaveBeenCalledWith(3, undefined);
   });
 
-  it('connects imported servers automatically without another Test click', async () => {
-    const saved = { ...connection, auth_kind: 'none' as const, status: 'draft' as const };
-    mockedList.mockResolvedValueOnce({ connections: [], templates: [] }).mockResolvedValue({
-      connections: [{ ...saved, status: 'active', error_kind: 'none', error_detail: null }],
-      templates: [],
-    });
-    vi.mocked(previewMcpImport).mockResolvedValue({
-      dialect: 'json',
-      rejected: [],
-      drafts: [
-        {
-          label: 'Team wiki',
-          transport: 'streamable-http',
-          location: 'remote',
-          url: connection.url,
-          argv: [],
-          env_names: [],
-          headers: [],
-          secrets: [],
-          paths: [],
-          package: null,
-          warnings: [],
-        },
-      ],
-    });
-    vi.mocked(saveMcpImport).mockResolvedValue({
-      dialect: 'json',
-      rejected: [],
-      drafts: [],
-      saved: [saved],
-    });
-    mockedTest.mockResolvedValue({ ok: true, tool_count: 4, resource_count: 0, prompt_count: 0 });
-    render(<McpConnectionsSection />);
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Add with JSON' })).toBeEnabled(),
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Add with JSON' }));
-    fireEvent.change(screen.getByLabelText('MCP configuration'), {
-      target: { value: '{"mcpServers":{"wiki":{"url":"https://wiki.example.com/mcp"}}}' },
-    });
-    fireEvent.click(await screen.findByRole('button', { name: 'Add 1 server' }));
-    expect(await screen.findByText('Team wiki connected. 4 tools.')).toBeInTheDocument();
-    expect(mockedTest).toHaveBeenCalledWith(3);
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  });
+  it.each([false, true])(
+    'connects an imported server and starts required sign-in (OAuth: %s)',
+    async (needsOAuth) => {
+      const saved = { ...connection, auth_kind: 'none' as const, status: 'draft' as const };
+      mockedList.mockResolvedValueOnce({ connections: [], templates: [] }).mockResolvedValue({
+        connections: [{ ...saved, status: 'active', error_kind: 'none', error_detail: null }],
+        templates: [],
+      });
+      vi.mocked(previewMcpImport).mockResolvedValue({
+        dialect: 'json',
+        rejected: [],
+        drafts: [
+          {
+            label: 'Team wiki',
+            transport: 'streamable-http',
+            location: 'remote',
+            url: connection.url,
+            argv: [],
+            env_names: [],
+            headers: [],
+            secrets: [],
+            paths: [],
+            package: null,
+            warnings: [],
+          },
+        ],
+      });
+      vi.mocked(saveMcpImport).mockResolvedValue({
+        dialect: 'json',
+        rejected: [],
+        drafts: [],
+        saved: [saved],
+      });
+      mockedTest.mockResolvedValue(
+        needsOAuth
+          ? { ok: false, error_kind: 'needs_authorization', message: 'Sign in required' }
+          : { ok: true, tool_count: 4, resource_count: 0, prompt_count: 0 },
+      );
+      mockedAuthorize.mockResolvedValue({ needs_client_id: true, message: 'Enter client ID' });
+      vi.mocked(enableMcpOAuth).mockResolvedValue({ ...saved, auth_kind: 'oauth' });
+      render(<McpConnectionsSection />);
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Add with JSON' })).toBeEnabled(),
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Add with JSON' }));
+      fireEvent.change(screen.getByLabelText('MCP configuration'), {
+        target: { value: '{"mcpServers":{"wiki":{"url":"https://wiki.example.com/mcp"}}}' },
+      });
+      fireEvent.click(await screen.findByRole('button', { name: 'Add 1 server' }));
+      if (needsOAuth) {
+        await waitFor(() => expect(enableMcpOAuth).toHaveBeenCalledWith(saved));
+        expect(mockedAuthorize).toHaveBeenCalledWith(3, undefined);
+      } else {
+        expect(await screen.findByText('Team wiki connected. 4 tools.')).toBeInTheDocument();
+      }
+      expect(mockedTest).toHaveBeenCalledWith(3);
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    },
+  );
 });
