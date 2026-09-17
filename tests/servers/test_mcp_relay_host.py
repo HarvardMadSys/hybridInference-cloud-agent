@@ -370,14 +370,22 @@ class TestTheMergedCatalogue:
         response = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
         assert "github__delete_everything" not in _tool_names(response)
 
+    @pytest.mark.parametrize(
+        "unavailable",
+        [
+            {"deleted_at": "2026-01-01T00:00:00Z"},
+            {"enabled": False},
+            {"status": "error", "error_kind": "unreachable"},
+        ],
+    )
     async def test_a_broken_connection_is_skipped_and_the_rest_survive(
-        self, client: AsyncClient
+        self, client: AsyncClient, unavailable
     ) -> None:
         """Losing every tool is a worse outcome than the failure that caused it."""
         store = FakeStore(
             connections={
                 7: _connection(7, "GitHub"),
-                8: _connection(8, "Docs", deleted_at="2026-01-01T00:00:00Z"),
+                8: _connection(8, "Docs", **unavailable),
             }
         )
         app = FastAPI()

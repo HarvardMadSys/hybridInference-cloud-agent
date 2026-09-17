@@ -68,6 +68,8 @@ from cloud_agent_host.logging_utils import get_logger
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
+    from _typeshed import FileDescriptorLike
+
 logger = get_logger(__name__)
 
 #: The wire version of the ``capacity`` block in a host heartbeat. A control
@@ -439,7 +441,13 @@ def _drain_child(
     status: CommandStatus | None = None
     lines = 0
     selector = selectors.DefaultSelector()
-    streams = {child.stdout: stdout, child.stderr: stderr}
+    # The selector reports each registered stream back as whatever
+    # ``register`` accepted (``FileDescriptorLike``), so the table it is read
+    # through is keyed by that type rather than by the concrete pipes.
+    streams: dict[FileDescriptorLike | None, bytearray] = {
+        child.stdout: stdout,
+        child.stderr: stderr,
+    }
     try:
         for stream in streams:
             if stream is not None:
@@ -453,7 +461,7 @@ def _drain_child(
                 sink = streams[key.fileobj]
                 limit = max_stdout_bytes if sink is stdout else max_stderr_bytes
                 try:
-                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    chunk = os.read(key.fd, 65536)
                 except OSError:
                     chunk = b""
                 if not chunk:

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { disconnectAgentIntegration, getAgentIntegrations } from '@/lib/api/agents';
 import type { AgentIntegrationProvider, AgentIntegrationProviderApi } from '@/lib/api/agents';
+import { SkillsSection } from './skills/SkillsSection';
 import { McpConnectionsSection, type McpAuthorizationResult } from './mcp/McpConnectionsSection';
 
 const PROVIDERS: AgentIntegrationProvider[] = ['github', 'gitlab'];
@@ -239,7 +240,7 @@ export function IntegrationsView({
         Integrations
       </h1>
       <p className="mt-2 text-base text-gray-500 dark:text-gray-400">
-        Connect source control providers and extend your agents with MCP servers.
+        Connect your tools and give your agents reusable skills.
       </p>
 
       {notice ? (
@@ -325,6 +326,7 @@ export function IntegrationsView({
       <div className="mt-10 rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 p-6 shadow-sm">
         <McpConnectionsSection authorizationResult={mcpAuthorization} />
       </div>
+      <SkillsSection />
     </section>
   );
 }

@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { McpImportStep } from './McpImportStep';
+import { McpCatalogBrowser } from './McpCatalogBrowser';
+import { McpServerIcon } from './McpServerIcon';
 import {
   createMcpConnection,
   type McpAuthKind,
@@ -27,7 +29,7 @@ export function McpAddDialog({
   onAdded: (connections: McpConnectionApi[]) => void;
 }) {
   const panel = useRef<HTMLDivElement>(null);
-  const [mode, setMode] = useState<McpAddMode>(templates.length ? initialMode : 'json');
+  const [mode, setMode] = useState<McpAddMode>(initialMode);
   const [selected, setSelected] = useState<McpTemplateApi | null>(null);
   const [authKind, setAuthKind] = useState<McpAuthKind>('oauth');
   const [secret, setSecret] = useState('');
@@ -135,7 +137,7 @@ export function McpAddDialog({
         >
           {(
             [
-              { key: 'servers', label: 'Popular servers' },
+              { key: 'servers', label: 'MCP servers' },
               { key: 'json', label: 'JSON configuration' },
             ] as const
           ).map((item) => (
@@ -159,101 +161,103 @@ export function McpAddDialog({
             <McpImportStep onAdded={onAdded} onBusyChange={setSaving} />
           </div>
           {mode === 'servers' ? (
-            <div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                {templates.map((template) => (
-                  <button
-                    key={template.name}
-                    type="button"
-                    disabled={saving}
-                    aria-label={template.label}
-                    aria-pressed={selected?.name === template.name}
-                    onClick={() => {
-                      setSelected(template);
-                      setAuthKind(template.auth_kind);
-                      setSecret('');
-                      setError(null);
-                    }}
-                    className={`rounded-xl border p-4 text-left transition-colors ${selected?.name === template.name ? 'border-gray-800 bg-gray-50 dark:border-gray-300 dark:bg-white/5' : 'border-gray-200 hover:bg-gray-50 dark:border-white/10 dark:hover:bg-white/5'}`}
-                  >
-                    <span className="flex items-center gap-3">
-                      <span
-                        aria-hidden="true"
-                        className="flex h-8 w-8 items-center justify-center rounded-lg bg-gray-100 text-sm font-semibold text-gray-700 dark:bg-white/10 dark:text-gray-200"
-                      >
-                        {template.label.slice(0, 1)}
-                      </span>
-                      <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                        {template.label}
-                      </span>
-                    </span>
-                    <span className="mt-3 block text-xs leading-5 text-gray-500 dark:text-gray-400">
-                      {template.description}
-                    </span>
-                  </button>
-                ))}
-              </div>
-              {selected ? (
-                <div className="mt-5 border-t border-gray-100 pt-4 dark:border-white/10">
-                  <p className="break-all text-xs text-gray-500 dark:text-gray-400">
-                    {selected.url}
-                  </p>
-                  {selected.name === 'github' ? (
-                    <label className="mt-3 block text-xs font-medium text-gray-700 dark:text-gray-300">
-                      Connect with
-                      <select
+            <McpCatalogBrowser
+              disabled={saving}
+              onAdded={onAdded}
+              onBusyChange={setSaving}
+              fallback={
+                <div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {templates.map((template) => (
+                      <button
+                        key={template.name}
+                        type="button"
                         disabled={saving}
-                        value={authKind}
-                        onChange={(event) => setAuthKind(event.target.value as McpAuthKind)}
-                        className={FIELD}
+                        aria-label={template.label}
+                        aria-pressed={selected?.name === template.name}
+                        onClick={() => {
+                          setSelected(template);
+                          setAuthKind(template.auth_kind);
+                          setSecret('');
+                          setError(null);
+                        }}
+                        className={`rounded-xl border p-4 text-left transition-colors ${selected?.name === template.name ? 'border-gray-800 bg-gray-50 dark:border-gray-300 dark:bg-white/5' : 'border-gray-200 hover:bg-gray-50 dark:border-white/10 dark:hover:bg-white/5'}`}
                       >
-                        <option value="oauth">GitHub OAuth app</option>
-                        <option value="static">Personal access token</option>
-                      </select>
-                    </label>
-                  ) : null}
-                  {authKind === 'static' ? (
-                    <label className="mt-3 block text-xs font-medium text-gray-700 dark:text-gray-300">
-                      Access token
-                      <input
-                        type="password"
-                        autoComplete="off"
-                        value={secret}
-                        onChange={(event) => setSecret(event.target.value)}
-                        disabled={saving}
-                        className={FIELD}
-                      />
-                    </label>
+                        <span className="flex items-center gap-3">
+                          <McpServerIcon name={template.name} label={template.label} />
+                          <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                            {template.label}
+                          </span>
+                        </span>
+                        <span className="mt-3 block text-xs leading-5 text-gray-500 dark:text-gray-400">
+                          {template.description}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                  {selected ? (
+                    <div className="mt-5 border-t border-gray-100 pt-4 dark:border-white/10">
+                      <p className="break-all text-xs text-gray-500 dark:text-gray-400">
+                        {selected.url}
+                      </p>
+                      {selected.name === 'github' ? (
+                        <label className="mt-3 block text-xs font-medium text-gray-700 dark:text-gray-300">
+                          Connect with
+                          <select
+                            disabled={saving}
+                            value={authKind}
+                            onChange={(event) => setAuthKind(event.target.value as McpAuthKind)}
+                            className={FIELD}
+                          >
+                            <option value="oauth">GitHub OAuth app</option>
+                            <option value="static">Personal access token</option>
+                          </select>
+                        </label>
+                      ) : null}
+                      {authKind === 'static' ? (
+                        <label className="mt-3 block text-xs font-medium text-gray-700 dark:text-gray-300">
+                          Access token
+                          <input
+                            type="password"
+                            autoComplete="off"
+                            value={secret}
+                            onChange={(event) => setSecret(event.target.value)}
+                            disabled={saving}
+                            className={FIELD}
+                          />
+                        </label>
+                      ) : (
+                        <p className="mt-3 text-sm text-gray-600 dark:text-gray-400">
+                          Sign in to {selected.label} to choose what your agents can access.
+                        </p>
+                      )}
+                      {notes.map((note) => (
+                        <p key={note} className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                          {note}
+                        </p>
+                      ))}
+                      {error ? (
+                        <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">
+                          {error}
+                        </p>
+                      ) : null}
+                      <button
+                        type="button"
+                        disabled={saving || (authKind === 'static' && !secret.trim())}
+                        onClick={() => void connect()}
+                        className="mt-4 rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"
+                      >
+                        {saving ? 'Connecting…' : `Connect ${selected.label}`}
+                      </button>
+                    </div>
                   ) : (
-                    <p className="mt-3 text-sm text-gray-600 dark:text-gray-400">
-                      Sign in to {selected.label} to choose what your agents can access.
+                    <p className="mt-4 text-xs text-gray-500 dark:text-gray-400">
+                      Choose a service, or paste a custom server configuration in the JSON tab.
                     </p>
                   )}
-                  {notes.map((note) => (
-                    <p key={note} className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                      {note}
-                    </p>
-                  ))}
-                  {error ? (
-                    <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">
-                      {error}
-                    </p>
-                  ) : null}
-                  <button
-                    type="button"
-                    disabled={saving || (authKind === 'static' && !secret.trim())}
-                    onClick={() => void connect()}
-                    className="mt-4 rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"
-                  >
-                    {saving ? 'Connecting…' : `Connect ${selected.label}`}
-                  </button>
                 </div>
-              ) : (
-                <p className="mt-4 text-xs text-gray-500 dark:text-gray-400">
-                  Choose a service, or paste a custom server configuration in the JSON tab.
-                </p>
-              )}
-            </div>
+              }
+            />
           ) : null}
         </div>
       </div>

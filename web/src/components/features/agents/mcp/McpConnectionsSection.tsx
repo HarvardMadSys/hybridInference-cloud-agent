@@ -8,6 +8,7 @@ import {
   listMcpConnections,
   testMcpConnection,
   enableMcpOAuth,
+  setMcpConnectionEnabled,
   type McpConnectionApi,
   type McpConnectionsApi,
 } from '@/lib/api/mcp';
@@ -83,6 +84,7 @@ export function McpConnectionsSection({
             return { connection, result };
           }),
         );
+        let authorizationNeeded: McpConnectionApi | null = null;
         const failures: string[] = [];
         const connected: string[] = [];
         for (let index = 0; index < results.length; index++) {
@@ -96,12 +98,20 @@ export function McpConnectionsSection({
               `${outcome.value.connection.label} connected. ${capabilitySummary(outcome.value.result)}.`,
             );
           } else {
+            if (
+              connections.length === 1 &&
+              outcome.value.connection.auth_kind === 'none' &&
+              outcome.value.result.error_kind === 'needs_authorization'
+            ) {
+              authorizationNeeded = outcome.value.connection;
+            }
             failures.push(`${outcome.value.connection.label}: ${outcome.value.result.message}`);
           }
         }
         if (connected.length) setNotice(connected.join(' '));
         if (failures.length) setError(failures.join(' '));
         await load();
+        return authorizationNeeded;
       } catch (cause: unknown) {
         setError(cause instanceof Error ? cause.message : 'Could not refresh your servers.');
       } finally {
@@ -182,7 +192,8 @@ export function McpConnectionsSection({
     ) {
       await authorize(connections[0]);
     } else {
-      await check(connections);
+      const authorizationNeeded = await check(connections);
+      if (authorizationNeeded) await authorize(authorizationNeeded);
     }
   }
 
@@ -208,6 +219,26 @@ export function McpConnectionsSection({
     }
   }
 
+  async function toggle(connection: McpConnectionApi) {
+    setBusy(new Set([connection.id]));
+    setError(null);
+    setNotice(null);
+    const enabled = connection.enabled === false;
+    try {
+      await setMcpConnectionEnabled(connection.id, enabled);
+      await load();
+      setNotice(
+        enabled
+          ? `${connection.label} is enabled. Available tools will appear with your next message.`
+          : `${connection.label} is off in all conversations. Your connection is saved.`,
+      );
+    } catch (cause: unknown) {
+      setError(cause instanceof Error ? cause.message : 'Could not update this server.');
+    } finally {
+      setBusy(new Set());
+    }
+  }
+
   const connections = data?.connections ?? [];
   return (
     <div>
@@ -215,7 +246,7 @@ export function McpConnectionsSection({
         <div>
           <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">MCP servers</h2>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Connect once, then choose which servers to use in each conversation.
+            Connect once. Enabled servers are available automatically in your conversations.
           </p>
         </div>
         <div className="flex gap-2">
@@ -278,25 +309,28 @@ export function McpConnectionsSection({
               Your tools, in every conversation
             </p>
             <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
-              Connect a popular service or paste an MCP JSON configuration to get started.
+              Browse MCP servers or paste an MCP JSON configuration to get started.
             </p>
           </div>
         ) : null}
         {connections.map((connection) => {
           const working = busy.has(connection.id);
           const signIn = needsSignIn(connection) && connection.auth_kind !== 'static';
-          const active = connection.status === 'active' && !signIn;
+          const enabled = connection.enabled !== false;
+          const active = enabled && connection.status === 'active' && !signIn;
           const state = working
             ? 'Connecting…'
-            : signIn
-              ? 'Sign-in required'
-              : active
-                ? 'Connected'
-                : connection.status === 'disabled'
-                  ? 'Disconnected'
-                  : connection.status === 'draft'
-                    ? 'Ready to connect'
-                    : 'Connection failed';
+            : !enabled
+              ? 'Off'
+              : signIn
+                ? 'Sign-in required'
+                : active
+                  ? 'Connected'
+                  : connection.status === 'disabled'
+                    ? 'Disconnected'
+                    : connection.status === 'draft'
+                      ? 'Ready to connect'
+                      : 'Connection failed';
           return (
             <div
               key={connection.id}
@@ -321,7 +355,7 @@ export function McpConnectionsSection({
                   </p>
                 </div>
                 <div className="flex gap-2">
-                  {connection.status !== 'disabled' ? (
+                  {enabled && connection.status !== 'disabled' ? (
                     <button
                       type="button"
                       disabled={busy.size > 0}
@@ -335,6 +369,21 @@ export function McpConnectionsSection({
                           : active
                             ? 'Refresh tools'
                             : 'Retry connection'}
+                    </button>
+                  ) : null}
+                  {connection.status !== 'disabled' ? (
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-label={`Enable ${connection.label}`}
+                      aria-checked={enabled}
+                      disabled={busy.size > 0}
+                      onClick={() => void toggle(connection)}
+                      className={`relative h-6 w-11 shrink-0 self-center rounded-full transition-colors disabled:opacity-50 ${enabled ? 'bg-gray-900 dark:bg-gray-100' : 'bg-gray-200 dark:bg-white/20'}`}
+                    >
+                      <span
+                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform dark:bg-gray-900 ${enabled ? 'translate-x-5' : ''}`}
+                      />
                     </button>
                   ) : null}
                 </div>

@@ -14,7 +14,21 @@
 # second opinion about whether the host is fit to run untrusted code, and the
 # two would drift.
 #
-# Usage:  deploy.sh <sha>
+# Usage:  deploy.sh [--phase prepare|activate] <sha>
+#
+# With no `--phase` this is the whole rollout, which is what every caller before
+# the split invoked and what this repository's own workflows still do.
+#
+# The phases are `sandbox_host.sh`'s two halves, with this script's own guards
+# and recovery around them. They exist because the release design sequences the
+# control plane's database preparation *between* them (#270):
+#
+#   prepare   the stray-stack guard, then everything the rollout does while the
+#             generation it replaces is still serving — pull or build, the Kata
+#             smoke test, the candidate kernel and observer check.
+#   activate  drain, replace, prove, record, and the fallback to the recorded
+#             generation if that fails.
+#
 #   DEPLOY_ROOT   required — where the deployed checkout lives. Deliberately
 #                 without a default: this path differs per machine (the host
 #                 runs as a user without write access to /srv) and a wrong
@@ -28,6 +42,22 @@ set -euo pipefail
 AGENT_DEPLOY_MODE="${AGENT_DEPLOY_MODE:-source}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SANDBOX_HOST_SCRIPT="deploy/host/sandbox_host.sh"
+PHASE=all
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --phase)
+      [ "$#" -ge 2 ] || { printf '[deploy-host] ERROR: --phase needs a value\n' >&2; exit 1; }
+      PHASE="$2"; shift 2 ;;
+    --phase=*) PHASE="${1#--phase=}"; shift ;;
+    *) break ;;
+  esac
+done
+case "${PHASE}" in
+  all|prepare|activate) ;;
+  *) printf '[deploy-host] ERROR: unknown phase %s; expected prepare or activate\n' "${PHASE}" >&2; exit 1 ;;
+esac
+runs_phase() { [ "${PHASE}" = all ] || [ "${PHASE}" = "$1" ]; }
+
 SHA="${1:-${DEPLOY_SHA:-}}"
 SOURCE_REPO="${SOURCE_REPO:-${GITHUB_WORKSPACE:-}}"
 DEPLOY_ROOT="${DEPLOY_ROOT:-}"
@@ -264,9 +294,22 @@ restore_recorded_generation() {
 # there, including the refusal to start runners on a host that cannot isolate
 # them. It exits non-zero on a failed gateway probe, which is what turns a
 # broken tunnel into a red deploy instead of jobs that claim and then fail.
-log "handing over to sandbox_host.sh up"
+if ! runs_phase activate; then
+  log "handing over to sandbox_host.sh prepare"
+  DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" prepare
+  log "phase ${PHASE} complete; this host still serves ${RECORDED:-nothing} and nothing was drained"
+  exit 0
+fi
+
+# `up` when this is the whole rollout, `activate` when a deployer already ran
+# `prepare` and put the control plane's database preparation between the two.
+# The recovery below is the same either way: what it reacts to is a drained host
+# advertising no generation, which only the second half can produce.
+ROLLOUT_PHASE=up
+runs_phase prepare || ROLLOUT_PHASE=activate
+log "handing over to sandbox_host.sh ${ROLLOUT_PHASE}"
 ROLLOUT_STATUS=0
-DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" up || ROLLOUT_STATUS=$?
+DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" "$ROLLOUT_PHASE" || ROLLOUT_STATUS=$?
 
 if [ "${ROLLOUT_STATUS}" -ne 0 ]; then
   if advertises_a_generation; then

@@ -147,7 +147,7 @@ def decide(
         # because this function is also called from the relay, where the user
         # comes from a fence row rather than from a session.
         return _deny("wrong_owner", name, "that MCP connection belongs to somebody else", kind)
-    if connection.status is ConnectionStatus.DISABLED:
+    if not connection.enabled or connection.status is ConnectionStatus.DISABLED:
         return _deny("connection_disabled", name, "that MCP connection is turned off", kind)
     if connection.status is ConnectionStatus.ERROR:
         return _deny(
@@ -200,15 +200,13 @@ def decide(
         )
 
     if rule is None:
-        # Migrated sessions have not made a capability selection yet.
+        # Default server access advertises tools but never approves a call.
         return AuthorizationDecision(
             outcome="confirm",
             code="needs_confirmation",
             capability_name=name,
             kind=kind,
-            message=(
-                f"this session predates per-connection choices; confirm what {name!r} may do for it"
-            ),
+            message=f"approve {name!r} for this conversation",
             policy_revision=binding.policy_revision,
         )
 
@@ -269,8 +267,8 @@ def visible_capabilities(
             continue
         rule = binding.rule_for(kind, capability.name)
         if rule is None:
-            # Visible only while the owner is still being asked. Once they have
-            # saved a selection, an absent name means they left it out.
+            # Unspecified tools use the server's default policy. Existing
+            # restricted selections continue to deny omitted names.
             if binding.selection_pending:
                 visible.append(capability)
             continue

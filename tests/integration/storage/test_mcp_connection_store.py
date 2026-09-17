@@ -703,7 +703,8 @@ async def test_replacing_a_threads_bindings_is_wholesale(store: Storage) -> None
         thread_id=str(job["thread_id"]), bindings=[binding(wiki, "deepwiki")]
     )
     remaining = await store.mcp.list_mcp_bindings(thread_id=str(job["thread_id"]))
-    assert [row["alias"] for row in remaining] == ["deepwiki"]
+    assert [row["alias"] for row in remaining if row["enabled"]] == ["deepwiki"]
+    assert next(row for row in remaining if row["alias"] == "github")["enabled"] is False
 
 
 @pytest.mark.parametrize(
@@ -846,7 +847,16 @@ async def test_concurrent_replacements_cannot_merge_two_distinct_selections(stor
             for row, alias in [(first, "first"), (second, "second")]
         ]
     )
-    assert len(await store.mcp.list_mcp_bindings(thread_id=thread_id)) == 1
+    assert (
+        len(
+            [
+                row
+                for row in await store.mcp.list_mcp_bindings(thread_id=thread_id)
+                if row["enabled"]
+            ]
+        )
+        == 1
+    )
 
 
 async def test_policy_sequence_migration_starts_above_previous_approval_revisions(store, pool):
@@ -1815,3 +1825,104 @@ async def test_the_ambiguous_quarantine_branch_cannot_be_reached_from_the_old_sc
         async with pool.acquire() as conn:
             await reset_agent_tables(conn)
         await pool.close()
+
+
+async def test_public_catalog_snapshot_survives_repository_restart_and_refuses_older_sync(pool):
+    """Replacing the directory is atomic and cannot overwrite newer metadata."""
+    from cloud_agent.storage.repositories.mcp_catalog import PostgresMcpCatalogRepository
+
+    catalog = PostgresMcpCatalogRepository(pool)
+    assert await catalog.load_mcp_catalog() is None
+    first = datetime.now(timezone.utc)
+    await catalog.save_mcp_catalog([{"name": "com.example/old"}], first)
+    newer = first + timedelta(hours=1)
+    await catalog.save_mcp_catalog([{"name": "com.example/new"}], newer)
+    await catalog.save_mcp_catalog([{"name": "com.example/stale"}], first)
+    restarted = PostgresMcpCatalogRepository(pool)
+    assert await restarted.load_mcp_catalog() == {
+        "entries": [{"name": "com.example/new"}],
+        "synced_at": newer,
+    }
+
+
+async def test_servers_automatically_become_available_only_in_the_owners_conversations(store):
+    from cloud_agent.mcp.authorization import decide, visible_capabilities
+    from cloud_agent.mcp.models import Capability, CapabilityKind
+    from cloud_agent.mcp.registry import binding_from_row, connection_from_row
+
+    job = await _create_job(store)
+    mine = await _connect(store, _OWNER)
+    await _connect(store, _OTHER)
+    gone = await _connect(store, _OWNER)
+    await store.mcp.disconnect_mcp_connection(connection_id=gone["id"], user_id=_OWNER)
+    rows = await store.mcp.list_mcp_bindings(thread_id=job["thread_id"])
+    assert [row["connection_id"] for row in rows] == [mine["id"]]
+    binding = binding_from_row(rows[0])
+    tool = Capability(kind=CapabilityKind.TOOL, name="search", description="Search pages")
+    assert binding.enabled and binding.selection_pending
+    assert visible_capabilities(binding, [tool], CapabilityKind.TOOL) == [tool]
+    decision = decide(
+        connection=connection_from_row(mine),
+        binding=binding,
+        capability=tool,
+        user_id=_OWNER,
+        name="search",
+        kind=CapabilityKind.TOOL,
+    )
+    assert decision.outcome == "confirm"
+    assert await store.mcp.list_mcp_bindings(thread_id=job["thread_id"]) == rows
+
+
+async def test_new_servers_join_existing_conversations_without_reenabling_opt_outs(store):
+    job = await _create_job(store)
+    first = await _connect(store, _OWNER)
+    thread = job["thread_id"]
+    initial = (await store.mcp.list_mcp_bindings(thread_id=thread))[0]
+    await store.mcp.replace_mcp_bindings(
+        thread_id=thread, bindings=[{**initial, "enabled": False}], merge=True
+    )
+    second = await _connect(store, _OWNER)
+    results = await asyncio.gather(
+        *(store.mcp.list_mcp_bindings(thread_id=thread) for _ in range(3))
+    )
+    for rows in results:
+        assert len(rows) == 2
+        assert len({row["alias"] for row in rows}) == 2
+        by_id = {row["connection_id"]: row for row in rows}
+        assert not by_id[first["id"]]["enabled"]
+        assert by_id[second["id"]]["enabled"]
+        assert by_id[second["id"]]["selection_pending"]
+    other_job = await _create_job(store)
+    assert all(
+        row["enabled"]
+        for row in await store.mcp.list_mcp_bindings(thread_id=other_job["thread_id"])
+    )
+
+
+async def test_pausing_server_keeps_credentials_and_diagnostics_cannot_reenable_it(store):
+    from cloud_agent.mcp.registry import resolve_connection
+
+    job = await _create_job(store)
+    connection = await _connect(store, _OWNER)
+    pending = await _invocation(store, job, connection)
+    assert (
+        await store.mcp.set_mcp_connection_enabled(
+            connection_id=connection["id"], user_id=_OTHER, enabled=False
+        )
+        is None
+    )
+    paused = await store.mcp.set_mcp_connection_enabled(
+        connection_id=connection["id"], user_id=_OWNER, enabled=False
+    )
+    assert paused["access_token_ciphertext"] == connection["access_token_ciphertext"]
+    assert paused["authorization_epoch"] > connection["authorization_epoch"]
+    assert (await store.mcp.get_mcp_invocation(invocation_id=pending["id"]))["status"] == "expired"
+    await store.mcp.set_mcp_connection_status(connection_id=connection["id"], status="active")
+    current = await store.mcp.get_mcp_connection(connection_id=connection["id"])
+    assert not current["enabled"]
+    assert not (await resolve_connection(store.mcp, row=current)).usable
+    resumed = await store.mcp.set_mcp_connection_enabled(
+        connection_id=connection["id"], user_id=_OWNER, enabled=True
+    )
+    assert resumed["enabled"]
+    assert resumed["access_token_ciphertext"] == connection["access_token_ciphertext"]

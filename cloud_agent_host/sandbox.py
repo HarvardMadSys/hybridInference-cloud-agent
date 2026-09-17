@@ -390,7 +390,7 @@ class _PopenProcess(SandboxProcess):
     that will never produce another line.
     """
 
-    def __init__(self, process: subprocess.Popen, *, container: str | None = None) -> None:
+    def __init__(self, process: subprocess.Popen[str], *, container: str | None = None) -> None:
         self._process = process
         self._container = container
         self._stderr_chunks: list[str] = []

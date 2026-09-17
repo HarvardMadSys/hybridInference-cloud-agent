@@ -304,7 +304,7 @@ def heartbeat(
     residencies: list[dict[str, Any]] | None = None,
     retained_sandboxes: list[dict[str, Any]] | None = None,
     capacity: dict[str, Any] | None = None,
-    on_residencies_lost: Callable[[list[str]], None] | None = None,
+    on_residencies_lost: Callable[[list[dict[str, Any]]], None] | None = None,
     on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> HostIdentity:
     """Report liveness and capacity, and read back what the pool decided.
@@ -491,7 +491,7 @@ class HostHeartbeat:
         residency_beats: Callable[[], list[dict[str, Any]]] | None = None,
         retained_sandbox_beats: Callable[[], list[dict[str, Any]] | None] | None = None,
         capacity_beats: Callable[[], dict[str, Any] | None] | None = None,
-        on_residencies_lost: Callable[[list[str]], None] | None = None,
+        on_residencies_lost: Callable[[list[dict[str, Any]]], None] | None = None,
         on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> None:
         self._base_url = base_url

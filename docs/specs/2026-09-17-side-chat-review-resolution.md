@@ -25,7 +25,7 @@ them. Read AGENTS.md and CONTRIBUTING.md before changing code.
 
 ### P0-1
 
-Entry point: `cloud_agent/api/routes.py:2074`.
+Entry point: `cloud_agent/api/routes.py:2098`.
 
 Return the hydrated owner read after both initial follow-up creation and
 idempotent replay. The command row lacks retained membership, so serializing it
@@ -203,7 +203,7 @@ announces the new thread; regular status polling handles normal turn changes.
 
 ### P4-1
 
-Entry point: `web/src/components/features/agents/JobDetail.test.tsx:236`.
+Entry point: `web/src/components/features/agents/JobDetail.test.tsx:239`.
 
 Add an integration fixture with a signed-in owner, source sandbox/thread/native
 eligibility and valid child receipt. Test lazy creation, placement and Escape
@@ -297,8 +297,8 @@ general transcript conventions.
 
 The failure chain is the `JOB_SELECT` projection in
 `cloud_agent/storage/_sql/jobs.py:65`, conversion in
-`cloud_agent/storage/_sql/rows.py:66`, and `_job_response` in
-`cloud_agent/api/routes.py:501`. The command result lacks the
+`cloud_agent/storage/_sql/rows.py:67`, and `_job_response` in
+`cloud_agent/api/routes.py:506`. The command result lacks the
 retained-membership join. Returning it directly from follow-up POST produced
 null sandbox/fork identity and false workspace_shared despite committing a valid
 turn. Both new and replayed responses now use the hydrated owner read. This
@@ -369,8 +369,8 @@ npm run build
 The CODEX_VERSION unset removes only the desktop-injected CLI version override
 that deployment tests intentionally reject. It does not change runtime pins. The
 database name/port above identify the isolated review cluster, not a required
-service configuration. The checks returned 4,022 standard Python tests, 450
-PostgreSQL tests, and 1,375 web tests passing during this review.
+service configuration. After merging dev at `e916c01`, the checks returned 4,135
+standard Python tests, 466 PostgreSQL tests, and 1,408 web tests passing.
 
 Browser acceptance: open the pane in two tabs/windows of one origin/profile and
 verify one fork, blank initial body, draft retention across workspace tabs,

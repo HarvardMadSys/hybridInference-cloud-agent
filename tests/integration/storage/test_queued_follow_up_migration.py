@@ -52,7 +52,9 @@ async def test_upgrade_preserves_pending_jobs_and_rollback_restores_dependency_s
     finally:
         await conn.close()
 
-    apply_migrations(config)
+    # Exercise this revision's data transform with the same column set on both
+    # sides. Later additive migrations have their own upgrade/rollback coverage.
+    apply_migrations(config, "0005_queued_follow_ups")
     conn = await asyncpg.connect(**config)
     try:
         after = [dict(row) for row in await conn.fetch("SELECT * FROM agent_jobs ORDER BY id")]
