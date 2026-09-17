@@ -172,6 +172,7 @@ class _RecordingClient:
         directories: Mapping[str, str] | None = None,
         truncate: bool = False,
         empty_stages: bool = False,
+        delay_s: float = 0.0,
     ) -> None:
         self.fail = fail
         #: Answer as a broker whose own deadline cut collection short.
@@ -179,6 +180,9 @@ class _RecordingClient:
         #: Answer with no stages at all -- a legitimate skip when not truncated,
         #: and "every stage was skipped" when it is.
         self.empty_stages = empty_stages
+        #: How long a read takes. A broker stand-in that answers instantly
+        #: cannot show whether a stage encloses the call or follows it.
+        self.delay_s = delay_s
         self.calls: list[dict[str, Any]] = []
         #: What a non-empty path turns out to be. A real broker learns this
         #: from the read; a test states it, which is what makes "a subdirectory
@@ -221,6 +225,8 @@ class _RecordingClient:
     ) -> dict[str, Any]:
         """Answer a file or directory read."""
         self.calls.append({"op": "files", "workspace_id": workspace_id, "path": path})
+        if self.delay_s:
+            await asyncio.sleep(self.delay_s)
         call = self._open(profiling, *(["files.list", "files.open"] if path else ["files.list"]))
         if self.fail is not None:
             raise self.fail
@@ -451,9 +457,9 @@ async def test_a_selected_file_read_is_measured_with_its_broker_fragment(
     assert record["facts"]["kind"] == "file"
     assert record["facts"]["job_id"]
     assert record["facts"]["sandbox_id"] == SANDBOX_ID
-    # The broker's own stages hang under the stage that performed the call,
-    # alongside the sub-stage this process timed for the round trip itself.
-    read = next(stage for stage in record["stages"] if stage["stage"] == "files.open")
+    # The read is timed as one stage named before the call was made, so the
+    # request's whole duration belongs to it and the round trip hangs under it.
+    read = next(stage for stage in record["stages"] if stage["stage"] == "read")
     children = {child["stage"]: child["source"] for child in read["children"]}
     assert children == {
         "broker_call": "control-plane",
@@ -625,19 +631,15 @@ async def test_a_continuation_from_another_chat_is_refused(
     )
 
     assert foreign.status_code == 200
-    # The id did not carry the other chat's interaction across: this request
-    # was measured, if at all, as its own chat's interaction.
-    assert foreign.json()["profiling"]["interaction_id"] != interaction_id
-
-    by_id = {record["measurement_id"]: record for record in records()}
-    assert set(by_id) == {
-        first.json()["profiling"]["measurement_id"],
-        foreign.json()["profiling"]["measurement_id"],
-    }
-    assert (
-        by_id[first.json()["profiling"]["measurement_id"]]["facts"]["job_id"]
-        != (by_id[foreign.json()["profiling"]["measurement_id"]]["facts"]["job_id"])
-    )
+    # The reference did not carry the other chat's interaction across, and it
+    # is not silently replaced by a fresh one either: a request that names an
+    # interaction this process cannot honour is still served, and is not
+    # measured. Sampling it would present a new interaction as though the one
+    # the caller named had continued.
+    assert "profiling" not in foreign.json()
+    assert [record["measurement_id"] for record in records()] == [
+        first.json()["profiling"]["measurement_id"]
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -699,8 +701,17 @@ async def test_a_malformed_selection_disables_collection_not_the_read(
     )
 
     assert listed.status_code == 200
-    assert "profiling" in listed.json()
-    assert listed.json()["profiling"]["fragment_recorded"] is True
+    # An unusable reference disables collection for this request and nothing
+    # else: the read is served exactly as it would have been, and no fresh
+    # interaction is invented to stand in for the one that was named.
+    assert "profiling" not in listed.json()
+    assert records() == []
+
+    # A request naming no interaction is an ordinary new one and is measured
+    # normally -- the rule is about references, not about traffic.
+    fresh = await client.get(f"/v1/agent/jobs/{job_id}/files")
+    assert fresh.status_code == 200
+    assert fresh.json()["profiling"]["fragment_recorded"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -1311,3 +1322,164 @@ async def test_a_subdirectory_is_a_listing_and_a_file_is_an_open(
     # a count rather than the content statistics a preview would.
     assert emitted[0]["facts"]["kind"] == ("directory" if expected == "files.list" else "file")
     assert emitted[0]["facts"]["request_kind"] == expected
+
+
+# ---------------------------------------------------------------------------
+# A read's whole duration belongs to the stage that started with it
+# ---------------------------------------------------------------------------
+
+
+async def test_a_slow_read_is_charged_to_the_stage_that_encloses_it(
+    client: AsyncClient, store: FakeStorage, monkeypatch, records
+):
+    """The stage a request is timed as starts before the call, not after it.
+
+    Timed the other way round, a 50 ms read produced a stage of 84 µs with a
+    50 ms broker child hanging under it and a 1 µs "broker_call" beside it --
+    the total was right and the attribution was wrong, which is the one thing
+    this feature exists to answer.
+    """
+    _enable(monkeypatch)
+    delay_s = 0.05
+    broker = _RecordingClient(delay_s=delay_s)
+    _use_broker(monkeypatch, broker)
+    job_id = await _ready_job(client, store)
+
+    response = await client.get(f"/v1/agent/jobs/{job_id}/files", params={"path": "README.md"})
+
+    assert response.status_code == 200
+    record = records()[0]
+    read = next(stage for stage in record["stages"] if stage["stage"] == "read")
+
+    # The stage covers the injected delay, and it begins at the start of the
+    # request rather than at the moment the response arrived.
+    assert read["duration_us"] >= delay_s * 1_000_000
+    assert read["start_offset_us"] < delay_s * 1_000_000
+    # The round trip this process measured is charged to the same stage, and it
+    # too covers the delay.
+    round_trip = next(child for child in read["children"] if child["stage"] == "broker_call")
+    assert round_trip["duration_us"] >= delay_s * 1_000_000
+    # The broker's own work is a child of the stage, not a sibling of it.
+    assert "exec" in {child["stage"] for child in read["children"]}
+    # No stage was created after the call returned: the read is the only one.
+    assert [stage["stage"] for stage in record["stages"]] == ["read"]
+    # The stage's duration is not the whole record's -- the record also ends
+    # after the response is built -- but it is the same order of magnitude
+    # rather than four orders below it.
+    assert read["duration_us"] >= record["duration_us"] * 0.5
+
+
+async def test_the_read_stage_is_named_before_the_kind_is_known(
+    client: AsyncClient, store: FakeStorage, monkeypatch, records
+):
+    """One stage name whatever the result was, so the two remain comparable."""
+    _enable(monkeypatch)
+    broker = _RecordingClient(directories={"src": "directory"})
+    _use_broker(monkeypatch, broker)
+    job_id = await _ready_job(client, store)
+
+    listing = await client.get(f"/v1/agent/jobs/{job_id}/files", params={"path": "src"})
+    opened = await client.get(f"/v1/agent/jobs/{job_id}/files", params={"path": "README.md"})
+
+    assert listing.status_code == 200 and opened.status_code == 200
+    emitted = records()
+    assert [record["operation"] for record in emitted] == ["files.list", "files.open"]
+    for record in emitted:
+        assert [stage["stage"] for stage in record["stages"]] == ["read"]
+
+
+# ---------------------------------------------------------------------------
+# An unusable continuation reference is not a licence to sample afresh
+# ---------------------------------------------------------------------------
+
+
+async def test_an_evicted_reference_is_not_replaced_by_a_fresh_interaction(
+    client: AsyncClient, store: FakeStorage, monkeypatch, records
+):
+    """A reference the process no longer holds stops collection, not continues it."""
+    _enable(monkeypatch)
+    broker = _RecordingClient()
+    _use_broker(monkeypatch, broker)
+    job_id = await _ready_job(client, store)
+
+    first = await client.get(f"/v1/agent/jobs/{job_id}/files")
+    interaction_id = first.json()["profiling"]["interaction_id"]
+    # The selection table is bounded and TTL'd; an eviction is what a browser
+    # sees when it keeps a tab open past either bound.
+    reset_selections()
+
+    second = await client.get(
+        f"/v1/agent/jobs/{job_id}/files",
+        headers={INTERACTION_HEADER: interaction_id},
+    )
+
+    assert second.status_code == 200
+    assert "profiling" not in second.json()
+    assert [record["measurement_id"] for record in records()] == [
+        first.json()["profiling"]["measurement_id"]
+    ]
+
+
+async def test_a_continuation_whose_host_moved_is_refused_without_a_target(
+    client: AsyncClient, store: FakeStorage, monkeypatch, records
+):
+    """An unfiltered run does not license recording a different machine.
+
+    The interaction was established on one host and one sandbox. A run that
+    does not filter by them still cannot treat a request served by a different
+    machine as a continuation, because the record would attribute this
+    request's time to the machine that served the first one.
+    """
+    _enable(monkeypatch)
+    broker = _RecordingClient()
+    _use_broker(monkeypatch, broker)
+    job_id = await _ready_job(client, store)
+
+    first = await client.get(f"/v1/agent/jobs/{job_id}/files")
+    interaction_id = first.json()["profiling"]["interaction_id"]
+    store.jobs[job_id]["thread_sandbox"].update({"host": "moved-host", "sandbox_id": "asbx_moved"})
+
+    second = await client.get(
+        f"/v1/agent/jobs/{job_id}/files",
+        headers={INTERACTION_HEADER: interaction_id},
+    )
+
+    assert second.status_code == 200
+    assert "profiling" not in second.json()
+    emitted = records()
+    assert len(emitted) == 1
+    assert emitted[0]["facts"]["host"] == BROKER_HOST
+    assert emitted[0]["facts"]["sandbox_id"] == SANDBOX_ID
+
+
+async def test_a_job_scoped_run_continues_the_interaction_it_started(
+    client: AsyncClient, store: FakeStorage, monkeypatch, records
+):
+    """The chat id lives on the scope, and that is where the check reads it.
+
+    Read from the facts instead, a run scoped by ``job_id`` rejected every
+    legitimate continuation -- then started a fresh interaction, so the two
+    requests of one terminal open could never be correlated.
+    """
+    broker = _RecordingClient()
+    _use_broker(monkeypatch, broker)
+    job_id = await _ready_job(client, store)
+    # The run is scoped by the chat this route resolves, which is the case that
+    # used to be rejected: the id lives on the scope, not in its facts.
+    _enable(monkeypatch, target={"job_id": job_id})
+
+    first = await client.get(f"/v1/agent/jobs/{job_id}/terminals")
+    assert first.status_code == 200
+    interaction_id = first.json()["profiling"]["interaction_id"]
+    second = await client.get(
+        f"/v1/agent/jobs/{job_id}/terminals",
+        headers={INTERACTION_HEADER: interaction_id},
+    )
+
+    assert second.status_code == 200
+    assert second.json()["profiling"]["interaction_id"] == interaction_id
+    assert (
+        second.json()["profiling"]["measurement_id"]
+        != (first.json()["profiling"]["measurement_id"])
+    )
+    assert len(records()) == 2

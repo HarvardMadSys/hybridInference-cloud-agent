@@ -2939,6 +2939,12 @@ async def _terminal_owner_workspace(
 #: What one measured broker call returns: a response body, or a live stream.
 _T = TypeVar("_T")
 
+#: The local stage one workspace read is timed as. Fixed before the call and
+#: not renamed afterwards: a file path is a candidate over listing and opening
+#: until its result arrives, and the request's whole duration belongs to the
+#: stage that started with it rather than to whatever kind it turned out to be.
+FILE_READ_STAGE = "read"
+
 
 def _render_fragment(measure: Selection | None) -> dict[str, Any] | None:
     """Return the profiling block for a response, or ``None`` when unselected.
@@ -3031,6 +3037,7 @@ async def _measured_call(
     call: Callable[[dict[str, Any] | None], Awaitable[_T]],
     record: bool = True,
     call_id: str | None = None,
+    timing_parent: str | None = None,
 ) -> _T:
     """Register one broker call, time it, and record the answer it returned.
 
@@ -3051,7 +3058,11 @@ async def _measured_call(
         return await call(None)
     if call_id is None:
         call_id = measure.begin_call(stage)
-    with measure.stage(stage, "broker_call"):
+    # The RPC interval hangs under ``timing_parent`` when the caller measured a
+    # stage whose name differs from the operation: a file read is timed as one
+    # ``read`` stage whatever kind its result turns out to be, and the round
+    # trip belongs to that stage rather than to a note beside it.
+    with measure.stage(timing_parent or stage, "broker_call"):
         response = await call(measure.context(call_id))
     if record and isinstance(response, dict):
         measure.record_answer(stage, call_id, response)
@@ -3101,13 +3112,20 @@ async def get_agent_job_workspace_file(
             },
         )
     with measured_operation(FILES_LIST, scope, continuing=continuation(request.headers)) as measure:
+        if measure is not None:
+            # Marked before the call, not after it. The stage a read is timed
+            # as is fixed here, so its start is the start of the work and it
+            # encloses the RPC; renaming it afterwards would have left the
+            # request's real duration attached to a stage that began when the
+            # call returned.
+            measure.mark(FILE_READ_STAGE)
         # The frame is captured outside the closure so the answer is recorded
         # against the id this call was made with.
-        frame = measure.begin_call("read") if measure is not None else None
+        frame = measure.begin_call(FILE_READ_STAGE) if measure is not None else None
         try:
             body = await _measured_call(
                 measure,
-                "read",
+                FILE_READ_STAGE,
                 call=lambda profiling: broker.files(
                     _workspace_id(job), safe_path, profiling=profiling
                 ),
@@ -3149,13 +3167,11 @@ async def get_agent_job_workspace_file(
                 # it lands in.
                 measure.discard()
                 return _measured_response(AgentWorkspaceResponse, None, body)
-            # One local stage for the whole read, named for the operation the
-            # read turned out to be, and the one its broker fragment hangs on.
-            operation = measure.operation
-            measure.mark(operation)
-            with measure.stage(operation, "broker_call"):
-                pass
-            measure.record_answer(operation, frame, body)
+            # The stage keeps the name it was marked with, so its start and its
+            # children stay intact. The operation the result turned out to be
+            # is stated on the record instead, which is where a reader looks
+            # for it.
+            measure.record_answer(FILE_READ_STAGE, frame, body)
             measure.measurement.facts["kind"] = kind
             if kind == "directory":
                 measure.measurement.facts["entry_count"] = len(body.get("entries") or [])

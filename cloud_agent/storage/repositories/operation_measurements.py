@@ -57,28 +57,62 @@ class PostgresOperationMeasurementRepository:
 
         Returns:
             ``"stored"`` when this call inserted the row, ``"duplicate"`` when
-            an identical measurement was already there, and ``"conflict"``
-            when the id exists with different contents -- which must be
-            surfaced, never overwritten and never retried.
+            an identical measurement was already there, ``"conflict"`` when the
+            measurement id exists with different contents, and
+            ``"run_conflict"`` when the experiment id already names a different
+            experiment -- different operations, a different target, or another
+            configuration version. The last two are refusals to be surfaced,
+            never overwritten and never retried; a refused measurement is not
+            stored.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             if run is not None:
-                await conn.execute(
+                existing = await conn.fetchrow(
                     """
-                    INSERT INTO agent_operation_profiling_runs (
-                        run_id, operations, target, expires_at, config_version,
-                        admission_instances
-                    )
-                    VALUES ($1, $2::text[], $3::jsonb, $4, $5, $6::jsonb)
-                    ON CONFLICT (run_id) DO NOTHING
+                    SELECT operations, target, expires_at, config_version,
+                           admission_instances
+                    FROM agent_operation_profiling_runs
+                    WHERE run_id = $1
+                    FOR UPDATE
                     """,
                     str(run["run_id"]),
-                    list(run["operations"]),
-                    json.dumps(dict(run.get("target") or {})),
-                    run["expires_at"],
-                    int(run.get("config_version") or 1),
-                    json.dumps(list(run.get("admission_instances") or [])),
                 )
+                if existing is not None:
+                    conflict = _run_configuration_conflict(existing, run)
+                    if conflict is not None:
+                        # The run id names one experiment. A second manifest
+                        # under it is a different experiment claiming the same
+                        # identity, so the sample is refused rather than stored
+                        # under a catalogue entry that describes something else.
+                        return "run_conflict"
+                    merged = _merge_admissions(existing["admission_instances"], run)
+                    if merged is None:
+                        return "run_conflict"
+                    await conn.execute(
+                        """
+                        UPDATE agent_operation_profiling_runs
+                        SET admission_instances = $2::jsonb
+                        WHERE run_id = $1
+                        """,
+                        str(run["run_id"]),
+                        json.dumps(merged),
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        INSERT INTO agent_operation_profiling_runs (
+                            run_id, operations, target, expires_at, config_version,
+                            admission_instances
+                        )
+                        VALUES ($1, $2::text[], $3::jsonb, $4, $5, $6::jsonb)
+                        """,
+                        str(run["run_id"]),
+                        list(run["operations"]),
+                        json.dumps(dict(run.get("target") or {})),
+                        run["expires_at"],
+                        int(run.get("config_version") or 1),
+                        json.dumps(list(run.get("admission_instances") or [])),
+                    )
             inserted = await conn.fetchval(
                 """
                 INSERT INTO agent_operation_measurements (
@@ -278,26 +312,49 @@ class PostgresOperationMeasurementRepository:
         Computed in SQL because the page a reader is looking at is not the
         population a percentile is about.
         """
-        dimensions = [name for name in (group_by or _DEFAULT_GROUPS) if name in _GROUPS]
+        unknown = sorted(name for name in (group_by or ()) if name not in _GROUPS)
+        if unknown:
+            # Silently dropping a dimension is how a caller ends up reading a
+            # distribution of things they never asked to mix.
+            raise ValueError(f"unknown grouping dimension(s): {', '.join(unknown)}")
+        # The dimensions that decide whether two samples are comparable at all
+        # cannot be grouped away. A caller may add to them, never remove them:
+        # a p95 over two boundary versions is not a p95 of either.
+        requested = list(group_by or ())
+        dimensions = [name for name in _REQUIRED_GROUPS if name not in requested] + requested
+        for name in _STARTUP_GROUPS:
+            # Startup paths differ by precisely the work they skipped, so they
+            # are separated whenever the samples are startups at all. Folding
+            # them together produces an average of two different operations.
+            if name not in dimensions:
+                dimensions.append(name)
         selected = ", ".join(_GROUPS[name] for name in dimensions)
-        prefix = f"{selected}, " if selected else ""
-        grouping = f"GROUP BY {selected} ORDER BY {selected}" if selected else ""
+        # Percentiles use the samples the design calls eligible -- a completed
+        # operation whose collection closed every boundary -- while the counts
+        # report everything that was stored. Keeping failures out of the
+        # distribution is not the same as hiding them, and only the second
+        # would be a problem.
+        eligible = "FILTER (WHERE collection_complete AND outcome IN ('completed', 'dispatched'))"
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT {prefix}
+                SELECT {selected},
                        COUNT(*) AS sample_count,
                        COUNT(DISTINCT interaction_id) AS interaction_count,
+                       COUNT(*) {eligible} AS eligible_count,
                        COUNT(*) FILTER (WHERE NOT collection_complete) AS incomplete_count,
-                       COUNT(*) FILTER (WHERE outcome <> 'completed'
-                                          AND outcome <> 'dispatched') AS failed_count,
-                       percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_us) AS p50_us,
-                       percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_us) AS p95_us,
-                       MIN(duration_us) AS min_us,
-                       MAX(duration_us) AS max_us
+                       COUNT(*) FILTER (WHERE outcome NOT IN ('completed', 'dispatched'))
+                           AS failed_count,
+                       percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_us)
+                           {eligible} AS p50_us,
+                       percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_us)
+                           {eligible} AS p95_us,
+                       MIN(duration_us) {eligible} AS min_us,
+                       MAX(duration_us) {eligible} AS max_us
                 FROM agent_operation_measurements
                 WHERE profiling_run_id = $1
-                {grouping}
+                GROUP BY {selected}
+                ORDER BY {selected}
                 """,
                 run_id,
             )
@@ -314,7 +371,65 @@ _GROUPS: dict[str, str] = {
     "startup_path": "startup_path",
 }
 
-_DEFAULT_GROUPS = ("operation", "request_kind", "boundary_version", "coverage_scope")
+#: Dimensions a caller may not group away.
+_REQUIRED_GROUPS = ("operation", "request_kind", "boundary_version", "coverage_scope")
+
+#: Added whenever the samples are startups, because they separate the four
+#: startup paths the runner classifies.
+_STARTUP_GROUPS = ("startup_path",)
+
+
+def _run_configuration_conflict(existing: Any, run: Mapping[str, Any]) -> str | None:
+    """Return why an incoming manifest is not the experiment already stored.
+
+    Compared are the parts that say *what an experiment is*: which operations
+    it selects, which targets it scoped itself to, and which configuration
+    version it was written for. A writer that disagrees on any of those is
+    describing a different experiment, and its samples would be filed against
+    a catalogue entry that says something else.
+
+    ``expires_at`` is deliberately not compared. It is a wall-clock instant
+    that every process re-derives from the same deployment setting, so two
+    writers of one experiment can state it microseconds apart, and a retry
+    carries it forward verbatim. Requiring equality would refuse an identical
+    retry -- which is the case idempotence exists for -- while a run that
+    genuinely ended earlier simply stops collecting.
+    """
+    if sorted(existing["operations"]) != sorted(str(item) for item in run["operations"]):
+        return "operations"
+    if json.loads(existing["target"]) != dict(run.get("target") or {}):
+        return "target"
+    if int(existing["config_version"]) != int(run.get("config_version") or 1):
+        return "config_version"
+    return None
+
+
+def _merge_admissions(existing: Any, run: Mapping[str, Any]) -> list[Any] | None:
+    """Add this writer's admission instance to the manifest, idempotently.
+
+    An experiment run by two control-plane replicas is two instances of one
+    manifest, and each is allowed to report its own budget. A second report for
+    an instance already listed has to agree with the first: a budget that
+    changed mid-run is a different experiment, and keeping whichever arrived
+    first would leave the page stating a limit nobody enforced.
+    """
+    merged = list(json.loads(existing))
+    by_name = {
+        str(item.get("instance")): item
+        for item in merged
+        if isinstance(item, dict) and item.get("instance")
+    }
+    for item in run.get("admission_instances") or []:
+        if not isinstance(item, dict) or not item.get("instance"):
+            continue
+        name = str(item["instance"])
+        if name in by_name:
+            if by_name[name] != item:
+                return None
+            continue
+        merged.append(item)
+        by_name[name] = item
+    return merged
 
 
 def _summary_row(row: Any) -> dict[str, Any]:

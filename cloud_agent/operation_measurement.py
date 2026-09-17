@@ -173,6 +173,14 @@ class Interaction:
     deadline_mono: float
     started_mono: float
     last_used_mono: float
+    #: The attribution this interaction was established with, including the
+    #: chat id. A continuation has to match it even when the run does not
+    #: filter by those fields: an interaction is one chat's workspace on one
+    #: machine, and a request that resolved a different host or sandbox is a
+    #: different interaction, not a continuation of this one. The chat id is
+    #: included because it lives on the scope rather than in its facts, which
+    #: is what made a job-scoped run reject a legitimate continuation.
+    source_facts: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def operation(self) -> str:
@@ -338,13 +346,20 @@ class Selection:
         return self.record_answer(stage, call_id, dict(answer))
 
     def settle(self) -> None:
-        """Run the deadline judgement the record will be emitted with.
+        """Freeze the end boundary and completeness, once, before any report.
 
-        Called before a response is built, so the response cannot claim a
-        sample is complete while ``finish`` is about to mark it expired. The
-        judgement itself lives in the collector and is idempotent.
+        Called before a response is built. Everything that reports on this
+        request afterwards -- the response block, the SSE headers, the log
+        line, the persisted row -- reads the same frozen values, so none of
+        them can contradict another about the sample they all describe.
+
+        The freeze happens here rather than at export on purpose: encoding a
+        response takes real time, and that time is not collection. A response
+        built at 100 and exported at 102 used to disagree -- complete in the
+        body, partial in the record -- and the boundary is what removes the
+        disagreement rather than hiding it.
         """
-        operation_profiling.settle(self.measurement)
+        operation_profiling.finalize(self.measurement, self.outcome)
 
     def metadata(self) -> dict[str, Any] | None:
         """Return the block a response carries, or ``None`` when unselected.
@@ -380,13 +395,21 @@ class Selection:
         }
 
     def finish(self, outcome: str | None = None, *, failure_stage: str | None = None) -> None:
-        """Emit the record once. Safe to call more than once."""
+        """Emit the record once. Safe to call more than once.
+
+        An outcome passed here may only replace one that was never frozen: a
+        route that already built its response has stated what the sample was,
+        and a later failure cannot rewrite a reply the client already has.
+        """
         if self._finished:
             return
         self._finished = True
+        settled = outcome or self.outcome
+        if not self.measurement.frozen or outcome is None:
+            self.outcome = settled
         operation_profiling.finish(
             self.measurement,
-            outcome=outcome or self.outcome,
+            outcome=self.outcome,
             failure_stage=failure_stage or self.failure_stage,
         )
 
@@ -537,6 +560,7 @@ def _root(operation: str, scope: Root, *, interaction_id: str | None) -> Selecti
         deadline_mono=measurement.deadline_mono,
         started_mono=now,
         last_used_mono=now,
+        source_facts={**scope.facts, "job_id": scope.job_id},
     )
     selection = Selection(measurement=measurement, interaction=interaction)
     operation_profiling.set_attributes(
@@ -560,11 +584,16 @@ def observe(operation: str, scope: Root, *, continuing: str | None = None) -> Se
     """
     if continuing:
         interaction = _resume(continuing, scope=scope)
-        if interaction is not None:
-            return _root(operation, scope, interaction_id=interaction.interaction_id)
-        # An id this process cannot honour is not a reason to fail the request.
-        # It is a new interaction, and the run may still select it -- but it is
-        # measured on its own evidence, never on the stale interaction's.
+        if interaction is None:
+            # The caller stated which interaction this request belongs to and
+            # this process cannot honour it -- evicted, expired, or another
+            # replica's. The business request proceeds, but it is not sampled:
+            # a fresh interaction here would present one more sample as if the
+            # interrupted interaction had continued, which is exactly the
+            # continuity the browser is asking about.
+            return None
+        return _root(operation, scope, interaction_id=interaction.interaction_id)
+    # No reference at all: an ordinary new request, selected on its own facts.
     return start(operation, scope)
 
 
@@ -599,11 +628,13 @@ def _resume(interaction_id: str, *, scope: Root) -> Interaction | None:
         if now - interaction.last_used_mono > operation_profiling.SELECTION_TTL_S:
             del _INTERACTIONS[wanted]
             return None
-        for key, wanted_value in run.target.items():
-            observed = scope.facts.get(key)
-            if observed is None or str(observed) != wanted_value:
-                # The scope moved, or this request cannot prove it. Either way
-                # the interaction's evidence does not cover this request.
+        # Every fact the interaction was established with has to still hold,
+        # whether or not the run filters by it. A host that changed under an
+        # unfiltered run is still a different machine, and continuing would
+        # report this request's time as having been served by the old one.
+        observed = {**scope.facts, "job_id": scope.job_id}
+        for key, established in interaction.source_facts.items():
+            if observed.get(key) != established:
                 return None
         refreshed = Interaction(
             interaction_id=interaction.interaction_id,
@@ -615,6 +646,7 @@ def _resume(interaction_id: str, *, scope: Root) -> Interaction | None:
             deadline_mono=interaction.deadline_mono,
             started_mono=interaction.started_mono,
             last_used_mono=now,
+            source_facts=interaction.source_facts,
         )
         _INTERACTIONS[wanted] = refreshed
         return refreshed

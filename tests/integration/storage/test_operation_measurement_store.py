@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import asyncpg
 import pytest
@@ -27,7 +28,7 @@ import pytest_asyncio
 from cloud_agent.storage.repositories.operation_measurements import (
     PostgresOperationMeasurementRepository,
 )
-from tests.support.db import reset_agent_tables
+from tests.support.db import backdate_measurement_arrival, reset_agent_tables
 from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -72,11 +73,28 @@ async def store():
 
     await _reset()
     try:
-        yield PostgresOperationMeasurementRepository(pool)
+        yield _Store(PostgresOperationMeasurementRepository(pool), pool)
     finally:
         apply_migrations(config)
         await _reset()
         await pool.close()
+
+
+class _Store:
+    """The repository, plus the pool the arrival seam needs.
+
+    The seam is a separate argument rather than an attribute of the repository:
+    a test may reach the pool, but not by walking through the object under
+    test, which is what the storage boundary forbids.
+    """
+
+    def __init__(self, repository: Any, pool: Any) -> None:
+        self.repository = repository
+        self.pool = pool
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate every capability call to the repository."""
+        return getattr(self.repository, name)
 
 
 def _run(**overrides: object) -> dict[str, object]:
@@ -183,7 +201,13 @@ async def test_the_record_round_trips_through_jsonb(store):
 
 
 async def test_a_page_does_not_skip_a_row_that_shares_a_timestamp(store):
-    """Two samples at the same instant are two rows, on two pages if need be."""
+    """Two samples at the same instant are two rows, on two pages if need be.
+
+    The keyset is ``(received_at, measurement_id)``, so the rows have to share
+    ``received_at`` -- their *arrival* -- for the tiebreaker to be what the
+    test exercises. Making only ``observed_at`` equal would leave the page key
+    already unique and the tiebreaker untested.
+    """
     moment = datetime.now(UTC)
     for index in range(5):
         await store.record_operation_measurement(
@@ -194,6 +218,7 @@ async def test_a_page_does_not_skip_a_row_that_shares_a_timestamp(store):
             ),
             run=_run(),
         )
+    await backdate_measurement_arrival(store.pool, moment=moment)
 
     first = await store.list_operation_measurements(limit=2)
     assert len(first) == 2
@@ -227,6 +252,7 @@ async def test_the_summary_covers_the_whole_experiment_not_one_page(store):
     assert len(summary) == 1
     row = summary[0]
     assert row["sample_count"] == 5
+    assert row["eligible_count"] == 5
     assert row["min_us"] == 10
     assert row["max_us"] == 50
     assert row["p50_us"] == 30
@@ -254,15 +280,20 @@ async def test_the_summary_keeps_incomparable_samples_apart(store):
 
 
 async def test_incomplete_and_failed_samples_are_counted_separately(store):
-    """A reader has to see what was excluded, not only what remained."""
+    """A reader has to see what was excluded, not only what remained.
+
+    The timings are deliberately far apart: if a failed or partial sample were
+    leaking into the distribution, the percentiles below could not be 100.
+    """
     await store.record_operation_measurement(
-        measurement=_measurement(measurement_id="msm_ok", payload_hash="h-1"),
+        measurement=_measurement(measurement_id="msm_ok", payload_hash="h-1", duration_us=100),
         run=_run(),
     )
     await store.record_operation_measurement(
         measurement=_measurement(
             measurement_id="msm_partial",
             payload_hash="h-2",
+            duration_us=20_000,
             collection_complete=False,
             outcome="completed",
         ),
@@ -272,6 +303,7 @@ async def test_incomplete_and_failed_samples_are_counted_separately(store):
         measurement=_measurement(
             measurement_id="msm_failed",
             payload_hash="h-3",
+            duration_us=10_000,
             outcome="failed",
             collection_complete=True,
         ),
@@ -283,6 +315,14 @@ async def test_incomplete_and_failed_samples_are_counted_separately(store):
     assert summary[0]["sample_count"] == 3
     assert summary[0]["incomplete_count"] == 1
     assert summary[0]["failed_count"] == 1
+    # Only the eligible sample is in the distribution. Their timings differ by
+    # orders of magnitude, so a p50 that included them could not be 100 -- and
+    # counting failures is not the same as keeping them out of the percentile.
+    assert summary[0]["eligible_count"] == 1
+    assert summary[0]["p50_us"] == 100
+    assert summary[0]["p95_us"] == 100
+    assert summary[0]["min_us"] == 100
+    assert summary[0]["max_us"] == 100
 
 
 async def test_a_measurement_can_be_filtered_by_what_it_measured(store):
@@ -334,3 +374,173 @@ async def test_a_measurement_without_a_run_row_is_still_stored(store):
     stored = await store.get_operation_measurement("msm_1")
     assert stored is not None
     assert stored["profiling_run_id"] == "run-1"
+
+
+async def test_a_distribution_with_no_eligible_sample_reports_no_percentile(store):
+    """No eligible sample means a null percentile, not a number from the rest."""
+    await store.record_operation_measurement(
+        measurement=_measurement(
+            measurement_id="msm_a",
+            payload_hash="h-a",
+            duration_us=10_000,
+            outcome="failed",
+            collection_complete=True,
+        ),
+        run=_run(),
+    )
+    await store.record_operation_measurement(
+        measurement=_measurement(
+            measurement_id="msm_b",
+            payload_hash="h-b",
+            duration_us=20_000,
+            outcome="completed",
+            collection_complete=False,
+        ),
+        run=_run(),
+    )
+
+    summary = await store.summarize_operation_measurements(run_id="run-1")
+
+    assert summary[0]["sample_count"] == 2
+    assert summary[0]["eligible_count"] == 0
+    assert summary[0]["p50_us"] is None
+    assert summary[0]["p95_us"] is None
+    assert summary[0]["min_us"] is None
+    assert summary[0]["max_us"] is None
+
+
+async def test_the_four_startup_paths_are_never_averaged_together(store):
+    """A new group and a live reuse are different operations, not one mean.
+
+    Folding them produced a p50 of 500500 µs from a 1 s reuse and a 1 s
+    creation: a number that describes neither.
+    """
+    for index, (path, duration) in enumerate(
+        (("new_group", 1_000_000), ("reuse_live", 1_000), ("resume_stopped", 2_000))
+    ):
+        await store.record_operation_measurement(
+            measurement=_measurement(
+                measurement_id=f"msm_{index}",
+                payload_hash=f"h-{index}",
+                operation="attempt.startup",
+                request_kind="attempt.startup",
+                coverage_scope="host_startup",
+                duration_us=duration,
+                startup_path=path,
+            ),
+            run=_run(operations=["attempt.startup"]),
+        )
+
+    summary = await store.summarize_operation_measurements(run_id="run-1")
+
+    by_path = {row["group"]["startup_path"]: row for row in summary}
+    assert set(by_path) == {"new_group", "reuse_live", "resume_stopped"}
+    assert by_path["new_group"]["p50_us"] == 1_000_000
+    assert by_path["reuse_live"]["p50_us"] == 1_000
+
+
+async def test_a_caller_cannot_group_away_a_required_dimension(store):
+    """The dimensions that decide comparability are not the caller's to remove."""
+    await store.record_operation_measurement(measurement=_measurement(), run=_run())
+
+    summary = await store.summarize_operation_measurements(run_id="run-1", group_by=[])
+
+    group = summary[0]["group"]
+    for required in ("operation", "request_kind", "boundary_version", "coverage_scope"):
+        assert required in group
+
+    with pytest.raises(ValueError):
+        await store.summarize_operation_measurements(run_id="run-1", group_by=["nonsense"])
+
+
+async def test_a_second_manifest_under_one_run_id_is_refused(store):
+    """A different experiment cannot claim an id the catalogue already defines."""
+    assert (
+        await store.record_operation_measurement(
+            measurement=_measurement(), run=_run(target={"host": "host-a"})
+        )
+        == "stored"
+    )
+
+    result = await store.record_operation_measurement(
+        measurement=_measurement(measurement_id="msm_2", payload_hash="h-2"),
+        run=_run(target={"host": "host-b"}),
+    )
+
+    assert result == "run_conflict"
+    # The sample was not stored: a record filed under a catalogue entry that
+    # describes something else is worse than a missing sample.
+    assert await store.get_operation_measurement("msm_2") is None
+    run = await store.get_profiling_run("run-1")
+    assert run is not None and run["target"] == {"host": "host-a"}
+
+
+async def test_a_run_that_changed_what_it_selects_is_refused(store):
+    """Every part that says what the experiment is is compared, not only the target."""
+    await store.record_operation_measurement(measurement=_measurement(), run=_run())
+
+    for changed in (
+        _run(operations=["terminal.open"]),
+        _run(config_version=2),
+    ):
+        result = await store.record_operation_measurement(
+            measurement=_measurement(measurement_id="msm_x", payload_hash="h-x"),
+            run=changed,
+        )
+        assert result == "run_conflict"
+
+
+async def test_an_expiry_that_drifted_between_writers_is_not_a_conflict(store):
+    """The deadline is re-derived by each process, so it is not an identity.
+
+    Every writer computes ``expires_at`` from the same deployment setting, and
+    two of them can state it microseconds apart. Treating that as a conflict
+    would refuse the second replica's samples for a difference nobody chose;
+    requiring it to be equal would also refuse an identical retry.
+    """
+    await store.record_operation_measurement(measurement=_measurement(), run=_run())
+
+    result = await store.record_operation_measurement(
+        measurement=_measurement(measurement_id="msm_2", payload_hash="h-2"),
+        run=_run(expires_at=datetime.now(UTC) + timedelta(hours=5)),
+    )
+
+    assert result == "stored"
+
+
+async def test_a_second_admission_instance_joins_the_manifest(store):
+    """Two replicas running one experiment are two instances of one manifest."""
+    await store.record_operation_measurement(
+        measurement=_measurement(),
+        run=_run(admission_instances=[{"instance": "cp-1", "max_operations": 200}]),
+    )
+
+    assert (
+        await store.record_operation_measurement(
+            measurement=_measurement(measurement_id="msm_2", payload_hash="h-2"),
+            run=_run(admission_instances=[{"instance": "cp-2", "max_operations": 200}]),
+        )
+        == "stored"
+    )
+
+    run = await store.get_profiling_run("run-1")
+    assert run is not None
+    assert [item["instance"] for item in run["admission_instances"]] == ["cp-1", "cp-2"]
+
+
+async def test_an_instance_reporting_a_different_budget_is_refused(store):
+    """A budget that changed mid-run is a different experiment, not a merge."""
+    await store.record_operation_measurement(
+        measurement=_measurement(),
+        run=_run(admission_instances=[{"instance": "cp-1", "max_operations": 200}]),
+    )
+
+    result = await store.record_operation_measurement(
+        measurement=_measurement(measurement_id="msm_2", payload_hash="h-2"),
+        run=_run(admission_instances=[{"instance": "cp-1", "max_operations": 500}]),
+    )
+
+    assert result == "run_conflict"
+    run = await store.get_profiling_run("run-1")
+    assert run is not None
+    assert run["admission_instances"] == [{"instance": "cp-1", "max_operations": 200}]

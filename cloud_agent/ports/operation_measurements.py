@@ -15,11 +15,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-#: The three answers a write can have. A conflict is a result rather than an
-#: exception because it is not a failure of the write: the record was refused
+#: The four answers a write can have. A refusal is a result rather than an
+#: exception because it is not a failure of the write: the record was rejected
 #: on purpose, and the caller has to decide what to do about it. Returning it
 #: makes that decision explicit instead of something a bare ``try`` can skip.
-MeasurementWriteResult = Literal["stored", "duplicate", "conflict"]
+#:
+#: ``"conflict"`` is the measurement id already naming different contents;
+#: ``"run_conflict"`` is the experiment id already naming a different
+#: experiment. Neither is retryable: sending the same record again cannot
+#: resolve either, and looping would turn a disagreement into an endless retry.
+MeasurementWriteResult = Literal["stored", "duplicate", "conflict", "run_conflict"]
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -52,9 +57,13 @@ class OperationMeasurements(Protocol):
 
         Returns:
             ``"stored"`` when this call inserted the row, ``"duplicate"`` when
-            an identical measurement was already there, and ``"conflict"``
-            when the id exists with different contents -- which must be
-            surfaced, never overwritten and never retried.
+            an identical measurement was already there, ``"conflict"`` when the
+            measurement id exists with different contents, and
+            ``"run_conflict"`` when the experiment id already names a different
+            experiment -- different operations, a different target, or another
+            configuration version. The last two are refusals to be surfaced,
+            never overwritten and never retried; a refused measurement is not
+            stored.
         """
         ...
 

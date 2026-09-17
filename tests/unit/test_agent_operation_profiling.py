@@ -1462,3 +1462,67 @@ def test_a_root_that_states_no_coverage_claims_none(monkeypatch, caplog):
     record = _records(caplog)[0]
     assert record["coverage_scope"] == ""
     assert record["end_to_end_complete"] is False
+
+
+def test_the_response_and_the_record_cannot_disagree_about_completeness(monkeypatch, caplog, clock):
+    """A boundary frozen before the response is built is the one emitted.
+
+    Reproduced the other way round: metadata rendered at 100 said complete,
+    ``finish`` at 102 re-read the clock, saw the deadline pass, and emitted the
+    same measurement as partial. The client had already been told the sample
+    was whole, and the record denied it.
+    """
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    _enable(monkeypatch)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    assert measurement is not None
+    profiling.mark(measurement, "validate")
+
+    # The response is built one microsecond before the deadline, and encoding
+    # it takes long enough to cross the deadline before export.
+    remaining = measurement.deadline_offset_us()
+    clock.advance(max(0, remaining - 1))
+    profiling.finalize(measurement, "dispatched")
+    assert profiling.collection_complete(measurement, "dispatched") is True
+
+    clock.advance(10_000)
+    profiling.finish(measurement, outcome="dispatched")
+
+    record = _records(caplog)[0]
+    # What the response said and what the record says are the same answer.
+    assert record["collection_complete"] is True
+    assert record["measurement_complete"] is True
+
+
+def test_a_boundary_frozen_past_the_deadline_stays_partial(monkeypatch, caplog, clock):
+    """The freeze is not an escape from the deadline, only from re-deciding it."""
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    _enable(monkeypatch)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    assert measurement is not None
+
+    clock.advance(measurement.deadline_offset_us() + 1_000)
+    profiling.finalize(measurement, "dispatched")
+    profiling.finish(measurement, outcome="dispatched")
+
+    record = _records(caplog)[0]
+    assert record["collection_complete"] is False
+    assert record["measurement_complete"] is False
+    assert record["facts"]["profiling_stopped"] == "expired"
+
+
+def test_a_frozen_outcome_is_not_rewritten_by_a_later_failure(monkeypatch, caplog):
+    """A client already told the request succeeded is not contradicted later."""
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    _enable(monkeypatch)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    assert measurement is not None
+
+    profiling.finalize(measurement, "dispatched")
+    # Export happens after the response; a bookkeeping failure must not turn a
+    # dispatched startup into a failed one in the record.
+    profiling.finish(measurement, outcome="failed")
+
+    record = _records(caplog)[0]
+    assert record["outcome"] == "dispatched"
+    assert record["startup_outcome"] == "dispatched"

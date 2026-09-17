@@ -344,6 +344,14 @@ class Measurement:
     truncated_fragments: set[tuple[str, str]] = field(default_factory=set)
     #: Set once the run's deadline passed with collecting still open.
     expired: bool = False
+    #: Set by :func:`finalize` when the end boundary and completeness are
+    #: frozen. After this, no report about the measurement re-reads the clock.
+    frozen: bool = False
+    #: The outcome frozen with the boundary, so ``finish`` cannot change it.
+    frozen_outcome: str = ""
+    #: The completeness frozen with the boundary, so a response and the record
+    #: it describes cannot disagree.
+    frozen_complete: bool = False
     #: The budget slot is held from selection and returned by `discard`.
     reserved: bool = True
     selected: bool = True
@@ -1327,18 +1335,50 @@ def _stages(measurement: Measurement) -> list[dict[str, Any]]:
     return stages
 
 
-def settle(measurement: Measurement | None) -> None:
-    """Run the deadline judgement the record will be emitted with.
+def finalize(measurement: Measurement | None, outcome: str) -> None:
+    """Freeze this measurement's end boundary and completeness, once.
 
-    A caller that builds a response before ``finish`` must call this first, or
-    the response can claim a sample is complete while ``finish`` is about to
-    mark it expired. Idempotent, and safe on ``None``.
+    Called once, at the end of the work being measured and before any response
+    is built. Everything that reports on the sample afterwards -- the response
+    metadata, the log line, the JSONL file, the persisted row -- reads these
+    frozen values, so none of them can disagree with another about the same
+    measurement.
+
+    Freezing here rather than at export is what closes the race the review
+    found: a response built at 100 could claim completeness while ``finish`` at
+    102 re-read the clock, saw the deadline pass, and emitted the same
+    measurement as partial. Encoding a response takes real time, and that time
+    is not collection -- so the boundary is the end of collection, and the
+    serialization that follows is deliberately outside it.
+
+    Idempotent, and safe on ``None``.
     """
-    if measurement is None or measurement.finished:
+    if measurement is None or measurement.frozen:
         return
-    if measurement.past_deadline():
-        measurement.expired = True
-        measurement.truncated = True
+    measurement.frozen_outcome = outcome
+    measurement.expired = measurement.expired or measurement.past_deadline()
+    ended = measurement.offset_us()
+    if measurement.expired:
+        # Collecting stopped at the deadline, so the record ends there too.
+        ended = min(ended, max(0, measurement.deadline_offset_us()))
+    measurement.ended_offset_us = ended
+    # Computed *before* the flag is set: ``collection_complete`` reads the
+    # freeze when there is one, so marking first would have it read the answer
+    # it is being asked to produce -- which is always False.
+    complete = collection_complete(measurement, outcome)
+    measurement.frozen = True
+    measurement.frozen_complete = complete
+
+
+def settle(measurement: Measurement | None) -> None:
+    """Deprecated alias for :func:`finalize`, kept for callers mid-migration.
+
+    Prefer ``finalize(measurement, outcome)``: it also freezes the outcome and
+    the completeness, which is what stops a later export from re-deciding them.
+    """
+    if measurement is None or measurement.frozen:
+        return
+    finalize(measurement, measurement.frozen_outcome or "incomplete")
 
 
 def collection_complete(measurement: Measurement | None, outcome: str) -> bool:
@@ -1352,6 +1392,10 @@ def collection_complete(measurement: Measurement | None, outcome: str) -> bool:
     """
     if measurement is None:
         return False
+    if measurement.frozen:
+        # The boundary was closed at a stated moment. Recomputing from a later
+        # clock is exactly the disagreement this freeze exists to prevent.
+        return measurement.frozen_complete
     missing = any(
         (producer, call_id) not in measurement.answered_fragments
         for producer, call_id, _stage in measurement.expected_fragments
@@ -1432,6 +1476,11 @@ def to_record(
         "collection_complete": collection_complete(measurement, outcome),
         # The v2 name for the same judgement, kept while readers migrate.
         "measurement_complete": collection_complete(measurement, outcome),
+        # The outcome and completeness that were frozen with the end boundary.
+        # Stated explicitly because they are what every other report of this
+        # measurement reads, and a reader has to be able to see that they are
+        # one decision rather than two.
+        "boundary_frozen": measurement.frozen,
         "dropped_spans": measurement.dropped_spans,
         # Completion order is not timeline order: a nested span closes first.
         "spans": [
@@ -1653,19 +1702,21 @@ def finish(
     outcome: str,
     failure_stage: str | None = None,
 ) -> None:
-    """Emit the measurement. Safe to call twice and safe on ``None``."""
+    """Emit the measurement. Safe to call twice and safe on ``None``.
+
+    Idempotent in both directions: a measurement already finalized at its end
+    boundary is emitted from those frozen values, and one that never called
+    :func:`finalize` is finalized here -- so a caller that forgets cannot make
+    a record and a response disagree, it can only move the boundary earlier.
+    """
     if measurement is None or measurement.finished:
         return
+    finalize(measurement, outcome)
+    outcome = measurement.frozen_outcome
     measurement.finished = True
     # The record about to be emitted is what the reserved slot was for, so
     # `discard` can no longer return it.
     measurement.reserved = False
-    measurement.expired = measurement.expired or measurement.past_deadline()
-    ended = measurement.offset_us()
-    if measurement.expired:
-        # Collecting stopped at the deadline, so the record ends there too.
-        ended = min(ended, max(0, measurement.deadline_offset_us()))
-    measurement.ended_offset_us = ended
     if not measurement.selected:
         return
     if outcome not in _OUTCOMES:  # pragma: no cover - guarded by callers
@@ -1757,6 +1808,7 @@ __all__ = [
     "context_call_id",
     "discard",
     "expect_fragment",
+    "finalize",
     "finish",
     "flush_sink",
     "fragment_truncated",
