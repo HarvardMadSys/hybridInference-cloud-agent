@@ -242,10 +242,7 @@ async def retry_snapshot_base_import(
     app_credentials: Any | None,
 ) -> bool:
     """Retry one durable post-publish object import after a broker outage."""
-    getter = getattr(store, "pending_snapshot_base_import", None)
-    if getter is None:
-        return False
-    snapshot = await getter()
+    snapshot = await store.snapshot.pending_snapshot_base_import()
     if snapshot is None:
         return False
     try:

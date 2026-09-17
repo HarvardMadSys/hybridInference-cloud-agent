@@ -800,10 +800,6 @@ function GitPanel({ job, active }: { job: AgentJob; active: boolean }) {
       setSelectedPath(files[0].path);
     }
   }, [files, selectedPath]);
-  const showWorkspacePublicationStatus =
-    job.workspaceShared &&
-    Boolean(job.workspacePublicationState) &&
-    job.workspacePublicationState !== 'published';
 
   return (
     <div className="space-y-4" aria-label="Git workspace">
@@ -819,19 +815,6 @@ function GitPanel({ job, active }: { job: AgentJob; active: boolean }) {
         {error || !live?.available ? (
           <span className="rounded bg-gray-100 dark:bg-white/5 px-2 py-1 text-[11px] text-gray-500 dark:text-gray-400">
             {error ? 'Unavailable' : loading ? 'Loading…' : 'Unavailable'}
-          </span>
-        ) : null}
-        {showWorkspacePublicationStatus ? (
-          <span
-            className={`rounded px-2 py-1 text-[11px] ${
-              job.workspacePublicationState === 'failed'
-                ? 'bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-300'
-                : 'bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300'
-            }`}
-          >
-            {job.workspacePublicationState === 'failed'
-              ? 'Shared snapshot needs review'
-              : 'Shared snapshot pending'}
           </span>
         ) : null}
         <button

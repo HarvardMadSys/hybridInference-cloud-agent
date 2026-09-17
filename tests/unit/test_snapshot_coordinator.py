@@ -10,7 +10,7 @@ import pytest
 from cloud_agent import app as control_plane
 
 
-class _ClaimStore:
+class _SnapshotPort:
     def __init__(self, *, fail_once: bool = False) -> None:
         self.calls = 0
         self.fail_once = fail_once
@@ -22,6 +22,28 @@ class _ClaimStore:
             raise RuntimeError("temporary database failure")
         self.called.set()
         return None
+
+
+class _ClaimStore:
+    """Shaped like the assembled ``Storage``: capabilities hang off named ports.
+
+    The claim used to be reached for with ``getattr(store, ...)`` against the
+    top-level store, and a fake carrying the method there kept these tests
+    green while the real composition root -- which has it on ``.snapshot`` --
+    silently claimed nothing. Keeping the fake's shape honest is what makes a
+    coordinator that reaches for the wrong object fail here.
+    """
+
+    def __init__(self, *, fail_once: bool = False) -> None:
+        self.snapshot = _SnapshotPort(fail_once=fail_once)
+
+    @property
+    def calls(self) -> int:
+        return self.snapshot.calls
+
+    @property
+    def called(self) -> asyncio.Event:
+        return self.snapshot.called
 
 
 @pytest.mark.asyncio

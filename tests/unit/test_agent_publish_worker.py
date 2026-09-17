@@ -80,6 +80,13 @@ class FakeStore(AllCapabilities):
     async def fail_snapshot_publish(self, *, snapshot_id: int, detail: str) -> None:
         self.snapshot_failed = (snapshot_id, detail)
 
+    async def pending_snapshot_base_import(self) -> dict[str, Any] | None:
+        # No durable import is outstanding: these scenarios publish from a
+        # broker that answered. The publisher used to reach for this through
+        # `getattr` on the store, so a fake missing it read as "nothing
+        # pending" instead of as a fake that had drifted from its port.
+        return None
+
     async def record_snapshot_base_import_failure(self, *, snapshot_id: int, detail: str) -> None:
         self.import_failed = (snapshot_id, detail)
 

@@ -576,10 +576,7 @@ async def _cleanup_reaped_shared_residencies(
 
 async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> None:
     """Capture at most one quiescent shared workspace without blocking turns."""
-    claim = getattr(store, "claim_due_sandbox_snapshot", None)
-    if claim is None:
-        return
-    snapshot = await claim()
+    snapshot = await store.snapshot.claim_due_sandbox_snapshot()
     if snapshot is None:
         return
 
@@ -752,30 +749,24 @@ async def reap_expired_attempts(
                     "agent_attempts_reaped",
                     extra={"event": "agent_attempts_reaped", "count": len(actions)},
                 )
-            snapshot_reaper = getattr(
-                store.snapshot, "reap_stalled_sandbox_snapshot_captures", None
-            )
-            if snapshot_reaper is not None:
-                stalled_captures = await snapshot_reaper()
-                if stalled_captures:
-                    logger.warning(
-                        "agent_snapshot_captures_stalled",
-                        extra={
-                            "event": "agent_snapshot_captures_stalled",
-                            "snapshot_ids": stalled_captures,
-                        },
-                    )
-            snapshot_publish_reaper = getattr(store, "reap_stalled_snapshot_publishes", None)
-            if snapshot_publish_reaper is not None:
-                stalled_snapshot_publishes = await snapshot_publish_reaper()
-                if stalled_snapshot_publishes:
-                    logger.warning(
-                        "agent_snapshot_publishes_stalled",
-                        extra={
-                            "event": "agent_snapshot_publishes_stalled",
-                            "snapshot_ids": stalled_snapshot_publishes,
-                        },
-                    )
+            stalled_captures = await store.snapshot.reap_stalled_sandbox_snapshot_captures()
+            if stalled_captures:
+                logger.warning(
+                    "agent_snapshot_captures_stalled",
+                    extra={
+                        "event": "agent_snapshot_captures_stalled",
+                        "snapshot_ids": stalled_captures,
+                    },
+                )
+            stalled_snapshot_publishes = await store.snapshot.reap_stalled_snapshot_publishes()
+            if stalled_snapshot_publishes:
+                logger.warning(
+                    "agent_snapshot_publishes_stalled",
+                    extra={
+                        "event": "agent_snapshot_publishes_stalled",
+                        "snapshot_ids": stalled_snapshot_publishes,
+                    },
+                )
             stalled_session_forks = await store.session_fork.reap_stalled_session_forks()
             if stalled_session_forks:
                 from cloud_agent.broker_routing import broker_for_job
