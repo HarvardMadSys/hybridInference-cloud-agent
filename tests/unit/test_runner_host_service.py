@@ -708,7 +708,7 @@ def _run_descriptor(monkeypatch, **overrides: Any) -> dict[str, Any]:
     """Turn profiling on in this process with one usable run."""
     import json
 
-    from cloud_agent_host import operation_profiling
+    from cloud_agent_profiling import operation_profiling
 
     descriptor = {**_descriptor(), **overrides}
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
@@ -724,8 +724,8 @@ def test_the_host_hands_its_selection_to_the_child(monkeypatch):
     in the parent is worthless unless it crosses that boundary. Without this
     the whole feature is silent on the path production actually uses.
     """
-    from cloud_agent_host import operation_profiling
     from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult
+    from cloud_agent_profiling import operation_profiling
 
     _run_descriptor(monkeypatch)
     payload = {
@@ -779,8 +779,8 @@ def test_a_turn_process_reattaches_the_selection_it_was_handed(monkeypatch):
     import io
     import os
 
-    from cloud_agent_host import operation_profiling
     from cloud_agent_host.host_runtime import encode_turn
+    from cloud_agent_profiling import operation_profiling
 
     _run_descriptor(monkeypatch)
     read_fd, write_fd = os.pipe()
@@ -890,7 +890,7 @@ def test_a_child_never_refuses_a_turn_over_an_unusable_selection(monkeypatch):
 
 def test_a_poll_that_claimed_nothing_spends_no_slot(monkeypatch):
     """An idle poll is not a startup, so it must not consume the experiment."""
-    from cloud_agent_host import operation_profiling
+    from cloud_agent_profiling import operation_profiling
 
     _run_descriptor(monkeypatch, max_operations=1)
 
@@ -925,7 +925,7 @@ def _sink_with(monkeypatch: Any, tmp_path: Any, records: list[dict[str, Any]]) -
     """Point profiling at a sink holding these frozen records."""
     import json
 
-    from cloud_agent_host import operation_profiling
+    from cloud_agent_profiling import operation_profiling
 
     sink = tmp_path / "records.jsonl"
     sink.write_text("".join(json.dumps(record) + "\n" for record in records))
@@ -1051,7 +1051,7 @@ def test_a_turn_with_no_measurement_delivers_nothing(monkeypatch, tmp_path):
     """Profiling off means no sink, no request and no cost."""
     import os
 
-    from cloud_agent_host import operation_profiling
+    from cloud_agent_profiling import operation_profiling
 
     monkeypatch.delenv(operation_profiling.ENV_PROFILING_SINK, raising=False)
     control = _StubControl([])

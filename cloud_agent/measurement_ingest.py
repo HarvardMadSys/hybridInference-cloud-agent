@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Final
 
-from cloud_agent_host.operation_profiling import (
+from cloud_agent_profiling.operation_profiling import (
     MAX_ATTRIBUTE_CHARS,
     MAX_REMOTE_STAGES,
     MAX_RUN_ID_CHARS,

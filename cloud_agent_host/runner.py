@@ -46,7 +46,6 @@ if TYPE_CHECKING:
 
 import httpx
 
-from cloud_agent_host import operation_profiling
 from cloud_agent_host.chat_sandbox import (
     CHAT_WORKDIR,
     ChatSandboxManager,
@@ -82,14 +81,6 @@ from cloud_agent_host.host_runtime import (
     write_handover,
 )
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
-from cloud_agent_host.measurement_delivery import (
-    DELIVERY_ATTEMPTS_MAX,
-    DELIVERY_DRAIN_S,
-    DELIVERY_TIMEOUT_S,
-    attempts_exhausted,
-    classify_exception,
-    classify_response,
-)
 from cloud_agent_host.patch_gate import branch_name_for
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
@@ -121,6 +112,15 @@ from cloud_agent_host.shared_protocol import (
     shared_deployment_capability,
 )
 from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
+from cloud_agent_profiling import operation_profiling
+from cloud_agent_profiling.measurement_delivery import (
+    DELIVERY_ATTEMPTS_MAX,
+    DELIVERY_DRAIN_S,
+    DELIVERY_TIMEOUT_S,
+    attempts_exhausted,
+    classify_exception,
+    classify_response,
+)
 
 DEFAULT_LEASE_TTL_S = 120.0
 HEARTBEAT_INTERVAL_S = 30.0

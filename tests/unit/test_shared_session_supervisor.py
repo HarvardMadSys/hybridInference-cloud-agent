@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from cloud_agent_host import operation_profiling
 from cloud_agent_host.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxSpec,
@@ -37,6 +36,7 @@ from cloud_agent_host.shared_session_supervisor import (
     SharedMemberManifest,
 )
 from cloud_agent_host.workspace_broker import SharedSandboxIdentityRequest, create_app
+from cloud_agent_profiling import operation_profiling
 
 
 class _Manager:

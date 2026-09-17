@@ -47,7 +47,7 @@ Every cohort runs that same sequence, and each attempt is timed end to end with
 
 ``onlog``
     Same as ``on``, plus a deliberately slow ``INFO`` handler attached to the
-    ``cloud_agent_host.operation_profiling`` logger for the duration of the
+    ``cloud_agent_profiling.operation_profiling`` logger for the duration of the
     measurement (``--log-delay-ms``, default 1.0).  One record per attempt at
     that delay would cost a millisecond *on whichever thread formats it* --
     roughly 40x the ~25 us attempt being measured -- so if any part of the log
@@ -123,8 +123,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from cloud_agent_host import operation_profiling
-from cloud_agent_host.operation_profiling import (
+from cloud_agent_profiling import operation_profiling
+from cloud_agent_profiling.operation_profiling import (
     ENV_PROFILING_ENABLED,
     ENV_PROFILING_RUN,
     ENV_PROFILING_SINK,
@@ -567,7 +567,7 @@ def onlog_comparison(samples: dict[str, Sample], delay_ms: float) -> dict[str, o
         ),
         "test": (
             "compare `onlog` against `on`; the cohorts are identical except that `onlog` "
-            "has a slow INFO handler attached to cloud_agent_host.operation_profiling"
+            "has a slow INFO handler attached to cloud_agent_profiling.operation_profiling"
         ),
         "handler_per_record_delay_ms": delay_ms,
         "synchronous_cost_per_attempt_us": round(synchronous_us, 3),

@@ -54,6 +54,8 @@ include = [
   "cloud_agent_git.*",
   "cloud_agent_host",
   "cloud_agent_host.*",
+  "cloud_agent_profiling",
+  "cloud_agent_profiling.*",
 ]
 
 [tool.pytest.ini_options]

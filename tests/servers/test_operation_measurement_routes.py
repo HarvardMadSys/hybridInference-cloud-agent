@@ -43,12 +43,12 @@ from cloud_agent.operation_measurement import (
     reset as reset_selections,
     root_scope,
 )
-from cloud_agent_host import operation_call, operation_profiling
-from cloud_agent_host.workspace_broker_client import (
+from cloud_agent.workspace_broker_client import (
     WorkspaceBrokerClient,
     WorkspaceBrokerError,
     WorkspaceBrokerStream,
 )
+from cloud_agent_profiling import operation_call, operation_profiling
 
 
 class _UnusedClient:

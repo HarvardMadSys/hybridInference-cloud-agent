@@ -32,7 +32,7 @@ from cloud_agent.operation_measurement import (
     INTERACTION_HEADER,
     reset as reset_selections,
 )
-from cloud_agent_host import operation_call, operation_profiling
+from cloud_agent_profiling import operation_call, operation_profiling
 from tests.servers.test_agent_jobs_api import (
     FakeStorage,
     _attach_shared_workspace,

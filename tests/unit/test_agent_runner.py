@@ -13,11 +13,12 @@ from unittest.mock import Mock
 import httpx
 import pytest
 
-from cloud_agent_host import operation_profiling, runner as runner_mod
+from cloud_agent_host import runner as runner_mod
 from cloud_agent_host.runner import ClaimedJob, LeaseLost
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError
 from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+from cloud_agent_profiling import operation_profiling
 
 
 @pytest.fixture(autouse=True)

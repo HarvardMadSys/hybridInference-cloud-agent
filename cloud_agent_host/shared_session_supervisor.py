@@ -48,12 +48,6 @@ from cloud_agent_host.member_resources import (
     WindowAccumulator,
     reduce_window,
 )
-from cloud_agent_host.operation_profiling import (
-    StageRecorder,
-    context_call_id,
-    start_stage_recording,
-    substage,
-)
 from cloud_agent_host.resident_transport import (
     ResidentLaunch,
     ResidentTransport,
@@ -66,6 +60,12 @@ from cloud_agent_host.session_lifecycle import (
     DEFAULT_SWEEP_INTERVAL_S,
     SessionBusy,
     SessionLeaseLost,
+)
+from cloud_agent_profiling.operation_profiling import (
+    StageRecorder,
+    context_call_id,
+    start_stage_recording,
+    substage,
 )
 
 if TYPE_CHECKING:

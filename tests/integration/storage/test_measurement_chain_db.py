@@ -30,8 +30,8 @@ from cloud_agent.api.deps import get_agent_app_credentials, get_storage
 from cloud_agent.app import create_app
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
-from cloud_agent_host import operation_profiling
 from cloud_agent_host.runner import ControlPlane, deliver_measurements
+from cloud_agent_profiling import operation_profiling
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 

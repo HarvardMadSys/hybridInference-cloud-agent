@@ -50,7 +50,6 @@ from cloud_agent_host.guest_observer import (
     GuestObserverRuntimeError,
     GuestObserverSnapshot,
 )
-from cloud_agent_host.operation_profiling import StageObserver, substage
 from cloud_agent_host.sandbox import (
     KATA_RUNTIME,
     ContainerBackend,
@@ -61,6 +60,7 @@ from cloud_agent_host.sandbox import (
     TerminalProcess,
 )
 from cloud_agent_host.tool_windows import MAX_TOOL_MARK_BYTES, TOOL_MARK_FILE, ToolMarkReader
+from cloud_agent_profiling.operation_profiling import StageObserver, substage
 
 if TYPE_CHECKING:
     import builtins

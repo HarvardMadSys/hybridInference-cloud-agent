@@ -203,8 +203,8 @@ def run_stack(python: str, root: Path, iterations: int, warmup: int) -> list[Sam
     import uvicorn
     from fastapi import FastAPI, Header, HTTPException, Query
 
+    from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
     from cloud_agent_host.retained_workspace import read_retained_file
-    from cloud_agent_host.workspace_broker_client import WorkspaceBrokerClient
 
     backend = SimpleNamespace(manager=_LocalExecManager(python, root), spec=object())
     app = FastAPI()
@@ -596,8 +596,8 @@ def _docker_http_samples(
     import uvicorn
     from fastapi import FastAPI, Header, HTTPException, Query
 
+    from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
     from cloud_agent_host.retained_workspace import read_retained_file
-    from cloud_agent_host.workspace_broker_client import WorkspaceBrokerClient
 
     app = FastAPI()
     expected_token = "bench"
