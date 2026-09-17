@@ -133,6 +133,15 @@ def test_the_build_tags_the_image_the_smoke_starts() -> None:
     assert "IMAGE_TAG=" in str(step("Name this cell")["run"])
 
 
+def test_mcp_interactions_run_before_smoke_removes_the_image() -> None:
+    """The smoke harness cleans its image, so later CLI tests cannot start it."""
+    steps = workflow()["jobs"]["artifacts"]["steps"]
+    interactions = step("All five CLIs retain MCP")
+    smoke_step = step("Start it, and assert")
+    assert interactions["env"]["MCP_TEST_SANDBOX_IMAGE"] == "${{ env.IMAGE_TAG }}"
+    assert steps.index(interactions) < steps.index(smoke_step)
+
+
 def test_cleanup_cannot_reach_another_cell() -> None:
     """Seven cells of one run share a run id, an attempt — and often a Docker host.
 

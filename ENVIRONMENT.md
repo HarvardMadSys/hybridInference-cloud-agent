@@ -88,6 +88,7 @@ it before deployment; it needs no model API key or deployed-service setting.
 | `AGENT_DEFAULT_EXECUTION_PROFILE` | **NEW** | Server-owned policy for new root threads. `untrusted-kata-v1` requires an enrolled Host whose current credential still matches and whose exact claiming replica attests `io.containerd.kata.v2` with a guest kernel different from the Host. `trusted-v1` permits the retained container to use runc for trusted internal/dev repositories. Follow-ups and forks inherit the stored profile; callers cannot select it. |
 | `AGENT_ONCALL_DISPATCH_TOKEN` | **NEW** | Authenticates the gateway alert relay on `/v1/agent/service/oncall/*` — one credential, one door. Random 32 bytes, same value in the relay's `.env.oncall`, distinct per environment. Unset opens nothing (the door then answers only to `ADMIN_TOKEN`). |
 | `AGENT_ONCALL_USER_ID` | **NEW** | Gateway user id every on-call job runs as. Its role decides which models the job's grant may carry (`glm-5.2` needs `internal`+), and its quota is what the analysis spends. Unset: the on-call door answers 503, the rest of the service is unaffected. |
+| `AGENT_ALERT_WEBHOOK_URL` | **NEW** | Operator-owned JSON webhook for queue incidents and recovery. The control-plane process checks every minute; a runnable queue head older than ten minutes with no serving host, or no running work, is reported after two observations. Delivery has a five-second timeout, retries on the next pass, and reminders are at most every 30 minutes. Payload contains only event, deployment SHA and counts. Unset still emits structured log events. Configure `STAGING_ALERT_WEBHOOK_URL` as an Actions secret for deployment failures to the same receiver. Neither URL enters runners or sandboxes. |
 | `AGENT_RESIDENCY_TTL_S` | **NEW** | How long a member's independently fenced live-process residency and short-lived inference grant survive between host heartbeats. Default 1800. Shared-live uses one residency per chat membership. This is credential/process ownership, not a second chat lifecycle clock: `AGENT_CHAT_IDLE_TIMEOUT_S` alone decides when a settled retained sandbox group is stopped. |
 | `ADMIN_TOKEN` | existing | The machine-to-machine admin credential (task E7). **Unset opens nothing** — `verify_admin_access` refuses an empty configured value rather than matching an empty presented one — so a deployment that skips it has no token door, only the admin-session one. |
 
@@ -126,13 +127,16 @@ MCP belongs to this service: it owns the catalogue, each user's credential and
 the attempt fence, so it is the only place that can decide a tool call. The
 gateway serves models and answers nothing about MCP.
 
-**Which servers exist is not configuration.** The catalogue is a reviewed,
-in-code list (`cloud_agent/mcp_catalogue.py`) and a user connects their
-own account to an entry in it; there is no variable that adds a server, and no
-variable that grants one to somebody. Credentials live per user in
+**Which servers exist is the user's decision, not configuration.** A person
+adds a standard MCP server — a remote URL, an imported `mcpServers` snippet, or
+a stdio launch spec — and the platform discovers what it offers. There is no
+variable that adds a server and no variable that grants one to somebody.
+Catalogued templates (`cloud_agent/api/mcp_connections.py`) only prefill a form;
+a server with no template is added the same way. Credentials live per user in
 `agent_mcp_connections`, wrapped with
 [`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`](#own-secrets). The variables below
-are all about *reaching* the relay, never about what it may reach.
+are all about *reaching* the relay, plus the three that bound what a
+user-added connection may dial.
 
 | Variable | New? | Value / who provisions |
 |---|---|---|
@@ -142,6 +146,10 @@ are all about *reaching* the relay, never about what it may reach.
 | `AGENT_MCP_HOSTNAME` | **NEW** | The relay's alias on both container networks. Defaults to `agent-mcp`. |
 | `AGENT_CONTROL_PLANE_TUNNEL_*` | **NEW** | The remote-runner host's **third** relay, and the only one the sandbox cannot reach: `SSH_DESTINATION`, `SSH_KEY`, `SSH_KNOWN_HOSTS`, plus the optional `SSH_PORT` / `REMOTE_HOST` / `REMOTE_PORT` / `LISTEN_PORT`. Its far end is the control plane's main listener (8000) — jobs, host registration, sessions, admin — which is why it is aliased on the runner's network only. Its own key again: a key that also opened the MCP tunnel would put 8000 one compromise away from the closed network. |
 | `AGENT_CONTROL_PLANE_HOSTNAME` | **NEW** | That tunnel's alias, on the runner network only. Defaults to `agent-control-plane`. |
+| `AGENT_MCP_PUBLIC_BASE_URL` | **NEW** | The public API base URL used to register and receive MCP OAuth callbacks, including the API prefix — for example `https://example.com/agents/api`. The callback is `<base>/v1/agent/mcp/oauth/callback/<connection-id>`. After processing it, the service returns the browser to `<AGENT_WEB_BASE_URL>/integrations`; the web and API bases may differ. Configured rather than derived from request headers so the registered callback stays stable. Unset means static credentials still work and only the browser flow is refused, with that reason shown. |
+| `AGENT_MCP_ALLOW_PRIVATE_TARGETS` | **NEW** | Whether a user-added MCP connection may dial private and loopback addresses. Off by default: a remote connection that reaches loopback reaches **this** service, and a user who needs a private network should run a connector instead. Turning it on still refuses the ranges this platform never dials, so it cannot be used to reach the cloud metadata service. |
+| `AGENT_MCP_ALLOW_PLAIN_HTTP` | **NEW** | Whether a user-added MCP connection may use `http://` as well as `https://`. Off by default because the credential would travel in the clear. A deployment whose connector bridge is genuinely HTTP inside a private network turns it on deliberately; it is a separate variable from the private-target one because it is a separate risk. |
+| `AGENT_MCP_SERVERS` | **NEW** | **Not operator-set — listed so nobody provisions it.** The name the runner publishes the relay endpoints under for the image-shipped wrappers, as one JSON object of `{alias: url}`. The wrappers merge it into the CLI config they already write, under whichever key their CLI spells MCP with, and add the token reference in that CLI's own syntax — which is not portable between them. A value put here by hand would point a sandbox at servers nobody connected. |
 | `AGENT_MCP_TOKEN` | **NEW** | **Not operator-set — listed so nobody provisions it.** The name the generated sandbox runtime config *references* (`${AGENT_MCP_TOKEN}`) for the per-attempt relay credential the runner injects at launch. A value put here by hand would be a static tool credential shared by every job, which is the thing the per-attempt token exists to avoid. |
 
 ### Scheduling

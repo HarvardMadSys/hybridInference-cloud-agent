@@ -47,6 +47,14 @@ export AGENT_DEPLOY_MODE
 
 cd "${DEPLOY_ROOT}" 2>/dev/null || die "${DEPLOY_ROOT} does not exist"
 
+# Read before anything in this script can overwrite it. This file is written
+# once a rollout has passed every host check, immediately before readiness is
+# published, so it names a generation that worked; `PREVIOUS` below does not — in
+# source mode it is whatever commit the checkout happened to be standing on,
+# which after a failed deploy is the commit that failed. The failure path at the
+# bottom is the only reader.
+RECORDED="$(cat .deployed-sha 2>/dev/null || true)"
+
 if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
   [ -f .env ] || die ".env is missing from ${DEPLOY_ROOT}"
   source "$SCRIPT_DIR/../release/artifact_env.sh"
@@ -172,15 +180,118 @@ Or set ALLOW_STRAY_STACK=1 if you genuinely want both."
   log "ALLOW_STRAY_STACK=1 — starting anyway"
 fi
 
+# ---------------------------------------------------------------------------
+# A failed rollout must not leave this host advertising nothing.
+#
+# `sandbox_host.sh up` is not transactional. It invalidates this host's
+# shared-live marker and drains the runners that were serving *before* it runs
+# the checks that decide whether the replacement is fit (sandbox_host.sh,
+# 902-943: prepare the marker, stop the runners, `compose up -d`, `cmd_check`,
+# complete the marker). A check that fails therefore leaves the marker at
+# `pending:<sha>`, and a runner advertising no deployment does not poll at all —
+# so the queue stalls behind a page that says "waiting to start" and nothing in
+# the system says why.
+#
+# On 2026-09-13 one lost guest-observer probe left staging in exactly that
+# state. Nothing retried it, and nothing brought the previous generation back,
+# so it lasted 29.6 hours — until an unrelated merge happened to trigger the
+# next deploy (issue #259). Retrying the probe is its own change (#257); this is
+# the other half, and the half that bounds the damage when a retry is exhausted.
+#
+# Restoring is a deploy of an older commit and deliberately not a second
+# mechanism: it is the documented rollback (README-cd.md, "Rolling back"),
+# driven by the commit `.deployed-sha` records instead of by a human who first
+# has to notice the deploy failed. This job still exits non-zero — a restore is
+# a repair, not a success.
+# ---------------------------------------------------------------------------
+
+#: A marker naming a commit is this host advertising a generation. An empty or
+#: `pending:` marker is this host advertising nothing, which is the only state
+#: worth interrupting a failed deploy to repair: `up` invalidates the marker
+#: after the build and the Kata probe, so a rollout that died before that left
+#: the previous generation running and must not be disturbed.
+advertises_a_generation() {
+  local current
+  current="$(cat .shared-live-ready 2>/dev/null || true)"
+  [[ -n "${current}" && "${current}" != pending:* ]]
+}
+
+#: Bring back the recorded generation, using the recorded generation's own
+#: script, compose file and build recipe — the same ones that produced the
+#: containers it is replacing. Returns non-zero, without touching the tree, when
+#: it cannot prove the target is one this host is able to produce.
+restore_recorded_generation() {
+  local recorded="$1" target_protocol
+  if [[ "${AGENT_DEPLOY_MODE}" != "source" ]]; then
+    log "cannot restore ${recorded} in ${AGENT_DEPLOY_MODE} mode: this script is handed one release manifest and has no older one to hand itself"
+    return 1
+  fi
+  # Resetting the tree rewrites the file bash is currently reading, because bash
+  # executes a script by byte offset rather than from a copy. CI runs this from
+  # `.deploy-orchestrator`, a checkout that is not DEPLOY_ROOT, and the
+  # documented manual path passes a SOURCE_REPO; running it out of the tree it
+  # is about to rewrite is refused rather than half-supported.
+  if [[ "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/" == "${DEPLOY_ROOT}/"* ]]; then
+    log "refusing to restore from inside ${DEPLOY_ROOT}: a restore resets that tree while this file is still being read. Dispatch the workflow with sha=${recorded} instead."
+    return 1
+  fi
+  # The recorded commit has to be one this tree can produce, not merely a name
+  # somebody wrote down. Fetching from the same clone the target came from
+  # covers a tree that has since been collected; the object check covers a fetch
+  # that could not reach it. A restore that silently checked out nothing would
+  # leave the host exactly as dark as it already is.
+  git fetch --quiet "${SOURCE_REPO}" "${recorded}" 2>/dev/null || true
+  if ! git cat-file -e "${recorded}^{commit}" 2>/dev/null; then
+    log "recorded generation ${recorded} is neither in ${DEPLOY_ROOT} nor fetchable from ${SOURCE_REPO}"
+    return 1
+  fi
+  # The same fence the target passed above, for the same reason: an online roll
+  # back across a protocol boundary is the thing the fence exists to refuse.
+  target_protocol="$(git show "${recorded}:deploy/DEPLOY_PROTOCOL" 2>/dev/null || true)"
+  if [[ "${target_protocol}" != "${DEPLOY_PROTOCOL}" ]]; then
+    log "recorded generation ${recorded} implements '${target_protocol:-no protocol}', not ${DEPLOY_PROTOCOL}; refusing to cross a protocol boundary"
+    return 1
+  fi
+  log "restoring the recorded generation ${recorded}"
+  git reset --hard --quiet "${recorded}" || return 1
+  AGENT_DEPLOYMENT_SHA="${recorded}"
+  export AGENT_DEPLOYMENT_SHA
+  if [ -n "${REPLICAS:-}" ]; then
+    DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" up "${REPLICAS}" || return 1
+  else
+    DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" up || return 1
+  fi
+  printf '%s\n' "${recorded}" > .deployed-sha || return 1
+  bash "$SANDBOX_HOST_SCRIPT" mark-ready "${recorded}"
+}
+
 # Everything that makes this a deployment rather than a `git pull` lives in
 # there, including the refusal to start runners on a host that cannot isolate
 # them. It exits non-zero on a failed gateway probe, which is what turns a
 # broken tunnel into a red deploy instead of jobs that claim and then fail.
 log "handing over to sandbox_host.sh up"
+ROLLOUT_STATUS=0
 if [ -n "${REPLICAS:-}" ]; then
-  DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" up "${REPLICAS}"
+  DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" up "${REPLICAS}" || ROLLOUT_STATUS=$?
 else
-  DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" up
+  DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" up || ROLLOUT_STATUS=$?
+fi
+
+if [ "${ROLLOUT_STATUS}" -ne 0 ]; then
+  if advertises_a_generation; then
+    die "the rollout of ${SHA} failed, but this host is still advertising the generation it was serving: nothing was interrupted and the queue is still being served"
+  fi
+  log "the rollout of ${SHA} failed after invalidating this host's marker: it advertises no deployment and will claim no work"
+  if [ -z "${RECORDED}" ]; then
+    die "the rollout of ${SHA} failed and .deployed-sha records no generation to fall back to. This host advertises no deployment and will claim no work until a rollout completes; roll back with a compatible commit."
+  fi
+  # Also the re-deploy case: a recorded generation equal to the target is the
+  # same commit rolled out again, which is the cheapest possible recovery and
+  # the one a deterministic failure will exhaust.
+  if restore_recorded_generation "${RECORDED}"; then
+    die "the rollout of ${SHA} failed and this host is serving ${RECORDED} again. The failure is still reported: this attempt did not pass its checks."
+  fi
+  die "the rollout of ${SHA} failed AND falling back to ${RECORDED} failed. This host advertises no deployment and will claim no work until a rollout completes."
 fi
 
 printf '%s\n' "${SHA}" > .deployed-sha

@@ -86,6 +86,12 @@ if "config" in a and "--environment" in a:
     print("\n".join(f"{k}={v}" for k,v in values.items()))
 elif "config" in a and "--services" in a:
     print("postgres\nmigrate\ncontrol-plane\nmcp-relay\nweb")
+elif "config" in a and "--format" in a:
+    if os.getenv("TEST_REAL_COMPOSE"):
+        raise SystemExit(subprocess.run([os.environ["TEST_REAL_COMPOSE"], *a]).returncode)
+    import yaml
+    model = yaml.safe_load(pathlib.Path(a[a.index("-f") + 1]).read_text())
+    print(json.dumps(model))
 elif a[:1] == ["compose"]:
     if "build" in a: raise SystemExit(91)
     if "pull" in a: raise SystemExit(int(os.getenv("TEST_PULL_EXIT", "0")))

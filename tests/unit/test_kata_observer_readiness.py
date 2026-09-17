@@ -9,7 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from cloud_agent_host import chat_sandbox
 from cloud_agent_host.chat_sandbox import (
+    GUEST_OBSERVER_PROBE_ATTEMPTS,
     MEMBER_REAPER_TARGET,
     MEMBER_UID_BASE,
     ChatSandboxInspection,
@@ -192,6 +194,9 @@ def test_readiness_requires_events_and_member_isolation_and_cleans_up(monkeypatc
     monkeypatch.setattr(manager, "_run", run)
     monkeypatch.setattr(manager, "exec_capture", capture)
     monkeypatch.setattr(manager, "_kata_privileged_exec", privileged)
+    # `marker_transport` is a race the probe now retries; the suite does not
+    # need to sit out the interval to see the verdict.
+    monkeypatch.setattr(chat_sandbox.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         manager, "begin_guest_observation", lambda spec, user_uid: SimpleNamespace(available=True)
     )
@@ -200,6 +205,9 @@ def test_readiness_requires_events_and_member_isolation_and_cleans_up(monkeypatc
         "finish_guest_observation",
         lambda spec, cursor: SimpleNamespace(
             complete=True,
+            lost_events=0,
+            truncated=False,
+            detail=None,
             tool_marks=()
             if failure == "marker_transport"
             else ((1.0, "pre", "preflight"), (2.0, "post", "preflight")),
@@ -212,7 +220,8 @@ def test_readiness_requires_events_and_member_isolation_and_cleans_up(monkeypatc
             manager.probe_guest_observer()
     assert calls[0][calls[0].index("--network") + 1] == "none"
     assert calls[-1][1:3] == ["rm", "--force"]
-    assert calls[-1][-1] == calls[0][calls[0].index("--name") + 1]
+    created = [call for call in calls if call[1:2] == ["create"]]
+    assert calls[-1][-1] == created[-1][created[-1].index("--name") + 1]
     if failure not in {"seccomp", "nnp", "effective"}:
         assert cleanup_calls[0][0] == [MEMBER_REAPER_TARGET, "reap", str(MEMBER_UID_BASE)]
         assert cleanup_calls[0][1]["input_bytes"] == b""
@@ -220,7 +229,12 @@ def test_readiness_requires_events_and_member_isolation_and_cleans_up(monkeypatc
     if failure in {"seccomp", "nnp", "effective", "member_cleanup"}:
         assert privileged_calls == []
     else:
-        assert privileged_calls == [[GUEST_OBSERVER_BINARY, "--self-test"]]
+        # A lost race is retried on a sandbox of its own, so the self-test runs
+        # once per attempt; everything else answers the same way every time and
+        # is asked exactly once.
+        probes = GUEST_OBSERVER_PROBE_ATTEMPTS if failure == "marker_transport" else 1
+        assert privileged_calls == [[GUEST_OBSERVER_BINARY, "--self-test"]] * probes
+        assert len(created) == probes
 
 
 def test_backend_refuses_claim_readiness_when_observer_probe_fails(monkeypatch):
@@ -387,3 +401,134 @@ def test_a_complete_capability_report_is_not_a_warning(monkeypatch, caplog):
         for record in caplog.records
         if str(record.__dict__.get("event", "")).startswith("guest_observer_window")
     ]
+
+
+def _probe_stubs(monkeypatch, manager, *, cursor, observations):
+    """Drive one probe past every deterministic check to the observation stages.
+
+    ``observations`` is consumed one entry per attempt, so a test can say what
+    the second try sees without knowing how the probe is structured.
+    """
+    created = []
+
+    def run(argv, **kwargs):
+        if argv[1:2] == ["create"]:
+            created.append(argv[argv.index("--name") + 1])
+        return SimpleNamespace(returncode=0, stdout="probe-id", stderr="")
+
+    def capture(spec, argv, **kwargs):
+        if argv[0] == MEMBER_REAPER_TARGET:
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if argv[0] == "python3":
+            status = {"uid": 10001, "nnp": 1, "seccomp": 2, "effective": 0, "permitted": 0}
+            return SimpleNamespace(returncode=0, stdout=json.dumps(status).encode(), stderr=b"")
+        return SimpleNamespace(returncode=0, stdout=b"freeinference-tool-mark-v1\n", stderr=b"")
+
+    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager, "exec_capture", capture)
+    monkeypatch.setattr(
+        manager,
+        "_kata_privileged_exec",
+        lambda spec, argv, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "freeinference-guest-observer-v2\n"
+                '{"window":{"cpu":true,"storage_io":true,"pss":true,"counters":7}}\n'
+            ),
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(manager, "begin_guest_observation", lambda spec, user_uid: cursor)
+    remaining = list(observations)
+    monkeypatch.setattr(manager, "finish_guest_observation", lambda spec, cursor: remaining.pop(0))
+    monkeypatch.setattr(chat_sandbox.time, "sleep", lambda _seconds: None)
+    return created
+
+
+def _observation(*, complete=True, marks=((1.0, "pre", "preflight"), (2.0, "post", "preflight"))):
+    return SimpleNamespace(
+        complete=complete, lost_events=0, truncated=False, detail=None, tool_marks=marks
+    )
+
+
+def test_a_lost_race_with_the_guest_is_retried_on_a_sandbox_of_its_own(monkeypatch):
+    """The stages that read back from a running observer get another try.
+
+    They race a guest that has just booted: the observer has to load its eBPF
+    program, publish a first status and drain its ring before the probe can see
+    the boundaries it just sent. Losing that race once is not a statement about
+    the host, and it used to be treated as one -- `cmd_up` leaves a host
+    advertising no deployment when the probe fails, and a runner advertising no
+    deployment does not poll, so staging went quiet for 29.6 hours on
+    2026-09-13 over a probe nothing retried.
+    """
+    manager = _manager()
+    created = _probe_stubs(
+        monkeypatch,
+        manager,
+        cursor=SimpleNamespace(available=True, detail=None),
+        observations=[_observation(marks=()), _observation()],
+    )
+
+    manager.probe_guest_observer()
+
+    assert len(created) == 2, "the second attempt must not reuse the first probe's sandbox"
+    assert created[0] != created[1]
+
+
+def test_a_host_that_keeps_losing_the_race_is_still_refused(monkeypatch):
+    """Retrying bounds the flake; it must not paper over a broken host."""
+    manager = _manager()
+    created = _probe_stubs(
+        monkeypatch,
+        manager,
+        cursor=SimpleNamespace(available=True, detail=None),
+        observations=[_observation(marks=())] * GUEST_OBSERVER_PROBE_ATTEMPTS,
+    )
+
+    with pytest.raises(SandboxError, match=f"after {GUEST_OBSERVER_PROBE_ATTEMPTS} attempts"):
+        manager.probe_guest_observer()
+
+    assert len(created) == GUEST_OBSERVER_PROBE_ATTEMPTS
+
+
+@pytest.mark.parametrize(
+    ("observation", "expected"),
+    [
+        (_observation(marks=()), r"marks=\[\]"),
+        (_observation(complete=False), "complete=False"),
+    ],
+    ids=["boundaries-never-arrived", "slice-could-not-be-read"],
+)
+def test_the_boundary_failure_says_which_half_failed(monkeypatch, observation, expected):
+    """One sentence used to cover two unrelated failures.
+
+    That is why the 2026-09-13 rollout could not be diagnosed from its logs: an
+    incomplete slice means the journal could not be read back, while a complete
+    slice carrying the wrong marks means the boundaries never arrived. They want
+    opposite investigations.
+    """
+    manager = _manager()
+    _probe_stubs(
+        monkeypatch,
+        manager,
+        cursor=SimpleNamespace(available=True, detail=None),
+        observations=[observation] * GUEST_OBSERVER_PROBE_ATTEMPTS,
+    )
+
+    with pytest.raises(SandboxError, match=expected):
+        manager.probe_guest_observer()
+
+
+def test_an_unavailable_cursor_carries_the_reason_it_reported(monkeypatch):
+    """`begin` folds every reason into one flag, so the detail must travel."""
+    manager = _manager()
+    _probe_stubs(
+        monkeypatch,
+        manager,
+        cursor=SimpleNamespace(available=False, detail="guest observer is not ready"),
+        observations=[],
+    )
+
+    with pytest.raises(SandboxError, match="guest observer is not ready"):
+        manager.probe_guest_observer()

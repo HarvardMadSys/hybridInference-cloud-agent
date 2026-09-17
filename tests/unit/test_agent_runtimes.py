@@ -15,6 +15,7 @@ import pytest
 
 from cloud_agent_host.runtimes import (
     MAX_INIT_TOOLS,
+    MERGED_MCP_SERVER_NAME,
     ClaudeCodeRuntime,
     CodexRuntime,
     GenericRuntime,
@@ -551,7 +552,7 @@ def test_a_brokered_runtime_emits_only_relay_endpoints_and_no_credential():
     assert env["ANTHROPIC_API_KEY"] == "agr-inference-grant-must-not-leak"
     assert env["AGENT_MCP_TOKEN"] != env["ANTHROPIC_API_KEY"]
     servers = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
-    assert servers["github"]["url"] == "http://agent-mcp:8000/v1/agent/mcp/github"
+    assert servers[MERGED_MCP_SERVER_NAME]["url"] == "http://agent-mcp:8000/v1/agent/mcp"
     assert "--strict-mcp-config" in argv
 
 
@@ -889,7 +890,7 @@ def test_the_relay_base_url_is_normalized_once():
         ),
     )
     servers = _mcp_config_of(argv)["mcpServers"]
-    assert servers["github"]["url"] == f"{_MCP_GATEWAY}/v1/agent/mcp/github"
+    assert servers[MERGED_MCP_SERVER_NAME]["url"] == f"{_MCP_GATEWAY}/v1/agent/mcp"
 
 
 def test_requesting_mcp_with_no_relay_address_refuses_rather_than_guessing():
@@ -911,10 +912,158 @@ def test_requesting_mcp_with_no_relay_address_refuses_rather_than_guessing():
 
 
 def test_only_runtimes_that_can_also_shut_out_repo_config_report_mcp():
-    """Codex is not wired up, and says so rather than dropping tools."""
-    assert runtimes_supporting_mcp() == ["claude-code"]
+    """The claim is "both halves", so a runtime that has only one does not make it.
+
+    A runtime appears here only when it can be pointed at the platform's relay
+    *and* be stopped from reading a repository's own MCP config. Codex and pi
+    fail the second half at their pinned versions and say so, rather than
+    running with dropped tools or somebody else's servers.
+    """
+    assert runtimes_supporting_mcp() == ["claude-code", "codex", "kilo", "opencode", "pi"]
     assert ClaudeCodeRuntime().capabilities().mcp is True
-    assert CodexRuntime().capabilities().mcp is False
+    assert OpencodeRuntime().capabilities().mcp is True
+    assert PiRuntime().capabilities().mcp is True
+    assert CodexRuntime().capabilities().mcp is True
+    assert KiloRuntime().capabilities().mcp is True
+
+
+def test_pi_loads_the_images_bridge_and_nothing_else():
+    """The only extension pi may load is the one the image was built with.
+
+    pi has no MCP client, so the bridge is the platform's MCP path on this
+    runtime -- and, because a project-local extension would otherwise be loaded
+    from the checkout, `--no-extensions` has to be in the same argv as the
+    explicit `-e`. Verified against 0.73.1: with both flags a repository's
+    `.pi/extensions/*.ts` does not load and the bridge's tools do.
+    """
+    argv, env = PiRuntime().prepare(
+        workdir="/w",
+        task_prompt="do it",
+        model="glm-5.1",
+        gateway_base_url=_MCP_GATEWAY,
+        credential="inference-credential",
+        mcp_config=RuntimeMCPConfig(
+            server_ids=("github",),
+            base_url=_MCP_GATEWAY,
+            credential="mcp-token",
+        ),
+    )
+    assert "--no-extensions" in argv
+    assert argv[argv.index("-e") + 1].endswith("pi-mcp-bridge.ts")
+    assert json.loads(env["AGENT_MCP_SERVERS"]) == {
+        MERGED_MCP_SERVER_NAME: f"{_MCP_GATEWAY}/v1/agent/mcp"
+    }
+    assert env["AGENT_MCP_TOKEN"] == "mcp-token"
+    assert "mcp-token" not in " ".join(argv)
+
+
+@pytest.mark.parametrize("runtime", [CodexRuntime, KiloRuntime])
+@pytest.mark.parametrize("live", [False, True])
+def test_codex_and_kilo_carry_the_same_mcp_scope_in_both_transports(runtime, live):
+    """Fresh and resident invocations share one relay and a separate MCP token."""
+    agent = runtime()
+    settings = {
+        "workdir": "/w",
+        "model": "glm-5.1",
+        "gateway_base_url": _MCP_GATEWAY,
+        "credential": "inference-token",
+        "mcp_config": RuntimeMCPConfig(
+            server_ids=("github", "docs"),
+            base_url=_MCP_GATEWAY,
+            credential="mcp-token",
+        ),
+    }
+    argv, env = (
+        agent.prepare_live(**settings) if live else agent.prepare(task_prompt="do it", **settings)
+    )
+    assert env["AGENT_MCP_TOKEN"] == "mcp-token"
+    assert "mcp-token" not in " ".join(argv)
+    if runtime is CodexRuntime:
+        import tomllib
+
+        config = tomllib.loads(next(arg for arg in argv if arg.startswith("mcp_servers =")))
+        assert set(config["mcp_servers"]) == {"session"}
+        assert config["mcp_servers"]["session"]["bearer_token_env_var"] == "AGENT_MCP_TOKEN"
+        assert config["mcp_servers"]["session"]["url"] == _MCP_GATEWAY + "/v1/agent/mcp"
+    else:
+        assert json.loads(env["AGENT_MCP_SERVERS"]) == {"session": _MCP_GATEWAY + "/v1/agent/mcp"}
+
+
+def test_a_wrapper_runtime_publishes_the_relay_urls_and_the_token_reference():
+    """The Python half: address here, the dialect reference in the wrapper.
+
+    How a CLI spells "read this from the environment" is not portable -- Claude
+    Code expands ``${VAR}``, the OpenCode family expands ``{env:VAR}`` -- so the
+    endpoint map is neutral and each wrapper adds the header in its own syntax,
+    next to the pinned binary that has to expand it.
+
+    The run names two connections here and still gets one entry: the relay's
+    bare prefix answers for all of them and namespaces what it lists by alias,
+    so one entry per connection would register the same catalogue twice.
+    """
+    argv, env = OpencodeRuntime().prepare(
+        workdir="/w",
+        task_prompt="do it",
+        model="glm-5.1",
+        gateway_base_url=_MCP_GATEWAY,
+        credential="inference-credential",
+        mcp_config=RuntimeMCPConfig(
+            server_ids=("github", "docs"),
+            base_url=f"{_MCP_GATEWAY}/v1",
+            credential="mcp-token-must-not-leak",
+        ),
+    )
+    assert json.loads(env["AGENT_MCP_SERVERS"]) == {
+        MERGED_MCP_SERVER_NAME: f"{_MCP_GATEWAY}/v1/agent/mcp"
+    }
+    # The token travels in the environment the wrapper interpolates from, never
+    # in argv, and never in the endpoint map that becomes a config file.
+    assert env["AGENT_MCP_TOKEN"] == "mcp-token-must-not-leak"
+    assert "mcp-token-must-not-leak" not in " ".join(argv)
+    assert "mcp-token-must-not-leak" not in env["AGENT_MCP_SERVERS"]
+
+
+def test_the_resident_path_carries_the_same_relay_config():
+    """A hot session must not be the turn where MCP quietly disappears.
+
+    ``prepare_live`` assembles its own argv/env around the same dialect layer,
+    so a change that only touched ``prepare`` would leave every resumed
+    conversation without tools -- and the agent would work around their absence
+    instead of failing.
+    """
+    argv, env = OpencodeRuntime().prepare_live(
+        workdir="/w",
+        model="glm-5.1",
+        gateway_base_url=_MCP_GATEWAY,
+        credential="inference-credential",
+        mcp_config=RuntimeMCPConfig(
+            server_ids=("github",),
+            base_url=_MCP_GATEWAY,
+            credential="mcp-token",
+        ),
+    )
+    assert json.loads(env["AGENT_MCP_SERVERS"]) == {
+        MERGED_MCP_SERVER_NAME: f"{_MCP_GATEWAY}/v1/agent/mcp"
+    }
+    assert env["AGENT_MCP_TOKEN"] == "mcp-token"
+    assert argv[0] == "http-agent-live-bridge"
+
+
+def test_a_wrapper_runtime_refuses_connections_it_has_no_credential_for():
+    """Referenced, not embedded, means a missing token is an empty bearer.
+
+    Left to run, every call would be refused with a 401 that reads as a broken
+    server rather than as a run that was never given a credential.
+    """
+    with pytest.raises(RuntimeMCPUnavailableError):
+        OpencodeRuntime().prepare(
+            workdir="/w",
+            task_prompt="do it",
+            model="glm-5.1",
+            gateway_base_url=_MCP_GATEWAY,
+            credential="inference-credential",
+            mcp_config=RuntimeMCPConfig(server_ids=("github",), base_url=_MCP_GATEWAY),
+        )
 
 
 def _prepare(runtime, **kwargs):

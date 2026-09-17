@@ -42,11 +42,11 @@ database stamped with the chain that predates it.
 |---|---|
 | `cloud_agent/app.py` | The two listeners: the main API and the MCP-only one |
 | `cloud_agent/api/` | One router module per surface — jobs, hosts, admin, session, MCP relay |
-| `cloud_agent/storage/store.py` | The Postgres store: claims, fences, residency, publication |
+| `cloud_agent/ports/`, `cloud_agent/storage/` | Narrow capability contracts and Postgres repositories: claims, fences, residency, publication |
 | `cloud_agent/grants.py`, `ledger.py`, `grant_usage.py` | Gateway inference grants, and the usage snapshots read back from them |
 | `cloud_agent/gateway.py`, `agent_access.py`, `identity.py` | The three gateway contracts: lookups, admission, identity |
 | `cloud_agent/identity_namespace.py` | Which Gateway minted the `user_id`s this database is keyed by |
-| `cloud_agent/mcp_catalogue.py`, `mcp_registry.py`, `mcp_proxy.py` | The reviewed MCP catalogue, per-user connections, and the relay |
+| `cloud_agent/mcp/`, `api/mcp_connections.py`, `api/mcp_relay.py` | Per-user connections, protocol hosting, authorization and the MCP relay |
 | `cloud_agent/publisher.py`, `publish_worker.py`, `source_control.py` | Branch and draft-PR publication, and the GitHub/GitLab credentials behind it |
 | `cloud_agent/admin_observability.py` | The cross-user admin reading surface and its audit |
 | `cloud_agent_host/enrollment.py` | Host registration and the persisted host credential |

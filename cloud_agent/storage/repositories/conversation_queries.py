@@ -391,3 +391,12 @@ class PostgresConversationQueries:
                 else None
             ),
         }
+
+    async def get_thread(self, thread_id: str) -> dict[str, Any] | None:
+        """Read a visible thread for the owner's MCP selection surface."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, user_id FROM agent_threads WHERE id = $1 AND deleted_at IS NULL",
+                thread_id,
+            )
+        return dict(row) if row is not None else None

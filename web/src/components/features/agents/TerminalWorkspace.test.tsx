@@ -591,4 +591,27 @@ describe('TerminalWorkspace', () => {
     expect(size!.cols).toBeGreaterThan(80);
     expect(size!.rows).toBeGreaterThan(24);
   });
+
+  it('cannot create a terminal before the workspace is ready', async () => {
+    // Two waits were removed together and only one of them should have been.
+    // The listing is not a precondition; workspace readiness is — there is no
+    // container to open a PTY in until the job reports `workspace_ready`, and
+    // a create issued before then fails at the broker. A new conversation
+    // starts in exactly this state.
+    vi.mocked(listAgentTerminals).mockResolvedValue([]);
+    vi.mocked(createAgentTerminal).mockResolvedValue(terminal('term-1'));
+
+    const view = render(<TerminalWorkspace jobId="job-1" active ready={false} />);
+
+    const button = await screen.findByRole('button', { name: 'New terminal' });
+    expect(button).toBeDisabled();
+
+    fireEvent.click(button);
+    await waitFor(() => expect(createAgentTerminal).not.toHaveBeenCalled());
+    expect(listAgentTerminals).not.toHaveBeenCalled();
+
+    // And it becomes usable the moment the workspace is.
+    view.rerender(<TerminalWorkspace jobId="job-1" active ready />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'New terminal' })).toBeEnabled());
+  });
 });

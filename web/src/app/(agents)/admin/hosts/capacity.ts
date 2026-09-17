@@ -29,6 +29,8 @@ import type {
   CapacityRange,
 } from '@/lib/api/admin';
 
+import { isReporting } from './format';
+
 // ── Numbers ────────────────────────────────────────────────────────────
 
 const BYTES_PER_GIB = 1024 ** 3;
@@ -430,9 +432,18 @@ export function summarizeSandboxes(
     const inventory = capacity?.inventory;
     if (capacity && inventory) reports.push({ host: member.host, capacity, inventory });
   }
-  // Enrollments that reported no inventory at all. They hold containers this
-  // server cannot see, so their silence bounds the total from below.
-  const unreported = members.length - reports.length;
+  // Enrollments that hold containers this server cannot see, so their silence
+  // bounds the total from below.
+  //
+  // A *reporting* enrollment that sends no inventory is one of those: a runner
+  // running code older than the collector, alive on this machine and unable to
+  // describe it. A row that is neither reporting nor ever sent an observation
+  // is not: it is a record of a machine that used to answer under this name —
+  // what a rename leaves behind — and it holds nothing this page can be short
+  // of. Counting it made every server that had ever been renamed report a
+  // lower bound forever, which is a claim about coverage that nobody made.
+  const observed = members.filter((member) => member.capacity !== null || isReporting(member));
+  const unreported = observed.length - reports.length;
   const perSource = [...reports]
     .sort((a, b) => observedAtMs(b.capacity) - observedAtMs(a.capacity))
     .map(sourceLine);

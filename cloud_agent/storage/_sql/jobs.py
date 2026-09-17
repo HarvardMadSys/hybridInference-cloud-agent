@@ -25,7 +25,7 @@ JOB_OWN_COLUMNS = (
     "created_at, updated_at"
 )
 
-THREAD_CONFIG_COLUMNS = "t.repo, t.setup_script, t.execution_profile, t.mcp_servers"
+THREAD_CONFIG_COLUMNS = "t.repo, t.setup_script, t.execution_profile"
 
 # Probe the unfinished-turn index before the latest-turn index: a cancelled
 # queued follow-up must not hide work that is still running earlier in the chat.
@@ -49,9 +49,24 @@ QUALIFIED_JOB_COLUMNS = (
     + f", {CONVERSATION_STATE_SQL} AS conversation_state"
 )
 
-JOB_SELECT = (
-    f"SELECT {QUALIFIED_JOB_COLUMNS} FROM agent_jobs j JOIN agent_threads t ON t.id = j.thread_id"
+MCP_BINDING_COLUMNS = "COALESCE(b.mcp_bindings, '[]'::jsonb) AS mcp_bindings"
+
+MCP_BINDING_JOIN = (
+    "LEFT JOIN LATERAL ("
+    "SELECT jsonb_agg(jsonb_build_object("
+    "'connection_id', tb.connection_id, 'alias', tb.alias, 'label', c.label"
+    ") ORDER BY tb.alias) AS mcp_bindings "
+    "FROM agent_mcp_thread_bindings tb "
+    "JOIN agent_mcp_connections c ON c.id = tb.connection_id "
+    "WHERE tb.thread_id = t.id"
+    ") b ON TRUE"
 )
+
+JOB_SELECT = (
+    f"SELECT {QUALIFIED_JOB_COLUMNS}, {MCP_BINDING_COLUMNS} "
+    f"FROM agent_jobs j JOIN agent_threads t ON t.id = j.thread_id {MCP_BINDING_JOIN}"
+)
+
 
 # An idle native process and its HOT credential lease outlive the completed
 # turn. Removing a chat from owner history must not tear down that process or

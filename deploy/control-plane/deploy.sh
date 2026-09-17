@@ -140,7 +140,13 @@ compose() {
       run) shift; set -- run --pull never "$@" ;;
     esac
   fi
-  docker compose -p "${COMPOSE_PROJECT}" --env-file .env -f "${COMPOSE_FILE}" "$@"
+  local command=(docker compose -p "${COMPOSE_PROJECT}" --env-file .env -f "${COMPOSE_FILE}")
+  if [[ "${WATCH_READINESS:-0}" == "1" && -n "${DEPLOY_PEER_JOB:-}" ]]; then
+    python3 "$SCRIPT_DIR/../watch_peer.py" --peer "$DEPLOY_PEER_JOB" \
+      --container "$READINESS_CONTAINER" -- "${command[@]}" "$@"
+  else
+    "${command[@]}" "$@"
+  fi
 }
 
 # Build with the daemon's own builder, never one that another job on this
@@ -281,7 +287,12 @@ fi
 # proves the control plane can dial every eligible broker before replacing live
 # API containers. It is a compatibility fence, not a feature switch.
 log "waiting for target ${SHA} host readiness and reverse broker probes"
-compose run --rm --no-deps control-plane \
+READINESS_CONTAINER="${COMPOSE_PROJECT}-readiness-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}"
+READINESS_ARGS=()
+if [[ -n "${DEPLOY_PEER_JOB:-}" ]]; then
+  READINESS_ARGS=(--name "$READINESS_CONTAINER")
+fi
+WATCH_READINESS=1 compose run --rm --no-deps ${READINESS_ARGS[@]+"${READINESS_ARGS[@]}"} control-plane \
   python -m cloud_agent.deploy_readiness \
     --timeout-seconds "${SHARED_READY_TIMEOUT}" \
     --expected-deployment-sha "${SHA}"

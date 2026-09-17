@@ -942,6 +942,11 @@ class ContainerBackend(SandboxBackend):
         code, and "nobody configured this" must not be the same thing as "full
         internet".
         """
+        # Docker's built-in null network has Internal=false because it has no
+        # bridge at all. It is stricter than an internal bridge: no interfaces
+        # except loopback. Candidate preflight deliberately uses this network.
+        if network == "none":
+            return
         if self.allow_open_network:
             logger.warning(
                 "agent_sandbox_open_network",

@@ -205,7 +205,7 @@ class PostgresSessionForkRepository:
             # history in, and a membership that already owns its resident
             # slot and can carry the residency the host is about to open.
             source_thread = await conn.fetchrow(
-                "SELECT repo, title, setup_script, execution_profile, mcp_servers "
+                "SELECT repo, title, setup_script, execution_profile "
                 "FROM agent_threads WHERE id = $1",
                 source["thread_id"],
             )
@@ -213,8 +213,8 @@ class PostgresSessionForkRepository:
                 """
                 INSERT INTO agent_threads
                     (id, user_id, repo, title, title_source,
-                     setup_script, execution_profile, mcp_servers)
-                VALUES ($1, $2, $3, $4, 'inherited', $5, $6, $7)
+                     setup_script, execution_profile)
+                VALUES ($1, $2, $3, $4, 'inherited', $5, $6)
                 """,
                 target_thread_id,
                 user_id,
@@ -222,7 +222,20 @@ class PostgresSessionForkRepository:
                 f"{source_thread['title']} (fork)"[:160],
                 source_thread["setup_script"],
                 source_thread["execution_profile"],
-                list(source_thread["mcp_servers"] or []),
+            )
+            await conn.execute(
+                """
+                INSERT INTO agent_mcp_thread_bindings
+                    (thread_id, connection_id, alias, enabled, selection_pending,
+                     config_revision, authorization_epoch, capability_revision,
+                     policy_revision, rules, resource_rules, prompt_rules)
+                SELECT $1, connection_id, alias, enabled, selection_pending,
+                       config_revision, authorization_epoch, capability_revision,
+                       policy_revision, rules, resource_rules, prompt_rules
+                FROM agent_mcp_thread_bindings WHERE thread_id = $2
+                """,
+                target_thread_id,
+                source["thread_id"],
             )
             await conn.execute(
                 """
@@ -612,7 +625,7 @@ class PostgresSessionForkRepository:
                 # follow-up held the thread row produced a real PostgreSQL
                 # deadlock cycle (each transaction then waited for the other).
                 thread = await conn.fetchrow(
-                    "SELECT repo, title, setup_script, execution_profile, mcp_servers "
+                    "SELECT repo, title, setup_script, execution_profile "
                     "FROM agent_threads WHERE id = $1 FOR UPDATE",
                     operation["source_thread_id"],
                 )

@@ -721,6 +721,22 @@ class CodexAppServerSession(_JsonResidentSession):
             raise DriverError("Codex resumed a different native thread")
         self.runtime.session_id = str(session_id)
 
+        if self._context.mcp_config.server_ids:
+            status_id = self._request_id("mcp-status")
+            self._write_json(
+                {
+                    "id": status_id,
+                    "method": "mcpServerStatus/list",
+                    "params": {"threadId": str(session_id), "detail": "full"},
+                }
+            )
+            status = self._read_until(lambda value: value.get("id") == status_id)
+            result = status.get("result")
+            inventory = result.get("data", []) if isinstance(result, dict) else []
+            session = next((entry for entry in inventory if entry.get("name") == "session"), None)
+            if status.get("error") or not session or not session.get("serverInfo"):
+                raise DriverError("Codex could not initialize the session MCP relay")
+
     def _start_protocol_turn(self, turn_input: TurnInput, turn: _JsonResidentTurn) -> None:
         request_id = self._request_id("turn")
         self._write_json(

@@ -56,6 +56,7 @@ RECIPE_FORMAT_VERSION = 1
 #: of installing a release.
 RECIPE_FILES: tuple[str, ...] = (
     "deploy/DEPLOY_PROTOCOL",
+    "deploy/watch_peer.py",
     "deploy/control-plane/deploy.sh",
     "deploy/control-plane/docker-compose.yml",
     "deploy/control-plane/edge.nginx.conf",

@@ -113,6 +113,176 @@ def test_two_acceptances_on_one_machine_do_not_share_a_port() -> None:
     assert first["COMPOSE_PROJECT"] == "one" and second["COMPOSE_PROJECT"] == "two"
 
 
+class _ProbeSocket:
+    """Stands in for `socket.socket()`: reports the port the kernel is told to."""
+
+    def __init__(self, port: int) -> None:
+        self._port = port
+
+    def bind(self, _address: tuple[str, int]) -> None:
+        return None
+
+    def getsockname(self) -> tuple[str, int]:
+        return ("127.0.0.1", self._port)
+
+    def __enter__(self) -> _ProbeSocket:
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+
+def _offered(monkeypatch: pytest.MonkeyPatch, ports: list[int], held: set[int]) -> None:
+    """Make `free_port` see exactly these ports, and start from exactly `held`."""
+    offered = iter(ports)
+    monkeypatch.setattr(ac, "_HANDED_OUT_PORTS", held)
+    monkeypatch.setattr(ac.socket, "socket", lambda: _ProbeSocket(next(offered)))
+
+
+def test_free_port_skips_a_port_it_has_already_handed_out(monkeypatch) -> None:
+    """The kernel offers the port straight back once the probe socket closes.
+
+    This is the 2026-09-15 CI failure made reproducible. Six calls returned
+    58361, 60585, 50619, 33503, 33503, 45119; the duplicate failed
+    `test_two_acceptances_on_one_machine_do_not_share_a_port` above, on a commit
+    that changed nothing in this file. Asking the kernel to repeat itself is not
+    something a test can do, so the repetition is supplied — and the assertion
+    above is left exactly as it was, because it was right.
+    """
+    _offered(monkeypatch, [33503, 33503, 45119], held=set())
+
+    assert [ac.free_port(), ac.free_port()] == [33503, 45119]
+
+
+def test_free_port_reports_an_exhausted_search_instead_of_spinning(monkeypatch) -> None:
+    """A range with nothing left to give is a failure, not a hang."""
+    _offered(monkeypatch, [33503] * ac._FREE_PORT_ATTEMPTS, held={33503})
+
+    with pytest.raises(ac.AcceptanceFailure, match="was free in"):
+        ac.free_port()
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Error response from daemon: Bind for 127.0.0.1:33503 failed: port is already allocated",
+        "failed to bind host port for 127.0.0.1:33503: address already in use",
+        "Error starting userland proxy: listen tcp4 127.0.0.1:33503: bind: address already in use",
+    ],
+)
+@pytest.mark.parametrize("operation", ["deploy", "compose"])
+def test_docker_port_conflicts_are_reported_from_both_startup_paths(
+    monkeypatch, tmp_path, message, operation
+) -> None:
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: result(message))
+
+    with pytest.raises(ac.HostPortConflict, match="33503"):
+        if operation == "deploy":
+            ac.run_deploy(tmp_path, tmp_path, tmp_path / "manifest.json", fence_timeout=1)
+        else:
+            ac.compose("test", tmp_path / "compose.yml", tmp_path, "up", "-d", "web")
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "application failed: address already in use",
+        "failed to bind host port for 127.0.0.1:33503: permission denied",
+        "could not connect to the Docker daemon",
+        ac.FENCE_REFUSAL,
+    ],
+)
+def test_unrelated_errors_are_not_classified_as_port_conflicts(message) -> None:
+    ac.check_host_port_conflict(result(message))
+
+
+def test_a_successful_command_is_not_retried_for_old_error_text() -> None:
+    ac.check_host_port_conflict(
+        result("Bind for 127.0.0.1:33503 failed: port is already allocated", returncode=0)
+    )
+
+
+@pytest.mark.parametrize("phase", ["deploy", "web"])
+def test_acceptance_cleans_up_and_reallocates_ports_after_a_conflict(
+    monkeypatch, tmp_path, phase
+) -> None:
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"source_commit": "a" * 40}))
+    environments = []
+    calls = []
+    conflict = "Bind for 127.0.0.1:33503 failed: port is already allocated"
+    monkeypatch.setattr(ac, "extract_recipe", lambda *a: REPO_ROOT)
+
+    def deploy(recipe, root, manifest, **kwargs):
+        environments.append(
+            dict(line.split("=", 1) for line in (root / ".env").read_text().splitlines())
+        )
+        calls.append("deploy")
+        if phase == "deploy" and len(environments) == 1:
+            ac.check_host_port_conflict(result(conflict))
+        return result(good_log())
+
+    def compose(*args, **kwargs):
+        calls.append("web")
+        if phase == "web" and len(environments) == 1:
+            ac.check_host_port_conflict(result(conflict))
+
+    def teardown(project):
+        assert project == "acceptance-test"
+        calls.append("cleanup")
+
+    monkeypatch.setattr(ac, "run_deploy", deploy)
+    monkeypatch.setattr(ac, "compose", compose)
+    monkeypatch.setattr(ac, "teardown", teardown)
+    monkeypatch.setattr(ac, "docker", lambda *a: "")
+    monkeypatch.setattr(ac, "generated_compose", lambda root: root / "compose.yml")
+    monkeypatch.setattr(ac, "observed_services", lambda *a: {})
+    monkeypatch.setattr(ac.aa, "expected_services", lambda *a: {})
+    monkeypatch.setattr(ac.aa, "check_running", lambda *a: ["running images verified"])
+
+    evidence = ac.accept(
+        manifest, tmp_path / "recipe.tar.gz", "agents", tmp_path, "acceptance-test"
+    )
+
+    assert evidence[-1] == "running images verified"
+    expected = ["deploy", "cleanup", "deploy", "web"]
+    if phase == "web":
+        expected.insert(1, "web")
+    assert calls == expected
+    ports = [value for env in environments for key, value in env.items() if key.endswith("_PORT")]
+    assert len(set(ports)) == len(ports) == 6
+    assert environments[0]["COMPOSE_PROJECT"] == environments[1]["COMPOSE_PROJECT"]
+
+
+@pytest.mark.parametrize("failure", ["persistent_conflict", "unrelated", "cleanup"])
+def test_acceptance_stops_when_retry_cannot_recover(monkeypatch, tmp_path, failure) -> None:
+    attempts = []
+    cleanups = []
+
+    def attempt(*args):
+        attempts.append(1)
+        if failure == "unrelated":
+            raise ac.AcceptanceFailure("image verification failed")
+        raise ac.HostPortConflict("host port is occupied")
+
+    monkeypatch.setattr(ac, "_accept_once", attempt)
+    monkeypatch.setattr(ac, "teardown", lambda project: cleanups.append(project))
+    monkeypatch.setattr(
+        ac, "docker", lambda *a: "leftover-container" if failure == "cleanup" else ""
+    )
+    expected = {
+        "persistent_conflict": "after 3 attempts",
+        "unrelated": "image verification failed",
+        "cleanup": "remain after cleanup",
+    }
+
+    with pytest.raises(ac.AcceptanceFailure, match=expected[failure]):
+        ac.accept(tmp_path / "manifest", tmp_path / "recipe", "agents", tmp_path, "acceptance-test")
+
+    assert len(attempts) == (3 if failure == "persistent_conflict" else 1)
+    assert len(cleanups) == {"persistent_conflict": 2, "unrelated": 0, "cleanup": 1}[failure]
+
+
 def test_an_unknown_variant_is_refused() -> None:
     with pytest.raises(ac.AcceptanceFailure, match="unknown variant"):
         ac.synthetic_environment(COMPOSE, "console", "p")

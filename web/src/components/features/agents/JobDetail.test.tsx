@@ -31,6 +31,7 @@ import {
 } from '@/lib/api/agents';
 
 import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
+import { decideMcpInvocation, listMcpInvocations, type McpInvocationApi } from '@/lib/api/mcp';
 
 import { JobDetail, WORKSPACE_WIDTH_STORAGE_KEY } from './JobDetail';
 import type { AgentJob } from './types';
@@ -39,6 +40,14 @@ const navigation = vi.hoisted(() => ({ push: vi.fn() }));
 
 vi.mock('next/navigation', () => ({
   useRouter: () => navigation,
+}));
+
+vi.mock('@/lib/api/mcp', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/mcp')>()),
+  listMcpInvocations: vi.fn().mockResolvedValue({ invocations: [] }),
+  decideMcpInvocation: vi.fn(),
+  getMcpThreadBindings: vi.fn().mockResolvedValue({ bindings: [] }),
+  listMcpConnections: vi.fn().mockResolvedValue({ connections: [] }),
 }));
 
 vi.mock('@/lib/api/agents', () => ({
@@ -183,6 +192,37 @@ const HISTORY = [
 ];
 
 describe('JobDetail', () => {
+  it('opens the pending tool decision from the conversation and approves it', async () => {
+    const invocation: McpInvocationApi = {
+      id: 11,
+      job_id: 'ajob_1',
+      thread_id: 'thread-1',
+      connection_id: 3,
+      connection_label: 'Issue tracker',
+      capability_name: 'get_issue',
+      status: 'pending',
+      arguments_digest: 'digest',
+      arguments: { number: 7 },
+      created_at: null,
+      expires_at: null,
+      decided_at: null,
+      result_summary: null,
+      guidance: '',
+    };
+    vi.mocked(listMcpInvocations).mockResolvedValue({ invocations: [invocation] });
+    vi.mocked(decideMcpInvocation).mockImplementation(async () => {
+      const approved = { ...invocation, status: 'approved' as const };
+      vi.mocked(listMcpInvocations).mockResolvedValue({ invocations: [approved] });
+      return approved;
+    });
+    render(<JobDetail job={makeJob()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Review tools' }));
+    expect(await screen.findByText('Issue tracker wants to call get_issue')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(decideMcpInvocation).toHaveBeenCalledWith(11, true));
+    expect(await screen.findByText('get_issue · approved')).toBeVisible();
+    expect(followUpAgentJob).not.toHaveBeenCalled();
+  });
   it.each([undefined, 'previous-job'])(
     'uses the same queue message with parent %s',
     async (parentJobId) => {
@@ -193,6 +233,7 @@ describe('JobDetail', () => {
   );
 
   beforeEach(() => {
+    vi.mocked(listMcpInvocations).mockReset().mockResolvedValue({ invocations: [] });
     navigation.push.mockReset();
     vi.mocked(cancelAgentJob).mockReset();
     vi.mocked(followUpAgentJob).mockReset();
@@ -476,6 +517,67 @@ describe('JobDetail', () => {
     expect(screen.getByText(/with all of its detail/)).toBeInTheDocument();
   });
 
+  it('keeps follow-up startup quiet while retaining the running controls and real activity', () => {
+    const startup = [
+      'started',
+      'workspace_preparing',
+      'workspace_reused',
+      'workspace_ready',
+      'init',
+    ].map((text) => ({ kind: 'lifecycle' as const, text, attemptNo: 1 }));
+    const job = makeJob({ turnNo: 2, events: startup });
+    const view = render(<JobDetail job={job} />);
+    const activity = screen.getByLabelText('Agent activity');
+    expect(activity).toBeEmptyDOMElement();
+    expect(screen.queryByText('Continuing conversation…')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();
+
+    view.rerender(
+      <JobDetail
+        job={{
+          ...job,
+          events: [
+            ...startup,
+            { kind: 'thinking', text: '', attemptNo: 1 },
+            { kind: 'lifecycle', text: 'Approaching model usage limit', attemptNo: 1 },
+          ],
+        }}
+      />,
+    );
+    expect(screen.queryByText('Continuing conversation…')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Agent reasoning')).toBeInTheDocument();
+    expect(screen.getByText('Approaching model usage limit')).toBeInTheDocument();
+    expect(activity).not.toHaveTextContent(/workspace|Run started|Agent ready/i);
+  });
+
+  it('keeps startup detail out of completed follow-ups and preserves their output', () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          turnNo: 3,
+          historyTurns: [
+            {
+              jobId: 'ajob_2',
+              turnNo: 2,
+              forkable: true,
+              messages: [],
+              events: [
+                { kind: 'lifecycle', text: 'workspace_preparing', attemptNo: 1 },
+                { kind: 'lifecycle', text: 'workspace_reused', attemptNo: 1 },
+                { kind: 'message', text: 'Follow-up answer', attemptNo: 1 },
+                { kind: 'lifecycle', text: 'result', attemptNo: 1 },
+              ],
+            },
+          ],
+        })}
+      />,
+    );
+    const history = within(screen.getByLabelText('Turn 2 agent activity'));
+    expect(history.queryByText(/workspace/i)).not.toBeInTheDocument();
+    expect(history.getByText('Follow-up answer')).toBeInTheDocument();
+    expect(history.getByText('Agent finished')).toBeInTheDocument();
+  });
+
   it('shows reasoning as a status without rendering raw thinking text', () => {
     render(
       <JobDetail
@@ -570,7 +672,8 @@ describe('JobDetail', () => {
         prompt: 'Now add a regression test',
       }),
     );
-    expect(navigation.push).toHaveBeenCalledWith('/ajob_child', { scroll: false });
+    expect(window.location.pathname).toBe('/ajob_child');
+    expect(navigation.push).not.toHaveBeenCalled();
   });
 
   it('sends the follow-up on Enter and keeps Shift+Enter a newline', async () => {
@@ -597,7 +700,8 @@ describe('JobDetail', () => {
         prompt: 'Now add a regression test',
       }),
     );
-    expect(navigation.push).toHaveBeenCalledWith('/ajob_child', { scroll: false });
+    expect(window.location.pathname).toBe('/ajob_child');
+    expect(navigation.push).not.toHaveBeenCalled();
   });
 
   it('swallows Enter on an empty follow-up rather than growing a blank line', async () => {

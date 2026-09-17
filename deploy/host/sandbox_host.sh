@@ -803,6 +803,27 @@ cmd_preflight() {
   kata_smoke_test
 }
 
+check_candidate() {
+  # Compose resolves both the source-built name and artifact-mode digest.
+  # Use a separate container with no live stack mounts or credentials. This
+  # runs the full Kata observer probe before the first disruptive operation,
+  # including on a cold host where no Compose network or broker exists yet.
+  local runner_image backend
+  # --images runner includes dependency images too. Read this service only;
+  # a source build without an explicit image uses Compose's project-service tag.
+  runner_image="$(compose config --format json | python3 -c \
+    'import json, sys; model = json.load(sys.stdin); print(model["services"]["runner"].get("image") or model["name"] + "-runner")')"
+  [[ -n "$runner_image" && "$runner_image" != *$'\n'* ]] \
+    || die "could not resolve exactly one candidate runner image"
+  backend="$(env_or_dotenv AGENT_SANDBOX_BACKEND)"
+  log "checking candidate kernel, guest observer and image attestation before draining"
+  docker run --rm --network none \
+    -v /var/run/docker.sock:/var/run/docker.sock:ro \
+    -e "AGENT_SANDBOX_BACKEND=${backend:-kata}" \
+    -e "AGENT_SANDBOX_IMAGE=$SANDBOX_IMAGE" \
+    "$runner_image" python -m cloud_agent_host.candidate_check
+}
+
 cmd_up() {
   local replicas="${1:-$(env_or_dotenv AGENT_RUNNER_REPLICAS)}"
   replicas="${replicas:-3}"
@@ -899,6 +920,7 @@ cmd_up() {
     AGENT_SANDBOX_IMAGE="$SANDBOX_IMAGE" AGENT_RUNNER_REPLICAS="$replicas" \
       compose build --provenance=false
   fi
+  check_candidate
   prepare_shared_live_marker
   if [[ -n "$(compose ps -q runner 2>/dev/null || true)" ]]; then
     log "draining existing runners before replacing their workspace broker"

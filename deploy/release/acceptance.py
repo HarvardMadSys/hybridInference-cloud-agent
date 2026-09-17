@@ -105,11 +105,68 @@ class AcceptanceFailure(Exception):
     """The release did not deploy, or what came up is not what it named."""
 
 
+class HostPortConflict(AcceptanceFailure):
+    """Docker could not publish a host port claimed after it was selected."""
+
+
+#: Every port this process has handed out. Held because the kernel will offer
+#: the same number again the moment the probe socket closes, and two acceptance
+#: stacks on one machine that publish the same port is the accident
+#: `test_two_acceptances_on_one_machine_do_not_share_a_port` exists to catch.
+_HANDED_OUT_PORTS: set[int] = set()
+
+#: Bounded so that an exhausted or misbehaving ephemeral range reports a failure
+#: rather than spinning. The range is tens of thousands of ports wide and a
+#: process here asks for a handful of them.
+_FREE_PORT_ATTEMPTS = 100
+
+#: A different process can claim a selected port before Docker publishes it.
+#: Retry only that explicit failure, with a fresh temporary stack and ports.
+_PORT_CONFLICT_ATTEMPTS = 3
+
+
 def free_port() -> int:
-    """A port nothing is listening on, for a stack that shares a machine."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
+    """A port nothing is listening on, and one this process has not used.
+
+    Both halves are load-bearing. "Nothing is listening" is what the kernel
+    answers; "not used" is what the caller needs, and it does not follow from
+    the first — the probe socket is closed before this returns, which releases
+    the port, and the kernel is free to offer the same number to the very next
+    call. On 2026-09-15 it did: six calls returned 58361, 60585, 50619, 33503,
+    33503, 45119, and the acceptance that requires two stacks on one machine not
+    to publish the same port failed on the duplicate.
+    """
+    for _ in range(_FREE_PORT_ATTEMPTS):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = int(probe.getsockname()[1])
+        if port not in _HANDED_OUT_PORTS:
+            _HANDED_OUT_PORTS.add(port)
+            return port
+    raise AcceptanceFailure(
+        f"no port outside the {len(_HANDED_OUT_PORTS)} this process already selected "
+        f"was free in {_FREE_PORT_ATTEMPTS} attempts"
+    )
+
+
+def check_host_port_conflict(result: subprocess.CompletedProcess[str]) -> None:
+    """Recognize Docker's host binding errors without retrying application failures."""
+    if result.returncode == 0:
+        return
+    log = result.stdout + result.stderr
+    for line in log.splitlines():
+        message = line.lower()
+        binding = any(
+            marker in message
+            for marker in (
+                "bind for ",
+                "failed to bind host port",
+                "error starting userland proxy:",
+            )
+        )
+        occupied = "port is already allocated" in message or "address already in use" in message
+        if binding and occupied:
+            raise HostPortConflict(line.strip())
 
 
 def required_variables(compose: Path) -> set[str]:
@@ -239,13 +296,15 @@ def run_deploy(
     }
     for name in ("DEPLOY_SHA", "SOURCE_REPO", "COMPOSE_PROJECT", "ALLOW_DIRTY"):
         environment.pop(name, None)
-    return subprocess.run(
+    result = subprocess.run(
         ["bash", str(recipe / "deploy/control-plane/deploy.sh")],
         env=environment,
         text=True,
         capture_output=True,
         timeout=fence_timeout + HEALTH_TIMEOUT_S * 3,
     )
+    check_host_port_conflict(result)
+    return result
 
 
 def check_stages(result: subprocess.CompletedProcess[str]) -> list[str]:
@@ -286,6 +345,7 @@ def docker(*arguments: str, check: bool = True, env: Mapping[str, str] | None = 
         env={**os.environ, **(env or {})} if env else None,
     )
     if check and result.returncode != 0:
+        check_host_port_conflict(result)
         raise AcceptanceFailure(f"`docker {' '.join(arguments)}` failed: {result.stderr.strip()}")
     return result.stdout.strip()
 
@@ -438,6 +498,35 @@ def accept(
     manifest_path: Path, recipe: Path, variant: str, workdir: Path, project: str
 ) -> list[str]:
     """Deploy the release and answer whether what came up is what it named."""
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return _accept_once(manifest_path, recipe, variant, workdir, project)
+        except HostPortConflict as error:
+            if attempt >= _PORT_CONFLICT_ATTEMPTS:
+                raise HostPortConflict(
+                    f"host port allocation failed after {attempt} attempts: {error}"
+                ) from error
+            print(
+                f"acceptance: host port conflict on attempt {attempt}; "
+                f"removing {project} and retrying with new ports: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
+            teardown(project)
+            if docker(
+                "ps", "-aq", "--filter", f"label=com.docker.compose.project={project}"
+            ).strip():
+                raise AcceptanceFailure(
+                    f"cannot retry port allocation: containers for {project} remain after cleanup"
+                ) from error
+
+
+def _accept_once(
+    manifest_path: Path, recipe: Path, variant: str, workdir: Path, project: str
+) -> list[str]:
+    """Run one acceptance attempt, including a newly selected set of host ports."""
     manifest = json.loads(manifest_path.read_text())
     recipe_root = extract_recipe(recipe, workdir / "recipe")
     evidence = [f"the recipe unpacks to a root with no source, no Dockerfile ({recipe_root.name})"]

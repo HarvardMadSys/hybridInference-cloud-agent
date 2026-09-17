@@ -1,0 +1,24 @@
+diff --git a/packages/opencode/src/config/config.ts b/packages/opencode/src/config/config.ts
+--- a/packages/opencode/src/config/config.ts
++++ b/packages/opencode/src/config/config.ts
+@@ -461,12 +461,14 @@
+         const auth = yield* authSvc.all().pipe(Effect.orDie)
+ 
+         let result: Info = {}
+-        const legacy = yield* Effect.promise(() =>
+-          KilocodeConfig.loadLegacyConfigs({
+-            projectDir: ctx.directory,
+-            merge: mergeConfigConcatArrays,
+-          }),
+-        )
++        const legacy = Flag.KILO_DISABLE_PROJECT_CONFIG
++          ? { config: {} as Info, warnings: [] as Warning[] }
++          : yield* Effect.promise(() =>
++              KilocodeConfig.loadLegacyConfigs({
++                projectDir: ctx.directory,
++                merge: mergeConfigConcatArrays,
++              }),
++            )
+         result = mergeConfigConcatArrays(result, legacy.config)
+         // Legacy rules are discovered from fixed global/project directories, so their paths safely identify the
+         // source boundary even though the migrator returns them as one merged instruction list.

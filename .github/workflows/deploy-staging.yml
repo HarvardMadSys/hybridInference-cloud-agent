@@ -33,6 +33,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   deploy:
@@ -128,6 +129,10 @@ jobs:
 
       - name: Deploy
         env:
+          # The orchestrator watches this attempt's peer only during the
+          # read-only fence; the token is never passed into an API container.
+          DEPLOY_PEER_JOB: Deploy runner host
+          GITHUB_TOKEN: ${{ github.token }}
           # Unset falls back to the script's own default, which is this
           # machine's path. Named here so production and staging are configured
           # the same way rather than one by variable and one by default.
@@ -144,19 +149,19 @@ jobs:
           # serves the previous commit. Shortening it does not loosen the
           # fence, it only gives up sooner.
           #
-          # 120s against a measured need of about 55: the three rollouts that
-          # succeeded on 2026-09-12 finished their host job in 52-54s, and the
-          # readiness fence resolved 31s into the one before that. The default
-          # of 900 was costing a quarter of an hour per failure -- that day, 10
-          # failures spent 176 minutes against 4 minutes for 3 successes, and
-          # the deploy slot is single, so everything behind them queued.
-          # Staging would rather retry than wait out fifteen minutes of a
-          # verdict already decided; production keeps the conservative default.
-          # A cold sandbox-image rebuild runs before the host's own checks and
-          # so eats into this window -- if one times out here, run it again,
-          # which now costs two minutes.
-          SHARED_READY_TIMEOUT: "120"
+          # Include a cold sandbox-image rebuild, not only a cached rollout.
+          # On 2026-09-15 the 120s limit expired eleven seconds before the
+          # host succeeded, leaving the old API against an upgraded database
+          # and runner. Use the script's normal 900s budget; a ready host still
+          # releases the fence immediately. Never bypass the exact-SHA check.
+          SHARED_READY_TIMEOUT: "900"
         run: bash .deploy-orchestrator/deploy/control-plane/deploy.sh "${{ steps.target.outputs.sha }}"
+
+      - name: Notify deployment failure
+        if: failure()
+        env:
+          AGENT_ALERT_WEBHOOK_URL: ${{ secrets.STAGING_ALERT_WEBHOOK_URL }}
+        run: python3 .deploy-orchestrator/deploy/notify_failure.py
 
       - name: What is running now
         if: always()
@@ -251,10 +256,10 @@ jobs:
           # rather than guessing when it is empty.
           COMPOSE_PROJECT: ${{ vars.STAGING_SANDBOX_COMPOSE_PROJECT }}
           SIBLING_COMPOSE_PROJECTS: ${{ vars.PROD_SANDBOX_COMPOSE_PROJECT }}
-          # The same fence, on the side that publishes readiness: `cmd_up`
-          # passes this to its own post-rollout check. Bounded here too so the
-          # two halves of one deployment cannot disagree about how long the
-          # rollout is allowed to take.
+          # This local check begins AFTER the image build. The control-plane
+          # wait above also covers that build, so it needs a larger budget.
+          # Keep a failed local probe bounded; deploy.sh restores the previous
+          # host generation if the replacement cannot advertise readiness.
           SHARED_READY_TIMEOUT: "120"
           # One capacity value drives both the number of synchronous runner
           # executors and the scheduler slots they advertise. Letting these
@@ -268,6 +273,12 @@ jobs:
           AGENT_RETAINED_DOCKER_DATA_ROOT: ${{ vars.STAGING_RETAINED_DOCKER_DATA_ROOT || '/var/lib/docker' }}
           SOURCE_REPO: ${{ github.workspace }}/.deploy-target
         run: bash .deploy-orchestrator/deploy/host/deploy.sh "${{ steps.target.outputs.sha }}"
+
+      - name: Notify deployment failure
+        if: failure()
+        env:
+          AGENT_ALERT_WEBHOOK_URL: ${{ secrets.STAGING_ALERT_WEBHOOK_URL }}
+        run: python3 .deploy-orchestrator/deploy/notify_failure.py
 
       - name: What is running now
         if: always()

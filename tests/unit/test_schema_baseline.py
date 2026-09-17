@@ -112,25 +112,42 @@ def test_the_revision_identifier_fits_alembic_version_num() -> None:
     assert len(str(_module_constant("revision"))) <= 32
 
 
-def test_the_baseline_creates_every_table_the_storage_layer_names() -> None:
-    """Every ``agent_*`` table the storage layer reads or writes is created here."""
+def _tables_created_by_every_revision() -> set[str]:
+    """Every table the whole migration chain creates.
+
+    Read from the revision files rather than from a list maintained here: the
+    schema has one owner, and a table added by a later revision is still a
+    table the store may name. Checking only the baseline made every migration
+    that follows it a hole in this test.
+    """
+    created: set[str] = set()
+    for path in sorted(VERSIONS.glob("*.py")):
+        created.update(re.findall(r"CREATE TABLE (\w+)", path.read_text(encoding="utf-8")))
+    return created
+
+
+def test_the_baseline_creates_the_tables_it_declares() -> None:
+    """The baseline is exactly the set it says it is, and nothing drifted in."""
     created = set()
     for statement in _literal("_STATEMENTS"):
         match = re.search(r"CREATE TABLE (\w+)", statement)
         if match:
             created.add(match.group(1))
     assert created == EXPECTED_TABLES
-    named_by_storage = set(re.findall(r"\b(agent_[a-z_]+)\b", _storage_source()))
-    tables_in_storage = {name for name in named_by_storage if name in created or name.endswith("s")}
+
+
+def test_every_table_the_store_names_is_created_by_a_revision() -> None:
+    """A store query against a table no revision creates fails in production only."""
+    created = _tables_created_by_every_revision()
+    store_source = _storage_source()
+    named_by_store = set(re.findall(r"\b(agent_[a-z_]+)\b", store_source))
+    tables_in_store = {name for name in named_by_store if name in created or name.endswith("s")}
     missing = {
         name
-        for name in tables_in_storage
-        if name not in created
-        and re.search(rf"(FROM|INTO|UPDATE|JOIN) {name}\b", _storage_source())
+        for name in tables_in_store
+        if name not in created and re.search(rf"(FROM|INTO|UPDATE|JOIN) {name}\b", store_source)
     }
-    assert not missing, (
-        f"the storage layer names tables the baseline does not create: {sorted(missing)}"
-    )
+    assert not missing, f"the store names tables no revision creates: {sorted(missing)}"
 
 
 def test_the_downgrade_drops_exactly_what_the_upgrade_creates() -> None:

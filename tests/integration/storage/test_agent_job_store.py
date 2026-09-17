@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 
+from cloud_agent.mcp.registry import binding_from_row
 from cloud_agent.schemas import WorkerEventRequest
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.thread_stats import summarize_thread
@@ -3547,7 +3548,31 @@ async def test_model_credential_uses_only_agent_owned_metadata(
     pool, store: Storage, users_surface: str
 ):
     """Local objects named users cannot change or break fenced MCP resolution."""
-    job = await _create_job(store, mcp_servers=["github", "docs"])
+    connection = await store.mcp.create_mcp_connection(
+        user_id="user-1",
+        label="Docs",
+        transport="streamable-http",
+        location="remote",
+        url="https://mcp.example.com/mcp",
+        launch_spec=None,
+        auth_kind="none",
+        auth_config={},
+        template="docs",
+    )
+    job = await _create_job(
+        store,
+        mcp_bindings=[
+            {
+                "connection_id": int(connection["id"]),
+                "alias": "docs",
+                "enabled": True,
+                "config_revision": 1,
+                "authorization_epoch": 1,
+                "capability_revision": 1,
+                "rules": {},
+            }
+        ],
+    )
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     fence = {
         "job_id": job["id"],
@@ -3568,6 +3593,17 @@ async def test_model_credential_uses_only_agent_owned_metadata(
             # The thread carries the tool servers now; still agent-owned.
             await conn.execute(
                 "CREATE TEMP VIEW agent_threads AS SELECT * FROM public.agent_threads"
+            )
+            # The bindings and their connections are joined on every fenced
+            # resolution, so they are exposed the same way rather than read
+            # through a second code path this test would not be checking.
+            await conn.execute(
+                "CREATE TEMP VIEW agent_mcp_thread_bindings "
+                "AS SELECT * FROM public.agent_mcp_thread_bindings"
+            )
+            await conn.execute(
+                "CREATE TEMP VIEW agent_mcp_connections "
+                "AS SELECT * FROM public.agent_mcp_connections"
             )
             await conn.execute("SET LOCAL search_path = pg_temp, pg_catalog")
             if users_surface == "unrelated":
@@ -3604,12 +3640,24 @@ async def test_model_credential_uses_only_agent_owned_metadata(
 
             scoped_store = Storage(SimpleNamespace(acquire=borrow_connection))
             identity = await scoped_store.credential_queries.resolve_model_credential(**fence)
-            assert identity == {
-                "user_id": job["user_id"],
-                "job_id": job["id"],
-                "model": job["model"],
-                "mcp_servers": ["github", "docs"],
-            }
+            # The owner, the model and the session's bindings all still resolve,
+            # and nothing about them comes from a ``users`` table this platform
+            # does not own.
+            assert identity["user_id"] == job["user_id"]
+            assert identity["job_id"] == job["id"]
+            assert identity["model"] == job["model"]
+            assert identity["thread_id"] == job["thread_id"]
+            assert [entry["alias"] for entry in identity["mcp_bindings"]] == ["docs"]
+            # The relay reads these rows through ``binding_from_row`` on every
+            # forwarded call, so the query has to hand back every field that
+            # reader needs. It did not: ``thread_id`` was selected for
+            # ``list_mcp_bindings`` and omitted from the fence, and the fakes
+            # supplied it, so nothing failed until the merged host endpoint
+            # drove the real store. Asserted here, on the real row.
+            binding = binding_from_row(identity["mcp_bindings"][0])
+            assert binding.thread_id == job["thread_id"]
+            assert binding.alias == "docs"
+            assert binding.connection_id == str(connection["id"])
             assert await conn.fetchval("SELECT 1") == 1
         finally:
             # Roll back even a passing test, including all temporary objects

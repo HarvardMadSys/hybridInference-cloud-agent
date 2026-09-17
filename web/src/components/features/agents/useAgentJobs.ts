@@ -394,7 +394,9 @@ export function useAgentJob(jobId: string): {
   // artifact uploaded by the runner. Fork siblings therefore see the same
   // current workspace diff, matching the Git panel below. Metadata reloads
   // clear the cached patch, so refetch even when the job state stays settled.
-  const state = api?.state;
+  // During an in-place turn change, api still belongs to the previous turn.
+  // Do not open the new stream with that turn's attempt or event identity.
+  const state = api?.id === jobId ? api.state : undefined;
   useEffect(() => {
     if (!jobId || !state) return undefined;
     let cancelled = false;
@@ -489,7 +491,8 @@ export function useAgentJob(jobId: string): {
   const conversationActive =
     api?.conversation_state === 'running' || api?.conversation_state === 'queued';
   const metadataActive =
-    publicationActive || (state !== 'running' && state !== 'publishing' && conversationActive);
+    api?.id === jobId &&
+    (publicationActive || (state !== 'running' && state !== 'publishing' && conversationActive));
   useEffect(() => {
     if (!jobId || !metadataActive) return undefined;
     let cancelled = false;

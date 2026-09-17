@@ -730,17 +730,13 @@ def test_staging_and_production_host_rollouts_are_independently_serialized() -> 
 
 
 def test_staging_bounds_the_readiness_fence_and_production_keeps_the_default() -> None:
-    """Both halves of a staging rollout give up at the same moment.
+    """The control-plane budget includes the build before the host's timer.
 
-    The fence is what stops a control plane from replacing the live API while a
-    host still serves the previous commit, and both jobs wait on it: the host
-    for its own post-rollout check, the control plane for the host to publish
-    readiness. A value set on one and not the other would let one half declare
-    the rollout dead while the other was still working, so the test that matters
-    is that they agree -- not what the number is.
-
-    Production is deliberately absent here: it keeps the script's conservative
-    default, where waiting longer is cheaper than retrying.
+    Equal durations do not give equal deadlines: the host starts its local
+    check only after building the sandbox. Requiring equality hid the cold
+    build race reproduced in test_deploy_readiness. Keep the local check
+    bounded while the control plane uses the normal, longer rollout budget.
+    Production continues to use the scripts' defaults.
     """
     staging = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-staging.yml").read_text())
     production = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-prod.yml").read_text())
@@ -753,18 +749,18 @@ def test_staging_bounds_the_readiness_fence_and_production_keeps_the_default() -
     host = deploy_env(staging, "deploy-host").get("SHARED_READY_TIMEOUT")
 
     assert control is not None, "the staging control job no longer bounds the readiness fence"
-    assert control == host, (
-        f"staging waits {control}s on one side and {host}s on the other; "
-        "one half would abandon a rollout the other was still completing"
+    assert host is not None, "the staging host job no longer bounds its local readiness check"
+    assert 0 < int(host) < int(control), (
+        "the control-plane wait must also cover the build before the host check starts"
     )
-    assert int(control) > 0
+    assert int(control) < 60 * staging["jobs"]["deploy"]["timeout-minutes"]
 
     default = re.search(
         r'SHARED_READY_TIMEOUT="\$\{SHARED_READY_TIMEOUT:-(\d+)\}"',
         (REPO_ROOT / "deploy/control-plane/deploy.sh").read_text(),
     )
     assert default, "deploy.sh no longer defines a SHARED_READY_TIMEOUT default"
-    assert int(control) < int(default.group(1))
+    assert int(control) == int(default.group(1))
 
     for job in ("deploy", "deploy-host"):
         assert "SHARED_READY_TIMEOUT" not in deploy_env(production, job), (
@@ -1402,6 +1398,229 @@ def test_kilo_wrapper_writes_config_sets_offline_flags_and_execs(tmp_path):
     assert provider["models"] == {"glm-5.1": {"name": "glm-5.1"}}
     # Credential-bearing config follows the runtime's activation-only path.
     assert seen["env"]["KILO_CONFIG"].startswith(str(activation))
+
+
+#: One entry per wrapper that can publish the platform's MCP relay, with the
+#: environment variable its CLI reads the merged config from.
+#:
+#: Both adapters publish the same authenticated relay and exclude project
+#: configuration, including Kilo's reviewed legacy-loader patch.
+_MCP_WRAPPERS = (
+    ("opencode", _OPENCODE_WRAPPER, "OPENCODE", "OPENCODE_GATEWAY_MODEL", "OPENCODE_CONFIG"),
+    ("kilo", _KILO_WRAPPER, "KILO", "KILO_GATEWAY_MODEL", "KILO_CONFIG"),
+)
+
+
+def _run_mcp_wrapper(tmp_path, wrapper, prefix: str, model_var: str, config_var: str, **extra):
+    """Run one wrapper with a stub CLI, returning ``(result, seen)``.
+
+    The stub records the environment the real CLI would have started with, so a
+    test can read both the flags and the config file the wrapper wrote without
+    a CLI being installed.
+    """
+    import json as _json
+    import os as _os
+    import subprocess as _subprocess
+    import sys as _sys
+
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir(exist_ok=True)
+    record = tmp_path / f"seen-{prefix}.json"
+    stub = stub_dir / prefix.lower()
+    stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "seen = {'argv': sys.argv[1:], 'env': dict(os.environ)}\n"
+        f"open({str(record)!r}, 'w').write(json.dumps(seen))\n"
+    )
+    stub.chmod(0o755)
+    home = tmp_path / f"home-{prefix}"
+    home.mkdir(exist_ok=True)
+    env = {
+        "PATH": f"{stub_dir}:{_os.environ['PATH']}",
+        "HOME": str(home),
+        "OPENAI_BASE_URL": "http://backend:8080/v1",
+        "OPENAI_API_KEY": "ajt.attempt.key",
+        model_var: "glm-5.1",
+        f"{prefix}_FREEINFERENCE_CONFIG_DIR": str(tmp_path / "activation" / prefix),
+    }
+    env.update(extra)
+    result = _subprocess.run(
+        [_sys.executable, str(wrapper), "run", "hi"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    seen = _json.loads(record.read_text()) if record.exists() else None
+    del config_var
+    return result, seen
+
+
+@pytest.mark.parametrize("name,wrapper,prefix,model_var,config_var", _MCP_WRAPPERS)
+def test_the_wrapper_declares_the_relay_and_references_the_token(
+    tmp_path, name, wrapper, prefix, model_var, config_var
+):
+    """**The relay endpoint and a reference, never the credential itself.**
+
+    The reference syntax is the load-bearing detail and it is not portable: this
+    CLI family substitutes ``{env:VAR}`` as a text pass over the raw config file
+    before parsing it, where Claude Code expands ``${VAR}``. The wrong one
+    produces a literal placeholder as the bearer token -- every call 401s and
+    nothing says why -- so the exact string is pinned here, and the json module
+    is what quotes a URL or a model id into the file.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    result, seen = _run_mcp_wrapper(
+        tmp_path,
+        wrapper,
+        prefix,
+        model_var,
+        config_var,
+        AGENT_MCP_SERVERS=_json.dumps({"github": "http://agent-mcp:8000/v1/agent/mcp/github"}),
+        AGENT_MCP_TOKEN="ajt.mcp.attempt.token",
+    )
+    assert result.returncode == 0, result.stderr
+
+    config = _json.loads(_Path(seen["env"][config_var]).read_text())
+    assert config["mcp"] == {
+        "github": {
+            "type": "remote",
+            "url": "http://agent-mcp:8000/v1/agent/mcp/github",
+            "enabled": True,
+            "headers": {
+                "Authorization": "Bearer {env:AGENT_MCP_TOKEN}",
+                **({"Connection": "close"} if name == "kilo" else {}),
+            },
+            # Without this the CLI probes the platform for an authorization
+            # server and marks the connection unauthenticated before the first
+            # call; the relay speaks MCP with a job token, not OAuth.
+            "oauth": False,
+            # Ten minutes for approval plus up to fifteen for execution.
+            "timeout": 1_560_000,
+        }
+    }
+    # The credential itself must never reach the file the CLI reads.
+    assert "ajt.mcp.attempt.token" not in _Path(seen["env"][config_var]).read_text()
+    # The project config is shut out, so this is the only MCP source.
+    assert seen["env"][f"{prefix}_DISABLE_PROJECT_CONFIG"] == "1"
+
+
+@pytest.mark.parametrize("name,wrapper,prefix,model_var,config_var", _MCP_WRAPPERS)
+def test_the_wrapper_declares_an_empty_map_when_the_run_has_no_connections(
+    tmp_path, name, wrapper, prefix, model_var, config_var
+):
+    """Written either way, so there is no turn on which the key is absent.
+
+    An MCP key that appeared only sometimes would leave the CLI free to find
+    its own sources on the turns where it did not -- which is exactly the hole
+    the project-config switch closes.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    result, seen = _run_mcp_wrapper(
+        tmp_path,
+        wrapper,
+        prefix,
+        model_var,
+        config_var,
+        AGENT_MCP_SERVERS="{}",
+        AGENT_MCP_TOKEN="",
+    )
+    assert result.returncode == 0, result.stderr
+    config = _json.loads(_Path(seen["env"][config_var]).read_text())
+    assert config["mcp"] == {}
+
+
+@pytest.mark.parametrize("name,wrapper,prefix,model_var,config_var", _MCP_WRAPPERS)
+def test_the_wrapper_refuses_connections_it_cannot_authenticate(
+    tmp_path, name, wrapper, prefix, model_var, config_var
+):
+    """A named refusal beats a run whose every tool call is a 401."""
+    import json as _json
+
+    result, _seen = _run_mcp_wrapper(
+        tmp_path,
+        wrapper,
+        prefix,
+        model_var,
+        config_var,
+        AGENT_MCP_SERVERS=_json.dumps({"github": "http://agent-mcp:8000/v1/agent/mcp/github"}),
+        AGENT_MCP_TOKEN="",
+    )
+    assert result.returncode == 64
+    assert "AGENT_MCP_TOKEN" in result.stderr
+
+
+@pytest.mark.parametrize("name,wrapper,prefix,model_var,config_var", _MCP_WRAPPERS)
+def test_the_wrapper_refuses_an_endpoint_map_it_cannot_read(
+    tmp_path, name, wrapper, prefix, model_var, config_var
+):
+    """Unreadable input is a refusal, not an empty map.
+
+    Degrading to "no servers" here would silently drop the tools the job was
+    created with, and the agent would work around their absence rather than
+    failing.
+    """
+    result, _seen = _run_mcp_wrapper(
+        tmp_path,
+        wrapper,
+        prefix,
+        model_var,
+        config_var,
+        AGENT_MCP_SERVERS="not json",
+        AGENT_MCP_TOKEN="ajt.token",
+    )
+    assert result.returncode == 64
+    assert "AGENT_MCP_SERVERS" in result.stderr
+
+
+def test_the_pi_bridge_is_shipped_where_the_adapter_loads_it_from():
+    """A path that drifts between the image and the adapter is a silent no-op.
+
+    pi is given `-e <this path>` on every run. If the image copied the bridge
+    somewhere else, pi would start with an extension path that does not exist:
+    with `--no-extensions` the MCP tools would simply be absent, and the agent
+    would work around them rather than fail. Read from both files so the two
+    cannot disagree without a test failing.
+    """
+    from cloud_agent_host import runtimes as _runtimes
+
+    dockerfile = (
+        Path(__file__).resolve().parents[2] / "deploy/sandbox/Dockerfile.agent-sandbox"
+    ).read_text()
+    source = Path(__file__).resolve().parents[2] / "deploy/sandbox/pi-mcp-bridge.ts"
+    assert source.is_file(), "the bridge is not in the build context"
+
+    destination = f"COPY deploy/sandbox/pi-mcp-bridge.ts {_runtimes.PI_MCP_BRIDGE}"
+    assert destination in dockerfile, (
+        f"the image does not copy the bridge to {_runtimes.PI_MCP_BRIDGE}, which is "
+        "where PiRuntime loads it from"
+    )
+    # Read-only, and outside any writable path: the extension talks to the relay
+    # with the job token, so nothing in the sandbox may replace it.
+    assert f"chmod 0444 {_runtimes.PI_MCP_BRIDGE}" in dockerfile
+
+
+def test_the_pi_bridge_only_ever_reads_its_endpoints_from_the_environment():
+    """The bridge must not be able to name a server of its own.
+
+    Its whole authority is the environment the control plane writes: the relay
+    endpoints and the `mcp`-scoped job token. A hardcoded URL or a fallback
+    would be a second source, and one the platform's binding check does not
+    cover.
+    """
+    source = (Path(__file__).resolve().parents[2] / "deploy/sandbox/pi-mcp-bridge.ts").read_text()
+    assert 'MCP_SERVERS_ENV = "AGENT_MCP_SERVERS"' in source
+    assert 'MCP_TOKEN_ENV = "AGENT_MCP_TOKEN"' in source
+    assert "process.env[MCP_SERVERS_ENV]" in source
+    assert "process.env[MCP_TOKEN_ENV]" in source
+    # No literal endpoint of any kind: every URL the bridge dials comes from
+    # the environment the control plane wrote.
+    assert "http://" not in source and "https://" not in source
 
 
 def test_kilo_wrapper_refuses_to_run_half_configured(tmp_path):

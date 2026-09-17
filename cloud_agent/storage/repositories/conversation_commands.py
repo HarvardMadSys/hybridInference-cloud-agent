@@ -17,6 +17,7 @@ from cloud_agent.domain.ids import new_job_id, new_thread_id
 from cloud_agent.domain.requests import check_client_request
 from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.storage._sql.jobs import JOB_SELECT, SESSION_DELETE_BLOCK_SQL
+from cloud_agent.storage._sql.mcp import write_mcp_bindings
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 from cloud_agent.task_titles import fallback_title
@@ -50,7 +51,7 @@ class PostgresConversationCommands:
         base_sha: str | None = None,
         setup_script: str | None = None,
         metadata: dict[str, Any] | None = None,
-        mcp_servers: list[str] | None = None,
+        mcp_bindings: list[dict[str, Any]] | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any]:
@@ -89,8 +90,8 @@ class PostgresConversationCommands:
                     """
                     INSERT INTO agent_threads
                         (id, user_id, repo, title, title_source,
-                         setup_script, execution_profile, mcp_servers)
-                    VALUES ($1, $2, $3, $4, 'fallback', $5, $6, $7)
+                         setup_script, execution_profile)
+                    VALUES ($1, $2, $3, $4, 'fallback', $5, $6)
                     """,
                     thread_id,
                     user_id,
@@ -98,8 +99,8 @@ class PostgresConversationCommands:
                     fallback_title(task_prompt),
                     setup_script,
                     execution_profile,
-                    list(mcp_servers or []),
                 )
+                await write_mcp_bindings(conn, thread_id=thread_id, bindings=mcp_bindings)
                 await conn.execute(
                     """
                     INSERT INTO agent_jobs

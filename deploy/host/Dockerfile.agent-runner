@@ -69,6 +69,10 @@ COPY cloud_agent_host/ cloud_agent_host/
 # those containers before their first post-deploy activation.
 COPY deploy/sandbox/member-process-reaper /usr/local/libexec/member-process-reaper
 RUN chmod 0555 /usr/local/libexec/member-process-reaper
+COPY deploy/sandbox/pi-freeinference deploy/sandbox/pi-mcp-bridge.ts \
+     deploy/sandbox/opencode-freeinference deploy/sandbox/kilo-freeinference \
+     deploy/sandbox/http-agent-live-bridge /usr/local/libexec/mcp-runtime/
+RUN chmod 0555 /usr/local/libexec/mcp-runtime/*
 
 # Root on purpose, and only here. The runner and broker need the host Docker
 # socket to create/start/stop retained containers. Repository source is cloned

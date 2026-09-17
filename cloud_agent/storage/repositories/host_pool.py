@@ -26,6 +26,7 @@ from cloud_agent.storage._sql.hosts import (
 )
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
+from cloud_agent_host.sandbox import KATA_RUNTIME
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -566,6 +567,65 @@ class PostgresHostPoolRepository:
             selected,
             {str(row["host"]) for row in owner_rows},
         )
+
+    async def queue_health(self, *, expected_deployment_sha: str) -> dict[str, int]:
+        """Observe ten-minute queue stalls without claiming or changing jobs.
+
+        Occupied slots are ordinary backpressure. Missing/stale/disabled hosts,
+        lost deployment markers and a wrong placement pin are not. Retained
+        members use their owner, independent of the pin for new conversations.
+        No user content, job identifiers or credentials leave this projection.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                WITH waiting AS (
+                    SELECT g.host AS owner, t.execution_profile,
+                           COALESCE(j.metadata->'requires', '[]'::jsonb) AS requires
+                    FROM agent_jobs j
+                    JOIN agent_threads t ON t.id = j.thread_id
+                    LEFT JOIN agent_thread_sandbox_memberships m ON m.thread_id = t.id
+                    LEFT JOIN agent_sandboxes g ON g.id = m.sandbox_id
+                    WHERE j.state = 'queued' AND NOT j.cancel_requested
+                      AND j.updated_at < NOW() - INTERVAL '10 minutes'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM agent_jobs earlier
+                          WHERE earlier.thread_id = j.thread_id AND earlier.turn_no < j.turn_no
+                            AND earlier.state IN ('queued', 'running')
+                      )
+                ), serving AS (
+                    SELECT h.* FROM agent_runner_hosts h
+                    WHERE h.status = 'online' AND h.credential_hash IS NOT NULL
+                      AND h.last_heartbeat_at >= NOW() - INTERVAL '90 seconds'
+                      AND h.capabilities @> '["shared-sandbox-v1"]'::jsonb
+                      AND COALESCE(h.slots_total, 1) > 0
+                      AND EXISTS (
+                          SELECT 1 FROM jsonb_array_elements_text(h.capabilities) c
+                          WHERE c LIKE 'shared-sandbox-deployment:%'
+                      )
+                )
+                SELECT COUNT(*) AS queued,
+                       COUNT(*) FILTER (WHERE NOT EXISTS (
+                           SELECT 1 FROM serving h
+                           WHERE waiting.requires <@ h.capabilities
+                             AND (waiting.execution_profile = 'trusted-v1' OR h.sandbox_runtime = $2)
+                             AND (
+                                 (waiting.owner IS NOT NULL AND h.host = waiting.owner)
+                                 OR (waiting.owner IS NULL
+                                     AND h.capabilities @> '["native-fork-at-anchor-v1"]'::jsonb
+                                     AND ($1 = '' OR h.capabilities ? ('shared-sandbox-deployment:' || $1))
+                                     AND ((SELECT active_host FROM agent_runner_policy WHERE id) IS NULL
+                                          OR h.host = (SELECT active_host FROM agent_runner_policy WHERE id)))
+                             )
+                       )) AS unavailable,
+                       (SELECT COUNT(*) FROM agent_jobs WHERE state = 'running') AS running
+                FROM waiting
+                """,
+                expected_deployment_sha,
+                KATA_RUNTIME,
+                timeout=10,
+            )
+        return {key: int(row[key]) for key in ("queued", "unavailable", "running")}
 
     async def list_runner_hosts(self) -> list[dict[str, Any]]:
         """Return every host seen polling, most recent poll first."""

@@ -127,12 +127,20 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
   ) as AgentTerminalApi[];
 
   const awaitingInitialLoad = active && !loadFailed && (!ready || loadedJobRef.current !== jobId);
-  // Deliberately not gated on the initial listing. That request answers "which
-  // terminals already exist", which is not a precondition for opening another
-  // one — and it is a full round trip, so gating on it made the first click
-  // wait for an answer it did not need. The cap is still enforced here once the
-  // listing lands, and by the broker regardless.
-  const canCreate = !loadFailed && sessions.length < MAX_SESSIONS;
+  // Two different waits, and only one of them is a precondition.
+  //
+  // The initial listing is not: it answers "which terminals already exist",
+  // and it is a full round trip, so gating the first click on it made the
+  // click wait for an answer it did not need. The cap is still enforced here
+  // once the listing lands, and by the broker regardless.
+  //
+  // Workspace readiness is. There is no container to open a PTY in until the
+  // job reports `workspace_ready`, so a create issued before then fails at the
+  // broker — which is what happened when this gate was removed along with the
+  // other one. The button stays visible and disabled rather than absent: the
+  // wait is short and aiming at a control that is about to work beats hunting
+  // for one that is not there yet.
+  const canCreate = ready && !loadFailed && sessions.length < MAX_SESSIONS;
 
   function retryLoad() {
     loadedJobRef.current = null;

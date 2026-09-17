@@ -116,7 +116,8 @@ async def test_a_live_attempt_resolves_its_owner_model_and_scope(
     assert resolved["user_id"] == _OWNER
     assert resolved["job_id"] == job["id"]
     assert resolved["model"] == job["model"]
-    assert isinstance(resolved["mcp_servers"], list)
+    assert isinstance(resolved["mcp_bindings"], list)
+    assert resolved["thread_id"] == job["thread_id"]
 
 
 async def test_a_superseded_generation_resolves_nothing(

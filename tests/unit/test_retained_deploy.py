@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -34,6 +35,7 @@ def _host(
     attest_exit: int = 0,
     broker_running: bool = True,
     broker_serving: bool = True,
+    candidate_exit: int = 0,
 ) -> dict[str, str]:
     app_dir = tmp_path / "app"
     app_dir.mkdir()
@@ -71,6 +73,8 @@ def _host(
         'case "$*" in\n'
         f"  'info --format {{{{.DockerRootDir}}}}') echo '{daemon_root}' ;;\n"
         "  'info') exit 0 ;;\n"
+        '  *\' config --format json\') echo \'{"name":"test-retained","services":{"runner":{"image":"test-candidate-runner"}}}\' ;;\n'
+        f"  run*'cloud_agent_host.candidate_check') exit {candidate_exit} ;;\n"
         f"  *' ps -q runner') printf '%s\\n' '{runner_ids}' ;;\n"
         f"  *' ps -q workspace-broker') printf '%s\\n' '{broker_id}' ;;\n"
         f"  *' logs --since 2m runner') echo '{rejection_log}' ;;\n"
@@ -635,3 +639,266 @@ def test_shared_live_check_reports_a_missing_broker_replica(tmp_path: Path) -> N
 
     assert result.returncode != 0
     assert "no workspace-broker replica is running" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# A failed rollout has to leave a host that can still take work (issue #259).
+#
+# `sandbox_host.sh up` invalidates this host's shared-live marker and drains the
+# runners that were serving before it proves the replacement. A failed check
+# therefore leaves the host advertising nothing, and a runner advertising
+# nothing does not poll at all. On 2026-09-13 that lasted 29.6 hours.
+#
+# These drive the real `deploy/host/deploy.sh` against a git checkout whose
+# bring-up is a stub, because what is under test is the orchestrator's failure
+# path rather than Docker, Kata or the stack.
+# ---------------------------------------------------------------------------
+
+#: Stands in for the real bring-up. `@GENERATION@` names the commit the files
+#: around it belong to, so a restore that ran the wrong tree's script is visible
+#: in the log rather than inferred from the marker.
+_STUB_BRING_UP = """#!/usr/bin/env bash
+set -euo pipefail
+echo "@GENERATION@ ${1:-} ${AGENT_DEPLOYMENT_SHA:-}" >>"${STUB_LOG}"
+case "${1:-}" in
+  up)
+    if [ "${STUB_FAILS_SHA:-}" = "${AGENT_DEPLOYMENT_SHA:-}" ]; then
+      # STUB_FAIL_ONCE models the transient failure a re-deploy recovers from;
+      # without it every attempt at that commit fails, which is a broken host.
+      so_far="$(grep -c ' up ' "${STUB_LOG}" || true)"
+      if [ "${STUB_FAIL_ONCE:-0}" != "1" ] || [ "${so_far}" -le 1 ]; then
+        if [ "${STUB_FAIL_BEFORE_MARKER:-0}" != "1" ]; then
+          printf 'pending:%s\\n' "${AGENT_DEPLOYMENT_SHA}" >.shared-live-ready
+        fi
+        exit 1
+      fi
+    fi
+    printf 'pending:%s\\n' "${AGENT_DEPLOYMENT_SHA}" >.shared-live-ready
+    ;;
+  mark-ready)
+    printf '%s\\n' "${2}" >.shared-live-ready
+    ;;
+esac
+"""
+
+
+def _deploy_git(*args: str, cwd: Path) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": os.environ["PATH"],
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_AUTHOR_NAME": "T",
+            "GIT_AUTHOR_EMAIL": "t@example.com",
+            "GIT_COMMITTER_NAME": "T",
+            "GIT_COMMITTER_EMAIL": "t@example.com",
+        },
+    ).stdout
+
+
+def _deploy_output(result: subprocess.CompletedProcess[str]) -> str:
+    """`log` reports on stdout and `die` on stderr; together they are the deploy."""
+    return result.stdout + result.stderr
+
+
+def _deploy_host_rollout(
+    tmp_path: Path,
+    *,
+    recorded: str | None = "previous",
+    advertising: bool = False,
+    fail_before_marker: bool = False,
+    fail_once: bool = False,
+    run_from: str = "outside",
+) -> tuple[subprocess.CompletedProcess[str], Path, str, str, list[str]]:
+    """Run one failing rollout and report what it left behind.
+
+    `recorded` is what `.deployed-sha` names: `"previous"` for the generation
+    this checkout can produce, `"target"` for the commit being deployed, a
+    literal commit it cannot produce, or nothing at all. `advertising` starts the
+    host off already serving the previous generation, which is what a rollout
+    that fails before it invalidates the marker leaves alone. `fail_once` makes
+    that commit's first attempt the only one that fails, which is what a retry
+    recovers from. Returns the result, the deploy root, both commits and the
+    bring-up log, in the order the stub was called.
+    """
+    root = tmp_path / "deploy-root"
+    protocol = root / "deploy/DEPLOY_PROTOCOL"
+    protocol.parent.mkdir(parents=True)
+    protocol.write_text("shared-live-exact-sha-v3\n")
+    bring_up = root / "deploy/host/sandbox_host.sh"
+    bring_up.parent.mkdir(parents=True, exist_ok=True)
+
+    bring_up.write_text(_STUB_BRING_UP.replace("@GENERATION@", "previous"))
+    _deploy_git("init", "-q", cwd=root)
+    _deploy_git("add", "-A", cwd=root)
+    _deploy_git("commit", "-qm", "previous", cwd=root)
+    previous = _deploy_git("rev-parse", "HEAD", cwd=root).strip()
+
+    bring_up.write_text(_STUB_BRING_UP.replace("@GENERATION@", "target"))
+    _deploy_git("add", "-A", cwd=root)
+    _deploy_git("commit", "-qm", "target", cwd=root)
+    target = _deploy_git("rev-parse", "HEAD", cwd=root).strip()
+
+    source = tmp_path / "source"
+    _deploy_git("clone", "--quiet", str(root), str(source), cwd=tmp_path)
+
+    (root / ".env").write_text("COMPOSE_PROJECT=test-restore\n")
+    if recorded == "previous":
+        (root / ".deployed-sha").write_text(previous + "\n")
+    elif recorded == "target":
+        (root / ".deployed-sha").write_text(target + "\n")
+    elif recorded is not None:
+        (root / ".deployed-sha").write_text(recorded + "\n")
+    if advertising:
+        (root / ".shared-live-ready").write_text(previous + "\n")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(fake_bin / "docker", "#!/bin/sh\nexit 0\n")
+
+    # A rollout is run from a checkout that is not the one it rewrites; `inside`
+    # is the invocation the restore deliberately refuses.
+    if run_from == "inside":
+        orchestrator = root / "deploy/host/deploy.sh"
+    else:
+        orchestrator = tmp_path / "orchestrator/deploy/host/deploy.sh"
+    orchestrator.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(HOST_DEPLOY, orchestrator)
+
+    log = tmp_path / "bring-up.log"
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "DEPLOY_ROOT": str(root),
+        "SOURCE_REPO": str(source),
+        "STUB_LOG": str(log),
+        "STUB_FAILS_SHA": target,
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+    }
+    if fail_before_marker:
+        env["STUB_FAIL_BEFORE_MARKER"] = "1"
+    if fail_once:
+        env["STUB_FAIL_ONCE"] = "1"
+
+    result = subprocess.run(
+        ["bash", str(orchestrator), target],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    calls = log.read_text().splitlines() if log.exists() else []
+    return result, root, previous, target, calls
+
+
+def test_a_failed_rollout_restores_the_recorded_generation(tmp_path: Path) -> None:
+    """The 29.6-hour failure was `up` leaving nothing advertised behind it."""
+    result, root, previous, target, calls = _deploy_host_rollout(tmp_path)
+
+    assert result.returncode != 0, "a restored rollout is still a failed deploy"
+    assert (root / ".deployed-sha").read_text().strip() == previous
+    assert (root / ".shared-live-ready").read_text().strip() == previous
+    # The restored generation's own script and tree, not the target's.
+    assert calls == [
+        f"target up {target}",
+        f"previous up {previous}",
+        f"previous mark-ready {previous}",
+    ]
+    assert f"serving {previous} again" in _deploy_output(result)
+
+
+def test_a_transient_failure_rerolls_the_recorded_commit(tmp_path: Path) -> None:
+    """Redeploying the recorded generation is the cheapest recovery there is.
+
+    When `.deployed-sha` already names the target — a manual re-run of a commit
+    that served before — the fallback is that same commit rolled out again, and
+    it costs a rebuild rather than a rollback. Refusing it here would leave a
+    host down over a failure a re-run recovers from.
+    """
+    result, root, _previous, target, calls = _deploy_host_rollout(
+        tmp_path, recorded="target", fail_once=True
+    )
+
+    assert result.returncode != 0
+    assert (root / ".shared-live-ready").read_text().strip() == target
+    assert (root / ".deployed-sha").read_text().strip() == target
+    assert calls == [
+        f"target up {target}",
+        f"target up {target}",
+        f"target mark-ready {target}",
+    ]
+
+
+def test_a_rollout_that_kept_the_host_serving_is_not_restored(tmp_path: Path) -> None:
+    """A build failure never invalidated anything, so nothing should move.
+
+    Restoring here would interrupt a host that is still working, which is a
+    worse outcome than the failed deploy it is reacting to.
+    """
+    result, root, previous, target, calls = _deploy_host_rollout(
+        tmp_path, advertising=True, fail_before_marker=True
+    )
+
+    assert result.returncode != 0
+    assert calls == [f"target up {target}"]
+    assert (root / ".shared-live-ready").read_text().strip() == previous
+    assert (root / ".deployed-sha").read_text().strip() == previous
+    assert "nothing was interrupted" in _deploy_output(result)
+
+
+def test_a_failed_rollout_with_nothing_recorded_says_so(tmp_path: Path) -> None:
+    """First deploy, or a `.deployed-sha` nobody wrote: there is no way back."""
+    result, root, _previous, _target, calls = _deploy_host_rollout(tmp_path, recorded=None)
+
+    assert result.returncode != 0
+    assert len(calls) == 1
+    assert (root / ".shared-live-ready").read_text().strip().startswith("pending:")
+    assert "records no generation to fall back to" in _deploy_output(result)
+
+
+def test_the_restore_refuses_a_generation_this_host_cannot_produce(tmp_path: Path) -> None:
+    """A name in a file is not a tree: checking out nothing restores nothing."""
+    result, root, _previous, target, calls = _deploy_host_rollout(tmp_path, recorded="0" * 40)
+
+    assert result.returncode != 0
+    assert len(calls) == 1, "a target that cannot be produced must not be attempted"
+    assert (root / ".shared-live-ready").read_text().strip() == f"pending:{target}"
+    assert "nor fetchable from" in _deploy_output(result)
+
+
+def test_the_restore_refuses_to_rewrite_the_tree_it_is_running_from(tmp_path: Path) -> None:
+    """Bash reads a script by offset, so a reset under it is not survivable.
+
+    CI runs the orchestrator from `.deploy-orchestrator`, a checkout that is not
+    DEPLOY_ROOT. Refusing the other invocation is better than executing whatever
+    the reset leaves at the running script's offset.
+    """
+    result, root, previous, target, calls = _deploy_host_rollout(tmp_path, run_from="inside")
+
+    assert result.returncode != 0
+    assert calls == [f"target up {target}"]
+    assert "refusing to restore from inside" in _deploy_output(result)
+    assert (root / ".deployed-sha").read_text().strip() == previous
+    assert (root / ".shared-live-ready").read_text().strip() == f"pending:{target}"
+
+
+def test_host_deploy_reads_the_recorded_generation_before_it_overwrites_it() -> None:
+    """`.deployed-sha` is the only name that is known to have served work.
+
+    Read it after a successful rollout has written it and the value is the
+    commit that just failed — the same mistake `PREVIOUS` already makes.
+    """
+    script = HOST_DEPLOY.read_text()
+
+    assert script.index('RECORDED="$(cat .deployed-sha') < script.index(
+        "printf '%s\\n' \"${SHA}\" > .deployed-sha"
+    )
+    assert 'mark-ready "${recorded}"' in script
+    assert "restore_recorded_generation" in script

@@ -470,6 +470,12 @@ class ResidentTransportFactory:
                     user_uid=uid,
                     user_gid=self._manager.backend.gid,
                 )
+                if launch.mcp_server_ids:
+                    self._manager.ensure_mcp_helpers(spec, runtime_id)
+                if runtime_id == "kilo":
+                    self._manager.ensure_kilo_mcp_runtime(spec, launch.runtime_version or "7.4.17")
+                if runtime_id == "codex" and launch.mcp_server_ids:
+                    self._manager.ensure_codex_mcp_policy(spec, launch.mcp_base_url)
                 reaped = True
             pidfile = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/resident-{secrets.token_hex(16)}.pid"
             return self._manager.spawn(

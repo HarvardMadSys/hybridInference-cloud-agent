@@ -906,11 +906,13 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     import asyncpg
     import httpx
 
+    from cloud_agent.api.mcp_relay import close_host, maintain_host_sessions
     from cloud_agent.broker_routing import close_broker_clients
     from cloud_agent.capacity_history import collect_host_capacity_history
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
     from cloud_agent.ledger import collect_usage_snapshots
+    from cloud_agent.operational_health import monitor_queue
     from cloud_agent.storage.assembly import Storage
 
     dsn = os.environ.get(ENV_DATABASE_URL, "")
@@ -982,6 +984,9 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         app.state.snapshot_task = snapshot_coordinator
         app.state.ledger_task = ledger_collector
         app.state.capacity_task = capacity_history
+        app.state.queue_monitor_task = asyncio.create_task(monitor_queue(storage.host_pool))
+        _BACKGROUND_TASKS.add(app.state.queue_monitor_task)
+        app.state.queue_monitor_task.add_done_callback(_BACKGROUND_TASKS.discard)
         _start_publisher(app, storage)
         logger.info("cloud agent control plane started")
     else:
@@ -989,17 +994,23 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         app.state.snapshot_task = None
         app.state.ledger_task = None
         app.state.capacity_task = None
+        app.state.queue_monitor_task = None
         app.state.publish_task = None
         logger.info("cloud agent relay listener started")
 
+    # Each listener owns upstream sockets in its own process, even when it
+    # does not run the control plane's grant reaper or publisher.
+    app.state.mcp_maintenance_task = asyncio.create_task(maintain_host_sessions(storage))
     try:
         yield
     finally:
         for task in (
+            app.state.mcp_maintenance_task,
             app.state.reaper_task,
             app.state.snapshot_task,
             app.state.ledger_task,
             app.state.capacity_task,
+            app.state.queue_monitor_task,
             app.state.publish_task,
         ):
             if task is None:
@@ -1007,6 +1018,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        await close_host()
         # Close what was opened, innermost first: the per-broker pools, the
         # GitHub App's own client, then the shared gateway pool.
         await close_broker_clients()
@@ -1028,6 +1040,7 @@ def create_app() -> FastAPI:
         admin_runs,
         admin_usage,
         hosts,
+        mcp_connections,
         mcp_relay,
         routes,
         service_jobs,
@@ -1043,6 +1056,12 @@ def create_app() -> FastAPI:
     )
     app.include_router(routes.router)
     app.include_router(usage.router)
+    # Registered before the relay, and never on the relay's own listener. The
+    # order matters: the relay's ``/{server_name}`` catch-all would otherwise
+    # match a connection-management path and answer it as an MCP request. The
+    # listener separation matters more: adding a connection or approving a call
+    # is owner-facing work, and a sandbox must not be able to reach it at all.
+    app.include_router(mcp_connections.router)
     app.include_router(mcp_relay.router)
     app.include_router(hosts.router)
     app.include_router(admin_hosts.router)
@@ -1109,7 +1128,7 @@ def create_mcp_app() -> FastAPI:
         version="0.1.0",
         # No reaper and no publisher: they belong to the control-plane process,
         # and a second copy would renew every grant twice and race the same
-        # publish. This listener needs the store, and nothing else.
+        # publish. This listener still maintains its own upstream MCP sockets.
         lifespan=lambda app: lifespan(app, background=False),
     )
     app.include_router(mcp_relay.router)

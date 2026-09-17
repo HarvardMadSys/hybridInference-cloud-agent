@@ -19,6 +19,16 @@ if TYPE_CHECKING:
 class HostPoolRepository(Protocol):
     """Port: the runner-host pool and its enrollment."""
 
+    async def queue_health(self, *, expected_deployment_sha: str) -> dict[str, int]:
+        """Observe ten-minute queue stalls without claiming or changing jobs.
+
+        Occupied slots are ordinary backpressure. Missing/stale/disabled hosts,
+        lost deployment markers and a wrong placement pin are not. Retained
+        members use their owner, independent of the pin for new conversations.
+        No user content, job identifiers or credentials leave this projection.
+        """
+        ...
+
     async def issue_enroll_token(
         self, *, token_hash: str, host: str, ttl_seconds: float, issued_by: str | None = None
     ) -> dict[str, Any]:

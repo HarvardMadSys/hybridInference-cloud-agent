@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentJob } from '@/components/features/agents/types';
 import { useConversationReadState } from '@/components/features/agents/useConversationReadState';
 const fixture = vi.hoisted(() => ({ id: 'job-a', loading: false, job: null as AgentJob | null }));
-vi.mock('next/navigation', () => ({ useParams: () => ({ jobId: fixture.id }) }));
+vi.mock('next/navigation', () => ({ usePathname: () => `/${fixture.id}` }));
 vi.mock('@/components/providers', () => ({
   useAuth: () => ({ state: { user: { id: 'reader' } } }),
 }));
@@ -75,5 +75,39 @@ describe('viewed completion receipt', () => {
       </>,
     );
     expect(screen.getByText('Unread')).toBeInTheDocument();
+  });
+});
+
+describe('follow-up loading', () => {
+  it('only shows the full loading screen when no conversation has loaded', () => {
+    fixture.job = null;
+    fixture.loading = true;
+    render(<AgentJobPage />);
+    expect(screen.getByText('Loading job…')).toBeInTheDocument();
+  });
+
+  it('keeps the mounted conversation through a slow next-turn fetch and Back', () => {
+    fixture.job = completed;
+    const view = render(<AgentJobPage />);
+    const conversation = screen.getByText('Open conversation');
+    fixture.id = 'job-b';
+    fixture.loading = true;
+    view.rerender(<AgentJobPage />);
+    expect(screen.queryByText('Loading job…')).not.toBeInTheDocument();
+    expect(screen.getByText('Open conversation')).toBe(conversation);
+
+    fixture.job = { ...completed, id: 'job-b', turnNo: 2, state: 'queued' };
+    fixture.loading = false;
+    view.rerender(<AgentJobPage />);
+    expect(screen.getByText('Open conversation')).toBe(conversation);
+
+    fixture.id = completed.id;
+    fixture.loading = true;
+    view.rerender(<AgentJobPage />);
+    expect(screen.queryByText('Loading job…')).not.toBeInTheDocument();
+    fixture.job = completed;
+    fixture.loading = false;
+    view.rerender(<AgentJobPage />);
+    expect(screen.getByText('Open conversation')).toBe(conversation);
   });
 });
