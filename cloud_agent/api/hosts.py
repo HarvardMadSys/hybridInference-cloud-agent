@@ -252,6 +252,7 @@ async def heartbeat_host(
         capacity_sample_age_ms=None if body.capacity is None else body.capacity.sample_age_ms,
         physical_host=body.physical_host,
         slots_total=body.slots_total,
+        launch_error=body.launch_error,
         runner_version=body.runner_version,
         broker_url=_checked_broker_url(body.broker_url),
         capabilities=body.capabilities,
@@ -365,6 +366,10 @@ async def heartbeat_host(
         status=updated["status"],
         slots_total=updated["slots_total"],
         slots_used=updated["slots_used"],
+        # The operator's requested limit rides the answer to the beat that
+        # carried the host's current one: the host adopts it, and the next beat
+        # reports it back as the limit it is now serving.
+        slots_desired=updated.get("slots_desired"),
         residencies_lost=lost,
         retained_sandboxes_stop=retained_stops,
         heartbeat_interval_seconds=HEARTBEAT_INTERVAL_S,

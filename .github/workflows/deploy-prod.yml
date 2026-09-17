@@ -252,8 +252,9 @@ jobs:
           # present. Accept an explicit CSV without changing staging's own
           # single project name or disabling the stray-stack guard.
           SIBLING_COMPOSE_PROJECTS: ${{ vars.PROD_SIBLING_COMPOSE_PROJECTS || vars.STAGING_SANDBOX_COMPOSE_PROJECT }}
+          # Turns at once until an admin sets a number on the Servers page;
+          # the host takes that number up at runtime without a redeploy.
           AGENT_HOST_SLOTS: ${{ vars.PROD_HOST_SLOTS || '3' }}
-          AGENT_RUNNER_REPLICAS: ${{ vars.PROD_HOST_SLOTS || '3' }}
           AGENT_CHAT_IDLE_TIMEOUT_S: "1800"
           # Daemon-owned retained state, never a per-chat bind mount.
           AGENT_RETAINED_DOCKER_DATA_ROOT: ${{ vars.PROD_RETAINED_DOCKER_DATA_ROOT || '/var/lib/docker' }}

@@ -20,10 +20,10 @@ not alternate code paths in the application.
 ## Run
 
 Prerequisites: Docker with Compose, `openssl`, `curl`, and Python 3. The script
-prefers the Compose v2 plugin and falls back to the standalone command. It
-always passes `--scale runner=$LOCAL_RUNNER_REPLICAS` (default 2), so a legacy
-Compose binary cannot silently ignore `deploy.replicas` and deadlock the
-concurrent-fork smoke. Give Docker Desktop at least 4 GiB of memory; 8 GiB is
+prefers the Compose v2 plugin and falls back to the standalone command. The
+single runner container runs up to `LOCAL_HOST_SLOTS` turns at once (default 2),
+which the concurrent-fork smoke needs; the admin Servers page can change that
+limit while the stack runs. Give Docker Desktop at least 4 GiB of memory; 8 GiB is
 recommended for the all-five-runtime and concurrent-fork smoke. A roughly
 2 GiB VM can OOM Kilo before the session protocol is exercised.
 

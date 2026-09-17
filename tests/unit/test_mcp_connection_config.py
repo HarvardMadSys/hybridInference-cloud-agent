@@ -205,6 +205,31 @@ class TestConfigImport:
         assert [draft.label for draft in result.drafts] == ["good"]
         assert result.rejected and result.rejected[0][0] == "bad"
 
+    def test_cursor_environment_reference_is_an_input_not_a_literal_secret(self) -> None:
+        """Cursor's documented env syntax must not become a saved API key."""
+        result = config_import.parse_import(
+            '{"mcpServers":{"docs":{"command":"npx","args":["-y","mcp-docs"],'
+            '"env":{"API_KEY":"${env:API_KEY}"}}}}'
+        )
+        draft = result.drafts[0]
+        assert draft.needs_a_secret
+        assert draft.secrets[0].value is None
+        assert draft.launch is not None
+        assert draft.launch.env["API_KEY"] == "secret://API_KEY"
+
+    def test_cursor_bearer_reference_preserves_the_authorization_scheme(self) -> None:
+        """A supplied token will still be sent with the pasted Bearer prefix."""
+        result = config_import.parse_import(
+            '{"mcpServers":{"docs":{"url":"https://docs.example/mcp",'
+            '"headers":{"Authorization":"Bearer ${env:API_KEY}"}}}}'
+        )
+        draft = result.drafts[0]
+        assert draft.needs_a_secret
+        assert draft.auth_kind.value == "static"
+        assert draft.header_auth.header_name == "Authorization"
+        assert draft.header_auth.scheme == "Bearer"
+        assert draft.secrets[0].value is None
+
     def test_refuses_something_that_is_not_a_configuration(self) -> None:
         """A paste with no server map is an error worth naming."""
         with pytest.raises(config_import.ImportError_):

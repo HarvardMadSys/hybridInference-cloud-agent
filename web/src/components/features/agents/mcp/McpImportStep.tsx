@@ -1,12 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   previewMcpImport,
   saveMcpImport,
   type McpImportDraftApi,
   type McpImportPreviewApi,
   type McpLocation,
+  type McpConnectionApi,
 } from '@/lib/api/mcp';
 
 const FIELD =
@@ -62,164 +63,245 @@ function DraftBody({ draft }: { draft: McpImportDraftApi }) {
   );
 }
 
-/**
- * The import path: paste, look at what it would create, then save.
- *
- * The preview is a separate round trip rather than a client-side parse because
- * only the backend can say what a configuration means — which dialect it is,
- * which secrets it carries, and what would run. Everything the second call
- * needs (the text and the per-draft run locations) is kept here so the two
- * requests are provably about the same paste.
- */
-export function McpImportStep({ onAdded }: { onAdded: (labels: string) => void }) {
+const EXAMPLES = {
+  remote: JSON.stringify(
+    { mcpServers: { 'my-server': { url: 'https://mcp.example.com/mcp' } } },
+    null,
+    2,
+  ),
+  command: JSON.stringify(
+    {
+      mcpServers: {
+        'my-server': {
+          command: 'npx',
+          args: ['-y', 'your-mcp-package'],
+          env: { API_KEY: '${env:API_KEY}' },
+        },
+      },
+    },
+    null,
+    2,
+  ),
+};
+
+/** Validate a pasted config in place, then add exactly the servers shown. */
+export function McpImportStep({
+  onAdded,
+  onBusyChange,
+}: {
+  onAdded: (connections: McpConnectionApi[]) => void;
+  onBusyChange?: (busy: boolean) => void;
+}) {
   const [text, setText] = useState('');
-  const [formatHint, setFormatHint] = useState('');
   const [preview, setPreview] = useState<McpImportPreviewApi | null>(null);
   const [locations, setLocations] = useState<Record<string, McpLocation>>({});
-  const [busy, setBusy] = useState<'preview' | 'save' | null>(null);
+  const [secrets, setSecrets] = useState<Record<string, Record<string, string>>>({});
+  const [checking, setChecking] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function runPreview() {
-    setBusy('preview');
+  useEffect(() => {
+    if (!text.trim()) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      setChecking(true);
+      void previewMcpImport(text)
+        .then((result) => {
+          if (cancelled) return;
+          setPreview(result);
+          setLocations(
+            Object.fromEntries(result.drafts.map((draft) => [draft.label, draft.location])),
+          );
+        })
+        .catch((cause: unknown) => {
+          if (!cancelled)
+            setError(cause instanceof Error ? cause.message : 'Could not read this configuration.');
+        })
+        .finally(() => {
+          if (!cancelled) setChecking(false);
+        });
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [text]);
+
+  function edit(value: string) {
+    if (value === text) return;
+    setText(value);
+    setPreview(null);
     setError(null);
-    try {
-      const result = await previewMcpImport(text, formatHint || undefined);
-      setPreview(result);
-      setLocations(Object.fromEntries(result.drafts.map((draft) => [draft.label, draft.location])));
-    } catch (cause: unknown) {
-      setPreview(null);
-      setError(cause instanceof Error ? cause.message : 'Could not read that configuration.');
-    } finally {
-      setBusy(null);
-    }
+    setChecking(false);
+    setSecrets({});
   }
 
+  const missingSecrets =
+    preview?.drafts.flatMap((draft) =>
+      draft.secrets
+        .filter((secret) => secret.value === '(not provided)')
+        .map((secret) => ({ server: draft.label, name: secret.name })),
+    ) ?? [];
+
   async function save() {
-    setBusy('save');
+    if (!preview?.drafts.length || saving) return;
+    setSaving(true);
+    onBusyChange?.(true);
     setError(null);
     try {
-      const result = await saveMcpImport(text, locations);
-      const labels = result.saved.map((connection) => connection.label).join(', ');
-      onAdded(labels || 'Connection');
+      const result = await saveMcpImport(text, locations, {}, undefined, secrets);
+      if (!result.saved.length) {
+        setError(
+          result.rejected.map((entry) => `${entry.name}: ${entry.reason}`).join(' ') ||
+            'No servers were added.',
+        );
+        return;
+      }
+      onAdded(result.saved);
     } catch (cause: unknown) {
-      setError(cause instanceof Error ? cause.message : 'Could not save the configuration.');
+      setError(cause instanceof Error ? cause.message : 'Could not save this configuration.');
     } finally {
-      setBusy(null);
+      setSaving(false);
+      onBusyChange?.(false);
     }
   }
 
   return (
     <div>
-      <label
-        className="block text-xs font-medium text-gray-700 dark:text-gray-300"
-        htmlFor="mcp-import-text"
-      >
-        MCP configuration
-      </label>
-      <textarea
-        id="mcp-import-text"
-        value={text}
-        onChange={(event) => {
-          setText(event.target.value);
-          // Any edit invalidates the preview: saving a paste the user has not
-          // just seen is the one thing this step exists to prevent.
-          setPreview(null);
-        }}
-        rows={8}
-        placeholder='{"mcpServers": {"files": {"command": "npx", "args": ["-y", "server-filesystem"]}}}'
-        className={`mt-1 font-mono ${FIELD}`}
-      />
-      <div className="mt-2 flex flex-wrap items-end gap-3">
-        <div>
+      <p className="text-sm text-gray-600 dark:text-gray-400">
+        Paste your <code className="text-xs">mcpServers</code> configuration to connect your tools
+        and data. You can add several servers at once.
+      </p>
+      <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 dark:border-white/10">
+        <div className="flex items-center justify-between gap-3 border-b border-gray-200 bg-gray-50 px-3 py-2 dark:border-white/10 dark:bg-white/5">
           <label
-            className="block text-xs font-medium text-gray-700 dark:text-gray-300"
-            htmlFor="mcp-import-format"
+            htmlFor="mcp-import-text"
+            className="font-mono text-xs text-gray-600 dark:text-gray-300"
           >
-            Format
+            mcp.json
           </label>
-          <select
-            id="mcp-import-format"
-            value={formatHint}
-            onChange={(event) => {
-              setFormatHint(event.target.value);
-              setPreview(null);
-            }}
-            className="mt-1 rounded-lg border border-gray-200 dark:border-white/10 bg-transparent px-2.5 py-2 text-sm text-gray-900 dark:text-gray-100"
-          >
-            <option value="">Detect automatically</option>
-            <option value="json">JSON</option>
-            <option value="toml">TOML</option>
-          </select>
+          <div className="flex gap-3 text-xs text-gray-500 dark:text-gray-400">
+            <button
+              type="button"
+              disabled={saving}
+              onClick={() => edit(EXAMPLES.remote)}
+              className="hover:text-gray-900 dark:hover:text-gray-100"
+            >
+              URL example
+            </button>
+            <button
+              type="button"
+              disabled={saving}
+              onClick={() => edit(EXAMPLES.command)}
+              className="hover:text-gray-900 dark:hover:text-gray-100"
+            >
+              Command example
+            </button>
+          </div>
         </div>
-        <button
-          type="button"
-          disabled={!text.trim() || busy !== null}
-          onClick={() => void runPreview()}
-          className="rounded-lg border border-gray-200 dark:border-white/10 px-3 py-1.5 text-sm font-medium text-gray-800 dark:text-gray-200 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {busy === 'preview' ? 'Reading…' : 'Preview'}
-        </button>
+        <textarea
+          id="mcp-import-text"
+          aria-label="MCP configuration"
+          value={text}
+          onChange={(event) => edit(event.target.value)}
+          rows={11}
+          placeholder={EXAMPLES.remote}
+          disabled={saving}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          className="block w-full resize-y bg-transparent p-4 font-mono text-xs leading-6 text-gray-900 outline-none focus:ring-2 focus:ring-inset focus:ring-gray-400 dark:text-gray-100"
+        />
       </div>
-
+      <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+        Supports JSON and TOML configurations. Adding servers keeps your existing connections.
+      </p>
+      {checking ? (
+        <p role="status" className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+          Checking configuration…
+        </p>
+      ) : null}
       {error ? (
         <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">
           {error}
         </p>
       ) : null}
-
       {preview ? (
         <div className="mt-4">
-          <p className="text-xs text-gray-500 dark:text-gray-400">
-            Read as {preview.dialect}. {preview.drafts.length}{' '}
-            {preview.drafts.length === 1 ? 'server' : 'servers'} found.
+          <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
+            {preview.drafts.length} {preview.drafts.length === 1 ? 'server' : 'servers'} found
           </p>
           {preview.drafts.map((draft) => (
             <div
               key={draft.label}
-              className="mt-3 rounded-xl border border-gray-200 dark:border-white/10 p-3"
+              className="mt-3 rounded-xl border border-gray-200 p-3 dark:border-white/10"
             >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="font-medium text-gray-900 dark:text-gray-50">{draft.label}</span>
-                <label className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-                  Run location
-                  <select
-                    aria-label={`Run location for ${draft.label}`}
-                    value={locations[draft.label] ?? draft.location}
-                    onChange={(event) =>
-                      setLocations((current) => ({
-                        ...current,
-                        [draft.label]: event.target.value as McpLocation,
-                      }))
-                    }
-                    className="rounded-lg border border-gray-200 dark:border-white/10 bg-transparent px-2 py-1 text-xs text-gray-900 dark:text-gray-100"
-                  >
-                    <option value="remote">Remote server</option>
-                    <option value="managed-worker">Managed worker</option>
-                    <option value="user-connector">Your connector</option>
-                  </select>
-                </label>
-              </div>
-              <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                {draft.transport} · imported as {draft.location}
-              </p>
+              <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{draft.label}</p>
               <DraftBody draft={draft} />
+              {draft.transport === 'stdio' ? (
+                <div className="mt-3">
+                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400">
+                    Run this command on
+                    <select
+                      aria-label={`Run location for ${draft.label}`}
+                      value={locations[draft.label] ?? draft.location}
+                      disabled={saving}
+                      onChange={(event) =>
+                        setLocations((current) => ({
+                          ...current,
+                          [draft.label]: event.target.value as McpLocation,
+                        }))
+                      }
+                      className={`mt-1 ${FIELD}`}
+                    >
+                      <option value="user-connector">
+                        Your computer (requires a connected MCP connector)
+                      </option>
+                      <option value="managed-worker">Cloud worker</option>
+                    </select>
+                  </label>
+                  <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                    Commands run where you choose. Files and packages on your computer are not
+                    automatically available in the cloud.
+                  </p>
+                </div>
+              ) : null}
               {draft.warnings.map((warning) => (
-                <p
-                  key={warning}
-                  className="mt-2 rounded-lg bg-amber-50 dark:bg-amber-500/10 px-2 py-1 text-xs text-amber-800 dark:text-amber-300"
-                >
+                <p key={warning} className="mt-2 text-xs text-amber-800 dark:text-amber-300">
                   {warning}
                 </p>
               ))}
             </div>
           ))}
+          {missingSecrets.map(({ server, name }) => (
+            <label
+              key={JSON.stringify([server, name])}
+              className="mt-3 block text-xs font-medium text-gray-700 dark:text-gray-300"
+            >
+              {server} · Value for {name}
+              <input
+                type="password"
+                autoComplete="off"
+                disabled={saving}
+                value={secrets[server]?.[name] ?? ''}
+                onChange={(event) =>
+                  setSecrets((current) => ({
+                    ...current,
+                    [server]: { ...current[server], [name]: event.target.value },
+                  }))
+                }
+                className={`mt-1 ${FIELD}`}
+              />
+            </label>
+          ))}
           {preview.rejected.length ? (
-            <div className="mt-3 rounded-xl border border-amber-200 dark:border-amber-500/25 p-3">
-              <h3 className="text-xs font-semibold text-amber-800 dark:text-amber-300">
-                Not imported
-              </h3>
+            <div
+              role="alert"
+              className="mt-3 rounded-lg bg-amber-50 p-3 text-xs text-amber-800 dark:bg-amber-500/10 dark:text-amber-300"
+            >
+              <p className="font-medium">These entries will not be added</p>
               {preview.rejected.map((entry) => (
-                <p key={entry.name} className="mt-1 text-xs text-amber-800 dark:text-amber-300">
+                <p key={entry.name} className="mt-1">
                   {entry.name}: {entry.reason}
                 </p>
               ))}
@@ -227,13 +309,17 @@ export function McpImportStep({ onAdded }: { onAdded: (labels: string) => void }
           ) : null}
           <button
             type="button"
-            disabled={preview.drafts.length === 0 || busy !== null}
+            disabled={
+              saving ||
+              !preview.drafts.length ||
+              missingSecrets.some(({ server, name }) => !secrets[server]?.[name]?.trim())
+            }
             onClick={() => void save()}
-            className="mt-4 rounded-lg bg-gray-900 dark:bg-gray-100 px-3 py-1.5 text-sm font-medium text-white dark:text-gray-900 disabled:cursor-not-allowed disabled:opacity-60"
+            className="mt-4 rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"
           >
-            {busy === 'save'
-              ? 'Saving…'
-              : `Save ${preview.drafts.length} ${preview.drafts.length === 1 ? 'connection' : 'connections'}`}
+            {saving
+              ? 'Adding servers…'
+              : `Add ${preview.drafts.length} ${preview.drafts.length === 1 ? 'server' : 'servers'}`}
           </button>
         </div>
       ) : null}

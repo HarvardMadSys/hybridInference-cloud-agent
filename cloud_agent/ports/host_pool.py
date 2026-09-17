@@ -127,6 +127,7 @@ class HostPoolRepository(Protocol):
         capacity_sample_age_ms: int | None = None,
         physical_host: str | None = None,
         slots_total: int | None = None,
+        launch_error: str | None = None,
         runner_version: str | None = None,
         broker_url: str | None = None,
         capabilities: list[str] | None = None,
@@ -168,7 +169,11 @@ class HostPoolRepository(Protocol):
             capacity: The validated, normalized capacity block to store.
             capacity_sample_age_ms: How old the observation was when sent.
             physical_host: Admin grouping label; never an identity.
-            slots_total: Claim ceiling this host now reports.
+            slots_total: The concurrency limit this host currently applies.
+            launch_error: Why it is not claiming, or ``""`` when nothing is
+                wrong. ``None`` is a host that does not report this at all and
+                leaves whatever is stored in place, the same way an unreported
+                runtime does.
             runner_version: Runner build the host is running.
             broker_url: Address the control plane reaches this host's broker.
             capabilities: What this host can run.
@@ -190,6 +195,24 @@ class HostPoolRepository(Protocol):
         caller means an admin draining a host and the reaper marking it offline
         can both read ``online`` and both write, and the loser's decision is the
         one that sticks.
+        """
+        ...
+
+    async def set_host_slots_desired(self, *, host: str, slots: int | None) -> str:
+        """Ask a host to run ``slots`` turns at once, or with ``None`` its default.
+
+        Returns ``"ok"`` or ``"unknown"``. Nothing here starts or stops
+        anything: the host reads the value off its next heartbeat answer,
+        serves it as its limit, and reports it back as ``slots_total``. The
+        claim honours the lower of the two from the next poll on, so a number
+        the host has not confirmed admits nothing extra and a lowered one takes
+        effect at once. Turns already running are never touched.
+
+        The value survives heartbeats and re-enrollment on purpose. It is a
+        decision about the named machine, and neither the heartbeat's
+        ``COALESCE`` nor the registration upsert names this column. Bounds are
+        the request schema's business; the column refuses only a non-positive
+        size, which is not a size.
         """
         ...
 

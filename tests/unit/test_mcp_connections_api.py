@@ -984,6 +984,66 @@ class TestImport:
             )
         assert response.status_code == 400
 
+    @pytest.mark.parametrize("scheme", ["Bearer", "Basic", ""])
+    def test_saving_keeps_the_imported_authorization_scheme(self, scheme: str) -> None:
+        """Saving must send the same Authorization header shown in the paste."""
+        store = FakeStore()
+        header = f"{scheme} private-token".strip()
+        with _client(store) as client:
+            response = client.post(
+                "/v1/agent/mcp/connections/import",
+                json={
+                    "text": json.dumps(
+                        {
+                            "mcpServers": {
+                                "wiki": {
+                                    "url": "https://wiki.example.com/mcp",
+                                    "headers": {"Authorization": header},
+                                }
+                            }
+                        }
+                    ),
+                    "save": True,
+                },
+            )
+        assert response.status_code == 200
+        stored = store.connections[1]
+        assert stored["auth_config"]["scheme"] == scheme
+        assert mcp_cipher().decrypt(stored["access_token_ciphertext"]) == "private-token"
+        assert "private-token" not in response.text
+
+    def test_missing_credentials_are_scoped_to_each_imported_server(self) -> None:
+        """Two services using Authorization still need two separate tokens."""
+        store = FakeStore()
+        servers = {
+            name: {
+                "url": f"https://{name}.example.com/mcp",
+                "headers": {"Authorization": "Bearer ${env:API_KEY}"},
+            }
+            for name in ("wiki", "tracker")
+        }
+        servers["public"] = {"url": "https://public.example.com/mcp"}
+        with _client(store) as client:
+            response = client.post(
+                "/v1/agent/mcp/connections/import",
+                json={
+                    "text": json.dumps({"mcpServers": servers}),
+                    "save": True,
+                    "env_secrets": {"UNRELATED": "do-not-use"},
+                    "server_secrets": {
+                        "wiki": {"Authorization": "wiki-token"},
+                        "tracker": {"Authorization": "tracker-token"},
+                    },
+                },
+            )
+        assert response.status_code == 200
+        for cid, token in ((1, "wiki-token"), (2, "tracker-token")):
+            stored = store.connections[cid]
+            assert mcp_cipher().decrypt(stored["access_token_ciphertext"]) == token
+            assert stored["auth_config"]["scheme"] == "Bearer"
+            assert token not in response.text
+        assert store.connections[3]["access_token_ciphertext"] is None
+
 
 class TestBindings:
     """A session's capability selection."""

@@ -528,6 +528,78 @@ def test_the_interval_follows_the_control_plane(monkeypatch) -> None:
     assert identity.interval_s == 7.5
 
 
+def test_the_heartbeat_reads_the_requested_executor_count_and_forgets_a_cleared_one(
+    monkeypatch,
+) -> None:
+    """The supervisor sizes its pool from this; a cleared request must not linger."""
+    identity = enrollment.HostIdentity(host="h1", credential="c")
+    answers = iter(
+        [
+            {"status": "online", "slots_desired": 6},
+            {"status": "online", "slots_desired": None},
+            {"status": "online"},
+            {"status": "online", "slots_desired": True},
+        ]
+    )
+    monkeypatch.setattr(enrollment, "_post", lambda url, body, bearer="": next(answers))
+
+    enrollment.heartbeat(base_url="http://cp", identity=identity)
+    assert identity.slots_desired == 6
+    enrollment.heartbeat(base_url="http://cp", identity=identity)
+    assert identity.slots_desired is None
+    identity.slots_desired = 6
+    enrollment.heartbeat(base_url="http://cp", identity=identity)
+    assert identity.slots_desired is None, "an absent field is no request, not the old one"
+    enrollment.heartbeat(base_url="http://cp", identity=identity)
+    assert identity.slots_desired is None, "a boolean is not a count"
+
+
+def test_a_callable_slot_count_is_read_fresh_on_every_beat(monkeypatch) -> None:
+    """The supervisor's live executor count moves; the beat must carry the current one."""
+    identity = enrollment.HostIdentity(host="h1", credential="c")
+    live = [3]
+    bodies: list[dict] = []
+    beat = enrollment.HostHeartbeat(
+        base_url="http://cp", identity=identity, slots_total=lambda: live[0]
+    )
+
+    def record(url, body, bearer=""):
+        bodies.append(body)
+        if len(bodies) == 1:
+            live[0] = 5
+        else:
+            beat._stop.set()
+        return {"status": "online", "heartbeat_interval_seconds": 0}
+
+    monkeypatch.setattr(enrollment, "_post", record)
+    beat._run()
+
+    assert [body["slots_total"] for body in bodies] == [3, 5]
+
+
+def test_wake_sends_the_next_beat_without_waiting_for_the_interval(monkeypatch) -> None:
+    identity = enrollment.HostIdentity(host="h1", credential="c")
+    identity.interval_s = 60.0
+    beats = threading.Semaphore(0)
+    count = [0]
+    beat = enrollment.HostHeartbeat(base_url="http://cp", identity=identity)
+
+    def record(url, body, bearer=""):
+        count[0] += 1
+        if count[0] == 2:
+            beat._stop.set()
+        beats.release()
+        return {"status": "online", "heartbeat_interval_seconds": 60}
+
+    monkeypatch.setattr(enrollment, "_post", record)
+    beat.start()
+    assert beats.acquire(timeout=5), "the first beat is immediate"
+    beat.wake()
+    assert beats.acquire(timeout=5), "the second beat followed the wake, not the minute"
+    beat.stop()
+    assert count[0] == 2
+
+
 def test_heartbeat_carries_retained_sandbox_observations_without_inferring_absence(
     monkeypatch,
 ) -> None:

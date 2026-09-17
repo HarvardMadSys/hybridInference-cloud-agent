@@ -111,3 +111,24 @@ native turn boundary, then either resume the same session or report that it
 cannot be recovered. A broker `busy=false` observation alone is insufficient:
 workspace setup commands run outside the broker's agent-turn transport. Never
 requeue a pre-admission turn solely because its admission field is empty.
+
+A host runs each turn in its own child process, and the one case where a turn
+does go back to the queue is that process never starting. The host asks with
+`POST /v1/agent/worker/jobs/<job>/release`, carrying that turn's own worker
+token, and the control plane refuses unless the attempt is still the running
+one under its lease generation **and** no membership has admitted the job. That
+second condition is the rule above, enforced in the statement rather than taken
+on the caller's word: a host cannot requeue a turn by being wrong about what
+its child did. Everything past the child's acceptance — a crash, a kill, a lost
+acknowledgement — remains the lease's, and the lease may end the conversation
+rather than repeat it.
+
+The host only asks when it can show the child never had the turn: the spawn
+failed, delivery failed, or the child closed its handover descriptor without
+answering — which includes a child that failed its own read-only preflight,
+since that runs before the acceptance precisely so a machine whose Docker or
+network has gone costs the turn nothing. A child that answered nothing and is still running is not evidence
+and is never released. Consecutive launch failures stop that host claiming,
+back off, and ride the heartbeat as `launch_error`, which the admin Servers
+page shows beside the host — so "this machine has room and is taking no work"
+has a reason on the page rather than in a log.

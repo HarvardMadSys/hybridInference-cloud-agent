@@ -12,6 +12,7 @@ import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../AdminNavigation';
 import { presetKey } from '../usage/present';
+import { RunsTableScroll } from './RunsTableScroll';
 import {
   runResourceCells,
   type ResourceCompleteness,
@@ -36,17 +37,20 @@ const STATES: AgentJobApiState[] = ['queued', 'running', 'succeeded', 'failed', 
 // alike; process I/O is deliberately absent, since it belongs to the detail
 // view and would widen the list past what a reader scans here.
 const COLUMNS = [
-  { label: 'Run', width: '25%' },
-  { label: 'User', width: '11%' },
-  { label: 'Status', width: '10%' },
-  { label: 'Agent / model', width: '15%' },
-  { label: 'Host', width: '11%' },
-  { label: 'Tool calls', width: '8%' },
-  { label: 'CPU', width: '8%' },
-  { label: 'Peak memory', width: '8%' },
-  { label: 'Resources', width: '9%' },
-  { label: 'Created', width: '15%' },
+  { label: 'Run', width: 320 },
+  { label: 'User', width: 160 },
+  { label: 'Status', width: 128 },
+  { label: 'Agent / model', width: 200 },
+  { label: 'Host', width: 144 },
+  { label: 'Tool calls', width: 104 },
+  { label: 'CPU', width: 224 },
+  { label: 'Peak memory', width: 272 },
+  { label: 'Resources', width: 152 },
+  { label: 'Created', width: 264 },
 ] as const;
+
+// Keep readable column widths instead of squeezing metrics into percentages.
+const TABLE_WIDTH = COLUMNS.reduce((total, column) => total + column.width, 0);
 
 //: The numeric columns, which are right-aligned like the tool-call count.
 const NUMERIC_COLUMNS = new Set(['Tool calls', 'CPU', 'Peak memory']);
@@ -151,8 +155,8 @@ function LinkedRunsList() {
 
 function RunsSkeletonFallback() {
   return (
-    <div className="flex-1 overflow-y-auto">
-      <section className="mx-auto w-full max-w-7xl px-6 py-10 lg:px-12 lg:py-14">
+    <div className="min-w-0 flex-1">
+      <section className="w-full px-4 py-10 sm:px-6 lg:px-8 lg:py-14">
         <div className={`${CARD} mt-8 h-64 animate-pulse`} />
       </section>
     </div>
@@ -239,8 +243,8 @@ function RunsList({ initialQuery }: { initialQuery: string }) {
 
   if (denied) return <AdminRequired />;
   return (
-    <div className="flex-1 overflow-y-auto">
-      <section className="mx-auto w-full max-w-7xl px-6 py-10 lg:px-12 lg:py-14">
+    <div className="min-w-0 flex-1">
+      <section className="w-full px-4 py-10 sm:px-6 lg:px-8 lg:py-14">
         <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
           Admin
         </h1>
@@ -367,118 +371,121 @@ function RunsList({ initialQuery }: { initialQuery: string }) {
 
 function RunsTable({ runs }: { runs: AdminRunsPage['runs'] }) {
   return (
-    <div className={`${CARD} mt-3 overflow-hidden`}>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[1420px] table-fixed text-left text-sm">
-          <colgroup>
-            {COLUMNS.map(({ label, width }) => (
-              <col key={label} style={{ width }} />
+    <RunsTableScroll>
+      <table className="w-full table-fixed text-left text-sm" style={{ minWidth: TABLE_WIDTH }}>
+        <colgroup>
+          {COLUMNS.map(({ label, width }) => (
+            <col key={label} style={{ width }} />
+          ))}
+        </colgroup>
+        <thead className="border-b border-gray-100 bg-gray-50/70 text-[11px] uppercase tracking-wide text-gray-500 dark:border-white/5 dark:bg-white/[0.02] dark:text-gray-400">
+          <tr>
+            {COLUMNS.map(({ label }) => (
+              <th
+                key={label}
+                className={`whitespace-nowrap px-4 py-3 font-medium ${
+                  NUMERIC_COLUMNS.has(label) ? 'text-right' : ''
+                } ${label === 'Run' ? 'bg-gray-50 dark:bg-gray-900 lg:sticky lg:left-0 lg:z-10 lg:shadow-[inset_-1px_0_0_#e5e7eb] dark:lg:shadow-[inset_-1px_0_0_#374151]' : ''}`}
+                scope="col"
+              >
+                {label}
+              </th>
             ))}
-          </colgroup>
-          <thead className="border-b border-gray-100 bg-gray-50/70 text-[11px] uppercase tracking-wide text-gray-500 dark:border-white/5 dark:bg-white/[0.02] dark:text-gray-400">
-            <tr>
-              {COLUMNS.map(({ label }) => (
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100 dark:divide-white/5">
+          {runs.map((run) => {
+            // Derived from this row's own summary, never from a previous
+            // row's: a cell cannot survive a filter or page change.
+            const cells = runResourceCells(run.resource_summary);
+            return (
+              <tr
+                key={run.id}
+                className="group h-16 align-middle transition-colors hover:bg-gray-50/70 dark:hover:bg-white/[0.03]"
+              >
                 <th
-                  key={label}
-                  className={`whitespace-nowrap px-4 py-3 font-medium ${
-                    NUMERIC_COLUMNS.has(label) ? 'text-right' : ''
-                  }`}
+                  scope="row"
+                  className="bg-white px-4 py-3 font-normal group-hover:bg-gray-50 dark:bg-gray-900 dark:group-hover:bg-gray-800 lg:sticky lg:left-0 lg:z-10 lg:shadow-[inset_-1px_0_0_#e5e7eb] dark:lg:shadow-[inset_-1px_0_0_#374151]"
                 >
-                  {label}
+                  <div className="flex min-w-0 items-baseline gap-2 leading-5">
+                    <Link
+                      href={`/admin/runs/${encodeURIComponent(run.id)}`}
+                      title={run.id}
+                      className="min-w-0 truncate rounded-sm font-mono text-xs font-medium text-crimson hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:text-crimson-light dark:focus-visible:ring-crimson-light dark:focus-visible:ring-offset-gray-900"
+                    >
+                      {run.id}
+                    </Link>
+                    <span
+                      className="max-w-20 shrink-0 truncate text-xs text-gray-500 dark:text-gray-400"
+                      title={`Turn ${run.turn_no}`}
+                    >
+                      Turn {run.turn_no}
+                    </span>
+                  </div>
+                  <span
+                    className="mt-1 block truncate text-xs leading-4 text-gray-500 dark:text-gray-400"
+                    title={run.repo}
+                  >
+                    {run.repo}
+                  </span>
                 </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100 dark:divide-white/5">
-            {runs.map((run) => {
-              // Derived from this row's own summary, never from a previous
-              // row's: a cell cannot survive a filter or page change.
-              const cells = runResourceCells(run.resource_summary);
-              return (
-                <tr
-                  key={run.id}
-                  className="h-16 align-middle transition-colors hover:bg-gray-50/70 dark:hover:bg-white/[0.03]"
-                >
-                  <th scope="row" className="px-4 py-3 font-normal">
-                    <div className="flex min-w-0 items-baseline gap-2 leading-5">
-                      <Link
-                        href={`/admin/runs/${encodeURIComponent(run.id)}`}
-                        className="min-w-0 truncate rounded-sm font-mono text-xs font-medium text-crimson hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:text-crimson-light dark:focus-visible:ring-crimson-light dark:focus-visible:ring-offset-gray-900"
-                      >
-                        {run.id}
-                      </Link>
-                      <span
-                        className="max-w-20 shrink-0 truncate text-xs text-gray-500 dark:text-gray-400"
-                        title={`Turn ${run.turn_no}`}
-                      >
-                        Turn {run.turn_no}
-                      </span>
-                    </div>
-                    <span
-                      className="mt-1 block truncate text-xs leading-4 text-gray-500 dark:text-gray-400"
-                      title={run.repo}
-                    >
-                      {run.repo}
-                    </span>
-                  </th>
-                  <td className="px-4 py-3">
-                    <span
-                      className="block truncate font-mono text-xs text-gray-600 dark:text-gray-300"
-                      title={run.user_id}
-                    >
-                      {run.user_id}
-                    </span>
-                  </td>
-                  <td className="overflow-hidden whitespace-nowrap px-4 py-3">
-                    <RunState state={run.state} />
-                  </td>
-                  <td className="px-4 py-3">
-                    <span
-                      className="block truncate leading-5 text-gray-800 dark:text-gray-200"
-                      title={run.runtime}
-                    >
-                      {run.runtime}
-                    </span>
-                    <span
-                      className="mt-1 block truncate text-xs leading-4 text-gray-500 dark:text-gray-400"
-                      title={run.model}
-                    >
-                      {run.model}
+                <td className="px-4 py-3">
+                  <span
+                    className="block truncate font-mono text-xs text-gray-600 dark:text-gray-300"
+                    title={run.user_id}
+                  >
+                    {run.user_id}
+                  </span>
+                </td>
+                <td className="overflow-hidden whitespace-nowrap px-4 py-3">
+                  <RunState state={run.state} />
+                </td>
+                <td className="px-4 py-3">
+                  <span
+                    className="block truncate leading-5 text-gray-800 dark:text-gray-200"
+                    title={run.runtime}
+                  >
+                    {run.runtime}
+                  </span>
+                  <span
+                    className="mt-1 block truncate text-xs leading-4 text-gray-500 dark:text-gray-400"
+                    title={run.model}
+                  >
+                    {run.model}
+                  </span>
+                </td>
+                <td className="px-4 py-3">
+                  <RunHosts hosts={run.physical_hosts ?? run.hosts} />
+                </td>
+                <td className="px-4 py-3 text-right tabular-nums text-gray-800 dark:text-gray-200">
+                  <span className="block break-words" title={run.tool_calls.toLocaleString()}>
+                    {run.tool_calls.toLocaleString()}
+                  </span>
+                </td>
+                {[cells.cpu, cells.memory].map((cell, index) => (
+                  <td
+                    key={COLUMNS[index + 6].label}
+                    className="px-4 py-3 text-right tabular-nums text-gray-800 dark:text-gray-200"
+                  >
+                    <span className="block break-words" title={cell.title ?? cell.text}>
+                      {cell.text}
                     </span>
                   </td>
-                  <td className="px-4 py-3">
-                    <RunHosts hosts={run.physical_hosts ?? run.hosts} />
-                  </td>
-                  <td className="px-4 py-3 text-right tabular-nums text-gray-800 dark:text-gray-200">
-                    <span className="block truncate" title={run.tool_calls.toLocaleString()}>
-                      {run.tool_calls.toLocaleString()}
-                    </span>
-                  </td>
-                  {[cells.cpu, cells.memory].map((cell, index) => (
-                    <td
-                      key={COLUMNS[index + 6].label}
-                      className="px-4 py-3 text-right tabular-nums text-gray-800 dark:text-gray-200"
-                    >
-                      <span className="block truncate" title={cell.title ?? cell.text}>
-                        {cell.text}
-                      </span>
-                    </td>
-                  ))}
-                  <td className="overflow-hidden whitespace-nowrap px-4 py-3">
-                    <RunResourceState cells={cells} />
-                  </td>
-                  <td className="px-4 py-3 text-xs text-gray-500 dark:text-gray-400">
-                    <span className="block truncate" title={dateTime(run.created_at)}>
-                      {dateTime(run.created_at)}
-                    </span>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
+                ))}
+                <td className="overflow-hidden whitespace-nowrap px-4 py-3">
+                  <RunResourceState cells={cells} />
+                </td>
+                <td className="px-4 py-3 text-xs text-gray-500 dark:text-gray-400">
+                  <span className="block" title={dateTime(run.created_at)}>
+                    {dateTime(run.created_at)}
+                  </span>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </RunsTableScroll>
   );
 }
 

@@ -56,7 +56,7 @@ from cloud_agent.broker_routing import (
     broker_for_job,
     hydrate_shared_broker,
 )
-from cloud_agent.domain.execution import RUNNING, SUCCEEDED, TERMINAL_STATES
+from cloud_agent.domain.execution import QUEUED, RUNNING, SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.requests import request_fingerprint
 from cloud_agent.entitlement import (
     REPO_PATTERN,
@@ -145,6 +145,7 @@ from cloud_agent.schemas import (
     WorkerFinishRequest,
     WorkerHeartbeatRequest,
     WorkerHeartbeatResponse,
+    WorkerReleaseRequest,
     WorkerResourcesRequest,
     WorkerSandboxAbandonRequest,
     WorkerSandboxAdmissionRequest,
@@ -4464,6 +4465,67 @@ async def worker_resume_terminals(
         )
         raise _lease_lost()
     return WorkerAckResponse(ok=True)
+
+
+@router.post("/worker/jobs/{job_id}/release", response_model=WorkerAckResponse)
+async def worker_release(
+    job_id: str,
+    body: WorkerReleaseRequest,
+    authorization: str | None = Header(None),
+    store: _RoutesStorage | None = Depends(get_storage),
+) -> WorkerAckResponse:
+    """Hand a claimed turn back to the queue, having never started it.
+
+    The one path from a claim back to ``queued`` without spending an attempt.
+    A host claims a turn and then starts the process that will run it; when
+    that process cannot be started, or exits without taking delivery, the turn
+    has provably not begun and the person waiting on it should not wait out a
+    lease that nothing is holding.
+
+    **Not an escape hatch for a turn that is running.** The release is refused
+    once the turn has been admitted to the CLI, and the check is the database's
+    rather than the caller's: replaying an admitted prompt executes the same
+    instruction twice, which is what the retained-session rules exist to
+    prevent. A caller that is refused has lost nothing — the lease was always
+    the backstop, and it still is.
+    """
+    job_store = _require_store(store)
+    claims = _worker_claims(authorization)
+    _match_job(claims, job_id)
+    released = await job_store.attempt_commands.release_claim(
+        job_id=job_id,
+        attempt_id=claims["attempt_id"],
+        lease_generation=claims["lease_generation"],
+        reason=body.reason,
+    )
+    if not released:
+        # 409 rather than 400: the request was well formed and would have been
+        # accepted a moment earlier. What changed is the turn, and an operator
+        # reading this needs to know the work was not lost — it is either
+        # running or already decided.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "turn_not_releasable",
+                    "message": (
+                        "This turn cannot be returned to the queue: it has started, its "
+                        "lease has moved on, or it is no longer running. Nothing was "
+                        "changed; its lease decides what happens next."
+                    ),
+                }
+            },
+        )
+    logger.info(
+        "agent_turn_released",
+        extra={
+            "event": "agent_turn_released",
+            "job_id": job_id,
+            "attempt_id": claims["attempt_id"],
+            "reason": body.reason,
+        },
+    )
+    return WorkerAckResponse(ok=True, state=QUEUED)
 
 
 @router.post("/worker/jobs/{job_id}/finish", response_model=WorkerAckResponse)
