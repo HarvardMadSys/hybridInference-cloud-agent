@@ -229,11 +229,19 @@ class ProfilingRun:
 
     ``deadline_mono`` is derived from ``expires_at`` when the descriptor is
     first read, so a process restart or a wall-clock jump cannot extend a run.
+
+    ``expires_at_utc`` is the configured instant itself, and it is a different
+    value from ``deadline_mono`` in every way that matters downstream: it is
+    what the experiment *is*, so a stored manifest is identified by it, while
+    the monotonic deadline is what this process enforces locally. A consumer
+    handed the monotonic form and asked to re-derive a wall clock would be
+    reconstructing the configuration from a measurement of it.
     """
 
     run_id: str
     operations: frozenset[str]
     expires_at: str
+    expires_at_utc: datetime
     deadline_mono: float
     max_operations: int
     target: Mapping[str, str] = field(default_factory=dict)
@@ -294,6 +302,10 @@ class Measurement:
     #: How far these boundaries reach. Empty means the root never stated it,
     #: and the record then claims no coverage rather than assuming the widest.
     coverage_scope: str = ""
+    #: The run's configured absolute expiry. This is the experiment's identity
+    #: for storage, not a measurement of how long is left: a producer that
+    #: derived it from its own clock would be stating a different experiment.
+    run_expires_at: datetime | None = None
     facts: dict[str, Any] = field(default_factory=dict)
     spans: list[_SpanRecord] = field(default_factory=list)
     marks: list[tuple[str, int]] = field(default_factory=list)
@@ -414,11 +426,12 @@ def _truthy(raw: str | None) -> bool:
     return (raw or "").strip().lower() in _TRUTHY
 
 
-def _parse_expiry(raw: str) -> float:
-    """Return the monotonic deadline for an ISO-8601 ``expires_at``.
+def _parse_absolute_expiry(raw: str) -> datetime:
+    """Return the configured absolute expiry of a run, normalized to UTC.
 
     A trailing ``Z`` is accepted because the design's run descriptors are
-    written in UTC.
+    written in UTC, and any other ISO-8601 offset is normalized to UTC so two
+    spellings of one instant compare equal.
 
     Raises:
         ValueError: the value is missing, unparseable, or not in the future.
@@ -433,10 +446,20 @@ def _parse_expiry(raw: str) -> float:
         raise ValueError(f"expires_at is not an ISO-8601 timestamp: {text!r}") from exc
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
-    remaining = (moment - datetime.now(timezone.utc)).total_seconds()
-    if remaining <= 0:
+    moment = moment.astimezone(timezone.utc)
+    if (moment - datetime.now(timezone.utc)).total_seconds() <= 0:
         raise ValueError(f"expires_at is not in the future: {text!r}")
-    return time.monotonic() + remaining
+    return moment
+
+
+def _parse_expiry(raw: str) -> float:
+    """Return the monotonic deadline for an ISO-8601 ``expires_at``.
+
+    Derived from :func:`_parse_absolute_expiry`, so the configured instant is
+    read in exactly one place.
+    """
+    moment = _parse_absolute_expiry(raw)
+    return time.monotonic() + (moment - datetime.now(timezone.utc)).total_seconds()
 
 
 def parse_run(raw: str) -> ProfilingRun:
@@ -486,11 +509,13 @@ def parse_run(raw: str) -> ProfilingRun:
         if isinstance(value, (str, int)) and str(value).strip()
     }
 
+    raw_expiry = str(body.get("expires_at") or "")
     return ProfilingRun(
         run_id=run_id,
         operations=operations,
-        expires_at=str(body.get("expires_at") or "").strip(),
-        deadline_mono=_parse_expiry(str(body.get("expires_at") or "")),
+        expires_at=raw_expiry.strip(),
+        expires_at_utc=_parse_absolute_expiry(raw_expiry),
+        deadline_mono=_parse_expiry(raw_expiry),
         max_operations=max_operations,
         target=target,
     )
@@ -602,6 +627,7 @@ def start_operation(
         deadline_mono=run.deadline_mono,
         producer=producer,
         coverage_scope=coverage_scope or COVERAGE_BY_OPERATION.get(operation, ""),
+        run_expires_at=run.expires_at_utc,
         facts={"operation": operation},
     )
     if host:

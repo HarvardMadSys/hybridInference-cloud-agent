@@ -67,6 +67,29 @@ class PostgresOperationMeasurementRepository:
         """
         async with self._pool.acquire() as conn, conn.transaction():
             if run is not None:
+                # The row is created first and locked second, in that order.
+                # ``SELECT ... FOR UPDATE`` cannot lock a row that does not
+                # exist yet, so two writers reporting one run for the first time
+                # would both read nothing and then race the primary key -- one
+                # of them surfacing a UniqueViolation instead of the outcome
+                # this port promises. DO NOTHING makes the loser of that race
+                # wait for the winner to commit and then continue to the lock.
+                await conn.execute(
+                    """
+                    INSERT INTO agent_operation_profiling_runs (
+                        run_id, operations, target, expires_at, config_version,
+                        admission_instances
+                    )
+                    VALUES ($1, $2::text[], $3::jsonb, $4, $5, $6::jsonb)
+                    ON CONFLICT (run_id) DO NOTHING
+                    """,
+                    str(run["run_id"]),
+                    list(run["operations"]),
+                    json.dumps(dict(run.get("target") or {})),
+                    run["expires_at"],
+                    int(run.get("config_version") or 1),
+                    json.dumps(list(run.get("admission_instances") or [])),
+                )
                 existing = await conn.fetchrow(
                     """
                     SELECT operations, target, expires_at, config_version,
@@ -77,42 +100,26 @@ class PostgresOperationMeasurementRepository:
                     """,
                     str(run["run_id"]),
                 )
-                if existing is not None:
-                    conflict = _run_configuration_conflict(existing, run)
-                    if conflict is not None:
-                        # The run id names one experiment. A second manifest
-                        # under it is a different experiment claiming the same
-                        # identity, so the sample is refused rather than stored
-                        # under a catalogue entry that describes something else.
-                        return "run_conflict"
-                    merged = _merge_admissions(existing["admission_instances"], run)
-                    if merged is None:
-                        return "run_conflict"
-                    await conn.execute(
-                        """
-                        UPDATE agent_operation_profiling_runs
-                        SET admission_instances = $2::jsonb
-                        WHERE run_id = $1
-                        """,
-                        str(run["run_id"]),
-                        json.dumps(merged),
-                    )
-                else:
-                    await conn.execute(
-                        """
-                        INSERT INTO agent_operation_profiling_runs (
-                            run_id, operations, target, expires_at, config_version,
-                            admission_instances
-                        )
-                        VALUES ($1, $2::text[], $3::jsonb, $4, $5, $6::jsonb)
-                        """,
-                        str(run["run_id"]),
-                        list(run["operations"]),
-                        json.dumps(dict(run.get("target") or {})),
-                        run["expires_at"],
-                        int(run.get("config_version") or 1),
-                        json.dumps(list(run.get("admission_instances") or [])),
-                    )
+                if existing is None:  # pragma: no cover - the insert above made it
+                    return "conflict"
+                # Compared even when this call is the one that inserted the
+                # row: an insert that lost the race is not an acceptance, and
+                # neither is one that won it against a different manifest.
+                conflict = _run_configuration_conflict(existing, run)
+                if conflict is not None:
+                    return "run_conflict"
+                merged = _merge_admissions(existing["admission_instances"], run)
+                if merged is None:
+                    return "run_conflict"
+                await conn.execute(
+                    """
+                    UPDATE agent_operation_profiling_runs
+                    SET admission_instances = $2::jsonb
+                    WHERE run_id = $1
+                    """,
+                    str(run["run_id"]),
+                    json.dumps(merged),
+                )
             inserted = await conn.fetchval(
                 """
                 INSERT INTO agent_operation_measurements (
@@ -388,17 +395,25 @@ def _run_configuration_conflict(existing: Any, run: Mapping[str, Any]) -> str | 
     describing a different experiment, and its samples would be filed against
     a catalogue entry that says something else.
 
-    ``expires_at`` is deliberately not compared. It is a wall-clock instant
-    that every process re-derives from the same deployment setting, so two
-    writers of one experiment can state it microseconds apart, and a retry
-    carries it forward verbatim. Requiring equality would refuse an identical
-    retry -- which is the case idempotence exists for -- while a run that
-    genuinely ended earlier simply stops collecting.
+    ``expires_at`` is the *configured* absolute expiry, not the deadline a
+    producer has left. The two are different values and only the first is
+    identity: the configured instant is the same in every process reading one
+    deployment setting, while the remaining time is re-derived per request and
+    can be shortened by a producer. A writer that states a different moment is
+    describing a different experiment -- one that ends tomorrow rather than in
+    fifteen minutes -- and its samples would extend a catalogue entry that says
+    otherwise.
+
+    The stored value is a ``timestamptz`` and the incoming one is normalized to
+    UTC, so two spellings of one instant compare equal and an unmodified retry
+    passes.
     """
     if sorted(existing["operations"]) != sorted(str(item) for item in run["operations"]):
         return "operations"
     if json.loads(existing["target"]) != dict(run.get("target") or {}):
         return "target"
+    if existing["expires_at"] != run["expires_at"]:
+        return "expires_at"
     if int(existing["config_version"]) != int(run.get("config_version") or 1):
         return "config_version"
     return None

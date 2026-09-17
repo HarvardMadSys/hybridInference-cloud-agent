@@ -1526,3 +1526,73 @@ def test_a_frozen_outcome_is_not_rewritten_by_a_later_failure(monkeypatch, caplo
     record = _records(caplog)[0]
     assert record["outcome"] == "dispatched"
     assert record["startup_outcome"] == "dispatched"
+
+
+def test_a_measurement_carries_the_configured_expiry_not_its_own_clock(monkeypatch, clock):
+    """The run's absolute expiry is identity; the monotonic deadline is not.
+
+    A producer that re-derived the expiry from its own remaining time would be
+    stating a different experiment than the one the descriptor configures, and
+    two writers of one run would then disagree about what it is.
+    """
+    # The descriptor states one instant; everything else about the run is
+    # derived from it.
+    configured = datetime.now(timezone.utc) + timedelta(minutes=30)
+    descriptor = {
+        "run_id": "run-1",
+        "operations": ["attempt.startup"],
+        "expires_at": configured.isoformat(),
+        "max_operations": 10,
+    }
+    monkeypatch.setenv(profiling.ENV_PROFILING_ENABLED, "true")
+    monkeypatch.setenv(profiling.ENV_PROFILING_RUN, json.dumps(descriptor))
+    profiling.reset_cache()
+
+    active = profiling.active_run()
+    assert active is not None
+    assert active.expires_at_utc == configured
+
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    assert measurement is not None
+    before = measurement.deadline_mono
+    clock.advance(60_000_000)
+    # Time passed, so the local deadline is closer -- and the configured
+    # instant is unchanged, because it is not a measurement of anything.
+    assert measurement.run_expires_at == configured
+    assert measurement.deadline_mono == before
+
+
+def test_the_same_instant_written_two_ways_is_one_expiry():
+    """An offset spelling and a UTC spelling are the same configured moment."""
+    utc_run = profiling.parse_run(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "operations": ["attempt.startup"],
+                "expires_at": "2026-09-17T12:00:00+00:00",
+                "max_operations": 10,
+            }
+        )
+    )
+    offset_run = profiling.parse_run(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "operations": ["attempt.startup"],
+                "expires_at": "2026-09-17T20:00:00+08:00",
+                "max_operations": 10,
+            }
+        )
+    )
+    zulu_run = profiling.parse_run(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "operations": ["attempt.startup"],
+                "expires_at": "2026-09-17T12:00:00Z",
+                "max_operations": 10,
+            }
+        )
+    )
+
+    assert utc_run.expires_at_utc == offset_run.expires_at_utc == zulu_run.expires_at_utc

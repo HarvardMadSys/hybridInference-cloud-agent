@@ -17,8 +17,9 @@ against a fake without testing the fake:
 
 from __future__ import annotations
 
+import asyncio
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import asyncpg
@@ -97,13 +98,20 @@ class _Store:
         return getattr(self.repository, name)
 
 
+#: One experiment's configured expiry, frozen for the whole module. A helper
+#: that re-derived it per call would be manufacturing a different experiment
+#: every time, so a test of idempotence would have to loosen the rule it is
+#: meant to be checking.
+RUN_EXPIRES_AT = datetime(2026, 9, 17, 12, 0, tzinfo=UTC)
+
+
 def _run(**overrides: object) -> dict[str, object]:
     """One experiment catalogue entry."""
     run: dict[str, object] = {
         "run_id": "run-1",
         "operations": ["files.list", "files.open", "terminal.open"],
         "target": {"sandbox_id": "asbx_1"},
-        "expires_at": datetime.now(UTC) + timedelta(minutes=30),
+        "expires_at": RUN_EXPIRES_AT,
         "config_version": 1,
         "admission_instances": [{"instance": "cp-1", "max_operations": 200}],
     }
@@ -490,19 +498,47 @@ async def test_a_run_that_changed_what_it_selects_is_refused(store):
         assert result == "run_conflict"
 
 
-async def test_an_expiry_that_drifted_between_writers_is_not_a_conflict(store):
-    """The deadline is re-derived by each process, so it is not an identity.
+async def test_an_experiment_that_ends_later_is_a_different_experiment(store):
+    """Extending the deadline must not be absorbed into an existing run.
 
-    Every writer computes ``expires_at`` from the same deployment setting, and
-    two of them can state it microseconds apart. Treating that as a conflict
-    would refuse the second replica's samples for a difference nobody chose;
-    requiring it to be equal would also refuse an identical retry.
+    Accepting it would file samples of a day-long experiment under a catalogue
+    entry that ends in half an hour, and leave every later writer disagreeing
+    with the deadline the ingest and the Admin catalogue read.
     """
     await store.record_operation_measurement(measurement=_measurement(), run=_run())
 
     result = await store.record_operation_measurement(
         measurement=_measurement(measurement_id="msm_2", payload_hash="h-2"),
-        run=_run(expires_at=datetime.now(UTC) + timedelta(hours=5)),
+        run=_run(expires_at=RUN_EXPIRES_AT + timedelta(days=1)),
+    )
+
+    assert result == "run_conflict"
+    assert await store.get_operation_measurement("msm_2") is None
+    run = await store.get_profiling_run("run-1")
+    assert run is not None and run["expires_at"] == RUN_EXPIRES_AT
+
+
+async def test_an_experiment_that_ends_sooner_is_a_different_experiment(store):
+    """Shortening the deadline is a refusal too, not a silent narrowing."""
+    await store.record_operation_measurement(measurement=_measurement(), run=_run())
+
+    result = await store.record_operation_measurement(
+        measurement=_measurement(measurement_id="msm_2", payload_hash="h-2"),
+        run=_run(expires_at=RUN_EXPIRES_AT - timedelta(minutes=5)),
+    )
+
+    assert result == "run_conflict"
+
+
+async def test_one_instant_spelled_two_ways_is_one_experiment(store):
+    """The comparison is on the instant, not on its ISO spelling."""
+    await store.record_operation_measurement(measurement=_measurement(), run=_run())
+
+    # The same moment, written with an offset instead of in UTC.
+    shifted = RUN_EXPIRES_AT.astimezone(timezone(timedelta(hours=8)))
+    result = await store.record_operation_measurement(
+        measurement=_measurement(measurement_id="msm_2", payload_hash="h-2"),
+        run=_run(expires_at=shifted),
     )
 
     assert result == "stored"
@@ -544,3 +580,84 @@ async def test_an_instance_reporting_a_different_budget_is_refused(store):
     run = await store.get_profiling_run("run-1")
     assert run is not None
     assert run["admission_instances"] == [{"instance": "cp-1", "max_operations": 200}]
+
+
+# ---------------------------------------------------------------------------
+# Two writers meeting on a run that does not exist yet
+# ---------------------------------------------------------------------------
+
+
+async def _simultaneously(first: Any, second: Any) -> list[Any]:
+    """Run two writes concurrently and return both outcomes.
+
+    Sequential calls cannot show a first-insert race: by the second call the
+    row exists, which is the case ``FOR UPDATE`` already handled. These are two
+    coroutines over one pool, so they take their own connections and reach the
+    insert together.
+    """
+    return list(await asyncio.gather(first, second))
+
+
+async def test_two_writers_creating_one_run_at_once_both_succeed(store):
+    """Compatible manifests racing to create a run do not raise at each other.
+
+    ``SELECT ... FOR UPDATE`` cannot lock a row that does not exist, so both
+    writers used to read nothing and then race the primary key -- one of them
+    surfacing a UniqueViolation to a caller that had been promised stored,
+    duplicate or a conflict. This is the ordinary case of several producers
+    starting an experiment, not an exotic one.
+    """
+    first, second = await _simultaneously(
+        store.record_operation_measurement(
+            measurement=_measurement(measurement_id="msm_a", payload_hash="h-a"),
+            run=_run(admission_instances=[{"instance": "cp-1", "max_operations": 200}]),
+        ),
+        store.record_operation_measurement(
+            measurement=_measurement(measurement_id="msm_b", payload_hash="h-b"),
+            run=_run(admission_instances=[{"instance": "cp-2", "max_operations": 200}]),
+        ),
+    )
+
+    assert first == "stored" and second == "stored"
+    # Both samples survive, and the manifest names both admission instances.
+    assert await store.get_operation_measurement("msm_a") is not None
+    assert await store.get_operation_measurement("msm_b") is not None
+    run = await store.get_profiling_run("run-1")
+    assert run is not None
+    assert sorted(item["instance"] for item in run["admission_instances"]) == ["cp-1", "cp-2"]
+
+
+async def test_two_incompatible_manifests_at_once_admit_exactly_one(store):
+    """Only one experiment may own a run id, however the race resolves."""
+    results = await _simultaneously(
+        store.record_operation_measurement(
+            measurement=_measurement(measurement_id="msm_a", payload_hash="h-a"),
+            run=_run(target={"host": "host-a"}),
+        ),
+        store.record_operation_measurement(
+            measurement=_measurement(measurement_id="msm_b", payload_hash="h-b"),
+            run=_run(target={"host": "host-b"}),
+        ),
+    )
+
+    assert sorted(results) == ["run_conflict", "stored"]
+    run = await store.get_profiling_run("run-1")
+    assert run is not None
+    # The catalogue describes the winner, and it kept exactly its own sample.
+    winner = "msm_a" if run["target"] == {"host": "host-a"} else "msm_b"
+    loser = "msm_b" if winner == "msm_a" else "msm_a"
+    assert await store.get_operation_measurement(winner) is not None
+    assert await store.get_operation_measurement(loser) is None
+
+
+async def test_the_same_measurement_retried_at_once_is_one_sample(store):
+    """Concurrent retries of one record leave one row and no error either."""
+    queued_run = _run()
+    results = await _simultaneously(
+        store.record_operation_measurement(measurement=_measurement(), run=queued_run),
+        store.record_operation_measurement(measurement=_measurement(), run=queued_run),
+    )
+
+    assert sorted(results) == ["duplicate", "stored"]
+    page = await store.list_operation_measurements()
+    assert [row["measurement_id"] for row in page] == ["msm_1"]
