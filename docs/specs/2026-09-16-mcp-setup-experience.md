@@ -37,10 +37,23 @@ action after adding a server or returning from OAuth.
   OAuth also discovers tools, after checking that a credential was stored. A
   single newly added URL that requires OAuth starts sign-in. Existing connections
   still offer Sign in explicitly. Failed discovery remains an error and offers retry.
-- Conversations still select their own servers and permissions. Ask before each
-  call and Disable all apply to the server's currently discovered capabilities;
-  Save selection commits that choice. Adding a server never silently grants its
-  tools permission to run.
+- Connected servers are available automatically in new and existing conversations.
+  Every turn resolves the current account connections before configuring the agent;
+  opening Tools is not required. All five supported runtimes use the same resolution.
+- Integrations has an account-wide enable switch. Turning a server off preserves
+  its credentials and conversation choices, immediately blocks subsequent calls,
+  and expires pending approvals. Connection diagnostics cannot turn it back on.
+- Tools shows server status and an immediate per-conversation switch. Tools and
+  permissions is collapsed by default; users can allow, confirm or deny individual
+  tools, resources and prompts. Default availability requires confirmation before
+  every call, including tools a server adds later. Existing explicit rules survive.
+- Each server's settings save independently, preserving other servers' policy
+  revisions and approvals. Disabling or removing a selection stores an opt-out so
+  automatic discovery cannot recreate it. Reset restores ask-before-call behavior.
+- Newly enabled tools become available on the next message; restrictions apply on
+  subsequent calls immediately. Native agent processes already restart/resume when
+  their MCP configuration changes. A disconnected or expired server stays actionable
+  in Tools and does not block an unrelated follow-up or another healthy server.
 
 The importer accepts JSON and TOML configurations. It recognizes
 `${env:NAME}` and `${input:NAME}` references in environment/header values, including
@@ -107,8 +120,12 @@ listed with a documentation path to manual JSON; required fields are never
 silently omitted. Importing still uses the existing target validation, encrypted
 credential storage, execution-location choice and per-conversation permissions.
 
-Migration 0013 adds a standalone cache table and does not alter the connection
-schema or old API projections. No feature flag or external API key is required.
+Migration 0013 adds a standalone cache table. Migration 0014 adds an account
+`enabled` preference with a default of true, preserving existing connections and
+credentials. Both are additive and leave previous API projections readable during
+rollout. Automatic binding inserts are scoped to the thread owner and serialized
+with conversation edits; no background fan-out or startup backfill is needed.
+No feature flag or external API key is required.
 
 Validation includes real full-feed synchronization, round-tripping generated
 configurations through the importer, cached restart, interrupted pagination,

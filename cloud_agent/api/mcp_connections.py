@@ -224,6 +224,7 @@ class ConnectionView(BaseModel):
     argv: list[str] = Field(default_factory=list)
     auth_kind: str
     status: str
+    enabled: bool = True
     error_kind: str = ConnectionErrorKind.NONE.value
     error_detail: str | None = None
     account_label: str | None = None
@@ -324,6 +325,13 @@ class UpdateConnectionRequest(BaseModel):
     request_timeout_s: float | None = Field(default=None, ge=5, le=900)
 
 
+class EnableConnectionRequest(BaseModel):
+    """Account-wide availability, independent of connection health."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool
+
+
 class SecretRequest(BaseModel):
     """Set or replace a connection's static credential."""
 
@@ -384,6 +392,7 @@ class BindingRequest(BaseModel):
     connection_id: int
     alias: str | None = None
     enabled: bool = True
+    use_defaults: bool = False
     #: Tool name to policy. ``deny`` is also what an omitted name means.
     tools: dict[str, str] = Field(default_factory=dict)
     resources: dict[str, str] = Field(default_factory=dict)
@@ -491,6 +500,7 @@ async def _view(store: _McpConnectionsStorage, row: Mapping[str, Any]) -> Connec
         argv=list(connection.config.launch.argv()) if connection.config.launch else [],
         auth_kind=connection.auth.kind.value,
         status=connection.status.value,
+        enabled=connection.enabled,
         error_kind=connection.error_kind.value,
         error_detail=connection.error_detail,
         account_label=row.get("account_label"),
@@ -807,6 +817,23 @@ async def update_connection(
         extra={"event": "agent_mcp_connection_updated", "connection_id": connection_id},
     )
     return await _view(job_store, updated)
+
+
+@router.put("/connections/{connection_id}/enabled", response_model=ConnectionView)
+async def set_connection_enabled(
+    connection_id: int,
+    body: EnableConnectionRequest,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _McpConnectionsStorage | None = Depends(get_storage),
+) -> ConnectionView:
+    """Enable or pause a server across the owner's conversations."""
+    job_store = _require_store(store)
+    row = await job_store.mcp.set_mcp_connection_enabled(
+        connection_id=connection_id, user_id=user["user_id"], enabled=body.enabled
+    )
+    if row is None:
+        raise _not_found("no such MCP connection")
+    return await _view(job_store, row)
 
 
 @router.delete("/connections/{connection_id}", status_code=204)
@@ -1561,6 +1588,34 @@ async def replace_thread_bindings(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _McpConnectionsStorage | None = Depends(get_storage),
 ) -> BindingsResponse:
+    """Replace explicit conversation overrides."""
+    return await _save_thread_bindings(thread_id, body, user, store, merge=False)
+
+
+@router.put("/threads/{thread_id}/bindings/{connection_id}", response_model=BindingsResponse)
+async def update_thread_binding(
+    thread_id: str,
+    connection_id: int,
+    body: BindingRequest,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _McpConnectionsStorage | None = Depends(get_storage),
+) -> BindingsResponse:
+    """Change one server without reapproving or overwriting another server's rules."""
+    if body.connection_id != connection_id:
+        raise _bad_request("the connection id does not match the requested server")
+    return await _save_thread_bindings(
+        thread_id, ReplaceBindingsRequest(bindings=[body]), user, store, merge=True
+    )
+
+
+async def _save_thread_bindings(
+    thread_id: str,
+    body: ReplaceBindingsRequest,
+    user: dict[str, Any],
+    store: _McpConnectionsStorage | None,
+    *,
+    merge: bool,
+) -> BindingsResponse:
     """Replace a session's selection.
 
     The selection is validated against the connections' *current* revisions, so
@@ -1604,7 +1659,8 @@ async def replace_thread_bindings(
             {
                 "connection_id": int(row["id"]),
                 "alias": binding.alias,
-                "enabled": item.enabled and binding.enabled,
+                "enabled": item.enabled and (binding.enabled or item.use_defaults),
+                "selection_pending": item.use_defaults,
                 "config_revision": binding.config_revision,
                 "authorization_epoch": binding.authorization_epoch,
                 "capability_revision": binding.capability_revision,
@@ -1619,11 +1675,20 @@ async def replace_thread_bindings(
         )
         aliases.append((item.connection_id, item.alias, _default_alias(row, index)))
     try:
-        for binding_row, alias in zip(prepared, binding_aliases(aliases), strict=True):
+        reserved = []
+        if merge:
+            changed_ids = {item.connection_id for item in body.bindings}
+            reserved = [
+                (int(row["connection_id"]), str(row["alias"]), str(row["alias"]))
+                for row in await job_store.mcp.list_mcp_bindings(thread_id=thread_id)
+                if int(row["connection_id"]) not in changed_ids
+            ]
+        assigned = binding_aliases([*reserved, *aliases])[len(reserved) :]
+        for binding_row, alias in zip(prepared, assigned, strict=True):
             binding_row["alias"] = alias
     except ValueError as exc:
         raise _bad_request(str(exc)) from exc
-    await job_store.mcp.replace_mcp_bindings(thread_id=thread_id, bindings=prepared)
+    await job_store.mcp.replace_mcp_bindings(thread_id=thread_id, bindings=prepared, merge=merge)
     logger.info(
         "agent_mcp_bindings_replaced",
         extra={"event": "agent_mcp_bindings_replaced", "thread_id": thread_id},
@@ -1641,7 +1706,7 @@ async def _binding_views(
         connection_row = await job_store.mcp.get_mcp_connection(
             connection_id=int(row["connection_id"])
         )
-        if connection_row is None:
+        if connection_row is None or connection_row.get("deleted_at") is not None:
             continue
         resolved = await resolve_connection(job_store.mcp, row=connection_row)
         snapshot = resolved.snapshot
@@ -1660,8 +1725,9 @@ async def _binding_views(
                 alias=str(row["alias"]),
                 enabled=bool(row["enabled"]),
                 selection_pending=bool(row.get("selection_pending", False)),
-                available=resolved.usable,
-                error=resolved.error,
+                available=resolved.usable
+                and resolved.connection.status is not ConnectionStatus.ERROR,
+                error=resolved.error or resolved.connection.error_detail,
                 capabilities=capabilities,
                 tools={
                     str(name): str(rule.get("policy") if isinstance(rule, Mapping) else rule)

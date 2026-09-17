@@ -107,6 +107,7 @@ export interface McpConnectionApi {
   argv: string[];
   auth_kind: McpAuthKind;
   status: McpConnectionStatus;
+  enabled?: boolean;
   error_kind: McpConnectionErrorKind;
   error_detail: string | null;
   account_label: string | null;
@@ -247,6 +248,7 @@ export interface McpBindingRequest {
   connection_id: number;
   alias?: string;
   enabled: boolean;
+  use_defaults?: boolean;
   tools: Record<string, McpPolicy>;
   resources: Record<string, McpPolicy>;
   prompts: Record<string, McpPolicy>;
@@ -419,7 +421,21 @@ export async function enableMcpOAuth(connection: McpConnectionApi): Promise<McpC
   );
 }
 
-/** Turn a connection off, keeping a tombstone and clearing its credential. */
+/** Pause or enable a server without losing its credentials. */
+export async function setMcpConnectionEnabled(
+  connectionId: number,
+  enabled: boolean,
+): Promise<McpConnectionApi> {
+  return jsonOrThrow(
+    await fetchWithAuth(API_BASE, `/v1/agent/mcp/connections/${connectionId}/enabled`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    }),
+  );
+}
+
+/** Disconnect a server, keeping a tombstone and clearing its credential. */
 export async function disconnectMcpConnection(connectionId: number): Promise<void> {
   const resp = await fetchWithAuth(API_BASE, `/v1/agent/mcp/connections/${connectionId}`, {
     method: 'DELETE',
@@ -493,6 +509,24 @@ export async function replaceMcpThreadBindings(
     },
   );
   return jsonOrThrow(resp);
+}
+
+/** Save one server's conversation override without changing other servers. */
+export async function updateMcpThreadBinding(
+  threadId: string,
+  binding: McpBindingRequest,
+): Promise<McpBindingsApi> {
+  return jsonOrThrow(
+    await fetchWithAuth(
+      API_BASE,
+      `/v1/agent/mcp/threads/${encodeURIComponent(threadId)}/bindings/${binding.connection_id}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(binding),
+      },
+    ),
+  );
 }
 
 /** Calls that needed a decision, for one job or one conversation. */

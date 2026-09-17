@@ -16,6 +16,7 @@ vi.mock('@/lib/api/mcp', async (importOriginal) => {
     disconnectMcpConnection: vi.fn(),
     authorizeMcpConnection: vi.fn(),
     enableMcpOAuth: vi.fn(),
+    setMcpConnectionEnabled: vi.fn(),
     createMcpConnection: vi.fn(),
     previewMcpImport: vi.fn(),
     saveMcpImport: vi.fn(),
@@ -28,6 +29,7 @@ import {
   listMcpConnections,
   testMcpConnection,
   enableMcpOAuth,
+  setMcpConnectionEnabled,
   previewMcpImport,
   saveMcpImport,
 } from '@/lib/api/mcp';
@@ -294,4 +296,30 @@ describe('McpConnectionsSection', () => {
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     },
   );
+});
+
+it('pauses and resumes account-wide access without disconnecting or losing sign-in', async () => {
+  const active = {
+    ...connection,
+    status: 'active' as const,
+    error_kind: 'none' as const,
+    error_detail: null,
+    has_credential: true,
+    enabled: true,
+  };
+  mockedList.mockResolvedValue({ connections: [active], templates: [] });
+  vi.mocked(setMcpConnectionEnabled).mockImplementation(async (_id, enabled) => {
+    const next = { ...active, enabled };
+    mockedList.mockResolvedValue({ connections: [next], templates: [] });
+    return next;
+  });
+  render(<McpConnectionsSection />);
+  fireEvent.click(await screen.findByRole('switch', { name: 'Enable Team wiki' }));
+  await waitFor(() => expect(screen.getByRole('switch')).not.toBeChecked());
+  expect(screen.getByText('Off')).toBeInTheDocument();
+  expect(mockedDisconnect).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('switch'));
+  await waitFor(() => expect(screen.getByRole('switch')).toBeChecked());
+  expect(mockedAuthorize).not.toHaveBeenCalled();
+  expect(screen.getByText('Connected')).toBeInTheDocument();
 });

@@ -371,10 +371,30 @@ class FakeStore(AllCapabilities):
             rows.append(row)
         return rows
 
-    async def replace_mcp_bindings(self, *, thread_id: str, bindings: list[dict[str, Any]]) -> None:
-        # ``selection_pending`` is written FALSE by the real store: saving a
-        # selection is exactly what ends the asking.
-        self.bindings[thread_id] = [{**binding, "selection_pending": False} for binding in bindings]
+    async def replace_mcp_bindings(
+        self, *, thread_id: str, bindings: list[dict[str, Any]], merge: bool = False
+    ) -> None:
+        supplied = {item["connection_id"] for item in bindings}
+        previous = self.bindings.get(thread_id, [])
+        self.bindings[thread_id] = [
+            {**binding, "selection_pending": binding.get("selection_pending", False)}
+            for binding in bindings
+        ] + [
+            row if merge else {**row, "enabled": False}
+            for row in previous
+            if row["connection_id"] not in supplied
+        ]
+
+    async def set_mcp_connection_enabled(
+        self, *, connection_id: int, user_id: str, enabled: bool
+    ) -> dict[str, Any] | None:
+        row = self.connections.get(connection_id)
+        if row is None or row["user_id"] != user_id or row["deleted_at"] is not None:
+            return None
+        if row.get("enabled", True) != enabled:
+            row["authorization_epoch"] += 1
+        row["enabled"] = enabled
+        return dict(row)
 
     async def get_thread(self, thread_id: str) -> dict[str, Any] | None:
         return self.threads.get(thread_id)
@@ -1678,3 +1698,81 @@ class TestTheOAuthPostsAreBounded:
         with pytest.raises(TransportError):
             await mcp_connections._post_form(_Request(), policy=EgressPolicy(allow_private=True))
         assert stream.pulled < 64, "the whole token reply was read before the limit applied"
+
+
+class TestAutomaticServerAccess:
+    def test_connection_can_be_paused_without_losing_credentials(self) -> None:
+        store = FakeStore()
+        cid = _seed(store, access_token_ciphertext="encrypted-credential")
+        with _client(store) as client:
+            paused = client.put(f"/v1/agent/mcp/connections/{cid}/enabled", json={"enabled": False})
+            assert paused.status_code == 200
+            assert paused.json()["enabled"] is False
+            assert paused.json()["has_credential"] is True
+            assert "encrypted-credential" not in paused.text
+            resumed = client.put(f"/v1/agent/mcp/connections/{cid}/enabled", json={"enabled": True})
+        assert resumed.json()["enabled"] is True
+        assert store.connections[cid]["access_token_ciphertext"] == "encrypted-credential"
+
+    def test_cannot_toggle_another_owners_connection(self) -> None:
+        store = FakeStore()
+        cid = _seed(store, user_id="someone-else")
+        with _client(store) as client:
+            response = client.put(
+                f"/v1/agent/mcp/connections/{cid}/enabled", json={"enabled": False}
+            )
+        assert response.status_code == 404
+        assert store.connections[cid].get("enabled", True) is True
+
+    def test_default_access_can_be_enabled_before_discovery_and_disabled_again(self) -> None:
+        store = FakeStore()
+        cid = _seed(store)
+        store.threads["thread-1"] = {"id": "thread-1", "user_id": _OWNER}
+        with _client(store) as client:
+            for enabled in (True, False):
+                response = client.put(
+                    f"/v1/agent/mcp/threads/thread-1/bindings/{cid}",
+                    json={"connection_id": cid, "enabled": enabled, "use_defaults": True},
+                )
+                assert response.status_code == 200, response.text
+                row = response.json()["bindings"][0]
+                assert row["enabled"] is enabled
+                assert row["selection_pending"] is True
+                assert row["tools"] == {}
+
+    def test_editing_one_server_preserves_the_other_servers_fences_and_rules(self) -> None:
+        store = FakeStore()
+        first, second = _seed(store), _seed(store)
+        store.threads["thread-1"] = {"id": "thread-1", "user_id": _OWNER}
+        with _client(store) as client:
+            for cid in (first, second):
+                response = client.put(
+                    f"/v1/agent/mcp/threads/thread-1/bindings/{cid}",
+                    json={"connection_id": cid, "use_defaults": True},
+                )
+                assert response.status_code == 200
+            other = dict(
+                next(row for row in store.bindings["thread-1"] if row["connection_id"] == second)
+            )
+            store.connections[second]["authorization_epoch"] += 1
+            response = client.put(
+                f"/v1/agent/mcp/threads/thread-1/bindings/{first}",
+                json={"connection_id": first, "enabled": False, "use_defaults": True},
+            )
+        assert response.status_code == 200
+        assert (
+            next(row for row in store.bindings["thread-1"] if row["connection_id"] == second)
+            == other
+        )
+
+    def test_an_override_cannot_reuse_another_servers_alias(self) -> None:
+        store = FakeStore()
+        first, second = _seed(store), _seed(store)
+        store.threads["thread-1"] = {"id": "thread-1", "user_id": _OWNER}
+        with _client(store) as client:
+            for cid, expected in ((first, 200), (second, 400)):
+                response = client.put(
+                    f"/v1/agent/mcp/threads/thread-1/bindings/{cid}",
+                    json={"connection_id": cid, "alias": "wiki", "use_defaults": True},
+                )
+                assert response.status_code == expected
