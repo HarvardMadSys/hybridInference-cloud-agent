@@ -81,7 +81,11 @@ def _host(
         f"  *' logs --since 2m runner') echo '{rejection_log}' ;;\n"
         f"  exec*'_shared_live_host_capabilities'*) echo '{capability}'; exit {attest_exit} ;;\n"
         f"  exec*8092/health*) exit {broker_probe_exit} ;;\n"
-        f"  exec*--turn*) echo '{turn_probe}'; exit {turn_probe_exit} ;;\n"
+        # The realistic shape: the same preflight a real turn runs logs a Kata
+        # measurement warning to stderr before the child answers on stdout,
+        # and the script captures both. The verdict has to be read past it.
+        "  exec*--turn*) echo '2026-09-17 06:18:18,846 - cloud_agent_host.chat_sandbox - WARNING - Kata guest cannot measure part of a member window: storage_io' >&2; "
+        f"echo '{turn_probe}'; exit {turn_probe_exit} ;;\n"
         f"  exec*'retained_docker_data_root'*) echo '{daemon_root}' ;;\n"
         "  exec*'AGENT_CONTROL_PLANE_URL'*) echo '200' ;;\n"
         "  run*) printf '200' ;;\n"
@@ -429,6 +433,17 @@ def test_a_leftover_replica_count_is_warned_about_not_read(tmp_path: Path) -> No
 
     assert result.returncode == 0, result.stderr
     assert "AGENT_RUNNER_REPLICAS is no longer read" in result.stderr
+
+
+def test_the_turn_probe_reads_its_answer_past_log_noise(tmp_path: Path) -> None:
+    """Staging, 2026-09-17: the probe's first rollout captured a preflight
+    warning on stderr ahead of the decline, judged the image unable to run
+    turns, and rolled the host back. The answer is a line, not the output."""
+    result = _run(_host(tmp_path), "check")
+
+    assert result.returncode == 0, result.stderr
+    assert "turn processes start: declined no turn was delivered" in result.stdout
+    assert "cannot run turns" not in result.stderr
 
 
 def test_shared_live_check_requires_the_image_to_start_a_turn(tmp_path: Path) -> None:

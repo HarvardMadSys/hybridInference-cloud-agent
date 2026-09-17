@@ -684,10 +684,20 @@ check_shared_live_stack() {
     log "waiting for the runner to be able to start a turn: ${turn_probe:-no output}"
     sleep 3
   done
-  case "$turn_probe" in
-    declined*) log "turn processes start: ${turn_probe}" ;;
-    *) die "runner $first_id started a turn process that answered '${turn_probe:-nothing}' instead of declining an empty turn; the image cannot run turns" ;;
-  esac
+  # The verdict is the child's own answer, the one line it writes to the
+  # descriptor this probe pointed at its standard output. Everything else the
+  # process says on the way — the logging every turn process configures, a
+  # Kata guest measurement warning from the same preflight a real turn runs —
+  # goes to stderr, and stderr is captured too because it is what explains a
+  # failure. So the answer is read as a line, not as the whole of the output:
+  # on staging the first rollout of this probe captured such a warning ahead
+  # of the decline, called the image unable to run turns, and rolled back.
+  turn_answer="$(printf '%s\n' "$turn_probe" | grep -E '^declined' | head -n 1 || true)"
+  if [[ -n "$turn_answer" ]]; then
+    log "turn processes start: ${turn_answer}"
+  else
+    die "runner $first_id started a turn process that answered '${turn_probe:-nothing}' instead of declining an empty turn; the image cannot run turns"
+  fi
 
   # Capability attestation proves the runner is configured to dial the broker;
   # make the dial as well. This catches a broker crash-loop (including a
