@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { installSideChatLocks } from './sideChatTestSupport';
 import { StrictMode, type ReactNode } from 'react';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -40,12 +41,12 @@ const copied = {
   forked_from_job_id: anchor.id,
   fork_anchor_job_id: anchor.id,
 } as AgentJobApi;
-let userId: string;
-let sequence = 0;
+const userId = 'side-test-user';
 beforeEach(() => {
-  userId = `side-chat-hook-${++sequence}`;
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   sessionStorage.clear();
+  localStorage.clear();
+  installSideChatLocks();
   vi.mocked(getAgentJob).mockResolvedValue(anchor);
   vi.mocked(forkAgentJob).mockResolvedValue(copied);
   vi.mocked(getAgentJobThread).mockResolvedValue({
@@ -76,7 +77,7 @@ describe('native side chat session', () => {
     rerender({ active: true });
     await waitFor(() => expect(result.current.status).toBe('ready'));
     expect(forkAgentJob).toHaveBeenCalledExactlyOnceWith(anchor.id, {
-      requestScope: sideChatStorageKey(userId, 'main'),
+      requestId: expect.any(String),
     });
     rerender({ active: false });
     rerender({ active: true });
@@ -153,6 +154,7 @@ describe('native side chat session', () => {
     const { rerender } = renderHook(({ active }) => useSideChatSession(source, userId, active), {
       initialProps: { active: true },
     });
+    await waitFor(() => expect(getAgentJob).toHaveBeenCalledTimes(1));
     rerender({ active: false });
     await act(async () => {
       resolve(anchor);
@@ -168,7 +170,7 @@ describe('native side chat session', () => {
     });
     const { result } = renderHook(() => useSideChatSession(source, userId, true));
     await waitFor(() => expect(result.current.status).toBe('error'));
-    expect(result.current.error).toMatch(/did not complete/);
+    expect(result.current.error).toBe('sideChat.unfinished');
     expect(forkAgentJob).not.toHaveBeenCalled();
   });
 
@@ -227,14 +229,14 @@ describe('native side chat session', () => {
   it.each(['workspace', 'parent', 'thread'])(
     'rejects a saved child with the wrong %s',
     async (mismatch) => {
-      sessionStorage.setItem(
+      localStorage.setItem(
         sideChatStorageKey(userId, 'main'),
         JSON.stringify({
           anchorJobId: anchor.id,
           sandboxId: 'sandbox',
           jobId: copied.id,
           threadId: 'side',
-          requestSent: true,
+          operation: { id: 'request-1', state: 'unknown' },
         }),
       );
       const foreign = {
@@ -254,4 +256,121 @@ describe('native side chat session', () => {
       expect(forkAgentJob).not.toHaveBeenCalled();
     },
   );
+});
+
+describe('side chat durable recovery', () => {
+  const record = () => ({
+    anchorJobId: anchor.id,
+    sandboxId: 'sandbox',
+    jobId: copied.id,
+    threadId: 'side',
+    operation: { id: 'durable-id', state: 'unknown' },
+  });
+  it('restores a valid localStorage receipt without any in-memory state', async () => {
+    localStorage.setItem(sideChatStorageKey(userId, 'main'), JSON.stringify(record()));
+    const { result } = renderHook(() => useSideChatSession(source, userId, true));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.session?.jobId).toBe(copied.id);
+    expect(forkAgentJob).not.toHaveBeenCalled();
+  });
+  it('serializes two independent windows and shares the same durable child', async () => {
+    const first = renderHook(() => useSideChatSession(source, userId, true));
+    const second = renderHook(() => useSideChatSession(source, userId, true));
+    await waitFor(() => expect(second.result.current.status).toBe('ready'));
+    expect(first.result.current.session?.jobId).toBe(second.result.current.session?.jobId);
+    expect(forkAgentJob).toHaveBeenCalledTimes(1);
+  });
+  it('retains the receipt when validation fails, then recovers without another POST', async () => {
+    vi.mocked(forkAgentJob).mockResolvedValueOnce({ ...copied, sandbox_id: 'wrong' });
+    const { result } = renderHook(() => useSideChatSession(source, userId, true));
+    await waitFor(() => expect(result.current.error).toBe('sideChat.invalidChild'));
+    expect(JSON.parse(localStorage.getItem(sideChatStorageKey(userId, 'main'))!).jobId).toBe(
+      copied.id,
+    );
+    act(() => result.current.retry());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(forkAgentJob).toHaveBeenCalledTimes(1);
+  });
+  it('rechecks archival after a durable failed saga before rotating its request id', async () => {
+    vi.mocked(forkAgentJob).mockRejectedValueOnce(
+      new APIError('native_fork_failed', 'Failed', 409),
+    );
+    const { result } = renderHook(() => useSideChatSession(source, userId, true));
+    await waitFor(() => expect(result.current.status).toBe('error'));
+    vi.mocked(getAgentJob).mockResolvedValue({ ...anchor, archived_at: '2026-09-17' });
+    act(() => result.current.retry());
+    await waitFor(() => expect(result.current.error).toBe('sideChat.unfinished'));
+    expect(forkAgentJob).toHaveBeenCalledTimes(1);
+    vi.mocked(getAgentJob).mockResolvedValue(anchor);
+    act(() => result.current.retry());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(vi.mocked(forkAgentJob).mock.calls[1][1]?.requestId).not.toBe(
+      vi.mocked(forkAgentJob).mock.calls[0][1]?.requestId,
+    );
+  });
+  it('GET-polls a known busy response with backoff and keeps the waiting status stable', async () => {
+    vi.useFakeTimers();
+    vi.mocked(forkAgentJob).mockRejectedValueOnce(new APIError('sandbox_busy', 'Busy', 409));
+    const { result } = renderHook(() => useSideChatSession(source, userId, true));
+    await flush();
+    vi.mocked(getAgentJob).mockResolvedValue({ ...anchor, conversation_state: 'running' });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(result.current.status).toBe('waiting');
+    expect(forkAgentJob).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(getAgentJob).toHaveBeenCalledTimes(2);
+    let resolve!: (row: AgentJobApi) => void;
+    vi.mocked(getAgentJob).mockReturnValueOnce(
+      new Promise((r) => {
+        resolve = r;
+      }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(result.current.status).toBe('waiting');
+    await act(async () => {
+      resolve(anchor);
+    });
+    expect(result.current.status).toBe('ready');
+  });
+  it('recovers a deleted child on retry instead of keeping a dead locator', async () => {
+    localStorage.setItem(sideChatStorageKey(userId, 'main'), JSON.stringify(record()));
+    vi.mocked(getAgentJobThread).mockResolvedValueOnce(null);
+    const { result } = renderHook(() => useSideChatSession(source, userId, true));
+    await waitFor(() => expect(result.current.error).toBe('sideChat.deleted'));
+    expect(localStorage.getItem(sideChatStorageKey(userId, 'main'))).toBeNull();
+    act(() => result.current.retry());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+  });
+  it('offers explicit recovery for corrupt storage and does not leak JSON parser errors', async () => {
+    localStorage.setItem(sideChatStorageKey(userId, 'main'), '{bad');
+    const { result } = renderHook(() => useSideChatSession(source, userId, true));
+    await waitFor(() => expect(result.current.error).toBe('sideChat.invalidRecord'));
+    expect(result.current.recoverable).toBe(true);
+    expect(forkAgentJob).not.toHaveBeenCalled();
+    await act(async () => {
+      await result.current.restart();
+    });
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+  });
+  it('migrates an in-flight legacy key without changing operation identity', async () => {
+    const legacy = `agent-side-chat:${userId}:main`;
+    sessionStorage.setItem(
+      legacy,
+      JSON.stringify({ anchorJobId: anchor.id, sandboxId: 'sandbox', requestSent: true }),
+    );
+    sessionStorage.setItem(
+      `agent-native-fork-request-${legacy}:${anchor.id}`,
+      'original-operation',
+    );
+    const { result } = renderHook(() => useSideChatSession(source, userId, true));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(forkAgentJob).toHaveBeenCalledWith(anchor.id, { requestId: 'original-operation' });
+    expect(sessionStorage.getItem(legacy)).toBeNull();
+  });
 });

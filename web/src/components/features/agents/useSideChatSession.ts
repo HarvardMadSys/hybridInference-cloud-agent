@@ -1,169 +1,71 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-
+import toast from 'react-hot-toast';
 import { forkAgentJob, getAgentJob, getAgentJobThread, type AgentJobApi } from '@/lib/api/agents';
-import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
+import { announceAgentSessionsChanged, onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { APIError } from '@/lib/utils/errors';
+import { useT } from '@/components/providers/LocaleProvider';
+import { hasLostContext, isBusyJob, latestJob } from './conversationJob';
+import { sideChatKeys } from './sideChatStorage';
 import type { AgentJob } from './types';
 
 export interface SideChatSession {
   anchorJobId: string;
   sandboxId: string;
-  requestSent?: boolean;
+  operation: { id: string; state: 'new' | 'unknown' | 'busy' | 'failed' };
   jobId?: string;
   threadId?: string;
 }
-
-type Preparation = { session: SideChatSession; ready: boolean };
 type Status = 'preparing' | 'waiting' | 'ready' | 'error';
+export const sideChatStorageKey = (userId: string, threadId: string) =>
+  sideChatKeys(userId, threadId).session;
 
-// The association is local to this signed-in user's browser tab. The child is
-// still an ordinary durable conversation in the server's project list.
-export function sideChatStorageKey(userId: string, threadId: string): string {
-  return `agent-side-chat:${userId}:${threadId}`;
-}
-
-const sessions = new Map<string, SideChatSession>();
-const requests = new Map<string, Promise<Preparation>>();
-
-function readSession(key: string): SideChatSession | undefined {
-  const memory = sessions.get(key);
-  if (memory) return memory;
-  let saved: string | null = null;
+function read(key: string): SideChatSession | null {
+  const raw = localStorage.getItem(key);
+  if (!raw) return null;
   try {
-    saved = sessionStorage.getItem(key);
+    const value = JSON.parse(raw) as SideChatSession;
+    if (
+      !value ||
+      !value.anchorJobId ||
+      !value.sandboxId ||
+      typeof value.anchorJobId !== 'string' ||
+      typeof value.sandboxId !== 'string' ||
+      typeof value.operation?.id !== 'string' ||
+      !value.operation.id ||
+      !['new', 'unknown', 'busy', 'failed'].includes(value.operation.state) ||
+      (value.jobId !== undefined && typeof value.jobId !== 'string') ||
+      (value.threadId !== undefined && typeof value.threadId !== 'string') ||
+      Boolean(value.jobId) !== Boolean(value.threadId)
+    )
+      throw new Error();
+    return value;
   } catch {
-    return undefined;
-  }
-  if (!saved) return undefined;
-  const parsed = JSON.parse(saved) as SideChatSession;
-  if (
-    !parsed ||
-    typeof parsed.anchorJobId !== 'string' ||
-    typeof parsed.sandboxId !== 'string' ||
-    (parsed.jobId !== undefined && typeof parsed.jobId !== 'string') ||
-    (parsed.threadId !== undefined && typeof parsed.threadId !== 'string') ||
-    Boolean(parsed.jobId) !== Boolean(parsed.threadId)
-  ) {
-    throw new Error('Could not restore the saved side chat.');
-  }
-  sessions.set(key, parsed);
-  return parsed;
-}
-
-function saveSession(key: string, session: SideChatSession): void {
-  sessions.set(key, session);
-  try {
-    sessionStorage.setItem(key, JSON.stringify(session));
-  } catch {
-    // Blocked storage still keeps one child for this page's lifetime.
+    // Do not cache malformed records or expose parser internals. Recovery is
+    // explicit because discarding an unknown request may abandon a real child.
+    throw new Error('sideChat.invalidRecord');
   }
 }
-
-function isBusy(job: AgentJobApi): boolean {
-  return (
-    ['queued', 'running', 'publishing'].includes(job.state) ||
-    job.conversation_state === 'running' ||
-    job.conversation_state === 'queued'
-  );
+function save(key: string, session: SideChatSession) {
+  localStorage.setItem(key, JSON.stringify(session));
 }
-
-function childSession(
+export function childSession(
   source: AgentJob,
   session: SideChatSession,
   child: AgentJobApi,
-): SideChatSession {
+): SideChatSession | null {
   if (
+    !child.id ||
     !child.thread_id ||
     child.thread_id === source.threadId ||
-    (session.threadId && child.thread_id !== session.threadId) ||
+    (session.threadId && session.threadId !== child.thread_id) ||
     child.sandbox_id !== session.sandboxId ||
     child.sandbox_id !== source.sandboxId ||
     child.fork_anchor_job_id !== session.anchorJobId
-  ) {
-    throw new Error('The saved side chat does not belong to this conversation’s workspace.');
-  }
+  )
+    return null;
   return { ...session, jobId: child.id, threadId: child.thread_id };
-}
-
-async function prepare(
-  key: string,
-  source: AgentJob,
-  sourceJobs: AgentJobApi[],
-  canStart: () => boolean,
-): Promise<Preparation> {
-  let session = readSession(key);
-  if (session?.jobId) {
-    // Storage is a locator, never authority. Read the authenticated child and
-    // prove its native parent/workspace before displaying or submitting to it.
-    const thread = await getAgentJobThread(session.jobId);
-    const latest = thread?.jobs.reduce<AgentJobApi | undefined>(
-      (found, job) => (!found || (job.turn_no ?? 0) > (found.turn_no ?? 0) ? job : found),
-      undefined,
-    );
-    if (!latest || thread?.thread_id !== session.threadId) {
-      throw new Error('Could not restore the side chat.');
-    }
-    session = childSession(source, session, latest);
-    saveSession(key, session);
-    return { session, ready: true };
-  }
-
-  if (!session) {
-    if (!source.threadId || !source.sandboxId || !source.workspaceShared || source.archivedAt) {
-      throw new Error('Side chat is unavailable for this conversation.');
-    }
-    const jobs = sourceJobs
-      .filter((job) => job.thread_id === source.threadId)
-      .sort((a, b) => (b.turn_no ?? 0) - (a.turn_no ?? 0));
-    // Opening an old turn still starts from the conversation's current native
-    // boundary. If it is running, fix that turn now and wait for it to settle;
-    // subsequently queued work must never move this boundary forward.
-    const anchor = jobs.find((job) => ['running', 'publishing'].includes(job.state)) ?? jobs[0];
-    session = { anchorJobId: anchor?.id ?? source.id, sandboxId: source.sandboxId };
-    saveSession(key, session);
-  }
-
-  if (!canStart()) return { session, ready: false };
-  const anchor = await getAgentJob(session.anchorJobId);
-  if (anchor.thread_id !== source.threadId || anchor.sandbox_id !== session.sandboxId) {
-    throw new Error('The main conversation’s native session is no longer available.');
-  }
-  if (!canStart()) return { session, ready: false };
-  if (!session.requestSent) {
-    if (
-      anchor.archived_at ||
-      anchor.native_state === 'lost' ||
-      anchor.context_status === 'lost' ||
-      anchor.state === 'failed' ||
-      anchor.state === 'cancelled'
-    ) {
-      throw new Error('The main turn did not complete. Side chat could not be created.');
-    }
-    if (isBusy(anchor) || !canStart()) return { session, ready: false };
-    if (!anchor.native_fork_available) {
-      throw new Error('Native side chat is unavailable for this conversation.');
-    }
-    session = { ...session, requestSent: true };
-    // Save before POST. Even a refresh after a lost response must recover this
-    // operation, not pick a newer anchor or turn a retry into a second fork.
-    saveSession(key, session);
-  }
-
-  try {
-    // An issued request is retried directly, even if the source later becomes
-    // busy: the server can return a previously committed child in that case.
-    const child = await forkAgentJob(session.anchorJobId, { requestScope: key });
-    session = childSession(source, session, child);
-    saveSession(key, session);
-    return { session, ready: true };
-  } catch (cause) {
-    if (cause instanceof APIError && cause.code === 'sandbox_busy') {
-      return { session, ready: false };
-    }
-    throw cause;
-  }
 }
 
 export function useSideChatSession(
@@ -172,82 +74,230 @@ export function useSideChatSession(
   active: boolean,
   sourceJobs: AgentJobApi[] = [],
 ) {
-  const key = userId ? sideChatStorageKey(userId, source.threadId ?? source.id) : '';
+  const t = useT();
+  const keys = userId ? sideChatKeys(userId, source.threadId ?? source.id) : null;
+  const key = keys?.session ?? '';
+  const legacyKey = userId ? `agent-side-chat:${userId}:${source.threadId ?? source.id}` : '';
   const [session, setSession] = useState<SideChatSession | null>(null);
   const [status, setStatus] = useState<Status>('preparing');
   const [error, setError] = useState<string | null>(null);
-  const [tick, setTick] = useState(0);
-  const sourceRef = useRef({ job: source, jobs: sourceJobs });
-  const activeRef = useRef(active);
-  const mounted = useRef(false);
-  sourceRef.current = { job: source, jobs: sourceJobs };
-  activeRef.current = active;
+  const [recoverable, setRecoverable] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const sourceRef = useRef({ source, sourceJobs });
+  sourceRef.current = { source, sourceJobs };
+  const retry = useCallback(() => setRevision((n) => n + 1), []);
 
   useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!active || !key || status === 'ready') return;
-    let cancelled = false;
+    if (!active || !key) return;
+    let disposed = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    setStatus('preparing');
-    setError(null);
-    let request = requests.get(key);
-    if (!request) {
-      request = prepare(
-        key,
-        sourceRef.current.job,
-        sourceRef.current.jobs,
-        () => mounted.current && activeRef.current,
-      );
-      requests.set(key, request);
-      // Coalesce StrictMode/remounts and double activation. A settled request
-      // leaves the map on both paths, without creating an unhandled rejection.
-      const clear = () => {
-        if (requests.get(key) === request) requests.delete(key);
-      };
-      void request.then(clear, clear);
-    }
-    void request.then(
-      (result) => {
-        if (cancelled) return;
-        setSession(result.session);
-        setStatus(result.ready ? 'ready' : 'waiting');
-        if (result.ready && result.session.threadId) {
-          announceAgentSessionsChanged({ threadIds: [result.session.threadId] });
+    let delay = 3000;
+    let busy = false;
+    const snapshot = sourceRef.current;
+    const canStart = () => !disposed && document.visibilityState !== 'hidden';
+    const run = async () => {
+      if (!canStart() || busy) return;
+      busy = true;
+      setStatus((previous) => (previous === 'waiting' ? previous : 'preparing'));
+      setError(null);
+      setRecoverable(false);
+      try {
+        // The lock spans read/POST/receipt persistence. A second window always
+        // re-reads the first window's receipt before deciding to create a child.
+        if (!navigator.locks) throw new Error('sideChat.storageUnavailable');
+        const result = await navigator.locks.request(key, async () => {
+          if (!canStart()) return null;
+          let saved = read(key);
+          if (!saved && sessionStorage.getItem(legacyKey)) {
+            // Preserve receipts and unknown operation IDs from the first UI
+            // version; a namespace change must never create another child.
+            try {
+              const legacy = JSON.parse(sessionStorage.getItem(legacyKey)!);
+              const pending = sessionStorage.getItem(
+                `agent-native-fork-request-${legacyKey}:${legacy.anchorJobId}`,
+              );
+              if (legacy.requestSent && !legacy.jobId && !pending) throw new Error();
+              save(key, {
+                ...legacy,
+                operation: {
+                  id: pending ?? crypto.randomUUID(),
+                  state: pending ? 'unknown' : 'new',
+                },
+              });
+              saved = read(key);
+              sessionStorage.removeItem(legacyKey);
+            } catch {
+              throw new Error('sideChat.invalidRecord');
+            }
+          }
+          if (!saved) {
+            const { source, sourceJobs } = snapshot;
+            if (
+              !source.threadId ||
+              !source.sandboxId ||
+              !source.workspaceShared ||
+              source.archivedAt
+            )
+              throw new Error('sideChat.unavailable');
+            const rows = sourceJobs.filter((row) => row.thread_id === source.threadId);
+            const anchor =
+              latestJob(rows.filter((row) => ['running', 'publishing'].includes(row.state))) ??
+              latestJob(rows);
+            saved = {
+              anchorJobId: anchor?.id ?? source.id,
+              sandboxId: source.sandboxId,
+              operation: { id: crypto.randomUUID(), state: 'new' },
+            };
+            save(key, saved);
+          }
+          if (saved.jobId) {
+            const thread = await getAgentJobThread(saved.jobId);
+            if (!thread) {
+              localStorage.removeItem(key);
+              throw new Error('sideChat.deleted');
+            }
+            const latest = latestJob(thread.jobs);
+            const restored =
+              latest && thread.thread_id === saved.threadId
+                ? childSession(snapshot.source, saved, latest)
+                : null;
+            if (!restored) throw new Error('sideChat.invalidChild');
+            save(key, restored);
+            return restored;
+          }
+          const anchor = await getAgentJob(saved.anchorJobId);
+          if (!canStart()) return null;
+          if (
+            anchor.thread_id !== snapshot.source.threadId ||
+            anchor.sandbox_id !== saved.sandboxId ||
+            !snapshot.source.sandboxId
+          )
+            throw new Error('sideChat.sourceChanged');
+          // Only an ambiguous POST bypasses liveness to recover the SAME key.
+          // A known busy/failed response never grants that exception.
+          if (saved.operation.state !== 'unknown') {
+            if (
+              anchor.archived_at ||
+              hasLostContext({
+                nativeState: anchor.native_state ?? undefined,
+                contextStatus: anchor.context_status ?? undefined,
+              }) ||
+              ['failed', 'cancelled'].includes(anchor.state)
+            )
+              throw new Error('sideChat.unfinished');
+            if (isBusyJob(anchor)) return null;
+            if (!anchor.native_fork_available) throw new Error('sideChat.unavailable');
+            if (saved.operation.state === 'failed')
+              saved.operation = { id: crypto.randomUUID(), state: 'new' };
+          }
+          saved.operation.state = 'unknown';
+          save(key, saved);
+          try {
+            const child = await forkAgentJob(saved.anchorJobId, { requestId: saved.operation.id });
+            // Persist the receipt before validating it. Neither a validation
+            // error nor a reload can turn this committed operation into a fork.
+            if (child.id && child.thread_id)
+              saved = { ...saved, jobId: child.id, threadId: child.thread_id };
+            save(key, saved);
+            const validated = childSession(snapshot.source, saved, child);
+            if (!validated) throw new Error('sideChat.invalidChild');
+            announceAgentSessionsChanged({ threadIds: [child.thread_id!] });
+            if (canStart()) toast.success(t('sideChat.created'));
+            return validated;
+          } catch (cause) {
+            if (
+              cause instanceof APIError &&
+              ['sandbox_busy', 'fork_in_progress', 'native_fork_failed'].includes(cause.code)
+            ) {
+              saved.operation.state = cause.code === 'native_fork_failed' ? 'failed' : 'busy';
+              save(key, saved);
+              if (cause.code !== 'native_fork_failed') return null;
+            }
+            throw cause;
+          }
+        });
+        if (disposed) return;
+        if (result) {
+          setSession(result);
+          setStatus('ready');
         } else {
-          timer = setTimeout(() => setTick((value) => value + 1), 3000);
+          setStatus('waiting');
+          timer = setTimeout(() => {
+            void run();
+          }, delay);
+          delay = Math.min(delay * 2, 30000);
         }
-      },
-      (cause: unknown) => {
-        if (cancelled) return;
+      } catch (cause) {
+        if (disposed) return;
+        const message = cause instanceof Error ? cause.message : 'sideChat.openFailed';
         setStatus('error');
-        setError(cause instanceof Error ? cause.message : 'Could not open side chat.');
-      },
-    );
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
+        setError(message);
+        setRecoverable(
+          [
+            'sideChat.invalidRecord',
+            'sideChat.invalidChild',
+            'sideChat.sourceChanged',
+            'sideChat.unfinished',
+          ].includes(message),
+        );
+      } finally {
+        busy = false;
+      }
     };
-    // Status changes are the result of this operation, not a reason to restart
-    // it. Retry, tab activation and a waiting poll are the only triggers.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, key, tick]);
+    const wake = () => {
+      if (timer) clearTimeout(timer);
+      if (canStart()) void run();
+    };
+    void run();
+    document.addEventListener('visibilitychange', wake);
+    const storage = (event: StorageEvent) => {
+      if (event.key === key) wake();
+    };
+    window.addEventListener('storage', storage);
+    const unsubscribe = onAgentSessionsChanged((change) => {
+      let saved: SideChatSession | null;
+      try {
+        saved = read(key);
+      } catch {
+        return;
+      }
+      if (saved?.threadId && change.threadIds.includes(saved.threadId)) {
+        if (change.deleted) {
+          localStorage.removeItem(key);
+          setSession(null);
+          setStatus('error');
+          setError('sideChat.deleted');
+        } else wake();
+      }
+    });
+    return () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener('visibilitychange', wake);
+      window.removeEventListener('storage', storage);
+      unsubscribe();
+    };
+  }, [active, key, legacyKey, revision, t]);
 
   const advance = useCallback(
-    (job: AgentJobApi) => {
-      if (!session || !key) return;
-      const next = childSession(sourceRef.current.job, session, job);
-      saveSession(key, next);
+    (job: AgentJobApi): boolean => {
+      if (!session || !key) return false;
+      const next = childSession(sourceRef.current.source, session, job);
+      if (!next) return false;
+      save(key, next);
       setSession(next);
-      announceAgentSessionsChanged({ threadIds: [next.threadId!] });
+      return true;
     },
     [key, session],
   );
-  const retry = useCallback(() => setTick((value) => value + 1), []);
-  return { session: status === 'ready' ? session : null, status, error, retry, advance, key };
+  const restart = useCallback(async () => {
+    if (!key || !navigator.locks) return;
+    await navigator.locks.request(key, () => {
+      localStorage.removeItem(key);
+      sessionStorage.removeItem(legacyKey);
+    });
+    setSession(null);
+    retry();
+  }, [key, legacyKey, retry]);
+  return { session, status, error, recoverable, retry, restart, advance };
 }

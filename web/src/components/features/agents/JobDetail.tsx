@@ -28,7 +28,6 @@ import {
 } from '@/lib/api/agents';
 
 import { ownerFailureMessage, toDiffFileDetails } from './adapt';
-import { isComposerSubmit } from './composerKeys';
 import {
   conversationNavigationScope,
   describeCurrentTurn,
@@ -64,6 +63,13 @@ import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
 import { shouldHoldReading, useConversationScroll } from './useConversationScroll';
 import { useResizablePane } from './useResizablePane';
 import { WorkspaceFiles } from './WorkspaceFiles';
+import {
+  composerModels,
+  composerOverrides,
+  ComposerTextarea,
+  ComposerSendButton,
+} from './ConversationComposer';
+import { hasLostContext, ownerRunNote } from './conversationJob';
 import { SideChat } from './SideChat';
 import {
   CopyIcon,
@@ -119,24 +125,6 @@ const DIFF_LINE_CLASS = {
   add: 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400',
   del: 'bg-red-50 dark:bg-red-500/10 text-red-700 dark:text-red-400',
 } as const;
-
-function hasLostContext(job: AgentJob): boolean {
-  return job.nativeState === 'lost' || job.contextStatus === 'lost';
-}
-
-function ownerRunNote(job: AgentJob): string | undefined {
-  // Success detail contains runner/publication bookkeeping, not the answer.
-  // The transcript carries the result; publication has its own status row.
-  if (job.state === 'done' || job.state === 'needs_review') return undefined;
-  // `stateNote` is already owner-facing: toDisplayJob translates `job.detail`
-  // through ownerFailureMessage before it reaches this display model.
-  return (
-    job.stateNote ||
-    (job.state === 'failed'
-      ? 'The run stopped before it could finish. No failure details were recorded.'
-      : undefined)
-  );
-}
 
 function RunGuidance({ job }: { job: AgentJob }) {
   if (hasLostContext(job)) {
@@ -651,7 +639,7 @@ export function JobDetail({
   // it, so the control cannot show one model while the turn would run another.
   const modelOptions = useMemo(() => {
     if (models.length === 0) return [];
-    return models.includes(job.model) ? models : [job.model, ...models];
+    return composerModels(models, job.model);
   }, [job.model, models]);
 
   // Against the model this turn would run — the switched-to one, or the
@@ -861,9 +849,7 @@ export function JobDetail({
         event.key !== 'Escape' ||
         event.repeat ||
         event.defaultPrevented ||
-        target?.closest(
-          'input, textarea, select, [contenteditable="true"], #workspace-panel-side-chat',
-        )
+        target?.closest('input, textarea, select, [contenteditable="true"]')
       ) {
         return;
       }
@@ -883,13 +869,8 @@ export function JobDetail({
     try {
       const child = await followUpAgentJob(job.id, {
         prompt,
-        // Only an actual switch is sent. Omitted, the turn inherits the
-        // parent's model, which was validated when it was chosen.
-        ...(model && model !== job.model ? { model } : {}),
-        // Only an actual change is sent; an omitted field inherits the parent's
-        // level, which is what leaving the control alone means. A thread that
-        // carried no level and now shows one differs, so it is sent.
-        ...(effort && effort !== job.reasoningEffort ? { reasoning_effort: effort } : {}),
+        // Omitted controls inherit the parent's validated model and effort.
+        ...composerOverrides(job, model, effort),
       });
       // A router.push remounts the dynamic [jobId] segment even with
       // scroll:false and a stable JobDetail key. Native history updates Next's
@@ -1491,18 +1472,11 @@ export function JobDetail({
                     onSubmit={(event) => void submitFollowUp(event)}
                     className="rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 shadow-[0_16px_40px_-28px_rgba(17,24,39,0.55)] transition focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05]"
                   >
-                    <textarea
+                    <ComposerTextarea
                       rows={2}
                       value={followUp}
                       onChange={(event) => setFollowUp(event.target.value)}
                       disabled={contextLost}
-                      onKeyDown={(event) => {
-                        if (!isComposerSubmit(event)) return;
-                        event.preventDefault();
-                        // Through the form, so the keyboard and the button take the
-                        // same path and cannot drift apart.
-                        event.currentTarget.form?.requestSubmit();
-                      }}
                       placeholder={
                         contextLost ? 'Unable to reconnect this chat' : 'Add a follow-up'
                       }
@@ -1551,32 +1525,12 @@ export function JobDetail({
                           {isActive ? ' · queued after this run' : ''}
                         </span>
                       )}
-                      <button
-                        type="submit"
-                        disabled={contextLost || !followUp.trim() || submitting}
-                        className="ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-crimson text-white shadow-sm transition-colors hover:bg-crimson-dark disabled:cursor-not-allowed disabled:opacity-40"
-                        aria-label="Send follow-up"
+                      <ComposerSendButton
+                        label="Send follow-up"
                         title="Send follow-up — ⏎ to send, ⇧⏎ for a new line"
-                      >
-                        {submitting ? (
-                          <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-                        ) : (
-                          <svg
-                            aria-hidden="true"
-                            className="h-4 w-4"
-                            fill="none"
-                            viewBox="0 0 24 24"
-                            stroke="currentColor"
-                            strokeWidth={2}
-                          >
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              d="M12 19V5m0 0-6 6m6-6 6 6"
-                            />
-                          </svg>
-                        )}
-                      </button>
+                        disabled={contextLost || !followUp.trim() || submitting}
+                        busy={submitting}
+                      />
                     </div>
                   </form>
                 )}

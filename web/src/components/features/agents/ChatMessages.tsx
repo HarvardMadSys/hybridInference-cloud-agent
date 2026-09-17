@@ -309,13 +309,27 @@ export function ThreadTurn({
       />
     );
   }
+  return <UserMessage text={message.content} {...{ blockKey, busy, onRewind }} />;
+}
+
+function UserMessage({
+  text,
+  blockKey,
+  busy,
+  onRewind,
+}: {
+  text: string;
+  blockKey?: string;
+  busy?: boolean;
+  onRewind?: () => void;
+}) {
   return (
     <div data-block-key={blockKey} className="group my-3 ml-auto w-fit max-w-[88%]">
       <div className="rounded-2xl bg-gray-100 dark:bg-white/5 px-4 py-3 text-sm leading-relaxed text-gray-800 dark:text-gray-200">
-        <Markdown text={message.content} />
+        <Markdown text={text} />
       </div>
       <MessageActions align="end">
-        <MessageActionButton label="Copy message" onClick={() => void copyMessage(message.content)}>
+        <MessageActionButton label="Copy message" onClick={() => void copyMessage(text)}>
           <CopyIcon />
           Copy
         </MessageActionButton>
@@ -445,6 +459,9 @@ export function HistoryTurn({
 
   return (
     <section aria-label={`Turn ${turn.displayNo}`} data-turn-key={turn.key}>
+      {turn.promptCard !== null ? (
+        <UserMessage text={turn.promptCard} blockKey={`${jobId}:prompt`} />
+      ) : null}
       {turn.messages
         .filter((message) => message.role === 'user')
         .map((message) => (
@@ -486,8 +503,8 @@ export function HistoryTurn({
           />
         ))}
       </div>
-      <div className="mb-6 mt-3 flex justify-end text-[11px] text-gray-400 dark:text-gray-500">
-        {onOpenRun ? (
+      {onOpenRun ? (
+        <div className="mb-6 mt-3 flex justify-end text-[11px] text-gray-400 dark:text-gray-500">
           <button
             type="button"
             onClick={() => onOpenRun(turn.jobId, turn.displayNo)}
@@ -495,8 +512,8 @@ export function HistoryTurn({
           >
             View execution
           </button>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
     </section>
   );
 }

@@ -12,6 +12,7 @@ import {
   getAgentJobThread,
 } from '@/lib/api/agents';
 import { CONVERSATION_RESTORED_EVENT, type ConversationRestoredDetail } from './conversationEvents';
+import { latestJob } from './conversationJob';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { PaneResizer } from './PaneResizer';
 import { useAgentProjects } from './useAgentJobs';
@@ -187,8 +188,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
     Promise.all([getAgentJob(id), getAgentJobThread(id)])
       .then(([job, thread]) => {
         if (cancelled || generation !== sessionGeneration.current) return;
-        const latest =
-          thread?.jobs.reduce((a, b) => ((b.turn_no ?? 1) > (a.turn_no ?? 1) ? b : a), job) ?? job;
+        const latest = latestJob([job, ...(thread?.jobs ?? [])]) ?? job;
         const row = conversationRow({
           job: latest,
           title: thread?.title ?? job.title ?? job.task_prompt.split('\n')[0],

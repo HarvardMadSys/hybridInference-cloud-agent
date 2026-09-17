@@ -343,6 +343,28 @@ describe('agents api', () => {
     expect(secondHeaders['Idempotency-Key']).not.toBe(firstHeaders['Idempotency-Key']);
   });
 
+  it('leaves an explicit fork operation ID under the caller’s control after any receipt', async () => {
+    const options = { requestId: 'persisted-side-chat-operation' };
+    fetchWithAuth
+      .mockResolvedValueOnce(jsonResponse({ id: 'committed-child' }))
+      .mockResolvedValueOnce(
+        jsonResponse({ detail: { error: { type: 'native_fork_failed', message: 'Failed' } } }, 409),
+      )
+      .mockResolvedValueOnce(jsonResponse({ id: 'committed-child' }));
+    await forkAgentJob('anchor', options);
+    await expect(forkAgentJob('anchor', options)).rejects.toThrow('Failed');
+    await forkAgentJob('anchor', options);
+    expect(
+      fetchWithAuth.mock.calls.map(
+        (call: Parameters<typeof client.fetchWithAuth>) => call[2]?.headers,
+      ),
+    ).toEqual([
+      { 'Idempotency-Key': options.requestId },
+      { 'Idempotency-Key': options.requestId },
+      { 'Idempotency-Key': options.requestId },
+    ]);
+  });
+
   it('loads source-control integrations', async () => {
     fetchWithAuth.mockResolvedValue(
       jsonResponse({ providers: [{ provider: 'github', configured: true, connected: false }] }),
