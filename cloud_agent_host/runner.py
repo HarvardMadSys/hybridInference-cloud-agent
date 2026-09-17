@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import json
 import os
 import pathlib
 import queue
@@ -41,7 +42,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable, Mapping
 
 import httpx
 
@@ -77,6 +78,13 @@ from cloud_agent_host.host_runtime import (
     write_handover,
 )
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
+from cloud_agent_host.measurement_delivery import (
+    DELIVERY_ATTEMPTS_MAX,
+    DELIVERY_TIMEOUT_S,
+    attempts_exhausted,
+    classify_exception,
+    classify_response,
+)
 from cloud_agent_host.patch_gate import branch_name_for
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
@@ -373,6 +381,25 @@ class ControlPlane:
             raise LeaseLost(response.text[:200])
         response.raise_for_status()
         return response.json() if response.content else {}
+
+    def record_measurement(self, job_id: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """Post one measurement and return its status and body.
+
+        Returns the answer rather than raising on a non-2xx, because delivery
+        decides what a status means: a 409 here is a *measurement* conflict,
+        not a lost lease, and the shared ``_post`` would raise ``LeaseLost``
+        for it and end a turn that had already succeeded.
+        """
+        response = self._client.post(
+            f"{self._base}/v1/agent/worker/jobs/{job_id}/measurements",
+            json=body,
+            timeout=DELIVERY_TIMEOUT_S,
+        )
+        try:
+            parsed = response.json() if response.content else {}
+        except ValueError:
+            parsed = {}
+        return response.status_code, parsed if isinstance(parsed, dict) else {}
 
     def append_event(self, event: NormalizedEvent) -> None:
         """Report one normalized event, retrying once now that replay is safe.
@@ -2353,6 +2380,56 @@ def run_turn(
     host: str | None = None,
     measurement: operation_profiling.Measurement | None = None,
 ) -> int:
+    """Deliver one already-claimed turn, then report what it measured.
+
+    The delivery is outside the turn on purpose: the record was frozen while
+    the startup ran, and sending it -- with its retries and its timeouts --
+    must not land inside the thing being measured or delay the turn's own
+    answer.
+    """
+    try:
+        return _run_turn(
+            job,
+            base_url=base_url,
+            gateway_url=gateway_url,
+            worker_id=worker_id,
+            lease_ttl=lease_ttl,
+            agent_timeout_s=agent_timeout_s,
+            backend=backend,
+            host=host,
+            measurement=measurement,
+        )
+    finally:
+        if measurement is not None:
+            control = ControlPlane(base_url, job.worker_token)
+            try:
+                deliver_measurements(
+                    control=control,
+                    job_id=job.job_id,
+                    measurement_ids=[measurement.measurement_id],
+                )
+            except Exception:
+                logger.warning(
+                    "agent_measurement_delivery_failed",
+                    exc_info=True,
+                    extra={"event": "agent_measurement_delivery_failed"},
+                )
+            finally:
+                control.close()
+
+
+def _run_turn(
+    job: ClaimedJob,
+    *,
+    base_url: str,
+    gateway_url: str = "",
+    worker_id: str,
+    lease_ttl: float = DEFAULT_LEASE_TTL_S,
+    agent_timeout_s: float = DEFAULT_AGENT_TIMEOUT_S,
+    backend: SandboxBackend | None = None,
+    host: str | None = None,
+    measurement: operation_profiling.Measurement | None = None,
+) -> int:
     """Deliver one already-claimed turn, and report its outcome.
 
     Everything after the claim: the lease renewal, the retained session, the
@@ -3014,6 +3091,159 @@ def run_forever(
     turns.shutdown(immediate=immediate)
     stop_all()
     return 0
+
+
+#: The fields of a record a run manifest is built from. The manifest is
+#: derived from the record rather than re-read from the environment so the two
+#: cannot describe different experiments: the producer states what it measured
+#: under, and the control plane compares that against what it already stored.
+def _manifest_for(record: Mapping[str, Any], descriptor: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the experiment manifest for one delivered record."""
+    return {
+        "run_id": record.get("profiling_run_id"),
+        "operations": list(descriptor.get("operations") or []),
+        "target": dict(descriptor.get("target") or {}),
+        "expires_at": record.get("run_expires_at"),
+        "config_version": int(descriptor.get("config_version") or 1),
+        "admission_instances": list(descriptor.get("admission_instances") or []),
+    }
+
+
+def deliver_measurements(
+    *,
+    control: ControlPlane,
+    job_id: str,
+    measurement_ids: Iterable[str] | None = None,
+) -> dict[str, int]:
+    """Send this process's finished measurements, and say what happened.
+
+    Called after the turn, never during it. The records were frozen while the
+    startup was running and written to the sink by the export thread; this only
+    reads them back and hands them over, so no delivery, retry or timeout can
+    land inside the thing being measured.
+
+    Delivery is best effort by design. A refused or undeliverable record is
+    counted and the turn ends normally -- the measurement is diagnostic, and
+    losing one must never fail the work it described. What it must not do is
+    *silently* lose one, which is what the counts are for.
+
+    Returns:
+        ``{"delivered", "duplicate", "dropped", "retried"}`` for this call.
+    """
+    sink = (os.environ.get(operation_profiling.ENV_PROFILING_SINK) or "").strip()
+    counts = {"delivered": 0, "duplicate": 0, "dropped": 0, "retried": 0}
+    if not sink or not os.path.exists(sink):
+        return counts
+    operation_profiling.flush_sink()
+    wanted = set(measurement_ids or ())
+    try:
+        with open(sink, encoding="utf-8") as handle:
+            lines = [line for line in handle if line.strip()]
+    except OSError as exc:
+        logger.warning(
+            "agent_measurement_sink_unreadable",
+            extra={"event": "agent_measurement_sink_unreadable", "error": str(exc)},
+        )
+        return counts
+
+    delivered: set[str] = set()
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            # A truncated line is a record the exporter could not finish
+            # writing. It is dropped from the sink and counted, not retried:
+            # re-reading bytes that will never parse cannot help.
+            counts["dropped"] += 1
+            continue
+        measurement_id = str(record.get("measurement_id") or "")
+        if wanted and measurement_id not in wanted:
+            continue
+        body: dict[str, Any] = {"record": record}
+        descriptor = _profiling_descriptor()
+        if descriptor:
+            body["run"] = _manifest_for(record, descriptor)
+        for attempt in range(1, DELIVERY_ATTEMPTS_MAX + 1):
+            try:
+                status, answer = control.record_measurement(job_id, body)
+            except Exception as exc:
+                outcome = classify_exception(exc)
+            else:
+                outcome = classify_response(status, answer)
+            if outcome.delivered:
+                counts["duplicate" if outcome.result == "duplicate" else "delivered"] += 1
+                delivered.add(measurement_id)
+                break
+            if not outcome.retryable:
+                counts["dropped"] += 1
+                delivered.add(measurement_id)
+                logger.warning(
+                    "agent_measurement_refused",
+                    extra={
+                        "event": "agent_measurement_refused",
+                        "job_id": job_id,
+                        "measurement_id": measurement_id,
+                        "reason": outcome.reason,
+                    },
+                )
+                break
+            counts["retried"] += 1
+            if attempts_exhausted(attempt):
+                counts["dropped"] += 1
+                delivered.add(measurement_id)
+                logger.warning(
+                    "agent_measurement_undeliverable",
+                    extra={
+                        "event": "agent_measurement_undeliverable",
+                        "job_id": job_id,
+                        "measurement_id": measurement_id,
+                        "reason": outcome.reason,
+                    },
+                )
+                break
+            time.sleep(min(2.0, 0.25 * attempt))
+
+    _forget_delivered(sink, lines, delivered)
+    return counts
+
+
+def _profiling_descriptor() -> dict[str, Any]:
+    """Return the raw run descriptor, or ``{}`` when profiling is off."""
+    raw = (os.environ.get(operation_profiling.ENV_PROFILING_RUN) or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _forget_delivered(sink: str, lines: list[str], delivered: set[str]) -> None:
+    """Rewrite the sink without the records whose fate is decided.
+
+    The sink is this process's outbox. A record that was delivered or refused
+    will never be sent again, so leaving it would mean sending it on the next
+    turn -- and a refused one would be refused again, once per turn, forever.
+    A record still in flight, or one this call did not select, stays.
+    """
+    remaining: list[str] = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if str(record.get("measurement_id") or "") in delivered:
+            continue
+        remaining.append(line)
+    try:
+        with open(sink, "w", encoding="utf-8") as handle:
+            handle.writelines(remaining)
+    except OSError as exc:  # pragma: no cover - depends on the filesystem
+        logger.warning(
+            "agent_measurement_sink_unwritable",
+            extra={"event": "agent_measurement_sink_unwritable", "error": str(exc)},
+        )
 
 
 def _bound_measurement(

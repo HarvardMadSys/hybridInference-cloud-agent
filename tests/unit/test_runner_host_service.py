@@ -908,3 +908,160 @@ def test_a_poll_that_claimed_nothing_spends_no_slot(monkeypatch):
     assert second is not None
     operation_profiling.discard(second)
     operation_profiling.reset_cache()
+
+
+# ── The exporter runtime ───────────────────────────────────────────────
+
+
+def _sink_with(monkeypatch: Any, tmp_path: Any, records: list[dict[str, Any]]) -> str:
+    """Point profiling at a sink holding these frozen records."""
+    import json
+
+    from cloud_agent_host import operation_profiling
+
+    sink = tmp_path / "records.jsonl"
+    sink.write_text("".join(json.dumps(record) + "\n" for record in records))
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    monkeypatch.setenv(
+        operation_profiling.ENV_PROFILING_RUN,
+        json.dumps(_descriptor()),
+    )
+    operation_profiling.reset_cache()
+    return str(sink)
+
+
+def _frozen(measurement_id: str = "msm_1", **overrides: Any) -> dict[str, Any]:
+    """One record as the collector freezes it."""
+    from datetime import UTC, datetime
+
+    record = {
+        "schema_version": 3,
+        "measurement_id": measurement_id,
+        "interaction_id": measurement_id,
+        "profiling_run_id": "run-1",
+        "operation": "attempt.startup",
+        "request_kind": "attempt.startup",
+        "boundary_version": 1,
+        "coverage_scope": "host_startup",
+        "producer": "runner",
+        "producer_instance_id": "p-1",
+        "duration_us": 10,
+        "outcome": "dispatched",
+        "collection_complete": True,
+        "end_to_end_complete": False,
+        "startup_path": "new_group",
+        "observed_at": datetime.now(UTC).isoformat(),
+        "facts": {"operation": "attempt.startup"},
+    }
+    record.update(overrides)
+    return record
+
+
+class _StubControl:
+    """A control plane that answers measurements with a scripted verdict."""
+
+    def __init__(self, answers: list[Any]) -> None:
+        self.answers = answers
+        self.sent: list[tuple[str, dict[str, Any]]] = []
+        self.closed = False
+
+    def record_measurement(self, job_id: str, body: dict[str, Any]) -> Any:
+        """Record the body and return the next scripted answer."""
+        self.sent.append((job_id, body))
+        answer = self.answers.pop(0) if self.answers else (200, {"result": "stored"})
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    def close(self) -> None:
+        """Mark the client closed."""
+        self.closed = True
+
+
+def test_a_frozen_measurement_is_delivered_after_the_turn(monkeypatch, tmp_path):
+    """The record the exporter wrote reaches the control plane."""
+    import json
+
+    sink = _sink_with(monkeypatch, tmp_path, [_frozen()])
+    control = _StubControl([(200, {"result": "stored"})])
+
+    counts = runner_mod.deliver_measurements(control=control, job_id="ajob_1")
+
+    assert counts == {"delivered": 1, "duplicate": 0, "dropped": 0, "retried": 0}
+    assert len(control.sent) == 1
+    job_id, body = control.sent[0]
+    assert job_id == "ajob_1"
+    assert body["record"]["measurement_id"] == "msm_1"
+    # The manifest travels with the record, derived from the same descriptor.
+    assert body["run"]["run_id"] == "run-1"
+    assert body["run"]["operations"] == ["attempt.startup"]
+    # The sink is this process's outbox: a delivered record leaves it, or the
+    # next turn sends it again.
+    with open(sink) as handle:
+        assert json.loads(handle.read() or "null") is None
+
+
+def test_a_duplicate_is_counted_as_such(monkeypatch, tmp_path):
+    """The control plane already having it is a success, said differently."""
+    _sink_with(monkeypatch, tmp_path, [_frozen()])
+    control = _StubControl([(200, {"result": "duplicate"})])
+
+    counts = runner_mod.deliver_measurements(control=control, job_id="ajob_1")
+
+    assert counts["duplicate"] == 1
+    assert counts["delivered"] == 0
+
+
+def test_a_refusal_is_not_retried(monkeypatch, tmp_path):
+    """A conflict is terminal: the same bytes get the same answer."""
+    _sink_with(monkeypatch, tmp_path, [_frozen()])
+    control = _StubControl([(200, {"result": "run_conflict"})])
+
+    counts = runner_mod.deliver_measurements(control=control, job_id="ajob_1")
+
+    assert counts["dropped"] == 1
+    assert counts["retried"] == 0
+    assert len(control.sent) == 1, "a refusal must not be sent again"
+
+
+def test_a_transport_failure_is_retried_then_given_up_on(monkeypatch, tmp_path):
+    """A destination that never answers costs bounded attempts, not a hang."""
+    import httpx
+
+    _sink_with(monkeypatch, tmp_path, [_frozen()])
+    failure = httpx.ConnectError("refused")
+    control = _StubControl([failure, failure, failure])
+
+    counts = runner_mod.deliver_measurements(control=control, job_id="ajob_1")
+
+    assert counts["dropped"] == 1
+    assert len(control.sent) == 3, "the stated attempt ceiling, no more"
+
+
+def test_a_turn_with_no_measurement_delivers_nothing(monkeypatch, tmp_path):
+    """Profiling off means no sink, no request and no cost."""
+    import os
+
+    from cloud_agent_host import operation_profiling
+
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_SINK, raising=False)
+    control = _StubControl([])
+
+    counts = runner_mod.deliver_measurements(control=control, job_id="ajob_1")
+
+    assert counts == {"delivered": 0, "duplicate": 0, "dropped": 0, "retried": 0}
+    assert control.sent == []
+    assert not os.path.exists(str(tmp_path / "records.jsonl"))
+
+
+def test_only_this_turns_record_is_delivered(monkeypatch, tmp_path):
+    """A sink shared with an earlier turn does not re-send its samples."""
+    _sink_with(monkeypatch, tmp_path, [_frozen("msm_old"), _frozen("msm_this")])
+    control = _StubControl([(200, {"result": "stored"})])
+
+    counts = runner_mod.deliver_measurements(
+        control=control, job_id="ajob_1", measurement_ids=["msm_this"]
+    )
+
+    assert counts["delivered"] == 1
+    assert [body["record"]["measurement_id"] for _job, body in control.sent] == ["msm_this"]
