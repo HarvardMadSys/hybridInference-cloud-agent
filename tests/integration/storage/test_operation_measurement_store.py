@@ -98,11 +98,12 @@ class _Store:
         return getattr(self.repository, name)
 
 
-#: One experiment's configured expiry, frozen for the whole module. A helper
-#: that re-derived it per call would be manufacturing a different experiment
-#: every time, so a test of idempotence would have to loosen the rule it is
-#: meant to be checking.
-RUN_EXPIRES_AT = datetime(2026, 9, 17, 12, 0, tzinfo=UTC)
+#: One experiment's configured expiry, frozen for the whole module but stated
+#: relative to now. A helper that re-derived it per call would be manufacturing
+#: a different experiment every time, so a test of idempotence would have to
+#: loosen the rule it is meant to be checking -- while a calendar literal would
+#: describe an experiment that has already ended.
+RUN_EXPIRES_AT = datetime.now(UTC).replace(microsecond=0) + timedelta(hours=1)
 
 
 def _run(**overrides: object) -> dict[str, object]:

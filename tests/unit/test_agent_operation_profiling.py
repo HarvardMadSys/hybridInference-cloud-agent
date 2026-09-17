@@ -1564,35 +1564,28 @@ def test_a_measurement_carries_the_configured_expiry_not_its_own_clock(monkeypat
 
 def test_the_same_instant_written_two_ways_is_one_expiry():
     """An offset spelling and a UTC spelling are the same configured moment."""
-    utc_run = profiling.parse_run(
-        json.dumps(
-            {
-                "run_id": "run-1",
-                "operations": ["attempt.startup"],
-                "expires_at": "2026-09-17T12:00:00+00:00",
-                "max_operations": 10,
-            }
-        )
-    )
-    offset_run = profiling.parse_run(
-        json.dumps(
-            {
-                "run_id": "run-1",
-                "operations": ["attempt.startup"],
-                "expires_at": "2026-09-17T20:00:00+08:00",
-                "max_operations": 10,
-            }
-        )
-    )
-    zulu_run = profiling.parse_run(
-        json.dumps(
-            {
-                "run_id": "run-1",
-                "operations": ["attempt.startup"],
-                "expires_at": "2026-09-17T12:00:00Z",
-                "max_operations": 10,
-            }
-        )
-    )
+    # One future instant, spelled three ways. Deriving all three from a single
+    # value is the point: literals pinned to a date would start failing on that
+    # date, because ``parse_run`` requires an expiry in the future and the
+    # check is against the real clock. A test must not expire.
+    # Whole seconds, because one of the three spellings carries no fractional
+    # part -- comparing a microsecond-truncated copy with the original would be
+    # testing the spelling rather than the instant.
+    moment = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(microsecond=0)
+    beijing = timezone(timedelta(hours=8))
 
+    def descriptor(expires_at: str) -> dict[str, object]:
+        return {
+            "run_id": "run-1",
+            "operations": ["attempt.startup"],
+            "expires_at": expires_at,
+            "max_operations": 10,
+        }
+
+    utc_run = profiling.parse_run(json.dumps(descriptor(moment.isoformat())))
+    offset_run = profiling.parse_run(json.dumps(descriptor(moment.astimezone(beijing).isoformat())))
+    zulu_run = profiling.parse_run(json.dumps(descriptor(moment.strftime("%Y-%m-%dT%H:%M:%SZ"))))
+
+    # Three strings that differ, one instant that does not.
+    assert len({moment.isoformat(), moment.astimezone(beijing).isoformat()}) == 2
     assert utc_run.expires_at_utc == offset_run.expires_at_utc == zulu_run.expires_at_utc
