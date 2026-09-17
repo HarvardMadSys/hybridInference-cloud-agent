@@ -12,6 +12,10 @@ import type { TranslationKey } from './en';
  * easier to read.
  */
 export const zhCN: Record<TranslationKey, string> = {
+  'sideChat.tab': '侧聊',
+  'sideChat.add': '添加工作区标签',
+  'sideChat.new': '新建侧聊',
+  'sideChat.close': '关闭{name}',
   'sideChat.region': '侧聊',
   'sideChat.message': '发送侧聊消息',
   'sideChat.messages': '侧聊消息',

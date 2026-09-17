@@ -72,6 +72,8 @@ import {
 } from './ConversationComposer';
 import { hasLostContext, ownerRunNote } from './conversationJob';
 import { SideChat } from './SideChat';
+import { WorkspaceTabBar } from './WorkspaceTabBar';
+import { useWorkspaceTabs, type WorkspaceTab } from './useWorkspaceTabs';
 import {
   CopyIcon,
   RewindIcon,
@@ -82,8 +84,6 @@ import {
   EventRow,
   HistoryTurn,
 } from './ChatMessages';
-
-type WorkspaceTab = 'git' | 'terminal' | 'files' | 'side-chat';
 
 export const WORKSPACE_WIDTH_STORAGE_KEY = 'agents.workspace.width';
 const WORKSPACE_DEFAULT_WIDTH = 560;
@@ -108,13 +108,6 @@ const INSPECTOR_DEFAULT_WIDTH = 400;
 const INSPECTOR_MIN_WIDTH = 320;
 const INSPECTOR_MAX_WIDTH = 640;
 const TRAJECTORY_MIN_WIDTH = 420;
-
-const WORKSPACE_TABS: Array<{ key: WorkspaceTab; label: string }> = [
-  { key: 'git', label: 'Git' },
-  { key: 'terminal', label: 'Terminal' },
-  { key: 'files', label: 'Files' },
-  { key: 'side-chat', label: 'Side Chat' },
-];
 
 const DIFF_LINE_CLASS = {
   hunk: 'bg-gray-50 dark:bg-gray-950 py-1 text-gray-400 dark:text-gray-500',
@@ -531,7 +524,8 @@ export function JobDetail({
   useEffect(() => setTitle(job.title), [job.title, job.threadId]);
   const [tab, setTab] = useState<'chat' | 'trajectory'>('chat');
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
-  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('git');
+  const workspaceTabs = useWorkspaceTabs(userId, job, threadJobs);
+  const workspaceTab = workspaceTabs.selected;
   // The right region holds either the workspace or one selected step, never
   // both: two panels would hide the trajectory that explains either of them.
   const [inspector, setInspector] = useState<InspectorSelection | null>(null);
@@ -719,7 +713,7 @@ export function JobDetail({
   }, [isActive]);
 
   function openWorkspace(tab: WorkspaceTab) {
-    setWorkspaceTab(tab);
+    workspaceTabs.select(tab);
     setWorkspaceOpen(true);
     setInspector(null);
   }
@@ -1633,35 +1627,15 @@ export function JobDetail({
             workspaceOpen ? 'flex' : 'hidden'
           } h-full min-h-0 min-w-0 flex-col overflow-hidden bg-white dark:bg-gray-900 lg:w-[var(--job-workspace-width)] lg:shrink-0`}
         >
-          <nav
-            aria-label="Workspace views"
-            role="tablist"
-            className="sticky top-0 z-10 flex gap-1 overflow-x-auto border-b border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-4 text-[13px] font-medium"
-          >
-            {WORKSPACE_TABS.map((tab) => (
-              <button
-                key={tab.key}
-                id={`workspace-tab-${tab.key}`}
-                type="button"
-                role="tab"
-                aria-controls={`workspace-panel-${tab.key}`}
-                aria-selected={workspaceTab === tab.key}
-                onClick={() => openWorkspace(tab.key)}
-                className={`shrink-0 border-b-2 px-3 py-3 ${
-                  workspaceTab === tab.key
-                    ? 'border-gray-900 dark:border-gray-100 text-gray-900 dark:text-gray-50'
-                    : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100'
-                }`}
-              >
-                {tab.label}
-                {tab.key === 'git' && job.diffFiles.length ? (
-                  <span className="ml-1.5 rounded bg-gray-100 dark:bg-white/5 px-1.5 py-0.5 text-[10px] text-gray-500 dark:text-gray-400">
-                    {job.diffFiles.length}
-                  </span>
-                ) : null}
-              </button>
-            ))}
-          </nav>
+          <WorkspaceTabBar
+            key={`${userId}:${job.threadId ?? job.id}`}
+            selected={workspaceTab}
+            chats={workspaceTabs.chats}
+            diffCount={job.diffFiles.length}
+            onSelect={openWorkspace}
+            onAdd={workspaceTabs.add}
+            onClose={workspaceTabs.close}
+          />
           <div
             id="workspace-panel-git"
             role="tabpanel"
@@ -1700,21 +1674,26 @@ export function JobDetail({
           >
             <WorkspaceFiles job={job} active={workspaceOpen && workspaceTab === 'files'} />
           </div>
-          <div
-            id="workspace-panel-side-chat"
-            role="tabpanel"
-            aria-labelledby="workspace-tab-side-chat"
-            hidden={workspaceTab !== 'side-chat'}
-            className="min-h-0 flex-1"
-          >
-            <SideChat
-              sourceJob={job}
-              sourceJobs={threadJobs}
-              userId={userId}
-              config={config}
-              active={workspaceOpen && workspaceTab === 'side-chat'}
-            />
-          </div>
+          {workspaceTabs.chats.map((chat) => (
+            <div
+              key={chat.id}
+              id={`workspace-panel-${chat.id}`}
+              data-side-chat-id={chat.id}
+              role="tabpanel"
+              aria-labelledby={`workspace-tab-${chat.id}`}
+              hidden={workspaceTab !== chat.id}
+              className="min-h-0 flex-1"
+            >
+              <SideChat
+                tab={chat}
+                sourceJob={job}
+                sourceJobs={threadJobs}
+                userId={userId}
+                config={config}
+                active={workspaceOpen && workspaceTab === chat.id}
+              />
+            </div>
+          ))}
         </aside>
 
         {inspector ? (
