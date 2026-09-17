@@ -141,7 +141,7 @@ describe('TaskComposer source-control onboarding', () => {
     await screen.findByLabelText('Branch');
     const picker = await screen.findByRole('button', { name: /1 selected/ });
     fireEvent.click(picker);
-    fireEvent.click(await screen.findByRole('checkbox'));
+    fireEvent.click(await screen.findByRole('switch'));
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
     expect(screen.getByRole('button', { name: /0 selected/ })).toBeInTheDocument();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Review the diff' } });
