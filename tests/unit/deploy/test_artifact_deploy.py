@@ -704,3 +704,51 @@ def test_a_warm_machine_never_records_the_generation_that_is_serving(tmp_path: P
 
     assert failed.returncode != 0
     assert not any("stop" in call["args"] for call in calls), [c["args"] for c in calls]
+
+
+def test_abandoning_stops_what_this_deployment_started_and_nothing_else(tmp_path: Path):
+    """The case a deployer has and this script did not: the *other* machine
+    failed, so there is no activation to run, and the only code that cleaned
+    these up lived inside the activation."""
+    script, env = deployment(tmp_path, "control-plane")
+    env["TEST_RUNNING"] = "0"
+    prepared, _ = run(script, env, "--phase", "prepare-database", COMMIT)
+    assert prepared.returncode == 0, prepared.stdout + prepared.stderr
+
+    result, calls = run(script, env, "--phase", "abandon", COMMIT)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    stopped = next(call for call in calls if "stop" in call["args"])
+    assert "control-plane" in stopped["args"] and "mcp-relay" in stopped["args"]
+    assert not (Path(env["DEPLOY_ROOT"]) / ".bootstrapped-services").exists()
+    assert not any("--remove-orphans" in c["args"] for c in calls), "it deploys nothing"
+    assert (Path(env["DEPLOY_ROOT"]) / ".deployed-sha").read_text().strip() == "previous-generation"
+
+
+def test_abandoning_a_warm_machine_touches_nothing(tmp_path: Path):
+    """A service that was already serving when this deployment began is not
+    this deployment's to stop. Undoing a rollout must not take down the one it
+    failed to replace."""
+    script, env = deployment(tmp_path, "control-plane")
+    run(script, env, "--phase", "prepare-database", COMMIT)
+
+    result, calls = run(script, env, "--phase", "abandon", COMMIT)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not any("stop" in call["args"] for call in calls), [c["args"] for c in calls]
+
+
+def test_abandoning_twice_is_not_an_error(tmp_path: Path):
+    """A cleanup a workflow runs on failure will sometimes run with nothing to
+    do, and that is not a failure of its own."""
+    script, env = deployment(tmp_path, "control-plane")
+    env["TEST_RUNNING"] = "0"
+    run(script, env, "--phase", "prepare-database", COMMIT)
+    first, _ = run(script, env, "--phase", "abandon", COMMIT)
+    # The recorded boundary appends across invocations; this assertion is about
+    # the second one alone.
+    Path(env["TEST_COMMAND_LOG"]).unlink()
+    second, calls = run(script, env, "--phase", "abandon", COMMIT)
+
+    assert first.returncode == 0 and second.returncode == 0
+    assert not any("stop" in call["args"] for call in calls), [c["args"] for c in calls]

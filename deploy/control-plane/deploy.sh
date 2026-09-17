@@ -32,6 +32,11 @@
 #                     nothing, so this phase too replaces nothing.
 #   activate          the compatibility fence, the stack, the health checks and
 #                     the record of what is deployed.
+#   abandon           stop what this deployment started and never activated, and
+#                     nothing else. For the deployer whose *other* machine
+#                     failed: with no activation to run, the services this
+#                     deployment brought up for the host's readiness probe would
+#                     otherwise stay up with nothing to serve.
 #
 #   SOURCE_REPO   a local clone holding <sha> (default: $GITHUB_WORKSPACE)
 #   DEPLOY_ROOT   where the deployed checkout lives (default /srv/freeinference-cloud-agent)
@@ -54,8 +59,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "${PHASE}" in
-  all|prepare|prepare-database|activate) ;;
-  *) printf '[deploy] ERROR: unknown phase %s; expected prepare, prepare-database, activate\n' "${PHASE}" >&2; exit 1 ;;
+  all|prepare|prepare-database|activate|abandon) ;;
+  *) printf '[deploy] ERROR: unknown phase %s; expected prepare, prepare-database, activate, abandon\n' "${PHASE}" >&2; exit 1 ;;
 esac
 # Every phase runs the same setup below — the mode check, the checkout or the
 # artifact environment, the Compose helper — because each is a separate process
@@ -250,6 +255,40 @@ cleanup_failed_bootstrap() {
   fi
 }
 trap cleanup_failed_bootstrap EXIT
+
+# Give up on this deployment and undo only what it started.
+#
+# The record is the whole of it: it names the services this deployment brought
+# up because nothing was running, which is exactly the set that may be stopped.
+# A service that was already serving when this deployment began is not in it and
+# is not touched — undoing a deployment must not take down the one it failed to
+# replace.
+#
+# For the case a deployer has and this script did not: the host failed, so there
+# is no activation to run, and the only code that ever cleaned these up lived
+# inside the activation.
+abandon_bootstrap() {
+  local started=()
+  if [ -f "${BOOTSTRAP_RECORD}" ]; then
+    while IFS= read -r bootstrapped; do
+      [ -n "${bootstrapped}" ] && started+=("${bootstrapped}")
+    done < "${BOOTSTRAP_RECORD}"
+  fi
+  if [ "${#started[@]}" -eq 0 ]; then
+    log "this deployment started no services of its own; nothing to undo"
+    rm -f "${BOOTSTRAP_RECORD}"
+    return 0
+  fi
+  log "stopping what this deployment started and never activated: ${started[*]}"
+  compose stop "${started[@]}"
+  rm -f "${BOOTSTRAP_RECORD}"
+}
+
+if [ "${PHASE}" = abandon ]; then
+  abandon_bootstrap
+  log "abandoned; the deployment that was running here is untouched"
+  exit 0
+fi
 
 if runs_phase prepare; then
   if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
