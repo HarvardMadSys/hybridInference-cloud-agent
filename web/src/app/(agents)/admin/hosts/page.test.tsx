@@ -556,7 +556,7 @@ describe('capacity columns', () => {
     expect(within(row).queryByText('0 GiB available')).not.toBeInTheDocument();
   });
 
-  it('asks a host for a number of turns and reports it as saved, not applied', async () => {
+  it('asks a host for a number of turns and shows it as applying until the host confirms', async () => {
     mocked.list.mockResolvedValue(pool([host({ slots_total: 4, slots_used: 1 })]));
     mocked.slots.mockResolvedValue(
       pool([host({ slots_total: 4, slots_used: 1, slots_desired: 6 })]),
@@ -576,25 +576,22 @@ describe('capacity columns', () => {
     // the row says the saved one is on its way rather than in force.
     expect(await within(row).findByText('1 / 4 in use')).toBeInTheDocument();
     expect(within(row).getByText('3 free · applying 6')).toBeInTheDocument();
-    expect(within(row).getByText(/takes the new one up on its next heartbeat/)).toBeInTheDocument();
-    // The confirmation says saved, because that is all that has happened.
-    expect(await screen.findByRole('status')).toHaveTextContent(
-      'Saved: runner-a runs at most 6 turns at once',
+    // The row is the whole confirmation: no banner restates it, and the
+    // mechanics (heartbeats, when raising applies) stay on hover, not on
+    // the page.
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(within(row).queryByText(/next heartbeat/)).not.toBeInTheDocument();
+    expect(within(row).getByText('1 / 4 in use').closest('div')).toHaveAttribute(
+      'title',
+      expect.stringContaining('next heartbeat'),
     );
   });
 
-  it('returns a host to its own default', async () => {
+  it('offers no reset: the saved number is simply the number the host has', async () => {
     mocked.list.mockResolvedValue(pool([host({ slots_total: 4, slots_desired: 3 })]));
-    mocked.slots.mockResolvedValue(pool([host({ slots_total: 4, slots_desired: null })]));
     render(<AdminHostsPage />);
 
-    const select = await screen.findByLabelText('Turns at once for runner-a');
-    expect(select).toHaveValue(3);
-    fireEvent.click(screen.getByRole('button', { name: 'Host default' }));
-
-    await waitFor(() => expect(mocked.slots).toHaveBeenCalledWith('runner-a', null));
-    expect(await screen.findByRole('status')).toHaveTextContent('goes back to its own default');
-    // Nothing to reset any more.
+    expect(await screen.findByLabelText('Turns at once for runner-a')).toHaveValue(3);
     expect(screen.queryByRole('button', { name: 'Host default' })).not.toBeInTheDocument();
   });
 
@@ -620,7 +617,12 @@ describe('capacity columns', () => {
     const row = (await screen.findByRole('rowheader', { name: 'runner-a' })).closest('tr')!;
     expect(within(row).getByText('0 / 3 in use')).toBeInTheDocument();
     expect(within(row).getByText('3 free · redeploy to change')).toBeInTheDocument();
-    expect(within(row).getByText(/predates remote limits/)).toBeInTheDocument();
+    // The reason is a hover, not a paragraph under the field.
+    expect(within(row).queryByText(/predates remote limits/)).not.toBeInTheDocument();
+    expect(within(row).getByText('0 / 3 in use').closest('div')).toHaveAttribute(
+      'title',
+      expect.stringContaining('predates remote limits'),
+    );
   });
 
   it('counts turns finishing above a limit that came down', async () => {

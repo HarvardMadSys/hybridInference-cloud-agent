@@ -561,9 +561,11 @@ function HostsView() {
     return () => clearInterval(timer);
   }, [historyTargetKey, loadHistory]);
 
-  // Every action returns the whole pool, so they all end the same way.
+  // Every action returns the whole pool, so they all end the same way. An
+  // action whose effect is visible on the row it changed passes no notice:
+  // the row is the confirmation, and a banner restating it is noise.
   const run = useCallback(
-    async (action: () => Promise<AgentRunnerHostPool>, ok: string) => {
+    async (action: () => Promise<AgentRunnerHostPool>, ok: string | null) => {
       setBusy(true);
       setNotice(null);
       try {
@@ -605,15 +607,11 @@ function HostsView() {
         : `${runtime} is back on each host's image default.`,
     );
 
-  const handleSlots = (host: string, name: string, slots: number | null) =>
-    run(
-      () => setAgentRunnerHostSlots(host, slots),
-      // Saved, which is all this can honestly claim. Whether the host has
-      // taken the number up is on the row, where it keeps being true.
-      slots === null
-        ? `Saved: ${name} goes back to its own default. Turns already running finish.`
-        : `Saved: ${name} runs at most ${slots} turns at once. Lowering applies immediately; raising applies when the host next reports in. Turns already running finish.`,
-    );
+  // No notice: the number lands in the row's own cell, which says "applying"
+  // until the host confirms it and then shows it in force. Whether the host
+  // has taken it up is on the row, where it keeps being true.
+  const handleSlots = (host: string, slots: number) =>
+    run(() => setAgentRunnerHostSlots(host, slots), null);
 
   const handleRemove = (host: string, slotsUsed: number) => {
     // The unforced call 409s on a busy host, and the operator would then have
@@ -904,11 +902,14 @@ function HostsView() {
                                 overwrite what the operator is typing, and a
                                 saved change does replace it.
 
-                                Saving is not applying, and the line below says
-                                which happened: a host takes a new limit up on
-                                its next heartbeat, an offline one takes it up
-                                when it returns, and one whose runner predates
-                                remote limits never does. */}
+                                Saving is not applying, and the cell's own note
+                                says which happened — "applying 8" until the
+                                host confirms, "not applied" for an offline
+                                host, "redeploy to change" for a runner that
+                                predates remote limits — with the longer reason
+                                on hover. Nothing else is written under the
+                                field: the number is the host's number, and an
+                                operator who wants a different one types it. */}
                             <form
                               className="mt-1.5 flex items-center gap-1.5"
                               onSubmit={(event) => {
@@ -923,7 +924,7 @@ function HostsView() {
                                 ) {
                                   return;
                                 }
-                                void handleSlots(host.host, name, value);
+                                void handleSlots(host.host, value);
                               }}
                             >
                               <input
@@ -947,22 +948,7 @@ function HostsView() {
                               >
                                 Apply
                               </button>
-                              {concurrency.requested !== null && (
-                                <button
-                                  type="button"
-                                  disabled={busy}
-                                  onClick={() => void handleSlots(host.host, name, null)}
-                                  className="text-[11px] text-gray-500 underline-offset-2 hover:underline disabled:opacity-40 dark:text-gray-400"
-                                >
-                                  Host default
-                                </button>
-                              )}
                             </form>
-                            {concurrency.explanation !== null && (
-                              <span className="mt-1 block max-w-[15rem] text-[11px] text-amber-700 dark:text-amber-300">
-                                {concurrency.explanation}
-                              </span>
-                            )}
                             {concurrency.launchError !== null && (
                               <span
                                 role="alert"
