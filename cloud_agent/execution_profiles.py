@@ -12,7 +12,7 @@ import os
 from collections.abc import Mapping
 from enum import StrEnum
 
-from cloud_agent_host.shared_protocol import (
+from cloud_agent_contracts.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,

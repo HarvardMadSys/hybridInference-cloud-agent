@@ -37,8 +37,9 @@ COPY cloud_agent_host/__init__.py cloud_agent_host/__init__.py
 ARG PIP_DEFAULT_TIMEOUT=120
 RUN pip install --no-cache-dir .
 
-# Both packages. See the header: `patch_gate` crosses the boundary.
+# All three packages. See the header: `patch_gate` crosses the boundary.
 COPY cloud_agent/ cloud_agent/
+COPY cloud_agent_contracts/ cloud_agent_contracts/
 COPY cloud_agent_host/ cloud_agent_host/
 
 # Alembic owns the schema. Nothing in this service creates a table at startup,

@@ -63,6 +63,7 @@ WORKDIR /app
 COPY --from=builder /app/.venv .venv
 ENV PATH="/app/.venv/bin:$PATH"
 
+COPY cloud_agent_contracts/ cloud_agent_contracts/
 COPY cloud_agent_host/ cloud_agent_host/
 # A new runner may adopt retained containers created from the previous image.
 # Keep the reviewed helper on the trusted side so it can atomically upgrade

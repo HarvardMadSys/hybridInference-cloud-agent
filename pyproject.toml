@@ -48,6 +48,8 @@ where = ["."]
 include = [
   "cloud_agent",
   "cloud_agent.*",
+  "cloud_agent_contracts",
+  "cloud_agent_contracts.*",
   "cloud_agent_host",
   "cloud_agent_host.*",
 ]
@@ -140,7 +142,7 @@ match-dir = "(?!tests|\\.venv|node_modules|web|migrations|docs).*"
 # imports` covers asyncpg, which ships no stubs.
 [tool.mypy]
 python_version = "3.12"
-files = ["cloud_agent", "cloud_agent_host"]
+files = ["cloud_agent", "cloud_agent_contracts", "cloud_agent_host"]
 follow_imports = "silent"
 ignore_missing_imports = true
 check_untyped_defs = true
