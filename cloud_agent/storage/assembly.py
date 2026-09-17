@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cloud_agent.storage.admin_conversation_queries import AdminConversationQueries
 from cloud_agent.storage.admin_queries import AdminRunQueries
 from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
 from cloud_agent.storage.repositories import (
@@ -75,6 +76,7 @@ class Storage:
         #: one console, not a capability any other caller asks for, and they
         #: have no port yet. Named here so that the routes which need them
         #: stop reaching into another object's pool to build one.
+        self.admin_conversations = AdminConversationQueries(pool)
         self.admin_runs = AdminRunQueries(pool)
         self.admin_usage = AdminUsageQueries(pool)
 

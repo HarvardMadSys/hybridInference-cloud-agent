@@ -12,6 +12,11 @@ workflow, inferred failure categories, queue diagnostics, or retry analysis.
 The navigation is **Admin → Runs → a task's activity, usage, and resources**.
 Servers remains available. A cross-task Usage page is a separate release.
 
+Navigation amendment (2026-09-17): the primary entry is now
+**Admin → Conversations → turns → execution observations**. See the
+[conversation navigation design](2026-09-17-admin-conversation-navigation.md)
+for grouping, selection, pagination and compatibility with existing run links.
+
 ## First release
 
 - List tasks across owners, defaulting to the last seven days, with bounded

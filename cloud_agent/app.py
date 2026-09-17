@@ -1032,6 +1032,7 @@ def create_app() -> FastAPI:
     configure_process_logging()
 
     from cloud_agent.api import (
+        admin_conversations,
         admin_hosts,
         admin_llm_requests,
         admin_runs,
@@ -1064,6 +1065,7 @@ def create_app() -> FastAPI:
     app.include_router(mcp_relay.router)
     app.include_router(hosts.router)
     app.include_router(admin_hosts.router)
+    app.include_router(admin_conversations.router)
     app.include_router(admin_runs.router)
     app.include_router(admin_usage.router)
     # Per-request LLM detail reads a second service and stays in its own module

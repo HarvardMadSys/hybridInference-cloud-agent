@@ -7,7 +7,7 @@ import binascii
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, Protocol, TypeVar
 
 import jwt
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
@@ -224,11 +224,19 @@ def decode_cursor(cursor: str | None, schema: type[_Cursor], scope: str) -> _Cur
         raise ValueError("Invalid pagination cursor for these filters.") from None
 
 
+class CreationWindowCursor(Protocol):
+    """The timestamp fields shared by run and conversation list cursors."""
+
+    since: datetime
+    until: datetime
+    created_at: datetime
+
+
 def resolve_run_window(
     *,
     since: datetime | None,
     until: datetime | None,
-    cursor: RunCursor | None,
+    cursor: CreationWindowCursor | None,
     now: datetime | None = None,
 ) -> tuple[datetime, datetime]:
     """Keep a seven-day default stable on later pages; bound each query to a year."""

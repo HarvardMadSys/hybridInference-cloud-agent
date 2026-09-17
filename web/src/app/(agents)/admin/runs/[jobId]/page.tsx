@@ -1,12 +1,14 @@
 'use client';
 
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
-import { useCallback, useEffect, useState } from 'react';
+import { useParams, useSearchParams } from 'next/navigation';
+import { Suspense, useCallback, useEffect, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import { getAdminRun, type AdminRunDetail } from '@/lib/api/adminRuns';
+import { conversationHref } from '@/lib/api/adminConversations';
+import { conversationLink } from '../../conversations/filters';
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../../AdminNavigation';
@@ -29,10 +31,15 @@ export default function AdminRunPage() {
   const params = useParams<{ jobId: string }>();
   const { state } = useAuth();
   if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) return <AdminRequired />;
-  return <RunDetails key={`${state.user?.id}:${params?.jobId}`} jobId={params?.jobId ?? ''} />;
+  return (
+    <Suspense>
+      <RunDetails key={`${state.user?.id}:${params?.jobId}`} jobId={params?.jobId ?? ''} />
+    </Suspense>
+  );
 }
 
 function RunDetails({ jobId }: { jobId: string }) {
+  const linked = conversationLink(useSearchParams().toString(), false);
   const [detail, setDetail] = useState<AdminRunDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -87,10 +94,14 @@ function RunDetails({ jobId }: { jobId: string }) {
         <AdminNavigation current="runs" />
         <div className="mt-6 flex items-center justify-between gap-4">
           <Link
-            href="/admin/runs"
+            href={
+              detail?.run.thread_id
+                ? conversationHref(detail.run.thread_id, linked.filters ?? {})
+                : '/admin/conversations'
+            }
             className="text-sm text-crimson hover:underline dark:text-crimson-light"
           >
-            ← All runs
+            {detail?.run.thread_id ? '← Back to conversation' : '← All conversations'}
           </Link>
           <button
             className={BUTTON}

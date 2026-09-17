@@ -606,7 +606,7 @@ function BreakdownRow({
             href={href}
             className="text-xs font-medium text-crimson hover:underline dark:text-crimson-light"
           >
-            View runs
+            View conversations
           </Link>
         ) : (
           <span className="text-xs text-gray-400 dark:text-gray-500">
