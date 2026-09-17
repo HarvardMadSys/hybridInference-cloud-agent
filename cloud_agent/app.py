@@ -1037,6 +1037,7 @@ def create_app() -> FastAPI:
     from cloud_agent.api import (
         admin_hosts,
         admin_llm_requests,
+        admin_measurements,
         admin_runs,
         admin_usage,
         hosts,
@@ -1067,6 +1068,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_hosts.router)
     app.include_router(admin_runs.router)
     app.include_router(admin_usage.router)
+    app.include_router(admin_measurements.router)
     # Per-request LLM detail reads a second service and stays in its own module
     # for the same reason it is a separate page load: the default run detail
     # must not acquire a gateway I/O path.
