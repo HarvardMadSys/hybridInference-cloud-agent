@@ -86,6 +86,12 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.binding_aliases import binding_aliases
 from cloud_agent.mcp.models import ALIAS_PATTERN, ToolPolicy
 from cloud_agent.mcp.registry import resolve_connection, resolve_for_thread
+from cloud_agent.measurement_ingest import (
+    MeasurementRejected,
+    Owner,
+    validate_measurement,
+    validate_run,
+)
 from cloud_agent.operation_measurement import (
     FILE_CANDIDATES,
     FILES_LIST,
@@ -170,6 +176,8 @@ from cloud_agent.schemas import (
     WorkerFinishRequest,
     WorkerHeartbeatRequest,
     WorkerHeartbeatResponse,
+    WorkerMeasurementRequest,
+    WorkerMeasurementResponse,
     WorkerResourcesRequest,
     WorkerSandboxAbandonRequest,
     WorkerSandboxAdmissionRequest,
@@ -237,6 +245,7 @@ if TYPE_CHECKING:
         GrantRepository,
         HostPoolRepository,
         McpConnectionRepository,
+        OperationMeasurements,
         ResidencyRepository,
         SandboxRepository,
         SessionForkRepository,
@@ -268,6 +277,7 @@ class _RoutesStorage(Protocol):
     grants: GrantRepository
     host_pool: HostPoolRepository
     mcp: McpConnectionRepository
+    operation_measurements: OperationMeasurements
     residency: ResidencyRepository
     sandbox: SandboxRepository
     session_fork: SessionForkRepository
@@ -4251,6 +4261,82 @@ async def worker_append_event(
     if event_id is None:
         raise _lease_lost()
     return WorkerEventResponse(event_id=event_id)
+
+
+@router.post(
+    "/worker/jobs/{job_id}/measurements",
+    response_model=WorkerMeasurementResponse,
+)
+async def worker_record_measurement(
+    job_id: str,
+    body: WorkerMeasurementRequest,
+    authorization: str | None = Header(None),
+    store: _RoutesStorage | None = Depends(get_storage),
+) -> WorkerMeasurementResponse:
+    """Append one finished measurement to the experiment's stored history.
+
+    This is a diagnostic write and it is deliberately allowed to fail: a
+    refused record returns 4xx/5xx to the *producer*, which records it, while
+    the request the measurement describes has already been answered and is
+    unaffected. That is why this endpoint does not reuse the permissive
+    handling the broker gets -- a broker rule that swallowed every payload
+    would make a malformed record indistinguishable from a stored one.
+
+    The token is checked as a scope and a job match, never as a lease. A
+    measurement is frequently delivered *after* its attempt ended -- the
+    interesting startup samples are the ones from attempts that failed
+    quickly -- so requiring a live lease would discard exactly the samples
+    this exists to collect. What protects the table is that the record is
+    filed under the attempt the credential names, and nothing in the payload
+    can change that.
+    """
+    job_store = _require_store(store)
+    claims = _worker_claims(authorization)
+    _match_job(claims, job_id)
+    job = await job_store.conversation_queries.get_job(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"type": "not_found", "message": "No such job."}},
+        )
+    thread_sandbox = job.get("thread_sandbox") or {}
+    owner = Owner(
+        owner_id=str(job.get("user_id") or "") or None,
+        job_id=job_id,
+        thread_id=str(job.get("thread_id") or "") or None,
+        sandbox_id=str(thread_sandbox.get("sandbox_id") or "") or None,
+        host_id=str(thread_sandbox.get("host") or "") or None,
+        attempt_id=claims.get("attempt_id"),
+        lease_generation=claims.get("lease_generation"),
+    )
+    try:
+        measurement = validate_measurement(body.record, owner=owner)
+        run = validate_run(body.run) if body.run is not None else None
+    except MeasurementRejected as exc:
+        # 422: the producer sent something this deployment does not store. It
+        # is terminal -- the same bytes would be refused identically -- so the
+        # delivery policy must not retry it.
+        raise HTTPException(
+            status_code=422,
+            detail={"error": {"type": "measurement_rejected", "message": str(exc)}},
+        ) from exc
+
+    result = await job_store.operation_measurements.record_operation_measurement(
+        measurement=measurement.as_row(), run=run
+    )
+    if result in {"conflict", "run_conflict"}:
+        # The id is taken by different contents, or the experiment id names a
+        # different experiment. Neither is retryable and neither overwrites.
+        return WorkerMeasurementResponse(
+            result=result,
+            measurement_id=measurement.measurement_id,
+            reason=(
+                "this measurement id already names different contents"
+                if result == "conflict"
+                else "this run id already names a different experiment"
+            ),
+        )
+    return WorkerMeasurementResponse(result=result, measurement_id=measurement.measurement_id)
 
 
 @router.post("/worker/jobs/{job_id}/continuity", response_model=WorkerAckResponse)

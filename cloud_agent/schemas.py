@@ -1706,6 +1706,36 @@ class WorkerAckResponse(BaseModel):
     state: str | None = None
 
 
+class WorkerMeasurementRequest(BaseModel):
+    """One finished measurement, as the producer froze it.
+
+    Deliberately opaque below the envelope: the record is validated against the
+    collector's own bounds and its facts whitelist by the route, because those
+    constants live with the producer that produced it and a schema that
+    restated them would be a second copy free to drift.
+    """
+
+    #: The frozen record, exactly as the producer emitted it.
+    record: dict[str, Any]
+    #: The experiment manifest, sent with the first record a producer delivers
+    #: so the catalogue can be created. Omitted afterwards.
+    run: dict[str, Any] | None = None
+
+
+class WorkerMeasurementResponse(BaseModel):
+    """What the control plane did with one measurement.
+
+    ``result`` is an outcome rather than a bare acknowledgement because the
+    producer has to distinguish three things it would otherwise guess at:
+    stored, already stored (a retry that must not count twice), and refused
+    (which is terminal and must not be retried).
+    """
+
+    result: Literal["stored", "duplicate", "conflict", "run_conflict", "rejected"]
+    measurement_id: str | None = None
+    reason: str | None = None
+
+
 class McpConnectionSummary(BaseModel):
     """One MCP connection the composer may offer, and whether it currently works.
 
