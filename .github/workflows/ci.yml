@@ -993,7 +993,7 @@ jobs:
 
       - name: All five CLIs retain MCP through approval, resume and fork
         if: matrix.artifact.name == 'sandbox'
-        timeout-minutes: 10
+        timeout-minutes: 20
         env:
           MCP_TEST_SANDBOX_IMAGE: ${{ env.IMAGE_TAG }}
           MCP_TEST_RUN_LABEL: ${{ env.SUFFIX }}
@@ -1001,7 +1001,10 @@ jobs:
           TEST_DB_NAME: hybridinference_test_mcp
           TEST_DB_USER: postgres
           TEST_DB_PASSWORD: mcp-conformance-only
-          MCP_TEST_WORKERS: "3"
+          # Kilo's two full native-session cases timed out when they shared a
+          # small hosted PR runner. Trusted x64 hosts keep the measured
+          # three-worker path; the disposable hosted runner runs them serially.
+          MCP_TEST_WORKERS: ${{ github.event_name == 'pull_request' && '1' || '3' }}
         run: |
           set -euo pipefail
           database="mcp-db-${SUFFIX}"
