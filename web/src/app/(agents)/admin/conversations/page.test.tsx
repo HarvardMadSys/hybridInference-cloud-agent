@@ -59,7 +59,6 @@ function conversation(overrides: Partial<AdminConversationMatch> = {}): AdminCon
     latest_turn_state: 'succeeded',
     latest_runtime: 'claude-code',
     latest_model: 'model-b',
-    matching_turn_count: 2,
     last_matching_turn_at: since,
     ...overrides,
   };
@@ -119,7 +118,7 @@ describe('conversation navigation', () => {
     expect(screen.queryByText('job-3')).not.toBeInTheDocument();
     expect(screen.getByText('idle')).toBeInTheDocument();
     expect(screen.queryByText('succeeded', { selector: 'span' })).not.toBeInTheDocument();
-    expect(screen.getByText('2 matching')).toBeInTheDocument();
+    expect(screen.getByRole('cell', { name: '3' })).toBeInTheDocument();
     expect(screen.queryByRole('columnheader', { name: 'CPU' })).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Conversations' })).toHaveAttribute(
       'aria-current',

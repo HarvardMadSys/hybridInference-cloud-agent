@@ -27,11 +27,11 @@ keeps the time window and filters. This is live keyset pagination, not a frozen
 snapshot across HTTP requests; changed turn states can change cohort membership.
 The default window is seven days and the maximum is 366 days.
 
-Each row distinguishes the total number of turns from the number matching
-the selection. Its state, latest model and last activity describe the whole
-conversation. State reuses the owner surface's active-turn-first calculation:
-a settled latest turn cannot hide an earlier running or queued turn. `idle`
-does not assert that the user's overall task is complete.
+Each row shows the conversation's total number of turns. Its state, latest
+model and last activity describe the whole conversation. State reuses the
+owner surface's active-turn-first calculation: a settled latest turn cannot
+hide an earlier running or queued turn. `idle` does not assert that the
+user's overall task is complete.
 
 `GET /admin/agent/conversations/{thread_id}` returns metadata and a bounded
 page of turns, newest first. With no selection, it reads the entire history

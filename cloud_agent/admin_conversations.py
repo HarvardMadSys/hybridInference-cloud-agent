@@ -33,7 +33,6 @@ class AdminConversation(BaseModel):
 class AdminConversationMatch(AdminConversation):
     """A distinct conversation containing turns in the selected run cohort."""
 
-    matching_turn_count: int
     last_matching_turn_at: datetime
 
 

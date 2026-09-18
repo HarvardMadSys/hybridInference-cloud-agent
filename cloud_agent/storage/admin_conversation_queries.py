@@ -93,19 +93,18 @@ class AdminConversationQueries:
             rows = await conn.fetch(
                 f"""
                 WITH matching AS (
-                    SELECT j.thread_id, COUNT(*) AS matching_turn_count,
-                           MAX(j.created_at) AS last_matching_turn_at
+                    SELECT j.thread_id, MAX(j.created_at) AS last_matching_turn_at
                     FROM agent_jobs j JOIN agent_threads t ON t.id = j.thread_id
                     WHERE {_MATCH}
                     GROUP BY j.thread_id
                 ), page AS (
-                    SELECT thread_id, matching_turn_count, last_matching_turn_at
+                    SELECT thread_id, last_matching_turn_at
                     FROM matching
                     WHERE $9::timestamptz IS NULL
                        OR (last_matching_turn_at, thread_id) < ($9, $10::text)
                     ORDER BY last_matching_turn_at DESC, thread_id DESC LIMIT $11
                 )
-                SELECT {_COLUMNS}, p.matching_turn_count, p.last_matching_turn_at
+                SELECT {_COLUMNS}, p.last_matching_turn_at
                 {_FROM}
                 JOIN page p ON p.thread_id = t.id
                 ORDER BY p.last_matching_turn_at DESC, t.id DESC

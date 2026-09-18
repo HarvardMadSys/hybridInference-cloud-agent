@@ -73,7 +73,7 @@ async def test_multiple_turns_form_one_conversation_with_global_state_and_safe_t
     page = await listing(store)
     assert len(page.conversations) == 2
     row = next(x for x in page.conversations if x.thread_id == first["thread_id"])
-    assert row.turn_count == row.matching_turn_count == 3
+    assert row.turn_count == 3
     assert row.latest_job_id == latest
     assert row.latest_model == "model-b"
     assert row.latest_turn_state == "succeeded"
@@ -101,7 +101,6 @@ async def test_matching_turn_filters_preserve_full_history_and_latest_model(db, 
     filters = RunFilters(model="model-a", state="failed", user_id=job["user_id"], repo=job["repo"])
     page = await listing(store, filters)
     assert len(page.conversations) == 1
-    assert page.conversations[0].matching_turn_count == 1
     assert page.conversations[0].turn_count == 3
     assert page.conversations[0].latest_model == "model-b"
     detail = await details(store, job["thread_id"], filters)
@@ -183,7 +182,6 @@ async def test_host_and_model_must_match_the_same_turn_without_attempt_duplicate
     assert (await listing(store, RunFilters(model="model-a", host="host-b"))).conversations == []
     matching = await listing(store, RunFilters(model="model-a", host="host-a"))
     assert len(matching.conversations) == 1
-    assert matching.conversations[0].matching_turn_count == 1
     detail = await details(store, job["thread_id"], RunFilters(host="host-a"))
     assert [x.matches_filters for x in detail.turns] == [False, True]
 
@@ -199,6 +197,6 @@ async def test_window_end_is_exclusive_and_idle_does_not_mean_conversation_compl
         await conn.execute("UPDATE agent_jobs SET created_at = $2 WHERE id = $1", outside, END)
     row = (await listing(store)).conversations[0]
     assert row.turn_count == 2
-    assert row.matching_turn_count == 1
+    assert row.last_matching_turn_at == START  # The turn created at END is outside.
     assert row.state == "idle"
     assert row.latest_turn_state == "succeeded"

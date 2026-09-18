@@ -22,7 +22,6 @@ export interface AdminConversation {
 }
 
 export interface AdminConversationMatch extends AdminConversation {
-  matching_turn_count: number;
   last_matching_turn_at: string;
 }
 
