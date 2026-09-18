@@ -158,6 +158,17 @@ def test_mcp_interactions_run_before_smoke_removes_the_image() -> None:
     assert steps.index(interactions) < steps.index(smoke_step)
 
 
+def test_mcp_interactions_run_in_isolated_parallel_workers() -> None:
+    """Each xdist worker needs the database suffix the test config selects."""
+    interactions = step("All five CLIs retain MCP")
+    assert interactions["env"]["MCP_TEST_WORKERS"] == "3"
+    run = str(interactions["run"])
+    assert '"${TEST_DB_NAME}_gw${worker}"' in run
+    assert "createdb" in run
+    assert '-n "${MCP_TEST_WORKERS}" --dist load' in run
+    assert run.index("createdb") < run.index("uv run pytest")
+
+
 def test_cleanup_cannot_reach_another_cell() -> None:
     """Seven cells of one run share a run id, an attempt — and often a Docker host.
 

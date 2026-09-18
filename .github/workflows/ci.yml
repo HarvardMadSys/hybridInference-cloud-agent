@@ -979,6 +979,7 @@ jobs:
           TEST_DB_NAME: hybridinference_test_mcp
           TEST_DB_USER: postgres
           TEST_DB_PASSWORD: mcp-conformance-only
+          MCP_TEST_WORKERS: "3"
         run: |
           set -euo pipefail
           database="mcp-db-${SUFFIX}"
@@ -992,10 +993,21 @@ jobs:
             sleep 1
           done
           docker exec "${database}" pg_isready -U postgres
+          # The test config appends pytest-xdist's worker id to TEST_DB_NAME.
+          # Give each worker its own database so migrations and state cannot race;
+          # the Postgres container creates only the unsuffixed database.
+          for worker in $(seq 0 "$((MCP_TEST_WORKERS - 1))"); do
+            docker exec "${database}" createdb \
+              -U "${TEST_DB_USER}" "${TEST_DB_NAME}_gw${worker}"
+          done
           TEST_DB_PORT=$(docker port "${database}" 5432/tcp | awk -F: '{print $NF}')
           MCP_TEST_HOST=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
           export TEST_DB_PORT MCP_TEST_HOST
-          uv run pytest -q -m external tests/external/test_resident_mcp_parity.py
+          # All 15 cases are one parametrized function in one file, so loadfile
+          # or loadscope would keep them serial. Dynamic load balances the real
+          # CLI processes while the worker databases isolate their storage.
+          uv run pytest -q -n "${MCP_TEST_WORKERS}" --dist load \
+            -m external tests/external/test_resident_mcp_parity.py
 
       # The smoke harness removes its image, so run it after the CLI matrix.
       - name: Start it, and assert what only starting shows
