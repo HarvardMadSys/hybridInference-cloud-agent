@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from cloud_agent import app as control_plane
+from cloud_agent.workers import snapshots as control_plane
 
 
 class _SnapshotPort:
