@@ -144,7 +144,7 @@ describe('TrajectoryView', () => {
     expect(screen.getByText('1 of 4')).toBeInTheDocument();
   });
 
-  it('keeps runtime-only attempts accessible without counting their logs as steps', () => {
+  it('keeps a runtime-only attempt out of the steps and says where its records are', () => {
     render(
       <Harness
         events={[
@@ -154,9 +154,8 @@ describe('TrajectoryView', () => {
     );
     expect(screen.getByText('0 steps')).toBeInTheDocument();
     expect(screen.getByText(/No execution steps recorded yet/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Run logs (1)' }));
-    expect(screen.getByRole('region', { name: 'Trajectory' })).toBeInTheDocument();
-    expect(screen.getByText(/workspace_preparing ·/)).toBeInTheDocument();
+    expect(screen.getByText(/Runtime records for a turn are in Run details/)).toBeInTheDocument();
+    expect(screen.queryByText(/workspace_preparing/)).not.toBeInTheDocument();
   });
 
   it('keeps protocol chatter from inflating the overview and step list', () => {
@@ -172,18 +171,15 @@ describe('TrajectoryView', () => {
     render(<Harness events={[...notifications, ...EVENTS]} />);
 
     expect(screen.getByText('2 steps')).toBeInTheDocument();
-    expect(screen.queryByText('Run logs')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Run logs (400)' }));
-    expect(screen.getByText(/Run logs · 400 runtime records/)).toBeInTheDocument();
+    expect(screen.queryByText(/runtime record/)).not.toBeInTheDocument();
     expect(
       screen.getAllByRole('button').filter((button) => button.hasAttribute('data-step-key')),
-    ).toHaveLength(3);
+    ).toHaveLength(2);
     expect(screen.getByText('Bash')).toBeInTheDocument();
     expect(screen.getByText('the build passes')).toBeInTheDocument();
   });
 
-  it('keeps Claude counters out of the Other lane while retaining selectable run logs', () => {
-    const onSelect = vi.fn();
+  it('keeps Claude counters out of the Other lane and out of the step list', () => {
     const counters = [10, 11].map((id) =>
       event({
         id,
@@ -198,15 +194,10 @@ describe('TrajectoryView', () => {
         },
       }),
     );
-    render(<Harness events={[...counters, ...EVENTS]} onSelectStep={onSelect} />);
+    render(<Harness events={[...counters, ...EVENTS]} />);
     expect(screen.getByText('2 steps')).toBeInTheDocument();
     expect(screen.queryByText('Other')).not.toBeInTheDocument();
     expect(screen.queryByText('runtime')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Run logs (2)' }));
-    fireEvent.click(screen.getByText(/Run logs · 2 runtime records/));
-    expect(onSelect).toHaveBeenCalledWith('runtime:ajob_1:1');
-    expect(screen.getByText('2 steps')).toBeInTheDocument();
-    expect(screen.queryByText('Other')).not.toBeInTheDocument();
   });
 
   it('lists every stored event as a step, including the one chat folds away', () => {

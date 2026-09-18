@@ -172,9 +172,10 @@ export interface TrajectoryStep {
    * that read it only then.
    */
   harness?: HarnessInventory;
-  /** Protocol bookkeeping grouped within one attempt, with every record in Raw. */
-  runtimeNotifications?: boolean;
-  /** Accessible through Run logs, excluded from execution counts and timeline. */
+  /**
+   * Runtime bookkeeping: excluded from execution counts, the timeline and the
+   * step list. The stored records stay in Run details and in Session log.
+   */
   diagnostic?: boolean;
 }
 
@@ -777,7 +778,7 @@ export function buildTrajectorySteps(
       lane: row.lane,
       actor: row.actor,
       label: runtimeNotification
-        ? 'Run logs'
+        ? 'Runtime records'
         : notification
           ? asText(notification.method)
           : row.label,
@@ -793,7 +794,6 @@ export function buildTrajectorySteps(
       truncated: isTruncatedPayload(payload),
       timing: { source: null, startedAt: null, finishedAt: null, durationMs: null },
       ...(harness ? { harness } : {}),
-      ...(runtimeNotification ? { runtimeNotifications: true, diagnostic: true } : {}),
       ...(diagnostic ? { diagnostic: true } : {}),
     };
     byKey.set(key, step);
@@ -806,7 +806,7 @@ export function buildTrajectorySteps(
 
   // Usage is metadata, never an injected Context message. Attach it only
   // when the runtime recorded a matching model-message owner; unowned/turn
-  // totals stay in Run logs and cannot create a new Assistant.
+  // totals stay runtime bookkeeping and cannot create a new Assistant.
   for (let index = steps.length - 1; index >= 0; index -= 1) {
     const event = steps[index].sourceEvents[0];
     if (event?.event_type !== 'usage') continue;

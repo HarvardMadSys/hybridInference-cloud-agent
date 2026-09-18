@@ -616,7 +616,11 @@ describe('buildTrajectorySteps', () => {
     ];
     const steps = buildTrajectorySteps(events);
 
-    expect(steps.map((step) => step.label)).toEqual(['Run logs', 'Assistant message', 'Shell']);
+    expect(steps.map((step) => step.label)).toEqual([
+      'Runtime records',
+      'Assistant message',
+      'Shell',
+    ]);
     expect(steps[0].sourceEvents).toEqual(notifications);
     expect(steps[0].detail).toContain('400 runtime records');
     expect(steps[0].diagnostic).toBe(true);
@@ -681,7 +685,8 @@ describe('buildTrajectorySteps', () => {
         payload: { text: JSON.stringify({ method, params }) },
       }),
     ]);
-    expect(step.runtimeNotifications).toBe(true);
+    expect(step.diagnostic).toBe(true);
+    expect(step.label).toBe('Runtime records');
   });
 
   it.each([
@@ -699,7 +704,7 @@ describe('buildTrajectorySteps', () => {
   ])('keeps warnings, errors and unrecognized raw records visible: %s', (text) => {
     const source = event({ id: 1, job_id: 'a', turn_no: 1, event_type: 'raw', payload: { text } });
     const [step] = buildTrajectorySteps([source]);
-    expect(step.runtimeNotifications).toBeUndefined();
+    expect(step.diagnostic).toBeUndefined();
     expect(step.sourceEvents).toEqual([source]);
   });
 
