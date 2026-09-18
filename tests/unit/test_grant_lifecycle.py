@@ -38,15 +38,16 @@ from typing import Any
 
 import pytest
 
-from cloud_agent import app, app as control_plane, grants as grant_client, grants as grants_mod
-from cloud_agent.app import (
+from cloud_agent import grants as grant_client, grants as grants_mod
+from cloud_agent.gateway import GatewayError
+from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
+from cloud_agent.workers import attempts as control_plane
+from cloud_agent.workers.attempts import (
     _cleanup_reaped_shared_residencies,
     _reap_lapsed_residencies,
     _renew_live_grants,
     _revoke_dead_grants,
 )
-from cloud_agent.gateway import GatewayError
-from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
 from tests.support.storage import AllCapabilities
 
 pytestmark = pytest.mark.asyncio
@@ -565,7 +566,7 @@ async def test_the_pass_deadline_leaves_room_for_two_of_them() -> None:
     capability dies under a running sandbox — the failure the concurrency
     limit was added for and did not fully close.
     """
-    worst_gap = 2 * app.GRANT_RENEWAL_PASS_DEADLINE_S + RENEWAL_INTERVAL_S
+    worst_gap = 2 * control_plane.GRANT_RENEWAL_PASS_DEADLINE_S + RENEWAL_INTERVAL_S
     assert worst_gap <= GRANT_TTL_S, (
         f"two passes plus an interval is {worst_gap}s against a {GRANT_TTL_S}s "
         "TTL: a grant can expire under a running attempt"
@@ -580,13 +581,13 @@ async def test_a_full_page_of_slow_renewals_cannot_outrun_the_ttl() -> None:
     full request timeout. Without a deadline that product is what one pass
     takes — and at today's numbers it exceeds the lifetime being renewed.
     """
-    waves = math.ceil(app.GRANT_RENEWAL_PAGE / app.GRANT_RENEWAL_CONCURRENCY)
+    waves = math.ceil(control_plane.GRANT_RENEWAL_PAGE / control_plane.GRANT_RENEWAL_CONCURRENCY)
     unbounded = waves * grants_mod._TIMEOUT_S
     assert unbounded > GRANT_TTL_S, (
         "the numbers no longer describe the problem this deadline solves; "
         "re-derive it rather than deleting the test"
     )
-    assert unbounded > app.GRANT_RENEWAL_PASS_DEADLINE_S
+    assert unbounded > control_plane.GRANT_RENEWAL_PASS_DEADLINE_S
 
 
 async def test_a_pass_that_runs_long_gives_up_its_tail_and_says_so(monkeypatch, caplog) -> None:
@@ -608,7 +609,7 @@ async def test_a_pass_that_runs_long_gives_up_its_tail_and_says_so(monkeypatch, 
                 await asyncio.sleep(10)
             return await super().renew(grant_id)
 
-    monkeypatch.setattr(app, "GRANT_RENEWAL_PASS_DEADLINE_S", 0.05)
+    monkeypatch.setattr(control_plane, "GRANT_RENEWAL_PASS_DEADLINE_S", 0.05)
     grants = _SlowGrants()
 
     with caplog.at_level(logging.WARNING):
@@ -637,7 +638,7 @@ async def test_a_cancelled_renewal_does_not_forget_its_refusal_count(monkeypatch
             await asyncio.sleep(10)
             return await super().renew(grant_id)
 
-    monkeypatch.setattr(app, "GRANT_RENEWAL_PASS_DEADLINE_S", 0.05)
+    monkeypatch.setattr(control_plane, "GRANT_RENEWAL_PASS_DEADLINE_S", 0.05)
     failures = {"grant_1": 2, "grant_2": 1}
 
     await _renew_live_grants(store, _SlowGrants(), failures=failures)

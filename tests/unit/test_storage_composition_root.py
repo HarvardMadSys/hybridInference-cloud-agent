@@ -14,16 +14,18 @@ from typing import Any, cast
 
 import pytest
 
-from cloud_agent import app as control_plane, ports
+from cloud_agent import ports
 from cloud_agent.publish_worker import PublishStorage
 from cloud_agent.storage.assembly import Storage
+from cloud_agent.workers import attempts as attempt_worker, snapshots as snapshot_worker
 
-#: Every protocol a background task is handed the real ``Storage`` for.
+#: Every protocol a background task is handed the real ``Storage`` for. They
+#: live beside the loops that declare them now, not in `app.py`.
 TASK_PROTOCOLS = [
-    control_plane._SettledTerminals,
-    control_plane._GrantRenewal,
-    control_plane._SnapshotCapture,
-    control_plane._Reaping,
+    attempt_worker._SettledTerminals,
+    attempt_worker._GrantRenewal,
+    attempt_worker._Reaping,
+    snapshot_worker._SnapshotCapture,
     PublishStorage,
 ]
 

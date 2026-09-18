@@ -25,7 +25,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from cloud_agent import app as control_plane
+from cloud_agent.workers.attempts import _reconcile_settled_terminals
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 from tests.support.storage import OneFake
 
@@ -68,10 +68,10 @@ async def test_a_settled_terminal_resume_retries_until_the_broker_confirms(
         AsyncMock(return_value=broker),
     )
 
-    await control_plane._reconcile_settled_terminals(store)
+    await _reconcile_settled_terminals(store)
     store.mark_terminal_resume_complete.assert_not_awaited()
 
-    await control_plane._reconcile_settled_terminals(store)
+    await _reconcile_settled_terminals(store)
     store.mark_terminal_resume_complete.assert_awaited_once_with(job_id="ajob_test")
     assert broker.resume_settled_terminals.await_count == 2
     broker.resume_settled_terminals.assert_awaited_with(
@@ -89,7 +89,7 @@ async def test_a_missing_owner_broker_keeps_the_marker_for_retry(
         AsyncMock(return_value=None),
     )
 
-    await control_plane._reconcile_settled_terminals(store)
+    await _reconcile_settled_terminals(store)
 
     store.mark_terminal_resume_complete.assert_not_awaited()
 
@@ -106,7 +106,7 @@ async def test_a_cancelled_pre_claim_job_has_no_workspace_to_resume(
     broker = AsyncMock()
     monkeypatch.setattr("cloud_agent.broker_routing.broker_for_job", broker)
 
-    await control_plane._reconcile_settled_terminals(store)
+    await _reconcile_settled_terminals(store)
 
     broker.assert_not_awaited()
     store.mark_terminal_resume_complete.assert_awaited_once_with(job_id="ajob_test")
@@ -143,7 +143,7 @@ async def test_one_broken_host_does_not_skip_other_terminal_markers(
         AsyncMock(side_effect=[broken, ready]),
     )
 
-    await control_plane._reconcile_settled_terminals(store)
+    await _reconcile_settled_terminals(store)
 
     store.mark_terminal_resume_complete.assert_awaited_once_with(job_id="ajob_ready")
     ready.resume_settled_terminals.assert_awaited_once_with(
