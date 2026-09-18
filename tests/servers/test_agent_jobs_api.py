@@ -42,6 +42,7 @@ from cloud_agent.api import routes as agent_jobs_router, workspace as agent_work
 from cloud_agent.api.deps import get_storage
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
+from cloud_agent.storage.repositories.goals import _action_columns
 from cloud_agent.tokens import mint_worker_token
 from tests.support.storage import AllCapabilities, EmptyAttachments, EmptySkillLibrary
 
@@ -178,27 +179,27 @@ class FakeGoals:
         current = self._goal(thread_id)
         if current is None or current["revision"] != revision:
             return None
+        # The real column mapping, not a second copy of its rules. A fake that
+        # branched on the kind itself skipped the requirement that a terminal
+        # action carry its code or reason, so a `block` with no code passed here
+        # and raised in Postgres — which is how "three consecutive blocked
+        # reports" was green in CI and dead in production.
+        state, pause, code, message = _action_columns(action, pause_reason, blocked_code)
         # The streak moves on its own; the revision does not. Continuing is not
         # a change to what the goal *is*, so a later turn's decision is still
         # made against the same revision the owner last wrote.
         current["blocked_streak"] = action.blocked_streak
-        if action.kind in ("none", "queue_work_round", "queue_verify_round"):
+        if state is None:
             return dict(current)
-        if action.kind == "pause":
-            current.update(state="paused", pause_reason=pause_reason, revision=revision + 1)
-            self._cancel_queued_rounds(thread_id)
-        elif action.kind == "block":
-            current.update(
-                state="blocked",
-                blocked_code=blocked_code,
-                blocked_message=action.message,
-                pause_reason=None,
-                revision=revision + 1,
-            )
-            self._cancel_queued_rounds(thread_id)
-        elif action.kind == "complete":
-            current.update(state="complete", revision=revision + 1)
-            self._cancel_queued_rounds(thread_id)
+        current.update(
+            state=state,
+            pause_reason=pause,
+            blocked_code=code,
+            blocked_message=message,
+            # A state change mints a revision; a streak write does not.
+            revision=revision + 1,
+        )
+        self._cancel_queued_rounds(thread_id)
         return dict(current)
 
     async def has_pending_turn(self, *, thread_id: str) -> bool:

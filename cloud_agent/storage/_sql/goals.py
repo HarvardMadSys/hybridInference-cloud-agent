@@ -51,12 +51,17 @@ RETURNING t.id
 """
 
 
-async def goal_after_terminal(conn: Any, *, job_id: str, state: str) -> bool:
+async def goal_after_terminal(conn: Any, *, job_id: str, thread_id: str, state: str) -> bool:
     """Pause the goal behind a job this caller has just made terminal.
 
-    Read from the job row rather than taken on the caller's word, so a turn
-    cannot be described as something other than what the database says it is.
-    Only an automatic round pauses a goal this way: a person's own turn failing
+    ``thread_id`` is passed rather than looked up. Every caller reaches this
+    holding the job's row lock — one cancelled a queued round, the other is the
+    reaper closing an expired attempt — and a lookup here would take the
+    thread's lock *after* it. That is the reverse of this repository's
+    thread-before-job order, and it deadlocks against the two places that take
+    them the other way round: pausing a goal, and appending a follow-up.
+
+    Only an automatic round pauses a goal this way. A person's own turn failing
     is reported to the person, and is not by itself a reason to stop their goal.
     """
     reason = "cancelled" if state == "cancelled" else "turn-failed"
@@ -64,18 +69,17 @@ async def goal_after_terminal(conn: Any, *, job_id: str, state: str) -> bool:
         await conn.fetchval(
             """
             UPDATE agent_threads t
-            SET goal_state = 'paused', goal_pause_reason = $2,
+            SET goal_state = 'paused', goal_pause_reason = $3,
                 goal_blocked_code = NULL, goal_blocked_message = NULL,
                 goal_revision = t.goal_revision + 1,
                 goal_updated_at = NOW(), updated_at = NOW()
-            WHERE t.id = (SELECT j.thread_id FROM agent_jobs j WHERE j.id = $1)
+            FROM agent_jobs j
+            WHERE t.id = $1 AND j.id = $2 AND j.thread_id = t.id
               AND t.goal_state = 'active'
-              AND EXISTS (
-                    SELECT 1 FROM agent_jobs j
-                    WHERE j.id = $1 AND j.turn_source = 'goal'
-              )
+              AND j.turn_source = 'goal'
             RETURNING t.id
             """,
+            thread_id,
             job_id,
             reason,
         )

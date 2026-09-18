@@ -1195,7 +1195,7 @@ class PostgresAttemptCommands:
         """
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
-                "SELECT state FROM agent_jobs WHERE id = $1 "
+                "SELECT state, thread_id FROM agent_jobs WHERE id = $1 "
                 "AND ($2::text IS NULL OR user_id = $2) FOR UPDATE",
                 job_id,
                 user_id,
@@ -1214,7 +1214,9 @@ class PostgresAttemptCommands:
                 # the goal stops in the same transaction: there is no window in
                 # which a cancelled round leaves an active goal with nothing to
                 # run it.
-                await goal_after_terminal(conn, job_id=job_id, state=CANCELLED)
+                await goal_after_terminal(
+                    conn, job_id=job_id, thread_id=row["thread_id"], state=CANCELLED
+                )
                 await fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
                 return CANCELLED
             if state == RUNNING:
@@ -1244,7 +1246,7 @@ class PostgresAttemptCommands:
         async with self._pool.acquire() as conn, conn.transaction():
             expired = await conn.fetch(
                 """
-                SELECT a.id AS attempt_id, a.job_id, a.attempt_no, a.host_id,
+                SELECT a.id AS attempt_id, a.job_id, j.thread_id, a.attempt_no, a.host_id,
                        j.state, j.cancel_requested, j.current_attempt_id,
                        member.thread_id AS sandbox_thread_id,
                        member.sandbox_id,
@@ -1530,7 +1532,9 @@ class PostgresAttemptCommands:
                     # a reaped turn never reaches it, so it is decided here —
                     # and the only safe decision is to stop and wait for the
                     # owner.
-                    await goal_after_terminal(conn, job_id=job_id, state=action)
+                    await goal_after_terminal(
+                        conn, job_id=job_id, thread_id=row["thread_id"], state=action
+                    )
                 if action in TERMINAL_STATES and not retained_activation_expired:
                     # A terminal reaper outcome is semantically the same turn
                     # boundary as ``transition``. Keep the linear chat moving

@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from cloud_agent.goals.decision import GoalAction
+from cloud_agent.goals.models import GoalError
 from tests.servers.test_agent_jobs_api import (  # noqa: F401 - pytest fixtures
     FakeStorage,
     _build_app,
@@ -297,6 +299,26 @@ async def test_editing_only_the_round_cap_keeps_the_rounds_already_spent(client,
     assert edited.status_code == 200, edited.text
     assert edited.json()["goal"]["revision"] == before["revision"]
     assert edited.json()["goal"]["rounds_used"] == 1
+
+
+async def test_the_fake_refuses_a_terminal_action_without_its_reason(client, store):
+    """The fake shares the real validation, so the route tests can catch §3.
+
+    ``maybe_continue_goal`` applies the decision twice on a blocked streak — once
+    for the streak, once for the state change — and the first of those used to
+    carry the terminal kind without the code it requires. That raised in
+    Postgres and was swallowed, so the platform simply never blocked; with the
+    fake doing the same check, the same mistake fails a server test instead of
+    reaching a database.
+    """
+    body = await _create_goal_job(client)
+    goal = await store.goals.get_goal_for_job(job_id=body["id"])
+    with pytest.raises(GoalError):
+        await store.goals.apply_action(
+            thread_id=str(store.jobs[body["id"]]["thread_id"]),
+            revision=goal["revision"],
+            action=GoalAction(kind="block", blocked_streak=3),
+        )
 
 
 async def test_a_queued_turn_from_the_owner_makes_the_goal_yield(client, store):

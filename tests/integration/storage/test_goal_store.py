@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from typing import Any
+
 # Imported pytest fixtures are intentionally named by test parameters.
 # ruff: noqa: F811
 import pytest
@@ -102,6 +105,19 @@ async def _live_goal_job(store, *, worker_id: str = "goal-worker", suffix: str =
     )
     assert goal is not None
     return job, claim, goal
+
+
+async def _queued_goal_round(store, thread_id: str) -> dict[str, Any] | None:
+    """The one automatic round of this conversation waiting to run, if any."""
+    turns = await store.conversation_queries.list_jobs(user_id="user-1")
+    for turn in turns:
+        if (
+            turn["thread_id"] == thread_id
+            and turn.get("turn_source") == "goal"
+            and turn["state"] == "queued"
+        ):
+            return turn
+    return None
 
 
 async def _finish(pool, claim):
@@ -772,6 +788,44 @@ async def test_a_queued_round_is_what_makes_a_round_yield(store):
         yield_to_queued=True,
     )
     assert yielded == {"error": "yielded"}
+
+
+async def test_cancelling_a_round_while_pausing_the_goal_settles(store, pool):
+    """Both writers on the same two rows, raced, and neither is left half-done.
+
+    Stopping a round and pausing its goal are two ordinary requests that reach
+    the same ``agent_jobs`` and ``agent_threads`` rows, so whatever order they
+    take them in is load-bearing. This asserts the outcome both ways round:
+    whichever lands first, the goal ends paused and the round does not run.
+
+    It is *not* a deadlock reproduction, and the fix for that order is not
+    claimed to be one. The two writers take the conversation's lock first, so
+    they serialize rather than interleave — which is also why an attempt to
+    interleave them by restoring the earlier, job-first shape still passed here.
+    The ordering is argued from the code paths, and this is the behavioural net
+    under it.
+    """
+    job, goal = await _goal_job(store)
+    await _round(store, parent=job)
+    queued = await _queued_goal_round(store, str(job["thread_id"]))
+    assert queued is not None
+
+    async def pause_the_goal():
+        return await store.goals.pause_goal(
+            thread_id=job["thread_id"], revision=goal["revision"], reason="user"
+        )
+
+    async def cancel_the_round():
+        await asyncio.sleep(0.005)
+        return await store.attempt_commands.request_cancel(job_id=queued["id"])
+
+    paused, cancelled = await asyncio.gather(
+        pause_the_goal(), cancel_the_round(), return_exceptions=True
+    )
+    for outcome in (paused, cancelled):
+        assert not isinstance(outcome, Exception), outcome
+    assert (await store.goals.get_goal(thread_id=job["thread_id"]))["state"] == "paused"
+    assert (await store.conversation_queries.get_job(queued["id"]))["state"] != "queued"
 
 
 async def test_has_pending_turn_sees_queued_and_running_work(store, pool):
