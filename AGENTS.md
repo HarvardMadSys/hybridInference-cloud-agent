@@ -46,6 +46,9 @@ database stamped with the chain that predates it.
 |---|---|
 | `cloud_agent/app.py` | The two listeners: the main API and the MCP-only one |
 | `cloud_agent/api/` | One router module per surface — jobs, hosts, admin, session, MCP relay |
+| `cloud_agent/application/` | Flows that run without a request: job admission and creation, native Fork materialization, residency credentials |
+| `cloud_agent/bootstrap/` | Internal assembly: the resources the listeners are built from, and the lifespan that starts and stops them |
+| `cloud_agent/workers/` | The background loops — attempt reaping, grant renewal, shared-workspace snapshot capture |
 | `cloud_agent/ports/`, `cloud_agent/storage/` | Narrow capability contracts and Postgres repositories: claims, fences, residency, publication |
 | `cloud_agent/grants.py`, `ledger.py`, `grant_usage.py` | Gateway inference grants, and the usage snapshots read back from them |
 | `cloud_agent/gateway.py`, `agent_access.py`, `identity.py` | The three gateway contracts: lookups, admission, identity |
