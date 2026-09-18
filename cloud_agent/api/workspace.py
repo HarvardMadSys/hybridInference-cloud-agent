@@ -30,9 +30,7 @@ from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
 from cloud_agent.api._workspace_access import (
     _TERMINAL_ID_PATTERN,
     _workspace_broker_for_job,
-    _workspace_broker_http_error,
     _workspace_id,
-    _workspace_not_materialized,
     _workspace_not_ready,
 )
 from cloud_agent.api.deps import get_agent_app_credentials, get_storage, require_store
@@ -66,6 +64,10 @@ from cloud_agent.schemas import (
 )
 from cloud_agent.terminal_coordination import resume_settled_terminal
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+from cloud_agent.workspace_errors import (
+    _workspace_broker_http_error,
+    _workspace_not_materialized,
+)
 from cloud_agent_contracts.workspace_browser import WorkspacePathError, normalize_workspace_path
 
 if TYPE_CHECKING:

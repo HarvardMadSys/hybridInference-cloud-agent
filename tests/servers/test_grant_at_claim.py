@@ -164,7 +164,7 @@ def _app(store: _ClaimStore, grants: _Grants) -> FastAPI:
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     app.dependency_overrides[get_grant_client] = lambda: grants
-    app.dependency_overrides[agent_jobs_router.verify_claiming_host] = lambda: {
+    app.dependency_overrides[agent_worker.verify_claiming_host] = lambda: {
         "host": "runner-test",
         "credential_hash": "test-credential-hash",
     }
@@ -356,7 +356,7 @@ async def test_title_generation_is_scheduled_after_successful_claim(monkeypatch,
     generate = AsyncMock()
     monkeypatch.setattr(agent_worker, "generate_thread_title", generate)
     background = BackgroundTasks()
-    response = await agent_jobs_router.worker_claim(
+    response = await agent_worker.worker_claim(
         WorkerClaimRequest(worker_id="w1"),
         background,
         claiming_host={"host": "runner-test", "credential_hash": "test-credential-hash"},

@@ -11,8 +11,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import usage
+from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
-from cloud_agent.api.routes import require_agent_owner
 from cloud_agent.app import create_app, create_mcp_app
 from tests.support.storage import OneFake
 from tests.unit.test_ledger_snapshots import END, START, ledger_row

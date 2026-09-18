@@ -26,6 +26,7 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import admin_hosts, hosts
 from cloud_agent.api.deps import get_grant_client, get_storage, verify_admin_access
+from cloud_agent.application import residency
 from cloud_agent.broker_routing import (
     ENV_BROKER_HOSTS,
     BrokerUrlRefused,
@@ -1530,7 +1531,7 @@ async def test_a_grant_with_no_token_is_revoked_rather_than_abandoned() -> None:
     grants = RecordingGrants()
     grants.mint = AsyncMock(return_value={"grant_id": "agr-orphan", "token": ""})
 
-    credential = await hosts._mint_residency_grant(store, grants, row=_residency_row())
+    credential = await residency._mint_residency_grant(store, grants, row=_residency_row())
 
     assert credential is None
     assert grants.revoked == ["agr-orphan"]
@@ -1549,7 +1550,7 @@ async def test_a_refused_revoke_still_reports_no_credential() -> None:
     grants.mint = AsyncMock(return_value={"grant_id": "agr-orphan", "token": ""})
     grants.revoke = AsyncMock(side_effect=RuntimeError("gateway is down"))
 
-    credential = await hosts._mint_residency_grant(store, grants, row=_residency_row())
+    credential = await residency._mint_residency_grant(store, grants, row=_residency_row())
 
     assert credential is None
 
@@ -1560,7 +1561,7 @@ async def test_an_answer_without_a_grant_id_has_nothing_to_revoke() -> None:
     grants = RecordingGrants()
     grants.mint = AsyncMock(return_value={"grant_id": "", "token": "tok-1"})
 
-    credential = await hosts._mint_residency_grant(store, grants, row=_residency_row())
+    credential = await residency._mint_residency_grant(store, grants, row=_residency_row())
 
     assert credential is None
     assert grants.revoked == []

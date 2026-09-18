@@ -59,9 +59,9 @@ import yaml
 from jsonschema import Draft202012Validator
 from jwt.algorithms import RSAAlgorithm
 
-from cloud_agent.app import DEAD_GRANT_REFUSALS
 from cloud_agent.gateway import GatewayClient, GatewayError
 from cloud_agent.grants import GrantClient
+from cloud_agent.workers.attempts import DEAD_GRANT_REFUSALS
 
 pytestmark = [pytest.mark.external, pytest.mark.asyncio]
 

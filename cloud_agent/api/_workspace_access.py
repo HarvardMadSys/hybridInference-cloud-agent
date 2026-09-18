@@ -14,6 +14,9 @@ from fastapi import HTTPException
 
 from cloud_agent.broker_routing import broker_for_job, hydrate_shared_broker
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+from cloud_agent.workspace_errors import (
+    _workspace_broker_http_error,
+)
 
 if TYPE_CHECKING:
     from typing import Any
@@ -51,28 +54,6 @@ def _workspace_id(job: dict[str, Any]) -> str:
             },
         )
     return str(thread_id)
-
-
-def _workspace_broker_http_error(exc: WorkspaceBrokerError) -> HTTPException:
-    """Map private broker failures onto bounded owner-facing errors."""
-    missing_workspace = _workspace_not_materialized(exc)
-    status = (
-        409
-        if missing_workspace
-        else exc.status_code
-        if exc.status_code in {400, 404, 408, 409, 413, 429}
-        else 503
-    )
-    message = "This chat has no retained workspace." if missing_workspace else exc.message
-    return HTTPException(
-        status_code=status,
-        detail={"error": {"type": "workspace_unavailable", "message": message}},
-    )
-
-
-def _workspace_not_materialized(exc: WorkspaceBrokerError) -> bool:
-    """Recognize the shared-only broker's missing-workspace response."""
-    return exc.status_code == 404 and exc.message == "shared chat workspace is not materialized"
 
 
 async def _workspace_broker_for_job(

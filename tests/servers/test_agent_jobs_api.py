@@ -38,7 +38,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent import broker_routing
-from cloud_agent.api import routes as agent_jobs_router, workspace as agent_workspace
+from cloud_agent.api import routes as agent_jobs_router, worker, workspace as agent_workspace
+from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.tokens import mint_worker_token
@@ -1356,9 +1357,9 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
     app.dependency_overrides[get_log_store] = lambda: None
     identity = {"user_id": _OWNER, "role": role, "authenticated": True}
     # Override identity only; every request still exercises Gateway admission.
-    app.dependency_overrides[agent_jobs_router.authenticate_agent_owner] = lambda: identity
+    app.dependency_overrides[authenticate_agent_owner] = lambda: identity
     if claim_auth:
-        app.dependency_overrides[agent_jobs_router.verify_claiming_host] = lambda: {
+        app.dependency_overrides[worker.verify_claiming_host] = lambda: {
             "host": "runner-test",
             "credential_hash": "test-credential-hash",
         }
@@ -1604,7 +1605,7 @@ async def test_conversation_search_requires_owner_and_accepts_browser_session(
     search = AsyncMock(return_value={"conversations": [], "next_cursor": None})
     monkeypatch.setattr(store, "list_conversations", search, raising=False)
     app = _build_app(store)
-    app.dependency_overrides.pop(agent_jobs_router.authenticate_agent_owner)
+    app.dependency_overrides.pop(authenticate_agent_owner)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         anonymous = await client.get("/v1/agent/conversations")
         assert anonymous.status_code == 401
@@ -2576,7 +2577,7 @@ async def test_fork_is_owner_scoped(client: AsyncClient, store: FakeStorage):
 async def test_browser_jwt_can_list_agent_jobs(store: FakeStorage):
     """Regression: the web login JWT was interpreted as an invalid API key."""
     app = _build_app(store)
-    app.dependency_overrides.pop(agent_jobs_router.authenticate_agent_owner)
+    app.dependency_overrides.pop(authenticate_agent_owner)
     token = _browser_session()
 
     transport = ASGITransport(app=app)
@@ -2595,7 +2596,7 @@ async def test_expired_browser_jwt_is_not_reinterpreted_as_api_key(store: FakeSt
     from datetime import timedelta
 
     app = _build_app(store)
-    app.dependency_overrides.pop(agent_jobs_router.authenticate_agent_owner)
+    app.dependency_overrides.pop(authenticate_agent_owner)
     token = _browser_session(expires_delta=timedelta(seconds=-1))
 
     transport = ASGITransport(app=app)
@@ -2624,7 +2625,7 @@ async def test_sandbox_token_stays_out_of_owner_routes(store: FakeStorage):
     from cloud_agent.tokens import SCOPE_MODEL
 
     app = _build_app(store)
-    app.dependency_overrides.pop(agent_jobs_router.authenticate_agent_owner)
+    app.dependency_overrides.pop(authenticate_agent_owner)
     token = mint_worker_token(
         job_id="ajob_0001",
         attempt_id=1,
@@ -4182,7 +4183,7 @@ async def test_the_sandbox_grant_cannot_write_job_state(client: AsyncClient):
 
 async def test_event_type_guard_rejects_a_trailing_newline(client: AsyncClient):
     """`match()` with `$` accepted "message\\n"; the guard must use fullmatch."""
-    from cloud_agent.api.routes import _SAFE_EVENT_TYPE
+    from cloud_agent.api._job_views import _SAFE_EVENT_TYPE
 
     assert _SAFE_EVENT_TYPE.fullmatch("message") is not None
     assert _SAFE_EVENT_TYPE.fullmatch("message\n") is None

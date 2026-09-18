@@ -87,6 +87,21 @@ loop and the give-up must fit inside the step. It cannot reach the gateway, so i
 would not notice the gateway changing one of them: the symptom is a sandbox
 losing its authorization mid-run — far from the constant that moved.
 
+## The one document here that is ours
+
+[`agent-control-plane.openapi.json`](agent-control-plane.openapi.json) is not a
+gateway contract. It is the API **this** service serves, generated from
+`create_app().openapi()` and committed key-sorted so that a change to the
+published shape is a diff somebody chose. `tests/unit/test_api_surface_contract.py`
+regenerates it and fails when the two disagree, which is the only thing that
+notices a route quietly changing its parameters or disappearing while every
+behavioural test still passes.
+
+It is checked in rather than produced during CI on purpose: a document generated
+at test time agrees with whatever the code does by construction, which is the
+opposite of a contract. Regenerate it deliberately, in the pull request that
+changes the API, with the command in that test's failure message.
+
 ## Checking them
 
 ```bash

@@ -11,8 +11,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.mcp_connections import router
-from cloud_agent.api.routes import require_agent_owner
 from cloud_agent.mcp.catalog import McpCatalog, catalog_entry, fetch_catalog
 from cloud_agent.mcp.config_import import parse_import
 

@@ -22,9 +22,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
 
-from cloud_agent.api._job_admission import ENV_SANDBOX_MCP_URL
 from cloud_agent.api._workspace_access import (
-    _workspace_broker_http_error,
     _workspace_id,
     _workspace_not_ready,
 )
@@ -34,7 +32,8 @@ from cloud_agent.api.deps import (
     get_storage,
     require_store,
 )
-from cloud_agent.api.hosts import RESIDENCY_TTL_S, _mint_residency_grant
+from cloud_agent.application.job_admission import ENV_SANDBOX_MCP_URL
+from cloud_agent.application.residency import RESIDENCY_TTL_S, _mint_residency_grant
 from cloud_agent.attachments.models import AttachmentView
 from cloud_agent.attachments.selection import prompt_with_attachments
 from cloud_agent.broker_routing import ENV_BROKER_TOKEN, broker_for_attempt, hydrate_shared_broker
@@ -88,6 +87,7 @@ from cloud_agent.tokens import (
     parse_worker_token,
 )
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+from cloud_agent.workspace_errors import _workspace_broker_http_error
 from cloud_agent_host.runtimes import runtimes_supporting_mcp
 
 if TYPE_CHECKING:
