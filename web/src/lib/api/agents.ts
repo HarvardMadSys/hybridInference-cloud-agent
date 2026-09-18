@@ -673,11 +673,29 @@ export async function listRepoBranches(repo: string): Promise<RepoBranchesApi> {
   return jsonOrThrow(resp);
 }
 
+/**
+ * One MCP connection a task may call, and the tools it may call on it.
+ *
+ * A capability the map does not name is denied, and the control plane derives
+ * `enabled` from whether anything is left non-denied — so an empty map binds
+ * the server switched off rather than fully open.
+ */
+export interface McpBindingInputApi {
+  connection_id: number;
+  alias?: string;
+  enabled?: boolean;
+  tools?: Record<string, 'deny' | 'confirm' | 'allow'>;
+  resources?: Record<string, 'deny' | 'confirm' | 'allow'>;
+  prompts?: Record<string, 'deny' | 'confirm' | 'allow'>;
+}
+
 export interface CreateAgentJobRequest {
   /** Omitted uses personal defaults; an empty list selects none. */
   skill_ids?: number[];
   /** Staged uploads to place under /uploads. Omitted attaches nothing. */
   attachment_ids?: number[];
+  /** MCP connections this task may call. Omitted gives it none. */
+  mcp_bindings?: McpBindingInputApi[];
   repo: string;
   task_prompt: string;
   model: string;

@@ -67,6 +67,9 @@ export function SkillDialog({
   onClose,
   children,
   footer,
+  // Defaulted rather than required: the library screens pass their own English
+  // copy today, and a missing label would be worse than an untranslated one.
+  dismissLabel = 'Dismiss skill dialog',
 }: {
   title: string;
   description?: string;
@@ -74,6 +77,7 @@ export function SkillDialog({
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
+  dismissLabel?: string;
 }) {
   const panel = useRef<HTMLDivElement>(null);
   const id = useId();
@@ -122,7 +126,7 @@ export function SkillDialog({
       <button
         type="button"
         tabIndex={-1}
-        aria-label="Dismiss skill dialog"
+        aria-label={dismissLabel}
         disabled={busy}
         onClick={onClose}
         className="absolute inset-0 cursor-default bg-gray-900/25 backdrop-blur-[2px] dark:bg-black/50"

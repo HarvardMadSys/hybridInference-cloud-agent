@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
 import { SkillIcon } from './skills/SkillDialog';
+import { McpSubmenu } from './mcp/McpSubmenu';
+import type { McpChoice } from './mcp/useComposerMcp';
 
 // The composer's one attach point.
 //
@@ -12,13 +14,17 @@ import { SkillIcon } from './skills/SkillDialog';
 // most tasks carry none — a different kind of choice wearing the same kind of
 // control. This menu is where that second kind lives.
 //
-// The two upload items open the operating system's own file picker rather than
-// a dialog of our own. A picker we drew would be a second thing to learn, a
+// The upload item opens the operating system's own file picker rather than a
+// dialog of our own. A picker we drew would be a second thing to learn, a
 // second thing to make accessible, and a second thing to keep working; the
-// native one is already all three. They are two items rather than one because
-// a file input can select files or a directory, never both: the directory
-// variant needs `webkitdirectory`, which is set below rather than written as a
-// JSX prop because React's typings do not carry it.
+// native one is already all three.
+//
+// One item, not two. A file input chooses files *or* a directory, never both —
+// the directory variant needs `webkitdirectory`, which turns the dialog into a
+// folder-only chooser — so offering both as clickable items meant two rows for
+// what reads as one action. Files are the common case and get the click;
+// a folder is dropped onto the composer, which takes files and folders in the
+// same gesture.
 
 function PlusIcon() {
   return (
@@ -35,7 +41,7 @@ function PlusIcon() {
   );
 }
 
-function DocumentIcon() {
+function McpIcon() {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -48,13 +54,28 @@ function DocumentIcon() {
       <path
         strokeLinecap="round"
         strokeLinejoin="round"
-        d="M14 3v5h5M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"
+        d="M9 3v4m6-4v4M5 7h14v5a7 7 0 0 1-14 0V7Zm7 12v2"
       />
     </svg>
   );
 }
 
-function DirectoryIcon() {
+function ChevronIcon() {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      aria-hidden="true"
+      className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-gray-500"
+    >
+      <path strokeLinecap="round" strokeLinejoin="round" d="m8 6 4 4-4 4" />
+    </svg>
+  );
+}
+
+function PaperclipIcon() {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -67,7 +88,7 @@ function DirectoryIcon() {
       <path
         strokeLinecap="round"
         strokeLinejoin="round"
-        d="M3 7a2 2 0 0 1 2-2h3.6l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"
+        d="M21.4 11.1 12.3 20a5.5 5.5 0 0 1-7.8-7.8l9.2-9.1a3.7 3.7 0 0 1 5.2 5.2l-9.2 9.1a1.8 1.8 0 0 1-2.6-2.6l8.5-8.4"
       />
     </svg>
   );
@@ -80,30 +101,32 @@ export function ComposerPlusMenu({
   onFiles,
   onOpenSkills,
   skillSummary,
+  mcp,
+  mcpBlockedReason,
   disabled = false,
 }: {
   onFiles: (files: File[]) => void;
   onOpenSkills: () => void;
   /** What the Skills row reports on its right: a count, or a pending note. */
   skillSummary: string;
+  mcp: {
+    choices: McpChoice[];
+    loading: boolean;
+    error: string | null;
+    count: number;
+    reload: () => void;
+    toggle: (connection: McpChoice['connection'], on: boolean) => void;
+  };
+  /** Set when the chosen runtime cannot be given MCP connections at all. */
+  mcpBlockedReason?: string;
   disabled?: boolean;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
+  const [submenu, setSubmenu] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const filePicker = useRef<HTMLInputElement>(null);
-  const directoryPicker = useRef<HTMLInputElement>(null);
-
-  // Not a JSX prop: `webkitdirectory` is absent from React's input typings, and
-  // the lowercase spelling React would emit for an unknown prop is not the one
-  // browsers honour.
-  useEffect(() => {
-    const input = directoryPicker.current;
-    if (!input) return;
-    input.setAttribute('webkitdirectory', '');
-    input.setAttribute('directory', '');
-  }, []);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -119,6 +142,7 @@ export function ComposerPlusMenu({
 
   function close(restoreFocus = true) {
     setOpen(false);
+    setSubmenu(false);
     if (restoreFocus) trigger.current?.focus();
   }
 
@@ -174,16 +198,6 @@ export function ComposerPlusMenu({
         tabIndex={-1}
         onChange={take}
       />
-      <input
-        ref={directoryPicker}
-        type="file"
-        multiple
-        hidden
-        aria-hidden="true"
-        tabIndex={-1}
-        onChange={take}
-      />
-
       {open ? (
         <div
           ref={menu}
@@ -212,20 +226,8 @@ export function ComposerPlusMenu({
               filePicker.current?.click();
             }}
           >
-            <DocumentIcon />
-            {t('attach.uploadFiles')}
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            className={ITEM}
-            onClick={() => {
-              close(false);
-              directoryPicker.current?.click();
-            }}
-          >
-            <DirectoryIcon />
-            {t('attach.uploadDirectory')}
+            <PaperclipIcon />
+            {t('attach.upload')}
           </button>
           <div className="my-1 h-px bg-gray-100 dark:bg-white/5" />
           <button
@@ -242,7 +244,52 @@ export function ComposerPlusMenu({
             <span className="text-xs font-normal text-gray-500 dark:text-gray-400">
               {skillSummary}
             </span>
+            <ChevronIcon />
           </button>
+
+          <button
+            type="button"
+            role="menuitem"
+            aria-haspopup="menu"
+            aria-expanded={submenu}
+            aria-disabled={mcpBlockedReason ? true : undefined}
+            className={ITEM}
+            onClick={() => {
+              if (mcpBlockedReason) return;
+              setSubmenu((was) => !was);
+            }}
+          >
+            <McpIcon />
+            <span className="flex-1">
+              {t('attach.mcp')}
+              {mcpBlockedReason ? (
+                // Said here rather than at job creation: the API refuses this
+                // pairing with a 400, and learning that after pressing Run is
+                // learning it too late.
+                <span className="mt-0.5 block text-xs font-normal text-gray-500 dark:text-gray-400">
+                  {mcpBlockedReason}
+                </span>
+              ) : null}
+            </span>
+            {!mcpBlockedReason && mcp.count ? (
+              <span className="text-xs font-normal text-gray-500 dark:text-gray-400">
+                {mcp.count}
+              </span>
+            ) : null}
+            {mcpBlockedReason ? null : <ChevronIcon />}
+          </button>
+
+          {submenu && !mcpBlockedReason ? (
+            <div className="absolute bottom-0 left-full ml-1.5">
+              <McpSubmenu
+                choices={mcp.choices}
+                loading={mcp.loading}
+                error={mcp.error}
+                onRetry={mcp.reload}
+                onToggle={(choice, on) => mcp.toggle(choice.connection, on)}
+              />
+            </div>
+          ) : null}
         </div>
       ) : null}
     </>

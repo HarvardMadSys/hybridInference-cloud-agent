@@ -13,6 +13,7 @@ import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { AttachmentStrip } from './attachments/AttachmentStrip';
 import { useAttachments } from './attachments/useAttachments';
 import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
+import { useComposerMcp } from './mcp/useComposerMcp';
 import { SkillSelectionDialog } from './skills/SkillPicker';
 import { useSkillLibrary } from './skills/useSkillLibrary';
 import type { SelectedSkillApi } from '@/lib/api/skills';
@@ -57,6 +58,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const attachments = useAttachments(t, config?.attachment_limits);
+  const mcp = useComposerMcp(t);
 
   // The config fetch runs once on mount, but its fallback message has to be
   // translated. Depending on `t` would refetch the config every time the
@@ -132,6 +134,15 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     };
   }, [config?.github_connected, repo]);
 
+  // `mcp_runtimes` has been reported by /config since MCP landed and read by
+  // nothing; an older control plane omits it, and not knowing is not the same
+  // as knowing the runtime cannot.
+  const mcpRuntimes = config?.mcp_runtimes;
+  const mcpBlockedReason =
+    runtime && mcpRuntimes && !mcpRuntimes.includes(runtime)
+      ? t('attach.mcpUnsupported', { runtime })
+      : undefined;
+
   const disconnected = config?.github_connected === false;
   const canRun =
     config?.github_connected === true &&
@@ -158,6 +169,9 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
         // Staged uploads, named by id. Omitted when nothing is attached so the
         // request keeps the shape it had before this feature existed.
         ...(attachments.ids.length ? { attachment_ids: attachments.ids } : {}),
+        // Omitted gives the task no servers at all, which is the right default:
+        // connecting a server and letting a task call it are separate choices.
+        ...(mcp.bindings.length ? { mcp_bindings: mcp.bindings } : {}),
         runtime,
         model,
         // Sent as a ref; the platform pins it to a commit at creation, because
@@ -283,6 +297,8 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
                 skillSummary={
                   pendingSkillDefaults ? t('attach.skillsDefaults') : String(selectedSkills.length)
                 }
+                mcp={mcp}
+                mcpBlockedReason={mcpBlockedReason}
               />
               <span className="h-4 w-px bg-gray-200 dark:bg-white/10" />
               <Picker
