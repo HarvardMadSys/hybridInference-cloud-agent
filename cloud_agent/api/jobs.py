@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query
 
-from cloud_agent.api._job_admission import _create_job_as
 from cloud_agent.api._job_views import (
     _attempt_resources,
     _attempt_summary_response,
@@ -33,6 +32,7 @@ from cloud_agent.api.deps import (
     get_storage,
     require_store,
 )
+from cloud_agent.application.job_admission import _create_job_as
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.logging_utils import get_logger
@@ -76,13 +76,13 @@ class _JobsStorage(Protocol):
     """The capabilities the job surface reaches the store for.
 
     Ten of them, and four are reached through a helper rather than spelled
-    here: `_job_admission._create_job_as` is typed against
+    here: `application.job_admission._create_job_as` is typed against
     `_JobCreationStorage`, which names `attachments` among them.
 
     Four of these are reached through a helper rather than spelled here,
     and leaving them out is not a narrowing: `cancel_agent_job` hands the whole
     store to `_workspace_access._workspace_broker_for_job`, and `create_agent_job`
-    hands it to `_job_admission._create_job_as`, which is typed against
+    hands it to `application.job_admission._create_job_as`, which is typed against
     `_JobCreationStorage` (`conversation_commands`, `mcp`, `skills`,
     `source_control`). mypy says so at the call site, which is the point of
     declaring capabilities rather than trusting a reader to trace them.

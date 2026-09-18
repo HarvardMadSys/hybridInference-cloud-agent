@@ -28,24 +28,6 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-# The shared helpers moved to their own modules (R3-a of #225). The aggregator
-# keeps binding the same objects, so a test, a ``Depends`` key or an importer
-# that still says ``routes.X`` resolves to the identity it always did. These
-# aliases exist for the transition; R5 deletes them once every caller imports
-# the new home.
-from cloud_agent.api._job_admission import (
-    ENV_SANDBOX_MCP_URL,  # noqa: F401 — re-exported: the identity the host namespace kept.
-    _binding_alias,  # noqa: F401 — re-exported: the identity the host namespace kept.
-    _create_job_as,  # noqa: F401 — re-exported: the identity the host namespace kept.
-    _idempotency_conflict,  # noqa: F401 — re-exported: the identity the host namespace kept.
-    _JobCreationStorage,  # noqa: F401 — re-exported: the identity the host namespace kept.
-    _require_offered_effort,  # noqa: F401 — re-exported: the identity the host namespace kept.
-    _require_registered_runtime,  # noqa: F401 — re-exported: the identity the host namespace kept.
-    _require_resolvable_model,  # noqa: F401 — re-exported: the identity the host namespace kept.
-    _resolve_attachment_selection,  # noqa: F401 — re-exported: the identity the host namespace kept.
-    _resolve_mcp_bindings,  # noqa: F401 — re-exported: the identity the host namespace kept.
-    _resolve_skill_selection,  # noqa: F401 — re-exported: the identity the host namespace kept.
-)
 from cloud_agent.api._job_views import (
     _EVENT_PAGE_SIZE,  # noqa: F401 — re-exported: the identity the host namespace kept.
     _SAFE_EVENT_TYPE,  # noqa: F401 — re-exported: the identity the host namespace kept.
@@ -195,6 +177,25 @@ from cloud_agent.api.workspace import (
     stream_agent_job_terminal,  # noqa: F401 — re-exported: the identity the host namespace kept.
     write_agent_job_terminal_input,  # noqa: F401 — re-exported: the identity the host namespace kept.
     write_agent_job_workspace_file,  # noqa: F401 — re-exported: the identity the host namespace kept.
+)
+
+# The shared helpers moved to their own modules (R3-a of #225). The aggregator
+# keeps binding the same objects, so a test, a ``Depends`` key or an importer
+# that still says ``routes.X`` resolves to the identity it always did. These
+# aliases exist for the transition; R5 deletes them once every caller imports
+# the new home.
+from cloud_agent.application.job_admission import (
+    ENV_SANDBOX_MCP_URL,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _binding_alias,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _create_job_as,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _idempotency_conflict,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _JobCreationStorage,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _require_offered_effort,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _require_registered_runtime,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _require_resolvable_model,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _resolve_attachment_selection,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _resolve_mcp_bindings,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _resolve_skill_selection,  # noqa: F401 — re-exported: the identity the host namespace kept.
 )
 
 router = APIRouter()

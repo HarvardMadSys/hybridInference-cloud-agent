@@ -19,14 +19,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
-from cloud_agent.api._job_admission import (
-    _idempotency_conflict,
-    _require_offered_effort,
-    _require_registered_runtime,
-    _require_resolvable_model,
-    _resolve_attachment_selection,
-    _resolve_skill_selection,
-)
 from cloud_agent.api._job_views import _job_response
 from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
 from cloud_agent.api._workspace_access import _workspace_broker_http_error
@@ -38,6 +30,14 @@ from cloud_agent.api.deps import (
     require_store,
 )
 from cloud_agent.api.hosts import RESIDENCY_TTL_S, _mint_residency_grant
+from cloud_agent.application.job_admission import (
+    _idempotency_conflict,
+    _require_offered_effort,
+    _require_registered_runtime,
+    _require_resolvable_model,
+    _resolve_attachment_selection,
+    _resolve_skill_selection,
+)
 from cloud_agent.broker_routing import broker_for_job
 from cloud_agent.domain.execution import SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.requests import request_fingerprint
