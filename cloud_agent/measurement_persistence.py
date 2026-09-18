@@ -15,6 +15,7 @@ failed by a diagnostic that could not be stored.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent.logging_utils import get_logger
@@ -29,7 +30,10 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from cloud_agent.measurement_ingest import Owner
-    from cloud_agent.ports.operation_measurements import OperationMeasurements
+    from cloud_agent.ports.operation_measurements import (
+        MeasurementWriteResult,
+        OperationMeasurements,
+    )
 
 logger = get_logger(__name__)
 
@@ -39,6 +43,19 @@ logger = get_logger(__name__)
 #: propagate so a producer can be told to try again, and the background caller
 #: catches it, because by then nobody is left to tell.
 PersistenceResult = Literal["stored", "duplicate", "conflict", "run_conflict", "rejected"]
+
+
+@dataclass(frozen=True)
+class PreparedMeasurement:
+    """A validated record, ready for whoever gets to storing it first.
+
+    ``payload`` is the record as it will be sent, kept so the queue can weigh
+    it against its byte bound; ``row`` is what the repository writes.
+    """
+
+    row: dict[str, Any]
+    run: dict[str, Any] | None
+    payload: dict[str, Any]
 
 
 def manifest_for_run(run: Any) -> dict[str, Any] | None:
@@ -60,21 +77,18 @@ def manifest_for_run(run: Any) -> dict[str, Any] | None:
     }
 
 
-async def persist_measurement(
+def prepare_measurement(
     *,
-    capability: OperationMeasurements,
     record: Mapping[str, Any],
     owner: Owner,
     run: Mapping[str, Any] | None,
     now: Any,
-) -> tuple[PersistenceResult, str]:
-    """Validate and store one record, reporting what happened.
+) -> tuple[PreparedMeasurement | None, str]:
+    """Validate one record, returning what to store or why it is refused.
 
-    Returns the repository's outcome -- or ``"rejected"`` with the reason it
-    was refused, when the record is not one this deployment stores. It never raises for a bad *record* -- that is a
-    judgement about the payload, and both callers act on the result -- but a
-    failing *store* propagates, so the endpoint can answer 5xx and a delivery
-    policy can retry it.
+    Synchronous and cheap on purpose: a caller on the request path decides
+    whether a record is worth queueing without touching the database, and the
+    write itself happens later, on the bounded queue.
     """
     try:
         measured = validate_measurement(record, owner=owner)
@@ -86,14 +100,43 @@ async def persist_measurement(
             "operation_measurement_rejected",
             extra={"event": "operation_measurement_rejected", "reason": reason},
         )
-        # The reason travels back with the refusal. A producer that is told
-        # only "rejected" cannot tell a schema it does not speak from a field
-        # it should not have sent, and this is a diagnostic surface.
+        return None, reason
+    return PreparedMeasurement(row=measured.as_row(), run=validated, payload=dict(record)), ""
+
+
+async def store_prepared(
+    capability: OperationMeasurements, prepared: PreparedMeasurement
+) -> MeasurementWriteResult:
+    """Write one prepared record, returning the store's outcome."""
+    return await capability.record_operation_measurement(measurement=prepared.row, run=prepared.run)
+
+
+async def persist_measurement(
+    *,
+    capability: OperationMeasurements,
+    record: Mapping[str, Any],
+    owner: Owner,
+    run: Mapping[str, Any] | None,
+    now: Any,
+) -> tuple[PersistenceResult, str]:
+    """Validate and store one record, reporting what happened.
+
+    The direct path, for a caller that must know the answer before it replies:
+    the delivery endpoint does, because a producer has to be told whether its
+    record was kept. The control plane's own producers queue instead, so that
+    congestion cannot reach the request that produced the record.
+    """
+    prepared, reason = prepare_measurement(record=record, owner=owner, run=run, now=now)
+    if prepared is None:
         return "rejected", reason
-    stored = await capability.record_operation_measurement(
-        measurement=measured.as_row(), run=validated
-    )
-    return stored, ""
+    return await store_prepared(capability, prepared), ""
 
 
-__all__ = ["PersistenceResult", "manifest_for_run", "persist_measurement"]
+__all__ = [
+    "PersistenceResult",
+    "PreparedMeasurement",
+    "manifest_for_run",
+    "persist_measurement",
+    "prepare_measurement",
+    "store_prepared",
+]

@@ -997,9 +997,24 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     # Each listener owns upstream sockets in its own process, even when it
     # does not run the control plane's grant reaper or publisher.
     app.state.mcp_maintenance_task = asyncio.create_task(maintain_host_sessions(storage))
+    # The diagnostics write queue, started with the process that answers the
+    # requests producing them. Its workers are bound to this loop, so it is
+    # created per start rather than once per import.
+    from cloud_agent.measurement_writer import MeasurementWriter, reset_writer
+
+    reset_writer(MeasurementWriter())
+    from cloud_agent.measurement_writer import writer as measurement_writer_for
+
+    measurement_writer_for().start()
     try:
         yield
     finally:
+        # Bounded: a stop must not be held hostage by a destination that is
+        # not answering, and whatever is left is counted rather than lost
+        # silently.
+        with contextlib.suppress(Exception):
+            await measurement_writer_for().shutdown()
+        reset_writer(None)
         for task in (
             app.state.mcp_maintenance_task,
             app.state.mcp_catalog_task,

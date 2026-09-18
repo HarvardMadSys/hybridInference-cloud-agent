@@ -86,6 +86,34 @@ def _deployment_secrets(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+async def _running_writer():
+    """Run the write queue for each test, as the application's lifespan does.
+
+    Records are offered to a bounded queue and written off the request path, so
+    a test that asserts on what was stored has to let the queue run -- which is
+    the behaviour under test, not a workaround.
+    """
+    from cloud_agent import measurement_writer
+
+    writer = measurement_writer.MeasurementWriter()
+    measurement_writer.reset_writer(writer)
+    writer.start()
+    try:
+        yield writer
+    finally:
+        await writer.shutdown()
+        measurement_writer.reset_writer(None)
+
+
+async def _drain(writer: Any, count: int) -> None:
+    """Wait, briefly, for the queue to have written ``count`` records."""
+    for _ in range(200):
+        if writer.counts.stored >= count:
+            return
+        await asyncio.sleep(0.01)
+
+
+@pytest.fixture(autouse=True)
 def _clean_measurement_state(monkeypatch, tmp_path):
     """Every test starts from a process that has never read the switch."""
     monkeypatch.delenv(operation_profiling.ENV_PROFILING_ENABLED, raising=False)
@@ -1513,7 +1541,7 @@ class _PersistingStorage(FakeStorage):
 
 
 async def test_a_file_read_is_stored_by_the_control_plane(
-    client: AsyncClient, store: FakeStorage, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch, _running_writer
 ):
     """The record a browser's request produced reaches the table.
 
@@ -1530,6 +1558,7 @@ async def test_a_file_read_is_stored_by_the_control_plane(
     response = await client.get(f"/v1/agent/jobs/{job_id}/files", params={"path": "README.md"})
 
     assert response.status_code == 200
+    await _drain(_running_writer, 1)
     assert len(store.rows) == 1
     row = store.rows[0]
     # The same identity the client was handed, not a second one minted for
@@ -1545,7 +1574,7 @@ async def test_a_file_read_is_stored_by_the_control_plane(
 
 
 async def test_a_terminal_open_is_stored_once_per_request(
-    client: AsyncClient, store: FakeStorage, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch, _running_writer
 ):
     """A list and a create are two records, each with its own request kind."""
     _enable(monkeypatch)
@@ -1561,6 +1590,7 @@ async def test_a_terminal_open_is_stored_once_per_request(
         headers={INTERACTION_HEADER: interaction},
     )
 
+    await _drain(_running_writer, 2)
     assert [row["request_kind"] for row in store.rows] == ["terminal.list", "terminal.create"]
     assert {row["operation"] for row in store.rows} == {"terminal.open"}
     # One interaction, two records, two measurements.
@@ -1568,7 +1598,7 @@ async def test_a_terminal_open_is_stored_once_per_request(
 
 
 async def test_a_request_that_was_not_selected_stores_nothing(
-    client: AsyncClient, store: FakeStorage, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch, _running_writer
 ):
     """Off means no row, not an empty one."""
     broker = _RecordingClient()
@@ -1578,5 +1608,7 @@ async def test_a_request_that_was_not_selected_stores_nothing(
     response = await client.get(f"/v1/agent/jobs/{job_id}/files")
 
     assert response.status_code == 200
+    # Nothing was selected, so nothing was even offered.
+    await asyncio.sleep(0.05)
     assert store.rows == []
     assert store.runs == []

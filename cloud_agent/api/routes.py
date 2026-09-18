@@ -49,6 +49,7 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from cloud_agent import measurement_writer
 from cloud_agent.api.deps import (
     bearer_token,
     get_agent_app_credentials,
@@ -90,7 +91,12 @@ from cloud_agent.mcp.registry import resolve_connection, resolve_for_thread
 from cloud_agent.measurement_ingest import (
     Owner,
 )
-from cloud_agent.measurement_persistence import manifest_for_run, persist_measurement
+from cloud_agent.measurement_persistence import (
+    manifest_for_run,
+    persist_measurement,
+    prepare_measurement,
+    store_prepared,
+)
 from cloud_agent.operation_measurement import (
     FILE_CANDIDATES,
     FILES_LIST,
@@ -2970,20 +2976,19 @@ async def _terminal_owner_workspace(
 _T = TypeVar("_T")
 
 
-def _schedule_measurement_store(
-    background_tasks: Any,
+def _offer_measurement(
     *,
     capability: Any,
-    scope: Any,
     job: Mapping[str, Any],
     measure: Selection | None,
 ) -> None:
-    """Queue this request's measurement for storage after the response.
+    """Offer this request's measurement to the bounded write queue.
 
-    Scheduled rather than awaited: the record is frozen by the time the
-    response is built, and the database write must not be part of the latency
-    this measurement exists to report. Nothing here blocks the request, and a
-    store that fails costs coverage rather than the file or terminal.
+    Offered, never awaited, and never raised from: the record is frozen by the
+    time the response is built, so the write must not be part of the latency
+    this measurement exists to report. A queue with no room drops the record
+    and counts it, which is what keeps a congested database from turning every
+    request into another pending write.
     """
     if measure is None:
         return
@@ -2997,44 +3002,55 @@ def _schedule_measurement_store(
         sandbox_id=str((job.get("thread_sandbox") or {}).get("sandbox_id") or "") or None,
         host_id=str((job.get("thread_sandbox") or {}).get("host") or "") or None,
     )
-    background_tasks.add_task(
-        _store_measurement_in_background,
-        capability=capability,
+    prepared, reason = prepare_measurement(
         record=record,
         owner=owner,
         run=manifest_for_run(current_run()),
+        now=datetime.now(UTC),
+    )
+    if prepared is None:
+        # Refused before it reached the queue: the record is not one this
+        # deployment stores, and saying so is better than a silent drop.
+        measurement_writer.writer().counts.note(f"rejected:{reason[:60]}")
+        return
+    measurement_writer.writer().offer(
+        persist=lambda: store_prepared(capability, prepared),
+        payload=prepared.payload,
     )
 
 
-async def _store_measurement_in_background(
+def _record_measurement(
     *,
-    capability: Any,
-    record: Mapping[str, Any],
-    owner: Owner,
-    run: Any,
+    store: Any,
+    scope: Any,
+    job: Mapping[str, Any],
+    measure: Selection | None,
+    failure: str | None = None,
 ) -> None:
-    """Store a measurement this process rooted, after the response is sent.
+    """Record a request's measurement, whether it succeeded or failed.
 
-    A background write has no caller left to fail: the file was read and the
-    terminal answered before this runs, so a store that is down costs coverage
-    and nothing else. It is logged rather than raised, because an exception
-    here would surface as an unhandled task error long after the request that
-    caused it.
+    Called on the way out of the measured block, so a request that raises is
+    still recorded. A failed request is the sample an operator most wants --
+    it is the only one that says where the time went before the failure -- and
+    recording only successes leaves the distribution describing a system that
+    never fails.
     """
-    try:
-        await persist_measurement(
-            capability=capability,
-            record=record,
-            owner=owner,
-            run=run,
-            now=datetime.now(UTC),
-        )
-    except Exception:
-        logger.warning(
-            "operation_measurement_store_failed",
-            exc_info=True,
-            extra={"event": "operation_measurement_store_failed"},
-        )
+    if measure is None:
+        return
+    if failure is not None and measure.outcome == "incomplete":
+        # ``incomplete`` is the selection's *unfinalized* state, not a decision
+        # about this request: the context manager decides a successful call's
+        # outcome and never reaches that decision when the body raised. So a
+        # request that failed is still unfinalized here, and this is where it
+        # is stated.
+        measure.outcome = failure
+        if measure.failure_stage is None:
+            measure.failure_stage = failure
+    _offer_measurement(
+        capability=_require_store(store).operation_measurements,
+        job=job,
+        measure=measure,
+    )
 
 
 #: The local stage one workspace read is timed as. Fixed before the call and
@@ -3171,7 +3187,6 @@ async def _measured_call(
 async def get_agent_job_workspace_file(
     job_id: str,
     request: Request,
-    background_tasks: BackgroundTasks,
     path: str = Query("", max_length=4096),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _RoutesStorage | None = Depends(get_storage),
@@ -3210,86 +3225,92 @@ async def get_agent_job_workspace_file(
                 }
             },
         )
+    recorded = False
     with measured_operation(FILES_LIST, scope, continuing=continuation(request.headers)) as measure:
-        if measure is not None:
-            # Marked before the call, not after it. The stage a read is timed
-            # as is fixed here, so its start is the start of the work and it
-            # encloses the RPC; renaming it afterwards would have left the
-            # request's real duration attached to a stage that began when the
-            # call returned.
-            measure.mark(FILE_READ_STAGE)
-        # The frame is captured outside the closure so the answer is recorded
-        # against the id this call was made with.
-        frame = measure.begin_call(FILE_READ_STAGE) if measure is not None else None
         try:
-            body = await _measured_call(
-                measure,
-                FILE_READ_STAGE,
-                call=lambda profiling: broker.files(
-                    _workspace_id(job), safe_path, profiling=profiling
-                ),
-                # Recorded below, once the operation the result turned out to
-                # be is known: the fragment has to hang on the stage that
-                # operation names, and only this call can say which it is.
-                record=False,
-                call_id=frame,
-            )
-        except WorkspaceBrokerError as exc:
-            if _workspace_not_materialized(exc):
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "error": {
-                            "type": "workspace_unavailable",
-                            "message": "This chat has no retained workspace.",
-                        }
-                    },
-                ) from exc
-            raise _workspace_broker_http_error(exc) from exc
-        if measure is not None:
-            kind = str(body.get("kind") or "")
-            # The read's own kind is the evidence, read from the body. The
-            # broker names the same conclusion when it was collecting; a
-            # disagreement means one of them is wrong, and neither may win by
-            # default, so the request is simply not reported.
-            kind_operation = measure.result_operation(body, default=FILES_LIST)
-            broker_operation = str(body.get("profiling_operation") or "").strip()
-            result_operation = kind_operation
-            if broker_operation and broker_operation != kind_operation:
-                result_operation = ""
-            if not measure.confirm(result_operation):
-                # The read turned out to be an operation this run does not
-                # select -- a listing under a preview-only experiment, or a
-                # preview under a listing-only one. That is not a sample, so
-                # the slot goes back and nothing is reported: a record filed
-                # under a kind nobody asked for would corrupt the distribution
-                # it lands in.
-                measure.discard()
-                return _measured_response(AgentWorkspaceResponse, None, body)
-            # The stage keeps the name it was marked with, so its start and its
-            # children stay intact. The operation the result turned out to be
-            # is stated on the record instead, which is where a reader looks
-            # for it.
-            measure.record_answer(FILE_READ_STAGE, frame, body)
-            measure.measurement.facts["kind"] = kind
-            if kind == "directory":
-                measure.measurement.facts["entry_count"] = len(body.get("entries") or [])
-            else:
-                measure.measurement.facts["content_truncated"] = bool(body.get("truncated"))
-                measure.measurement.facts["binary"] = bool(body.get("binary"))
-            measure.outcome = "completed"
-        response = _measured_response(AgentWorkspaceResponse, measure, body)
-        # Scheduled after the response is built, so the record stored is the
-        # one the client was told about and the write is outside the latency
-        # this measurement exists to report.
-        _schedule_measurement_store(
-            background_tasks,
-            capability=_require_store(store).operation_measurements,
-            scope=scope,
-            job=job,
-            measure=measure,
-        )
-        return response
+            if measure is not None:
+                # Marked before the call, not after it. The stage a read is timed
+                # as is fixed here, so its start is the start of the work and it
+                # encloses the RPC; renaming it afterwards would have left the
+                # request's real duration attached to a stage that began when the
+                # call returned.
+                measure.mark(FILE_READ_STAGE)
+            # The frame is captured outside the closure so the answer is recorded
+            # against the id this call was made with.
+            frame = measure.begin_call(FILE_READ_STAGE) if measure is not None else None
+            try:
+                body = await _measured_call(
+                    measure,
+                    FILE_READ_STAGE,
+                    call=lambda profiling: broker.files(
+                        _workspace_id(job), safe_path, profiling=profiling
+                    ),
+                    # Recorded below, once the operation the result turned out to
+                    # be is known: the fragment has to hang on the stage that
+                    # operation names, and only this call can say which it is.
+                    record=False,
+                    call_id=frame,
+                )
+            except WorkspaceBrokerError as exc:
+                if _workspace_not_materialized(exc):
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "error": {
+                                "type": "workspace_unavailable",
+                                "message": "This chat has no retained workspace.",
+                            }
+                        },
+                    ) from exc
+                raise _workspace_broker_http_error(exc) from exc
+            if measure is not None:
+                kind = str(body.get("kind") or "")
+                # The read's own kind is the evidence, read from the body. The
+                # broker names the same conclusion when it was collecting; a
+                # disagreement means one of them is wrong, and neither may win by
+                # default, so the request is simply not reported.
+                kind_operation = measure.result_operation(body, default=FILES_LIST)
+                broker_operation = str(body.get("profiling_operation") or "").strip()
+                result_operation = kind_operation
+                if broker_operation and broker_operation != kind_operation:
+                    result_operation = ""
+                if not measure.confirm(result_operation):
+                    # The read turned out to be an operation this run does not
+                    # select -- a listing under a preview-only experiment, or a
+                    # preview under a listing-only one. That is not a sample, so
+                    # the slot goes back and nothing is reported: a record filed
+                    # under a kind nobody asked for would corrupt the distribution
+                    # it lands in.
+                    measure.discard()
+                    return _measured_response(AgentWorkspaceResponse, None, body)
+                # The stage keeps the name it was marked with, so its start and its
+                # children stay intact. The operation the result turned out to be
+                # is stated on the record instead, which is where a reader looks
+                # for it.
+                measure.record_answer(FILE_READ_STAGE, frame, body)
+                measure.measurement.facts["kind"] = kind
+                if kind == "directory":
+                    measure.measurement.facts["entry_count"] = len(body.get("entries") or [])
+                else:
+                    measure.measurement.facts["content_truncated"] = bool(body.get("truncated"))
+                    measure.measurement.facts["binary"] = bool(body.get("binary"))
+                measure.outcome = "completed"
+            response = _measured_response(AgentWorkspaceResponse, measure, body)
+            # Offered after the response is built, so the record stored is the one
+            # the client was told about and the write is outside the latency this
+            # measurement exists to report.
+            _record_measurement(store=store, scope=scope, job=job, measure=measure)
+            recorded = True
+            return response
+        finally:
+            # A request that raised is recorded too, and it is the sample an
+            # operator most wants: it is the only one that says where the time went
+            # before the failure. Recording only successes leaves the distribution
+            # describing a system that never fails.
+            if not recorded:
+                _record_measurement(
+                    store=store, scope=scope, job=job, measure=measure, failure="failed"
+                )
 
 
 @router.put("/jobs/{job_id}/files", response_model=AgentWorkspaceResponse)
@@ -3388,7 +3409,6 @@ async def run_agent_job_terminal_command(
 async def create_agent_job_terminal(
     job_id: str,
     request: Request,
-    background_tasks: BackgroundTasks,
     body: AgentTerminalSessionCreateRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _RoutesStorage | None = Depends(get_storage),
@@ -3406,33 +3426,37 @@ async def create_agent_job_terminal(
     with measured_operation(
         TERMINAL_OPEN, scope, continuing=continuation(request.headers)
     ) as measure:
-        if measure is not None:
-            measure.name_request(TERMINAL_CREATE)
-            measure.mark(TERMINAL_CREATE)
         try:
-            payload = await _measured_call(
-                measure,
-                TERMINAL_CREATE,
-                call=lambda profiling: broker.create_terminal(
-                    _workspace_id(job),
-                    rows=body.rows,
-                    cols=body.cols,
-                    profiling=profiling,
-                ),
+            if measure is not None:
+                measure.name_request(TERMINAL_CREATE)
+                measure.mark(TERMINAL_CREATE)
+            try:
+                payload = await _measured_call(
+                    measure,
+                    TERMINAL_CREATE,
+                    call=lambda profiling: broker.create_terminal(
+                        _workspace_id(job),
+                        rows=body.rows,
+                        cols=body.cols,
+                        profiling=profiling,
+                    ),
+                )
+            except WorkspaceBrokerError as exc:
+                raise _terminal_broker_http_error(exc) from exc
+            if measure is not None:
+                measure.outcome = "completed"
+            response = _measured_response(AgentTerminalSessionResponse, measure, payload)
+            _record_measurement(store=store, scope=scope, job=job, measure=measure)
+            return response
+        except BaseException:
+            # A request that failed is recorded too: it is the sample that says
+            # where the time went before the failure, and recording only
+            # successes leaves the distribution describing a system that never
+            # fails.
+            _record_measurement(
+                store=store, scope=scope, job=job, measure=measure, failure="failed"
             )
-        except WorkspaceBrokerError as exc:
-            raise _terminal_broker_http_error(exc) from exc
-        if measure is not None:
-            measure.outcome = "completed"
-        response = _measured_response(AgentTerminalSessionResponse, measure, payload)
-        _schedule_measurement_store(
-            background_tasks,
-            capability=_require_store(store).operation_measurements,
-            scope=scope,
-            job=job,
-            measure=measure,
-        )
-        return response
+            raise
 
 
 @router.get(
@@ -3442,7 +3466,6 @@ async def create_agent_job_terminal(
 async def list_agent_job_terminals(
     job_id: str,
     request: Request,
-    background_tasks: BackgroundTasks,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _RoutesStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
@@ -3459,31 +3482,31 @@ async def list_agent_job_terminals(
     with measured_operation(
         TERMINAL_OPEN, scope, continuing=continuation(request.headers)
     ) as measure:
-        if measure is not None:
-            measure.name_request(TERMINAL_LIST)
-            measure.mark(TERMINAL_LIST)
         try:
-            payload = await _measured_call(
-                measure,
-                TERMINAL_LIST,
-                call=lambda profiling: broker.list_terminals(
-                    _workspace_id(job), profiling=profiling
-                ),
+            if measure is not None:
+                measure.name_request(TERMINAL_LIST)
+                measure.mark(TERMINAL_LIST)
+            try:
+                payload = await _measured_call(
+                    measure,
+                    TERMINAL_LIST,
+                    call=lambda profiling: broker.list_terminals(
+                        _workspace_id(job), profiling=profiling
+                    ),
+                )
+            except WorkspaceBrokerError as exc:
+                raise _terminal_broker_http_error(exc) from exc
+            if measure is not None:
+                measure.outcome = "completed"
+                measure.measurement.facts["terminal_count"] = len(payload.get("terminals") or [])
+            response = _measured_response(AgentTerminalSessionListResponse, measure, payload)
+            _record_measurement(store=store, scope=scope, job=job, measure=measure)
+            return response
+        except BaseException:
+            _record_measurement(
+                store=store, scope=scope, job=job, measure=measure, failure="failed"
             )
-        except WorkspaceBrokerError as exc:
-            raise _terminal_broker_http_error(exc) from exc
-        if measure is not None:
-            measure.outcome = "completed"
-            measure.measurement.facts["terminal_count"] = len(payload.get("terminals") or [])
-        response = _measured_response(AgentTerminalSessionListResponse, measure, payload)
-        _schedule_measurement_store(
-            background_tasks,
-            capability=_require_store(store).operation_measurements,
-            scope=scope,
-            job=job,
-            measure=measure,
-        )
-        return response
+            raise
 
 
 @router.get("/jobs/{job_id}/terminals/{terminal_id}/stream")
@@ -3507,51 +3530,65 @@ async def stream_agent_job_terminal(
     with measured_operation(
         TERMINAL_OPEN, scope, continuing=continuation(request.headers)
     ) as measure:
-        if measure is not None:
-            measure.name_request(TERMINAL_STREAM)
-            measure.mark(TERMINAL_STREAM)
-        # The call id is captured outside the closure that makes the call, so
-        # the answer is recorded against the id *this* call was made with.
-        stream_call = measure.begin_call(TERMINAL_STREAM) if measure is not None else None
         try:
-            upstream = await _measured_call(
-                measure,
-                TERMINAL_STREAM,
-                call=lambda profiling: broker.stream_terminal(
-                    _workspace_id(job), terminal_id, after=after, profiling=profiling
-                ),
-                record=False,
-                call_id=stream_call,
-            )
-        except WorkspaceBrokerError as exc:
-            raise _terminal_broker_http_error(exc) from exc
-        if measure is not None:
-            # The stream's answer travels in the response headers: its body is
-            # the terminal's own bytes. Until the handshake is validated the
-            # fragment stays unanswered, and the record says so by name.
-            measure.record_answer_from_headers(
-                TERMINAL_STREAM, stream_call, upstream.profiling_answer
-            )
-            measure.outcome = "completed"
-
-        async def relay() -> AsyncIterator[Any]:
+            if measure is not None:
+                measure.name_request(TERMINAL_STREAM)
+                measure.mark(TERMINAL_STREAM)
+            # The call id is captured outside the closure that makes the call,
+            # so the answer is recorded against the id *this* call was made
+            # with.
+            stream_call = measure.begin_call(TERMINAL_STREAM) if measure is not None else None
             try:
-                async for chunk in upstream:
-                    if await request.is_disconnected():
-                        break
-                    yield chunk
-            finally:
-                await upstream.aclose()
+                upstream = await _measured_call(
+                    measure,
+                    TERMINAL_STREAM,
+                    call=lambda profiling: broker.stream_terminal(
+                        _workspace_id(job), terminal_id, after=after, profiling=profiling
+                    ),
+                    record=False,
+                    call_id=stream_call,
+                )
+            except WorkspaceBrokerError as exc:
+                raise _terminal_broker_http_error(exc) from exc
+            if measure is not None:
+                # The stream's answer travels in the response headers: its body
+                # is the terminal's own bytes. Until the handshake is validated
+                # the fragment stays unanswered, and the record says so by name.
+                measure.record_answer_from_headers(
+                    TERMINAL_STREAM, stream_call, upstream.profiling_answer
+                )
+                measure.outcome = "completed"
 
-        return StreamingResponse(
-            relay(),
-            media_type="text/event-stream",
-            headers=(
-                _SSE_HEADERS
-                if measure is None
-                else {**_SSE_HEADERS, **_profiling_answer_headers(measure)}
-            ),
-        )
+            async def relay() -> AsyncIterator[Any]:
+                try:
+                    async for chunk in upstream:
+                        if await request.is_disconnected():
+                            break
+                        yield chunk
+                finally:
+                    await upstream.aclose()
+
+            # Recorded when the attach completes, not when the stream ends.
+            # The relay below can outlive the request by hours -- a terminal's
+            # bytes are the user's, and the measurement is about the attach.
+            # Waiting would hold the record until the socket closes and, past
+            # the experiment's grace period, lose it entirely.
+            response = StreamingResponse(
+                relay(),
+                media_type="text/event-stream",
+                headers=(
+                    _SSE_HEADERS
+                    if measure is None
+                    else {**_SSE_HEADERS, **_profiling_answer_headers(measure)}
+                ),
+            )
+            _record_measurement(store=store, scope=scope, job=job, measure=measure)
+            return response
+        except BaseException:
+            _record_measurement(
+                store=store, scope=scope, job=job, measure=measure, failure="failed"
+            )
+            raise
 
 
 @router.post(
