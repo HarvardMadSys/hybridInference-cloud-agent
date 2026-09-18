@@ -540,8 +540,14 @@ async def _create_job_as(
         setup_script=body.setup_script,
         metadata=metadata or None,
         mcp_bindings=mcp_bindings,
-        **({"skills": skills} if skills is not None else {}),
-        **({"attachments": attachments} if attachments is not None else {}),
+        # Named rather than splatted: see the note on the same call in
+        # ``turns.py`` — an unpacked dict defeats the argument types.
+        skills=skills,
+        attachments=attachments,
+        # Set in the same transaction that creates the conversation, so the
+        # first turn is already working toward the objective rather than
+        # learning about it one turn later.
+        goal=body.goal,
         client_request_id=client_request_id,
         # Over the request as sent, not as resolved: a branch that moved
         # between two sends of one submission is still one submission. The

@@ -60,6 +60,23 @@ function McpIcon() {
   );
 }
 
+export function GoalIcon({ className = 'h-[17px] w-[17px] shrink-0' }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      aria-hidden="true"
+      className={className}
+    >
+      <circle cx="12" cy="12" r="8.5" />
+      <circle cx="12" cy="12" r="3.5" />
+      <path strokeLinecap="round" d="M12 3.5v3M12 17.5v3M3.5 12h3M17.5 12h3" />
+    </svg>
+  );
+}
+
 function ChevronIcon() {
   return (
     <svg
@@ -101,15 +118,26 @@ export function ComposerPlusMenu({
   onFiles,
   onOpenSkills,
   skillSummary,
+  goalSummary,
+  onOpenGoal,
   mcp,
   mcpBlockedReason,
   disabled = false,
 }: {
-  onFiles: (files: File[]) => void;
+  /**
+   * Absent on a composer that offers neither. Both are optional because the
+   * attach point is one menu with one job — holding what this message carries —
+   * and a caller that can only offer part of that should show the part it has
+   * rather than grow a second, differently-shaped menu beside it.
+   */
+  onFiles?: (files: File[]) => void;
   onOpenSkills: () => void;
   /** What the Skills row reports on its right: a count, or a pending note. */
   skillSummary: string;
-  mcp: {
+  /** What the completion-condition row shows under its label. */
+  goalSummary: string;
+  onOpenGoal: () => void;
+  mcp?: {
     choices: McpChoice[];
     loading: boolean;
     error: string | null;
@@ -161,7 +189,7 @@ export function ComposerPlusMenu({
     // Clearing lets the same file be picked again — without it the input's
     // value is unchanged and no second `change` event fires.
     event.target.value = '';
-    if (picked.length) onFiles(picked);
+    if (picked.length) onFiles?.(picked);
   }
 
   return (
@@ -192,15 +220,17 @@ export function ComposerPlusMenu({
         <PlusIcon />
       </button>
 
-      <input
-        ref={filePicker}
-        type="file"
-        multiple
-        hidden
-        aria-hidden="true"
-        tabIndex={-1}
-        onChange={take}
-      />
+      {onFiles ? (
+        <input
+          ref={filePicker}
+          type="file"
+          multiple
+          hidden
+          aria-hidden="true"
+          tabIndex={-1}
+          onChange={take}
+        />
+      ) : null}
       {open ? (
         <div
           ref={menu}
@@ -220,19 +250,23 @@ export function ComposerPlusMenu({
           }}
           className="absolute bottom-[calc(100%+6px)] left-0 z-50 w-[272px] rounded-xl border border-gray-200 bg-white p-1.5 shadow-lg dark:border-white/10 dark:bg-gray-900"
         >
-          <button
-            type="button"
-            role="menuitem"
-            className={ITEM}
-            onClick={() => {
-              close(false);
-              filePicker.current?.click();
-            }}
-          >
-            <PaperclipIcon />
-            {t('attach.upload')}
-          </button>
-          <div className="my-1 h-px bg-gray-100 dark:bg-white/5" />
+          {onFiles ? (
+            <>
+              <button
+                type="button"
+                role="menuitem"
+                className={ITEM}
+                onClick={() => {
+                  close(false);
+                  filePicker.current?.click();
+                }}
+              >
+                <PaperclipIcon />
+                {t('attach.upload')}
+              </button>
+              <div className="my-1 h-px bg-gray-100 dark:bg-white/5" />
+            </>
+          ) : null}
           <button
             type="button"
             role="menuitem"
@@ -250,39 +284,66 @@ export function ComposerPlusMenu({
             <ChevronIcon />
           </button>
 
+          {/* Its own group. Skills and MCP connections are things this
+              message *carries*; the completion condition is what the whole
+              conversation is for, and it outlives every message after it. */}
+          <div className="my-1 h-px bg-gray-100 dark:bg-white/5" />
           <button
             type="button"
             role="menuitem"
-            aria-haspopup="menu"
-            aria-expanded={submenu}
-            aria-disabled={mcpBlockedReason ? true : undefined}
             className={ITEM}
             onClick={() => {
-              if (mcpBlockedReason) return;
-              setSubmenu((was) => !was);
+              close(false);
+              onOpenGoal();
             }}
           >
-            <McpIcon />
+            <GoalIcon />
             <span className="flex-1">
-              {t('attach.mcp')}
-              {mcpBlockedReason ? (
-                // Said here rather than at job creation: the API refuses this
-                // pairing with a 400, and learning that after pressing Run is
-                // learning it too late.
-                <span className="mt-0.5 block text-xs font-normal text-gray-500 dark:text-gray-400">
-                  {mcpBlockedReason}
-                </span>
-              ) : null}
-            </span>
-            {!mcpBlockedReason && mcp.count ? (
-              <span className="text-xs font-normal text-gray-500 dark:text-gray-400">
-                {mcp.count}
+              {t('attach.goal')}
+              <span className="mt-0.5 block truncate text-xs font-normal text-gray-500 dark:text-gray-400">
+                {goalSummary}
               </span>
-            ) : null}
-            {mcpBlockedReason ? null : <ChevronIcon />}
+            </span>
+            <ChevronIcon />
           </button>
 
-          {submenu && !mcpBlockedReason ? (
+          {mcp ? (
+            <>
+              <button
+                type="button"
+                role="menuitem"
+                aria-haspopup="menu"
+                aria-expanded={submenu}
+                aria-disabled={mcpBlockedReason ? true : undefined}
+                className={ITEM}
+                onClick={() => {
+                  if (mcpBlockedReason) return;
+                  setSubmenu((was) => !was);
+                }}
+              >
+                <McpIcon />
+                <span className="flex-1">
+                  {t('attach.mcp')}
+                  {mcpBlockedReason ? (
+                    // Said here rather than at job creation: the API refuses this
+                    // pairing with a 400, and learning that after pressing Run is
+                    // learning it too late.
+                    <span className="mt-0.5 block text-xs font-normal text-gray-500 dark:text-gray-400">
+                      {mcpBlockedReason}
+                    </span>
+                  ) : null}
+                </span>
+                {!mcpBlockedReason && mcp.count ? (
+                  <span className="text-xs font-normal text-gray-500 dark:text-gray-400">
+                    {mcp.count}
+                  </span>
+                ) : null}
+                {mcpBlockedReason ? null : <ChevronIcon />}
+              </button>
+            </>
+          ) : null}
+
+          {mcp && submenu && !mcpBlockedReason ? (
             <div className="absolute bottom-0 left-full ml-1.5">
               <McpSubmenu
                 choices={mcp.choices}

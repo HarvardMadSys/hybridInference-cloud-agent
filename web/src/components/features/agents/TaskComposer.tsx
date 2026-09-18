@@ -13,6 +13,7 @@ import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { AttachmentStrip } from './attachments/AttachmentStrip';
 import { useAttachments } from './attachments/useAttachments';
 import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
+import { GoalDialog, type GoalDraft } from './goal/GoalDialog';
 import { useComposerMcp } from './mcp/useComposerMcp';
 import { SkillSelectionDialog } from './skills/SkillPicker';
 import { useSkillLibrary } from './skills/useSkillLibrary';
@@ -44,7 +45,14 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     chosenSkills ?? skillLibrary.skills.filter((skill) => skill.default_enabled);
   const pendingSkillDefaults =
     chosenSkills === null && (skillLibrary.loading || !!skillLibrary.error);
+  // The attach menu's own state. What this message will carry, as opposed to
+  // how it runs; an untouched composer sends neither `skill_ids` nor a goal.
   const [skillsOpen, setSkillsOpen] = useState(false);
+  // What this message would set the conversation's goal to, and nothing else:
+  // the draft rides the message, because a goal with no message attached has
+  // nothing to work on yet.
+  const [goalOpen, setGoalOpen] = useState(false);
+  const [goalDraft, setGoalDraft] = useState<GoalDraft | null>(null);
   const [dropping, setDropping] = useState(false);
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
   const [models, setModels] = useState<string[]>([]);
@@ -153,6 +161,12 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     !attachments.uploading &&
     Boolean(repo && runtime && model);
 
+  /** Drop the drafted goal without sending it. */
+  function discardGoalDraft() {
+    setGoalDraft(null);
+    setGoalOpen(false);
+  }
+
   async function run() {
     if (!canRun) return;
     setSubmitting(true);
@@ -172,6 +186,11 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
         // Omitted gives the task no servers at all, which is the right default:
         // connecting a server and letting a task call it are separate choices.
         ...(mcp.bindings.length ? { mcp_bindings: mcp.bindings } : {}),
+        // The completion condition rides the first message, so the first turn
+        // is already working toward it rather than learning about it later.
+        ...(goalDraft
+          ? { goal: { objective: goalDraft.objective, max_rounds: goalDraft.maxRounds } }
+          : {}),
         runtime,
         model,
         // Sent as a ref; the platform pins it to a commit at creation, because
@@ -297,6 +316,8 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
                 skillSummary={
                   pendingSkillDefaults ? t('attach.skillsDefaults') : String(selectedSkills.length)
                 }
+                goalSummary={goalDraft ? goalDraft.objective : t('attach.goalNone')}
+                onOpenGoal={() => setGoalOpen(true)}
                 mcp={mcp}
                 mcpBlockedReason={mcpBlockedReason}
               />
@@ -378,6 +399,18 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           }}
         />
       ) : null}
+
+      <GoalDialog
+        open={goalOpen}
+        initial={goalDraft}
+        limits={config?.goal_limits}
+        onClose={() => setGoalOpen(false)}
+        onApply={(draft) => {
+          setGoalDraft(draft);
+          setGoalOpen(false);
+        }}
+        onClear={goalDraft ? discardGoalDraft : undefined}
+      />
 
       {skillLibrary.error ? (
         <div className="mt-3 text-center text-sm text-red-600 dark:text-red-400" role="alert">

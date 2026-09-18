@@ -53,10 +53,20 @@ class OneFake(AllCapabilities):
         self._inner = inner
 
     def __getattr__(self, name: str) -> Any:
-        """A capability name is this object; anything else is the fake's own."""
+        """A capability name is this object; anything else is the fake's own.
+
+        Unless the wrapped fake answers for it itself. That exception is what
+        lets a test model a deployment assembled *without* one capability —
+        ``goals = None`` on the inner object — instead of being handed this
+        wrapper back and quietly getting a fake that pretends to have it.
+        """
+        try:
+            return getattr(self._inner, name)
+        except AttributeError:
+            pass
         if name in CAPABILITIES:
             return self
-        return getattr(self._inner, name)
+        raise AttributeError(name)
 
 
 class EmptySkillLibrary:

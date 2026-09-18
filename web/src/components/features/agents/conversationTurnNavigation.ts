@@ -14,6 +14,7 @@ import type {
   AgentJob,
   AgentJobState,
   AgentThreadMessage,
+  GoalTurn,
 } from './types';
 
 /**
@@ -49,6 +50,12 @@ export interface ConversationTurnDescription {
    * than as one of `messages`; null when the prompt is not drawn separately.
    */
   promptCard: string | null;
+  /**
+   * How this turn came to exist and what it reported about the conversation's
+   * goal. Absent for a person's turn on a conversation without one, which is
+   * the overwhelming majority of turns.
+   */
+  goalTurn?: GoalTurn;
   /**
    * Whether this turn's own rows are a valid starting point for a fork. Only a
    * stored turn can carry it; the newest turn answers the question elsewhere.
@@ -279,6 +286,7 @@ function historyTurnDescription(
     displayNo,
     turnNo: turn.turnNo,
     ...(turn.state === undefined ? {} : { state: turn.state }),
+    ...(turn.goalTurn ? { goalTurn: turn.goalTurn } : {}),
     messages: turn.messages,
     events: chatEvents(turn.events, displayNo),
     fallbackResponses,
@@ -347,6 +355,7 @@ export function describeCurrentTurn(
         : messages.filter((message) => message.role === 'assistant'),
       promptCard: job.prompt || job.title,
       forkable: false,
+      ...(job.goalTurn ? { goalTurn: job.goalTurn } : {}),
       toolCalls: toolCallsIn(events),
       prompt: job.prompt || job.title,
       lastResponse: isTerminal(job.state)
@@ -383,6 +392,7 @@ export function describeCurrentTurn(
       : messages.filter((message) => message.role === 'assistant'),
     promptCard,
     forkable: false,
+    ...(job.goalTurn ? { goalTurn: job.goalTurn } : {}),
     toolCalls: toolCallsIn(events),
     prompt: promptCard ?? firstUserMessage(messages),
     lastResponse,

@@ -105,6 +105,8 @@ export interface AgentHistoryTurn {
   forkable: boolean;
   messages: AgentThreadMessage[];
   events: AgentEvent[];
+  /** How this turn came to exist and what it reported. Absent on older rows. */
+  goalTurn?: GoalTurn;
 }
 
 export interface DiffLine {
@@ -231,8 +233,34 @@ export interface TurnResources {
   processes?: ProcessObservation[];
 }
 
+/** The conversation's completion goal, as the job band reads it. */
+export interface AgentGoal {
+  objective: string;
+  state: 'active' | 'paused' | 'blocked' | 'complete';
+  revision: number;
+  roundsUsed: number;
+  maxRounds: number;
+  blockedStreak: number;
+  pauseReason?: string;
+  blockedCode?: 'round-limit' | 'model-reported';
+  blockedMessage?: string;
+}
+
+/** How one turn came to exist, and what it said about the goal. */
+export interface GoalTurn {
+  source: 'human' | 'goal';
+  round?: number;
+  kind?: 'work' | 'verify';
+  report?: 'continue' | 'complete' | 'blocked';
+  reason?: string;
+}
+
 export interface AgentJob {
   skills?: SelectedSkillApi[];
+  /** Present only on a conversation that has a goal. */
+  goal?: AgentGoal;
+  /** Present on every turn; `source` is `human` unless the platform queued it. */
+  goalTurn?: GoalTurn;
   id: string;
   /** Used to group conversation rows in the recent-tasks sidebar. */
   createdAt?: string | null;

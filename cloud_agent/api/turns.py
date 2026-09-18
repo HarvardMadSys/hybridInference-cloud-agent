@@ -258,8 +258,17 @@ async def create_agent_follow_up(
         model=model if body.model else None,
         reasoning_effort=reasoning_effort,
         reset_reasoning_effort=reset_effort,
-        **({"skills": skills} if skills is not None else {}),
-        **({"attachments": attachments} if attachments is not None else {}),
+        # Named rather than splatted. Omitted and ``None`` mean the same thing
+        # to the store — inherit — and an unpacked dict makes the argument
+        # types unknowable at the call site, which is exactly what a later
+        # added keyword parameter silently broke.
+        skills=skills,
+        attachments=attachments,
+        # A message can set or replace the conversation's completion condition.
+        # Omitted leaves the goal exactly as it is, which is what every turn the
+        # platform queues for itself sends — and why an automatic round can
+        # never edit the goal it is running for.
+        goal=body.goal,
         client_request_id=idempotency_key,
         # The same value the replay lookup above used, so the pre-check and the
         # unique index cannot disagree about what was submitted.

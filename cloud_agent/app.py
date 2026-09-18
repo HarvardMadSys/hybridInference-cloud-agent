@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from cloud_agent.ports import (
         AttemptCommands,
         ConversationQueries,
+        GoalRepository,
         GrantRepository,
         HostPoolRepository,
         ResidencyRepository,
@@ -93,6 +94,7 @@ class _Reaping(Protocol):
 
     attempt_commands: AttemptCommands
     conversation_queries: ConversationQueries
+    goals: GoalRepository
     grants: GrantRepository
     host_pool: HostPoolRepository
     residency: ResidencyRepository
@@ -740,6 +742,25 @@ async def reap_expired_attempts(
             await store.attempt_commands.sweep_queued_follow_ups()
         except Exception:
             logger.warning("Queued follow-up sweep failed", exc_info=True)
+        # After the sweeps that can leave a goal with nothing to run it, and
+        # before the pass that reports on the queue. This is a backstop and
+        # nothing else: every ordinary way an active goal stops being able to
+        # continue pauses it where it happens. Anything found here arrived
+        # through a path missing one of those, so it is logged as the warning
+        # it is rather than corrected quietly.
+        try:
+            stalled_goals = await store.goals.pause_stalled_goals()
+            if stalled_goals:
+                logger.warning(
+                    "agent_goals_stalled",
+                    extra={
+                        "event": "agent_goals_stalled",
+                        "count": len(stalled_goals),
+                        "thread_ids": stalled_goals,
+                    },
+                )
+        except Exception:
+            logger.warning("Stalled goal sweep failed", exc_info=True)
         try:
             actions = await store.attempt_commands.reap_expired(max_attempts=max_attempts)
             await _cleanup_reaped_shared_residencies(store.host_pool, actions, grants)
@@ -937,7 +958,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     http = httpx.AsyncClient()
     app.state.http = http
     app.state.gateway = GatewayClient(client=http)
-    # The sandbox's credential is minted at the gateway now (E9), so the claim
+    # The sandbox's credential is minted at the gateway now, so the claim
     # path and the renewal/revocation passes share that pool rather than each
     # building their own per call. They take the same seam; until this was
     # wired, the comment here described sharing that was not happening.

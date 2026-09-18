@@ -15,6 +15,7 @@ from cloud_agent.ports.conversation_commands import ConversationCommands
 from cloud_agent.ports.conversation_queries import ConversationQueries
 from cloud_agent.ports.credential_queries import CredentialQueries
 from cloud_agent.ports.execution_queries import ExecutionQueries
+from cloud_agent.ports.goals import GoalRepository
 from cloud_agent.ports.grants import GrantRepository
 from cloud_agent.ports.host_capacity import HostCapacityRepository
 from cloud_agent.ports.host_pool import HostPoolRepository
@@ -36,6 +37,7 @@ __all__ = [
     "ConversationQueries",
     "CredentialQueries",
     "ExecutionQueries",
+    "GoalRepository",
     "GrantRepository",
     "HostCapacityRepository",
     "HostPoolRepository",

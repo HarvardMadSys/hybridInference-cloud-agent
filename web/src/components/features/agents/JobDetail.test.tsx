@@ -629,7 +629,9 @@ describe('JobDetail', () => {
         ]}
       />,
     );
-    expect(screen.getByRole('button', { name: /0 selected/ })).toBeInTheDocument();
+    // The selection's size is on the attach menu's Skills row now, not on a
+    // control in the row — which is the point of the menu.
+    expect(screen.getByRole('button', { name: 'Add files or skills' })).toBeInTheDocument();
   });
 
   it('allows clearing saved skills for the next follow-up', async () => {
@@ -655,7 +657,8 @@ describe('JobDetail', () => {
         })}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: /1 selected/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add files or skills' }));
+    fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: /Skills/ }));
     fireEvent.click(await screen.findByRole('switch'));
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
     fireEvent.change(screen.getByLabelText('Add a follow-up'), {

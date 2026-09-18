@@ -4,13 +4,16 @@ import type { ReactNode } from 'react';
 import toast from 'react-hot-toast';
 
 import { Markdown } from '@/components/ui/Markdown';
+import { useT } from '@/components/providers';
+import { GoalIcon } from './ComposerPlusMenu';
+import type { TranslationKey } from '@/lib/i18n/dictionaries/en';
 import { lifecyclePhaseLabel } from './adapt';
 import {
   eventBlockKey,
   messageBlockKey,
   type ConversationTurnDescription,
 } from './conversationTurnNavigation';
-import type { AgentEvent, AgentThreadMessage } from './types';
+import type { AgentEvent, AgentThreadMessage, GoalTurn } from './types';
 
 function Chevron({ className = '' }: { className?: string }) {
   return (
@@ -284,6 +287,7 @@ export function ThreadTurn({
   onRewind,
   footer,
   blockKey,
+  goalTurn,
 }: {
   message: AgentThreadMessage;
   footer?: ReactNode;
@@ -291,7 +295,10 @@ export function ThreadTurn({
   onFork?: () => void;
   onRewind?: () => void;
   blockKey?: string;
+  /** How this turn came to exist, and what it reported about the goal. */
+  goalTurn?: GoalTurn;
 }) {
+  const t = useT();
   if (message.role === 'assistant') {
     return (
       <AssistantMessage
@@ -309,8 +316,44 @@ export function ThreadTurn({
       />
     );
   }
+  if (goalTurn?.source === 'goal') {
+    // Not a bubble, because nobody wrote it. The round's body is the
+    // instruction the platform generated, and it stays in the transcript for
+    // anyone who wants to read it — collapsed, because it is the same standing
+    // text every round and would otherwise be most of what the conversation
+    // appears to be.
+    return (
+      <div data-block-key={blockKey} className="my-4">
+        <details className="group rounded-lg border border-dashed border-gray-300 px-3 py-2 dark:border-white/15">
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+            <GoalIcon className="h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 flex-1 truncate">
+              {goalTurn.kind === 'verify'
+                ? t('goal.turnVerify')
+                : t('goal.turnWork', { round: goalTurn.round ?? 1 })}
+            </span>
+            {goalTurn.report ? (
+              <span className="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] dark:bg-white/10">
+                {t(REPORT_KEYS[goalTurn.report])}
+              </span>
+            ) : null}
+          </summary>
+          <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+            <Markdown text={message.content} />
+          </div>
+        </details>
+      </div>
+    );
+  }
   return <UserMessage text={message.content} {...{ blockKey, busy, onRewind }} />;
 }
+
+/** The dictionary key for a report the platform recorded for a turn. */
+const REPORT_KEYS: Record<'continue' | 'complete' | 'blocked', TranslationKey> = {
+  continue: 'goal.reportContinue',
+  complete: 'goal.reportComplete',
+  blocked: 'goal.reportBlocked',
+};
 
 function UserMessage({
   text,
@@ -468,6 +511,7 @@ export function HistoryTurn({
           <ThreadTurn
             key={message.id}
             message={message}
+            goalTurn={turn.goalTurn}
             blockKey={messageBlockKey(jobId, message.id)}
             busy={busy}
             onRewind={

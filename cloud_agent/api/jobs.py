@@ -21,6 +21,7 @@ from cloud_agent.api._job_admission import _create_job_as
 from cloud_agent.api._job_views import (
     _attempt_resources,
     _attempt_summary_response,
+    _goal_view,
     _iso,
     _job_response,
 )
@@ -35,6 +36,8 @@ from cloud_agent.api.deps import (
 )
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.entitlement import REPO_PATTERN
+from cloud_agent.goals.continuation import maybe_continue_goal
+from cloud_agent.goals.models import GoalConflict, GoalView
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
     AgentAttemptTelemetry,
@@ -46,6 +49,9 @@ from cloud_agent.schemas import (
     AgentThreadPinResponse,
     AgentThreadRenameRequest,
     AgentThreadRenameResponse,
+    GoalClearedResponse,
+    GoalRequest,
+    GoalResponse,
 )
 from cloud_agent.terminal_coordination import resume_settled_terminal
 
@@ -56,6 +62,7 @@ if TYPE_CHECKING:
         ConversationCommands,
         ConversationQueries,
         ExecutionQueries,
+        GoalRepository,
         HostPoolRepository,
         McpConnectionRepository,
         SandboxRepository,
@@ -93,6 +100,7 @@ class _JobsStorage(Protocol):
     conversation_commands: ConversationCommands
     conversation_queries: ConversationQueries
     execution_queries: ExecutionQueries
+    goals: GoalRepository
     host_pool: HostPoolRepository
     mcp: McpConnectionRepository
     sandbox: SandboxRepository
@@ -345,6 +353,223 @@ async def _set_agent_thread_pinned(
         thread_id=result["thread_id"],
         pinned=pinned,
         pinned_at=_iso(result["pinned_at"]),
+    )
+
+
+def _no_such_goal_error() -> HTTPException:
+    """A goal write against a conversation that no longer has one."""
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": {
+                "type": "goal_missing",
+                "message": "This conversation has had its goal cleared. Set a new one first.",
+            }
+        },
+    )
+
+
+def _goal_conflict_error() -> HTTPException:
+    """A goal write made against a revision the goal has already moved past."""
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": {
+                "type": "goal_revision_conflict",
+                "message": "This goal changed while you were editing it. Reload and try again.",
+            }
+        },
+    )
+
+
+def _goal_response(job: dict[str, Any], goal: dict[str, Any]) -> GoalResponse:
+    """The whole job, with the goal this write just left on its conversation."""
+    return GoalResponse(
+        thread_id=str(job["thread_id"]),
+        job=_job_response({**job, "goal": goal}),
+        goal=_goal_view(goal) or GoalView.model_validate(goal),
+    )
+
+
+@router.put("/jobs/{job_id}/goal", response_model=GoalResponse)
+async def set_agent_goal(
+    job_id: str,
+    body: GoalRequest,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _JobsStorage | None = Depends(get_storage),
+) -> GoalResponse:
+    """Set, replace or edit the conversation's completion condition.
+
+    Addressable through any turn of the conversation, because a goal belongs to
+    the conversation and not to the turn that happened to set it.
+    """
+    job_store = _require_store(store)
+    job = await _owned_job(job_store.conversation_queries, job_id, user)
+    try:
+        goal = await job_store.goals.set_goal(
+            thread_id=str(job["thread_id"]),
+            user_id=user["user_id"],
+            goal=body.goal,
+            expected_revision=body.revision,
+        )
+    except GoalConflict as exc:
+        raise _goal_conflict_error() from exc
+    if goal is None:
+        raise _no_such_goal_error()
+    logger.info(
+        "agent_goal_set",
+        extra={
+            "event": "agent_goal_set",
+            "thread_id": job["thread_id"],
+            "job_id": job_id,
+            "goal_revision": goal["revision"],
+            "max_rounds": goal["max_rounds"],
+        },
+    )
+    return _goal_response(job, goal)
+
+
+@router.post("/jobs/{job_id}/goal/pause", response_model=GoalResponse)
+async def pause_agent_goal(
+    job_id: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _JobsStorage | None = Depends(get_storage),
+) -> GoalResponse:
+    """Stop the goal continuing itself; leave the turn that is already running.
+
+    A queued automatic round is cancelled in the same transaction, so nothing
+    the goal asked for slips past the pause. A *running* round is deliberately
+    left alone: stopping work in flight is what the cancel endpoint is for, and
+    doing it here would make "pause" mean two different things.
+    """
+    job_store = _require_store(store)
+    job = await _owned_job(job_store.conversation_queries, job_id, user)
+    thread_id = str(job["thread_id"])
+    goal = await job_store.goals.get_goal(thread_id=thread_id)
+    if goal is None:
+        raise _no_such_goal_error()
+    paused = False
+    if goal["state"] != "paused":
+        paused = await job_store.goals.pause_goal(
+            thread_id=thread_id, revision=goal["revision"], reason="user"
+        )
+        # Either way, report what the row says now: a pause that lost a race
+        # with another writer must not be described as one that landed.
+        goal = await job_store.goals.get_goal(thread_id=thread_id) or goal
+    if paused:
+        logger.info(
+            "agent_goal_paused_by_owner",
+            extra={
+                "event": "agent_goal_paused_by_owner",
+                "thread_id": thread_id,
+                "job_id": job_id,
+            },
+        )
+    return _goal_response(job, goal)
+
+
+@router.post("/jobs/{job_id}/goal/resume", response_model=GoalResponse)
+async def resume_agent_goal(
+    job_id: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _JobsStorage | None = Depends(get_storage),
+    app_credentials: Any | None = Depends(get_agent_app_credentials),
+) -> GoalResponse:
+    """Start a paused goal moving again.
+
+    Resuming has to *do* something. A paused goal usually left no turn behind —
+    the round it cancelled is gone — so flipping the state is not enough: the
+    conversation would sit there looking resumed and never run. When nothing is
+    queued or running, one work round is queued immediately, through the same
+    path a finished turn uses.
+    """
+    job_store = _require_store(store)
+    job = await _owned_job(job_store.conversation_queries, job_id, user)
+    thread_id = str(job["thread_id"])
+    goal = await job_store.goals.get_goal(thread_id=thread_id)
+    if goal is None:
+        raise _no_such_goal_error()
+    if goal["rounds_used"] >= goal["max_rounds"]:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "goal_rounds_exhausted",
+                    "message": (
+                        f"This goal has used all {goal['max_rounds']} of its automatic "
+                        "rounds. Raise the limit to keep going."
+                    ),
+                }
+            },
+        )
+    if goal["state"] == "paused":
+        resumed = await job_store.goals.resume_goal(thread_id=thread_id, revision=goal["revision"])
+        goal = await job_store.goals.get_goal(thread_id=thread_id) or goal
+        if not resumed:
+            # Another writer moved the goal between this handler's read and its
+            # write. The row is re-read either way, so the response describes
+            # what happened rather than what was intended.
+            logger.info(
+                "agent_goal_resume_raced",
+                extra={"event": "agent_goal_resume_raced", "thread_id": thread_id},
+            )
+    if not await job_store.goals.has_pending_turn(thread_id=thread_id):
+        # From the last turn that actually *ran*, not the last one that reached
+        # a terminal state. Pausing cancels the round that was waiting, and a
+        # cancelled round is not a turn the resumed goal can continue from —
+        # nor a parent the next round may hang from, since the store refuses a
+        # follow-up whose parent was cancelled.
+        parent = await job_store.conversation_queries.latest_terminal_turn(thread_id=thread_id)
+        if parent is not None:
+            # ``maybe_continue_goal`` re-reads the goal, so it decides from what
+            # the resume actually wrote rather than from what this handler read
+            # before writing it. The report is assumed rather than read: what is
+            # being continued is the owner's request, and the turn named here is
+            # named for its parentage.
+            await maybe_continue_goal(
+                goals=job_store.goals,
+                conversations=job_store.conversation_commands,
+                queries=job_store.conversation_queries,
+                source_control=job_store.source_control,
+                job_id=str(parent["id"]),
+                app_credentials=app_credentials,
+                assume_report="continue",
+            )
+    logger.info(
+        "agent_goal_resumed",
+        extra={"event": "agent_goal_resumed", "thread_id": thread_id, "job_id": job_id},
+    )
+    return _goal_response(job, goal)
+
+
+@router.delete("/jobs/{job_id}/goal", response_model=GoalClearedResponse)
+async def clear_agent_goal(
+    job_id: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _JobsStorage | None = Depends(get_storage),
+) -> GoalClearedResponse:
+    """Remove the goal and every automatic round that was queued for it.
+
+    The rounds go with it. They are not turns toward anything any more, and
+    leaving them queued would run work for an objective the owner just withdrew.
+    """
+    job_store = _require_store(store)
+    job = await _owned_job(job_store.conversation_queries, job_id, user)
+    thread_id = str(job["thread_id"])
+    cleared = await job_store.goals.clear_goal(thread_id=thread_id, user_id=user["user_id"])
+    logger.info(
+        "agent_goal_cleared",
+        extra={
+            "event": "agent_goal_cleared",
+            "thread_id": thread_id,
+            "job_id": job_id,
+            "cleared": cleared,
+        },
+    )
+    return GoalClearedResponse(
+        thread_id=thread_id,
+        job=_job_response({**job, "goal": None}),
+        cleared=cleared,
     )
 
 

@@ -23,6 +23,13 @@ from cloud_agent.capacity_protocol import (
 )
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.execution_profiles import ExecutionProfile
+from cloud_agent.goals.models import (
+    GoalInput,
+    GoalLimits,
+    GoalReportStatus,
+    GoalRoundKind,
+    GoalView,
+)
 from cloud_agent.host_pool import ENROLL_TOKEN_TTL_S
 from cloud_agent.skills.models import (
     SelectedSkill,
@@ -155,6 +162,15 @@ class AgentJobCreate(BaseModel):
             "Staged uploads to place under /uploads in the sandbox. Omitted attaches "
             "nothing: unlike skills there are no account defaults, because an upload "
             "is something done for this one task rather than a standing preference."
+        ),
+    )
+    goal: GoalInput | None = Field(
+        None,
+        description=(
+            "A completion condition for this conversation. The platform judges it at "
+            "the end of every turn and queues the next turn itself while the objective "
+            "is unmet, up to max_rounds. Omitted means no goal: nothing continues "
+            "without the owner asking again."
         ),
     )
     metadata: dict[str, Any] | None = Field(None, description="Opaque caller metadata.")
@@ -595,6 +611,18 @@ class AgentJobResponse(BaseModel):
     # Set on turns created by a fork: the original turn this row copies.
     forked_from_job_id: str | None = None
     metadata: dict[str, Any] | None = None
+    # How this turn came to exist, and what it was asked to do about the
+    # conversation's goal. A snapshot: editing the objective later never
+    # rewrites what this turn was told or what it reported.
+    turn_source: Literal["human", "goal"] = "human"
+    goal_round: int | None = None
+    goal_round_kind: GoalRoundKind | None = None
+    goal_report: GoalReportStatus | None = None
+    goal_reason: str | None = None
+    # The conversation's *live* goal, on every turn of it, the way ``title`` is.
+    # Editing the objective is visible here immediately; ``goal_round`` above is
+    # what this particular turn ran against.
+    goal: GoalView | None = None
     # Labels and revisions only. The owner never sees a connection's address or
     # credential — those are the two things this service's MCP relay keeps off
     # the sandbox-facing wire.
@@ -673,6 +701,41 @@ class AgentJobListResponse(BaseModel):
     """A page of agent jobs."""
 
     jobs: list[AgentJobResponse]
+
+
+class GoalRequest(BaseModel):
+    """A goal write, with the revision the caller read it at.
+
+    ``revision`` is what makes two edits from two tabs resolvable: the second
+    one is refused rather than silently overwriting the first. Omitted means
+    "write it whatever it currently says", which is what a first-time set from
+    the composer wants.
+    """
+
+    goal: GoalInput
+    revision: int | None = Field(None, ge=0)
+
+
+class GoalResponse(BaseModel):
+    """The conversation's goal after a write that changed it.
+
+    Carries the whole job as well, because the caller's view of the
+    conversation is a job view: the goal band, the turn list and the polling
+    predicate all read from it, and a goal write that returned only the goal
+    would leave the page rebuilding the rest from what it already had.
+    """
+
+    thread_id: str
+    job: AgentJobResponse
+    goal: GoalView
+
+
+class GoalClearedResponse(BaseModel):
+    """The conversation after removing its goal."""
+
+    thread_id: str
+    job: AgentJobResponse
+    cleared: bool = True
 
 
 AgentSessionState = Literal[
@@ -881,8 +944,8 @@ class AgentFollowUpRequest(BaseModel):
         None,
         description=(
             "Accepted only when it names the thread's own harness — a thread's "
-            "harness is fixed (its session is the unit of continuity; design "
-            "D2). Any other value is a 400; start a new chat to switch."
+            "harness is fixed (its session is the unit of continuity). Any "
+            "other value is a 400; start a new chat to switch."
         ),
     )
     model: str | None = Field(None, description="Optional model override for this turn.")
@@ -895,6 +958,14 @@ class AgentFollowUpRequest(BaseModel):
             f"{RESET_REASONING_EFFORT!r} resets to Auto — effort needs a way "
             "back that model never did, because null is a value a turn can "
             "legitimately hold rather than the absence of one."
+        ),
+    )
+    goal: GoalInput | None = Field(
+        None,
+        description=(
+            "Set or replace this conversation's completion condition along with "
+            "this message. Omitted leaves the goal as it is. A turn queued by the "
+            "goal itself never carries one."
         ),
     )
 
@@ -1805,6 +1876,7 @@ class AgentConfigResponse(BaseModel):
 
     skill_limits: SkillLimits = Field(default_factory=SkillLimits)
     attachment_limits: AttachmentLimits = Field(default_factory=AttachmentLimits)
+    goal_limits: GoalLimits = Field(default_factory=GoalLimits)
 
     repos: list[str] = Field(
         default_factory=list,
@@ -2510,7 +2582,7 @@ class HostHeartbeatResponse(BaseModel):
     )
 
 
-# ── Session (E8) ───────────────────────────────────────────────────────
+# ── Session ────────────────────────────────────────────────────────────
 
 
 class SessionUserResponse(BaseModel):

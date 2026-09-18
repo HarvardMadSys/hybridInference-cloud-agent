@@ -32,6 +32,7 @@ from cloud_agent.execution_profiles import (
 )
 from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
 from cloud_agent.storage._sql.events import insert_event
+from cloud_agent.storage._sql.goals import goal_after_terminal
 from cloud_agent.storage._sql.hosts import host_slots_exhausted, release_host_slot
 from cloud_agent.storage._sql.jobs import (
     QUALIFIED_JOB_COLUMNS,
@@ -42,6 +43,7 @@ from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 
 if TYPE_CHECKING:
+    from cloud_agent.goals.report import GoalReport
     from cloud_agent.ports.attempt_commands import TurnSummaryWrite
 
 #: What the ordering rules decide, before the caller writes anything.
@@ -103,7 +105,7 @@ class PostgresAttemptCommands:
         exclude new chats from the old host while still admitting only retained
         groups whose immutable ``host`` is that old host.
 
-        **The pool gate (G4) sits after the pin and answers the same way.**
+        **The pool gate sits after the pin and answers the same way.**
         A reported host must be ``online`` and have a free slot under the lower
         of its reported executor count and the size an operator asked for, and the job it
         takes must require nothing the host did not declare. All three refusals
@@ -325,6 +327,31 @@ class PostgresAttemptCommands:
                 job_id,
                 attempt["id"],
             )
+            # The round is charged *here*, not when it was queued, and only the
+            # first attempt pays. A round that was queued and then cancelled
+            # never reaches this statement, so it never spends the budget; a
+            # retry of a round that already started does not spend it twice.
+            # Verification rounds are deliberately not charged: they exist to
+            # check one completion claim, not to make progress.
+            if (
+                job_row["turn_source"] == "goal"
+                and job_row["goal_round_kind"] == "work"
+                and attempt["attempt_no"] == 1
+                and job_row["goal_revision"] is not None
+            ):
+                # The revision is the goal this round was created for. If the
+                # owner has since replaced it, this round's claim must not spend
+                # the new goal's budget.
+                await conn.execute(
+                    """
+                    UPDATE agent_threads
+                    SET goal_rounds_used = goal_rounds_used + 1,
+                        goal_updated_at = NOW()
+                    WHERE id = $1 AND goal_revision = $2
+                    """,
+                    job_row["thread_id"],
+                    job_row["goal_revision"],
+                )
         claim = job_row_to_dict(job_row)
         claim["state"] = RUNNING
         claim["current_attempt_id"] = attempt["id"]
@@ -496,12 +523,16 @@ class PostgresAttemptCommands:
         to_state: str,
         detail: str | None = None,
         base_sha: str | None = None,
+        goal_report: GoalReport | None = None,
     ) -> bool:
         """Move a job between states, fenced by the attempt's live lease.
 
         Terminal transitions also close the attempt (``finished``). Returns
         False when the caller lost the lease or the job is not in
         ``from_states`` — the caller must stop.
+
+        ``goal_report`` is what the turn said about its conversation's goal; it
+        is stored in the same transaction as the outcome.
 
         ``base_sha`` fills in the commit the worker resolved, and only when the
         job does not already have one: an owner who pinned a commit must get a
@@ -553,6 +584,25 @@ class PostgresAttemptCommands:
                 ) from exc
             if updated is None:
                 return False
+            if goal_report is not None:
+                # A report the turn made through the goal tool wins. It was
+                # written while the tool call happened, it is a structured act
+                # rather than a sentence the model may have restated mid-answer,
+                # and overwriting it with whatever its closing prose happened to
+                # say would replace the better evidence with the worse. The text
+                # convention is the fallback for a turn that called nothing,
+                # which is exactly what the ``goal_report IS NULL`` predicate
+                # selects. Re-sending the same finish writes the same value.
+                await conn.execute(
+                    """
+                    UPDATE agent_jobs
+                    SET goal_report = $2, goal_reason = $3
+                    WHERE id = $1 AND goal_report IS NULL
+                    """,
+                    job_id,
+                    goal_report.status,
+                    goal_report.reason,
+                )
             if to_state in TERMINAL_STATES:
                 sandbox_transition = None
                 # Close any retained-sandbox turn boundary in the same
@@ -1170,9 +1220,20 @@ class PostgresAttemptCommands:
                     "terminal_resume_pending = TRUE, updated_at = NOW() WHERE id = $1",
                     job_id,
                 )
+                # A queued automatic round that has just been cancelled is a
+                # goal that can no longer continue itself. Cancel the round and
+                # the goal stops in the same transaction: there is no window in
+                # which a cancelled round leaves an active goal with nothing to
+                # run it.
+                await goal_after_terminal(conn, job_id=job_id, state=CANCELLED)
                 await fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
                 return CANCELLED
             if state == RUNNING:
+                # Deliberately no goal write here: this only asks the running
+                # turn to stop, and it stops by reaching a terminal state
+                # through ``transition``, which is where every other outcome is
+                # decided. Pausing now would race the decision that is about to
+                # be made about this same turn.
                 await conn.execute(
                     "UPDATE agent_jobs SET cancel_requested = TRUE, updated_at = NOW() "
                     "WHERE id = $1",
@@ -1466,6 +1527,14 @@ class PostgresAttemptCommands:
                         "UPDATE agent_jobs SET state = 'queued', updated_at = NOW() WHERE id = $1",
                         job_id,
                     )
+                if action in TERMINAL_STATES:
+                    # Every terminal reaper outcome is a turn that did not end
+                    # workably from the goal's point of view. The ordinary
+                    # finish path decides the goal in ``maybe_continue_goal``;
+                    # a reaped turn never reaches it, so it is decided here —
+                    # and the only safe decision is to stop and wait for the
+                    # owner.
+                    await goal_after_terminal(conn, job_id=job_id, state=action)
                 if action in TERMINAL_STATES and not retained_activation_expired:
                     # A terminal reaper outcome is semantically the same turn
                     # boundary as ``transition``. Keep the linear chat moving

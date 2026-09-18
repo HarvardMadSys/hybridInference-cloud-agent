@@ -297,6 +297,53 @@ describe('toDisplayJob', () => {
     expect(toDisplayJob(JOB).branch).toBe('agent/ajob_1');
   });
 
+  it("carries the conversation goal and this turn's report", () => {
+    const job = toDisplayJob({
+      ...JOB,
+      turn_source: 'goal',
+      goal_round: 3,
+      goal_round_kind: 'verify',
+      goal_report: 'continue',
+      goal_reason: 'two tests still fail',
+      goal: {
+        objective: 'make `pytest` pass',
+        state: 'active',
+        revision: 4,
+        max_rounds: 10,
+        rounds_used: 3,
+        blocked_streak: 0,
+        pause_reason: null,
+        blocked_code: null,
+        blocked_message: null,
+        created_at: null,
+        updated_at: null,
+      },
+    });
+    expect(job.goal).toEqual({
+      objective: 'make `pytest` pass',
+      state: 'active',
+      revision: 4,
+      roundsUsed: 3,
+      maxRounds: 10,
+      blockedStreak: 0,
+    });
+    expect(job.goalTurn).toEqual({
+      source: 'goal',
+      round: 3,
+      kind: 'verify',
+      report: 'continue',
+      reason: 'two tests still fail',
+    });
+  });
+
+  it('says nothing about a goal on a conversation that has none', () => {
+    // A deployment older than this feature, and every conversation nobody set
+    // a goal on: the transcript must not grow an empty band for either.
+    const job = toDisplayJob(JOB);
+    expect(job.goal).toBeUndefined();
+    expect(job.goalTurn).toEqual({ source: 'human' });
+  });
+
   it('maps the conversation pin time', () => {
     expect(toDisplayJob({ ...JOB, pinned_at: '2026-07-29T12:00:00Z' }).pinnedAt).toBe(
       '2026-07-29T12:00:00Z',

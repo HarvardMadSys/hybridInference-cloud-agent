@@ -9,7 +9,10 @@ operations it needs rather than on the whole persistence surface.
 
 from __future__ import annotations
 
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+if TYPE_CHECKING:
+    from cloud_agent.goals.report import GoalReport
 
 #: Every outcome of :meth:`AttemptCommands.record_attempt_turn_summary`.
 #: ``stored`` and ``duplicate`` are success -- a retried post is the same
@@ -57,7 +60,7 @@ class AttemptCommands(Protocol):
         exclude new chats from the old host while still admitting only retained
         groups whose immutable ``host`` is that old host.
 
-        **The pool gate (G4) sits after the pin and answers the same way.**
+        **The pool gate sits after the pin and answers the same way.**
         A reported host must be ``online`` and have a free slot under the lower
         of its reported executor count and the size an operator asked for, and the job it
         takes must require nothing the host did not declare. All three refusals
@@ -134,12 +137,16 @@ class AttemptCommands(Protocol):
         to_state: str,
         detail: str | None = None,
         base_sha: str | None = None,
+        goal_report: GoalReport | None = None,
     ) -> bool:
         """Move a job between states, fenced by the attempt's live lease.
 
         Terminal transitions also close the attempt (``finished``). Returns
         False when the caller lost the lease or the job is not in
         ``from_states`` — the caller must stop.
+
+        ``goal_report`` is what the turn said about its conversation's goal; it
+        is stored in the same transaction as the outcome.
 
         ``base_sha`` fills in the commit the worker resolved, and only when the
         job does not already have one: an owner who pinned a commit must get a

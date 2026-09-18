@@ -42,7 +42,11 @@ import { highestEffort, offeredEfforts } from './effort';
 import { LedgerUsage, useLedgerUsage } from './LedgerUsage';
 import { PaneResizer } from './PaneResizer';
 import { Picker } from './Picker';
-import { SkillPicker } from './skills/SkillPicker';
+import { ComposerPlusMenu, GoalIcon } from './ComposerPlusMenu';
+import { GoalBar } from './goal/GoalBar';
+import { GoalDialog, type GoalDraft } from './goal/GoalDialog';
+import { hasLiveWork } from './goal/liveWork';
+import { SkillSelectionDialog } from './skills/SkillPicker';
 import type { SelectedSkillApi } from '@/lib/api/skills';
 import { BackToBottom, TurnRail } from './TurnNavigator';
 import { TerminalWorkspace } from './TerminalWorkspace';
@@ -552,6 +556,13 @@ export function JobDetail({
   }, [events, threadJobs, job.id, job.prompt, job.turnNo, job.createdAt]);
   const [followUp, setFollowUp] = useState('');
   const [chosenSkills, setChosenSkills] = useState<SelectedSkillApi[] | null>(null);
+  // What the next message would set the conversation's goal to, and nothing
+  // else: the draft rides that message, because a goal with no message
+  // attached has nothing to work on yet. The band above manages the goal the
+  // conversation already has; the two are never on screen together.
+  const [goalOpen, setGoalOpen] = useState(false);
+  const [goalDraft, setGoalDraft] = useState<GoalDraft | null>(null);
+  const [skillsOpen, setSkillsOpen] = useState(false);
   // Follow-ups append to the thread's latest turn, even from an older URL.
   const inheritedSkills = threadJobs.reduce(
     (latest, turn) =>
@@ -858,6 +869,12 @@ export function JobDetail({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isActive, stop]);
 
+  /** Drop the drafted goal without sending it. */
+  function discardGoalDraft() {
+    setGoalDraft(null);
+    setGoalOpen(false);
+  }
+
   async function submitFollowUp(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const prompt = followUp.trim();
@@ -868,6 +885,12 @@ export function JobDetail({
       const child = await followUpAgentJob(job.id, {
         prompt,
         ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
+        // A drafted goal rides this message. It is the same endpoint that
+        // carries a skills change, so one message can set both, and the goal is
+        // written in the transaction that appends the turn.
+        ...(goalDraft
+          ? { goal: { objective: goalDraft.objective, max_rounds: goalDraft.maxRounds } }
+          : {}),
         // Omitted controls inherit the parent's validated model and effort.
         ...composerOverrides(job, model, effort),
       });
@@ -1254,6 +1277,7 @@ export function JobDetail({
                         <ThreadTurn
                           key={message.id}
                           message={message}
+                          goalTurn={currentTurn.goalTurn}
                           blockKey={messageBlockKey(message.jobId, message.id)}
                           footer={
                             lastVisibleMessageIndex < 0 && message.id === currentReplyId
@@ -1427,6 +1451,52 @@ export function JobDetail({
                 ref={scroll.composerRef}
                 className="sticky bottom-0 z-10 -mx-2 mt-10 bg-gradient-to-t from-gray-50 via-gray-50/95 px-2 pb-2 pt-8 dark:from-gray-950 dark:via-gray-950/95"
               >
+                {goalDraft ? (
+                  <div className="mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-gray-300 px-3 py-2 text-xs text-gray-500 dark:border-white/15 dark:text-gray-400">
+                    <GoalIcon className="h-3.5 w-3.5 shrink-0" />
+                    <span className="min-w-0 flex-1 basis-48 truncate" title={goalDraft.objective}>
+                      {t('attach.goalSet', { objective: goalDraft.objective })}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={discardGoalDraft}
+                      className="shrink-0 rounded-md border border-gray-200 px-2 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/5"
+                    >
+                      {t('goal.discardDraft')}
+                    </button>
+                  </div>
+                ) : null}
+                {job.goal ? (
+                  <GoalBar
+                    jobId={job.id}
+                    goal={job.goal}
+                    limits={config?.goal_limits}
+                    state={{
+                      live: hasLiveWork(job),
+                      verifying: job.goalTurn?.kind === 'verify' && isActive,
+                      ...(job.goalTurn?.reason ? { lastReason: job.goalTurn.reason } : {}),
+                      forked: job.goal.pauseReason === 'fork',
+                    }}
+                    onChanged={() => {
+                      // The server answers with the whole job row; the page's
+                      // own reload is what re-renders it. Reimplementing
+                      // fetch-and-adapt here would be a second reader of the
+                      // same endpoint, and the two would drift.
+                      onReload?.();
+                    }}
+                  />
+                ) : null}
+                <GoalDialog
+                  open={goalOpen}
+                  initial={goalDraft}
+                  limits={config?.goal_limits}
+                  onClose={() => setGoalOpen(false)}
+                  onApply={(draft) => {
+                    setGoalDraft(draft);
+                    setGoalOpen(false);
+                  }}
+                  onClear={goalDraft ? discardGoalDraft : undefined}
+                />
                 <McpSessionPanel
                   jobId={job.id}
                   threadId={job.threadId ?? job.id}
@@ -1522,12 +1592,32 @@ export function JobDetail({
                           {isActive ? ' · queued after this run' : ''}
                         </span>
                       )}
-                      <SkillPicker
-                        limits={config?.skill_limits}
-                        selected={chosenSkills ?? inheritedSkills}
-                        onChange={setChosenSkills}
+                      <ComposerPlusMenu
+                        onOpenSkills={() => setSkillsOpen(true)}
+                        skillSummary={String((chosenSkills ?? inheritedSkills).length)}
+                        goalSummary={goalDraft ? goalDraft.objective : t('attach.goalNone')}
+                        onOpenGoal={() => setGoalOpen(true)}
                         disabled={contextLost || submitting}
                       />
+                      {skillsOpen ? (
+                        <SkillSelectionDialog
+                          limits={config?.skill_limits}
+                          selected={chosenSkills ?? inheritedSkills}
+                          onClose={() => setSkillsOpen(false)}
+                          onApply={(skills) => {
+                            const originalIds = new Set(
+                              (chosenSkills ?? inheritedSkills).map((skill) => skill.id),
+                            );
+                            if (
+                              skills.length !== originalIds.size ||
+                              skills.some((skill) => !originalIds.has(skill.id))
+                            ) {
+                              setChosenSkills(skills);
+                            }
+                            setSkillsOpen(false);
+                          }}
+                        />
+                      ) : null}
                       <ComposerSendButton
                         label="Send follow-up"
                         title="Send follow-up — ⏎ to send, ⇧⏎ for a new line"

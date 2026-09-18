@@ -9,7 +9,10 @@ operations it needs rather than on the whole persistence surface.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from cloud_agent.goals.models import GoalInput
 
 
 class ConversationCommands(Protocol):
@@ -31,10 +34,15 @@ class ConversationCommands(Protocol):
         mcp_bindings: list[dict[str, Any]] | None = None,
         skills: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        goal: GoalInput | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any]:
         """Create a queued job and return it.
+
+        ``goal`` sets the conversation's completion condition in the same
+        transaction that creates it, so the first turn is already working
+        toward it rather than learning about it one turn later.
 
         Callers that do not name a profile still go through the deployment's
         server-owned default.  This matters for internal producers that call
@@ -62,10 +70,25 @@ class ConversationCommands(Protocol):
         reset_reasoning_effort: bool = False,
         skills: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        goal: GoalInput | None = None,
+        turn_source: str = "human",
+        goal_round: int | None = None,
+        goal_round_kind: str | None = None,
+        goal_revision: int | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:
         """Append a user turn and create the run that will answer it.
+
+        ``goal`` sets or replaces the conversation's completion condition in the
+        same transaction that appends this turn.
+
+        ``turn_source``, ``goal_round``, ``goal_round_kind`` and
+        ``goal_revision`` describe an automatic round the platform is running
+        toward the conversation's goal. They are written by the continuation
+        path only; a person's message never sets them, and there is deliberately
+        no parameter here that could change the objective — an automatic round
+        cannot edit the goal it is running for.
 
         ``reasoning_effort`` overrides the inherited depth; omitting it keeps
         the parent's, as an omitted model does. ``reset_reasoning_effort``

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cloud_agent.storage._sql.goals import PAUSE_GOALS_SQL
+
 if TYPE_CHECKING:
     from typing import Any
 
@@ -22,10 +24,26 @@ JOB_OWN_COLUMNS = (
     "cancel_requested, terminal_resume_pending, current_attempt_id, "
     "published_pr_url, published_commit_sha, detail, "
     "metadata, skills, attachments, fork_source_job_id, "
+    "turn_source, goal_round, goal_round_kind, goal_revision, goal_report, goal_reason, "
     "created_at, updated_at"
 )
 
-THREAD_CONFIG_COLUMNS = "t.repo, t.setup_script, t.execution_profile"
+# What a conversation shares with every one of its turns: where it runs, and —
+# since the goal is conversation-level and single-valued — what it is working
+# toward. The counters travel with the objective because a response that showed
+# one without the other would report progress that is not the goal's.
+#
+# The thread's ``goal_revision`` is aliased. ``agent_jobs`` has one too — the
+# revision *this turn* was created for — and a row carrying two columns of the
+# same name keeps only the later one, which would quietly make every job read
+# report the conversation's revision as its own snapshot.
+THREAD_CONFIG_COLUMNS = (
+    "t.repo, t.setup_script, t.execution_profile, "
+    "t.goal_objective, t.goal_state, t.goal_pause_reason, t.goal_blocked_code, "
+    "t.goal_blocked_message, t.goal_revision AS thread_goal_revision, "
+    "t.goal_max_rounds, t.goal_rounds_used, "
+    "t.goal_blocked_streak, t.goal_created_at, t.goal_updated_at"
+)
 
 # Probe the unfinished-turn index before the latest-turn index: a cancelled
 # queued follow-up must not hide work that is still running earlier in the chat.
@@ -157,7 +175,7 @@ async def fail_discontinuous_follow_ups(
     periodic sweep handles legacy rows. Scheduling itself only checks
     eligibility and never needs to promote a queued turn.
     """
-    await conn.execute(
+    invalid = await conn.fetch(
         """
             WITH invalid_threads AS (
                 SELECT DISTINCT child.thread_id
@@ -182,6 +200,14 @@ async def fail_discontinuous_follow_ups(
                 updated_at = NOW()
             WHERE pending.thread_id IN (SELECT thread_id FROM invalid_threads)
               AND pending.state = 'queued'
+            RETURNING pending.thread_id
             """,
         parent_job_id,
     )
+    # An automatic round that will now never run is the goal's answer about
+    # this conversation's context, not the person's: the goal stops with it.
+    # Scoped to the threads this statement just emptied, so an unrelated
+    # failure elsewhere cannot pause a goal that is still moving.
+    failed_threads = sorted({str(row["thread_id"]) for row in invalid})
+    if failed_threads:
+        await conn.execute(PAUSE_GOALS_SQL, failed_threads, "context-lost")

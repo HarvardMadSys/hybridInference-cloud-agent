@@ -15,6 +15,7 @@ from cloud_agent.storage.repositories.conversation_commands import PostgresConve
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 from cloud_agent.storage.repositories.credential_queries import PostgresCredentialQueries
 from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
+from cloud_agent.storage.repositories.goals import PostgresGoalRepository
 from cloud_agent.storage.repositories.grants import PostgresGrantRepository
 from cloud_agent.storage.repositories.host_capacity import PostgresHostCapacityRepository
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
@@ -36,6 +37,7 @@ __all__ = [
     "PostgresConversationQueries",
     "PostgresCredentialQueries",
     "PostgresExecutionQueries",
+    "PostgresGoalRepository",
     "PostgresGrantRepository",
     "PostgresHostCapacityRepository",
     "PostgresHostPoolRepository",

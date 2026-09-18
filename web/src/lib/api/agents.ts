@@ -353,6 +353,15 @@ export interface AgentJobUsageApi {
 
 export interface AgentJobApi {
   skills?: SelectedSkillApi[];
+  /** How this turn came to exist. `goal` turns are the platform's own rounds. */
+  turn_source?: 'human' | 'goal';
+  goal_round?: number | null;
+  goal_round_kind?: 'work' | 'verify' | null;
+  /** What this turn reported about the goal, as the platform recorded it. */
+  goal_report?: 'continue' | 'complete' | 'blocked' | null;
+  goal_reason?: string | null;
+  /** The conversation's live goal, on every turn of it. */
+  goal?: GoalApi | null;
   title?: string | null;
   title_source?: 'fallback' | 'generated' | 'manual' | 'inherited' | null;
   id: string;
@@ -527,8 +536,37 @@ export interface AgentJobSymlinkApi {
 
 export type AgentJobFilesApi = AgentJobDirectoryApi | AgentJobFileApi | AgentJobSymlinkApi;
 
+/** A completion condition the platform judges at the end of every turn. */
+export interface GoalApi {
+  objective: string;
+  state: 'active' | 'paused' | 'blocked' | 'complete';
+  revision: number;
+  max_rounds: number;
+  rounds_used: number;
+  blocked_streak: number;
+  pause_reason: string | null;
+  blocked_code: 'round-limit' | 'model-reported' | null;
+  blocked_message: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+/** What a client sends to set one. */
+export interface GoalInputApi {
+  objective: string;
+  max_rounds?: number;
+}
+
+export interface GoalLimitsApi {
+  max_objective_chars: number;
+  max_rounds: number;
+  default_rounds: number;
+}
+
 export interface AgentConfigApi {
   skill_limits?: import('@/lib/skillLimits').SkillLimits;
+  goal_limits?: GoalLimitsApi;
+
   /** Upload bounds. Absent on a control plane that predates attachments. */
   attachment_limits?: import('@/lib/attachmentLimits').AttachmentLimits;
   repos: string[];
@@ -696,6 +734,8 @@ export interface CreateAgentJobRequest {
   attachment_ids?: number[];
   /** MCP connections this task may call. Omitted gives it none. */
   mcp_bindings?: McpBindingInputApi[];
+  /** Omitted means no goal: nothing continues without the owner asking again. */
+  goal?: GoalInputApi;
   repo: string;
   task_prompt: string;
   model: string;
@@ -1020,6 +1060,59 @@ export async function createAgentJob(body: CreateAgentJobRequest): Promise<Agent
   );
 }
 
+/** A goal write, with the revision the caller read it at. */
+export interface GoalWriteApi {
+  goal: GoalInputApi;
+  revision?: number;
+}
+
+/** The conversation after a goal write, as the server now holds it. */
+export interface GoalResponseApi {
+  thread_id: string;
+  job: AgentJobApi;
+  goal: GoalApi;
+}
+
+/** Set, replace or edit the conversation's completion condition. */
+export async function setAgentGoal(jobId: string, body: GoalWriteApi): Promise<GoalResponseApi> {
+  const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/goal`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return jsonOrThrow(resp);
+}
+
+/** Stop the goal continuing itself; the running turn is left alone. */
+export async function pauseAgentGoal(jobId: string): Promise<GoalResponseApi> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/goal/pause`,
+    { method: 'POST' },
+  );
+  return jsonOrThrow(resp);
+}
+
+/** Start a paused goal moving again, queueing a round when nothing is pending. */
+export async function resumeAgentGoal(jobId: string): Promise<GoalResponseApi> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/goal/resume`,
+    { method: 'POST' },
+  );
+  return jsonOrThrow(resp);
+}
+
+/** Remove the goal and the automatic round queued for it. */
+export async function clearAgentGoal(
+  jobId: string,
+): Promise<{ thread_id: string; job: AgentJobApi; cleared: boolean }> {
+  const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/goal`, {
+    method: 'DELETE',
+  });
+  return jsonOrThrow(resp);
+}
+
 export async function cancelAgentJob(
   jobId: string,
 ): Promise<{ id: string; state: string; cancel_requested: boolean }> {
@@ -1032,6 +1125,8 @@ export async function cancelAgentJob(
 export interface FollowUpAgentJobRequest {
   /** Omitted inherits saved content; explicit ids snapshot the current library. */
   skill_ids?: number[];
+  /** Set or replace the conversation's goal along with this message. */
+  goal?: GoalInputApi;
   prompt: string;
   /** Omitted values inherit the parent run's harness and model. */
   runtime?: string;

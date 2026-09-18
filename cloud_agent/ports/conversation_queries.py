@@ -23,6 +23,27 @@ class ConversationQueries(Protocol):
         """Fetch one job by id."""
         ...
 
+    async def latest_terminal_turn(self, *, thread_id: str) -> dict[str, Any] | None:
+        """The newest finished turn of this conversation, or ``None``.
+
+        The parent an owner-initiated automatic round hangs from. It is not
+        always the newest turn: a queued round can be cancelled, and a
+        conversation resumed afterwards continues the same linear chain from the
+        last turn that actually happened.
+        """
+        ...
+
+    async def latest_assistant_message(self, *, job_id: str) -> str | None:
+        """The last thing this turn said, or ``None`` if it said nothing.
+
+        Ordered by insert, not by time: every assistant message mirrors exactly
+        one ``message`` event, and the insert order *is* the order the runtime
+        emitted them. A turn that produced no assistant text reports ``None``
+        rather than the previous turn's words, which is what makes "no report"
+        distinguishable from "reported".
+        """
+        ...
+
     async def list_jobs(
         self, *, user_id: str, limit: int = 50, archived: bool = False, repo: str | None = None
     ) -> list[dict[str, Any]]:

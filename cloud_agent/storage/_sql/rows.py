@@ -28,6 +28,39 @@ def sandbox_row_to_dict(row: Any) -> dict[str, Any]:
     return result
 
 
+def thread_goal(row: Any) -> dict[str, Any] | None:
+    """The conversation's live goal, or ``None`` when it has none.
+
+    Returned under one key rather than spread across the job's own, so that a
+    reader can never confuse the conversation's current objective with the
+    snapshot a particular turn was run against. Reads that do not join
+    ``agent_threads`` have no goal columns at all; they report ``None``.
+
+    The revision is read under whichever name the projection gave it:
+    ``JOB_SELECT`` aliases the thread's column because the job has one of the
+    same name, while a goal-only read of ``agent_threads`` has no collision to
+    avoid and selects the plain name.
+    """
+    if row.get("goal_objective") is None:
+        return None
+    revision = row.get("thread_goal_revision")
+    if revision is None:
+        revision = row.get("goal_revision")
+    return {
+        "objective": row["goal_objective"],
+        "state": row["goal_state"],
+        "pause_reason": row.get("goal_pause_reason"),
+        "blocked_code": row.get("goal_blocked_code"),
+        "blocked_message": row.get("goal_blocked_message"),
+        "revision": revision or 0,
+        "max_rounds": row.get("goal_max_rounds"),
+        "rounds_used": row.get("goal_rounds_used") or 0,
+        "blocked_streak": row.get("goal_blocked_streak") or 0,
+        "created_at": row.get("goal_created_at"),
+        "updated_at": row.get("goal_updated_at"),
+    }
+
+
 def job_row_to_dict(row: Any) -> dict[str, Any]:
     """Convert an ``agent_jobs`` row to a plain dict."""
     return {
@@ -59,6 +92,18 @@ def job_row_to_dict(row: Any) -> dict[str, Any]:
         "skills": load_json(row.get("skills")),
         "attachments": load_json(row.get("attachments")),
         "fork_source_job_id": row["fork_source_job_id"],
+        # This turn's immutable goal snapshot: what it was told, what kind of
+        # round it was, and what it reported. Distinct from the conversation's
+        # live goal below — this one never changes when the objective is edited.
+        "turn_source": row.get("turn_source") or "human",
+        "goal_round": row.get("goal_round"),
+        "goal_round_kind": row.get("goal_round_kind"),
+        "round_goal_revision": row.get("goal_revision"),
+        "goal_report": row.get("goal_report"),
+        "goal_reason": row.get("goal_reason"),
+        # The conversation's live goal, under the job's keys as every other
+        # thread-level value is. Present only on reads that join the thread.
+        "goal": thread_goal(row),
         "mcp_bindings": load_json(row.get("mcp_bindings")) or [],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],

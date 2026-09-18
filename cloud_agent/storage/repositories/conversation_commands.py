@@ -8,7 +8,7 @@ they were, and only the class holding them changed.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
@@ -21,7 +21,16 @@ from cloud_agent.storage._sql.jobs import JOB_SELECT, SESSION_DELETE_BLOCK_SQL
 from cloud_agent.storage._sql.mcp import write_mcp_bindings
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
+from cloud_agent.storage.repositories.goals import (
+    CANCEL_QUEUED_GOAL_ROUNDS_SQL,
+    GOAL_ARCHIVE_PAUSE_SQL,
+    SET_GOAL_SQL,
+    goal_rounds_used_after,
+)
 from cloud_agent.task_titles import fallback_title
+
+if TYPE_CHECKING:
+    from cloud_agent.goals.models import GoalInput
 
 
 class PostgresConversationCommands:
@@ -55,10 +64,15 @@ class PostgresConversationCommands:
         mcp_bindings: list[dict[str, Any]] | None = None,
         skills: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        goal: GoalInput | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any]:
         """Create a queued job and return it.
+
+        ``goal`` sets the conversation's completion condition in the same
+        transaction that creates it, so the first turn is already working
+        toward it rather than learning about it one turn later.
 
         Callers that do not name a profile still go through the deployment's
         server-owned default.  This matters for internal producers that call
@@ -93,8 +107,15 @@ class PostgresConversationCommands:
                     """
                     INSERT INTO agent_threads
                         (id, user_id, repo, title, title_source,
-                         setup_script, execution_profile)
-                    VALUES ($1, $2, $3, $4, 'fallback', $5, $6)
+                         setup_script, execution_profile,
+                         goal_objective, goal_state, goal_max_rounds,
+                         goal_revision, goal_created_at, goal_updated_at)
+                    VALUES ($1, $2, $3, $4, 'fallback', $5, $6,
+                            $7, CASE WHEN $7::text IS NULL THEN NULL ELSE 'active' END,
+                            $8,
+                            CASE WHEN $7::text IS NULL THEN 0 ELSE 1 END,
+                            CASE WHEN $7::text IS NULL THEN NULL ELSE NOW() END,
+                            CASE WHEN $7::text IS NULL THEN NULL ELSE NOW() END)
                     """,
                     thread_id,
                     user_id,
@@ -102,6 +123,8 @@ class PostgresConversationCommands:
                     fallback_title(task_prompt),
                     setup_script,
                     execution_profile,
+                    goal.objective if goal is not None else None,
+                    goal.max_rounds if goal is not None else None,
                 )
                 await write_mcp_bindings(conn, thread_id=thread_id, bindings=mcp_bindings)
                 await conn.execute(
@@ -177,10 +200,25 @@ class PostgresConversationCommands:
         reset_reasoning_effort: bool = False,
         skills: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        goal: GoalInput | None = None,
+        turn_source: str = "human",
+        goal_round: int | None = None,
+        goal_round_kind: str | None = None,
+        goal_revision: int | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:
         """Append a user turn and create the run that will answer it.
+
+        ``goal`` sets or replaces the conversation's completion condition in the
+        same transaction that appends this turn.
+
+        ``turn_source``, ``goal_round``, ``goal_round_kind`` and
+        ``goal_revision`` describe an automatic round the platform is running
+        toward the conversation's goal. They are written by the continuation
+        path only; a person's message never sets them, and there is deliberately
+        no parameter here that could change the objective — an automatic round
+        cannot edit the goal it is running for.
 
         ``reasoning_effort`` overrides the inherited depth; omitting it keeps
         the parent's, as an omitted model does. ``reset_reasoning_effort``
@@ -218,6 +256,11 @@ class PostgresConversationCommands:
                 reset_reasoning_effort=reset_reasoning_effort,
                 skills=skills,
                 attachments=attachments,
+                goal=goal,
+                turn_source=turn_source,
+                goal_round=goal_round,
+                goal_round_kind=goal_round_kind,
+                goal_revision=goal_revision,
                 client_request_id=client_request_id,
                 client_request_fingerprint=client_request_fingerprint,
             )
@@ -286,6 +329,9 @@ class PostgresConversationCommands:
                 user_id,
                 archived,
             )
+            if archived:
+                await conn.execute(GOAL_ARCHIVE_PAUSE_SQL, thread_ids)
+                await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, thread_ids)
         return {"sessions": [dict(row) for row in updated]}
 
     async def delete_sessions(self, *, thread_ids: list[str], user_id: str) -> dict[str, Any]:
@@ -350,7 +396,7 @@ class PostgresConversationCommands:
         self, *, job_id: str, user_id: str, archived: bool
     ) -> dict[str, Any] | None:
         """Archive or restore the owned thread containing ``job_id``."""
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 """
                 UPDATE agent_threads t
@@ -373,9 +419,17 @@ class PostgresConversationCommands:
                 user_id,
                 archived,
             )
-        if row is None:
-            return None
-        return {"thread_id": row["thread_id"], "archived_at": row["archived_at"]}
+            if row is None:
+                return None
+            if archived:
+                # An archived conversation is not one automatic rounds belong
+                # in. Pausing here, rather than refusing the archive, keeps the
+                # owner's action authoritative and leaves the goal resumable
+                # afterwards — and it shares the transaction, so "archived" and
+                # "still running itself" are never both true.
+                await conn.execute(GOAL_ARCHIVE_PAUSE_SQL, [row["thread_id"]])
+                await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, [row["thread_id"]])
+            return {"thread_id": row["thread_id"], "archived_at": row["archived_at"]}
 
     async def set_thread_title(
         self, *, job_id: str, user_id: str, title: str
@@ -492,6 +546,11 @@ class PostgresConversationCommands:
         reset_reasoning_effort: bool,
         skills: list[dict[str, Any]] | None,
         attachments: list[dict[str, Any]] | None,
+        goal: GoalInput | None,
+        turn_source: str,
+        goal_round: int | None,
+        goal_round_kind: str | None,
+        goal_revision: int | None,
         client_request_id: str | None,
         client_request_fingerprint: str | None,
     ) -> dict[str, Any] | None:
@@ -506,7 +565,8 @@ class PostgresConversationCommands:
             if requested is None:
                 return None
             thread = await conn.fetchrow(
-                "SELECT id, title, title_source, pinned_at, archived_at FROM agent_threads "
+                "SELECT id, title, title_source, pinned_at, archived_at, "
+                "goal_objective, goal_rounds_used FROM agent_threads "
                 "WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL FOR UPDATE",
                 requested["thread_id"],
                 user_id,
@@ -516,6 +576,20 @@ class PostgresConversationCommands:
             if thread["archived_at"] is not None:
                 return {"error": "session_archived"}
             thread_id = thread["id"]
+            if goal is not None:
+                # The objective and the message are one commit. A turn that
+                # carried a new goal into a transaction that then failed would
+                # otherwise leave a goal nothing had been asked to work on.
+                await conn.execute(
+                    SET_GOAL_SQL,
+                    thread_id,
+                    goal.objective,
+                    goal.max_rounds,
+                    goal_rounds_used_after(
+                        thread["goal_objective"] != goal.objective,
+                        int(thread["goal_rounds_used"] or 0),
+                    ),
+                )
             parent = await conn.fetchrow(
                 f"{JOB_SELECT} WHERE j.thread_id = $1 "
                 "ORDER BY j.turn_no DESC LIMIT 1 FOR UPDATE OF j",
@@ -575,9 +649,10 @@ class PostgresConversationCommands:
                 INSERT INTO agent_jobs
                     (id, thread_id, parent_job_id, turn_no, user_id, base_sha,
                      task_prompt, runtime, model, reasoning_effort, state, metadata,
-                     client_request_id, client_request_fingerprint, skills, attachments)
+                     client_request_id, client_request_fingerprint, skills, attachments,
+                     turn_source, goal_round, goal_round_kind, goal_revision)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14,
-                        $15::jsonb, $16::jsonb)
+                        $15::jsonb, $16::jsonb, $17, $18, $19, $20)
                 """,
                 job_id,
                 thread_id,
@@ -602,6 +677,10 @@ class PostgresConversationCommands:
                 # and are re-imported whenever the sandbox is rebuilt, so this
                 # column records only what this turn added.
                 json.dumps(attachments) if attachments else None,
+                turn_source,
+                goal_round,
+                goal_round_kind,
+                goal_revision,
             )
             await claim_attachments(
                 conn,

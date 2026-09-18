@@ -23,9 +23,11 @@ import type {
   AgentEvent,
   AgentHistoryTurn,
   AgentAttempt,
+  AgentGoal,
   AgentJob,
   AgentJobState,
   DiffLine,
+  GoalTurn,
   ToolCallResources,
   ProcessObservation,
   TurnResources,
@@ -605,6 +607,38 @@ export function toAttemptTelemetry(
   };
 }
 
+/** How one stored turn relates to the conversation's goal, if it does at all.
+ *
+ * A turn on a conversation with no goal carries neither field, and this returns
+ * nothing for it — which is what keeps a goal from appearing on every turn of
+ * every chat the moment the feature ships.
+ */
+function storedGoalTurn(job: AgentJobApi): GoalTurn | undefined {
+  if (job.turn_source !== 'goal' && !job.goal_report) return undefined;
+  return {
+    source: job.turn_source === 'goal' ? 'goal' : 'human',
+    ...(typeof job.goal_round === 'number' ? { round: job.goal_round } : {}),
+    ...(job.goal_round_kind ? { kind: job.goal_round_kind } : {}),
+    ...(job.goal_report ? { report: job.goal_report } : {}),
+    ...(job.goal_reason ? { reason: job.goal_reason } : {}),
+  };
+}
+
+/** The conversation's goal as the band reads it. */
+function toDisplayGoal(goal: NonNullable<AgentJobApi['goal']>): AgentGoal {
+  return {
+    objective: goal.objective,
+    state: goal.state,
+    revision: goal.revision,
+    roundsUsed: goal.rounds_used,
+    maxRounds: goal.max_rounds,
+    blockedStreak: goal.blocked_streak,
+    ...(goal.pause_reason ? { pauseReason: goal.pause_reason } : {}),
+    ...(goal.blocked_code ? { blockedCode: goal.blocked_code } : {}),
+    ...(goal.blocked_message ? { blockedMessage: goal.blocked_message } : {}),
+  };
+}
+
 export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): AgentJob {
   const events = options.events ?? [];
   const patch = options.patch ?? '';
@@ -707,6 +741,10 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
       // membership. Showing a button from state alone creates a predictable
       // 409 for failed rollout generations.
       forkable: threadJob.native_fork_available === true,
+      // Each stored turn carries its own relationship to the goal: whether the
+      // platform queued it, and what it reported. Absent for a conversation
+      // without a goal, which is what keeps this from touching every turn.
+      ...(storedGoalTurn(threadJob) ? { goalTurn: storedGoalTurn(threadJob) } : {}),
       messages: (options.thread?.messages ?? [])
         .filter((message) => message.job_id === threadJob.id)
         .map(mapMessage),
@@ -751,6 +789,20 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     model: job.model,
     reasoningEffort: job.reasoning_effort ?? undefined,
     skills: job.skills ?? [],
+    // The conversation's goal, and this turn's relationship to it. Assigned
+    // after the literal rather than spread inside it: a ternary returning an
+    // object, spread into another object, is indented differently by Prettier
+    // and ESLint and the two refuse to agree. Both fields are optional — a
+    // conversation without a goal carries neither, and a deployment older than
+    // this feature carries no fields at all.
+    ...(job.goal ? { goal: toDisplayGoal(job.goal) } : {}),
+    goalTurn: {
+      source: job.turn_source === 'goal' ? 'goal' : 'human',
+      ...(typeof job.goal_round === 'number' ? { round: job.goal_round } : {}),
+      ...(job.goal_round_kind ? { kind: job.goal_round_kind } : {}),
+      ...(job.goal_report ? { report: job.goal_report } : {}),
+      ...(job.goal_reason ? { reason: job.goal_reason } : {}),
+    },
     // Summed server-side from api_logs. Null there means no ledger is
     // configured; 0 is the honest display for that, but the panel below reads
     // `hasLedger` so it can say so rather than imply the job was free.

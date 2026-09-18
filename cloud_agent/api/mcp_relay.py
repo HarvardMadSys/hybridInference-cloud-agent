@@ -38,7 +38,7 @@ import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
@@ -53,6 +53,11 @@ from cloud_agent.mcp.invocations import deadline_for
 from cloud_agent.mcp.jsonrpc import INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, PARSE_ERROR
 from cloud_agent.mcp.models import CapabilityKind, McpServer
 from cloud_agent.mcp.net_policy import policy_from_environment
+from cloud_agent.mcp.platform import (
+    call as platform_call,
+    handles as platform_handles,
+    tool_entries as platform_tools,
+)
 from cloud_agent.mcp.refresh import RefreshRefused, ensure_fresh
 from cloud_agent.mcp.registry import (
     binding_from_row,
@@ -83,6 +88,7 @@ if TYPE_CHECKING:
 
     from cloud_agent.ports import (
         CredentialQueries,
+        GoalRepository,
         McpConnectionRepository,
     )
 
@@ -98,6 +104,10 @@ class _McpRelayStorage(Protocol):
     """
 
     credential_queries: CredentialQueries
+    # The goal tools read and write this service's own conversation row. They
+    # are not connections: nothing about them is resolved, authorized or
+    # proxied, which is exactly why they live on the platform's own port.
+    goals: GoalRepository
     mcp: McpConnectionRepository
 
 
@@ -1121,7 +1131,7 @@ async def _host_catalogue(
     identity: dict[str, Any],
     store: _McpRelayStorage,
     kind: CapabilityKind = CapabilityKind.TOOL,
-) -> dict[str, tuple[Authorized, Any]]:
+) -> dict[str, tuple[Authorized | _PlatformBinding, Any]]:
     """Every capability of one kind this job may use, keyed by what it is called.
 
     One builder for all three surfaces, because they differ only in what the
@@ -1141,7 +1151,7 @@ async def _host_catalogue(
     server; the map is built from the catalogue, so a name that is not in it is
     genuinely not callable.
     """
-    catalogue: dict[str, tuple[Authorized, Any]] = {}
+    catalogue: dict[str, tuple[Authorized | _PlatformBinding, Any]] = {}
     for binding_row in identity.get("mcp_bindings") or []:
         alias = str(binding_row.get("alias") or "")
         if not alias:
@@ -1171,7 +1181,89 @@ async def _host_catalogue(
                 else protocol.presented_name(alias, capability.name)
             )
             catalogue.setdefault(key, (authorized, capability))
+    if kind is CapabilityKind.TOOL:
+        # The platform's own tools are merged here rather than appended to the
+        # reply, so every surface that reads the catalogue -- tools/list,
+        # tools/call, and the request/response host the real protocol tests
+        # drive -- sees one set. Appending to the listing instead would mean the
+        # call path resolved names the listing had invented, which is how a
+        # catalogue and its router drift apart.
+        #
+        # A bare name cannot collide with an upstream one: every connection is
+        # presented as ``<alias>__<tool>``.
+        for presented, capability in _platform_catalogue():
+            catalogue.setdefault(presented, (_PLATFORM_AUTHORIZED, capability))
     return catalogue
+
+
+def _platform_catalogue() -> list[tuple[str, Any]]:
+    """This platform's own tools, in the shape an upstream capability has."""
+    return [
+        (
+            entry["name"],
+            PlatformCapability(
+                name=entry["name"],
+                description=entry["description"],
+                input_schema=entry["inputSchema"],
+            ),
+        )
+        for entry in platform_tools()
+    ]
+
+
+@dataclass(frozen=True)
+class PlatformCapability:
+    """One of this platform's tools, wearing an upstream capability's shape.
+
+    The catalogue is keyed by ``(authorized, capability)`` and rendered from
+    ``capability.name`` / ``.description`` / ``.input_schema``. Rather than
+    teach every reader that some entries are special, the platform's tools are
+    given the same three fields -- there is nothing else a reader asks for.
+    """
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+
+
+class _Catalogued(Protocol):
+    """What a listing needs of the entry it renders a tool from.
+
+    The merged catalogue holds two kinds of entry -- a resolved connection, and
+    one of this platform's own tools -- and a listing reads exactly this much of
+    either. Narrowing it to a protocol is what keeps the renderer honest: a
+    version that took ``Authorized`` would have to be handed a fabricated
+    connection to render a tool that has none.
+
+    Declared as properties because that is the shape both entry kinds already
+    have: a dataclass field *is* a readable attribute, and a protocol that
+    asked for a settable one would exclude them both.
+    """
+
+    @property
+    def alias(self) -> str: ...
+    @property
+    def connection_id(self) -> int: ...
+
+
+@dataclass(frozen=True)
+class _PlatformBinding:
+    """The stand-in a platform tool is catalogued under.
+
+    Not a connection and deliberately not resolvable: the dispatch path checks
+    for the platform's names *before* it resolves anything, so this object is
+    only ever read for the two labels a listing needs.
+    """
+
+    job_id: str = ""
+    alias: str = ""
+    connection_id: int = 0
+
+
+#: One instance is enough: it holds no state and is never resolved, authorized
+#: or refreshed. Identity is not what tells a platform tool apart -- its name
+#: is, and the names are reserved.
+_PLATFORM_AUTHORIZED = _PlatformBinding()
 
 
 def _resource_entry(capability: Any, uri: str) -> dict[str, Any]:
@@ -1213,7 +1305,7 @@ async def _host_session(authorized: Authorized, authorization: str | None) -> An
     return await _host().open(authorized.connection, secret=authorized.secret, key=key)
 
 
-def _host_tool_entry(presented: str, authorized: Authorized, capability: Any) -> dict[str, Any]:
+def _host_tool_entry(presented: str, authorized: _Catalogued, capability: Any) -> dict[str, Any]:
     """Render one merged catalogue entry the way a client reads it."""
     return {
         "name": presented,
@@ -1316,7 +1408,9 @@ async def _host_post(
                     {
                         "tools": [
                             _host_tool_entry(name, authorized, capability)
-                            for name, (authorized, capability) in sorted(catalogue.items())
+                            for name, (authorized, capability) in sorted(
+                                catalogue.items(), key=lambda item: item[0]
+                            )
                         ]
                     },
                     stateless=stateless,
@@ -1489,7 +1583,12 @@ async def _host_fetch(
                 f"{key!r} is not one of this session's prompts. Call prompts/list for the current set.",
             )
         try:
-            authorized, capability = await _refresh_catalogue_entry(entry, authorization, store)
+            # Resources and prompts are connections only: the platform's own
+            # tools are a tool surface, so this catalogue holds nothing that is
+            # not a resolved connection.
+            authorized, capability = await _refresh_catalogue_entry(
+                cast("tuple[Authorized, Any]", entry), authorization, store
+            )
         except HTTPException as exc:
             return _binding_error(request_id, exc)
     held = await _decide_call(
@@ -1557,6 +1656,21 @@ async def _host_call(
     params = payload.get("params")
     name = str(params.get("name") or "") if isinstance(params, dict) else ""
     arguments = params.get("arguments") if isinstance(params, dict) else None
+    if platform_handles(name):
+        # Ahead of the catalogue's resolution step, because this is not one of
+        # the session's bindings: there is no connection to resolve, no policy
+        # to consult and no approval to wait for. It is this service reading and
+        # writing its own row, and it is available whether or not the owner
+        # connected anything at all.
+        outcome = await platform_call(
+            name,
+            arguments,
+            goals=store.goals,
+            job_id=str(identity["job_id"]),
+            attempt_id=_attempt_id_of(authorization),
+            lease_generation=_lease_of(authorization),
+        )
+        return _result_reply(request_id, outcome.as_dict(), stateless=stateless)
     catalogue = await _host_catalogue(identity, store)
     entry = catalogue.get(name)
     if entry is None:
@@ -1565,7 +1679,11 @@ async def _host_call(
             f"{name!r} is not one of this session's tools. Call tools/list for the current set.",
         )
     try:
-        authorized, capability = await _refresh_catalogue_entry(entry, authorization, store)
+        # A platform tool never reaches here: its name is recognised above and
+        # answered without a connection, so this entry is a resolved one.
+        authorized, capability = await _refresh_catalogue_entry(
+            cast("tuple[Authorized, Any]", entry), authorization, store
+        )
     except HTTPException as exc:
         return _binding_error(request_id, exc)
     held = await _decide_call(

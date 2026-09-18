@@ -41,6 +41,9 @@ from cloud_agent.domain.execution import QUEUED, RUNNING, TERMINAL_STATES
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.gateway import GatewayError
 from cloud_agent.github_app import AppNotInstalled
+from cloud_agent.goals.continuation import maybe_continue_goal
+from cloud_agent.goals.prompts import prompt_with_goal, with_mcp_availability
+from cloud_agent.goals.report import parse_goal_report
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.models import ConnectionStatus
@@ -91,6 +94,7 @@ if TYPE_CHECKING:
         AttemptCommands,
         ConversationCommands,
         ConversationQueries,
+        GoalRepository,
         GrantRepository,
         HostPoolRepository,
         McpConnectionRepository,
@@ -120,6 +124,7 @@ class _WorkerStorage(Protocol):
     attempt_commands: AttemptCommands
     conversation_commands: ConversationCommands
     conversation_queries: ConversationQueries
+    goals: GoalRepository
     grants: GrantRepository
     host_pool: HostPoolRepository
     mcp: McpConnectionRepository
@@ -713,10 +718,18 @@ async def worker_claim(
         base_sha=claim["base_sha"],
         # Attachments are named inside the user task, then the skill selection
         # wraps the whole thing: the files are context for the task, and the
-        # skills are guidance about how to approach it.
-        task_prompt=prompt_with_skills(
-            prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
-            claim.get("skills"),
+        # skills are guidance about how to approach it. The goal goes outermost
+        # of all, and reaches human and automatic turns alike — the turn that
+        # set the objective is the first one that should be working toward it.
+        task_prompt=prompt_with_goal(
+            prompt_with_skills(
+                prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
+                claim.get("skills"),
+            ),
+            with_mcp_availability(
+                claim.get("goal"),
+                bool(mcp_aliases) or claim["runtime"] in runtimes_supporting_mcp(),
+            ),
         ),
         setup_script=claim.get("setup_script"),
         runtime=claim["runtime"],
@@ -1425,12 +1438,27 @@ async def worker_release(
     return WorkerAckResponse(ok=True, state=QUEUED)
 
 
+async def _goal_report_for_turn(job: dict[str, Any], queries: ConversationQueries) -> Any | None:
+    """What this turn said about its conversation's goal, if it said anything.
+
+    Only asked about a turn that is part of a conversation with a goal: parsing
+    every turn's last message for a convention the turn was never told about
+    would be reading tea leaves, and would put a report on rows whose only
+    relationship to a goal is that someone set one later.
+    """
+    if job.get("goal") is None:
+        return None
+    text = await queries.latest_assistant_message(job_id=str(job["id"]))
+    return parse_goal_report(text)
+
+
 @router.post("/worker/jobs/{job_id}/finish", response_model=WorkerAckResponse)
 async def worker_finish(
     job_id: str,
     body: WorkerFinishRequest,
     authorization: str | None = Header(None),
     store: _WorkerStorage | None = Depends(get_storage),
+    app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> WorkerAckResponse:
     """Drive the fenced terminal transition for this attempt."""
     job_store = _require_store(store)
@@ -1482,6 +1510,10 @@ async def worker_finish(
                     }
                 },
             ) from exc
+    # Read the turn's self-report before its outcome is committed, so both land
+    # in the same transaction: a terminal turn is never one whose goal answer is
+    # missing because the read happened to be scheduled after the write.
+    goal_report = await _goal_report_for_turn(job, job_store.conversation_queries)
     try:
         ok = await job_store.attempt_commands.transition(
             job_id=job_id,
@@ -1491,6 +1523,7 @@ async def worker_finish(
             to_state=body.state,
             detail=body.detail,
             base_sha=body.base_sha,
+            goal_report=goal_report,
         )
     except Exception:
         await _restore_terminal_suspension(
@@ -1508,4 +1541,29 @@ async def worker_finish(
             lease_generation=claims["lease_generation"],
         )
         raise _lease_lost()
+    # Synchronously, and before the runner is acknowledged. The owner's page
+    # watches the newest turn: if the next round did not exist by the time this
+    # returned, the conversation would look finished for a moment and the page
+    # would stop polling — so the round the user is waiting to see would be the
+    # one round nobody fetched.
+    #
+    # In its own guard, because the turn itself is already decided: an error
+    # while *starting the next* turn must not turn a successful finish into a
+    # 500 the runner will retry. Retrying would not help, and the retry would
+    # find no transition left to make.
+    try:
+        await maybe_continue_goal(
+            goals=job_store.goals,
+            conversations=job_store.conversation_commands,
+            queries=job_store.conversation_queries,
+            source_control=job_store.source_control,
+            job_id=job_id,
+            app_credentials=app_credentials,
+        )
+    except Exception:
+        logger.warning(
+            "agent_goal_continuation_failed",
+            extra={"event": "agent_goal_continuation_failed", "job_id": job_id},
+            exc_info=True,
+        )
     return WorkerAckResponse(ok=True, state=body.state)

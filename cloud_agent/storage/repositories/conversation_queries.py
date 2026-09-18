@@ -13,6 +13,7 @@ import json
 from typing import TYPE_CHECKING
 
 from cloud_agent.storage._sql.jobs import (
+    JOB_SELECT,
     JOB_SUMMARY_SELECT,
     QUALIFIED_JOB_SUMMARY_COLUMNS,
     SESSION_DELETE_BLOCK_SQL,
@@ -107,6 +108,42 @@ class PostgresConversationQueries:
                 job_id,
             )
         return job_row_to_dict(row) if row else None
+
+    async def latest_terminal_turn(self, *, thread_id: str) -> dict[str, Any] | None:
+        """The newest finished turn of this conversation, or ``None``.
+
+        The parent an owner-initiated automatic round hangs from. It is not
+        always the newest turn: a queued round can be cancelled, and a
+        conversation resumed afterwards continues the same linear chain from the
+        last turn that actually happened.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"{JOB_SELECT} WHERE j.thread_id = $1 "
+                "AND j.state IN ('succeeded', 'failed', 'cancelled') "
+                "ORDER BY (j.state = 'cancelled') DESC, j.turn_no DESC LIMIT 1",
+                thread_id,
+            )
+        return None if row is None else job_row_to_dict(row)
+
+    async def latest_assistant_message(self, *, job_id: str) -> str | None:
+        """The last thing this turn said, or ``None`` if it said nothing.
+
+        Ordered by insert, not by time: every assistant message mirrors exactly
+        one ``message`` event, and the insert order *is* the order the runtime
+        emitted them. A turn that produced no assistant text reports ``None``
+        rather than the previous turn's words, which is what makes "no report"
+        distinguishable from "reported".
+        """
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(
+                """
+                SELECT content FROM agent_thread_messages
+                WHERE job_id = $1 AND role = 'assistant'
+                ORDER BY id DESC LIMIT 1
+                """,
+                job_id,
+            )
 
     async def list_jobs(
         self,

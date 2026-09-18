@@ -24,6 +24,7 @@ from cloud_agent.schemas import (
     AgentJobEvent,
     AgentJobResponse,
     AttemptResources,
+    GoalView,
     McpBindingSummary,
     ProcessObservation,
     ToolCallResources,
@@ -116,6 +117,13 @@ def _attempt_summary_response(telemetry: dict[str, Any]) -> AgentAttemptSummary:
     )
 
 
+def _goal_view(goal: dict[str, Any] | None) -> GoalView | None:
+    """Shape a store goal row for the owner-facing API, or ``None`` if there is none."""
+    if not goal:
+        return None
+    return GoalView.model_validate(goal)
+
+
 def _job_response(
     job: dict[str, Any],
     usage: dict[str, Any] | None = None,
@@ -168,6 +176,17 @@ def _job_response(
         published_commit_sha=job.get("published_commit_sha"),
         detail=job["detail"],
         forked_from_job_id=job.get("fork_source_job_id"),
+        # How this turn came to exist, and what it said about the
+        # conversation's goal: a snapshot that editing the objective later
+        # never rewrites.
+        turn_source=job.get("turn_source") or "human",
+        goal_round=job.get("goal_round"),
+        goal_round_kind=job.get("goal_round_kind"),
+        goal_report=job.get("goal_report"),
+        goal_reason=job.get("goal_reason"),
+        # The conversation's *live* goal, on every turn of it, the way
+        # ``title`` is.
+        goal=_goal_view(job.get("goal")),
         metadata=metadata or None,
         mcp_bindings=[McpBindingSummary(**entry) for entry in (job.get("mcp_bindings") or [])],
         skills=job.get("skills") or [],
