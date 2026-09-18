@@ -3,7 +3,7 @@ import Link from 'next/link';
 export function AdminNavigation({
   current,
 }: {
-  current: 'servers' | 'runs' | 'conversations' | 'usage';
+  current: 'servers' | 'runs' | 'conversations' | 'usage' | 'measurements';
 }) {
   const section = current === 'runs' ? 'conversations' : current;
   return (
@@ -15,6 +15,7 @@ export function AdminNavigation({
         { key: 'servers', label: 'Servers', href: '/admin/hosts' },
         { key: 'conversations', label: 'Conversations', href: '/admin/conversations' },
         { key: 'usage', label: 'Usage', href: '/admin/usage' },
+        { key: 'measurements', label: 'Measurements', href: '/admin/measurements' },
       ].map((item) => (
         <Link
           key={item.key}

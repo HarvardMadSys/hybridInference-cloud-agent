@@ -11,6 +11,7 @@ a number, changing their mind, and typing another.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -1349,4 +1350,127 @@ def test_a_sink_that_does_not_exist_yet_is_not_a_completed_send(
 
     assert counts["delivered"] == 1, "the queued record must still be delivered"
     assert [body["record"]["measurement_id"] for body in control.sent] == [frozen.measurement_id]
+    operation_profiling.reset_cache()
+
+
+def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeypatch, tmp_path):
+    """A long turn must not delay its own startup sample.
+
+    The prompt handoff is where the startup ends, so the record must leave the
+    host there -- while the model may run for another hour. Delivering it at
+    the turn's exit would delay an operator's view of it and, past the
+    experiment's grace period, deliver it after the endpoint has begun refusing
+    that run's records.
+    """
+    import threading
+
+    from cloud_agent_profiling import operation_profiling
+
+    _run_descriptor(monkeypatch)
+    sink = tmp_path / "records.jsonl"
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    operation_profiling.reset_cache()
+
+    sent: list[str] = []
+    turn_is_running = threading.Event()
+    release_delivery = threading.Event()
+
+    class _Recorder:
+        def record_measurement(self, job_id: str, body: dict[str, Any]) -> Any:
+            """Keep the measurement id, then hold the delivery open.
+
+            Held so the assertion can prove the sample left the host *while the
+            turn was still running*: without this the turn could have ended
+            first and the ordering being tested would go unobserved.
+            """
+            sent.append(str(body["record"]["measurement_id"]))
+            release_delivery.wait(timeout=10)
+            return (200, {"result": "stored"})
+
+        def close(self) -> None:
+            """Release nothing."""
+
+    class _HangingSupervisor:
+        """A model that has not finished: the turn is still in flight."""
+
+        def start_shared_turn(self, *_args: Any, **_kwargs: Any) -> Any:
+            """Hand back a stream that never produces a frame."""
+            turn_is_running.set()
+            return _HangingStream()
+
+    class _HangingStream:
+        def frames(self) -> Any:
+            """Block until the test is done with the assertion."""
+            turn_is_running.wait(timeout=10)
+            return iter(())
+
+        def close(self) -> None:
+            """Release nothing."""
+
+    measurement = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+    assert measurement is not None
+    real_control = runner_mod.ControlPlane
+    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_a, **_k: _Recorder())
+    try:
+        turn = threading.Thread(
+            target=lambda: runner_mod._stream_shared_agent_turn(
+                supervisor=_HangingSupervisor(),
+                job=_claimed(),
+                control=real_control("http://control", "t"),
+                heart=_IdleHeart(),
+                lease_token="lease",
+                timeout_s=10.0,
+                measurement=measurement,
+                on_frozen=lambda frozen: runner_mod._enqueue_delivery(
+                    frozen,
+                    job=_claimed(),
+                    base_url="http://control",
+                    drain_s=2.0,
+                ),
+            ),
+            daemon=True,
+        )
+        turn.start()
+        assert turn_is_running.wait(timeout=5), "the turn must have started"
+        for _ in range(200):
+            if sent:
+                break
+            import time as _time
+
+            _time.sleep(0.01)
+
+        # The record is out while the model is still working. The delivery is
+        # held open, so the turn cannot have finished before this was sent.
+        assert sent == [measurement.measurement_id], (
+            "the startup sample must be delivered at the handoff, not at the turn's exit"
+        )
+        assert not release_delivery.is_set()
+        assert turn.is_alive(), "the turn was still running when the sample was sent"
+        # And the frozen record really is the startup's, not a placeholder.
+        written = [json.loads(line) for line in sink.read_text().splitlines() if line.strip()]
+        assert written and written[0]["operation"] == "attempt.startup"
+    finally:
+        release_delivery.set()
+        turn_is_running.set()
+        operation_profiling.reset_cache()
+
+
+def test_profiling_off_sends_nothing_at_all(monkeypatch, tmp_path):
+    """The switch is the promise: off means no request, no sink, no record."""
+    from cloud_agent_profiling import operation_profiling
+
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_ENABLED, raising=False)
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_RUN, raising=False)
+    sink = tmp_path / "records.jsonl"
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    operation_profiling.reset_cache()
+
+    measurement = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+
+    assert measurement is None, "off must not select an operation"
+    assert not sink.exists(), "off must not write a sink"
     operation_profiling.reset_cache()
