@@ -783,12 +783,18 @@ def test_a_streaming_answer_round_trips_through_headers(monkeypatch):
     headers = call.headers(extra={"Cache-Control": "no-cache"})
 
     assert headers["Cache-Control"] == "no-cache"
-    assert operation_profiling.answer_from_headers(headers) == {
-        "profiling_call_id": "c7",
-        "profiling_recorded": True,
-        "profiling_operation": "terminal.open",
-        "stages": [{"name": "stream_attach", "duration_us": 0, "outcome": "ok"}],
-    }
+    answer = operation_profiling.answer_from_headers(headers)
+    assert answer is not None
+    assert answer["profiling_call_id"] == "c7"
+    assert answer["profiling_recorded"] is True
+    assert answer["profiling_operation"] == "terminal.open"
+    # The stage is what the contract promises; its duration is whatever the
+    # clock on this machine measured. Pinning it to a number made this pass
+    # locally and fail on CI, where an empty `with` body can round to zero.
+    (stage,) = answer["stages"]
+    assert stage["name"] == "stream_attach"
+    assert stage["outcome"] == "ok"
+    assert isinstance(stage["duration_us"], int) and stage["duration_us"] >= 0
     # A response that answers nothing leaves the fragment unanswered.
     assert operation_profiling.answer_from_headers({"Cache-Control": "no-cache"}) is None
 
