@@ -1,22 +1,20 @@
 name: Sync dev to main
 
-# `main` is the production branch: what is on it is what `deploy-prod.yml`
-# ships. Nothing lands on it directly — it only ever fast-forwards to `dev`, and
-# only when somebody asks.
+# `main` is the default branch and the trusted copy of workflow definitions
+# used by `workflow_run`. Nothing lands on it directly — it only ever
+# fast-forwards to `dev`, and only when somebody asks.
 #
-# **Manual on purpose.** The production cutover (plan task H3) requires that
-# deploy to ride alone, no other change sharing it. An automatic sync would make
-# "what is on main" a consequence of merge timing rather than a decision, and
-# the isolation would then rest on somebody remembering it at the wrong moment.
+# **Manual on purpose.** Advancing the default branch changes which publication
+# workflow future green `dev` commits execute. Keep that release-control change
+# explicit rather than making it a side effect of merge timing.
 #
 # Fast-forward only. A failure here saying the merge is not possible means
 # `main` carries a commit `dev` does not, which is a thing to go and look at
 # rather than a thing to force past.
 #
 # The push uses `GITHUB_TOKEN`, and GitHub raises no workflow events for pushes
-# made with it. So this moves `main` and starts nothing: the production deploy
-# stays a separate, deliberate dispatch. That is the arrangement, not an
-# oversight — the gateway's equivalent works the same way.
+# made with it. So this moves `main` and starts nothing. Deployments belong to
+# downstream distributions and are not triggered from this repository.
 
 on:
   workflow_dispatch:
@@ -65,5 +63,5 @@ jobs:
           {
             echo "### main is now \`${after}\`"
             echo
-            echo "Deploying it is a separate step: dispatch **Deploy Production**."
+            echo "No environment was deployed; this repository only publishes releases."
           } >> "${GITHUB_STEP_SUMMARY}"

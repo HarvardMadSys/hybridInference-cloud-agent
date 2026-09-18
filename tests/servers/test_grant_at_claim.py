@@ -1,4 +1,4 @@
-"""The claim asks the gateway for the sandbox's credential (task E9).
+"""The claim asks the gateway for the sandbox's credential.
 
 Before this the claim minted a ``model``-scoped worker token signed with
 ``AGENT_CONTROL_TOKEN_SECRET`` — a root the gateway does not know. It parsed,

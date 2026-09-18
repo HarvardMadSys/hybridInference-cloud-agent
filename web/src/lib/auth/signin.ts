@@ -43,7 +43,7 @@ export function safeReturnTo(candidate: string | undefined): string {
  */
 export function signInUrl(returnTo: string): string {
   // An empty `agentApiBase` is not a missing one: it is the same-origin
-  // deployment (DR4), and the result is a relative URL the browser resolves
+  // deployment, and the result is a relative URL the browser resolves
   // against the page. There is nothing here to refuse.
   const params = new URLSearchParams({ return_to: safeReturnTo(returnTo) });
   return `${agentApiBase}/v1/session/login?${params.toString()}`;

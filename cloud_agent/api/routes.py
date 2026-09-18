@@ -1,4 +1,4 @@
-"""Agent-sandbox job API (``/v1/agent/jobs``) — issue #1041, P0.
+"""Agent-sandbox job API (``/v1/agent/jobs``).
 
 Two audiences, two authentication schemes:
 

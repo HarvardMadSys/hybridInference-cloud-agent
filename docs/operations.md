@@ -140,15 +140,16 @@ Be precise about these when reporting status:
 - **The deleted `agent-job-runner` workflow has never executed on GitHub.** It
   was the source repository's disposable runner (see §1 below) and no longer
   exists here, so it can never run. This repository's own Actions do run:
-  merging to `dev` deploys staging, and CI's `Build control-plane` job builds
-  the image.
+  green `dev` commits publish neutral releases, and CI's
+  `Build control-plane` job builds the image.
 - **This service's production deployment.** `/v1/agent/*` belongs to this
   service, so whether it answers in production is a fact about this
   deployment. The 404 this bullet used to report was the _gateway's_ agent
   routes — a different service, deleted 2026-08-09 — never these. Deployment
-  state is recorded by `docs/cutover.md`,
-  `deploy/control-plane/README-cd.md` and `deploy/DEPLOY_PROTOCOL`, not here;
-  read one of those rather than inferring it from this page.
+  state is owned and recorded by each downstream distribution. The generic
+  artifact interface is `deploy/release/README.md` and
+  `deploy/DEPLOY_PROTOCOL`; read those rather than inferring a named
+  environment's state from this page.
 - **Staging's model surface is thin.** Of the 15 models `/v1/models` lists,
   only `glm-5.1` and `qwen3.6-35b` actually resolve for an agent-job token, and
   both land on `qwen3.6-35b`. Everything else answers `404 Model not found`, so

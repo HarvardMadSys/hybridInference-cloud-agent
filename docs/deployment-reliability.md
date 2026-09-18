@@ -69,11 +69,10 @@ Events are always logged. For notifications beyond GitHub's normal failed-run
 notifications, configure an operator-owned receiver:
 
 - Control-plane `.env`: `AGENT_ALERT_WEBHOOK_URL` (runtime queue monitoring).
-- Staging Actions environment secret: `STAGING_ALERT_WEBHOOK_URL` (failed
-  control/host deploy steps, including a link to the run).
 
-Both send JSON with `text` and `event`; runtime notifications add
-`deployment_sha` and aggregate `queue` counts, deploy notifications `run_url`.
+It sends JSON with `text` and `event`; runtime notifications add
+`deployment_sha` and aggregate `queue` counts. Deployment workflow alerting is
+owned by the downstream distribution.
 The receiver must accept this JSON contract; a chat provider may need a small
 adapter. No prompts, repository names, job IDs, host credentials or log dumps
 are sent. HTTP redirects are refused. Delivery errors do not affect requests

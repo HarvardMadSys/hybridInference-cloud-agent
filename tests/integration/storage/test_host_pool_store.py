@@ -207,7 +207,7 @@ async def _claim(
     )
 
 
-# ── G2: enrollment tokens ──────────────────────────────────────────────
+# ── Enrollment tokens ──────────────────────────────────────────────────
 
 
 async def test_an_enrollment_token_is_spendable_exactly_once(
@@ -291,7 +291,7 @@ async def test_a_typo_cannot_revoke_a_live_hosts_credential(
     )
 
 
-# ── G2/G3: registration, authentication, heartbeat ─────────────────────
+# ── Registration, authentication, heartbeat ────────────────────────────
 
 
 async def test_registration_stores_what_the_host_declared(store, hosts: PostgresHostPoolRepository):
@@ -377,7 +377,7 @@ async def test_re_registration_recounts_slots_rather_than_zeroing_them(
     assert (await hosts.get_host(host="runner-a"))["slots_used"] == 1
 
 
-# ── G3: the status machine and the reaper ──────────────────────────────
+# ── The status machine and the reaper ──────────────────────────────────
 
 
 async def test_an_illegal_transition_is_refused_by_the_store(
@@ -473,7 +473,7 @@ async def _age_heartbeat(db, store: Storage, host: str, *, seconds: int) -> None
         )
 
 
-# ── G4: host-aware claiming ────────────────────────────────────────────
+# ── Host-aware claiming ────────────────────────────────────────────────
 
 
 async def test_a_claim_takes_a_slot_and_stamps_the_attempt(
@@ -1240,7 +1240,7 @@ async def test_the_schema_refuses_a_status_it_does_not_know(db, store, hosts):
             )
 
 
-# ── G6 / #1158 interaction ─────────────────────────────────────────────
+# ── The #1158 interaction ──────────────────────────────────────────────
 
 
 async def test_removing_keeps_the_row_and_forgetting_drops_it(
@@ -1305,7 +1305,7 @@ async def test_the_pin_and_the_pool_both_have_to_agree(store, hosts: PostgresHos
     assert await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a") is None
 
 
-# ── P3: thread residency (design §7) ───────────────────────────────────
+# ── Thread residency ───────────────────────────────────────────────────
 
 
 async def _running_claim(store, host: str, **overrides) -> tuple[dict, dict]:

@@ -158,10 +158,13 @@ def test_mcp_interactions_run_before_smoke_removes_the_image() -> None:
     assert steps.index(interactions) < steps.index(smoke_step)
 
 
-def test_mcp_interactions_run_in_isolated_parallel_workers() -> None:
-    """Each xdist worker needs the database suffix the test config selects."""
+def test_mcp_interactions_use_isolated_workers_sized_for_the_runner() -> None:
+    """Trusted hosts run three workers; smaller hosted PR runners stay serial."""
     interactions = step("All five CLIs retain MCP")
-    assert interactions["env"]["MCP_TEST_WORKERS"] == "3"
+    assert interactions["env"]["MCP_TEST_WORKERS"] == (
+        "${{ github.event_name == 'pull_request' && '1' || '3' }}"
+    )
+    assert interactions["timeout-minutes"] >= 20
     run = str(interactions["run"])
     assert '"${TEST_DB_NAME}_gw${worker}"' in run
     assert "createdb" in run

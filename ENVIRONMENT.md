@@ -37,12 +37,11 @@ need a gateway secret here, the design is wrong — stop and escalate.
 | Production values provisioned | ✅ 2026-08-07 (`docs/cutover.md`, H3) |
 | Secret storage | deploy host environment / unit env files, and read-only file mounts for keys. **Never** in git. |
 
-Both environments have been serving traffic since those dates: `README.md`,
-`docs/cutover.md` and `deploy/control-plane/README-cd.md` are the deployment
-record. This table is about the *values* being in place, not about a particular
-release being deployed — a pending rollout belongs in that record, not here.
-What is still missing on the production side is spelled out in
-`deploy/control-plane/README-cd.md` § *Production — what is still missing*.
+Those dates record the original extraction cutover. This repository now
+publishes neutral releases and does not own any named environment's deployment
+configuration or record. Concrete values, rollout status and recovery evidence
+belong to each downstream operator; the generic artifact contract is documented
+in `deploy/release/README.md`.
 
 ## Control plane (`cloud_agent`)
 
@@ -88,7 +87,7 @@ it before deployment; it needs no model API key or deployed-service setting.
 | `AGENT_DEFAULT_EXECUTION_PROFILE` | **NEW** | Server-owned policy for new root threads. `untrusted-kata-v1` requires an enrolled Host whose current credential still matches and whose exact claiming replica attests `io.containerd.kata.v2` with a guest kernel different from the Host. `trusted-v1` permits the retained container to use runc for trusted internal/dev repositories. Follow-ups and forks inherit the stored profile; callers cannot select it. |
 | `AGENT_ONCALL_DISPATCH_TOKEN` | **NEW** | Authenticates the gateway alert relay on `/v1/agent/service/oncall/*` — one credential, one door. Random 32 bytes, same value in the relay's `.env.oncall`, distinct per environment. Unset opens nothing (the door then answers only to `ADMIN_TOKEN`). |
 | `AGENT_ONCALL_USER_ID` | **NEW** | Gateway user id every on-call job runs as. Its role decides which models the job's grant may carry (`glm-5.2` needs `internal`+), and its quota is what the analysis spends. Unset: the on-call door answers 503, the rest of the service is unaffected. |
-| `AGENT_ALERT_WEBHOOK_URL` | **NEW** | Operator-owned JSON webhook for queue incidents and recovery. The control-plane process checks every minute; a runnable queue head older than ten minutes with no serving host, or no running work, is reported after two observations. Delivery has a five-second timeout, retries on the next pass, and reminders are at most every 30 minutes. Payload contains only event, deployment SHA and counts. Unset still emits structured log events. Configure `STAGING_ALERT_WEBHOOK_URL` as an Actions secret for deployment failures to the same receiver. Neither URL enters runners or sandboxes. |
+| `AGENT_ALERT_WEBHOOK_URL` | **NEW** | Operator-owned JSON webhook for queue incidents and recovery. The control-plane process checks every minute; a runnable queue head older than ten minutes with no serving host, or no running work, is reported after two observations. Delivery has a five-second timeout, retries on the next pass, and reminders are at most every 30 minutes. Payload contains only event, deployment SHA and counts. Unset still emits structured log events. Deployment-workflow alerting belongs to the downstream distribution. This URL never enters runners or sandboxes. |
 | `AGENT_RESIDENCY_TTL_S` | **NEW** | How long a member's independently fenced live-process residency and short-lived inference grant survive between host heartbeats. Default 1800. Shared-live uses one residency per chat membership. This is credential/process ownership, not a second chat lifecycle clock: `AGENT_CHAT_IDLE_TIMEOUT_S` alone decides when a settled retained sandbox group is stopped. |
 | `ADMIN_TOKEN` | existing | The machine-to-machine admin credential (task E7). **Unset opens nothing** — `verify_admin_access` refuses an empty configured value rather than matching an empty presented one — so a deployment that skips it has no token door, only the admin-session one. |
 

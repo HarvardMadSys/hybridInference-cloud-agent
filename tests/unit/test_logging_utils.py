@@ -1,11 +1,10 @@
-"""Pins the logging shim's contract — including the gap D6 must close.
+"""Pins the logging shim's contract — including the gap the entrypoint closes.
 
 The source repo's ``get_logger`` initialised root logging as a side effect;
 the host shim deliberately does not. These tests make that difference a stated
 contract instead of an accident: if someone adds side-effect configuration to
-the shim, or D6 forgets to configure logging at the runner entrypoint, one of
-these assertions (or D6's own required test, see the module docstring) is the
-tripwire.
+the shim, or the runner entrypoint stops configuring logging, one of these
+assertions (or the entrypoint's own required test, below) is the tripwire.
 """
 
 from __future__ import annotations
@@ -25,8 +24,8 @@ def test_returns_the_named_stdlib_logger() -> None:
 def test_configures_nothing_as_a_side_effect() -> None:
     """The shim must not touch global logging state.
 
-    Handler/level configuration belongs to the process entrypoint (task D6 for
-    the runner). If this test starts failing because the shim grew a root
+    Handler/level configuration belongs to the process entrypoint (the
+    runner's). If this test starts failing because the shim grew a root
     handler, that configuration moved to import time — which breaks any
     embedding process that configures logging itself.
     """
@@ -42,9 +41,9 @@ def test_configures_nothing_as_a_side_effect() -> None:
 def test_get_logger_alone_configures_no_output_path() -> None:
     """The shim adds nothing — output only exists once an entrypoint asks.
 
-    This held before D6 as the record of the gap; it holds after D6 because
-    configuration lives in ``configure_process_logging``, called from
-    ``main()``, never at import.
+    This held before the entrypoint configured logging, as the record of the
+    gap; it still holds because configuration lives in
+    ``configure_process_logging``, called from ``main()``, never at import.
     """
     logger = get_logger("cloud_agent_host.sandbox")
     # No handlers of its own, and root's default threshold hides INFO.
@@ -73,7 +72,7 @@ def _pristine_root():
 
 
 def test_configure_process_logging_makes_info_reach_a_handler(monkeypatch) -> None:
-    """The D6 register row's required positive test.
+    """The deferred register's required positive test (the runner-logging row).
 
     In a process shaped like the runner (no logging configured yet), one
     ``configure_process_logging()`` call must give a host module's INFO event

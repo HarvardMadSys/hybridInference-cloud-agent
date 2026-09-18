@@ -1,7 +1,9 @@
 # Cloud Agent upstream / FreeInference distribution boundary
 
 - **Language:** English · [简体中文](2026-09-03-freeinference-cloud-agent-distribution-design.zh-CN.md)
-- **Status:** proposed v1 — for review (Murphy, Juncheng)
+- **Status:** implemented — both environment handoffs were accepted and the
+  upstream deployment workflows retired on 2026-09-18. Statements below about
+  the “current” direct-deploy path are the pre-cutover baseline.
 - **Date:** 2026-09-03
 - **Applies to:**
   [HarvardMadSys/hybridInference-cloud-agent](https://github.com/HarvardMadSys/hybridInference-cloud-agent)

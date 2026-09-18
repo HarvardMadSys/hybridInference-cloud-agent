@@ -103,7 +103,7 @@ class PostgresAttemptCommands:
         exclude new chats from the old host while still admitting only retained
         groups whose immutable ``host`` is that old host.
 
-        **The pool gate (G4) sits after the pin and answers the same way.**
+        **The pool gate sits after the pin and answers the same way.**
         A reported host must be ``online`` and have a free slot under the lower
         of its reported executor count and the size an operator asked for, and the job it
         takes must require nothing the host did not declare. All three refusals

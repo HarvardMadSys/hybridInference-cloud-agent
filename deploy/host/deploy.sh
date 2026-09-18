@@ -96,7 +96,7 @@ if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
   log "target:   ${SHA}"
 else
   git rev-parse --git-dir >/dev/null 2>&1 \
-    || die "${DEPLOY_ROOT} is not a git checkout — convert it once first (deploy/control-plane/README-cd.md)"
+    || die "${DEPLOY_ROOT} is not the git checkout required by AGENT_DEPLOY_MODE=source"
 
   # Same guard, same reason as the control plane's: this tree was populated by
   # rsync, and on 2026-08-06 it still held files from two branches that had been
@@ -228,10 +228,9 @@ fi
 # the other half, and the half that bounds the damage when a retry is exhausted.
 #
 # Restoring is a deploy of an older commit and deliberately not a second
-# mechanism: it is the documented rollback (README-cd.md, "Rolling back"),
-# driven by the commit `.deployed-sha` records instead of by a human who first
-# has to notice the deploy failed. This job still exits non-zero — a restore is
-# a repair, not a success.
+# mechanism. It is driven by the commit `.deployed-sha` records instead of by a
+# human who first has to notice the deploy failed. This job still exits non-zero
+# — a restore is a repair, not a success.
 # ---------------------------------------------------------------------------
 
 #: A marker naming a commit is this host advertising a generation. An empty or

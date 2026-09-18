@@ -15,7 +15,7 @@
 /**
  * Control plane base URL (`NEXT_PUBLIC_AGENT_API_URL`).
  *
- * Empty means same-origin, which is the shape DR4 describes: one host serving
+ * Empty means same-origin, which is the shipped shape: one host serving
  * the web app and the API. A cross-origin deployment must set this *and*
  * arrange CORS with credentials on the control plane, because the session is a
  * cookie rather than a bearer token.

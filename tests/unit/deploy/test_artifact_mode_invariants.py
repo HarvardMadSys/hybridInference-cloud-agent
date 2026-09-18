@@ -7,9 +7,9 @@ predates the split, and each is asserted by name so that making one conditional
 is an argument somebody has to make rather than a line that slipped into a
 branch.
 
-This is the half of P3 that survived consolidation from the parallel
-implementation: the two branches agreed on the mechanism and differed on what
-was pinned, and this is what the other branch pinned.
+This is the half that survived consolidation from the parallel implementation:
+the two branches agreed on the mechanism and differed on what was pinned, and
+this is what the other branch pinned.
 """
 
 from __future__ import annotations

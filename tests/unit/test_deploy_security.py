@@ -42,21 +42,24 @@ def _mounts(service: dict) -> list[str]:
     return out
 
 
-def test_private_repository_ci_uses_existing_self_hosted_pools() -> None:
-    """Keep private CI on our pools until the public-PR split in #99 lands."""
+def test_trusted_ci_events_keep_the_existing_self_hosted_pools() -> None:
+    """The public-PR split must not discard trusted-event build caches."""
     workflow = yaml.safe_load((WORKFLOW_DIR / "ci.yml").read_text())
     assert workflow["permissions"] == {"contents": "read"}
     jobs = workflow["jobs"]
     special_runners = {
-        # One cell per artifact, each naming the pool it builds and starts on.
-        "artifacts": "${{ fromJSON(matrix.artifact.runner) }}",
-        "compose": ["self-hosted", "Linux", "ARM64", "image-verify-arm64"],
-        "kata": ["self-hosted", "Linux", "deploy-cloud-agent-sandbox-staging"],
+        "artifacts": "fromJSON(matrix.artifact.runner)",
+        "compose": "image-verify-arm64",
+        "kata": ["self-hosted", "Linux", "X64", "image-verify-x64"],
     }
     assert special_runners.keys() <= jobs.keys()
     for name, job in jobs.items():
-        expected = special_runners.get(name, ["self-hosted", "Linux", "ci-general"])
-        assert job["runs-on"] == expected, f"{name} left its self-hosted CI pool"
+        expected = special_runners.get(name, "ci-general")
+        if isinstance(expected, list):
+            assert job["runs-on"] == expected
+        else:
+            assert expected in job["runs-on"], f"{name} left its trusted-event pool"
+            assert "fromJSON(" in job["runs-on"]
 
 
 def test_kata_validation_cannot_run_pull_request_code_on_the_deployment_host() -> None:

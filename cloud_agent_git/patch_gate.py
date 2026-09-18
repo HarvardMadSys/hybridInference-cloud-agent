@@ -1,4 +1,4 @@
-"""Validation gate for agent-produced patches (issue #1041, P0).
+"""Validation gate for agent-produced patches.
 
 The patch-out model puts *no* credential inside the sandbox: the agent emits a
 patch, and a trusted publisher outside the sandbox applies it, pushes an

@@ -2,8 +2,8 @@
 
 Ported from the gateway with assertions untouched. One piece of wiring changed
 and could not not change: the gateway's ``AppServices`` container became
-``app.state.storage``. ``verify_admin_access`` is this repository's own since E7
-and is left real — the ``ADMIN_TOKEN`` these tests knock with is the door it
+``app.state.storage``. ``verify_admin_access`` is this repository's own and is
+left real — the ``ADMIN_TOKEN`` these tests knock with is the door it
 actually opens.
 """
 
@@ -105,7 +105,7 @@ class FakeHostStore(AllCapabilities):
 
 
 def _admin_app(store: FakeHostStore | None) -> FastAPI:
-    """Mount the admin router over one store, with E7's gate stood in for."""
+    """Mount the admin router over one store."""
     app = FastAPI()
     app.state.storage = store
     app.include_router(admin_router.router)

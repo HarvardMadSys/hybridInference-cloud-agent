@@ -2,7 +2,7 @@
 
 The source's four tests walked a fake route registry — role gates, alias
 resolution, unpublished/disabled/embedding exclusion, visibility-resolver
-overrides. **None of that behaviour lives here after E4**; it stays in the
+overrides. **None of that behaviour lives here**; it stays in the
 gateway, which still owns the registry, and is covered there by
 ``tests/unit/test_internal_lookups.py`` (see MIGRATION.md's manifest notes for
 the case-by-case record).

@@ -132,11 +132,15 @@ def test_a_published_release_is_never_rebuilt_or_rewritten() -> None:
 
 
 def test_the_matrix_is_the_one_ci_verifies() -> None:
-    """Same cells, same pools, same build arguments, or the release is not what CI checked."""
+    """Same cells, pools and arguments; CI alone also selects a hosted PR runner."""
     mine = job("artifacts")["strategy"]["matrix"]["artifact"]
     theirs = yaml.safe_load(CI.read_text())["jobs"]["artifacts"]["strategy"]["matrix"]["artifact"]
+
+    def release_fields(cell: dict) -> dict:
+        return {key: value for key, value in cell.items() if key != "pull_request_runner"}
+
     assert sorted(mine, key=lambda cell: cell["name"]) == sorted(
-        theirs, key=lambda cell: cell["name"]
+        map(release_fields, theirs), key=lambda cell: cell["name"]
     )
     assert job("artifacts")["strategy"]["fail-fast"] is False
 

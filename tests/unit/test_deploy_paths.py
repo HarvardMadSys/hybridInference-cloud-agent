@@ -1,9 +1,9 @@
 """The deploy files must reference paths that exist in *this* repository.
 
-D7 is the one migration task whose diff is mostly path edits rather than
-imports, and nothing else checks them: a Dockerfile that `COPY`s a path from
-the source repo's layout fails at build time on a runner host, long after
-review. These tests read the files and assert every path they name is real.
+The migration's diff here was mostly path edits rather than imports, and
+nothing else checks them: a Dockerfile that `COPY`s a path from the source
+repo's layout fails at build time on a runner host, long after review. These
+tests read the files and assert every path they name is real.
 
 They deliberately do not re-test *behaviour* the source repo already covers
 (egress network internal, socket read-only, non-root sandbox). Those
@@ -68,11 +68,6 @@ _NOT_OUR_PATHS = {
     # The pi CLI's own documentation, quoted in the wrapper's explanation of
     # why that CLI needs a config file rather than OPENAI_BASE_URL.
     "docs/models.md",
-    # Task F1 adds the Next.js app. web-ci.yml names these deliberately and
-    # guards on their absence, so referencing them before they exist is the
-    # intended behaviour, not a stale path.
-    "web/package.json",
-    "web/package-lock.json",
     # The files an operator creates by copying the examples beside them. They
     # cannot exist here — `.gitignore` forbids committing either, which is the
     # point — and the `cp` line naming both is the instruction, not a stale
@@ -158,7 +153,7 @@ def test_the_remote_compose_invokes_host_modules() -> None:
 
 
 def _text_files() -> list[Path]:
-    """Deploy files plus the workflows — everything D7 rewrote paths in."""
+    """Deploy files plus the workflows — everything the path rewrite touched."""
     return [*DEPLOY_FILES, *sorted((REPO / ".github/workflows").glob("*.yml"))]
 
 
@@ -199,71 +194,3 @@ def test_no_file_references_a_source_repo_only_directory(path: Path) -> None:
 def test_the_legacy_actions_runner_workflow_is_removed() -> None:
     """Manual dispatch must not reopen the removed one-shot/process backend."""
     assert not (REPO / ".github/workflows/agent-job-runner.yml").exists()
-
-
-@pytest.mark.parametrize(
-    ("workflow", "expected"),
-    [
-        (".github/workflows/deploy-staging.yml", "staging"),
-        (".github/workflows/deploy-prod.yml", "production"),
-    ],
-)
-def test_every_deploy_job_records_which_environment_it_deployed(workflow: str, expected: str):
-    """Both halves of a deploy must name their environment, or it is invisible.
-
-    A job without `environment:` deploys without leaving a record, so the
-    repository's Deployments panel shows nothing for it. Staging shipped that
-    way: the only trace of a deploy was in the Actions tab, filed under the
-    default branch because `workflow_run` runs are — so filtering the run list
-    by `dev` showed nothing at all and read as "it never deployed".
-
-    Parameterized over both workflows because the failure is asymmetry: one
-    half declared and the other not is exactly the state this replaces, and it
-    is invisible until somebody goes looking for a deployment that happened.
-    """
-    spec = yaml.safe_load((REPO / workflow).read_text(encoding="utf-8"))
-    environments = {name: job.get("environment") for name, job in spec["jobs"].items()}
-
-    assert environments, f"{workflow} declares no jobs"
-    assert all(value == expected for value in environments.values()), (
-        f"{workflow} has jobs that deploy without recording it: {environments}"
-    )
-
-
-@pytest.mark.parametrize(
-    "workflow",
-    [".github/workflows/deploy-staging.yml", ".github/workflows/deploy-prod.yml"],
-)
-def test_every_deploy_job_authenticates_its_image_pulls(workflow: str):
-    """A deploy builds, and every base image it builds from comes from Docker Hub.
-
-    Anonymous, the allowance is per IP and shared with the other repository's
-    CI; it ran out twice on 2026-09-11 and took seven image jobs with it. A
-    machine-level login would cover this too, but it is not in git, does not
-    survive a rebuilt host, and on the execution host was never done at all.
-
-    Parameterized over both files, and asserted on both jobs, because the
-    failure is asymmetry: the control half authenticated and the host half not
-    is a deploy that half works, at a rate limit nobody chose.
-
-    The config directory is the other half. The runners on one host share a
-    `$HOME`, and `docker/login-action`'s post step logs out of whatever config
-    it used — which is how every finished image cell was logging the runner
-    user out of Docker Hub before this.
-    """
-    spec = yaml.safe_load((REPO / workflow).read_text(encoding="utf-8"))
-    for name, job in spec["jobs"].items():
-        steps = job.get("steps", [])
-        logins = [s for s in steps if str(s.get("uses", "")).startswith("docker/login-action")]
-        assert len(logins) == 1, f"{workflow}:{name} has {len(logins)} Docker Hub logins"
-        assert logins[0]["with"]["username"] == "${{ secrets.DOCKERHUB_USERNAME }}"
-
-        isolated = [s for s in steps if "DOCKER_CONFIG=" in str(s.get("run", ""))]
-        assert isolated, f"{workflow}:{name} logs in to the shared ~/.docker/config.json"
-
-        order = {id(step): index for index, step in enumerate(steps)}
-        deploy = next(s for s in steps if s.get("name") == "Deploy")
-        assert order[id(isolated[0])] < order[id(logins[0])] < order[id(deploy)], (
-            f"{workflow}:{name} must point DOCKER_CONFIG somewhere private, then log in, "
-            "then deploy"
-        )

@@ -294,7 +294,7 @@ def _binding_alias(row: dict[str, Any]) -> str:
 def _require_registered_runtime(runtime: str) -> None:
     """400 unless ``runtime`` names a registered harness.
 
-    The registry is the trust boundary (design D2): what may run is what this
+    The registry is the trust boundary: what may run is what this
     deployment registered, never whatever string a request carried.
     """
     known = registered_runtimes()

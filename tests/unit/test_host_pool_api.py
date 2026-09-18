@@ -442,7 +442,7 @@ async def _enroll(client, store, name="runner-a", **body) -> str:
     return response.json()["credential"]
 
 
-# ── G2: enrollment ─────────────────────────────────────────────────────
+# ── Enrollment ─────────────────────────────────────────────────────────
 
 
 async def test_enrollment_returns_a_credential_and_starts_the_host_enrolling(client):
@@ -664,10 +664,10 @@ async def test_the_enrollment_token_is_never_shown_twice(client):
     ],
 )
 def test_every_pool_admin_route_declares_the_admin_gate(path):
-    """Asserted structurally, because the gate itself is still E7's placeholder.
+    """Asserted structurally, because a live 401 would prove only one route.
 
-    Sending an unauthenticated request would only prove that a
-    ``NotImplementedError`` propagates. What is checkable now — and what would
+    Sending an unauthenticated request would answer for the route it names and
+    nothing about the next one. What is checkable now — and what would
     actually go wrong if a new route were added without thinking — is whether
     ``verify_admin_access`` is in the route's dependency tree at all. Minting
     enrollment tokens or revoking a host from an unauthenticated call is the
@@ -682,7 +682,7 @@ def test_every_pool_admin_route_declares_the_admin_gate(path):
     ), path
 
 
-# ── G3: heartbeat ──────────────────────────────────────────────────────
+# ── Heartbeat ──────────────────────────────────────────────────────────
 
 
 async def test_the_first_heartbeat_puts_an_enrolling_host_online(client):
@@ -916,7 +916,7 @@ async def test_another_hosts_credential_does_not_authenticate_this_one(client):
     assert response.json()["host"] == "runner-b"
 
 
-# ── G4: the claim takes its host from the credential ───────────────────
+# ── The claim takes its host from the credential ───────────────────────
 
 
 class ClaimRecorder(FakeHostPoolStore):
@@ -1092,7 +1092,7 @@ async def test_a_host_credential_for_an_unknown_host_cannot_claim(claim_client):
     assert store.claims == []
 
 
-# ── G6: drain, undrain, remove ─────────────────────────────────────────
+# ── Drain, undrain, remove ─────────────────────────────────────────────
 
 
 async def test_draining_stops_new_claims_without_touching_the_running_ones(client):

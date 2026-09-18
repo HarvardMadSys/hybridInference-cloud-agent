@@ -1,4 +1,4 @@
-"""The control plane's own deployment files (task E11's dependency).
+"""The control plane's own deployment files.
 
 `tests/unit/test_deploy_config.py` does this for the *host* stack, which is the
 one that executes untrusted code. This file covers the other machine, where the

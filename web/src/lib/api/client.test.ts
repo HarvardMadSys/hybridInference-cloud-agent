@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
-// `client.ts` is the one file F2 rewrites rather than moves, so it arrives with
-// no inherited coverage. These cases pin the two things the rewrite changed:
+// `client.ts` is the one file the move rewrote rather than copied, so it arrives
+// with no inherited coverage. These cases pin the two things the rewrite changed:
 // the credential is the cookie and nothing else, and a 401 is terminal.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';

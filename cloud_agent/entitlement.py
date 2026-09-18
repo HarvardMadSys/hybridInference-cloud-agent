@@ -10,7 +10,7 @@ installed on, have the platform clone it into a sandbox, and read the contents
 back through their own job's events and retained workspace. That is a confused
 deputy: the requester supplies the target, the platform supplies the authority.
 
-P0 is a single-tenant dogfood ("repo == our own"), so the entitlement is an
+This is a single-tenant dogfood ("repo == our own"), so the entitlement is an
 explicit deployment allowlist rather than a per-user GitHub identity. That is
 the honest shape for the stage: it fails closed, it needs no OAuth linkage that
 does not exist yet, and it makes the multi-tenant version an obvious next step

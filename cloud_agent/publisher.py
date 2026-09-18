@@ -1,4 +1,4 @@
-"""Trusted publisher for agent-produced patches (issue #1041, P0).
+"""Trusted publisher for agent-produced patches.
 
 Runs **outside** the sandbox. The agent never holds a git credential and never
 pushes: it emits a patch, and this module validates it, applies it to a

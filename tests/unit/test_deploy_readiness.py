@@ -3,15 +3,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
-import yaml
 
-from cloud_agent import deploy_readiness
 from cloud_agent.deploy_readiness import shared_live_readiness
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
@@ -20,51 +15,6 @@ from cloud_agent_host.shared_protocol import (
 )
 
 DEPLOYMENT_SHA = "abc123"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("host_ready_after", [132, None])
-async def test_staging_wait_covers_a_cold_build_but_still_requires_the_target_host(
-    monkeypatch, host_ready_after
-):
-    """Replay the September 15 timing with the timeout actually shipped by CD."""
-    workflow = yaml.safe_load(
-        (Path(__file__).resolve().parents[2] / ".github/workflows/deploy-staging.yml").read_text()
-    )
-    step = next(step for step in workflow["jobs"]["deploy"]["steps"] if step["name"] == "Deploy")
-    timeout = float(step["env"]["SHARED_READY_TIMEOUT"])
-    elapsed = 0.0
-    pool = SimpleNamespace(close=AsyncMock())
-    probe = AsyncMock(return_value=None)
-
-    async def sleep(seconds):
-        nonlocal elapsed
-        elapsed += seconds
-
-    async def readiness(_store, **kwargs):
-        host = _host(datetime.now(UTC))
-        if host_ready_after is None or elapsed < host_ready_after:
-            host["capabilities"][-1] = shared_deployment_capability("previous-commit")
-        return await shared_live_readiness(_Store([host]), broker_probe=probe, **kwargs)
-
-    monkeypatch.setenv("AGENT_DATABASE_URL", "postgresql://test-only")
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "test-broker-token")
-    monkeypatch.setattr(deploy_readiness.asyncpg, "create_pool", AsyncMock(return_value=pool))
-    monkeypatch.setattr(deploy_readiness, "time", SimpleNamespace(monotonic=lambda: elapsed))
-    monkeypatch.setattr(deploy_readiness, "asyncio", SimpleNamespace(sleep=sleep))
-    monkeypatch.setattr(deploy_readiness, "shared_live_readiness", readiness)
-
-    ready = await deploy_readiness.wait_for_shared_live(
-        timeout_seconds=timeout, interval_seconds=3, expected_deployment_sha=DEPLOYMENT_SHA
-    )
-    assert ready is (host_ready_after is not None)
-    if ready:
-        assert elapsed == host_ready_after
-        probe.assert_awaited_once()
-    else:
-        assert elapsed == timeout
-        probe.assert_not_awaited()
-    pool.close.assert_awaited_once()
 
 
 class _Store:

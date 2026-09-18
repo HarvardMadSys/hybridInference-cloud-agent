@@ -14,7 +14,7 @@ dependencies they asked for there. Three kinds arrive at this module:
   there without renaming it here degrades silently to "not configured" rather
   than failing.
 
-- **Identity and admin auth, which E7 answers from this service's own world.**
+- **Identity and admin auth, which this service answers from its own world.**
   There is no ``users`` table here and no ``api_keys`` table: the gateway kept
   both. So the browser credential is the session token
   :mod:`cloud_agent.identity` mints — carried in an ``HttpOnly`` cookie, or as a
@@ -229,7 +229,7 @@ def bearer_token(authorization: str | None) -> str | None:
     return authorization[7:].strip() or None
 
 
-# ── Identity — E7 ──────────────────────────────────────────────────────
+# ── Identity ───────────────────────────────────────────────────────────
 
 
 def session_token(request: Request, authorization: str | None = None) -> str | None:
@@ -331,7 +331,7 @@ async def verify_admin_access(
     raise HTTPException(status_code=401, detail="Invalid authentication token.")
 
 
-# ── The admin audit trail — E7 ─────────────────────────────────────────
+# ── The admin audit trail ──────────────────────────────────────────────
 
 
 def get_client_ip(request: Request) -> str:
