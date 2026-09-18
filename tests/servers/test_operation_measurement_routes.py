@@ -1612,3 +1612,58 @@ async def test_a_request_that_was_not_selected_stores_nothing(
     await asyncio.sleep(0.05)
     assert store.rows == []
     assert store.runs == []
+
+
+async def test_a_request_that_failed_is_stored_too(
+    client: AsyncClient, store: FakeStorage, monkeypatch, _running_writer
+):
+    """A failed request is the sample an operator most wants.
+
+    It is the only one that says where the time went before the failure.
+    Recording only successes leaves the distribution describing a system that
+    never fails -- and the 503 here is a business failure the route answers,
+    not a broken measurement.
+    """
+    _enable(monkeypatch)
+    _use_broker(monkeypatch, _RecordingClient(fail=WorkspaceBrokerError(503, "unavailable")))
+    job_id = await _ready_job(client, store)
+
+    response = await client.get(f"/v1/agent/jobs/{job_id}/files")
+
+    assert response.status_code == 503
+    await _drain(_running_writer, 1)
+    assert len(store.rows) == 1
+    row = store.rows[0]
+    assert row["outcome"] == "failed"
+    assert row["operation"] == "files.list"
+    assert row["job_id"] == job_id
+    # An incomplete sample is stored as incomplete, never dressed up as whole.
+    assert row["collection_complete"] is False
+    assert row["end_to_end_complete"] is False
+
+
+async def test_a_queue_with_no_room_drops_the_record_and_keeps_answering(
+    client: AsyncClient, store: FakeStorage, monkeypatch, _running_writer
+):
+    """Congestion costs coverage, never the request.
+
+    The write is the diagnostic; the file was read and the terminal answered
+    regardless. A full queue drops and counts, which is what stops a slow
+    database from turning every request into another pending write.
+    """
+    _enable(monkeypatch)
+    _use_broker(monkeypatch, _RecordingClient())
+    job_id = await _ready_job(client, store)
+    # No worker may drain, so the queue fills and stays full.
+    await _running_writer.shutdown()
+    _running_writer.counts.dropped_full = 0
+
+    for _ in range(4):
+        response = await client.get(f"/v1/agent/jobs/{job_id}/files")
+        assert response.status_code == 200
+        assert response.json()["profiling"]["measurement_id"]
+
+    # Every offer was refused for want of a running writer, and each one is
+    # counted rather than lost silently.
+    assert _running_writer.counts.dropped_shutdown == 4
+    assert store.rows == []
