@@ -44,6 +44,7 @@ THREAD_ID = "athr_chain"
 USER_ID = "user-chain"
 ATTEMPT_ID = 7
 RUN_ID = "chain-run-1"
+SANDBOX_ID = "asbx_chain"
 #: Frozen: a helper that re-derived it per call would state a different
 #: experiment every time, and the repository compares the instant.
 EXPIRES_AT = (datetime.now(UTC) + timedelta(minutes=30)).replace(microsecond=0)
@@ -451,15 +452,57 @@ async def test_the_attempt_lookup_decodes_its_sandbox_for_a_real_row(chain):
             THREAD_ID,
         )
 
-    from cloud_agent.storage.assembly import Storage
+        # A real sandbox for this thread, so the column is a populated JSONB
+        # object. Allowing None would let the un-decoded implementation pass:
+        # text and null are different failures, and only the object proves the
+        # mapping a caller reads is what arrives.
+        await conn.execute(
+            """
+            INSERT INTO agent_sandboxes (id, user_id, origin_thread_id, generation, host,
+                                         container_name, runtime_id, execution_profile,
+                                         memory_limit, cpu_limit, stop_timeout_seconds,
+                                         state, last_activity_at, idle_timeout_seconds,
+                                         active_operation_count, resident_slot_capacity,
+                                         workspace_epoch, snapshot_state)
+            VALUES ($1, $2, $3, 1, 'host-that-ran-it', 'c1', 'r1', 'trusted-v1',
+                    1, 1, 30, 'running', NOW(), 30, 0, 4, 1, 'quiescent')
+            ON CONFLICT (id) DO NOTHING
+            """,
+            SANDBOX_ID,
+            USER_ID,
+            THREAD_ID,
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_thread_sandbox_memberships (thread_id, user_id, sandbox_id,
+                                                          native_state, context_status,
+                                                          activation_generation,
+                                                          process_generation,
+                                                          residency_generation,
+                                                          resident_state, residency_status)
+            VALUES ($1, $2, $3, 'new', 'live', 1, 1, 1, 'live', 'none')
+            ON CONFLICT (thread_id) DO NOTHING
+            """,
+            THREAD_ID,
+            USER_ID,
+            SANDBOX_ID,
+        )
+
+    attempt = await Storage(pool).execution_queries.get_attempt(
+        job_id=JOB_ID, attempt_id=ATTEMPT_ID
+    )
 
     attempt = await Storage(pool).execution_queries.get_attempt(
         job_id=JOB_ID, attempt_id=ATTEMPT_ID
     )
 
     assert attempt is not None
-    # A mapping, or None when this job has no sandbox row -- never text.
-    assert attempt["thread_sandbox"] is None or isinstance(attempt["thread_sandbox"], dict)
+    # A populated mapping, not text and not null.
+    assert isinstance(attempt["thread_sandbox"], dict), (
+        "the sandbox arrives as JSONB text unless the query decodes it"
+    )
+    assert attempt["thread_sandbox"]["sandbox_id"] == SANDBOX_ID
+    assert attempt["thread_sandbox"]["host"] == "host-that-ran-it"
     assert attempt["lease_generation"] == 3
 
 

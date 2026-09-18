@@ -2159,6 +2159,7 @@ def _run_shared_live_attempt(
                 lease_token=lease_token,
                 timeout_s=agent_timeout_s,
                 measurement=measurement,
+                on_frozen=_frozen_measurement,
             )
         finally:
             # Container totals include concurrent siblings and cannot be
@@ -2447,17 +2448,32 @@ def _enqueue_delivery(
     base_url: str,
     drain_s: float,
 ) -> None:
-    """Send a frozen measurement once, without holding the turn open.
+    """Start a frozen measurement's send, or wait for the one already running.
 
-    Idempotent by measurement id: a record is frozen once, so whichever caller
-    reaches it first sends it and the other is a no-op. That is what lets the
-    startup record go out the moment it is frozen *and* lets the turn's own
-    exit try again for anything the earlier attempt did not manage.
+    A record is frozen once, so only the first caller starts a thread. Every
+    later caller joins *that* thread for its own bound instead of returning:
+    the handoff waits briefly because the turn goes on working, and the turn's
+    exit waits longer to finish a send the first attempt could not. Returning
+    early on "already queued" would silently reduce two bounded attempts to one
+    and make the exit's sweep a no-op for exactly the case it exists for.
     """
-    if measurement is None or measurement.measurement_id in _ENQUEUED_MEASUREMENT_IDS:
+    if measurement is None:
         return
-    _ENQUEUED_MEASUREMENT_IDS.add(measurement.measurement_id)
-    _deliver_in_background(job=job, base_url=base_url, measurement=measurement, drain_s=drain_s)
+    measurement_id = measurement.measurement_id
+    thread = _IN_FLIGHT_DELIVERIES.get(measurement_id)
+    if thread is None:
+        thread = _deliver_in_background(
+            job=job, base_url=base_url, measurement=measurement, drain_s=drain_s
+        )
+        # Recorded only once it is actually running. A thread that could not
+        # start leaves nothing behind, so the next caller tries again rather
+        # than finding a send that never began.
+        if thread is not None:
+            _IN_FLIGHT_DELIVERIES[measurement_id] = thread
+        return
+    # Already on its way. Waiting for that send, rather than returning, is the
+    # difference between a bounded attempt and no attempt at all.
+    thread.join(timeout=drain_s)
 
 
 def _deliver_in_background(
@@ -2466,8 +2482,8 @@ def _deliver_in_background(
     base_url: str,
     measurement: operation_profiling.Measurement,
     drain_s: float = DELIVERY_DRAIN_S,
-) -> None:
-    """Send this turn's measurement without holding the turn open."""
+) -> threading.Thread | None:
+    """Start a send for this measurement, or ``None`` if no thread would run."""
 
     def _send() -> None:
         control = ControlPlane(base_url, job.worker_token)
@@ -2494,10 +2510,8 @@ def _deliver_in_background(
             "agent_measurement_delivery_unstarted",
             extra={"event": "agent_measurement_delivery_unstarted", "error": str(exc)},
         )
-        return
-    # A bounded wait, not a join: the thread outlives this call if the control
-    # plane is slow, and the process may exit with it still running.
-    thread.join(timeout=drain_s)
+        return None
+    return thread
 
 
 def _run_turn(
@@ -3323,13 +3337,17 @@ _DELIVERED_MEASUREMENT_IDS: set[str] = set()
 #: frozen once and its fate is decided once, so a second enqueue would be the
 #: same sample sent twice -- and one of the two would be reported as a
 #: duplicate that never happened.
-_ENQUEUED_MEASUREMENT_IDS: set[str] = set()
+#: The delivery in flight for each measurement, so a later caller can wait
+#: for the send already happening. A second enqueue cannot start one -- the
+#: record is frozen once -- but "already queued" must not mean "do not wait",
+#: or the handoff's short bound would silently become the only attempt.
+_IN_FLIGHT_DELIVERIES: dict[str, threading.Thread] = {}
 
 
 def reset_delivery_state() -> None:
     """Forget what this process delivered and queued. Tests call this."""
     _DELIVERED_MEASUREMENT_IDS.clear()
-    _ENQUEUED_MEASUREMENT_IDS.clear()
+    _IN_FLIGHT_DELIVERIES.clear()
 
 
 def _bound_measurement(

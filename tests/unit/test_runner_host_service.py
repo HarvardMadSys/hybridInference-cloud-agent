@@ -1074,3 +1074,189 @@ def test_only_this_turns_record_is_delivered(monkeypatch, tmp_path):
 
     assert counts["delivered"] == 1
     assert [body["record"]["measurement_id"] for _job, body in control.sent] == ["msm_this"]
+
+
+# ── When the startup sample is queued, and who waits for it ────────────
+
+
+def _claimed(job_id: str = "ajob_1") -> Any:
+    """A claimed turn, with only the fields the delivery path reads."""
+    from cloud_agent_host.runner import ClaimedJob
+
+    return ClaimedJob(
+        job_id=job_id,
+        thread_id="athr_1",
+        attempt_id=7,
+        attempt_no=1,
+        repo="o/n",
+        base_sha=None,
+        task_prompt="do it",
+        runtime="claude-code",
+        model="m",
+        worker_token="ajt.a.b",
+        sandbox_token="grant",
+    )
+
+
+@pytest.fixture
+def startup_measurement(monkeypatch) -> Any:
+    """A selected, frozen startup measurement, under a live experiment."""
+    from cloud_agent_profiling import operation_profiling
+
+    _run_descriptor(monkeypatch)
+    measurement = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+    assert measurement is not None, "the experiment must select this operation"
+    operation_profiling.finish(measurement, outcome="dispatched")
+    yield measurement
+    operation_profiling.reset_cache()
+
+
+class _IdleSupervisor:
+    """A supervisor whose turn produces no frames and ends at once."""
+
+    def start_shared_turn(self, *_args: Any, **_kwargs: Any) -> Any:
+        """Return a stream that immediately ends."""
+        return _EmptyStream()
+
+
+class _IdleHeart:
+    """A lease that is alive and never asks to cancel."""
+
+    lease_lost = False
+    cancel_requested = False
+
+
+class _EmptyStream:
+    """A broker stream that ends as soon as it is read."""
+
+    def frames(self) -> Any:
+        """Yield the one frame that ends the turn."""
+        return iter(({"kind": "result", "exit_code": 0},))
+
+    def close(self) -> None:
+        """Release nothing."""
+
+
+def test_the_streaming_helper_invokes_the_freeze_callback(startup_measurement):
+    """The prompt handoff is where the startup ends, so it is where it is sent.
+
+    Left to the turn's exit, a long turn would report its startup an hour late
+    -- and past the experiment's grace period the endpoint would refuse a
+    perfectly good sample.
+    """
+    measurement = startup_measurement
+    frozen: list[Any] = []
+    runner_mod._stream_shared_agent_turn(
+        supervisor=_IdleSupervisor(),
+        job=_claimed(job_id="ajob_1"),
+        control=_StubControl([]),
+        heart=_IdleHeart(),
+        lease_token="lease",
+        timeout_s=1.0,
+        measurement=measurement,
+        on_frozen=frozen.append,
+    )
+
+    assert frozen == [measurement], "the record must leave the host at the handoff"
+
+
+def test_the_call_path_actually_passes_the_freeze_callback():
+    """The callback has to be threaded to where the freeze happens.
+
+    ``_frozen_measurement`` was defined at the call site and never passed, so
+    the handoff queued nothing and the startup still waited for the model. A
+    behaviour test cannot see that: the helper is correct and the *wiring* is
+    missing, which only the call site can show.
+    """
+    import ast
+    import inspect
+
+    source = ast.parse(inspect.getsource(runner_mod._run_shared_live_attempt))
+    calls = [
+        node
+        for node in ast.walk(source)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_stream_shared_agent_turn"
+    ]
+
+    assert calls, "the streaming helper must be called from the attempt"
+    passed = {keyword.arg for keyword in calls[0].keywords}
+    assert "on_frozen" in passed, (
+        "the streaming helper receives no on_frozen, so a startup record waits "
+        "for the model to finish"
+    )
+
+
+def test_a_later_caller_waits_for_the_send_already_running(
+    startup_measurement, monkeypatch, tmp_path
+):
+    """Dedup must not turn two bounded attempts into none.
+
+    The handoff can only afford a short wait because the turn goes on working;
+    the turn's exit is the one that can afford a long one. An exit that
+    returned immediately on "already queued" would make that sweep a no-op for
+    exactly the case it exists for.
+    """
+    import threading
+
+    _sink_with(monkeypatch, tmp_path, [_frozen()])
+    release = threading.Event()
+    started = threading.Event()
+    finished = threading.Event()
+
+    def _slow_send(**_kwargs: Any) -> Any:
+        def _run() -> None:
+            started.set()
+            # Held until the test lets go: the slow destination the second
+            # caller is supposed to wait for.
+            release.wait(timeout=10)
+            finished.set()
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        return thread
+
+    monkeypatch.setattr(runner_mod, "_deliver_in_background", _slow_send)
+    measurement = startup_measurement
+    job = _claimed()
+    try:
+        runner_mod._enqueue_delivery(measurement, job=job, base_url="http://control", drain_s=0.05)
+        assert started.wait(timeout=5), "the first enqueue must start a send"
+        assert not finished.is_set()
+
+        # The handoff's short bound returns while the send is still in flight.
+        runner_mod._enqueue_delivery(measurement, job=job, base_url="http://control", drain_s=0.05)
+        assert not finished.is_set(), "the handoff's short bound must not wait it out"
+
+        # The exit's longer bound waits for the same in-flight send rather than
+        # declining to try, which is the whole point of leaving it running.
+        release.set()
+        runner_mod._enqueue_delivery(measurement, job=job, base_url="http://control", drain_s=5.0)
+        assert finished.is_set(), "the exit sweep waited for the send already running"
+    finally:
+        release.set()
+
+
+def test_a_send_that_never_started_is_retried_by_the_next_caller(
+    startup_measurement, monkeypatch, tmp_path
+):
+    """A thread that could not start leaves nothing to dedup against."""
+    _sink_with(monkeypatch, tmp_path, [_frozen()])
+    measurement = startup_measurement
+    attempts: list[str] = []
+
+    def _refuse(**kwargs: Any) -> Any:
+        attempts.append("tried")
+        return None  # as a failed thread start reports itself
+
+    monkeypatch.setattr(runner_mod, "_deliver_in_background", _refuse)
+
+    for _ in range(2):
+        runner_mod._enqueue_delivery(
+            measurement, job=_claimed(), base_url="http://control", drain_s=0.05
+        )
+
+    assert len(attempts) == 2, "a send that never began must not be remembered as queued"
