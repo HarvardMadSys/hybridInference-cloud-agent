@@ -129,7 +129,8 @@ class PostgresOperationMeasurementRepository:
                     operation, request_kind, boundary_version, coverage_scope,
                     producer, producer_instance_id,
                     duration_us, outcome, collection_complete, end_to_end_complete,
-                    startup_path, observed_at, record, payload_hash
+                    startup_path, runtime_id, runtime_version, execution_profile,
+                    observed_at, record, payload_hash
                 )
                 VALUES (
                     $1, $2, $3, $4,
@@ -138,7 +139,8 @@ class PostgresOperationMeasurementRepository:
                     $12, $13, $14, $15,
                     $16, $17,
                     $18, $19, $20, $21,
-                    $22, $23, $24::jsonb, $25
+                    $22, $23, $24, $25,
+                    $26, $27::jsonb, $28
                 )
                 ON CONFLICT (measurement_id) DO NOTHING
                 RETURNING measurement_id
@@ -165,11 +167,24 @@ class PostgresOperationMeasurementRepository:
                 bool(measurement["collection_complete"]),
                 bool(measurement.get("end_to_end_complete", False)),
                 measurement.get("startup_path"),
+                measurement.get("runtime_id"),
+                measurement.get("runtime_version"),
+                measurement.get("execution_profile"),
                 measurement["observed_at"],
                 json.dumps(dict(measurement["record"])),
                 str(measurement["payload_hash"]),
             )
             if inserted is not None:
+                # Catalogue recency means the latest newly stored sample, not
+                # merely the first row that happened to create the manifest.
+                await conn.execute(
+                    """
+                    UPDATE agent_operation_profiling_runs
+                    SET received_at = NOW()
+                    WHERE run_id = $1
+                    """,
+                    str(measurement["profiling_run_id"]),
+                )
                 return "stored"
             stored = await conn.fetchval(
                 "SELECT payload_hash FROM agent_operation_measurements WHERE measurement_id = $1",
@@ -277,7 +292,8 @@ class PostgresOperationMeasurementRepository:
                        operation, request_kind, boundary_version, coverage_scope,
                        producer, producer_instance_id,
                        duration_us, outcome, collection_complete, end_to_end_complete,
-                       startup_path, observed_at, received_at
+                       startup_path, runtime_id, runtime_version, execution_profile,
+                       observed_at, received_at
                 FROM agent_operation_measurements
                 {where}
                 ORDER BY received_at DESC, measurement_id DESC
@@ -298,7 +314,8 @@ class PostgresOperationMeasurementRepository:
                        operation, request_kind, boundary_version, coverage_scope,
                        producer, producer_instance_id,
                        duration_us, outcome, collection_complete, end_to_end_complete,
-                       startup_path, observed_at, received_at, record, payload_hash
+                       startup_path, runtime_id, runtime_version, execution_profile,
+                       observed_at, received_at, record, payload_hash
                 FROM agent_operation_measurements
                 WHERE measurement_id = $1
                 """,
@@ -376,10 +393,21 @@ _GROUPS: dict[str, str] = {
     "boundary_version": "boundary_version",
     "coverage_scope": "coverage_scope",
     "startup_path": "startup_path",
+    "runtime_id": "runtime_id",
+    "runtime_version": "runtime_version",
+    "execution_profile": "execution_profile",
 }
 
 #: Dimensions a caller may not group away.
-_REQUIRED_GROUPS = ("operation", "request_kind", "boundary_version", "coverage_scope")
+_REQUIRED_GROUPS = (
+    "operation",
+    "request_kind",
+    "boundary_version",
+    "coverage_scope",
+    "runtime_id",
+    "runtime_version",
+    "execution_profile",
+)
 
 #: Added whenever the samples are startups, because they separate the four
 #: startup paths the runner classifies.
@@ -472,6 +500,9 @@ def _summary_row(row: Any) -> dict[str, Any]:
         "collection_complete": row["collection_complete"],
         "end_to_end_complete": row["end_to_end_complete"],
         "startup_path": row["startup_path"],
+        "runtime_id": row["runtime_id"],
+        "runtime_version": row["runtime_version"],
+        "execution_profile": row["execution_profile"],
         "observed_at": row["observed_at"],
         "received_at": row["received_at"],
     }

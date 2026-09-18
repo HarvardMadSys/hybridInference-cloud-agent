@@ -97,10 +97,12 @@ async def test_the_surface_requires_an_administrator(setup):
     """It answers for every user's experiments, so it is not an owner surface."""
     app, _ = setup
 
-    assert (await get(app, MEASUREMENTS, headers={})).status_code == 401
-    assert (
-        await get(app, MEASUREMENTS, headers={"Authorization": "Bearer nope"})
-    ).status_code == 401
+    missing = await get(app, MEASUREMENTS, headers={})
+    invalid = await get(app, MEASUREMENTS, headers={"Authorization": "Bearer nope"})
+    assert missing.status_code == 401
+    assert invalid.status_code == 401
+    assert missing.headers["cache-control"] == "no-store"
+    assert invalid.headers["cache-control"] == "no-store"
 
 
 async def test_reads_are_never_cached(setup):
@@ -111,6 +113,42 @@ async def test_reads_are_never_cached(setup):
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
+
+
+async def test_the_local_writer_exposes_its_bounds_and_loss_counts(setup):
+    """Queue loss is visible and explicitly scoped to this replica."""
+    from cloud_agent import measurement_writer
+    from cloud_agent.measurement_writer import MeasurementWriter
+
+    app, _ = setup
+    local = MeasurementWriter()
+    local.counts.dropped_full = 3
+    measurement_writer.reset_writer(local)
+    try:
+        response = await get(app, "/admin/agent/measurement-writer")
+    finally:
+        measurement_writer.reset_writer(None)
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "scope": "this_control_plane_process",
+        "running": False,
+        "pending": 0,
+        "in_flight": 0,
+        "queued_bytes": 0,
+        "counts": {
+            "stored": 0,
+            "duplicate": 0,
+            "rejected": 0,
+            "conflict": 0,
+            "dropped_full": 3,
+            "dropped_timeout": 0,
+            "dropped_shutdown": 0,
+            "failed": 0,
+            "reasons": {},
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -136,17 +174,30 @@ async def test_an_empty_page_says_why_it_cannot_say_why(setup):
     assert "undelivered" in body["empty_reason"]
 
 
-async def test_a_full_page_offers_a_cursor_and_a_short_one_does_not(setup):
-    """A caller can tell "more to read" from "that was all of it"."""
+async def test_a_page_offers_a_cursor_only_when_lookahead_finds_more(setup):
+    """A page exactly at the limit must not invent a row after it."""
     app, capability = setup
     capability.list_operation_measurements.return_value = [_row("msm_1"), _row("msm_2")]
 
+    exact = await get(app, f"{MEASUREMENTS}?limit=2")
+    assert exact.json()["next_cursor"] is None
+
+    capability.list_operation_measurements.return_value = [
+        _row("msm_1"),
+        _row("msm_2"),
+        _row("msm_3"),
+    ]
     full = await get(app, f"{MEASUREMENTS}?limit=2")
+    assert [row["measurement_id"] for row in full.json()["measurements"]] == [
+        "msm_1",
+        "msm_2",
+    ]
     assert full.json()["next_cursor"] == "msm_2"
 
     capability.list_operation_measurements.return_value = [_row("msm_1")]
     short = await get(app, f"{MEASUREMENTS}?limit=2")
     assert short.json()["next_cursor"] is None
+    assert capability.list_operation_measurements.await_args.kwargs["limit"] == 3
 
 
 async def test_a_cursor_is_resolved_rather_than_trusted(setup):
@@ -172,6 +223,7 @@ async def test_an_unknown_cursor_is_refused(setup):
 
     assert response.status_code == 404
     assert response.json()["detail"]["error"]["type"] == "unknown_cursor"
+    assert response.headers["cache-control"] == "no-store"
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +286,7 @@ async def test_a_missing_measurement_is_a_404(setup):
     response = await get(app, f"{MEASUREMENTS}/msm_missing")
 
     assert response.status_code == 404
+    assert response.headers["cache-control"] == "no-store"
 
 
 async def test_the_catalogue_reports_how_many_runs_it_returned(setup):

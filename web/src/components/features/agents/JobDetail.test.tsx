@@ -38,6 +38,7 @@ import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { decideMcpInvocation, listMcpInvocations, type McpInvocationApi } from '@/lib/api/mcp';
 
 import { installSideChatLocks } from './sideChatTestSupport';
+import { sideChatKeys } from './sideChatStorage';
 import { JobDetail, WORKSPACE_WIDTH_STORAGE_KEY } from './JobDetail';
 import type { AgentJob } from './types';
 
@@ -148,6 +149,76 @@ function openWorkspace() {
   fireEvent.click(screen.getByRole('button', { name: 'Open workspace' }));
 }
 
+function addSideChat() {
+  fireEvent.click(screen.getByRole('button', { name: 'New Side Chat' }));
+}
+
+function sideChatFixture() {
+  installSideChatLocks();
+  const source = {
+    id: 'tabs-main',
+    thread_id: 'tabs-main-thread',
+    sandbox_id: 'tabs-group',
+    workspace_shared: true,
+    native_state: 'ready',
+    native_fork_available: true,
+    turn_no: 1,
+    state: 'succeeded',
+    conversation_state: 'idle',
+    task_prompt: 'Main',
+    runtime: 'codex',
+    model: 'qwen-test',
+    repo: 'owner/repository',
+    current_attempt_id: null,
+  } as AgentJobApi;
+  const jobs = new Map([[source.id, source]]);
+  let forks = 0;
+  vi.mocked(getAgentJob).mockImplementation(async (id) => jobs.get(id)!);
+  vi.mocked(getAgentJobThread).mockImplementation(async (id) => {
+    const job = jobs.get(id)!;
+    return {
+      thread_id: job.thread_id!,
+      jobs: [...jobs.values()].filter((row) => row.thread_id === job.thread_id),
+      messages: [],
+    };
+  });
+  vi.mocked(listAllAgentThreadEvents).mockResolvedValue([]);
+  vi.mocked(forkAgentJob).mockImplementation(async (id) => {
+    const child = {
+      ...jobs.get(id)!,
+      id: `tabs-child-${++forks}`,
+      thread_id: `tabs-thread-${forks}`,
+      forked_from_job_id: id,
+      fork_anchor_job_id: id,
+    };
+    jobs.set(child.id, child);
+    return child;
+  });
+  vi.mocked(followUpAgentJob).mockImplementation(async (id, body) => {
+    const child = {
+      ...jobs.get(id)!,
+      id: `${id}-next`,
+      turn_no: 2,
+      forked_from_job_id: null,
+      task_prompt: body.prompt,
+    };
+    jobs.set(child.id, child);
+    return child;
+  });
+  return {
+    source,
+    jobs,
+    job: makeJob({
+      id: source.id,
+      threadId: source.thread_id!,
+      sandboxId: source.sandbox_id!,
+      workspaceShared: true,
+      state: 'done',
+    }),
+    userId: 'tabs-owner',
+  };
+}
+
 function measuredUsage(): AgentJobUsageApi {
   const totals = {
     calls: 2,
@@ -204,6 +275,161 @@ const HISTORY = [
 ];
 
 describe('JobDetail', () => {
+  it('creates independent side chats, preserves drafts and sends to the selected child', async () => {
+    const { source, job, userId } = sideChatFixture();
+    const props = { job, userId, threadJobs: [source] };
+    const view = render(<JobDetail {...props} />);
+    openWorkspace();
+    expect(screen.queryByRole('tab', { name: /Side Chat/ })).not.toBeInTheDocument();
+    addSideChat();
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message side chat' }), {
+      target: { value: 'First draft' },
+    });
+    addSideChat();
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole('tab', { name: 'Side Chat 2' })).toHaveFocus();
+    expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue('');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message side chat' }), {
+      target: { value: 'Second draft' },
+    });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Send side chat message' })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenCalledWith('tabs-child-2', { prompt: 'Second draft' }),
+    );
+    fireEvent.click(screen.getByRole('tab', { name: 'Side Chat' }));
+    expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue('First draft');
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Send side chat message' })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenCalledWith('tabs-child-1', { prompt: 'First draft' }),
+    );
+    expect(new Set(vi.mocked(forkAgentJob).mock.calls.map((call) => call[1]?.requestId)).size).toBe(
+      2,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Close Side Chat 2' }));
+    expect(screen.getByRole('tab', { name: 'Side Chat' })).toHaveAttribute('aria-selected', 'true');
+    view.unmount();
+    render(<JobDetail {...props} />);
+    openWorkspace();
+    expect(screen.queryByRole('tab', { name: 'Side Chat 2' })).not.toBeInTheDocument();
+    await waitFor(() => expect(getAgentJobThread).toHaveBeenCalledWith('tabs-child-1-next'));
+    expect(forkAgentJob).toHaveBeenCalledTimes(2);
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+  });
+
+  it('closes all side tabs, remembers closure after refresh and can create a fresh chat', async () => {
+    const { source, job, userId } = sideChatFixture();
+    const props = { job, userId, threadJobs: [source] };
+    const view = render(<JobDetail {...props} />);
+    openWorkspace();
+    addSideChat();
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1));
+    addSideChat();
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole('button', { name: 'Close Side Chat 2' }));
+    expect(screen.getByRole('tab', { name: 'Side Chat' })).toHaveFocus();
+    fireEvent.click(screen.getByRole('button', { name: 'Close Side Chat' }));
+    expect(screen.getByRole('tab', { name: /Git/ })).toHaveFocus();
+    expect(screen.getByRole('tab', { name: /Git/ })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByRole('textbox', { name: 'Message side chat' })).not.toBeInTheDocument();
+    expect(localStorage.getItem(sideChatKeys(userId, source.thread_id!).session)).toContain(
+      'tabs-child-1',
+    );
+    view.unmount();
+    render(<JobDetail {...props} />);
+    openWorkspace();
+    expect(screen.queryByRole('tab', { name: /Side Chat/ })).not.toBeInTheDocument();
+    addSideChat();
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(3));
+    expect(screen.getByRole('tab', { name: 'Side Chat 3' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+  });
+
+  it('preserves a pending fork receipt when its tab closes and starts a different operation for a new tab', async () => {
+    const { source, job, userId, jobs } = sideChatFixture();
+    let resolve!: (job: AgentJobApi) => void;
+    vi.mocked(forkAgentJob).mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    render(<JobDetail job={job} userId={userId} threadJobs={[source]} />);
+    openWorkspace();
+    addSideChat();
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Close Side Chat' }));
+    const child = {
+      ...source,
+      id: 'closed-child',
+      thread_id: 'closed-thread',
+      forked_from_job_id: source.id,
+      fork_anchor_job_id: source.id,
+    };
+    jobs.set(child.id, child);
+    await act(async () => resolve(child));
+    expect(localStorage.getItem(sideChatKeys(userId, source.thread_id!).session)).toContain(
+      'closed-child',
+    );
+    addSideChat();
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(forkAgentJob).mock.calls[0][1]?.requestId).not.toEqual(
+      vi.mocked(forkAgentJob).mock.calls[1][1]?.requestId,
+    );
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+  });
+
+  it('creates and focuses a side chat from one click on + without stopping the main conversation', async () => {
+    render(<JobDetail job={makeJob()} />);
+    openWorkspace();
+    expect(screen.queryByRole('tab', { name: /Side Chat/ })).not.toBeInTheDocument();
+    addSideChat();
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    const tab = screen.getByRole('tab', { name: 'Side Chat' });
+    expect(tab).toHaveFocus();
+    expect(tab).toHaveAttribute('aria-selected', 'true');
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+  });
+
+  it('stops only the selected new side chat when Escape is pressed on its tab', async () => {
+    const { source, job, userId, jobs } = sideChatFixture();
+    vi.mocked(followUpAgentJob).mockImplementationOnce(async (id, body) => {
+      const next = {
+        ...jobs.get(id)!,
+        id: 'running-side',
+        forked_from_job_id: null,
+        turn_no: 2,
+        task_prompt: body.prompt,
+        state: 'running' as const,
+        conversation_state: 'running' as const,
+      };
+      jobs.set(next.id, next);
+      return next;
+    });
+    render(<JobDetail job={{ ...job, state: 'running' }} userId={userId} threadJobs={[source]} />);
+    openWorkspace();
+    addSideChat();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message side chat' }), {
+      target: { value: 'Run in side chat' },
+    });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Send side chat message' })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
+    await screen.findByRole('button', { name: 'Stop side chat' });
+    fireEvent.keyDown(screen.getByRole('tab', { name: 'Side Chat' }), { key: 'Escape' });
+    await waitFor(() => expect(cancelAgentJob).toHaveBeenCalledExactlyOnceWith('running-side'));
+  });
+
   it('lazily prepares a real side session and isolates Escape on the tab button', async () => {
     installSideChatLocks();
     const source = {
@@ -248,8 +474,8 @@ describe('JobDetail', () => {
     expect(getAgentJob).not.toHaveBeenCalled();
     openWorkspace();
     expect(forkAgentJob).not.toHaveBeenCalled();
+    addSideChat();
     const tab = screen.getByRole('tab', { name: 'Side Chat' });
-    fireEvent.click(tab);
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1));
     fireEvent.keyDown(tab, { key: 'Escape' });
     fireEvent.keyDown(document.body, { key: 'Escape' });
@@ -263,16 +489,13 @@ describe('JobDetail', () => {
     render(<JobDetail job={makeJob()} />);
     openWorkspace();
     const workspace = screen.getByRole('region', { name: 'Job workspace' });
-    const tabs = within(
-      within(workspace).getByRole('tablist', { name: 'Workspace views' }),
-    ).getAllByRole('tab');
-    expect(tabs.map((tab) => tab.textContent?.replace(/\d+$/, '').trim())).toEqual([
-      'Git',
-      'Terminal',
-      'Files',
-      'Side Chat',
-    ]);
-    fireEvent.click(within(workspace).getByRole('tab', { name: 'Side Chat' }));
+    const names = () =>
+      within(within(workspace).getByRole('tablist', { name: 'Workspace views' }))
+        .getAllByRole('tab')
+        .map((tab) => tab.textContent?.replace(/\d+$/, '').trim());
+    expect(names()).toEqual(['Git', 'Terminal', 'Files']);
+    addSideChat();
+    expect(names()).toEqual(['Git', 'Terminal', 'Files', 'Side Chat']);
     expect(screen.getByRole('textbox', { name: 'Message side chat' })).toBeVisible();
     fireEvent.keyDown(screen.getByRole('region', { name: 'Side chat messages' }), {
       key: 'Escape',
@@ -326,6 +549,9 @@ describe('JobDetail', () => {
   );
 
   beforeEach(() => {
+    vi.mocked(getAgentJob).mockReset();
+    vi.mocked(getAgentJobThread).mockReset();
+    vi.mocked(listAllAgentThreadEvents).mockReset();
     vi.mocked(listMcpInvocations).mockReset().mockResolvedValue({ invocations: [] });
     navigation.push.mockReset();
     vi.mocked(cancelAgentJob).mockReset();

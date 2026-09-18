@@ -97,7 +97,6 @@ async def _running_writer():
 
     writer = measurement_writer.MeasurementWriter()
     measurement_writer.reset_writer(writer)
-    writer.start()
     try:
         yield writer
     finally:
@@ -364,7 +363,7 @@ async def _ready_job(client: AsyncClient, store: FakeStorage) -> str:
 
 
 async def test_profiling_off_leaves_the_payload_and_the_call_untouched(
-    client: AsyncClient, store: FakeStorage, monkeypatch, records
+    client: AsyncClient, store: FakeStorage, monkeypatch, records, _running_writer
 ):
     """A switched-off deployment serves exactly what it served before."""
     broker = _RecordingClient()
@@ -392,6 +391,7 @@ async def test_profiling_off_leaves_the_payload_and_the_call_untouched(
     assert body["content"] is None and body["size"] is None
     assert [call["op"] for call in broker.calls] == ["files"]
     assert records() == []
+    assert _running_writer.running is False
 
 
 async def test_an_unselected_operation_is_not_measured(
@@ -1321,6 +1321,7 @@ async def test_a_subdirectory_is_a_listing_and_a_file_is_an_open(
     store: FakeStorage,
     monkeypatch,
     records,
+    _running_writer,
     operations: list[str],
     path: str,
     directories: dict[str, str],
@@ -1347,6 +1348,8 @@ async def test_a_subdirectory_is_a_listing_and_a_file_is_an_open(
     if expected is None:
         assert "profiling" not in response.json()
         assert records() == []
+        await asyncio.sleep(0.02)
+        assert store.rows == []
         return
     assert response.json()["profiling"]["operation"] == expected
     emitted = records()
@@ -1356,6 +1359,8 @@ async def test_a_subdirectory_is_a_listing_and_a_file_is_an_open(
     # a count rather than the content statistics a preview would.
     assert emitted[0]["facts"]["kind"] == ("directory" if expected == "files.list" else "file")
     assert emitted[0]["facts"]["request_kind"] == expected
+    await _drain(_running_writer, 1)
+    assert [row["operation"] for row in store.rows] == [expected]
 
 
 # ---------------------------------------------------------------------------
@@ -1597,6 +1602,63 @@ async def test_a_terminal_open_is_stored_once_per_request(
     assert len({row["measurement_id"] for row in store.rows}) == 2
 
 
+async def test_a_terminal_attach_is_stored_while_its_stream_is_still_open(
+    client: AsyncClient, store: FakeStorage, monkeypatch, _running_writer
+):
+    """A long-lived SSE must not postpone its short attach measurement."""
+    release = asyncio.Event()
+
+    class _HeldBytes(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            await release.wait()
+            if False:  # pragma: no cover - makes this an async generator
+                yield b""
+
+        async def aclose(self) -> None:
+            """Release no external resource."""
+
+    class _HeldBroker(_RecordingClient):
+        async def stream_terminal(
+            self,
+            workspace_id: str,
+            terminal_id: str,
+            *,
+            after: int,
+            profiling: dict[str, Any] | None = None,
+        ) -> Any:
+            del terminal_id, after
+            self.calls.append({"op": "stream_terminal", "workspace_id": workspace_id})
+            call = self._open(profiling, "terminal.open")
+            call.set_operation("terminal.open")
+            with call.stage("stream_attach"):
+                pass
+            response = httpx.Response(
+                200,
+                headers=call.headers(),
+                stream=_HeldBytes(),
+            )
+            return WorkspaceBrokerStream(
+                _UnusedClient(),
+                response,
+                profiling_answer=_answer(response.headers),
+            )
+
+    _enable(monkeypatch)
+    _use_broker(monkeypatch, _HeldBroker())
+    job_id = await _ready_job(client, store)
+    request = asyncio.create_task(
+        client.get(f"/v1/agent/jobs/{job_id}/terminals/term_measured/stream")
+    )
+    try:
+        await _drain(_running_writer, 1)
+        assert [row["request_kind"] for row in store.rows] == ["terminal.stream_attach"]
+        assert not request.done(), "the stream itself is intentionally still open"
+    finally:
+        release.set()
+    response = await request
+    assert response.status_code == 200
+
+
 async def test_a_request_that_was_not_selected_stores_nothing(
     client: AsyncClient, store: FakeStorage, monkeypatch, _running_writer
 ):
@@ -1654,8 +1716,9 @@ async def test_a_queue_with_no_room_drops_the_record_and_keeps_answering(
     _enable(monkeypatch)
     _use_broker(monkeypatch, _RecordingClient())
     job_id = await _ready_job(client, store)
-    # No worker may drain, so the queue fills and stays full.
-    await _running_writer.shutdown()
+    # A zero-capacity writer models a destination whose bounded queue has no
+    # room. It remains running so this tests fullness, not shutdown.
+    _running_writer._max_count = 0
     _running_writer.counts.dropped_full = 0
 
     for _ in range(4):
@@ -1663,7 +1726,6 @@ async def test_a_queue_with_no_room_drops_the_record_and_keeps_answering(
         assert response.status_code == 200
         assert response.json()["profiling"]["measurement_id"]
 
-    # Every offer was refused for want of a running writer, and each one is
-    # counted rather than lost silently.
-    assert _running_writer.counts.dropped_shutdown == 4
+    # Every offer was refused by the count bound and recorded as such.
+    assert _running_writer.counts.dropped_full == 4
     assert store.rows == []

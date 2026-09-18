@@ -145,6 +145,9 @@ def _measurement(**overrides: object) -> dict[str, object]:
         "collection_complete": True,
         "end_to_end_complete": False,
         "startup_path": None,
+        "runtime_id": None,
+        "runtime_version": None,
+        "execution_profile": None,
         "observed_at": datetime.now(UTC),
         "record": {"schema_version": 3, "operation": "files.list", "stages": []},
         "payload_hash": "hash-1",
@@ -373,6 +376,27 @@ async def test_the_experiment_catalogue_is_readable(store):
     assert await store.get_profiling_run("run-missing") is None
 
 
+async def test_catalogue_recency_advances_when_a_new_sample_arrives(store):
+    """Newest delivery order must not remain pinned to a run's first sample."""
+    await store.record_operation_measurement(measurement=_measurement(), run=_run())
+    old = datetime.now(UTC) - timedelta(days=1)
+    async with store.pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_operation_profiling_runs SET received_at = $2 WHERE run_id = $1",
+            "run-1",
+            old,
+        )
+
+    await store.record_operation_measurement(
+        measurement=_measurement(measurement_id="msm_2", payload_hash="h-2"),
+        run=_run(),
+    )
+
+    run = await store.get_profiling_run("run-1")
+    assert run is not None
+    assert run["received_at"] > old
+
+
 async def test_a_measurement_without_a_run_row_is_still_stored(store):
     """A producer that never sent its manifest still contributes its sample."""
     assert (
@@ -448,6 +472,44 @@ async def test_the_four_startup_paths_are_never_averaged_together(store):
     assert by_path["reuse_live"]["p50_us"] == 1_000
 
 
+async def test_startup_runtimes_and_execution_profiles_are_never_mixed(store):
+    """A percentile must describe one comparable runtime configuration."""
+    for index, (runtime, version, profile) in enumerate(
+        (
+            ("claude-code", "2.0.0", "untrusted-kata-v1"),
+            ("codex", "1.4.0", "trusted-v1"),
+        )
+    ):
+        await store.record_operation_measurement(
+            measurement=_measurement(
+                measurement_id=f"msm_runtime_{index}",
+                payload_hash=f"runtime-{index}",
+                operation="attempt.startup",
+                request_kind="attempt.startup",
+                coverage_scope="host_startup",
+                startup_path="new_group",
+                runtime_id=runtime,
+                runtime_version=version,
+                execution_profile=profile,
+            ),
+            run=_run(operations=["attempt.startup"]),
+        )
+
+    summary = await store.summarize_operation_measurements(run_id="run-1")
+
+    assert {
+        (
+            row["group"]["runtime_id"],
+            row["group"]["runtime_version"],
+            row["group"]["execution_profile"],
+        )
+        for row in summary
+    } == {
+        ("claude-code", "2.0.0", "untrusted-kata-v1"),
+        ("codex", "1.4.0", "trusted-v1"),
+    }
+
+
 async def test_a_caller_cannot_group_away_a_required_dimension(store):
     """The dimensions that decide comparability are not the caller's to remove."""
     await store.record_operation_measurement(measurement=_measurement(), run=_run())
@@ -455,7 +517,15 @@ async def test_a_caller_cannot_group_away_a_required_dimension(store):
     summary = await store.summarize_operation_measurements(run_id="run-1", group_by=[])
 
     group = summary[0]["group"]
-    for required in ("operation", "request_kind", "boundary_version", "coverage_scope"):
+    for required in (
+        "operation",
+        "request_kind",
+        "boundary_version",
+        "coverage_scope",
+        "runtime_id",
+        "runtime_version",
+        "execution_profile",
+    ):
         assert required in group
 
     with pytest.raises(ValueError):

@@ -143,7 +143,6 @@ function EventStepDetails({
   idPrefix: string;
 }) {
   const payload = step.sourceEvents[0]?.payload ?? {};
-  const truncationPayload = step.runtimeNotifications ? { truncated: step.truncated } : payload;
   if (tab === 'raw') {
     return (
       <TabPanel idPrefix={idPrefix} tab="raw">
@@ -158,7 +157,7 @@ function EventStepDetails({
             />
           </>
         ) : null}
-        <TruncationNote payload={truncationPayload} />
+        <TruncationNote payload={payload} />
         <div className="space-y-1.5">
           {step.sourceEvents.map((event) => (
             <StoredRecord
@@ -176,11 +175,7 @@ function EventStepDetails({
       <DetailRows>
         <DetailRow label="Event type">
           <span className="font-mono">
-            {step.kind === 'user'
-              ? 'User input'
-              : step.runtimeNotifications
-                ? 'Runtime log'
-                : (step.sourceEvents[0]?.event_type ?? step.label)}
+            {step.kind === 'user' ? 'User input' : (step.sourceEvents[0]?.event_type ?? step.label)}
           </span>
         </DetailRow>
         <DetailRow label="Status" tone={step.status === 'failed' ? 'error' : 'muted'}>
@@ -193,18 +188,10 @@ function EventStepDetails({
             <DetailRow label="Attempt">{step.attemptId}</DetailRow>
           </>
         ) : null}
-        {step.runtimeNotifications ? (
-          <DetailRow label="Records">{step.sourceEvents.length}</DetailRow>
-        ) : null}
       </DetailRows>
-      <TruncationNote payload={truncationPayload} />
+      <TruncationNote payload={payload} />
       {step.kind === 'user' ? (
         <Markdown text={step.inputText ?? ''} />
-      ) : step.runtimeNotifications ? (
-        <p className="text-[12px] text-gray-500 dark:text-gray-400">
-          Runtime notifications are grouped for this attempt. Open Raw to inspect all{' '}
-          {step.sourceEvents.length} stored records.
-        </p>
       ) : (
         <ValueBlock value={payload} what="Payload" />
       )}
@@ -312,19 +299,15 @@ export function TrajectoryInspector({
         ? 'Assistant'
         : step.kind === 'tool'
           ? 'Tool'
-          : step.diagnostic
-            ? 'Runtime log'
-            : 'Event';
-  const hiddenByQuery =
-    !step.diagnostic && !stepSearchText(step).includes(query.trim().toLowerCase());
+          : 'Event';
+  const hiddenByQuery = !stepSearchText(step).includes(query.trim().toLowerCase());
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="flex items-start gap-2 border-b border-gray-200 px-4 py-3 dark:border-white/10">
         <div className="min-w-0 flex-1">
           <p className="text-[10px] font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">
-            {kindLabel} · Turn {step.turnNo}
-            {step.diagnostic ? '' : ` · Step ${step.stepNo}`}
+            {kindLabel} · Turn {step.turnNo} · Step {step.stepNo}
           </p>
           <h2 className="truncate text-[13px] font-semibold text-gray-900 dark:text-gray-50">
             {step.label}

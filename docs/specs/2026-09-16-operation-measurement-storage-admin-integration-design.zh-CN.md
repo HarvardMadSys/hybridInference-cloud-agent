@@ -1,14 +1,15 @@
 # 可选操作测量：整合 #218 的存储与 Admin 展示
 
-日期：2026-09-16。状态：**待实现设计**，不表示以下能力已合并或部署。
+日期：2026-09-16，2026-09-18 更新。状态：**已在 #258 分支实现并完成服务端验收，
+尚未合并或部署；浏览器 producer 仍明确延期。**
 
 核对基线：[#218](https://github.com/HarvardMadSys/hybridInference-cloud-agent/pull/218)
 `9c02a26`、[#258](https://github.com/HarvardMadSys/hybridInference-cloud-agent/pull/258)
-远端 `3a191e5`，以及同一分支本地后续提交 `e77e3e6`。后者已加入文件和终端的
-服务端测量，但尚未 push；本轮 review 见
+历史基线 `3a191e5` 与后续提交 `e77e3e6`。后者加入文件和终端的
+服务端测量；当时的 review 见
 [e77e3e6 review](2026-09-16-operation-measurement-e77e3e6-review.zh-CN.md)。
 
-本文约定下一轮的实现目标：**保留 #258 的唯一采集器，把 #218 的持久化、读取和
+本文记录已经采用的实现：**保留 #258 的唯一采集器，把 #218 的持久化、读取和
 Admin 展示接到同一份测量记录上。** 文件和终端与启动共用这条数据链路。
 本文对记录身份、存储、读取和交付顺序的决定优先于旧设计；操作边界与浏览器接入
 继续参考[平台测量清单](2026-09-14-platform-operation-measurement-inventory.zh-CN.md)。
@@ -38,22 +39,22 @@ flowchart LR
     C[broker 调用片段] --> B
     B --> D[完成本地记录并投递有界队列]
     D --> E[日志 / 可选 JSONL]
-    D --> F[可选 CP 持久化]
+    D --> F[有界 CP 持久化]
     F --> G[版本校验 / 身份归属 / 幂等写入]
     G --> H[统一 measurement 表]
     H --> I[Admin 实验列表和详情]
 ```
 
-**采集与持久化分别开关。** 保留 `AGENT_OPERATION_PROFILING_ENABLED` 和
-`AGENT_OPERATION_PROFILING_RUN`；新增拟议配置
-`AGENT_OPERATION_PROFILING_PERSIST_ENABLED`，默认 false。相关 producer 与 CP
-均启用持久化后才上传/入库；CP 关闭时拒绝新的诊断写入，已有历史仍可查询。
+**采集开关也是新增写入的总门。** 保留 `AGENT_OPERATION_PROFILING_ENABLED` 和
+`AGENT_OPERATION_PROFILING_RUN`；没有第二个容易配置分裂的持久化开关。只有被当前
+run 选中的根操作会投递，profiling 关闭时 writer 不启动、无上传和数据库写入；
+已有历史仍可查询。`AGENT_OPERATION_PROFILING_SINK` 只控制可选 JSONL 基线文件，
+不再是启动记录进入 Admin 的前提。
 
 | 状态 | 行为 |
 | --- | --- |
 | profiling 关闭、配置无效或未选中 | 无新增测量记录、队列、上传、数据库写入；原业务响应不变 |
-| profiling 开启，持久化关闭 | 保持现有日志/可选 JSONL 实验工作流 |
-| profiling 与持久化都开启 | 同一份记录额外异步入库；不增加第二套 timer |
+| profiling 开启 | 同一冻结记录写日志/可选 JSONL，并经有界队列异步入库；不增加第二套 timer |
 | 采集到期、记录已在队列中 | 停止新增计时；允许在有界投递宽限期内上传已完成的记录 |
 
 浏览 Admin 历史不打开 profiling，不启动额外轮询。env 配置仍按进程读取，部署或
@@ -142,7 +143,8 @@ missing_fragments、truncated_fragments、dropped_spans 和原始微秒整数；
 
 迁移期间 `measurement_complete` 可作为 collection_complete 的兼容别名，但不能在
 UI 中简写为“整个操作完整”。`startup_outcome` 仍只作为 attempt.startup 的别名。
-CP 必须重新验证完整性约束，发现声明 true 与缺失/截断矛盾时置 false 并记录原因。
+CP 必须重新验证完整性约束；声明 true 与缺失/截断矛盾的记录直接拒绝，不能让它进入
+成功样本分位数。
 
 | 记录 | 当前准确起止点 | 不能声称包含 |
 | --- | --- | --- |
@@ -174,7 +176,7 @@ measurement 的不可变唯一键为 `measurement_id`；主要列如下：
 | 身份 | measurement_id、interaction_id、profiling_run_id、schema_version |
 | 可信关联 | owner_id、job_id、thread_id、sandbox_id、host_id；attempt_id/lease_generation 可空 |
 | 可过滤口径 | operation、request_kind、boundary_version、coverage_scope、producer、producer_instance_id |
-| 摘要 | duration_us、outcome、collection_complete、startup_path 可空 |
+| 摘要 | duration_us、outcome、collection_complete、startup_path、runtime/version、execution_profile 可空 |
 | 时间与原文 | observed_at、received_at、经验证的 record JSONB、canonical payload hash |
 
 可信关联由 CP 依据已有业务上下文或 worker 凭据解析，不接受 payload 自报的 owner
@@ -194,16 +196,15 @@ admission 实例的预算/部署版本。它是实验 manifest 与查询目录�
 cherry-pick 后制造两个未处理的 head。新增 additive migration，不修改已发布 revision。
 按当前 ports/repositories/assembly 架构增加窄的测量读写能力，不恢复旧 store.py 大类。
 
-原始记录默认保留 14 天；定期清理按小批次进行，随作业删除遵循既有数据清理规则。
-首版每 run 持久化最多 20,000 条、每条最多 64 KiB，超限只拒绝测量并计数；这是独立
-的存储保护上限，不替代 producer 采样预算。实验目录显示保留期限和拒绝/丢弃信息；
-run 清理与样本清理一致，不留下无限增长的 manifest 或进程维度计数。
+本切片落实了每条 64 KiB、producer 根操作预算、256 条/4 MiB 投递队列和写入超时。
+14 天自动清理与跨 replica 的每-run 20,000 条硬上限尚未实现，不能在 Admin 中声称
+已有该保留策略；它们属于部署长期运行前的后续容量治理，不替代当前实验预算。
 
 ## 6. 写入协议与业务隔离
 
 ### 6.1 producer 到 CP
 
-拟议 worker 入口：`POST /v1/agent/worker/jobs/{job_id}/measurements`，一次一条根记录。
+已实现 worker 入口：`POST /v1/agent/worker/jobs/{job_id}/measurements`，一次一条根记录。
 runner 使用已有的 worker 身份和固定 CP 地址；令牌只保存在队列投递 envelope 中，
 绝不写进 JSON、日志或数据库。broker 不单独入库，由根 producer 汇总其应答。
 
@@ -250,7 +251,8 @@ worker 写入验证：有效签名/用途、job/attempt/lease_generation 精确�
 
 ## 7. 读取 API 与 Admin
 
-读取入口沿用现有 Admin 身份校验、审计和 Cache-Control:no-store。拟议接口：
+读取入口沿用现有 Admin 身份校验与 Cache-Control:no-store（成功和错误响应均覆盖）。
+已实现接口：
 
 | 接口 | 用途 |
 | --- | --- |
@@ -258,6 +260,7 @@ worker 写入验证：有效签名/用途、job/attempt/lease_generation 精确�
 | `GET /admin/agent/measurements?run_id=...` | 按 operation、request_kind、scope、path、outcome、完整性筛选；游标分页 |
 | `GET /admin/agent/measurements/{measurement_id}` | 单条摘要、阶段、原始完整性与缺失原因 |
 | `GET /admin/agent/profiling-runs/{run_id}/summary` | 同口径的 count、p50/p95、失败/partial 数；SQL 聚合而非只算当前页 |
+| `GET /admin/agent/measurement-writer` | 当前 CP replica 的队列、in-flight 与拒绝/丢弃计数 |
 
 路径基于既有应用 API 前缀挂载；启动面板继续放在 #218 选择的 Admin run detail 中，
 按 job+attempt 精确读取本次启动。文件/终端通过 thread 与 interaction 查询，不伪装
@@ -286,18 +289,17 @@ schema v1/v2 startup 日志可经明确适配器转换边界后离线导入；e7
 
 ## 8. 实施顺序与 PR 收敛
 
-这些是依赖顺序，可以在同一个 PR 完成，不要求再拆成多个 PR：
+以下依赖步骤均已在 #258 分支完成：
 
 1. 修复 [review 的五项问题](2026-09-16-operation-measurement-e77e3e6-review.zh-CN.md)，
    定下 v3 身份、scope/边界和 continuation 规则；更新测试，不能通过改弱断言过关。
-2. 在 #258 分支按需要合并当前 dev 并解决冲突；重新核对迁移 head、ports 和 Admin
-   API。这是实现前置步骤，本文没有执行合并/rebase。
+2. 合并当前 dev 并解决路由抽取冲突；测量路由落在新的 workspace/worker leaf，
+   migration 接到当前单一 head。
 3. 以 collector 的冻结记录接后台投递、独立写入服务与 additive migration，覆盖
    runner startup 和 CP 文件/终端两类根 producer；仅 startup 入库不算完成整合。
 4. 将 #218 的页面与 Admin 读取改成消费统一记录，增加文件/终端的实验列表和分组。
    不引入 ActivationRecorder、同步 report_activation 或旧三列存储。
-5. 更新 #258 标题/说明为最终范围，验证整条链路。#218 在整合验收并由维护者确认后
-   标为已被替代；本次设计不自动关闭任何 PR。
+5. 更新文档并验证整条链路。#218 是否关闭仍由维护者决定；本实现不自动修改其他 PR。
 
 浏览器点击到 UI commit/xterm 可交互的接入仍按平台清单推进，可在本整合后实施；
 新增 producer 复用表和 API，不再创建第二套 startup 专属持久化。CP 排队、完整
@@ -317,9 +319,9 @@ broker 解析/wake 前段、eBPF 资源窗口、#265 磁盘容量保持各自边
 | 存储 | 真实 Postgres JSONB 往返、summary 与原文一致、大小/条数/保留期限制；迁移升级/回退/单 head |
 | Admin | 无记录不显示 0；server-only 不显示 E2E 完整；unknown 路径不猜；partial/失败可查看、分布不混算；未知 schema 不使整页 500 |
 
-除 make check 外，必须运行相关真实 DB 测试和 web 类型/单测/构建检查。前一轮
-3261 passed 是 e77 的作者报告；本次 reviewer 只复跑了相关 89 个测试，不能据此
-宣称新整合已通过全量验收。
+验收包含真实 collector → 无 JSONL 依赖的运行时投递 → HTTP → Postgres → Admin API，
+真实数据库锁拥塞、持续 terminal SSE、失败请求、关闭快路径、迁移单 head，以及 web
+类型/单测/生产构建。最终提交仍须以本分支 `make check`、`make test-db` 和 CI 为准。
 
 性能实验分别比较 bare / off / on-local / on-persist，以及 CP/DB 故意变慢时的业务
 延迟、队列长度和丢弃数。分别覆盖四条启动路径、目录/文件读取、terminal list/create/

@@ -36,14 +36,14 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from cloud_agent.api import routes as agent_jobs_router
+from cloud_agent.api import routes as agent_jobs_router, worker as agent_worker
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_grant_client,
     get_storage,
 )
 from cloud_agent.gateway import GatewayError
-from tests.support.storage import AllCapabilities
+from tests.support.storage import AllCapabilities, EmptyAttachments
 
 pytestmark = pytest.mark.asyncio
 
@@ -52,7 +52,7 @@ _ATTEMPT = 100
 _GENERATION = 1
 
 
-class _ClaimStore(AllCapabilities):
+class _ClaimStore(EmptyAttachments, AllCapabilities):
     """Only the surface ``worker_claim`` touches."""
 
     def __init__(self, *, queued: bool = True, fence_still_current: bool = True) -> None:
@@ -354,7 +354,7 @@ async def test_title_generation_is_scheduled_after_successful_claim(monkeypatch,
 
     monkeypatch.setattr(store, "claim_job", claim_with_title_state)
     generate = AsyncMock()
-    monkeypatch.setattr(agent_jobs_router, "generate_thread_title", generate)
+    monkeypatch.setattr(agent_worker, "generate_thread_title", generate)
     background = BackgroundTasks()
     response = await agent_jobs_router.worker_claim(
         WorkerClaimRequest(worker_id="w1"),
@@ -386,7 +386,7 @@ async def test_failed_claim_does_not_schedule_title_generation(monkeypatch, clai
     from unittest.mock import AsyncMock
 
     generate = AsyncMock()
-    monkeypatch.setattr(agent_jobs_router, "generate_thread_title", generate)
+    monkeypatch.setattr(agent_worker, "generate_thread_title", generate)
     store, grants = _ClaimStore(), _Grants(fail=True)
     original_claim = store.claim_job
 

@@ -57,6 +57,7 @@ def job_row_to_dict(row: Any) -> dict[str, Any]:
         "detail": row["detail"],
         "metadata": load_json(row["metadata"]),
         "skills": load_json(row.get("skills")),
+        "attachments": load_json(row.get("attachments")),
         "fork_source_job_id": row["fork_source_job_id"],
         "mcp_bindings": load_json(row.get("mcp_bindings")) or [],
         "created_at": row["created_at"],

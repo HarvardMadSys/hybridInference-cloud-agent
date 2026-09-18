@@ -65,7 +65,9 @@ describe('Claude runtime telemetry', () => {
         [1, 2],
         [3],
       ]);
-      expect(logs.every((step) => step.stepNo === 0 && step.label === 'Run logs')).toBe(true);
+      expect(logs.every((step) => step.stepNo === 0 && step.label === 'Runtime records')).toBe(
+        true,
+      );
       expect(logs.flatMap((step) => step.sourceEvents)).toEqual(records.slice(0, 3));
       expect(
         toSessionLog(records)

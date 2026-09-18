@@ -8,6 +8,7 @@ handed any object with the right shape.
 
 from __future__ import annotations
 
+from cloud_agent.ports.attachments import AttachmentRepository
 from cloud_agent.ports.attempt_commands import AttemptCommands
 from cloud_agent.ports.audit import AuditRepository
 from cloud_agent.ports.conversation_commands import ConversationCommands
@@ -32,6 +33,7 @@ from cloud_agent.ports.snapshot import SnapshotRepository
 from cloud_agent.ports.source_control import SourceControlRepository
 
 __all__ = [
+    "AttachmentRepository",
     "AttemptCommands",
     "AuditRepository",
     "ConversationCommands",

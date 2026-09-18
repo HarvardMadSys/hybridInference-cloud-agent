@@ -473,6 +473,9 @@ def test_a_stored_record_keeps_no_more_than_the_whitelist_allows():
         ({"request_kind": "terminal.create"}, "request_kind", "terminal.create"),
         ({"request_kind": "terminal.stream_attach"}, "request_kind", "terminal.stream_attach"),
         ({"coverage_scope": "host_startup"}, "coverage_scope", "host_startup"),
+        ({"runtime_id": "claude-code"}, "runtime_id", "claude-code"),
+        ({"runtime_version": "2.1.0"}, "runtime_version", "2.1.0"),
+        ({"execution_profile": "untrusted-kata-v1"}, "execution_profile", "untrusted-kata-v1"),
     ],
 )
 def test_a_grouping_field_is_read_from_facts_when_it_is_only_there(
@@ -500,6 +503,34 @@ def test_a_stated_top_level_field_wins_over_the_same_name_in_facts():
     )
 
     assert stored.request_kind == "terminal.list"
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        {"truncated": True},
+        {"missing_fragments": ["broker:c1:read"]},
+        {"missing_producers": ["broker"]},
+        {"truncated_fragments": ["broker:c1"]},
+        {"dropped_spans": 1},
+        {"profiling_stopped": "expired"},
+        {"measurement_complete": False},
+        {"boundary_frozen": False},
+    ],
+)
+def test_a_complete_summary_cannot_contradict_the_record(evidence: dict[str, Any]):
+    """A partial record must never enter the successful percentile population."""
+    with pytest.raises(MeasurementRejected, match="contradict"):
+        measurement_ingest.validate_measurement(_record(**evidence))
+
+
+def test_run_ids_are_safe_admin_path_segments():
+    """A descriptor accepted for storage must have a reachable summary URL."""
+    with pytest.raises(MeasurementRejected, match="run_id"):
+        measurement_ingest.validate_run(_manifest(run_id="run/one"))
+
+    with pytest.raises(MeasurementRejected, match="measurement_id"):
+        measurement_ingest.validate_measurement(_record(measurement_id="msm/one"))
 
 
 # ---------------------------------------------------------------------------

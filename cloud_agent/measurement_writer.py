@@ -136,6 +136,8 @@ class MeasurementWriter:
         self._lock = threading.Lock()
         self._pending: list[_Pending] = []
         self._bytes = 0
+        self._in_flight = 0
+        self._in_flight_bytes = 0
         self._running = False
         self._wake: asyncio.Event | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -157,11 +159,13 @@ class MeasurementWriter:
                 self.counts.dropped_shutdown += 1
                 self.counts.note("writer_stopped")
                 return False
-            if len(self._pending) >= self._max_count or self._bytes + size > self._max_bytes:
+            accepted = len(self._pending) + self._in_flight
+            accepted_bytes = self._bytes + self._in_flight_bytes
+            if accepted >= self._max_count or accepted_bytes + size > self._max_bytes:
                 # Which bound was hit is the useful part: a full count means
                 # the destination is behind, a full byte budget means the
                 # records are large.
-                reason = "queue_count" if len(self._pending) >= self._max_count else "queue_bytes"
+                reason = "queue_count" if accepted >= self._max_count else "queue_bytes"
                 self.counts.dropped_full += 1
                 self.counts.note(reason)
                 return False
@@ -182,14 +186,26 @@ class MeasurementWriter:
         with self._lock:
             return self._bytes
 
+    @property
+    def in_flight(self) -> int:
+        """How many accepted writes currently hold a worker."""
+        with self._lock:
+            return self._in_flight
+
+    @property
+    def running(self) -> bool:
+        """Whether this process currently accepts measurement writes."""
+        with self._lock:
+            return self._running
+
     # ── Lifetime ──────────────────────────────────────────────────────
 
     def start(self) -> None:
         """Start the worker pool on the running loop. Idempotent."""
-        if self._running:
-            return
         loop = asyncio.get_running_loop()
         with self._lock:
+            if self._running:
+                return
             self._running = True
         self._loop = loop
         self._wake = asyncio.Event()
@@ -206,15 +222,17 @@ class MeasurementWriter:
         deadline = loop.time() + timeout_s
         while loop.time() < deadline:
             with self._lock:
-                if not self._pending:
+                if not self._pending and self._in_flight == 0:
                     break
             _signal(self)
             await asyncio.sleep(0.02)
         with self._lock:
             left, self._pending = self._pending, []
+            in_flight = self._in_flight
             self._bytes = 0
-        if left:
-            self.counts.dropped_shutdown += len(left)
+        abandoned = len(left) + in_flight
+        if abandoned:
+            self.counts.dropped_shutdown += abandoned
             self.counts.note("shutdown")
         for worker in self._workers:
             worker.cancel()
@@ -245,7 +263,10 @@ class MeasurementWriter:
                 except TimeoutError:
                     continue
                 continue
-            await self._write(item)
+            try:
+                await self._write(item)
+            finally:
+                self._complete(item)
 
     def _take(self) -> _Pending | None:
         """Remove the oldest queued record, or return ``None`` when empty."""
@@ -254,7 +275,15 @@ class MeasurementWriter:
                 return None
             item = self._pending.pop(0)
             self._bytes -= item.size
+            self._in_flight += 1
+            self._in_flight_bytes += item.size
             return item
+
+    def _complete(self, item: _Pending) -> None:
+        """Release one worker-held record after success, failure, or cancellation."""
+        with self._lock:
+            self._in_flight = max(0, self._in_flight - 1)
+            self._in_flight_bytes = max(0, self._in_flight_bytes - item.size)
 
     async def _write(self, item: _Pending) -> None:
         """Run one persist call under the write timeout, counting its result."""

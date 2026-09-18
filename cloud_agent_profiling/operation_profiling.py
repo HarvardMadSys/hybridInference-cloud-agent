@@ -45,9 +45,9 @@ Known limits of this slice, all deliberate:
   :func:`start_operation`, then the authoritative :func:`bind`, which requires
   every configured field to be present and equal. A scoped measurement that was
   never bound is dropped rather than reported.
-* Records go to a structured log line and, when the sink is configured, to an
-  appended JSONL file. Durable per-attempt storage and the admin reading
-  surface are later slices.
+* Records go to a structured log line and, when configured, an appended JSONL
+  file. Root producers can also hand the same frozen payload to bounded
+  durable delivery; storage never rebuilds a second version of the record.
 """
 
 from __future__ import annotations
@@ -58,6 +58,7 @@ import json
 import logging
 import os
 import queue
+import re
 import socket
 import threading
 import time
@@ -104,6 +105,12 @@ COVERAGE_BROWSER_INTERACTION = "browser_interaction"
 #: The coverage each root operation's boundaries actually reach. Filled in
 #: below, once the operation names themselves are declared.
 COVERAGE_BY_OPERATION: dict[str, str] = {}
+BOUNDARIES_BY_OPERATION: dict[str, tuple[str, str]] = {
+    "attempt.startup": ("runner.claim.request", "supervisor.prompt.dispatched"),
+    "files.list": ("control_plane.operation.selected", "control_plane.response.built"),
+    "files.open": ("control_plane.operation.selected", "control_plane.response.built"),
+    "terminal.open": ("control_plane.operation.selected", "control_plane.response.built"),
+}
 
 #: The runner's root operation. Only this operation keeps the v1
 #: ``startup_outcome`` alias, because that name is a claim about a startup.
@@ -146,6 +153,11 @@ SELECTION_TTL_S = 120.0
 #: Ceiling on remembered selections per process, so a client that never
 #: finishes an interaction cannot grow the table without bound.
 MAX_SELECTIONS = 512
+
+#: Run ids are used in Admin URL path segments as well as database keys.
+#: Accepting slashes makes a descriptor valid but its summary route
+#: unreachable after URL decoding.
+RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 
 #: Supplied by the control plane as the fallback root stage name when no
 #: operation is inherited. Kept generic deliberately: an unmarked file or
@@ -245,6 +257,8 @@ class ProfilingRun:
     deadline_mono: float
     max_operations: int
     target: Mapping[str, str] = field(default_factory=dict)
+    config_version: int = 1
+    admission_instances: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass
@@ -364,6 +378,10 @@ class Measurement:
     #: The completeness frozen with the boundary, so a response and the record
     #: it describes cannot disagree.
     frozen_complete: bool = False
+    #: The immutable payload built from the frozen boundary. Log, JSONL, HTTP
+    #: delivery, and in-process storage all reuse these exact values.
+    frozen_payload: dict[str, Any] | None = None
+    frozen_failure_stage: str | None = None
     #: The budget slot is held from selection and returned by `discard`.
     reserved: bool = True
     selected: bool = True
@@ -482,6 +500,8 @@ def parse_run(raw: str) -> ProfilingRun:
         raise ValueError("run descriptor has no run_id")
     if len(run_id) > MAX_RUN_ID_CHARS:
         raise ValueError(f"run_id is longer than {MAX_RUN_ID_CHARS} characters")
+    if RUN_ID_PATTERN.fullmatch(run_id) is None:
+        raise ValueError("run_id must contain only letters, numbers, '.', '_', ':' or '-'")
 
     raw_operations = body.get("operations")
     if not isinstance(raw_operations, list):
@@ -496,6 +516,33 @@ def parse_run(raw: str) -> ProfilingRun:
         raise ValueError("run descriptor has no valid max_operations") from exc
     if max_operations <= 0:
         raise ValueError("max_operations must be positive")
+
+    try:
+        config_version = int(body.get("config_version") or 1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("config_version must be an integer") from exc
+    if config_version <= 0:
+        raise ValueError("config_version must be positive")
+
+    raw_admissions = body.get("admission_instances") or []
+    if not isinstance(raw_admissions, list):
+        raise ValueError("admission_instances must be a list")
+    admissions: list[Mapping[str, Any]] = []
+    for raw_admission in raw_admissions:
+        if not isinstance(raw_admission, Mapping):
+            raise ValueError("admission_instances entries must be objects")
+        instance = str(raw_admission.get("instance") or "").strip()
+        if not instance:
+            raise ValueError("admission_instances entries need an instance")
+        try:
+            budget = int(raw_admission.get("max_operations"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("admission_instances entries need max_operations") from exc
+        if budget <= 0:
+            raise ValueError("admission instance max_operations must be positive")
+        admissions.append({"instance": instance, "max_operations": budget})
+    if not any(item["instance"] == PRODUCER_INSTANCE_ID for item in admissions):
+        admissions.append({"instance": PRODUCER_INSTANCE_ID, "max_operations": max_operations})
 
     raw_target = body.get("target") or {}
     if not isinstance(raw_target, dict):
@@ -518,7 +565,24 @@ def parse_run(raw: str) -> ProfilingRun:
         deadline_mono=_parse_expiry(raw_expiry),
         max_operations=max_operations,
         target=target,
+        config_version=config_version,
+        admission_instances=tuple(admissions),
     )
+
+
+def manifest_for_run(run: ProfilingRun | None) -> dict[str, Any] | None:
+    """Return the immutable catalogue manifest for one parsed run."""
+    if run is None:
+        return None
+    return {
+        "run_id": run.run_id,
+        "operations": sorted(run.operations),
+        "target": dict(run.target),
+        "expires_at": run.expires_at_utc.isoformat(),
+        "config_version": run.config_version,
+        "max_operations": run.max_operations,
+        "admission_instances": [dict(item) for item in run.admission_instances],
+    }
 
 
 def _load() -> _Loaded:
@@ -582,7 +646,7 @@ def _recording(measurement: Measurement) -> bool:
     that lapses mid-attempt stops adding to the record instead of reporting the
     whole attempt as a complete sample.
     """
-    if measurement.finished:
+    if measurement.finished or measurement.frozen:
         return False
     if measurement.past_deadline():
         measurement.expired = True
@@ -957,6 +1021,12 @@ def measurement_context(
         "operation": measurement.operation,
         "producer": measurement.producer,
         "coverage_scope": measurement.coverage_scope,
+        "start_boundary": BOUNDARIES_BY_OPERATION.get(
+            measurement.operation, ("unknown", "unknown")
+        )[0],
+        "end_boundary": BOUNDARIES_BY_OPERATION.get(measurement.operation, ("unknown", "unknown"))[
+            1
+        ],
         # The facts travel so a process that continues this selection reports
         # the same scope its parent proved. A child that re-derived them would
         # be stating attribution it never authenticated.
@@ -1452,7 +1522,25 @@ def frozen_record(
     # The boundary has to be frozen first, or this would report a completeness
     # that ``finish`` is about to re-decide from a later clock.
     finalize(measurement, outcome)
-    return to_record(measurement, outcome=measurement.frozen_outcome, failure_stage=failure_stage)
+    frozen_outcome = measurement.frozen_outcome
+    if frozen_outcome not in _OUTCOMES:  # pragma: no cover - guarded by callers
+        frozen_outcome = "incomplete"
+    run = _load().run
+    if run is not None and run.target and not measurement.bound:
+        return None
+    if measurement.frozen_payload is None:
+        measurement.frozen_failure_stage = failure_stage
+        measurement.facts["outcome"] = frozen_outcome
+        if failure_stage:
+            measurement.facts["failure_stage"] = failure_stage
+        if measurement.expired:
+            measurement.facts["profiling_stopped"] = "expired"
+        measurement.frozen_payload = to_record(
+            measurement,
+            outcome=frozen_outcome,
+            failure_stage=failure_stage,
+        )
+    return measurement.frozen_payload
 
 
 def finalize(measurement: Measurement | None, outcome: str) -> None:
@@ -1852,8 +1940,6 @@ def finish(
     measurement.reserved = False
     if not measurement.selected:
         return
-    if outcome not in _OUTCOMES:  # pragma: no cover - guarded by callers
-        outcome = "incomplete"
     run = _load().run
     if run is not None and run.target and not measurement.bound:
         # A scoped run reports only attempts whose scope was proved; emitting
@@ -1864,16 +1950,9 @@ def finish(
             measurement.operation,
         )
         return
-    # Written directly rather than through set_attributes, which stops
-    # collecting, and the closing facts have to survive that boundary. The
-    # alias is emitted top-level by ``to_record``; ``facts`` carries the
-    # generic name so no consumer reads a file read as a startup.
-    measurement.facts["outcome"] = outcome
-    if failure_stage:
-        measurement.facts["failure_stage"] = failure_stage
-    if measurement.expired:
-        measurement.facts["profiling_stopped"] = "expired"
-    _emit(to_record(measurement, outcome=outcome, failure_stage=failure_stage))
+    record = frozen_record(measurement, outcome=outcome, failure_stage=failure_stage)
+    if record is not None:
+        _emit(record)
 
 
 def discard(measurement: Measurement | None) -> None:
@@ -1881,6 +1960,7 @@ def discard(measurement: Measurement | None) -> None:
     if measurement is None or measurement.finished:
         return
     measurement.finished = True
+    measurement.selected = False
     if measurement.reserved:
         measurement.reserved = False
         _release_budget()
@@ -1897,6 +1977,7 @@ def reset_cache() -> None:
 
 
 __all__ = [
+    "BOUNDARIES_BY_OPERATION",
     "BOUNDARY_VERSION",
     "CLOCK_DOMAIN_ID",
     "COVERAGE_BROWSER_INTERACTION",
@@ -1921,6 +2002,7 @@ __all__ = [
     "PROFILING_ANSWER_STAGES_HEADER",
     "PROFILING_ANSWER_TRUNCATED_HEADER",
     "PROFILING_CONTEXT_HEADER",
+    "RUN_ID_PATTERN",
     "SCHEMA_VERSION",
     "SELECTION_TTL_S",
     "SINK_QUEUE_MAX",
@@ -1947,6 +2029,7 @@ __all__ = [
     "flush_sink",
     "fragment_truncated",
     "frozen_record",
+    "manifest_for_run",
     "mark",
     "measurement_context",
     "parse_context",

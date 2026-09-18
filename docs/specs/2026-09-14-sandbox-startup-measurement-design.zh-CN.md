@@ -1,26 +1,24 @@
 # 沙盒启动时间测量设计
 
-创建：2026-09-14；交付范围更新：2026-09-16。
+创建：2026-09-14；交付范围更新：2026-09-18。
 状态：**#258 已实现开关、run descriptor、分阶段计时、四条启动路径分类、关键内部阶段、
-采集器微基准，以及 files/terminal 的服务端接入（CP 选择 + broker 阶段）**；
-浏览器终点、CP 存储、Admin 读面和端到端 benchmark 报告仍未实现。
-初始路径检查基于 checkout `01cfbae`；交付核对基于 #258 head `3a191e5` 及后续提交，
-不代表线上耗时。
-2026-09-16 检查时 [#258](https://github.com/HarvardMadSys/hybridInference-cloud-agent/pull/258)
-仍为 OPEN、目标 dev、CI Gate 通过，尚未合并；不把分支实现等同于部署完成。
+采集器微基准、files/terminal 服务端接入、Postgres、Admin API/UI 与有界投递**；
+浏览器终点和端到端 benchmark 报告仍未实现。
+初始路径检查基于 checkout `01cfbae`；当前交付核对基于合并最新 dev 后的 #258 分支，
+不代表线上耗时或已经部署。
 
 实现现状见 [§9 实施顺序与验收](#9-实施顺序与验收)：本文的字段语义、时钟与失败处理
 仍是后续切片的目标形态，已实现的子集以 `cloud_agent_profiling/operation_profiling.py` 为准。
 
-**2026-09-16 整合决定**：将 #218 的持久化/API/Admin 能力接入 #258 的唯一采集链路。
+**2026-09-18 整合结果**：#218 的持久化/API/Admin 能力已接入 #258 的唯一采集链路。
 [存储/Admin 整合设计](2026-09-16-operation-measurement-storage-admin-integration-design.zh-CN.md)
 规定新的记录身份、覆盖范围、异步写入、鉴权、幂等和交付顺序；与本文的早期
-存储草案或实施顺序有差异时以整合设计为准。本地 e77e3e6 的服务端接入尚有
-[五项 review 问题](2026-09-16-operation-measurement-e77e3e6-review.zh-CN.md)待修，未 push。
+存储草案或实施顺序有差异时以整合设计为准。`e77e3e6` 的历史
+[五项 review 问题](2026-09-16-operation-measurement-e77e3e6-review.zh-CN.md)已关闭。
 
 目标：对每次启动回答三个问题：**总共等了多久、时间花在哪里、某个优化是否真的有效**。
-完整目标包含启动摘要、单次启动时间线和可重复的 benchmark；#258 当前以结构化日志和
-可选 JSONL 承载数据。Postgres 与 Admin 是后续展示方案，不是这次已交付的依赖。
+完整目标包含启动摘要、单次启动时间线和可重复的 benchmark；#258 以结构化日志、
+可选 JSONL、Postgres 与 Admin 承载同一冻结记录。
 
 **原始首批需求还包括文件浏览/打开与终端打开。** 它们共享开关、时钟、call ID、
 完整性与异步导出机制，区别在操作入口和完成条件。当前 attempt.startup 只覆盖
@@ -363,16 +361,14 @@ benchmark 报告至少包含：环境 manifest、实验顺序、全部 attempt I
 按可独立验收的操作组织交付；下列是实现依赖，不强制逐项拆 PR。新增工作从 dev
 分支开展，PR 目标为 dev；既有 #258 的后续修订保持在该 PR：
 
-1. **启动测量切片（#258）**：默认关闭的快路径、run、runner/broker 阶段、四路径动作、
-   call ID 片段协议与有界日志/JSONL 导出；已实现子集见 §9.1。
-2. **补齐文件/终端首批需求**：复用并通用化采集器，接入 CP 与浏览器，覆盖非 attempt
-   触发的 sandbox wake。入口、终点和回归矩阵以平台清单 §3–§5 为准；文件/终端不以
-   独立 benchmark 或仅后端耗时作为完整用户测量的验收。
+1. **启动测量切片（已实现）**：默认关闭的快路径、run、runner/broker 阶段、四路径动作、
+   call ID 片段协议、有界导出与持久化；见 §9.1。
+2. **文件/终端服务端切片（已实现）**：复用通用采集器并接入 CP/broker；浏览器
+   点击与可见/可交互终点仍按平台清单 §3–§5 延期。
 3. **真实 benchmark 与基线报告**：固定 fixture、四启动路径、文件与终端各场景，
    原始样本与 JSONL/CSV 分析；分别验证采集开销和 profiler 关闭时的实际优化收益。
-4. **持久化和 Admin 读面**：原先计划在完整测量接入后开展；2026-09-16 改为下一轮
-   优先整合 #218 的能力，先修 e77e3e6 的身份/范围/兼容问题，再持久化已有服务端
-   样本并展示。无需等浏览器终点或基线全部完成；具体以整合设计 §8–§9 为准。
+4. **持久化和 Admin 读面（已实现）**：#218 的能力已改为消费统一 schema v3 记录，
+   含实验目录、样本列表/详情、分布与本地 writer 丢弃计数。
 
 ### 9.1 已交付的切片
 
@@ -499,7 +495,8 @@ CPython 3.12.13 / macOS arm64：
   `runner.py` 把唯一一次多属性 `set_attributes` 放在 `if measurement is not None:` 里，
   实际关闭路径比 `off` cohort 还略低。相对真实启动（§8 中为毫秒到秒级）可忽略，
   但不声称“绝对零成本”。
-- **开启后约 +25 µs/attempt**，主要来自构造记录与 `json.dumps`，不是取时钟或打点。
+- **开启后约 +30 µs/attempt**（2026-09-18，5,000 次复跑），主要来自构造记录与
+  `json.dumps`，不是取时钟或打点。
   远低于 §9 验收建议的“P95 增量不超过 10 ms 或基线 1%（取较大者）”。
 - **日志 handler 不再落在 attempt 线程上。** `onlog` 用每记录 1 ms 的 handler，
   与 `on` 的差值在噪声内（p50 +1.2 µs、p95 +0.001 µs，重复运行符号会翻转）；
@@ -515,7 +512,8 @@ CPython 3.12.13 / macOS arm64：
 - **选择发生在 runner，不在 CP。** 因此 `max_operations` 是单进程预算，不是跨 replica 配额；
   服务重启不续期这一条由 run descriptor 的绝对 `expires_at` 保证。broker 侧只校验开关与
   有效期，不参与名额分配。
-- **没有 CP 持久化、启动摘要 endpoint 和 Admin 读面**，数据目前是日志与 JSONL。
+- **持久化和 Admin 已实现**：启动记录不依赖 JSONL，按确切历史 attempt 归属并可从
+  Admin 的实验目录、列表、详情和分布读取。
 - **仍有阶段在更内层**：`setup_script` 的脚本内部分解、`readiness_source` 的 runtime
   差异（Claude 的 process-alive 与 Codex 的 protocol ack），以及 `prompt_ack`。
 - **没有 post-dispatch 片段**（首输出）。
@@ -550,19 +548,19 @@ CPython 3.12.13 / macOS arm64：
 
 | 能力 | 落地位置 |
 | --- | --- |
-| schema v2 | `outcome` 为通用结果字段；`startup_outcome` 只对 `attempt.startup` 作为别名保留，文件/终端记录不会自称 startup |
+| schema v3 | `outcome` 为通用结果字段；带 boundary/coverage/完整性；`startup_outcome` 只对 `attempt.startup` 作为别名保留 |
 | 通用 producer | 记录带 `producer`（根操作归属）与 `producers`（应答过调用的生产者）；`timing_sources` 只列真正进入时间线的来源 |
 | CP 根操作选择 | 目标匹配走 collector 的 `bind()`：路由无法证明的 fact 不匹配，不匹配者归还名额 |
 | 名额 | 仍为单进程预算，由 CP 根操作消耗；broker 子调用不消耗。跨 replica 分配仍未实现 |
-| 交互关联 | `X-Agent-Measurement-Id` 回传同一 `measurement_id`；一次交互的 list/create/stream 各自成记录但共享 ID |
+| 交互关联 | `X-Agent-Interaction-Id` 关联交互；list/create/stream 各自有唯一 measurement_id |
 | 选择缓存 | 单进程有界（`MAX_SELECTIONS`）+ TTL（`SELECTION_TTL_S`），并受 run 截止时间约束 |
 | broker 阶段 | `files`：`admission`/`network_phase`/`exec`；`terminals`：`admission`/`network_phase`/`pty_spawn`/`list`/`stream_attach` |
 | 流式应答 | 终端 SSE 的 body 是终端字节，片段的 `call_id`/`recorded`/`stages` 走响应头回传 |
 | 关闭路径不变 | 未选中时响应体与响应头与接入前逐字节一致（`profiling` 键不出现），不新增请求或监听 |
 
 **明确未交付。** 浏览器终点（点击、UI commit、xterm 可交互、本地导出与预领名额）、
-纯缓存命中不产生 HTTP 请求时的覆盖、跨 replica 的统一名额、CP 持久化与 Admin 读面、
-三类真实操作基线均未实现。因此当前只能声明 **server-only** 覆盖：不能把服务端耗时
+纯缓存命中不产生 HTTP 请求时的覆盖、跨 replica 的统一名额和三类线上操作基线
+仍未实现。因此当前只能声明 **server-only** 覆盖：不能把服务端耗时
 说成“点击到可用”，也不能用文件 helper 微基准代替 CP → broker → 前端整段采集的开销实测。
 文件与终端的入参、成功终点、缓存/重试/就绪边界和验收矩阵以
 [平台操作测量清单 §3–§5](2026-09-14-platform-operation-measurement-inventory.zh-CN.md) 为准。
@@ -577,7 +575,8 @@ CPython 3.12.13 / macOS arm64：
 - [operation profiling](../../cloud_agent_profiling/operation_profiling.py)：开关、run、collector、片段协议。
 - [operation call](../../cloud_agent_profiling/operation_call.py)：broker 侧一次调用的片段校验与应答。
 - [operation measurement](../../cloud_agent/operation_measurement.py)：CP 侧根操作选择、名额与选择缓存。
-- [claim API](../../cloud_agent/api/routes.py) / [attempt store](../../cloud_agent/storage/repositories/attempt_commands.py)：claim 及 fencing。
+- [worker API](../../cloud_agent/api/worker.py) / [workspace API](../../cloud_agent/api/workspace.py)：启动入库与文件/终端根操作。
+- [measurement writer](../../cloud_agent/measurement_writer.py)：CP 有界异步持久化。
 - [host capacity](../../cloud_agent_host/host_capacity.py)：已有 host 快照。
 - [Admin observability](2026-09-10-admin-observability-v1.md)：接收时间、权限、metadata 语义。
 - [native session design](2026-08-31-native-session-fork-shared-workspace-design.md)：保留容器、native resume 与共享 workspace 边界。

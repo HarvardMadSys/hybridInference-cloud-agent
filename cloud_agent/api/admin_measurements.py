@@ -26,6 +26,7 @@ from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
+from cloud_agent import measurement_writer
 from cloud_agent.api.deps import get_storage, require_store, verify_admin_access
 from cloud_agent.logging_utils import get_logger
 
@@ -154,8 +155,10 @@ async def list_measurements(
         job_id=job_id,
         thread_id=thread_id,
         after=keyset,
-        limit=limit,
+        limit=limit + 1,
     )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
     # An empty page is reported as empty, with what it covered. It is never
     # rendered as zero latency, and a caller cannot tell from the page alone
     # why an experiment has no samples -- so the page does not claim to.
@@ -163,7 +166,7 @@ async def list_measurements(
         "measurements": rows,
         "count": len(rows),
         "limit": limit,
-        "next_cursor": rows[-1]["measurement_id"] if len(rows) == limit else None,
+        "next_cursor": rows[-1]["measurement_id"] if has_more and rows else None,
     }
     if not rows:
         body["empty_reason"] = (
@@ -172,6 +175,20 @@ async def list_measurements(
             "report measurements"
         )
     return body
+
+
+@router.get("/measurement-writer")
+async def measurement_writer_status() -> dict[str, Any]:
+    """Return this replica's bounded diagnostic-writer state and loss counts."""
+    local = measurement_writer.writer()
+    return {
+        "scope": "this_control_plane_process",
+        "running": local.running,
+        "pending": local.pending,
+        "in_flight": local.in_flight,
+        "queued_bytes": local.queued_bytes,
+        "counts": local.counts.as_dict(),
+    }
 
 
 @router.get("/measurements/{measurement_id}")

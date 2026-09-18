@@ -16,6 +16,7 @@ from cloud_agent.domain.execution import QUEUED, SUCCEEDED
 from cloud_agent.domain.ids import new_job_id, new_thread_id
 from cloud_agent.domain.requests import check_client_request
 from cloud_agent.execution_profiles import default_execution_profile
+from cloud_agent.storage._sql.attachments import claim_attachments
 from cloud_agent.storage._sql.jobs import JOB_SELECT, SESSION_DELETE_BLOCK_SQL
 from cloud_agent.storage._sql.mcp import write_mcp_bindings
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
@@ -53,6 +54,7 @@ class PostgresConversationCommands:
         metadata: dict[str, Any] | None = None,
         mcp_bindings: list[dict[str, Any]] | None = None,
         skills: list[dict[str, Any]] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any]:
@@ -107,8 +109,10 @@ class PostgresConversationCommands:
                     INSERT INTO agent_jobs
                         (id, thread_id, turn_no, user_id, base_sha, task_prompt,
                          runtime, model, reasoning_effort, metadata,
-                         client_request_id, client_request_fingerprint, skills)
-                    VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12::jsonb)
+                         client_request_id, client_request_fingerprint, skills,
+                         attachments)
+                    VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12::jsonb,
+                            $13::jsonb)
                     """,
                     job_id,
                     thread_id,
@@ -124,6 +128,14 @@ class PostgresConversationCommands:
                     # No earlier skill instructions exist in a new conversation.
                     # An empty selection needs no clearing context in its prompt.
                     json.dumps(skills) if skills else None,
+                    json.dumps(attachments) if attachments else None,
+                )
+                await claim_attachments(
+                    conn,
+                    user_id=user_id,
+                    job_id=job_id,
+                    thread_id=thread_id,
+                    attachments=attachments,
                 )
                 row = await conn.fetchrow(f"{JOB_SELECT} WHERE j.id = $1", job_id)
                 await conn.execute(
@@ -164,6 +176,7 @@ class PostgresConversationCommands:
         reasoning_effort: str | None = None,
         reset_reasoning_effort: bool = False,
         skills: list[dict[str, Any]] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:
@@ -204,6 +217,7 @@ class PostgresConversationCommands:
                 reasoning_effort=reasoning_effort,
                 reset_reasoning_effort=reset_reasoning_effort,
                 skills=skills,
+                attachments=attachments,
                 client_request_id=client_request_id,
                 client_request_fingerprint=client_request_fingerprint,
             )
@@ -281,6 +295,10 @@ class PostgresConversationCommands:
         native-fork preparation and archive changes. Worker lifecycle access
         deliberately keeps the immutable job, residency and sandbox ledgers.
         A fork's shared workspace is never removed by a chat-history action.
+
+        Files the owner uploaded are the exception: those rows are deleted
+        rather than hidden, because they are the owner's content rather than an
+        audit trail, and nothing else would ever remove them.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             rows = await conn.fetch(
@@ -311,6 +329,18 @@ class PostgresConversationCommands:
             await conn.execute(
                 "UPDATE agent_threads SET deleted_at = NOW() "
                 "WHERE id = ANY($1::text[]) AND user_id = $2",
+                thread_ids,
+                user_id,
+            )
+            # Uploaded bytes are removed outright, not soft-deleted with the
+            # rest. A soft delete keeps the ledger — jobs, residency, sandbox
+            # history — because those are audit rows. A file the owner attached
+            # is their content, not an audit row, and the foreign key's cascade
+            # never fires here because the job rows above deliberately survive.
+            # Without this the bytes would outlive the conversation forever.
+            await conn.execute(
+                "DELETE FROM agent_job_attachments WHERE thread_id = ANY($1::text[]) "
+                "AND user_id = $2",
                 thread_ids,
                 user_id,
             )
@@ -461,6 +491,7 @@ class PostgresConversationCommands:
         reasoning_effort: str | None,
         reset_reasoning_effort: bool,
         skills: list[dict[str, Any]] | None,
+        attachments: list[dict[str, Any]] | None,
         client_request_id: str | None,
         client_request_fingerprint: str | None,
     ) -> dict[str, Any] | None:
@@ -544,8 +575,9 @@ class PostgresConversationCommands:
                 INSERT INTO agent_jobs
                     (id, thread_id, parent_job_id, turn_no, user_id, base_sha,
                      task_prompt, runtime, model, reasoning_effort, state, metadata,
-                     client_request_id, client_request_fingerprint, skills)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15::jsonb)
+                     client_request_id, client_request_fingerprint, skills, attachments)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14,
+                        $15::jsonb, $16::jsonb)
                 """,
                 job_id,
                 thread_id,
@@ -566,6 +598,17 @@ class PostgresConversationCommands:
                 client_request_id,
                 client_request_fingerprint,
                 json.dumps(selected_skills) if selected_skills is not None else None,
+                # Not inherited. Earlier turns' files are already under /uploads
+                # and are re-imported whenever the sandbox is rebuilt, so this
+                # column records only what this turn added.
+                json.dumps(attachments) if attachments else None,
+            )
+            await claim_attachments(
+                conn,
+                user_id=user_id,
+                job_id=job_id,
+                thread_id=thread_id,
+                attachments=attachments,
             )
             row = await conn.fetchrow(f"{JOB_SELECT} WHERE j.id = $1", job_id)
             await conn.execute(

@@ -407,8 +407,8 @@ export function RunDetails({
           ))
         )}
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
-          This export is the run log for Turn {turnNo} only. The Session log button on the
-          trajectory list exports the whole conversation.
+          This export covers Turn {turnNo} only. The Session log button on the trajectory list
+          exports the whole conversation.
         </p>
       </TabPanel>
     );

@@ -109,10 +109,17 @@ ENV_GITHUB_TOKEN = "AGENT_GITHUB_TOKEN"
 
 #: The admin observation reads. Their bodies are time-varying and describe
 #: other users' runs, so no intermediary may store one.
-ADMIN_READ_PREFIX = "/admin/agent/runs"
+ADMIN_READ_PREFIXES = (
+    "/admin/agent/runs",
+    "/admin/agent/measurements",
+    "/admin/agent/measurement-writer",
+    "/admin/agent/profiling-runs",
+)
 
 
-def install_admin_no_store(app: FastAPI, *, prefix: str = ADMIN_READ_PREFIX) -> None:
+def install_admin_no_store(
+    app: FastAPI, *, prefixes: tuple[str, ...] = ADMIN_READ_PREFIXES
+) -> None:
     """Keep admin read responses, refusals included, out of every cache.
 
     A route dependency can set a header on a response the route returns, but
@@ -121,7 +128,7 @@ def install_admin_no_store(app: FastAPI, *, prefix: str = ADMIN_READ_PREFIX) -> 
     them, and are registered here rather than as middleware: middleware would
     also sit in front of the event streams, which are long-lived by design.
     """
-    prefix = prefix.rstrip("/")
+    normalized = tuple(prefix.rstrip("/") for prefix in prefixes)
 
     async def with_no_store(request: Request, exc: Exception) -> Response:
         response: Response
@@ -129,7 +136,10 @@ def install_admin_no_store(app: FastAPI, *, prefix: str = ADMIN_READ_PREFIX) -> 
             response = await request_validation_exception_handler(request, exc)
         else:
             response = await http_exception_handler(request, exc)  # type: ignore[arg-type]
-        if request.url.path == prefix or request.url.path.startswith(f"{prefix}/"):
+        if any(
+            request.url.path == prefix or request.url.path.startswith(f"{prefix}/")
+            for prefix in normalized
+        ):
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -899,7 +909,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
 
     from cloud_agent.api.mcp_relay import close_host, maintain_host_sessions
     from cloud_agent.broker_routing import close_broker_clients
-    from cloud_agent.capacity_history import collect_host_capacity_history
+    from cloud_agent.capacity_history import prune_host_capacity_history
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
     from cloud_agent.ledger import collect_usage_snapshots
@@ -964,10 +974,12 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             collect_usage_snapshots(storage.ledger, app.state.grants)
         )
         # Host capacity history keeps filling whether or not anybody has the
-        # admin page open — that is the whole reason it lives here rather than
-        # in the browser. Its own task and its own budgets, so a slow write
-        # cannot delay a heartbeat or the reaper.
-        capacity_history = asyncio.create_task(collect_host_capacity_history(storage.host_capacity))
+        # admin page open — that is the whole reason it is stored at all rather
+        # than accumulated in the browser. The points are written by the
+        # heartbeats that accept them; what runs here is the retention that
+        # bounds the table, in its own task, so a slow delete cannot delay a
+        # heartbeat or the reaper.
+        capacity_history = asyncio.create_task(prune_host_capacity_history(storage.host_capacity))
         _BACKGROUND_TASKS.add(reaper)
         _BACKGROUND_TASKS.add(snapshot_coordinator)
         _BACKGROUND_TASKS.add(ledger_collector)
@@ -997,15 +1009,13 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     # Each listener owns upstream sockets in its own process, even when it
     # does not run the control plane's grant reaper or publisher.
     app.state.mcp_maintenance_task = asyncio.create_task(maintain_host_sessions(storage))
-    # The diagnostics write queue, started with the process that answers the
-    # requests producing them. Its workers are bound to this loop, so it is
-    # created per start rather than once per import.
+    # The diagnostics queue is created per process start, but its workers are
+    # lazy: with profiling disabled there must be no polling task at all.  The
+    # first selected record starts it on this loop.
     from cloud_agent.measurement_writer import MeasurementWriter, reset_writer
 
-    reset_writer(MeasurementWriter())
-    from cloud_agent.measurement_writer import writer as measurement_writer_for
-
-    measurement_writer_for().start()
+    local_measurement_writer = MeasurementWriter()
+    reset_writer(local_measurement_writer)
     try:
         yield
     finally:
@@ -1013,7 +1023,15 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # not answering, and whatever is left is counted rather than lost
         # silently.
         with contextlib.suppress(Exception):
-            await measurement_writer_for().shutdown()
+            counts = await local_measurement_writer.shutdown()
+            if any(counts.as_dict().get(name) for name in counts.as_dict() if name != "reasons"):
+                logger.info(
+                    "operation_measurement_writer_summary",
+                    extra={
+                        "event": "operation_measurement_writer_summary",
+                        **counts.as_dict(),
+                    },
+                )
         reset_writer(None)
         for task in (
             app.state.mcp_maintenance_task,
@@ -1060,6 +1078,7 @@ def create_app() -> FastAPI:
         service_jobs,
         session,
         skills,
+        uploads,
         usage,
     )
 
@@ -1077,6 +1096,7 @@ def create_app() -> FastAPI:
     # listener separation matters more: adding a connection or approving a call
     # is owner-facing work, and a sandbox must not be able to reach it at all.
     app.include_router(skills.router)
+    app.include_router(uploads.router)
     app.include_router(mcp_connections.router)
     app.include_router(mcp_relay.router)
     app.include_router(hosts.router)

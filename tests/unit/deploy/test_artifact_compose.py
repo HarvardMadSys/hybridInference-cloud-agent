@@ -132,6 +132,21 @@ def test_third_party_services_keep_their_own_images() -> None:
     assert document["services"]["edge"]["image"] == "nginx:1.27.5-alpine"
 
 
+def test_supported_services_receive_the_opt_in_profiling_descriptor() -> None:
+    """Values in a Compose .env are inert unless each producer passes them."""
+    names = {
+        "AGENT_OPERATION_PROFILING_ENABLED",
+        "AGENT_OPERATION_PROFILING_RUN",
+        "AGENT_OPERATION_PROFILING_SINK",
+    }
+    control = source("control-plane")["services"]["control-plane"]["environment"]
+    host = source("host")["services"]
+
+    assert names <= set(control)
+    assert names <= set(host["runner"]["environment"])
+    assert names <= set(host["workspace-broker"]["environment"])
+
+
 @pytest.mark.parametrize(
     ("mutate", "stack", "variant"),
     [

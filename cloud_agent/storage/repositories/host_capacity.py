@@ -9,11 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cloud_agent.capacity_protocol import (
-    CAPACITY_HISTORY_MAX_AGE_S,
-    CAPACITY_HISTORY_RETENTION_S,
-    history_window,
-)
+from cloud_agent.capacity_protocol import CAPACITY_HISTORY_RETENTION_S, history_window
 
 if TYPE_CHECKING:
     from typing import Any
@@ -23,121 +19,75 @@ if TYPE_CHECKING:
     from cloud_agent.capacity_protocol import CapacityHistoryPointWrite
 
 
+async def insert_capacity_history_point(
+    conn: Any,
+    *,
+    host: str,
+    capacity_epoch: Any,
+    point: CapacityHistoryPointWrite,
+) -> bool:
+    """Keep one observation for a host, epoch and minute, on a caller's connection.
+
+    A function rather than a method because the only writer that matters runs
+    inside somebody else's transaction: the heartbeat that accepted the sample
+    holds a connection and a row lock on the host, and a write that went and
+    took a second connection from the same pool would be one more way for a
+    busy pool to deadlock with itself.
+
+    ``ON CONFLICT DO NOTHING`` against both the primary key and the sample
+    uniqueness constraint, and that is the whole correctness argument: the
+    first observation to reach a minute is the one that is kept. Later ones in
+    the same minute are not averaged, not summed and not allowed to replace it
+    — replicas report independently, and a chart built from whichever of them
+    wrote last would move for reasons that have nothing to do with the machine.
+    The same clause is what makes the write idempotent, so a retried heartbeat
+    and two control planes racing on one host cost nothing but a no-op.
+
+    Args:
+        conn: The connection to write on, inside whatever transaction it holds.
+        host: The host the observation belongs to.
+        capacity_epoch: The generation it was observed under. Passed through
+            from the write that accepted it, never re-derived, so a delayed
+            write cannot stamp an old sample with a new epoch.
+        point: The scalar observation.
+
+    Returns:
+        ``True`` when this call inserted the minute's point.
+    """
+    inserted = await conn.fetchval(
+        """
+        INSERT INTO agent_host_capacity_history (
+            host, capacity_epoch, bucket_at, sampled_at, sample_id, linux_boot_id,
+            cpu_percent, cpu_logical_count, cpu_window_seconds, cpu_missing_reason,
+            memory_total_bytes, memory_available_bytes, memory_missing_reason
+        )
+        VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT DO NOTHING
+        RETURNING bucket_at
+        """,
+        host,
+        capacity_epoch,
+        point.bucket_at,
+        point.sampled_at,
+        point.sample_id,
+        point.linux_boot_id,
+        point.cpu_percent,
+        point.cpu_logical_count,
+        point.cpu_window_seconds,
+        point.cpu_missing_reason,
+        point.memory_total_bytes,
+        point.memory_available_bytes,
+        point.memory_missing_reason,
+    )
+    return inserted is not None
+
+
 class PostgresHostCapacityRepository:
     """Host capacity: what each machine is actually doing."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
-
-    async def record_capacity_history_point(
-        self,
-        *,
-        host: str,
-        capacity_epoch: Any,
-        point: CapacityHistoryPointWrite,
-    ) -> bool:
-        """Keep one observation for a host, epoch and minute.
-
-        ``ON CONFLICT DO NOTHING`` against both the primary key and the sample
-        uniqueness constraint, and that is the whole correctness argument: the
-        first fresh observation selected for a minute is the one that is kept.
-        Later ones in the same minute are not averaged, not summed and not
-        allowed to replace it — three runner replicas report independently, and
-        a chart built from whichever of them wrote last would move for reasons
-        that have nothing to do with the machine.
-
-        Args:
-            host: The host the observation belongs to.
-            capacity_epoch: The generation it was observed under. Passed
-                through from the row that was read, never re-derived, so a
-                delayed write cannot stamp an old sample with a new epoch.
-            point: The scalar observation.
-
-        Returns:
-            ``True`` when this call inserted the minute's point.
-        """
-        async with self._pool.acquire() as conn:
-            inserted = await conn.fetchval(
-                """
-                INSERT INTO agent_host_capacity_history (
-                    host, capacity_epoch, bucket_at, sampled_at, sample_id, linux_boot_id,
-                    cpu_percent, cpu_logical_count, cpu_window_seconds, cpu_missing_reason,
-                    memory_total_bytes, memory_available_bytes, memory_missing_reason
-                )
-                VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid, $7, $8, $9, $10, $11, $12, $13)
-                ON CONFLICT DO NOTHING
-                RETURNING bucket_at
-                """,
-                host,
-                capacity_epoch,
-                point.bucket_at,
-                point.sampled_at,
-                point.sample_id,
-                point.linux_boot_id,
-                point.cpu_percent,
-                point.cpu_logical_count,
-                point.cpu_window_seconds,
-                point.cpu_missing_reason,
-                point.memory_total_bytes,
-                point.memory_available_bytes,
-                point.memory_missing_reason,
-            )
-        return inserted is not None
-
-    async def list_capacity_history_candidates(
-        self, *, after_host: str | None = None, limit: int = 100
-    ) -> list[dict[str, Any]]:
-        """Return one page of hosts whose stored observation is still fresh.
-
-        Keyset pagination on the host name, not ``OFFSET``: the history task
-        walks the pool every minute, and an offset it restarts from would
-        re-read the same prefix forever while the hosts behind it are never
-        sampled.
-
-        The snapshot's scalars are projected as text rather than cast in SQL.
-        A cast would make one corrupt document fail the whole batch, and a
-        batch that fails at the same row never gets past it; parsing happens
-        where a bad value costs a single point.
-
-        Args:
-            after_host: Last host of the previous page, or ``None`` to start.
-            limit: Page size ceiling.
-
-        Returns:
-            Rows ordered by host, each carrying its epoch, sample identity and
-            projected scalars.
-        """
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT host,
-                       capacity_epoch,
-                       capacity_sample_id,
-                       capacity_sampled_at,
-                       capacity_snapshot #>> '{linux_boot_id}' AS linux_boot_id,
-                       capacity_snapshot #>> '{cpu_percent}' AS cpu_percent,
-                       capacity_snapshot #>> '{cpu_logical_count}' AS cpu_logical_count,
-                       capacity_snapshot #>> '{cpu_window_seconds}' AS cpu_window_seconds,
-                       capacity_snapshot #>> '{missing,cpu}' AS cpu_missing_reason,
-                       capacity_snapshot #>> '{memory_total_bytes}' AS memory_total_bytes,
-                       capacity_snapshot #>> '{memory_available_bytes}' AS memory_available_bytes,
-                       capacity_snapshot #>> '{missing,memory}' AS memory_missing_reason
-                FROM agent_runner_hosts
-                WHERE capacity_snapshot IS NOT NULL
-                  AND capacity_sample_id IS NOT NULL
-                  AND capacity_sampled_at IS NOT NULL
-                  AND capacity_sampled_at
-                      >= NOW() - make_interval(secs => $2::double precision)
-                  AND host > COALESCE($1, '')
-                ORDER BY host
-                LIMIT $3
-                """,
-                after_host,
-                CAPACITY_HISTORY_MAX_AGE_S,
-                limit,
-            )
-        return [dict(row) for row in rows]
 
     async def prune_capacity_history(
         self, *, older_than_seconds: float = CAPACITY_HISTORY_RETENTION_S, limit: int = 2000

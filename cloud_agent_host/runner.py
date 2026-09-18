@@ -46,7 +46,9 @@ if TYPE_CHECKING:
 
 import httpx
 
+from cloud_agent_git.source_archive import build_upload_archive
 from cloud_agent_host.chat_sandbox import (
+    CHAT_UPLOADS_DIR,
     CHAT_WORKDIR,
     ChatSandboxManager,
     ChatSandboxSpec,
@@ -130,6 +132,9 @@ HEARTBEAT_INTERVAL_S = 30.0
 # Idempotent lifecycle receipts reuse the same short retry interval.
 _CONTROL_RETRY_INTERVAL_S = 5.0
 _HEARTBEAT_TIMEOUT_S = 10.0
+#: One upload is capped at 5 MB by the control plane, but the connection can be
+#: slow; the default 30 s client timeout is too tight for a file transfer.
+_ATTACHMENT_TIMEOUT_S = 120.0
 DEFAULT_AGENT_TIMEOUT_S = 3600.0
 # How often the control checks run while the agent is silent.
 _POLL_INTERVAL_S = 0.5
@@ -320,6 +325,15 @@ class ClaimedJob:
     # claimed turn reserves its sandbox; every executable claim uses this
     # topology and remains pinned to the owning host afterwards.
     thread_sandbox: dict[str, Any] | None = None
+    # How many uploads this whole conversation holds, counted by the control
+    # plane. Zero means skip the fetch, which is every turn of every task that
+    # attached nothing. Absent from a control plane that predates uploads, and
+    # absent means the same thing as none.
+    thread_attachment_count: int = 0
+    # How many this turn itself added. A retained container already holds the
+    # earlier turns' files, so only a new container or a turn that attached
+    # something needs the import to run.
+    turn_attachment_count: int = 0
 
     @classmethod
     def from_response(cls, body: dict[str, Any]) -> ClaimedJob:
@@ -353,6 +367,8 @@ class ClaimedJob:
                 if isinstance(body.get("thread_sandbox"), dict)
                 else None
             ),
+            thread_attachment_count=int(body.get("thread_attachment_count") or 0),
+            turn_attachment_count=int(body.get("turn_attachment_count") or 0),
         )
 
 
@@ -427,6 +443,30 @@ class ControlPlane:
             self._post(f"/v1/agent/worker/jobs/{self.job_id}/events", body)
         except httpx.TransportError:
             self._post(f"/v1/agent/worker/jobs/{self.job_id}/events", body)
+
+    def _get(self, path: str, *, timeout: float | None = None) -> dict[str, Any]:
+        """Read from the worker surface, with the same fencing as a write."""
+        response = self._client.get(
+            f"{self._base}{path}",
+            timeout=self._client.timeout if timeout is None else timeout,
+        )
+        if response.status_code == 409:
+            raise LeaseLost(response.text[:200])
+        response.raise_for_status()
+        return response.json() if response.content else {}
+
+    def list_attachments(self) -> list[dict[str, Any]]:
+        """Every upload in this conversation, without the bytes."""
+        body = self._get(f"/v1/agent/worker/jobs/{self.job_id}/attachments")
+        return list(body.get("attachments") or [])
+
+    def read_attachment(self, attachment_id: int) -> tuple[str, bytes]:
+        """One upload's path and bytes."""
+        body = self._get(
+            f"/v1/agent/worker/jobs/{self.job_id}/attachments/{attachment_id}",
+            timeout=_ATTACHMENT_TIMEOUT_S,
+        )
+        return str(body["path"]), base64.b64decode(body["content_base64"])
 
     def heartbeat(self, ttl: float) -> dict[str, Any]:
         """Renew the lease and learn whether cancellation is pending."""
@@ -1362,6 +1402,44 @@ def _prepare_retained_checkout(
     return base_sha
 
 
+def _import_uploads(
+    *,
+    job: ClaimedJob,
+    control: ControlPlane,
+    manager: ChatSandboxManager,
+    spec: ChatSandboxSpec,
+    fresh_container: bool,
+) -> int:
+    """Place this conversation's uploaded files under ``/uploads``.
+
+    Always the whole thread's files, never a delta: the import overwrites the
+    same paths, so one code path serves a new container and a container that
+    gained a file this turn.
+
+    It runs when the container is new, or when this turn attached something.
+    A retained container already holds the earlier turns' files — ``/uploads``
+    is root-owned and read-only, so the sandbox cannot have removed them — and
+    re-fetching them on every follow-up would move the whole conversation's
+    bytes again to write what is already there.
+
+    The files never touch ``CHAT_WORKDIR``. The publish path stages the
+    workspace with ``git add -A -N``, so an upload written there would be
+    committed and appear in the draft pull request.
+    """
+    if job.thread_attachment_count <= 0:
+        return 0
+    if not fresh_container and job.turn_attachment_count <= 0:
+        return 0
+    files: list[tuple[str, bytes]] = []
+    for entry in control.list_attachments():
+        path, content = control.read_attachment(int(entry["id"]))
+        files.append((path, content))
+    if not files:
+        return 0
+    manager.import_archive(spec, CHAT_UPLOADS_DIR, build_upload_archive(files))
+    return len(files)
+
+
 def _import_retained_base(
     *,
     job: ClaimedJob,
@@ -1974,6 +2052,29 @@ def _run_shared_live_attempt(
                 )
             base_sha = job.base_sha or _retained_head(retained)
             reused_workspace = True
+        # Every turn, after both branches: a first turn populates a new
+        # container and a follow-up re-populates one that may have been rebuilt.
+        # Before the turn is admitted, so the agent never observes a half-written
+        # directory.
+        stage = "uploads"
+        imported_uploads = _import_uploads(
+            job=job,
+            control=control,
+            manager=manager,
+            spec=spec,
+            fresh_container=not has_context,
+        )
+        if imported_uploads:
+            control.append_event(
+                NormalizedEvent(
+                    "lifecycle",
+                    {
+                        "phase": "uploads_imported",
+                        "files": imported_uploads,
+                        "path": CHAT_UPLOADS_DIR,
+                    },
+                )
+            )
         control.append_event(
             NormalizedEvent(
                 "lifecycle",
@@ -2381,7 +2482,8 @@ def run_once(
         job_id=job.job_id,
         thread_id=job.thread_id,
         sandbox_id=str((job.thread_sandbox or {}).get("sandbox_id") or "") or None,
-        runtime=job.runtime,
+        runtime_id=job.runtime,
+        runtime_version=job.runtime_version,
         execution_profile=job.execution_profile,
     ):
         operation_profiling.discard(measurement)
@@ -2460,14 +2562,19 @@ def _enqueue_delivery(
     if measurement is None:
         return
     measurement_id = measurement.measurement_id
-    thread = _IN_FLIGHT_DELIVERIES.get(measurement_id)
+    with _DELIVERY_STATE_LOCK:
+        if measurement_id in _DELIVERED_MEASUREMENT_IDS:
+            return
+        thread = _IN_FLIGHT_DELIVERIES.get(measurement_id)
     if thread is None:
         thread = _deliver_in_background(job=job, base_url=base_url, measurement=measurement)
         # Recorded only once it is actually running. A thread that could not
         # start leaves nothing behind, so the next caller tries again rather
         # than finding a send that never began.
         if thread is not None:
-            _IN_FLIGHT_DELIVERIES[measurement_id] = thread
+            with _DELIVERY_STATE_LOCK:
+                if measurement_id not in _DELIVERED_MEASUREMENT_IDS:
+                    _IN_FLIGHT_DELIVERIES[measurement_id] = thread
     # Joined whether it was just started or was already on its way: the bound
     # belongs to the caller that is waiting, not to whoever happened to be
     # first.
@@ -2487,11 +2594,35 @@ def _deliver_in_background(
     def _send() -> None:
         control = ControlPlane(base_url, job.worker_token)
         try:
-            deliver_measurements(
+            outcome = measurement.frozen_outcome or "incomplete"
+            record = operation_profiling.frozen_record(measurement, outcome)
+            manifest = operation_profiling.manifest_for_run(operation_profiling.active_run())
+            if record is None or manifest is None:
+                logger.warning(
+                    "agent_measurement_delivery_missing_record",
+                    extra={
+                        "event": "agent_measurement_delivery_missing_record",
+                        "job_id": job.job_id,
+                        "measurement_id": measurement.measurement_id,
+                    },
+                )
+                return
+            counts = deliver_measurement_record(
                 control=control,
                 job_id=job.job_id,
-                measurement_ids=[measurement.measurement_id],
+                record=record,
+                manifest=manifest,
             )
+            if counts["dropped"] or counts["retried"]:
+                logger.info(
+                    "agent_measurement_delivery_summary",
+                    extra={
+                        "event": "agent_measurement_delivery_summary",
+                        "job_id": job.job_id,
+                        "measurement_id": measurement.measurement_id,
+                        **counts,
+                    },
+                )
         except Exception:
             logger.warning(
                 "agent_measurement_delivery_failed",
@@ -2500,6 +2631,9 @@ def _deliver_in_background(
             )
         finally:
             control.close()
+            with _DELIVERY_STATE_LOCK:
+                _DELIVERED_MEASUREMENT_IDS.add(measurement.measurement_id)
+                _IN_FLIGHT_DELIVERIES.pop(measurement.measurement_id, None)
 
     thread = threading.Thread(target=_send, name="agent-measurement-delivery", daemon=True)
     try:
@@ -3195,18 +3329,54 @@ def run_forever(
 
 #: The fields of a record a run manifest is built from. The manifest is
 #: derived from the record rather than re-read from the environment so the two
-#: cannot describe different experiments: the producer states what it measured
-#: under, and the control plane compares that against what it already stored.
-def _manifest_for(record: Mapping[str, Any], descriptor: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the experiment manifest for one delivered record."""
-    return {
-        "run_id": record.get("profiling_run_id"),
-        "operations": list(descriptor.get("operations") or []),
-        "target": dict(descriptor.get("target") or {}),
-        "expires_at": record.get("run_expires_at"),
-        "config_version": int(descriptor.get("config_version") or 1),
-        "admission_instances": list(descriptor.get("admission_instances") or []),
-    }
+def deliver_measurement_record(
+    *,
+    control: ControlPlane,
+    job_id: str,
+    record: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+) -> dict[str, int]:
+    """Deliver one frozen record with bounded retries and explicit accounting."""
+    counts = {"delivered": 0, "duplicate": 0, "dropped": 0, "retried": 0}
+    measurement_id = str(record.get("measurement_id") or "")
+    body: dict[str, Any] = {"record": dict(record), "run": dict(manifest)}
+    for attempt in range(1, DELIVERY_ATTEMPTS_MAX + 1):
+        try:
+            status, answer = control.record_measurement(job_id, body)
+        except Exception as exc:
+            outcome = classify_exception(exc)
+        else:
+            outcome = classify_response(status, answer)
+        if outcome.delivered:
+            counts["duplicate" if outcome.result == "duplicate" else "delivered"] += 1
+            break
+        if not outcome.retryable:
+            counts["dropped"] += 1
+            logger.warning(
+                "agent_measurement_refused",
+                extra={
+                    "event": "agent_measurement_refused",
+                    "job_id": job_id,
+                    "measurement_id": measurement_id,
+                    "reason": outcome.reason,
+                },
+            )
+            break
+        counts["retried"] += 1
+        if attempts_exhausted(attempt):
+            counts["dropped"] += 1
+            logger.warning(
+                "agent_measurement_undeliverable",
+                extra={
+                    "event": "agent_measurement_undeliverable",
+                    "job_id": job_id,
+                    "measurement_id": measurement_id,
+                    "reason": outcome.reason,
+                },
+            )
+            break
+        time.sleep(min(2.0, 0.25 * attempt))
+    return counts
 
 
 def deliver_measurements(
@@ -3215,12 +3385,11 @@ def deliver_measurements(
     job_id: str,
     measurement_ids: Iterable[str] | None = None,
 ) -> dict[str, int]:
-    """Send this process's finished measurements, and say what happened.
+    """Drain selected records from the optional JSONL baseline sink.
 
-    Called after the turn, never during it. The records were frozen while the
-    startup was running and written to the sink by the export thread; this only
-    reads them back and hands them over, so no delivery, retry or timeout can
-    land inside the thing being measured.
+    The live runtime delivers its frozen record directly and does not require
+    this file. This reader remains for explicit sink drains and recovery tests;
+    delivery, retry, and timeout still happen after the measurement boundary.
 
     Delivery is best effort by design. A refused or undeliverable record is
     counted and the turn ends normally -- the measurement is diagnostic, and
@@ -3268,68 +3437,28 @@ def deliver_measurements(
             continue
         if measurement_id in _DELIVERED_MEASUREMENT_IDS:
             continue
-        body: dict[str, Any] = {"record": record}
-        descriptor = _profiling_descriptor()
-        if descriptor:
-            body["run"] = _manifest_for(record, descriptor)
-        for attempt in range(1, DELIVERY_ATTEMPTS_MAX + 1):
-            try:
-                status, answer = control.record_measurement(job_id, body)
-            except Exception as exc:
-                outcome = classify_exception(exc)
-            else:
-                outcome = classify_response(status, answer)
-            if outcome.delivered:
-                counts["duplicate" if outcome.result == "duplicate" else "delivered"] += 1
-                delivered.add(measurement_id)
-                break
-            if not outcome.retryable:
-                counts["dropped"] += 1
-                delivered.add(measurement_id)
-                logger.warning(
-                    "agent_measurement_refused",
-                    extra={
-                        "event": "agent_measurement_refused",
-                        "job_id": job_id,
-                        "measurement_id": measurement_id,
-                        "reason": outcome.reason,
-                    },
-                )
-                break
-            counts["retried"] += 1
-            if attempts_exhausted(attempt):
-                counts["dropped"] += 1
-                delivered.add(measurement_id)
-                logger.warning(
-                    "agent_measurement_undeliverable",
-                    extra={
-                        "event": "agent_measurement_undeliverable",
-                        "job_id": job_id,
-                        "measurement_id": measurement_id,
-                        "reason": outcome.reason,
-                    },
-                )
-                break
-            time.sleep(min(2.0, 0.25 * attempt))
+        manifest = operation_profiling.manifest_for_run(operation_profiling.active_run())
+        if manifest is None:
+            counts["dropped"] += 1
+            delivered.add(measurement_id)
+            continue
+        outcome_counts = deliver_measurement_record(
+            control=control,
+            job_id=job_id,
+            record=record,
+            manifest=manifest,
+        )
+        for key, value in outcome_counts.items():
+            counts[key] += value
+        delivered.add(measurement_id)
 
     # Remembered in this process rather than erased from the file. The sink can
     # be shared -- several runners on one host pointed at one state directory --
     # and a read-modify-write of it would silently drop whatever another
     # process appended between this call's read and its write.
-    _DELIVERED_MEASUREMENT_IDS.update(delivered)
+    with _DELIVERY_STATE_LOCK:
+        _DELIVERED_MEASUREMENT_IDS.update(delivered)
     return counts
-
-
-def _profiling_descriptor() -> dict[str, Any]:
-    """Return the raw run descriptor, or ``{}`` when profiling is off."""
-    raw = (os.environ.get(operation_profiling.ENV_PROFILING_RUN) or "").strip()
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except ValueError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
 
 
 #: Measurements this process has already decided the fate of. Held in memory
@@ -3348,12 +3477,14 @@ _DELIVERED_MEASUREMENT_IDS: set[str] = set()
 #: record is frozen once -- but "already queued" must not mean "do not wait",
 #: or the handoff's short bound would silently become the only attempt.
 _IN_FLIGHT_DELIVERIES: dict[str, threading.Thread] = {}
+_DELIVERY_STATE_LOCK = threading.Lock()
 
 
 def reset_delivery_state() -> None:
     """Forget what this process delivered and queued. Tests call this."""
-    _DELIVERED_MEASUREMENT_IDS.clear()
-    _IN_FLIGHT_DELIVERIES.clear()
+    with _DELIVERY_STATE_LOCK:
+        _DELIVERED_MEASUREMENT_IDS.clear()
+        _IN_FLIGHT_DELIVERIES.clear()
 
 
 def _bound_measurement(
@@ -3382,7 +3513,8 @@ def _bound_measurement(
         job_id=job.job_id,
         thread_id=job.thread_id,
         sandbox_id=str((job.thread_sandbox or {}).get("sandbox_id") or "") or None,
-        runtime=job.runtime,
+        runtime_id=job.runtime,
+        runtime_version=job.runtime_version,
         execution_profile=job.execution_profile,
     ):
         operation_profiling.discard(measurement)
@@ -3407,6 +3539,10 @@ def _hand_over_turn(
     back from here would be this host overruling that judgement with a guess.
     """
     job_id = str(payload.get("job_id") or "")
+    try:
+        delivery_job = ClaimedJob.from_response(payload)
+    except (KeyError, TypeError, ValueError):
+        delivery_job = None
     # Carried beside the turn rather than in it: the child logs under the same
     # name the claim recorded as this turn's lease owner. Stripped before
     # delivery, so the payload the child parses is the control plane's answer
@@ -3452,6 +3588,13 @@ def _hand_over_turn(
         operation_profiling.finish(
             measurement, outcome="incomplete", failure_stage="handover_uncertain"
         )
+        if delivery_job is not None:
+            _enqueue_delivery(
+                measurement,
+                job=delivery_job,
+                base_url=base_url,
+                drain_s=DELIVERY_HANDOFF_DRAIN_S,
+            )
         logger.warning(
             "agent_turn_handover_uncertain",
             extra={
@@ -3464,6 +3607,13 @@ def _hand_over_turn(
     # Provably never started: back to the queue, with no attempt spent and no
     # wait for a lease that nothing is holding.
     operation_profiling.finish(measurement, outcome="incomplete", failure_stage="not_started")
+    if delivery_job is not None:
+        _enqueue_delivery(
+            measurement,
+            job=delivery_job,
+            base_url=base_url,
+            drain_s=DELIVERY_HANDOFF_DRAIN_S,
+        )
     worker_token = str(payload.get("worker_token") or "")
     released = bool(worker_token) and release_turn(
         base_url=base_url,

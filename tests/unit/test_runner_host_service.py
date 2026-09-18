@@ -775,6 +775,54 @@ def test_the_host_hands_its_selection_to_the_child(monkeypatch):
     operation_profiling.reset_cache()
 
 
+@pytest.mark.parametrize("outcome", [LAUNCH_NOT_STARTED, LAUNCH_UNCERTAIN])
+def test_a_parent_side_handover_failure_delivers_its_measurement(monkeypatch, outcome):
+    """Failures before a child owns the sample still reach persistence."""
+    from cloud_agent_profiling import operation_profiling
+
+    _run_descriptor(monkeypatch)
+    payload = {
+        "job_id": "ajob_1",
+        "thread_id": "athr_1",
+        "attempt_id": 7,
+        "attempt_no": 1,
+        "repo": "o/n",
+        "task_prompt": "do it",
+        "runtime": "claude-code",
+        "model": "m",
+        "worker_token": "ajt.a.b",
+        "sandbox_token": "grant",
+    }
+    measurement = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+    assert measurement is not None
+    assert runner_mod._bound_measurement(measurement, payload) is measurement
+    queued: list[Any] = []
+    monkeypatch.setattr(
+        runner_mod,
+        "_enqueue_delivery",
+        lambda selected, **_kwargs: queued.append(selected),
+    )
+
+    class _Turns:
+        def launch(self, _payload: dict[str, Any]) -> Any:
+            return LaunchResult(outcome, None, "review failure")
+
+    monkeypatch.setattr(runner_mod, "release_turn", lambda **_kwargs: True)
+    runner_mod._hand_over_turn(
+        payload,
+        turns=_Turns(),
+        base_url="http://control",
+        worker_id="runner-a",
+        measurement=measurement,
+    )
+
+    assert queued == [measurement]
+    assert measurement.frozen_outcome == "incomplete"
+    operation_profiling.reset_cache()
+
+
 def test_a_turn_process_reattaches_the_selection_it_was_handed(monkeypatch):
     """The child times the turn; it does not select one or spend a slot."""
     import io
@@ -930,6 +978,7 @@ def _sink_with(monkeypatch: Any, tmp_path: Any, records: list[dict[str, Any]]) -
 
     sink = tmp_path / "records.jsonl"
     sink.write_text("".join(json.dumps(record) + "\n" for record in records))
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
     monkeypatch.setenv(
         operation_profiling.ENV_PROFILING_RUN,
@@ -1062,6 +1111,33 @@ def test_a_turn_with_no_measurement_delivers_nothing(monkeypatch, tmp_path):
     assert counts == {"delivered": 0, "duplicate": 0, "dropped": 0, "retried": 0}
     assert control.sent == []
     assert not os.path.exists(str(tmp_path / "records.jsonl"))
+
+
+def test_runtime_delivery_does_not_require_the_optional_jsonl_sink(monkeypatch):
+    """Admin persistence is independent of the operator's baseline file."""
+    from cloud_agent_profiling import operation_profiling
+
+    _run_descriptor(monkeypatch)
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_SINK, raising=False)
+    measurement = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+    assert measurement is not None
+    operation_profiling.finish(measurement, outcome="dispatched")
+    control = _StubControl([(200, {"result": "stored"})])
+    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_args, **_kwargs: control)
+
+    runner_mod._enqueue_delivery(
+        measurement,
+        job=_claimed(),
+        base_url="http://control",
+        drain_s=1.0,
+    )
+
+    assert [body["record"]["measurement_id"] for _job, body in control.sent] == [
+        measurement.measurement_id
+    ]
+    assert control.sent[0][1]["run"]["admission_instances"]
 
 
 def test_only_this_turns_record_is_delivered(monkeypatch, tmp_path):
@@ -1241,6 +1317,34 @@ def test_a_later_caller_waits_for_the_send_already_running(
         release.set()
 
 
+def test_prompt_handoff_starts_delivery_without_waiting(startup_measurement, monkeypatch, tmp_path):
+    """A diagnostic send must not sit between prompt dispatch and stream reads."""
+    import threading
+    import time
+
+    _sink_with(monkeypatch, tmp_path, [_frozen()])
+    release = threading.Event()
+
+    def _slow_send(**_kwargs: Any) -> Any:
+        thread = threading.Thread(target=lambda: release.wait(timeout=10), daemon=True)
+        thread.start()
+        return thread
+
+    monkeypatch.setattr(runner_mod, "_deliver_in_background", _slow_send)
+    try:
+        started = time.perf_counter()
+        runner_mod._enqueue_delivery(
+            startup_measurement,
+            job=_claimed(),
+            base_url="http://control",
+            drain_s=runner_mod.DELIVERY_HANDOFF_DRAIN_S,
+        )
+        elapsed = time.perf_counter() - started
+        assert elapsed < 0.05
+    finally:
+        release.set()
+
+
 def test_a_send_that_never_started_is_retried_by_the_next_caller(
     startup_measurement, monkeypatch, tmp_path
 ):
@@ -1374,6 +1478,7 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
     sent: list[str] = []
     turn_is_running = threading.Event()
     release_delivery = threading.Event()
+    release_turn = threading.Event()
 
     class _Recorder:
         def record_measurement(self, job_id: str, body: dict[str, Any]) -> Any:
@@ -1401,8 +1506,8 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
     class _HangingStream:
         def frames(self) -> Any:
             """Block until the test is done with the assertion."""
-            turn_is_running.wait(timeout=10)
-            return iter(())
+            release_turn.wait(timeout=10)
+            return iter(({"kind": "result", "exit_code": 0},))
 
         def close(self) -> None:
             """Release nothing."""
@@ -1427,7 +1532,7 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
                     frozen,
                     job=_claimed(),
                     base_url="http://control",
-                    drain_s=2.0,
+                    drain_s=runner_mod.DELIVERY_HANDOFF_DRAIN_S,
                 ),
             ),
             daemon=True,
@@ -1453,7 +1558,8 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
         assert written and written[0]["operation"] == "attempt.startup"
     finally:
         release_delivery.set()
-        turn_is_running.set()
+        release_turn.set()
+        turn.join(timeout=2)
         operation_profiling.reset_cache()
 
 

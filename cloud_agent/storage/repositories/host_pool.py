@@ -10,6 +10,10 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from cloud_agent.capacity_protocol import (
+    CAPACITY_HISTORY_MAX_AGE_S,
+    history_point_write_from_block,
+)
 from cloud_agent.execution_profiles import KATA_RUNTIME
 from cloud_agent.host_pool import (
     HOST_DISABLED,
@@ -27,6 +31,7 @@ from cloud_agent.storage._sql.hosts import (
 )
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
+from cloud_agent.storage.repositories.host_capacity import insert_capacity_history_point
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -250,7 +255,11 @@ class PostgresHostPoolRepository:
         credential" outside the write would let exactly that request through.
         That second statement runs in its own savepoint, so a block the
         database refuses costs the host nothing but the block: the liveness
-        half of the same call still commits.
+        half of the same call still commits. A third, in a savepoint of its
+        own again, keeps an accepted observation in the history the chart
+        reads — this request is the only place that sample is known to exist,
+        because the row it was just written into holds one observation and the
+        next heartbeat replaces it.
 
         Args:
             host: The authenticated host name.
@@ -810,10 +819,16 @@ class PostgresHostPoolRepository:
         then refused by JSONB, and a constraint added tomorrow could refuse
         something else. A host that is alive must be recorded as alive whatever
         the control plane thinks of its monitoring data.
+
+        An accepted observation is then kept twice: in the host row, which is
+        the current reading the table shows, and in the history table, which is
+        the chart. Both from this request, because this is the only moment the
+        sample is known to exist — the row holds one observation and the next
+        heartbeat overwrites it.
         """
         try:
             async with conn.transaction():
-                await PostgresHostPoolRepository._record_host_capacity(
+                accepted = await PostgresHostPoolRepository._record_host_capacity(
                     conn,
                     host=host,
                     credential_hash=credential_hash,
@@ -826,6 +841,83 @@ class PostgresHostPoolRepository:
                 exc_info=True,
                 extra={"event": "agent_host_capacity_write_failed", "host": host},
             )
+            return
+        if accepted is None:
+            # Refused by one of the write's own conditions: a replay, an
+            # observation older than the stored one, or a credential that has
+            # since been replaced. None of them is a new measurement, so none
+            # of them belongs in the history either.
+            return
+        await PostgresHostPoolRepository._keep_capacity_history_isolated(
+            conn,
+            host=host,
+            capacity=capacity,
+            sample_age_ms=sample_age_ms,
+            accepted=accepted,
+        )
+
+    @staticmethod
+    async def _keep_capacity_history_isolated(
+        conn: Any,
+        *,
+        host: str,
+        capacity: Mapping[str, Any],
+        sample_age_ms: int,
+        accepted: Mapping[str, Any],
+    ) -> None:
+        """Add this observation to the chart's history, in a savepoint of its own.
+
+        **Why the write is here and not on a timer.** The host row holds one
+        observation, and every heartbeat replaces it. A task that re-read that
+        row on its own clock could therefore only ever see whichever sample
+        happened to be in it at that instant: every other sample was already
+        gone. At a 30-second report and a 60-second pass the two clocks drift
+        against each other, and each time they crossed, a minute went by whose
+        sample had been overwritten before anything read it. That minute was
+        then missing from the table for good — nothing backfills, by design —
+        and the chart drew a gap no outage had caused. Writing from the request
+        that accepts the sample has no clock to drift against.
+
+        **Why a second savepoint.** The reading an operator sees in the table
+        was just accepted, and it must not be rolled back because another
+        table refused a row. This failure costs one point in a curve; the one
+        it is being kept away from costs the current number for a live machine.
+
+        Args:
+            conn: The heartbeat's connection, inside its transaction.
+            host: The host the observation belongs to.
+            capacity: The block that was accepted.
+            sample_age_ms: How old the observation was when it was sent.
+            accepted: Epoch, instant and identity, as the accepting write
+                returned them.
+        """
+        if sample_age_ms > CAPACITY_HISTORY_MAX_AGE_S * 1000:
+            # A sampler that has been stalled for minutes is reporting a
+            # measurement, but not this minute's: it is admitted as the current
+            # reading, where its age is shown beside it, and kept out of a
+            # curve that has no way to say how late it was.
+            return
+        point = history_point_write_from_block(
+            capacity,
+            sampled_at=accepted["capacity_sampled_at"],
+            sample_id=str(accepted["capacity_sample_id"]),
+        )
+        if point is None:
+            return
+        try:
+            async with conn.transaction():
+                await insert_capacity_history_point(
+                    conn,
+                    host=host,
+                    capacity_epoch=accepted["capacity_epoch"],
+                    point=point,
+                )
+        except Exception:
+            logger.warning(
+                "agent_host_capacity_history_write_failed",
+                exc_info=True,
+                extra={"event": "agent_host_capacity_history_write_failed", "host": host},
+            )
 
     @staticmethod
     async def _record_host_capacity(
@@ -835,7 +927,7 @@ class PostgresHostPoolRepository:
         credential_hash: str,
         capacity: Mapping[str, Any],
         sample_age_ms: int,
-    ) -> None:
+    ) -> Any:
         """Store a capacity observation, iff it is new, newer, and still ours.
 
         Three conditions, all in the predicate rather than in a prior read:
@@ -853,8 +945,15 @@ class PostgresHostPoolRepository:
         ``sampled_at`` is derived from the server's own ``NOW()`` minus the
         reported age. The runner's wall clock is never trusted, and the two
         timestamps therefore come from one clock that cannot jump.
+
+        Returns:
+            The epoch, instant and identity the row now holds, or ``None`` when
+            one of the three conditions refused the write. The caller keeps the
+            history point from this row rather than from the block it sent, so
+            the point and the snapshot cannot disagree about which observation
+            they are, or about when it was taken.
         """
-        await conn.execute(
+        return await conn.fetchrow(
             """
             UPDATE agent_runner_hosts
             SET capacity_snapshot = $3::jsonb,
@@ -868,6 +967,7 @@ class PostgresHostPoolRepository:
                   capacity_sampled_at IS NULL
                   OR capacity_sampled_at < NOW() - make_interval(secs => $4::double precision)
               )
+            RETURNING capacity_epoch, capacity_sampled_at, capacity_sample_id
             """,
             host,
             credential_hash,

@@ -117,6 +117,22 @@ def test_the_build_loads_the_image_it_is_about_to_start() -> None:
         assert build["with"]["push"] is False
 
 
+def test_the_build_does_not_export_an_unused_remote_cache() -> None:
+    """The persistent per-runner builder is the cache used by later builds.
+
+    A GHA exporter without an importer uploaded the sandbox's large runtime
+    layers on every run but no build ever consumed them. The export alone took
+    minutes and occupied every x64 runner on their shared physical host.
+    """
+    for fragment in (
+        "Build ${{ matrix.artifact.name }}",
+        "Build ${{ matrix.artifact.name }} (retry)",
+    ):
+        build = step(fragment)
+        assert "cache-to" not in build["with"]
+        assert "cache-from" not in build["with"]
+
+
 def test_the_build_tags_the_image_the_smoke_starts() -> None:
     """`load: true` without a tag loads an image the next step cannot find.
 
@@ -140,6 +156,17 @@ def test_mcp_interactions_run_before_smoke_removes_the_image() -> None:
     smoke_step = step("Start it, and assert")
     assert interactions["env"]["MCP_TEST_SANDBOX_IMAGE"] == "${{ env.IMAGE_TAG }}"
     assert steps.index(interactions) < steps.index(smoke_step)
+
+
+def test_mcp_interactions_run_in_isolated_parallel_workers() -> None:
+    """Each xdist worker needs the database suffix the test config selects."""
+    interactions = step("All five CLIs retain MCP")
+    assert interactions["env"]["MCP_TEST_WORKERS"] == "3"
+    run = str(interactions["run"])
+    assert '"${TEST_DB_NAME}_gw${worker}"' in run
+    assert "createdb" in run
+    assert '-n "${MCP_TEST_WORKERS}" --dist load' in run
+    assert run.index("createdb") < run.index("uv run pytest")
 
 
 def test_cleanup_cannot_reach_another_cell() -> None:

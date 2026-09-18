@@ -8,6 +8,7 @@ import { APIError } from '@/lib/utils/errors';
 import { useT } from '@/components/providers/LocaleProvider';
 import { hasLostContext, isBusyJob, latestJob } from './conversationJob';
 import { sideChatKeys } from './sideChatStorage';
+import { sideChatAnchor, type SideChatTab } from './useWorkspaceTabs';
 import type { AgentJob } from './types';
 
 export interface SideChatSession {
@@ -73,18 +74,22 @@ export function useSideChatSession(
   userId: string | undefined,
   active: boolean,
   sourceJobs: AgentJobApi[] = [],
+  tab?: SideChatTab,
 ) {
   const t = useT();
-  const keys = userId ? sideChatKeys(userId, source.threadId ?? source.id) : null;
+  const keys = userId ? sideChatKeys(userId, source.threadId ?? source.id, tab?.id) : null;
   const key = keys?.session ?? '';
-  const legacyKey = userId ? `agent-side-chat:${userId}:${source.threadId ?? source.id}` : '';
+  const legacyKey =
+    userId && (!tab || tab.id === 'side-chat')
+      ? `agent-side-chat:${userId}:${source.threadId ?? source.id}`
+      : '';
   const [session, setSession] = useState<SideChatSession | null>(null);
   const [status, setStatus] = useState<Status>('preparing');
   const [error, setError] = useState<string | null>(null);
   const [recoverable, setRecoverable] = useState(false);
   const [revision, setRevision] = useState(0);
-  const sourceRef = useRef({ source, sourceJobs });
-  sourceRef.current = { source, sourceJobs };
+  const sourceRef = useRef({ source, sourceJobs, tab });
+  sourceRef.current = { source, sourceJobs, tab };
   const retry = useCallback(() => setRevision((n) => n + 1), []);
 
   useEffect(() => {
@@ -108,7 +113,7 @@ export function useSideChatSession(
         const result = await navigator.locks.request(key, async () => {
           if (!canStart()) return null;
           let saved = read(key);
-          if (!saved && sessionStorage.getItem(legacyKey)) {
+          if (!saved && legacyKey && sessionStorage.getItem(legacyKey)) {
             // Preserve receipts and unknown operation IDs from the first UI
             // version; a namespace change must never create another child.
             try {
@@ -139,13 +144,10 @@ export function useSideChatSession(
               source.archivedAt
             )
               throw new Error('sideChat.unavailable');
-            const rows = sourceJobs.filter((row) => row.thread_id === source.threadId);
-            const anchor =
-              latestJob(rows.filter((row) => ['running', 'publishing'].includes(row.state))) ??
-              latestJob(rows);
+            const anchor = snapshot.tab?.anchor ?? sideChatAnchor(source, sourceJobs);
             saved = {
-              anchorJobId: anchor?.id ?? source.id,
-              sandboxId: source.sandboxId,
+              anchorJobId: anchor.jobId,
+              sandboxId: anchor.sandboxId,
               operation: { id: crypto.randomUUID(), state: 'new' },
             };
             save(key, saved);

@@ -160,7 +160,11 @@ class HostPoolRepository(Protocol):
         credential" outside the write would let exactly that request through.
         That second statement runs in its own savepoint, so a block the
         database refuses costs the host nothing but the block: the liveness
-        half of the same call still commits.
+        half of the same call still commits. A third, in a savepoint of its
+        own again, keeps an accepted observation in the history the chart
+        reads — this request is the only place that sample is known to exist,
+        because the row it was just written into holds one observation and the
+        next heartbeat replaces it.
 
         Args:
             host: The authenticated host name.

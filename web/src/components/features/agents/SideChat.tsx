@@ -29,6 +29,7 @@ import { useAgentJob } from './useAgentJobs';
 import { markConversationRead } from './useConversationReadState';
 import { useConversationScroll } from './useConversationScroll';
 import { useSideChatSession } from './useSideChatSession';
+import type { SideChatTab } from './useWorkspaceTabs';
 
 interface SideChatProps {
   sourceJob: AgentJob;
@@ -36,6 +37,7 @@ interface SideChatProps {
   userId?: string;
   config: AgentConfigApi | null;
   active: boolean;
+  tab?: SideChatTab;
 }
 
 function SideChatBoundary(props: SideChatProps) {
@@ -43,7 +45,7 @@ function SideChatBoundary(props: SideChatProps) {
   // or switching accounts cannot reuse its draft, stream, or pending request.
   return (
     <SideChatContent
-      key={`${props.userId ?? 'signed-out'}:${props.sourceJob.threadId ?? props.sourceJob.id}`}
+      key={`${props.userId ?? 'signed-out'}:${props.sourceJob.threadId ?? props.sourceJob.id}:${props.tab?.id ?? 'side-chat'}`}
       {...props}
     />
   );
@@ -56,6 +58,7 @@ function SideChatContent({
   userId,
   config,
   active: selected,
+  tab,
 }: SideChatProps) {
   const [visible, setVisible] = useState(true);
   useEffect(() => {
@@ -71,6 +74,7 @@ function SideChatContent({
     userId,
     active,
     sourceJobs,
+    tab,
   );
   const {
     job,
@@ -79,13 +83,19 @@ function SideChatContent({
     error: loadError,
     reload,
   } = useAgentJob(session?.jobId ?? '', { active, hideForkedHistory: true });
-  const draftKey = userId ? sideChatKeys(userId, sourceJob.threadId ?? sourceJob.id).draft : '';
+  const draftKey = userId
+    ? sideChatKeys(userId, sourceJob.threadId ?? sourceJob.id, tab?.id).draft
+    : '';
   const [draft, setDraft] = useState(() => {
     try {
       if (!draftKey) return '';
       const legacy = `agent-side-chat:${userId}:${sourceJob.threadId ?? sourceJob.id}:draft`;
-      const value = sessionStorage.getItem(draftKey) ?? sessionStorage.getItem(legacy) ?? '';
-      sessionStorage.removeItem(legacy);
+      const migrateLegacy = !tab || tab.id === 'side-chat';
+      const value =
+        sessionStorage.getItem(draftKey) ??
+        (migrateLegacy ? sessionStorage.getItem(legacy) : null) ??
+        '';
+      if (migrateLegacy) sessionStorage.removeItem(legacy);
       return value;
     } catch {
       return '';
@@ -277,7 +287,9 @@ function SideChatContent({
       const target = event.target instanceof Element ? event.target : null;
       const ownsFocus =
         target === document.body ||
-        target?.closest('#workspace-tab-side-chat, #workspace-panel-side-chat');
+        target?.closest('[data-side-chat-id]')?.getAttribute('data-side-chat-id') ===
+          (tab?.id ?? 'side-chat') ||
+        (!tab && target?.closest('#workspace-tab-side-chat, #workspace-panel-side-chat'));
       if (
         event.key !== 'Escape' ||
         event.repeat ||
@@ -291,7 +303,7 @@ function SideChatContent({
     };
     window.addEventListener('keydown', onEscape, true);
     return () => window.removeEventListener('keydown', onEscape, true);
-  }, [active, stop]);
+  }, [active, stop, tab]);
   useEffect(() => {
     const clear = (event: Event) => {
       if ((event as CustomEvent).detail === userId) setDraft('');

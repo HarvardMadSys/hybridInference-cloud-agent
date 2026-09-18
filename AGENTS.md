@@ -27,6 +27,8 @@ cloud_agent_contracts/  shared vocabulary both images ship: capability strings,
                         protocol versions, pins, egress policy, shared errors
 cloud_agent_git/        shared Git algorithms both images ship: the patch gate
                         and the source-archive builders
+cloud_agent_profiling/  neutral opt-in measurement vocabulary used by the
+                        control plane and host without reversing their boundary
 web/                    Next.js user UI + admin dashboard
 contracts/              OpenAPI mirrors of the gateway contracts we consume
 migrations/             Alembic migrations (agent-owned database only)

@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from fastapi import Depends, FastAPI
+from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent import identity
@@ -155,7 +156,19 @@ MACHINE_GATES = frozenset(
 
 #: Both routers a browser reaches with a session. The admin router is a second
 #: mount point, not a second kind of caller.
-SESSION_ROUTERS = (agent_jobs_router.router, admin_hosts_router.router)
+SESSION_ROUTERS = (*agent_jobs_router.SURFACE_ROUTERS, admin_hosts_router.router)
+
+#: Every route that answers a session, flattened. ``SURFACE_ROUTERS`` are the
+#: leaves the aggregator mounts; the handlers that have not moved out of it yet
+#: are still plain routes on ``router``, and the filter is what finds them — after
+#: an include, ``router.routes`` also holds lazy wrapper objects with no
+#: ``methods`` and no ``dependant``, and walking those would skip every moved
+#: route silently, which is the failure this test exists to catch. Once the last
+#: surface moves the generator yields nothing and the registry is the whole set.
+SESSION_ROUTES = (
+    *(route for router in SESSION_ROUTERS for route in router.routes),
+    *(route for route in agent_jobs_router.router.routes if isinstance(route, APIRoute)),
+)
 
 #: Gates that re-ask the gateway before they allow a write.
 REVALIDATING_GATES = frozenset({"require_agent_owner", "verify_admin_access"})
@@ -171,22 +184,21 @@ async def test_every_mutating_route_a_session_can_reach_revalidates():
     mutating = {"POST", "PUT", "PATCH", "DELETE"}
 
     unguarded = []
-    for router in SESSION_ROUTERS:
-        for route in router.routes:
-            methods = getattr(route, "methods", set()) or set()
-            if not (methods & mutating):
-                continue
-            if _gates(route) & REVALIDATING_GATES:
-                continue
-            # Worker routes verify their capability token in the handler rather
-            # than through a dependency, so the dependency tree cannot see it.
-            try:
-                body = inspect.getsource(route.endpoint)
-            except (OSError, TypeError):  # pragma: no cover - defensive
-                body = ""
-            if any(gate in body for gate in MACHINE_GATES):
-                continue
-            unguarded.append(f"{sorted(methods)} {route.path}")
+    for route in SESSION_ROUTES:
+        methods = getattr(route, "methods", set()) or set()
+        if not (methods & mutating):
+            continue
+        if _gates(route) & REVALIDATING_GATES:
+            continue
+        # Worker routes verify their capability token in the handler rather
+        # than through a dependency, so the dependency tree cannot see it.
+        try:
+            body = inspect.getsource(route.endpoint)
+        except (OSError, TypeError):  # pragma: no cover - defensive
+            body = ""
+        if any(gate in body for gate in MACHINE_GATES):
+            continue
+        unguarded.append(f"{sorted(methods)} {route.path}")
 
     assert not unguarded, (
         "these mutating routes authenticate nothing that can go stale — wire "

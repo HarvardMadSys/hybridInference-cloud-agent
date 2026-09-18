@@ -202,6 +202,61 @@ async def test_a_shutdown_that_cannot_finish_counts_what_it_abandoned():
         await writer.shutdown()
 
 
+async def test_shutdown_counts_a_write_already_taken_by_a_worker():
+    """An in-flight write is not invisible merely because it left the queue."""
+    writer = MeasurementWriter()
+    started = asyncio.Event()
+
+    async def _never() -> str:
+        started.set()
+        await asyncio.sleep(30)
+        return "stored"
+
+    writer.start()
+    try:
+        assert writer.offer(persist=_never, payload=_payload()) is True
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert writer.pending == 0
+        assert writer.in_flight == 1
+
+        counts = await writer.shutdown(timeout_s=0.05)
+
+        assert counts.dropped_shutdown == 1
+        assert counts.stored == 0
+        assert writer.in_flight == 0
+    finally:
+        await writer.shutdown()
+
+
+async def test_the_count_bound_includes_writes_already_in_flight():
+    """Workers taking rows may not make room beyond the configured bound."""
+    writer = MeasurementWriter(max_count=2, max_concurrent=2)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    entered = 0
+
+    async def _blocked() -> str:
+        nonlocal entered
+        entered += 1
+        if entered == 2:
+            started.set()
+        await release.wait()
+        return "stored"
+
+    writer.start()
+    try:
+        assert writer.offer(persist=_blocked, payload=_payload()) is True
+        assert writer.offer(persist=_blocked, payload=_payload()) is True
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert writer.pending == 0
+        assert writer.in_flight == 2
+        assert writer.offer(persist=_blocked, payload=_payload()) is False
+        assert writer.counts.dropped_full == 1
+    finally:
+        release.set()
+        await writer.shutdown()
+
+
 async def test_offering_after_shutdown_is_counted_not_raised():
     """Between a stop and the next start there is nowhere for a record to go."""
     writer = MeasurementWriter()

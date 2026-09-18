@@ -25,6 +25,7 @@ from cloud_agent.measurement_ingest import (
     validate_measurement,
     validate_run,
 )
+from cloud_agent_profiling.operation_profiling import manifest_for_run as _manifest_for_run
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -65,16 +66,7 @@ def manifest_for_run(run: Any) -> dict[str, Any] | None:
     the environment again: two readings could disagree, and the manifest is an
     experiment's identity.
     """
-    if run is None:
-        return None
-    return {
-        "run_id": run.run_id,
-        "operations": sorted(run.operations),
-        "target": dict(run.target),
-        "expires_at": run.expires_at_utc.isoformat(),
-        "config_version": 1,
-        "admission_instances": [],
-    }
+    return _manifest_for_run(run)
 
 
 def prepare_measurement(

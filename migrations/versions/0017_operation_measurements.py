@@ -18,16 +18,16 @@ Every column is additive. Nothing existing is renamed, dropped or backfilled,
 and a deployment that never enables persistence keeps exactly the schema it
 had.
 
-Revision ID: 0016_operation_measurements
-Revises: 0015_mcp_enablement
+Revision ID: 0017_operation_measurements
+Revises: 0016_job_attachments
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "0016_operation_measurements"
-down_revision = "0015_mcp_enablement"
+revision = "0017_operation_measurements"
+down_revision = "0016_job_attachments"
 branch_labels = None
 depends_on = None
 
@@ -82,6 +82,9 @@ def upgrade() -> None:
             collection_complete BOOLEAN NOT NULL,
             end_to_end_complete BOOLEAN NOT NULL DEFAULT FALSE,
             startup_path TEXT,
+            runtime_id TEXT,
+            runtime_version TEXT,
+            execution_profile TEXT,
             observed_at TIMESTAMPTZ NOT NULL,
             received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             record JSONB NOT NULL,

@@ -8,6 +8,7 @@ import { forkAgentJob, getAgentJob, getAgentJobThread, type AgentJobApi } from '
 import { APIError } from '@/lib/utils/errors';
 import type { AgentJob } from './types';
 import { sideChatStorageKey, useSideChatSession } from './useSideChatSession';
+import { sideChatKeys } from './sideChatStorage';
 
 vi.mock('@/lib/api/agents', () => ({
   forkAgentJob: vi.fn(),
@@ -65,6 +66,37 @@ async function flush() {
 }
 
 describe('native side chat session', () => {
+  it('uses a new tab’s pinned boundary and never migrates the original tab’s receipt', async () => {
+    sessionStorage.setItem(
+      `agent-side-chat:${userId}:main`,
+      JSON.stringify({
+        anchorJobId: anchor.id,
+        sandboxId: 'sandbox',
+        jobId: 'legacy-copy',
+        threadId: 'legacy-thread',
+      }),
+    );
+    const pinned = { ...anchor, id: 'source-1', turn_no: 1 };
+    vi.mocked(getAgentJob).mockResolvedValue(pinned);
+    vi.mocked(forkAgentJob).mockResolvedValue({ ...copied, fork_anchor_job_id: pinned.id });
+    const { result } = renderHook(() =>
+      useSideChatSession(source, userId, true, [anchor], {
+        id: 'side-chat-new',
+        number: 2,
+        anchor: { jobId: pinned.id, sandboxId: 'sandbox' },
+      }),
+    );
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(forkAgentJob).toHaveBeenCalledExactlyOnceWith(pinned.id, {
+      requestId: expect.any(String),
+    });
+    expect(sessionStorage.getItem(`agent-side-chat:${userId}:main`)).toContain('legacy-copy');
+    expect(localStorage.getItem(sideChatKeys(userId, 'main', 'side-chat-new').session)).toContain(
+      'side-copy',
+    );
+    expect(localStorage.getItem(sideChatStorageKey(userId, 'main'))).toBeNull();
+  });
+
   it('does nothing until selected and coalesces StrictMode creation', async () => {
     const { result, rerender } = renderHook(
       ({ active }) => useSideChatSession(source, userId, active, [anchor]),

@@ -28,9 +28,16 @@ import pytest_asyncio
 
 from cloud_agent.api.deps import get_agent_app_credentials, get_storage
 from cloud_agent.app import create_app
+from cloud_agent.measurement_ingest import Owner
+from cloud_agent.measurement_persistence import (
+    manifest_for_run,
+    prepare_measurement,
+    store_prepared,
+)
+from cloud_agent.measurement_writer import MeasurementWriter
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
-from cloud_agent_host.runner import ControlPlane, deliver_measurements
+from cloud_agent_host.runner import ClaimedJob, ControlPlane, deliver_measurements
 from cloud_agent_profiling import operation_profiling
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
@@ -266,7 +273,13 @@ async def test_a_real_record_travels_from_the_collector_to_the_admin_page(chain)
     )
     assert measurement is not None
     assert operation_profiling.bind(
-        measurement, job_id=JOB_ID, attempt_id=ATTEMPT_ID, sandbox_id="asbx_chain"
+        measurement,
+        job_id=JOB_ID,
+        attempt_id=ATTEMPT_ID,
+        sandbox_id="asbx_chain",
+        runtime_id="claude-code",
+        runtime_version="2.0.0",
+        execution_profile="untrusted-kata-v1",
     )
     operation_profiling.mark(measurement, "supervisor_acquire")
     operation_profiling.mark(measurement, "sandbox_running")
@@ -299,6 +312,9 @@ async def test_a_real_record_travels_from_the_collector_to_the_admin_page(chain)
     assert row["sandbox_id"] == "asbx_chain"
     assert row["operation"] == "attempt.startup"
     assert row["startup_path"] == "new_group"
+    assert row["runtime_id"] == "claude-code"
+    assert row["runtime_version"] == "2.0.0"
+    assert row["execution_profile"] == "untrusted-kata-v1"
     assert row["coverage_scope"] == "host_startup"
     assert row["collection_complete"] is True
     assert row["end_to_end_complete"] is False
@@ -339,7 +355,11 @@ async def test_a_real_record_travels_from_the_collector_to_the_admin_page(chain)
     assert detail_body["collection_complete"] is True
     assert detail_body["end_to_end_complete"] is False
     assert detail_body["host_id"] == "host-that-ran-it"
+    assert detail_body["runtime_id"] == "claude-code"
+    assert detail_body["runtime_version"] == "2.0.0"
+    assert detail_body["execution_profile"] == "untrusted-kata-v1"
     assert summary.json()["groups"][0]["eligible_count"] == 1
+    assert summary.json()["groups"][0]["group"]["runtime_id"] == "claude-code"
     assert [item["run_id"] for item in catalogue.json()["runs"]] == [RUN_ID]
 
 
@@ -368,6 +388,109 @@ async def test_delivering_the_same_record_twice_stores_one(chain):
             measurement.measurement_id,
         )
     assert count == 1
+
+
+async def test_live_delivery_reaches_postgres_without_a_jsonl_sink(chain, monkeypatch):
+    """The optional baseline file is not a prerequisite for Admin storage."""
+    pool, base_url, _sink = chain
+    from cloud_agent_host import runner as runner_mod
+
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_SINK, raising=False)
+    measurement = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION,
+        host="host-that-ran-it",
+    )
+    assert measurement is not None
+    assert operation_profiling.bind(measurement, job_id=JOB_ID)
+    operation_profiling.finish(measurement, outcome="dispatched")
+    job = ClaimedJob(
+        job_id=JOB_ID,
+        thread_id=THREAD_ID,
+        attempt_id=ATTEMPT_ID,
+        attempt_no=1,
+        repo="o/n",
+        base_sha=None,
+        task_prompt="measure",
+        runtime="claude-code",
+        model="m",
+        worker_token=_token(),
+        sandbox_token="unused",
+    )
+
+    runner_mod._enqueue_delivery(measurement, job=job, base_url=base_url, drain_s=0)
+    for _ in range(200):
+        async with pool.acquire() as conn:
+            stored = await conn.fetchval(
+                "SELECT COUNT(*) FROM agent_operation_measurements WHERE measurement_id = $1",
+                measurement.measurement_id,
+            )
+        if stored:
+            break
+        await asyncio.sleep(0.01)
+
+    assert stored == 1
+    assert not os.path.exists(str(_sink))
+
+
+async def test_real_database_congestion_is_bounded_off_the_request_path(chain):
+    """A locked Postgres table costs samples, never an unbounded task list."""
+    pool, _base_url, _sink = chain
+    repository = Storage(pool).operation_measurements
+    writer = MeasurementWriter(max_count=2, max_concurrent=1, timeout_s=5)
+    writer.start()
+    lock = await pool.acquire()
+    transaction = lock.transaction()
+    await transaction.start()
+    await lock.execute("LOCK TABLE agent_operation_measurements IN ACCESS EXCLUSIVE MODE")
+
+    def prepared():
+        measurement = operation_profiling.start_operation(
+            operation=operation_profiling.STARTUP_OPERATION,
+            host="host-that-ran-it",
+        )
+        assert measurement is not None
+        assert operation_profiling.bind(measurement, job_id=JOB_ID)
+        record = operation_profiling.frozen_record(measurement, "dispatched")
+        assert record is not None
+        result, reason = prepare_measurement(
+            record=record,
+            owner=Owner(job_id=JOB_ID),
+            run=manifest_for_run(operation_profiling.active_run()),
+            now=datetime.now(UTC),
+        )
+        assert result is not None, reason
+        return result
+
+    try:
+        first, second, third = (prepared() for _ in range(3))
+        started = asyncio.get_running_loop().time()
+        assert writer.offer(
+            persist=lambda: store_prepared(repository, first),
+            payload=first.payload,
+        )
+        for _ in range(100):
+            if writer.in_flight == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert writer.in_flight == 1
+        assert writer.offer(
+            persist=lambda: store_prepared(repository, second),
+            payload=second.payload,
+        )
+        assert not writer.offer(
+            persist=lambda: store_prepared(repository, third),
+            payload=third.payload,
+        )
+        assert asyncio.get_running_loop().time() - started < 0.25
+        assert writer.pending == 1
+        assert writer.counts.dropped_full == 1
+    finally:
+        await transaction.rollback()
+        await pool.release(lock)
+        counts = await writer.shutdown(timeout_s=2)
+
+    assert counts.stored == 2
+    assert counts.dropped_full == 1
 
 
 async def test_a_token_that_names_no_attempt_is_refused_before_any_write(chain):

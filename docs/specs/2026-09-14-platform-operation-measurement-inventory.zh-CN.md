@@ -1,17 +1,16 @@
 # 平台操作测量清单
 
-创建：2026-09-14；范围与接入契约更新：2026-09-16。
-状态：**启动测量已在 #258 实现；文件与终端的服务端接入（CP 选择 + broker 阶段）
-已实现，浏览器终点仍待实现**。
+创建：2026-09-14；范围与接入契约更新：2026-09-18。
+状态：**#258 已实现三类服务端采集、持久化、Admin API/UI 与有界投递；
+浏览器终点仍待实现，分支尚未合并或部署。**
 基于本地代码检查，扩展 [沙盒启动测量设计](2026-09-14-sandbox-startup-measurement-design.zh-CN.md)。
 
-**2026-09-16 整合修订**：下一轮将 #218 的存储与 Admin 读面接到 #258 的统一采集器，
+**2026-09-18 整合修订**：#218 的存储与 Admin 读面已经接到 #258 的统一采集器，
 具体身份、预算、持久化、版本与交付契约见
 [存储/Admin 整合设计](2026-09-16-operation-measurement-storage-admin-integration-design.zh-CN.md)。
-本地 `e77e3e6` 的服务端扩展还有
-[五项 review 问题](2026-09-16-operation-measurement-e77e3e6-review.zh-CN.md)待修；
-尤其是下文旧版“共用 measurement_id”应按新设计拆为 interaction_id 与每请求唯一
-measurement_id，不能直接作为持久化身份。下文描述的实现不等同于已验收。
+`e77e3e6` 的历史
+[五项 review 问题](2026-09-16-operation-measurement-e77e3e6-review.zh-CN.md)已经关闭；
+身份已拆为 interaction_id 与每请求唯一 measurement_id。
 
 目标：在按需开启的 profiling 实验中，每个主要用户操作都能回答：
 **多久可用、是否成功、卡在哪一步、结果是否新鲜**。
@@ -27,18 +26,17 @@ measurement_id，不能直接作为持久化身份。下文描述的实现不等
 用户要求的首批范围是**沙盒启动、文件浏览/打开、终端打开**。三者共享测量方法，
 区别在入口、成功终点和内部阶段。启动测量通过验收，不等于三类需求都已交付。
 
-截至 2026-09-16 检查，[#258](https://github.com/HarvardMadSys/hybridInference-cloud-agent/pull/258)
-为 OPEN、目标 dev，代码 head 为 3a191e5，CI Gate 通过，尚未合并。这是检查时的状态，
-不代表已部署。下表的服务端扩展以本地后续提交 e77e3e6 为依据，该提交尚未 push；
-§3.1–§3.5 中的浏览器等剩余部分仍是待实现契约。
+截至 2026-09-18，[#258](https://github.com/HarvardMadSys/hybridInference-cloud-agent/pull/258)
+仍为 OPEN、目标 dev，尚未合并或部署。下表以合并最新 dev 后的分支实现为准；
+§3.1–§3.5 中的浏览器部分仍是待实现契约。
 
 | 能力 | 已有内容 | 尚缺内容 |
 | --- | --- | --- |
-| attempt.startup | runner claim 请求前至 prompt 交给 supervisor；四路径、内部阶段、可选采集与完整性协议 | CP 排队、浏览器等待、模型首输出等完整用户边界；真实四路径基线 |
+| attempt.startup | runner claim 请求前至 prompt 交给 supervisor；四路径、内部阶段、可选采集、自动入库与完整性协议 | CP 排队、浏览器等待、模型首输出等完整用户边界；真实四路径线上基线 |
 | files.list / files.open | 独立 helper/stack/docker/live benchmark；环境范围明确的 baseline 文档；**CP 选择 + broker 阶段 + 响应片段透传** | 浏览器起点与内容可见终点、纯缓存命中的覆盖、真实整段开销实测 |
 | terminal.open | 终端现有业务流程；本清单中的边界设计；**list/create/stream 的共同操作身份（`measurement_id`）、PTY 阶段、流式片段的响应头回传** | 前端 xterm 可交互终点、buffer replay 与新输出的区分、首输出观察窗口 |
-| 共享采集器 | 默认关闭、run/期限/单进程预算、call ID、缺失与截断、有界异步导出；**schema v2 通用 `outcome`/`producer`，files/terminals 可选择与应答** | 前端适配器与上报入口、分布式名额分配 |
-| 分析与展示 | 结构化日志、可选 JSONL、启动采集器微基准 | 三类真实操作报告、CP 持久化、Admin 读面；broker 完整采集开销实测 |
+| 共享采集器 | 默认关闭、run/期限/单进程预算、call ID、缺失与截断、有界异步导出；schema v3 通用记录与三类根操作 | 前端适配器、分布式名额分配 |
+| 分析与展示 | 结构化日志、可选 JSONL、Postgres、Admin API/UI、启动采集器微基准 | 三类线上基线与浏览器端到端报告；broker 完整采集开销实测 |
 
 服务端接入的落地位置、关闭路径不变性与明确未交付范围见
 [启动设计 §9.3](2026-09-14-sandbox-startup-measurement-design.zh-CN.md)。
@@ -72,8 +70,9 @@ measurement_id，不能直接作为持久化身份。下文描述的实现不等
 选择发生在 runner 根操作处，所以 `max_operations` 目前是**单进程**预算，
 不是清单要求的跨 replica 统一分配；名额在确认选中 attempt 后才消耗，未选中的
 （空 claim、目标不匹配、claim 失败）会归还。产出写入结构化日志，并在配置
-`AGENT_OPERATION_PROFILING_SINK` 时经**有界队列与后台线程**追加 JSONL，尚无 CP
-持久化与 Admin 读面。目标过滤要求每个配置字段都匹配，未知字段直接拒绝该 run。
+`AGENT_OPERATION_PROFILING_SINK` 时经**有界队列与后台线程**追加 JSONL；同一冻结
+记录另经有界队列进入 Postgres 与 Admin，JSONL 不是入库前提。目标过滤要求每个配置
+字段都匹配，未知字段直接拒绝该 run。
 broker 侧需要同样打开开关并校验继承的选择才会贡献内部阶段。记录按每次调用的
 call ID 判断完整性，并区分缺失、已应答但截断、正常复用而无需执行子阶段；完整协议
 见启动设计 §9.1。日志和 JSONL 都经同一有界后台队列发布。
@@ -93,8 +92,8 @@ max_operations: 200
 sample_rate: 1.0
 ```
 
-这是文件/终端接入后的目标形态；#258 只接入 attempt.startup，尚未实现这些入口和
-sample_rate。终端 create/reattach 是 terminal.open 的路径分类，不重复消耗根操作名额。
+这是当前文件/终端接入使用的形态；`sample_rate` 尚未实现，选择使用显式操作、目标、
+期限与 `max_operations`。终端 list/create/stream_attach 是 terminal.open 的请求分类。
 
 可按测试 session/thread/sandbox 或指定 host 限定目标；host 级实验也必须显式选择，
 不隐式扩大到全部用户。`operations` 选择根操作，其必要子阶段自动继承。缺少范围、
@@ -285,7 +284,8 @@ startup_path 等只属于启动 facts；不得把文件返回成功写成 startu
 schema 升版，保留 #258 的 v1 读取兼容，不在同一 schema_version 下改变旧字段含义。
 无需为了计时先迁移目录或引入新的 tracing 服务。
 
-**已实现**：schema v2（`outcome`、`producer`、`producers`、`timing_sources`）；
+**已实现**：schema v3（`outcome`、`producer`、`producers`、`timing_sources`、
+边界、coverage 与完整性）；
 `startup_outcome` 仅作为 `attempt.startup` 的 v1 别名保留；CP 与 broker 作为 producer
 接入，broker 片段经 `operation_call.py` 校验与应答。**未实现**：浏览器 producer 与其
 轻量适配器（前端仍不上报，因此 browser 片段按缺失计）。
@@ -437,13 +437,14 @@ create 与 reattach 分开聚合；reattach 正常不生成 PTY-spawn 阶段，�
 
 1. **启动切片（#258，已实现）**：保持 §0 的关闭快路径和启动片段回归；真实四路径基线
    与 broker 自身开销仍待补，不因微基准通过就宣称启动已变快。
-2. **公共记录与 CP 接入（已实现）**：schema v2 的通用记录语义、CP 根操作选择与名额、
-   选择缓存与交互关联，以及无 attempt 请求的片段透传。
-3. **文件和终端完整接入（部分实现）**：§3.3–§3.4 的后端阶段（含 files/terminal 引发的
-   sandbox wake）已实现并标为 **server-only** 交付；前端起点、UI/终端终点与本地导出仍
-   待实现，实现前不得声明端到端覆盖。
-4. **首批整体验收（待实现）**：跑 §3.5 的回归与三类真实操作基线，提交原始样本、
-   P50/P95、覆盖率、失败率、on/off 开销和实验 manifest。该步骤完成后才称三类需求完成。
+2. **公共记录与 CP 接入（已实现）**：schema v3、CP 根操作选择与名额、选择缓存、
+   交互关联、有界持久化与 Admin 读面。
+3. **文件和终端服务端接入（已实现）**：§3.3–§3.4 的后端阶段已实现并标为
+   **server-only**；成功、失败与 stream attach 均在测量结束处入库。前端起点、
+   UI/终端终点仍待实现，实现前不得声明端到端覆盖。
+4. **服务端整体验收（已实现）**：覆盖真实 Postgres/HTTP/Admin 链路、无 JSONL 的启动
+   投递、持续 SSE、数据库拥塞、关闭快路径和 collector 开销。三类真实线上操作的
+   P50/P95、覆盖率与失败率是启用该能力后的首轮 profiling 产物，不伪装成代码测试结果。
 
 随后补齐 P0 的提交/会话打开/停止闭环，再按表推进 P1/P2。第一版可用结构化日志、
 有界存储与导出验证，不以完成一个通用 tracing 平台或全量仪表盘作为前置任务。
@@ -457,6 +458,6 @@ workspace，不清生产缓存、不更改用户 shell，不向生产任务注�
 已有 isolated
 helper benchmark 负责解释该层成本，完整产品路径需要浏览器与真实 broker/Kata 测试。
 
-实施 PR 仍按仓库要求完成 `make check`、涉及数据库时的 `make test-db` 及相应真实
-集成测试。当前实现不包含浏览器终点，也不宣称三类端到端基线、缓存命中覆盖或线上
-验证已经完成；哪些能力已交付、哪些仍是缺口以本节和启动设计 §9.3 为准。
+实施 PR 仍按仓库要求完成 `make check`、`make test-db` 及 web 类型/单测/构建检查。
+当前实现不包含浏览器终点，也不宣称三类端到端基线、缓存命中覆盖或线上优化结果；
+哪些能力已交付、哪些仍是缺口以本节和启动设计 §9.3 为准。

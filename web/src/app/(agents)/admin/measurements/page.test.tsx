@@ -51,10 +51,12 @@ vi.mock('@/lib/api/adminMeasurements', () => ({
   listMeasurements: vi.fn(),
   summarizeProfilingRun: vi.fn(),
   getMeasurement: vi.fn(),
+  getMeasurementWriterStatus: vi.fn(),
 }));
 
 import {
   getMeasurement,
+  getMeasurementWriterStatus,
   listMeasurements,
   listProfilingRuns,
   summarizeProfilingRun,
@@ -99,6 +101,9 @@ function row(overrides: Partial<MeasurementSummary> = {}): MeasurementSummary {
     collection_complete: true,
     end_to_end_complete: false,
     startup_path: null,
+    runtime_id: null,
+    runtime_version: null,
+    execution_profile: null,
     observed_at: '2026-09-17T10:00:00Z',
     received_at: '2026-09-17T10:00:01Z',
     ...overrides,
@@ -152,6 +157,9 @@ function group(overrides: Partial<MeasurementSummaryGroup> = {}): MeasurementSum
       boundary_version: 1,
       coverage_scope: 'server_request',
       startup_path: null,
+      runtime_id: null,
+      runtime_version: null,
+      execution_profile: null,
     },
     sample_count: 30,
     interaction_count: 12,
@@ -179,6 +187,24 @@ beforeEach(() => {
   vi.mocked(listMeasurements).mockResolvedValue(page());
   vi.mocked(summarizeProfilingRun).mockResolvedValue({ run_id: 'run-1', groups: [group()] });
   vi.mocked(getMeasurement).mockResolvedValue(detail());
+  vi.mocked(getMeasurementWriterStatus).mockResolvedValue({
+    scope: 'this_control_plane_process',
+    running: true,
+    pending: 0,
+    in_flight: 0,
+    queued_bytes: 0,
+    counts: {
+      stored: 1,
+      duplicate: 0,
+      rejected: 0,
+      conflict: 0,
+      dropped_full: 0,
+      dropped_timeout: 0,
+      dropped_shutdown: 0,
+      failed: 0,
+      reasons: {},
+    },
+  });
 });
 afterEach(cleanup);
 
@@ -195,6 +221,7 @@ describe('admin measurements page', () => {
     expect(listMeasurements).not.toHaveBeenCalled();
     expect(summarizeProfilingRun).not.toHaveBeenCalled();
     expect(getMeasurement).not.toHaveBeenCalled();
+    expect(getMeasurementWriterStatus).not.toHaveBeenCalled();
   });
 
   it('reads the newest experiments and one page of samples, and says what it covers', async () => {
@@ -208,6 +235,7 @@ describe('admin measurements page', () => {
     // A distribution is about one experiment, so nothing asks for one yet.
     expect(summarizeProfilingRun).not.toHaveBeenCalled();
     expect(getMeasurement).not.toHaveBeenCalled();
+    expect(getMeasurementWriterStatus).toHaveBeenCalledTimes(1);
 
     const nav = screen.getByRole('navigation', { name: 'Admin sections' });
     expect(within(nav).getByRole('link', { name: 'Measurements' })).toHaveAttribute(
@@ -218,6 +246,8 @@ describe('admin measurements page', () => {
     expect(screen.getByText('What these measurements cover')).toBeInTheDocument();
     expect(screen.getByText(/Server-side measurements only/)).toBeInTheDocument();
     expect(screen.getByText(/Browser-to-server time is not measured/)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Local persistence writer' })).toBeInTheDocument();
+    expect(screen.getByText('Running')).toBeInTheDocument();
   });
 
   it('links an experiment, and once selected reads its manifest, samples and distribution', async () => {
@@ -364,6 +394,7 @@ describe('admin measurements page', () => {
                   duration_us: 900,
                   source: 'broker',
                   call_id: 'call-1',
+                  outcome: 'failed',
                   truncated: true,
                 },
               ],
@@ -401,6 +432,7 @@ describe('admin measurements page', () => {
     expect(
       within(recordSection).getByText(/Observed up to the collection deadline/),
     ).toBeInTheDocument();
+    expect(within(recordSection).getByText('call call-1')).toBeInTheDocument();
   });
 
   it('does not claim completeness for a record with no reasons listed', async () => {

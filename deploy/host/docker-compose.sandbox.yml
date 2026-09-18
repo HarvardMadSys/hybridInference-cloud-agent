@@ -238,6 +238,9 @@ services:
       # structured fields these services already log.
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
+      AGENT_OPERATION_PROFILING_ENABLED: ${AGENT_OPERATION_PROFILING_ENABLED:-false}
+      AGENT_OPERATION_PROFILING_RUN: ${AGENT_OPERATION_PROFILING_RUN:-}
+      AGENT_OPERATION_PROFILING_SINK: ${AGENT_OPERATION_PROFILING_SINK:-}
       # A broker-only secret. Host enrollment/claim uses its persisted host
       # credential; neither credential is accepted at the other's surface.
       AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?a secret for this host's workspace broker}
@@ -310,6 +313,9 @@ services:
       # structured fields these services already log.
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
+      AGENT_OPERATION_PROFILING_ENABLED: ${AGENT_OPERATION_PROFILING_ENABLED:-false}
+      AGENT_OPERATION_PROFILING_RUN: ${AGENT_OPERATION_PROFILING_RUN:-}
+      AGENT_OPERATION_PROFILING_SINK: ${AGENT_OPERATION_PROFILING_SINK:-}
       # The tunnel, by the name both this container and the sandboxes resolve.
       # Overriding it with the gateway's real address is a mistake worth naming:
       # the runner would reach it and the sandbox — on the closed network —

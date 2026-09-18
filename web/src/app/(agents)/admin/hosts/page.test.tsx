@@ -497,8 +497,10 @@ describe('capacity columns', () => {
     expect(within(row).getByText('35% · 335 / 1000 GiB')).toBeInTheDocument();
     expect(within(row).getByText('650 GiB available')).toBeInTheDocument();
     expect(within(row).getByText('3 running · 7 stopped')).toBeInTheDocument();
-    expect(within(row).getByText('12s ago')).toBeInTheDocument();
-    // The poll-time column it replaced is gone.
+    // Sampling age and the poll-time column are both implementation details,
+    // not fleet facts that need a permanent column.
+    expect(within(row).queryByText('12s ago')).not.toBeInTheDocument();
+    expect(screen.queryByText('Observed')).not.toBeInTheDocument();
     expect(screen.queryByText('Last polled')).not.toBeInTheDocument();
     // Each load figure carries a bar on the chart's own 0-100 scale, so the
     // fleet is read down the column without reading the numbers. The bar is
@@ -528,13 +530,11 @@ describe('capacity columns', () => {
       'Memory',
       'Storage',
       'Sandboxes',
-      'Observed',
       'Actions',
     ]);
-    // The expanded band is one cell across all nine columns; an eight-column
-    // span leaves the last one outside the tinted band.
+    // The expanded band is one cell across all eight columns.
     expect(document.querySelectorAll('td[colspan]')).toHaveLength(1);
-    expect(document.querySelector('td[colspan]')).toHaveAttribute('colspan', '9');
+    expect(document.querySelector('td[colspan]')).toHaveAttribute('colspan', '8');
   });
 
   it('reads a control plane older than the storage block as not measured', async () => {
@@ -556,7 +556,7 @@ describe('capacity columns', () => {
     expect(within(row).queryByText('0 GiB available')).not.toBeInTheDocument();
   });
 
-  it('asks a host for a number of turns and reports it as saved, not applied', async () => {
+  it('asks a host for a number of turns and shows it as applying until the host confirms', async () => {
     mocked.list.mockResolvedValue(pool([host({ slots_total: 4, slots_used: 1 })]));
     mocked.slots.mockResolvedValue(
       pool([host({ slots_total: 4, slots_used: 1, slots_desired: 6 })]),
@@ -576,25 +576,22 @@ describe('capacity columns', () => {
     // the row says the saved one is on its way rather than in force.
     expect(await within(row).findByText('1 / 4 in use')).toBeInTheDocument();
     expect(within(row).getByText('3 free · applying 6')).toBeInTheDocument();
-    expect(within(row).getByText(/takes the new one up on its next heartbeat/)).toBeInTheDocument();
-    // The confirmation says saved, because that is all that has happened.
-    expect(await screen.findByRole('status')).toHaveTextContent(
-      'Saved: runner-a runs at most 6 turns at once',
+    // The row is the whole confirmation: no banner restates it, and the
+    // mechanics (heartbeats, when raising applies) stay on hover, not on
+    // the page.
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(within(row).queryByText(/next heartbeat/)).not.toBeInTheDocument();
+    expect(within(row).getByText('1 / 4 in use').closest('div')).toHaveAttribute(
+      'title',
+      expect.stringContaining('next heartbeat'),
     );
   });
 
-  it('returns a host to its own default', async () => {
+  it('offers no reset: the saved number is simply the number the host has', async () => {
     mocked.list.mockResolvedValue(pool([host({ slots_total: 4, slots_desired: 3 })]));
-    mocked.slots.mockResolvedValue(pool([host({ slots_total: 4, slots_desired: null })]));
     render(<AdminHostsPage />);
 
-    const select = await screen.findByLabelText('Turns at once for runner-a');
-    expect(select).toHaveValue(3);
-    fireEvent.click(screen.getByRole('button', { name: 'Host default' }));
-
-    await waitFor(() => expect(mocked.slots).toHaveBeenCalledWith('runner-a', null));
-    expect(await screen.findByRole('status')).toHaveTextContent('goes back to its own default');
-    // Nothing to reset any more.
+    expect(await screen.findByLabelText('Turns at once for runner-a')).toHaveValue(3);
     expect(screen.queryByRole('button', { name: 'Host default' })).not.toBeInTheDocument();
   });
 
@@ -620,7 +617,12 @@ describe('capacity columns', () => {
     const row = (await screen.findByRole('rowheader', { name: 'runner-a' })).closest('tr')!;
     expect(within(row).getByText('0 / 3 in use')).toBeInTheDocument();
     expect(within(row).getByText('3 free · redeploy to change')).toBeInTheDocument();
-    expect(within(row).getByText(/predates remote limits/)).toBeInTheDocument();
+    // The reason is a hover, not a paragraph under the field.
+    expect(within(row).queryByText(/predates remote limits/)).not.toBeInTheDocument();
+    expect(within(row).getByText('0 / 3 in use').closest('div')).toHaveAttribute(
+      'title',
+      expect.stringContaining('predates remote limits'),
+    );
   });
 
   it('counts turns finishing above a limit that came down', async () => {
@@ -681,11 +683,10 @@ describe('capacity columns', () => {
     expect(within(silent).queryByText('0 running · 0 stopped')).not.toBeInTheDocument();
   });
 
-  it('ages only what the row shows, and never adds an expired source', async () => {
-    // Two environments behind one physical name: one measured twelve seconds
-    // ago, one an hour ago. The expired one contributes nothing to this row —
-    // its containers have been stopped or started since it reported — so it
-    // must be neither added to the count nor allowed to set the row's age.
+  it('uses the current source and never adds an expired source', async () => {
+    // Two environments behind one physical name: one current, one expired.
+    // The expired one contributes nothing to this row — its containers have
+    // been stopped or started since it reported — so it must not be added.
     mocked.list.mockResolvedValue(
       pool([
         host({
@@ -709,13 +710,11 @@ describe('capacity columns', () => {
     render(<AdminHostsPage />);
 
     const row = (await screen.findByRole('rowheader', { name: 'gpu-box' })).closest('tr')!;
-    // The freshest observation is what the machine's load cells show, and it
-    // is the only thing on the row whose age is being described.
+    // The freshest observation is what the machine's load cells show.
     expect(within(row).getByText('5%')).toBeInTheDocument();
-    expect(within(row).getByText('12s ago')).toBeInTheDocument();
     // The row still says that something on it has expired, and the count is a
     // lower bound rather than a total that includes an hour-old reading.
-    expect(within(row).getByText('stale')).toBeInTheDocument();
+    expect(within(row).getByText('Capacity stale')).toBeInTheDocument();
     expect(within(row).getByText('≥10 observed · Partial')).toBeInTheDocument();
     expect(within(row).getByText(reasonLabel('source_stale'))).toBeInTheDocument();
     // The expired environment is still named, with its own last count.
@@ -833,21 +832,29 @@ describe('capacity panel', () => {
     expect(screen.queryByText('Capacity · box-b')).not.toBeInTheDocument();
   });
 
-  it('does not repeat the row age or the bucket width in the panel header', async () => {
-    // Both were already on screen. The age is the Observed column, which is
-    // the same number advanced from the same instant; the bucket width is what
-    // the sentence under the charts already says in words. Two more labels in
-    // a header are two more things to read that say nothing new.
+  it('does not show sampling implementation details around the charts', async () => {
     render(<AdminHostsPage />);
     await openPanel();
 
     await vi.waitFor(() =>
       expect(screen.getByRole('img', { name: 'CPU usage (%)' })).toBeInTheDocument(),
     );
-    expect(screen.getByText('12s ago')).toBeInTheDocument();
     expect(screen.queryByText(/^Oldest observation:/)).not.toBeInTheDocument();
     expect(screen.queryByText(/^Bucket:/)).not.toBeInTheDocument();
-    expect(screen.getByText(/one observation, 60s apart/)).toBeInTheDocument();
+    expect(screen.queryByText(/Each point is one observation/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/CPU averages the interval/)).not.toBeInTheDocument();
+  });
+
+  it('does not repeat a healthy single-source sandbox count in the panel', async () => {
+    render(<AdminHostsPage />);
+    await openPanel();
+
+    const row = (await screen.findByRole('rowheader', { name: 'runner-a' })).closest('tr')!;
+    expect(within(row).getByText('3 running · 7 stopped')).toBeInTheDocument();
+
+    const panel = panelFor();
+    expect(within(panel).getByText('Retained sandboxes')).not.toBeVisible();
+    expect(within(panel).getByText('example-agent-kata')).not.toBeVisible();
   });
 
   it('reads one hour by default and switches window on request', async () => {
@@ -1231,11 +1238,11 @@ describe('capacity panel', () => {
 
     const panel = panelFor();
     expect((await screen.findAllByText(/History is accumulating/)).length).toBe(2);
-    expect(within(panel).getByText('Retained sandboxes')).toBeInTheDocument();
-    expect(within(panel).getByText('≥3 observed · Partial')).toBeInTheDocument();
-    expect(within(panel).getByText(/outside the fixed vocabulary/)).toBeInTheDocument();
+    expect(within(panel).getByText('Retained sandboxes')).toBeVisible();
+    expect(within(panel).getByText('≥3 observed · Partial')).toBeVisible();
+    expect(within(panel).getByText(/outside the fixed vocabulary/)).toBeVisible();
     // The enrollment that contributed the count is named, not just summed.
-    expect(within(panel).getByText('example-agent-kata')).toBeInTheDocument();
+    expect(within(panel).getByText('example-agent-kata')).toBeVisible();
   });
 });
 
@@ -1252,7 +1259,7 @@ describe('polling and actions', () => {
     vi.restoreAllMocks();
   });
 
-  it('keeps the last good pool when a background refresh fails, and its age keeps moving', async () => {
+  it('keeps the last good pool when a background refresh fails', async () => {
     vi.useFakeTimers();
     const clock = { ms: 1_000 };
     const spy = vi.spyOn(performance, 'now').mockImplementation(() => clock.ms);
@@ -1260,7 +1267,6 @@ describe('polling and actions', () => {
       mocked.list.mockResolvedValueOnce(pool([host({ capacity: capacity() })]));
       render(<AdminHostsPage />);
       await vi.waitFor(() => expect(screen.getByText('runner-a')).toBeInTheDocument());
-      expect(screen.getByText('12s ago')).toBeInTheDocument();
 
       mocked.list.mockRejectedValue(new Error('gateway down'));
       clock.ms += 30_000;
@@ -1272,12 +1278,6 @@ describe('polling and actions', () => {
       expect(screen.getByText('37%')).toBeInTheDocument();
       expect(screen.queryByText('gateway down')).not.toBeInTheDocument();
       expect(screen.getByText(/Refresh failed/)).toBeInTheDocument();
-
-      // The age advances on local monotonic time; it never freezes at 12s.
-      expect(screen.getByText('42s ago')).toBeInTheDocument();
-      clock.ms += 5_000;
-      await vi.advanceTimersByTimeAsync(5_000);
-      expect(screen.getByText('47s ago')).toBeInTheDocument();
     } finally {
       spy.mockRestore();
     }
@@ -1285,9 +1285,8 @@ describe('polling and actions', () => {
 
   it('expires a reading locally when the pool goes quiet', async () => {
     // The server's `freshness` describes the moment it answered. Two minutes
-    // of failing polls later the reading is 132 seconds old, and a page that
-    // kept calling it fresh — while the age beside it climbed — would be the
-    // one combination that looks current and is not.
+    // of failing polls later the reading is 132 seconds old, and the page must
+    // stop presenting it as current even though it no longer shows a live age.
     vi.useFakeTimers();
     const clock = { ms: 1_000 };
     const spy = vi.spyOn(performance, 'now').mockImplementation(() => clock.ms);
@@ -1297,14 +1296,13 @@ describe('polling and actions', () => {
       );
       render(<AdminHostsPage />);
       await vi.waitFor(() => expect(screen.getByText('runner-a')).toBeInTheDocument());
-      expect(screen.queryByText('stale')).not.toBeInTheDocument();
+      expect(screen.queryByText('Capacity stale')).not.toBeInTheDocument();
 
       mocked.list.mockRejectedValue(new Error('gateway down'));
       clock.ms += 120_000;
       await vi.advanceTimersByTimeAsync(120_000);
 
-      expect(screen.getByText('2m ago')).toBeInTheDocument();
-      expect(screen.getByText('stale')).toBeInTheDocument();
+      expect(screen.getByText('Capacity stale')).toBeInTheDocument();
     } finally {
       spy.mockRestore();
     }

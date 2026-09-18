@@ -827,12 +827,16 @@ rolling-deploy compatibility for writers that no longer existed: the
 sandbox mode, the `retained_followup_eligible` cutover flag and the two
 `native_turn_no` triggers. The rewritten baseline adds the composite foreign
 keys and CHECKs, replaces `included_job_ids` with `agent_snapshot_jobs`, and
-drops the residue; its module docstring is the design record. Every database
-that had been stamped with the old chain was rebuilt from it — staging held one
-internal user's test runs and production the retired on-call bot's — so the
-rows above that mention `0001_baseline`, `0002_host_pool`, `0003_attempt_host`,
-`0004_enroll_token_host`, `0005_grants_and_audit`, `0023`–`0025`,
-`0026_attempt_ledger` or `0029_identity_namespace` describe history, not files
-in the tree. The rebuild itself is runbooked in `docs/operations.md`
-§ *Rebuilding the agent database*, including the state that has to survive it;
-`docs/minimal-identity.md` carries the identity-binding half.
+drops the residue; its module docstring is the design record. The September 10 record originally
+stated that every old-chain database had been rebuilt. The P6 inventory on
+September 18 disproved that: production still held jobs, messages and host state
+at `0025_retained_followup_gate`. The old revision files are no longer in this
+tree, but that surviving database still requires an explicit transition.
+
+For this supported revision, `scripts/convert_legacy_database_copy.py` preserves
+the entire original schema and converts a separately restored copy. See
+`docs/operations.md` § *Preserving an old-chain database* and the conversion
+contract in `docs/plans/2026-09-18-legacy-database-copy.md`. The selected-state
+rebuild below is only appropriate when discarding task history is intentional;
+it is not a substitute for that conversion. `docs/minimal-identity.md` carries
+the separate identity-binding requirements.

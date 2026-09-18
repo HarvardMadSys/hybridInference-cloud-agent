@@ -1,9 +1,11 @@
 /** UI locators are shared across windows; request IDs belong to the record. */
-export function sideChatKeys(userId: string, threadId: string) {
+export function sideChatKeys(userId: string, threadId: string, sideId = 'side-chat') {
   const scope = `${encodeURIComponent(userId)}:${encodeURIComponent(threadId)}`;
+  // Keep the original tab's locator, including any in-flight fork request.
+  const suffix = sideId === 'side-chat' ? '' : `:${encodeURIComponent(sideId)}`;
   return {
-    session: `agents.sideChat.session.${scope}`,
-    draft: `agents.sideChat.draft.${scope}`,
+    session: `agents.sideChat.session.${scope}${suffix}`,
+    draft: `agents.sideChat.draft.${scope}${suffix}`,
   };
 }
 

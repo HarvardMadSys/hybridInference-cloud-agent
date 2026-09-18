@@ -44,7 +44,7 @@ terminal state: what a running turn has produced so far is not what it will say,
 and a card that rewrites itself under the pointer is worse than one that waits.
 
 Nothing hidden is ever previewed. Chain-of-thought, tool arguments, tool output
-and run logs stay out; the preview repeats text you could already read in the
+and runtime records stay out; the preview repeats text you could already read in the
 transcript, capped at fifty characters for the question and a hundred and twenty
 for the reply.
 

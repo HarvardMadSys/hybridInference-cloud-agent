@@ -3,8 +3,9 @@
 // The trajectory: every stored event of the conversation, projected into the
 // steps a reader can inspect.
 //
-// Tool results join their calls; runtime notifications live in Run logs outside
-// the execution overview. Unknown events remain visible; export keeps every row.
+// Tool results join their calls; runtime records stay out of the execution
+// overview entirely, reachable per turn through Run details. Unknown events
+// remain visible; export keeps every row.
 // Selecting a row no longer opens an inline panel: the detail goes to the
 // right-hand inspector, so the list keeps its place while a step is read.
 //
@@ -680,9 +681,7 @@ export function TrajectoryView({
 }) {
   const [mode, setMode] = useState<TimelineMode>('steps');
   const [range, setRange] = useState<DomainRange | null>(null);
-  const [showLogs, setShowLogs] = useState(false);
   const steps = useMemo(() => allSteps.filter((step) => !step.diagnostic), [allSteps]);
-  const logs = useMemo(() => allSteps.filter((step) => step.diagnostic), [allSteps]);
   const visible = useMemo(() => filterSteps(steps, query), [steps, query]);
   const model = useMemo(() => deriveTimeline(steps, mode), [steps, mode]);
   const timed = useMemo(() => hasRecordedTiming(steps), [steps]);
@@ -691,10 +690,6 @@ export function TrajectoryView({
     [query, visible],
   );
   const focused = useMemo(() => (range === null ? null : focusKeys(model, range)), [model, range]);
-
-  useEffect(() => {
-    if (selectedKey && logs.some((step) => step.key === selectedKey)) setShowLogs(true);
-  }, [logs, selectedKey]);
 
   useEffect(() => {
     if (!focusJobId) return;
@@ -837,15 +832,6 @@ export function TrajectoryView({
           ) : null}
           <button
             type="button"
-            aria-expanded={showLogs}
-            aria-controls="trajectory-run-logs"
-            onClick={() => setShowLogs((value) => !value)}
-            className="shrink-0 rounded-lg border border-gray-200 px-2.5 py-1.5 text-[12px] text-gray-600 dark:border-white/10 dark:text-gray-400"
-          >
-            Run logs ({logs.reduce((count, step) => count + step.sourceEvents.length, 0)})
-          </button>
-          <button
-            type="button"
             onClick={download}
             title="Download session log"
             className="shrink-0 rounded-lg border border-gray-200 dark:border-white/10 px-2.5 py-1.5 text-[12px] text-gray-600 dark:text-gray-400 transition-colors hover:border-gray-300 dark:hover:border-white/20 hover:text-gray-900 dark:hover:text-gray-100"
@@ -854,35 +840,6 @@ export function TrajectoryView({
           </button>
         </div>
       </div>
-
-      {showLogs ? (
-        <div
-          id="trajectory-run-logs"
-          aria-label="Run logs"
-          className="max-h-64 overflow-y-auto rounded-lg border border-gray-200 dark:border-white/10"
-        >
-          <p className="px-3 py-2 text-[12px] text-gray-500 dark:text-gray-400">
-            Runtime records are kept here and in Session log. They do not count as execution steps.
-          </p>
-          {logs.map((step) => (
-            <button
-              key={step.key}
-              type="button"
-              data-step-key={step.key}
-              onClick={() => onSelectStep(step.key)}
-              aria-current={selectedKey === step.key ? 'true' : undefined}
-              className="flex w-full gap-3 border-t border-gray-100 px-3 py-2 text-left text-[12px] hover:bg-gray-50 dark:border-white/5 dark:hover:bg-white/5"
-            >
-              <span className="shrink-0">
-                Turn {step.turnNo} · Attempt {step.attemptId}
-              </span>
-              <span className="min-w-0 truncate">
-                {step.label} · {step.detail}
-              </span>
-            </button>
-          ))}
-        </div>
-      ) : null}
 
       <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-white/10">
         {visible.map((step, index) => {
@@ -993,7 +950,7 @@ export function TrajectoryView({
         {visible.length === 0 ? (
           <p className="px-3 py-6 text-center text-[12px] text-gray-500 dark:text-gray-400">
             {steps.length === 0
-              ? 'No execution steps recorded yet. Runtime activity is available in Run logs.'
+              ? 'No execution steps recorded yet. Runtime records for a turn are in Run details.'
               : `No step matches “${query}”.`}
           </p>
         ) : null}

@@ -53,11 +53,10 @@ DELIVERY_TIMEOUT_S: Final = 10.0
 #: a destination that is not answering.
 DELIVERY_DRAIN_S: Final = 2.0
 
-#: How long a process waits at a mid-turn handoff, where it will go on working
-#: afterwards. Shorter than the exit bound on purpose: nothing is lost by
-#: returning early, because the record is already queued and the turn's own
-#: exit sweeps for it again.
-DELIVERY_HANDOFF_DRAIN_S: Final = 0.25
+#: A prompt handoff starts delivery but never waits for it.  Waiting here is
+#: hidden user latency after the startup boundary and before model output is
+#: read; the turn's exit performs the bounded drain.
+DELIVERY_HANDOFF_DRAIN_S: Final = 0.0
 
 #: Statuses worth trying again: the destination asked for time, or a proxy in
 #: front of it did. Everything else is a statement about the request.

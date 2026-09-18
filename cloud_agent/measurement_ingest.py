@@ -36,6 +36,7 @@ from cloud_agent_profiling.operation_profiling import (
     MAX_REMOTE_STAGES,
     MAX_RUN_ID_CHARS,
     MAX_SPANS,
+    RUN_ID_PATTERN,
 )
 
 #: Longest record accepted, in bytes. The collector's own ceilings bound the
@@ -68,6 +69,7 @@ ALLOWED_FACTS: Final = frozenset(
         "workspace_action",
         "runtime_id",
         "runtime_version",
+        "execution_profile",
         "host",
         "worker_id",
         "job_id",
@@ -127,6 +129,8 @@ KNOWN_RECORD_KEYS: Final = frozenset(
         "request_kind",
         "boundary_version",
         "coverage_scope",
+        "start_boundary",
+        "end_boundary",
         "producer",
         "producer_instance_id",
         "duration_us",
@@ -160,6 +164,9 @@ KNOWN_RECORD_KEYS: Final = frozenset(
         "resident_action",
         "context_status",
         "workspace_action",
+        "runtime_id",
+        "runtime_version",
+        "execution_profile",
     }
 )
 
@@ -238,6 +245,9 @@ class StoredMeasurement:
     collection_complete: bool
     end_to_end_complete: bool
     startup_path: str | None
+    runtime_id: str | None
+    runtime_version: str | None
+    execution_profile: str | None
     observed_at: datetime
     record: dict[str, Any]
     payload_hash: str
@@ -268,6 +278,9 @@ class StoredMeasurement:
             "collection_complete": self.collection_complete,
             "end_to_end_complete": self.end_to_end_complete,
             "startup_path": self.startup_path,
+            "runtime_id": self.runtime_id,
+            "runtime_version": self.runtime_version,
+            "execution_profile": self.execution_profile,
             "observed_at": self.observed_at,
             "record": self.record,
             "payload_hash": self.payload_hash,
@@ -294,6 +307,24 @@ def _require(record: Mapping[str, Any], key: str, *, limit: int | None = None) -
     if limit is not None and len(text) > limit:
         raise MeasurementRejected(f"{key} is longer than {limit} characters")
     return text
+
+
+def _require_run_id(record: Mapping[str, Any], key: str = "run_id") -> str:
+    """Return a bounded run id that is safe as an Admin path segment."""
+    run_id = _require(record, key, limit=MAX_RUN_ID_CHARS)
+    if RUN_ID_PATTERN.fullmatch(run_id) is None:
+        raise MeasurementRejected(f"{key} must contain only letters, numbers, '.', '_', ':' or '-'")
+    return run_id
+
+
+def _require_measurement_id(record: Mapping[str, Any]) -> str:
+    """Return a measurement id addressable by the Admin detail route."""
+    measurement_id = _require(record, "measurement_id", limit=MAX_MEASUREMENT_ID_CHARS)
+    if RUN_ID_PATTERN.fullmatch(measurement_id) is None:
+        raise MeasurementRejected(
+            "measurement_id must contain only letters, numbers, '.', '_', ':' or '-'"
+        )
+    return measurement_id
 
 
 def _bounded_count(record: Mapping[str, Any], key: str, limit: int) -> int:
@@ -419,6 +450,7 @@ def _validate_structure(record: Mapping[str, Any]) -> None:
         ("spans", MAX_SPANS),
         ("milestones", MAX_SPANS),
         ("missing_fragments", MAX_REMOTE_STAGES),
+        ("missing_producers", MAX_REMOTE_STAGES),
         ("truncated_fragments", MAX_REMOTE_STAGES),
     ):
         value = record.get(key, [])
@@ -430,6 +462,71 @@ def _validate_structure(record: Mapping[str, Any]) -> None:
         for item in record.get(key) or []:
             if not isinstance(item, Mapping):
                 raise MeasurementRejected(f"{key} entries must be objects")
+
+
+def _contains_truncated(items: Any) -> bool:
+    """Return whether a nested stage or span says its duration was truncated."""
+    if not isinstance(items, list):
+        return False
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("truncated") is True or _contains_truncated(item.get("children")):
+            return True
+    return False
+
+
+def _validate_completeness(
+    record: Mapping[str, Any],
+    *,
+    outcome: str,
+    collection_complete: bool,
+    end_to_end_complete: bool,
+) -> None:
+    """Reject records whose summary flag contradicts their own evidence."""
+    alias = record.get("measurement_complete")
+    if alias is not None:
+        if not isinstance(alias, bool):
+            raise MeasurementRejected("measurement_complete must be a boolean")
+        if alias != collection_complete:
+            raise MeasurementRejected("measurement_complete contradicts collection_complete")
+    truncated = record.get("truncated", False)
+    if not isinstance(truncated, bool):
+        raise MeasurementRejected("truncated must be a boolean")
+    boundary_frozen = record.get("boundary_frozen")
+    if boundary_frozen is not None and not isinstance(boundary_frozen, bool):
+        raise MeasurementRejected("boundary_frozen must be a boolean")
+    dropped = record.get("dropped_spans", 0)
+    if not isinstance(dropped, int) or isinstance(dropped, bool) or dropped < 0:
+        raise MeasurementRejected("dropped_spans must be a non-negative integer")
+    if dropped > MAX_SPANS:
+        raise MeasurementRejected(f"dropped_spans exceeds {MAX_SPANS}")
+    if end_to_end_complete and not collection_complete:
+        raise MeasurementRejected(
+            "end_to_end_complete cannot be true when collection is incomplete"
+        )
+    if not collection_complete:
+        return
+    contradictory: list[str] = []
+    if outcome == "incomplete":
+        contradictory.append("incomplete outcome")
+    if (
+        truncated
+        or _contains_truncated(record.get("stages"))
+        or _contains_truncated(record.get("spans"))
+    ):
+        contradictory.append("truncated timing")
+    if dropped:
+        contradictory.append("dropped spans")
+    if boundary_frozen is False:
+        contradictory.append("unfrozen boundary")
+    for key in ("missing_fragments", "missing_producers", "truncated_fragments"):
+        if record.get(key):
+            contradictory.append(key)
+    if _from_either(record, "profiling_stopped"):
+        contradictory.append("profiling_stopped")
+    if contradictory:
+        raise MeasurementRejected("collection_complete contradicts " + ", ".join(contradictory))
 
 
 def validate_measurement(
@@ -482,8 +579,17 @@ def validate_measurement(
     end_to_end_complete = record.get("end_to_end_complete", False)
     if not isinstance(end_to_end_complete, bool):
         raise MeasurementRejected("end_to_end_complete must be a boolean")
+    _validate_completeness(
+        record,
+        outcome=outcome,
+        collection_complete=collection_complete,
+        end_to_end_complete=end_to_end_complete,
+    )
 
     startup_path = _from_either(record, "startup_path")
+    runtime_id = _from_either(record, "runtime_id")
+    runtime_version = _from_either(record, "runtime_version")
+    execution_profile = _from_either(record, "execution_profile")
     # Unknown top-level fields are refused, not dropped. Silently discarding
     # one would leave the producer believing it had been stored, and the field
     # it chose might be exactly the content this promise is about.
@@ -504,15 +610,14 @@ def validate_measurement(
     resolved_owner = owner or Owner()
 
     return StoredMeasurement(
-        measurement_id=_require(record, "measurement_id", limit=MAX_MEASUREMENT_ID_CHARS),
+        measurement_id=_require_measurement_id(record),
         # An operation with no interaction of its own is its own interaction,
         # which is what the collector states; a producer that omits the field
         # is taken at that same meaning rather than refused.
-        interaction_id=str(
-            record.get("interaction_id")
-            or _require(record, "measurement_id", limit=MAX_MEASUREMENT_ID_CHARS)
-        )[:MAX_MEASUREMENT_ID_CHARS],
-        profiling_run_id=_require(record, "profiling_run_id", limit=MAX_RUN_ID_CHARS),
+        interaction_id=str(record.get("interaction_id") or _require_measurement_id(record))[
+            :MAX_MEASUREMENT_ID_CHARS
+        ],
+        profiling_run_id=_require_run_id(record, "profiling_run_id"),
         schema_version=int(schema_version),
         operation=operation,
         request_kind=str(_from_either(record, "request_kind") or "")[:MAX_ATTRIBUTE_CHARS],
@@ -525,6 +630,13 @@ def validate_measurement(
         collection_complete=collection_complete,
         end_to_end_complete=end_to_end_complete,
         startup_path=None if startup_path is None else str(startup_path)[:MAX_ATTRIBUTE_CHARS],
+        runtime_id=None if runtime_id is None else str(runtime_id)[:MAX_ATTRIBUTE_CHARS],
+        runtime_version=(
+            None if runtime_version is None else str(runtime_version)[:MAX_ATTRIBUTE_CHARS]
+        ),
+        execution_profile=(
+            None if execution_profile is None else str(execution_profile)[:MAX_ATTRIBUTE_CHARS]
+        ),
         observed_at=_timestamp(record, "observed_at"),
         record=sanitized,
         # Hashed over the record as it will be stored, so a retry of one record
@@ -588,7 +700,7 @@ def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:
     """
     if not isinstance(run, Mapping):
         raise MeasurementRejected("run must be an object")
-    run_id = _require(run, "run_id", limit=MAX_RUN_ID_CHARS)
+    run_id = _require_run_id(run)
     raw_operations = run.get("operations")
     if not isinstance(raw_operations, list) or not raw_operations:
         raise MeasurementRejected("run.operations must be a non-empty list")

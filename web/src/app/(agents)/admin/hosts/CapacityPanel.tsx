@@ -85,6 +85,15 @@ export default function CapacityPanel({
     if (line.reason !== null) namedBySource.add(line.reason);
   }
   const panelReasons = sandboxes.reasons.filter((reason) => !namedBySource.has(reason));
+  // A complete count from one source is already visible in the table row.
+  // Keep this section for provenance that changes how the total is read:
+  // several sources, incomplete coverage, stale data, or an explanation.
+  const showSandboxDiagnostics =
+    sandboxes.perSource.length > 1 ||
+    sandboxes.partial ||
+    sandboxes.stale ||
+    sandboxes.explanation !== null ||
+    sandboxes.reasons.length > 0;
   const switcherId = `${id}-source`;
 
   return (
@@ -161,7 +170,7 @@ export default function CapacityPanel({
 
       {stale && (
         <p className="mt-3 text-xs text-amber-700 dark:text-amber-300">
-          The last observation is stale. Its value and age are still shown, and the curve is not
+          The last observation is stale. Its last values remain visible, and the curve is not
           extended to now.
         </p>
       )}
@@ -227,15 +236,13 @@ export default function CapacityPanel({
           {loading && (
             <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">Refreshing history…</p>
           )}
-          <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
-            Each point is one observation, {history.resolution_seconds}s apart: CPU averages the
-            interval before it, memory is instantaneous. Read{' '}
-            {formatUtcTimestamp(history.observed_at)}.
-          </p>
         </>
       )}
 
-      <div className="mt-5 border-t border-gray-200 pt-4 dark:border-white/10">
+      <div
+        hidden={!showSandboxDiagnostics}
+        className="mt-5 border-t border-gray-200 pt-4 dark:border-white/10"
+      >
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
           <h4 className="text-xs font-semibold text-gray-900 dark:text-gray-100">
             Retained sandboxes

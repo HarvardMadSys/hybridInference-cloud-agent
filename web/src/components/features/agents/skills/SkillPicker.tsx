@@ -6,6 +6,7 @@ import { getErrorMessage } from '@/lib/utils/errors';
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
+import { useT } from '@/components/providers';
 import { listSkills, type SelectedSkillApi, type SkillSummaryApi } from '@/lib/api/skills';
 import {
   SkillDialog,
@@ -16,17 +17,25 @@ import {
   SKILL_PRIMARY,
 } from './SkillDialog';
 
-function SelectionDialog({
+/**
+ * The selection surface itself, separate from any one button that opens it.
+ *
+ * The composer reaches it from the plus menu and has no picker button of its
+ * own; the follow-up composer still uses `SkillPicker` below. Both render this
+ * same dialog, so the two surfaces cannot drift apart.
+ */
+export function SkillSelectionDialog({
   selected,
   onApply,
   onClose,
-  limits,
+  limits = DEFAULT_SKILL_LIMITS,
 }: {
-  limits: SkillLimits;
+  limits?: SkillLimits;
   selected: SelectedSkillApi[];
   onApply: (skills: SelectedSkillApi[]) => void;
   onClose: () => void;
 }) {
+  const t = useT();
   const [skills, setSkills] = useState<SkillSummaryApi[]>([]);
   const [checked, setChecked] = useState(() => new Set(selected.map((skill) => skill.id)));
   const [loading, setLoading] = useState(true);
@@ -60,19 +69,20 @@ function SelectionDialog({
   const invalid = missing.some((skill) => checked.has(skill.id));
   return (
     <SkillDialog
-      title="Skills"
-      description="For this conversation"
+      title={t('skills.title')}
+      description={t('skills.forThisConversation')}
       onClose={onClose}
+      dismissLabel={t('skills.dismiss')}
       footer={
         <>
           <Link
             href="/integrations"
             className="mr-auto text-sm text-gray-500 underline dark:text-gray-400"
           >
-            Manage skills
+            {t('skills.manage')}
           </Link>
           <button type="button" onClick={onClose} className={SKILL_BUTTON}>
-            Cancel
+            {t('skills.cancel')}
           </button>
           <button
             type="button"
@@ -82,14 +92,14 @@ function SelectionDialog({
             onClick={() => onApply(skills.filter((skill) => checked.has(skill.id)))}
             className={SKILL_PRIMARY}
           >
-            Apply
+            {t('skills.apply')}
           </button>
         </>
       }
     >
       {loading ? (
         <p role="status" className="py-5 text-sm text-gray-500 dark:text-gray-400">
-          Loading skills…
+          {t('skills.loading')}
         </p>
       ) : error ? (
         <>
@@ -99,7 +109,7 @@ function SelectionDialog({
             onClick={() => setRetry((value) => value + 1)}
             className={`${SKILL_BUTTON} mt-3`}
           >
-            Try again
+            {t('skills.tryAgain')}
           </button>
         </>
       ) : (
@@ -115,7 +125,7 @@ function SelectionDialog({
                 </span>
                 {!available.has(skill.id) ? (
                   <span className="mt-0.5 block text-xs text-gray-500 dark:text-gray-400">
-                    Removed from library. Turn off to continue.
+                    {t('skills.removed')}
                   </span>
                 ) : null}
               </div>
@@ -134,19 +144,15 @@ function SelectionDialog({
             </div>
           ))}
           {!skills.length && !missing.length ? (
-            <p className="py-5 text-sm text-gray-500 dark:text-gray-400">
-              Add skills in Integrations to make them available here.
-            </p>
+            <p className="py-5 text-sm text-gray-500 dark:text-gray-400">{t('skills.empty')}</p>
           ) : null}
         </div>
       )}
       {checked.size > limits.max_selected ? (
-        <SkillErrorMessage message={`Select at most ${limits.max_selected} skills.`} />
+        <SkillErrorMessage message={t('skills.atMost', { limit: limits.max_selected })} />
       ) : null}
-      {oversized ? (
-        <SkillErrorMessage message="Unselect a skill to fit the combined instruction size limit." />
-      ) : null}
-      <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">Applies to your next message.</p>
+      {oversized ? <SkillErrorMessage message={t('skills.oversized')} /> : null}
+      <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">{t('skills.appliesNext')}</p>
     </SkillDialog>
   );
 }
@@ -162,6 +168,7 @@ export function SkillPicker({
   disabled?: boolean;
   limits?: SkillLimits;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   return (
     <>
@@ -169,12 +176,12 @@ export function SkillPicker({
         type="button"
         disabled={disabled}
         onClick={() => setOpen(true)}
-        aria-label={`Skills for this conversation: ${selected.length} selected`}
+        aria-label={t('skills.pickerLabel', { count: selected.length })}
         aria-haspopup="dialog"
         className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/5"
       >
         <SkillIcon />
-        Skills
+        {t('skills.title')}
         {selected.length ? (
           <span className="rounded bg-gray-100 px-1 text-[10px] dark:bg-white/10">
             {selected.length}
@@ -182,7 +189,7 @@ export function SkillPicker({
         ) : null}
       </button>
       {open ? (
-        <SelectionDialog
+        <SkillSelectionDialog
           limits={limits}
           selected={selected}
           onClose={() => setOpen(false)}

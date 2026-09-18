@@ -17,6 +17,7 @@ import { fetchWithAuth, jsonOrThrow } from './client';
 
 const RUNS = '/admin/agent/profiling-runs';
 const MEASUREMENTS = '/admin/agent/measurements';
+const WRITER = '/admin/agent/measurement-writer';
 
 /**
  * The dimensions the summary groups by.
@@ -33,7 +34,10 @@ export type MeasurementGroupBy =
   | 'request_kind'
   | 'boundary_version'
   | 'coverage_scope'
-  | 'startup_path';
+  | 'startup_path'
+  | 'runtime_id'
+  | 'runtime_version'
+  | 'execution_profile';
 
 /** One admission instance of an experiment: the budget one replica enforced. */
 export interface ProfilingAdmissionInstance {
@@ -80,7 +84,7 @@ export interface MeasurementSummary {
   thread_id: string | null;
   sandbox_id: string | null;
   host_id: string | null;
-  attempt_id: string | null;
+  attempt_id: number | null;
   lease_generation: number | null;
   operation: string;
   request_kind: string;
@@ -97,6 +101,9 @@ export interface MeasurementSummary {
   end_to_end_complete: boolean;
   /** One of the four startup paths, or `unknown` when the actions did not say. */
   startup_path: string | null;
+  runtime_id: string | null;
+  runtime_version: string | null;
+  execution_profile: string | null;
   observed_at: string;
   received_at: string;
 }
@@ -160,6 +167,8 @@ export interface MeasurementRecord {
   operation: string;
   boundary_version: number;
   coverage_scope: string;
+  start_boundary?: string;
+  end_boundary?: string;
   /** Stated by the record itself; false wherever no browser producer was joined. */
   end_to_end_complete: boolean;
   producer: string;
@@ -226,6 +235,25 @@ export interface MeasurementSummaryGroup {
 export interface MeasurementSummaryResponse {
   run_id: string;
   groups: MeasurementSummaryGroup[];
+}
+
+export interface MeasurementWriterStatus {
+  scope: 'this_control_plane_process';
+  running: boolean;
+  pending: number;
+  in_flight: number;
+  queued_bytes: number;
+  counts: {
+    stored: number;
+    duplicate: number;
+    rejected: number;
+    conflict: number;
+    dropped_full: number;
+    dropped_timeout: number;
+    dropped_shutdown: number;
+    failed: number;
+    reasons: Record<string, number>;
+  };
 }
 
 /** One page of measurement summaries, newest first. */
@@ -324,5 +352,13 @@ export async function getMeasurement(
       signal,
       cache: 'no-store',
     }),
+  );
+}
+
+export async function getMeasurementWriterStatus(
+  signal?: AbortSignal,
+): Promise<MeasurementWriterStatus> {
+  return jsonOrThrow<MeasurementWriterStatus>(
+    await fetchWithAuth(config.apiBase, WRITER, { signal, cache: 'no-store' }),
   );
 }

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   getMeasurement,
+  getMeasurementWriterStatus,
   listMeasurements,
   listProfilingRuns,
   summarizeProfilingRun,
@@ -107,6 +108,14 @@ describe('admin measurements client', () => {
     const controller = new AbortController();
     await getMeasurement('msm_1 2', controller.signal);
     expect(fetch.mock.calls[0][1]).toBe('/admin/agent/measurements/msm_1%202');
+    expect(fetch.mock.calls[0][2]).toEqual({ signal: controller.signal, cache: 'no-store' });
+  });
+
+  it('reads the local writer counters without a cache', async () => {
+    const fetch = stub();
+    const controller = new AbortController();
+    await getMeasurementWriterStatus(controller.signal);
+    expect(fetch.mock.calls[0][1]).toBe('/admin/agent/measurement-writer');
     expect(fetch.mock.calls[0][2]).toEqual({ signal: controller.signal, cache: 'no-store' });
   });
 });

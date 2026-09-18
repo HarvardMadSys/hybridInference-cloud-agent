@@ -8,6 +8,7 @@ import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import {
   getMeasurement,
+  getMeasurementWriterStatus,
   listMeasurements,
   listProfilingRuns,
   summarizeProfilingRun,
@@ -15,6 +16,7 @@ import {
   type MeasurementPage,
   type MeasurementSummary,
   type MeasurementSummaryResponse,
+  type MeasurementWriterStatus,
   type ProfilingAdmissionInstance,
   type ProfilingRun,
   type ProfilingRunCatalogue,
@@ -191,6 +193,7 @@ function MeasurementsView({ initialQuery }: { initialQuery: string }) {
         ) : (
           <>
             <CoverageNotice />
+            <WriterStatusPanel onDenied={onDenied} refreshKey={refreshKey} />
             <RunsPanel selection={selection} onDenied={onDenied} refreshKey={refreshKey} />
             <MeasurementsPanel
               selection={selection}
@@ -244,6 +247,63 @@ function CoverageNotice() {
           </div>
         ))}
       </dl>
+    </section>
+  );
+}
+
+function WriterStatusPanel({ onDenied, refreshKey }: { onDenied: () => void; refreshKey: number }) {
+  const read = useCallback(
+    (signal: AbortSignal, _nonce: number) => getMeasurementWriterStatus(signal),
+    [],
+  );
+  const { data, error, loading, stale } = useAdminRead<MeasurementWriterStatus>(
+    read,
+    refreshKey,
+    onDenied,
+  );
+  const counts = data?.counts;
+  const lost = counts
+    ? counts.rejected +
+      counts.conflict +
+      counts.dropped_full +
+      counts.dropped_timeout +
+      counts.dropped_shutdown +
+      counts.failed
+    : 0;
+  return (
+    <section className={`${CARD} mt-5 p-5`} aria-labelledby="writer-status-heading">
+      <h3
+        id="writer-status-heading"
+        className="text-sm font-semibold text-gray-900 dark:text-gray-50"
+      >
+        Local persistence writer
+      </h3>
+      <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+        This is the control-plane process that answered this Admin request, not a fleet aggregate.
+        It makes queue loss visible without claiming another replica reported zero.
+      </p>
+      {error && (
+        <ErrorNotice>
+          {error}
+          {stale && ' The last refresh failed; these are the previous successful counters.'}
+        </ErrorNotice>
+      )}
+      {loading && !data ? (
+        <div className="mt-3 h-8 animate-pulse rounded-lg bg-gray-100 dark:bg-white/5" />
+      ) : (
+        data && (
+          <dl className="mt-3 grid gap-3 text-xs sm:grid-cols-3 lg:grid-cols-6">
+            <ManifestItem label="Workers">{data.running ? 'Running' : 'Idle / off'}</ManifestItem>
+            <ManifestItem label="Waiting">{number(data.pending)}</ManifestItem>
+            <ManifestItem label="In flight">{number(data.in_flight)}</ManifestItem>
+            <ManifestItem label="Queued bytes">{number(data.queued_bytes)}</ManifestItem>
+            <ManifestItem label="Stored">
+              {number(data.counts.stored + data.counts.duplicate)}
+            </ManifestItem>
+            <ManifestItem label="Rejected or lost">{number(lost)}</ManifestItem>
+          </dl>
+        )
+      )}
     </section>
   );
 }
@@ -953,6 +1013,11 @@ function RecordBody({ detail }: { detail: MeasurementDetail }) {
                           attached
                         </span>
                       )}
+                      {row.callId && (
+                        <span className="mt-1 block text-[11px] text-gray-400 dark:text-gray-500">
+                          call {row.callId}
+                        </span>
+                      )}
                     </th>
                     <td className="whitespace-nowrap px-3 py-2 text-xs text-gray-500 dark:text-gray-400">
                       {row.startUs === null
@@ -976,6 +1041,11 @@ function RecordBody({ detail }: { detail: MeasurementDetail }) {
                       {row.depth > 0 && !row.truncated && (
                         <span className="text-gray-400 dark:text-gray-500">
                           {ATTACHED_STAGE_NOTE}
+                        </span>
+                      )}
+                      {row.outcome && (
+                        <span className="mt-1 block text-gray-500 dark:text-gray-400">
+                          {outcomeLabel(row.outcome)}
                         </span>
                       )}
                     </td>
@@ -1093,6 +1163,14 @@ function RecordBody({ detail }: { detail: MeasurementDetail }) {
         </ManifestItem>
         <ManifestItem label="Owner">{detail.owner_id ?? 'Not reported'}</ManifestItem>
         <ManifestItem label="Host">{detail.host_id ?? 'Not reported'}</ManifestItem>
+        <ManifestItem label="Runtime">
+          {detail.runtime_id
+            ? `${detail.runtime_id}${detail.runtime_version ? ` @ ${detail.runtime_version}` : ''}`
+            : 'Not reported'}
+        </ManifestItem>
+        <ManifestItem label="Execution profile">
+          {detail.execution_profile ?? 'Not reported'}
+        </ManifestItem>
         <ManifestItem label="Producer">
           {record.producer} · {record.producer_instance_id}
         </ManifestItem>
@@ -1105,6 +1183,11 @@ function RecordBody({ detail }: { detail: MeasurementDetail }) {
         <ManifestItem label="Clock domain">{record.clock_domain_id ?? 'Not reported'}</ManifestItem>
         <ManifestItem label="Schema / boundary version">
           {number(record.schema_version)} / {number(record.boundary_version)}
+        </ManifestItem>
+        <ManifestItem label="Measured boundary">
+          {record.start_boundary && record.end_boundary
+            ? `${record.start_boundary} → ${record.end_boundary}`
+            : 'Not reported'}
         </ManifestItem>
         <ManifestItem label="Observed at (producer clock)">
           {dateTime(record.observed_at)}

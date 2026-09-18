@@ -77,9 +77,12 @@ MAX_CAPACITY_BYTES = 8 * 1024
 #: last reading should keep being drawn in green.
 FRESH_AFTER_SECONDS = 90.0
 
-#: How old a stored observation may be and still be written into history. Three
-#: heartbeat intervals: a host that has stopped reporting must stop adding
-#: points rather than have its last reading copied forward minute after minute.
+#: How old an observation may be when it is reported and still be written into
+#: history. Three heartbeat intervals: a runner whose sampler has been stalled
+#: for minutes is still reporting a real measurement, and it is still taken as
+#: the current reading — where the page shows its age beside it — but a curve
+#: has no way to say how late a point was, and a gap is the honest drawing of a
+#: minute nothing arrived for.
 CAPACITY_HISTORY_MAX_AGE_S = 90.0
 
 #: History retention. The page serves at most 24 hours, so anything older is
@@ -852,7 +855,7 @@ __all__ = [
     "admin_capacity_view",
     "bucket_for",
     "history_point_grid",
-    "history_point_write_from_row",
+    "history_point_write_from_block",
     "parse_capacity_block",
     "resolve_history_range",
 ]
@@ -895,48 +898,59 @@ def bucket_for(sampled_at: datetime) -> datetime:
     return _as_utc(sampled_at).replace(second=0, microsecond=0)
 
 
-def history_point_write_from_row(row: Mapping[str, Any]) -> CapacityHistoryPointWrite | None:
-    """Convert one projected host row into an insertable history point.
+def history_point_write_from_block(
+    block: Mapping[str, Any], *, sampled_at: datetime, sample_id: str
+) -> CapacityHistoryPointWrite | None:
+    """Convert one accepted capacity block into an insertable history point.
 
-    The row arrives as text, because the stored snapshot is JSONB and a cast
-    inside SQL would turn one corrupt document into a failed batch — and a
-    batch that always fails at the same row never makes progress. Numbers are
-    therefore parsed here, where a bad one costs that host one point.
+    Every bound below repeats one ``HostCapacityReport`` already enforced, and
+    the repetition is the point: the constraints that matter here are the
+    history table's own, and a value outside them has to become ``NULL``
+    rather than an exception. The statement this runs beside is the one
+    keeping a live machine's reading, and a number nobody can store must cost
+    its own field and nothing else.
 
     Args:
-        row: A candidate row, with the snapshot's scalars projected as text.
+        block: The capacity block as it was stored, already validated.
+        sampled_at: The instant the accepting write stamped the snapshot with.
+            Taken from that write rather than re-derived here, so the point and
+            the snapshot are provably the same observation.
+        sample_id: The sample identity that write stored, for the same reason.
 
     Returns:
-        The point, or ``None`` when the row cannot yield one: no sampled
-        instant, no sample id, or numbers outside the ranges the table's own
-        constraints allow. ``None`` is silent on purpose — the row is a
-        snapshot the write path already validated, so a row that no longer
-        converts is a hand-edited or corrupted document, and the next
-        heartbeat replaces it.
+        The point, or ``None`` when the identity is unusable: an instant that
+        is not one, or a sample id that is not a UUID. Both are impossible from
+        the write path and neither is worth raising over.
     """
-    sampled_at = row.get("capacity_sampled_at")
-    sample_id = _uuid_text(row.get("capacity_sample_id"))
-    if not isinstance(sampled_at, datetime) or sample_id is None:
+    if not isinstance(sampled_at, datetime):
         return None
-    cpu_percent = _bounded_float(row.get("cpu_percent"), low=0.0, high=100.0)
-    cpu_window = _bounded_float(row.get("cpu_window_seconds"), low=0.0, high=90.0, strict_low=True)
-    cpu_count = _bounded_int(row.get("cpu_logical_count"), low=1)
-    total_bytes = _bounded_int(row.get("memory_total_bytes"), low=1)
-    available_bytes = _bounded_int(row.get("memory_available_bytes"), low=0)
-    if total_bytes is not None and available_bytes is not None and available_bytes > total_bytes:
+    identity = _uuid_text(sample_id)
+    if identity is None:
+        return None
+    missing = block.get("missing")
+    reasons: Mapping[str, Any] = missing if isinstance(missing, dict) else {}
+    total_bytes = _bounded_int(block.get("memory_total_bytes"), low=1)
+    available_bytes = _bounded_int(block.get("memory_available_bytes"), low=0)
+    # The table stores both memory figures or neither, so a pair that is half
+    # present or self-contradictory becomes no memory reading at all. Dropping
+    # the pair here rather than letting the CHECK refuse it is what keeps the
+    # CPU half of the same observation.
+    if total_bytes is None or available_bytes is None or available_bytes > total_bytes:
         total_bytes, available_bytes = None, None
     return CapacityHistoryPointWrite(
         bucket_at=bucket_for(sampled_at),
         sampled_at=sampled_at,
-        sample_id=sample_id,
-        linux_boot_id=_uuid_text(row.get("linux_boot_id")),
-        cpu_percent=cpu_percent,
-        cpu_logical_count=cpu_count,
-        cpu_window_seconds=cpu_window,
-        cpu_missing_reason=_bounded_reason(row.get("cpu_missing_reason")),
+        sample_id=identity,
+        linux_boot_id=_uuid_text(block.get("linux_boot_id")),
+        cpu_percent=_bounded_float(block.get("cpu_percent"), low=0.0, high=100.0),
+        cpu_logical_count=_bounded_int(block.get("cpu_logical_count"), low=1),
+        cpu_window_seconds=_bounded_float(
+            block.get("cpu_window_seconds"), low=0.0, high=90.0, strict_low=True
+        ),
+        cpu_missing_reason=_bounded_reason(reasons.get("cpu")),
         memory_total_bytes=total_bytes,
         memory_available_bytes=available_bytes,
-        memory_missing_reason=_bounded_reason(row.get("memory_missing_reason")),
+        memory_missing_reason=_bounded_reason(reasons.get("memory")),
     )
 
 

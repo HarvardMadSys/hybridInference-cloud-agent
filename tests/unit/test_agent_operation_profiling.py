@@ -264,6 +264,7 @@ def test_a_discarded_measurement_returns_its_budget_slot(monkeypatch):
     empty_claim = profiling.start_operation(operation="attempt.startup", host="host-a")
     assert empty_claim is not None
     profiling.discard(empty_claim)
+    assert profiling.frozen_record(empty_claim, "incomplete") is None
 
     real_attempt = profiling.start_operation(operation="attempt.startup", host="host-a")
     assert real_attempt is not None, "an empty claim must not consume the only slot"
@@ -283,6 +284,21 @@ def test_a_finished_measurement_keeps_its_budget_slot(monkeypatch):
     profiling.finish(measurement, outcome="failed", failure_stage="checkout")
 
     assert profiling.start_operation(operation="attempt.startup", host="host-a") is None
+
+
+def test_storage_and_export_reuse_the_same_frozen_record(monkeypatch, caplog):
+    """One measurement id must not acquire two observed_at values."""
+    _enable(monkeypatch)
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    assert measurement is not None
+
+    stored = profiling.frozen_record(measurement, "dispatched")
+    profiling.finish(measurement, outcome="dispatched")
+
+    assert stored is not None
+    assert _records(caplog) == [stored]
+    assert profiling.frozen_record(measurement, "dispatched") is stored
 
 
 def test_spans_record_nesting_and_duration(monkeypatch, caplog, clock):
@@ -1112,6 +1128,30 @@ def test_a_run_id_at_the_limit_is_accepted(monkeypatch):
     _enable(monkeypatch, run_id="r" * profiling.MAX_RUN_ID_CHARS)
 
     assert profiling.active_run() is not None
+
+
+def test_a_run_id_that_cannot_be_an_admin_path_is_rejected(monkeypatch, caplog):
+    """A valid descriptor must have a reachable Admin summary URL."""
+    _enable(monkeypatch, run_id="run/one")
+    caplog.set_level(logging.WARNING, logger=profiling.__name__)
+
+    assert profiling.start_operation(operation="attempt.startup") is None
+    assert "run_id" in caplog.text
+
+
+def test_the_parsed_run_preserves_manifest_identity_and_its_local_budget(monkeypatch):
+    """Storage sees the same config version and budget the selector enforced."""
+    _enable(monkeypatch, config_version=2, max_operations=77)
+
+    manifest = profiling.manifest_for_run(profiling.active_run())
+
+    assert manifest is not None
+    assert manifest["config_version"] == 2
+    assert manifest["max_operations"] == 77
+    assert {
+        "instance": profiling.PRODUCER_INSTANCE_ID,
+        "max_operations": 77,
+    } in manifest["admission_instances"]
 
 
 def test_an_exporter_that_cannot_start_drops_measurements_without_failing(monkeypatch, caplog):

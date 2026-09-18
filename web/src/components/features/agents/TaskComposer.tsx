@@ -9,7 +9,12 @@ import { ConnectSourceControl } from './ConnectSourceControl';
 import { highestEffort, offeredEfforts } from './effort';
 import { useT } from '@/components/providers';
 import { Picker } from './Picker';
-import { SkillPicker } from './skills/SkillPicker';
+import { ComposerPlusMenu } from './ComposerPlusMenu';
+import { AttachmentStrip } from './attachments/AttachmentStrip';
+import { useAttachments } from './attachments/useAttachments';
+import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
+import { useComposerMcp } from './mcp/useComposerMcp';
+import { SkillSelectionDialog } from './skills/SkillPicker';
 import { useSkillLibrary } from './skills/useSkillLibrary';
 import type { SelectedSkillApi } from '@/lib/api/skills';
 
@@ -39,6 +44,8 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     chosenSkills ?? skillLibrary.skills.filter((skill) => skill.default_enabled);
   const pendingSkillDefaults =
     chosenSkills === null && (skillLibrary.loading || !!skillLibrary.error);
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [dropping, setDropping] = useState(false);
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
   const [models, setModels] = useState<string[]>([]);
   const [repo, setRepo] = useState('');
@@ -50,6 +57,8 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const attachments = useAttachments(t, config?.attachment_limits);
+  const mcp = useComposerMcp(t);
 
   // The config fetch runs once on mount, but its fallback message has to be
   // translated. Depending on `t` would refetch the config every time the
@@ -125,11 +134,23 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     };
   }, [config?.github_connected, repo]);
 
+  // `mcp_runtimes` has been reported by /config since MCP landed and read by
+  // nothing; an older control plane omits it, and not knowing is not the same
+  // as knowing the runtime cannot.
+  const mcpRuntimes = config?.mcp_runtimes;
+  const mcpBlockedReason =
+    runtime && mcpRuntimes && !mcpRuntimes.includes(runtime)
+      ? t('attach.mcpUnsupported', { runtime })
+      : undefined;
+
   const disconnected = config?.github_connected === false;
   const canRun =
     config?.github_connected === true &&
     task.trim().length > 0 &&
     !submitting &&
+    // A file still in flight has no id yet. Running now would queue a job
+    // without the attachment the user can see on screen.
+    !attachments.uploading &&
     Boolean(repo && runtime && model);
 
   async function run() {
@@ -145,6 +166,12 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
         // Defaults are resolved by the server. Only an explicit picker change
         // belongs in the request, so retries are independent of library edits.
         ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
+        // Staged uploads, named by id. Omitted when nothing is attached so the
+        // request keeps the shape it had before this feature existed.
+        ...(attachments.ids.length ? { attachment_ids: attachments.ids } : {}),
+        // Omitted gives the task no servers at all, which is the right default:
+        // connecting a server and letting a task call it are separate choices.
+        ...(mcp.bindings.length ? { mcp_bindings: mcp.bindings } : {}),
         runtime,
         model,
         // Sent as a ref; the platform pins it to a commit at creation, because
@@ -188,7 +215,31 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
 
       <div
         aria-disabled={disconnected || undefined}
-        className={`rounded-xl border border-gray-200/90 dark:border-white/10 shadow-[0_14px_40px_-28px_rgba(17,24,39,0.5)] transition ${
+        // Dropping onto the composer is the other way in, and the only one that
+        // takes files and folders in a single gesture — a file input can offer
+        // one or the other, never both.
+        onDragOver={(event) => {
+          if (disconnected || !event.dataTransfer.types.includes('Files')) return;
+          event.preventDefault();
+          setDropping(true);
+        }}
+        onDragLeave={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+          setDropping(false);
+        }}
+        onDrop={(event) => {
+          if (disconnected) return;
+          event.preventDefault();
+          setDropping(false);
+          void filesFromDataTransfer(event.dataTransfer).then((files) => {
+            if (files.length) attachments.add(files);
+          });
+        }}
+        className={`rounded-xl border shadow-[0_14px_40px_-28px_rgba(17,24,39,0.5)] transition ${
+          dropping
+            ? 'border-crimson/40 ring-4 ring-crimson/[0.08]'
+            : 'border-gray-200/90 dark:border-white/10'
+        } ${
           disconnected
             ? 'mt-4 bg-gray-50 dark:bg-gray-950'
             : 'mt-8 bg-white dark:bg-gray-900 focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05]'
@@ -210,7 +261,15 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           className="w-full resize-none rounded-t-xl border-0 bg-transparent px-5 pb-2 pt-4 text-[15px] leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0 disabled:cursor-not-allowed"
         />
 
-        <div className="flex flex-wrap items-center gap-2 border-t border-gray-100/90 dark:border-white/5 px-3.5 py-2.5">
+        {disconnected ? null : (
+          <AttachmentStrip
+            entries={attachments.entries}
+            onRemove={attachments.remove}
+            disabled={submitting}
+          />
+        )}
+
+        <div className="relative flex flex-wrap items-center gap-2 border-t border-gray-100/90 dark:border-white/5 px-3.5 py-2.5">
           {disconnected ? (
             <span className="inline-flex min-w-0 flex-1 items-center gap-2 text-[13px] text-gray-400 dark:text-gray-500">
               <svg
@@ -231,6 +290,17 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
             </span>
           ) : (
             <>
+              <ComposerPlusMenu
+                disabled={submitting}
+                onFiles={attachments.add}
+                onOpenSkills={() => setSkillsOpen(true)}
+                skillSummary={
+                  pendingSkillDefaults ? t('attach.skillsDefaults') : String(selectedSkills.length)
+                }
+                mcp={mcp}
+                mcpBlockedReason={mcpBlockedReason}
+              />
+              <span className="h-4 w-px bg-gray-200 dark:bg-white/10" />
               <Picker
                 label={t('composer.repository')}
                 value={repo}
@@ -262,18 +332,6 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
                 options={efforts}
                 onChange={setEffort}
               />
-              {pendingSkillDefaults ? (
-                <span className="text-xs text-gray-500 dark:text-gray-400">
-                  Skills · account defaults
-                </span>
-              ) : (
-                <SkillPicker
-                  limits={config?.skill_limits}
-                  selected={selectedSkills}
-                  onChange={setChosenSkills}
-                  disabled={submitting}
-                />
-              )}
             </>
           )}
 
@@ -299,6 +357,27 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           </button>
         </div>
       </div>
+
+      {skillsOpen ? (
+        <SkillSelectionDialog
+          limits={config?.skill_limits}
+          selected={selectedSkills}
+          onClose={() => setSkillsOpen(false)}
+          onApply={(skills) => {
+            // Only a real change is recorded. Leaving the selection alone keeps
+            // `chosenSkills` null, which is what makes the request omit
+            // `skill_ids` and let the server resolve account defaults.
+            const originalIds = new Set(selectedSkills.map((skill) => skill.id));
+            if (
+              skills.length !== originalIds.size ||
+              skills.some((skill) => !originalIds.has(skill.id))
+            ) {
+              setChosenSkills(skills);
+            }
+            setSkillsOpen(false);
+          }}
+        />
+      ) : null}
 
       {skillLibrary.error ? (
         <div className="mt-3 text-center text-sm text-red-600 dark:text-red-400" role="alert">

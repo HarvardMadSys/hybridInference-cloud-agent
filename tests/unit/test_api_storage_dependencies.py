@@ -22,8 +22,10 @@ import pytest
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 API_DIR = REPO_ROOT / "cloud_agent" / "api"
 
-#: Every module whose handlers take the store as a dependency.
-MODULES = ("routes.py", "admin_runs.py", "hosts.py", "deps.py")
+#: Every module in the API package. Enumerated rather than listed: a surface that
+#: moves into its own module must be covered without editing this tuple, and a
+#: list is how the module nobody remembers stays unchecked.
+MODULES = tuple(sorted(path.name for path in API_DIR.glob("*.py")))
 
 PARAMETER = re.compile(
     r"^[ \t]*(?P<name>\w+):[ \t]*(?P<annotation>[^=\n]+?)[ \t]*=[ \t]*Depends\(get_storage\)",

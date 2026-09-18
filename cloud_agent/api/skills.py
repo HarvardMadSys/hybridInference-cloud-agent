@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_agent_app_credentials, get_storage, require_store
-from cloud_agent.api.routes import require_agent_owner
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.github_app import GitHubAppError
 from cloud_agent.skills.imports import (

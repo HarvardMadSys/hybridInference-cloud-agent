@@ -115,6 +115,12 @@ services:
       AGENT_TRUST_PROXY_HEADERS: ${AGENT_TRUST_PROXY_HEADERS:-false}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
+      # Opt-in operation profiling. All three values are inert by default;
+      # they are explicit here because Compose does not otherwise pass a
+      # shell/.env value into the container.
+      AGENT_OPERATION_PROFILING_ENABLED: ${AGENT_OPERATION_PROFILING_ENABLED:-false}
+      AGENT_OPERATION_PROFILING_RUN: ${AGENT_OPERATION_PROFILING_RUN:-}
+      AGENT_OPERATION_PROFILING_SINK: ${AGENT_OPERATION_PROFILING_SINK:-}
       AGENT_ALERT_WEBHOOK_URL: ${AGENT_ALERT_WEBHOOK_URL:-}
       AGENT_DEFAULT_EXECUTION_PROFILE: ${AGENT_DEFAULT_EXECUTION_PROFILE:-untrusted-kata-v1}
       # --- Publishing and source control ------------------------------------

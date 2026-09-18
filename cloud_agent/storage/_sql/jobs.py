@@ -21,7 +21,7 @@ JOB_OWN_COLUMNS = (
     "runtime, model, reasoning_effort, state, "
     "cancel_requested, terminal_resume_pending, current_attempt_id, "
     "published_pr_url, published_commit_sha, detail, "
-    "metadata, skills, fork_source_job_id, "
+    "metadata, skills, attachments, fork_source_job_id, "
     "created_at, updated_at"
 )
 
