@@ -23,6 +23,29 @@ from tests.support.storage import AllCapabilities
 ADMIN = {"Authorization": "Bearer test-admin"}
 
 
+class _AuditTrail:
+    """The audit capability, in the shape ``Storage`` really exposes it.
+
+    The handler records through ``store.audit.record_admin_action``. This fake
+    used to carry that method flat on the store *and* an ``audit`` list beside
+    it — the shape #210 left behind — which is why these tests stayed green
+    while the deployed service wrote no audit rows at all.
+    """
+
+    def __init__(self) -> None:
+        self.rows: list[dict[str, Any]] = []
+
+    async def record_admin_action(self, **kwargs: Any) -> int:
+        self.rows.append(kwargs)
+        return len(self.rows)
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        return self.rows[index]
+
+
 class FakeHostStore(AllCapabilities):
     """The runner-host capability, in memory."""
 
@@ -31,7 +54,7 @@ class FakeHostStore(AllCapabilities):
         # The singleton policy row: two facts, in one place, as in the store.
         self.active_host: str | None = None
         self.runtime_versions: dict[str, str] = {}
-        self.audit: list[dict[str, Any]] = []
+        self.audit = _AuditTrail()
 
     def seed(self, host: str, *, active: bool = False, seen_minutes_ago: float = 0.0) -> None:
         seen = datetime.now(timezone.utc) - timedelta(minutes=seen_minutes_ago)
@@ -79,10 +102,6 @@ class FakeHostStore(AllCapabilities):
             return False
         self.active_host = host
         return True
-
-    async def record_admin_action(self, **kwargs: Any) -> int:
-        self.audit.append(kwargs)
-        return len(self.audit)
 
     async def forget_runner_host(self, *, host: str) -> str:
         # The active-host refusal is the store's, not the caller's.

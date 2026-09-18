@@ -58,6 +58,7 @@ from cloud_agent.schemas import (
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
+        AuditRepository,
         HostCapacityRepository,
         HostPoolRepository,
     )
@@ -67,9 +68,12 @@ class _AdminHostsStorage(Protocol):
     """The capabilities this module's handlers reach the store for.
 
     Named here so that reaching for one more is a deliberate edit to
-    this list rather than a call that happens to type-check.
+    this list rather than a call that happens to type-check. ``audit`` is one
+    of them: every handler here records what it did, through
+    :func:`cloud_agent.api.deps.log_admin_action`.
     """
 
+    audit: AuditRepository
     host_capacity: HostCapacityRepository
     host_pool: HostPoolRepository
 
