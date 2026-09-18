@@ -311,9 +311,11 @@ function GitPanel({ job, active }: { job: AgentJob; active: boolean }) {
             {live?.available ? live.branch || 'detached HEAD' : job.branch}
           </p>
         </div>
-        {error || !live?.available ? (
+        {/* Silent while the workspace is still answering: a badge that appears
+            only to vanish reads as a fault. The Refresh button carries the wait. */}
+        {error || (!loading && !live?.available) ? (
           <span className="rounded bg-gray-100 dark:bg-white/5 px-2 py-1 text-[11px] text-gray-500 dark:text-gray-400">
-            {error ? 'Unavailable' : loading ? 'Loading…' : 'Unavailable'}
+            Unavailable
           </span>
         ) : null}
         <button

@@ -26,9 +26,15 @@ on:
   pull_request:
     branches: [main, dev]
 
-# Pull requests, including forks, run on GitHub-hosted machines. Trusted pushes
-# and dispatches retain the self-hosted pools and their local build caches.
-# Tests pin the split because CI cannot safely discover its own routing mistake.
+# While this repository is private, every event runs on the self-hosted pools.
+# GitHub-hosted minutes are billed to the organisation for a private repository,
+# and a pull request here can only come from somebody who already has push
+# access to this code, so routing pull requests away from our own machines
+# spends quota to remove a risk that does not exist yet. It exists the moment
+# this repository is public: a fork's pull request then executes unvetted code —
+# tests, package install hooks, Docker builds. That routing is prepared as its
+# own pull request and merges on the day this repository goes public.
+# `tests/unit/test_ci_workflow_policy.py` is what fails if it lands early.
 permissions:
   contents: read
 
@@ -45,10 +51,7 @@ env:
 jobs:
   changes:
     name: Classify Changes
-    # Pull requests, including forks, carry code nobody here has vetted. Keep
-    # them on disposable GitHub-hosted machines; trusted pushes and dispatches
-    # retain the existing self-hosted pool.
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted", "Linux", "ci-general"]') }}
+    runs-on: [self-hosted, Linux, ci-general]
     outputs:
       backend: ${{ steps.classify.outputs.backend }}
       web: ${{ steps.classify.outputs.web }}
@@ -163,7 +166,7 @@ jobs:
     name: Lint
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted", "Linux", "ci-general"]') }}
+    runs-on: [self-hosted, Linux, ci-general]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -260,7 +263,7 @@ jobs:
     name: Tests
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted", "Linux", "ci-general"]') }}
+    runs-on: [self-hosted, Linux, ci-general]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -351,7 +354,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.backend == 'true'
     # This pool can start service containers; postgres:15 supports ARM64.
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted", "Linux", "ci-general"]') }}
+    runs-on: [self-hosted, Linux, ci-general]
 
     services:
       postgres:
@@ -552,7 +555,7 @@ jobs:
     name: Web
     needs: changes
     if: needs.changes.outputs.web == 'true'
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted", "Linux", "ci-general"]') }}
+    runs-on: [self-hosted, Linux, ci-general]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -683,7 +686,7 @@ jobs:
   # ------------------------------------------------------------------ secret
   gitleaks:
     name: Gitleaks
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted", "Linux", "ci-general"]') }}
+    runs-on: [self-hosted, Linux, ci-general]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -754,9 +757,7 @@ jobs:
     name: ${{ matrix.artifact.name }} (${{ matrix.artifact.arch }})
     needs: changes
     if: needs.changes.outputs.docker == 'true'
-    # Pull requests use disposable hosted runners of the artifact's native
-    # architecture. Trusted events keep the persistent local build caches.
-    runs-on: ${{ github.event_name == 'pull_request' && matrix.artifact.pull_request_runner || fromJSON(matrix.artifact.runner) }}
+    runs-on: ${{ fromJSON(matrix.artifact.runner) }}
     # The builder lives in a config directory belonging to the *runner*, not to
     # this job, because its layer cache is the only thing between a cell and
     # re-downloading hundreds of megabytes. With a builder per job the cache
@@ -791,14 +792,12 @@ jobs:
             arch: arm64
             smoke_args: --role control
             dockerfile: deploy/control-plane/Dockerfile
-            pull_request_runner: ubuntu-24.04-arm
             runner: '["self-hosted","Linux","ARM64","image-verify-arm64"]'
             build_args: ""
           - name: web-root
             arch: arm64
             smoke_args: --role web --variant root
             dockerfile: deploy/control-plane/Dockerfile.web
-            pull_request_runner: ubuntu-24.04-arm
             runner: '["self-hosted","Linux","ARM64","image-verify-arm64"]'
             build_args: |
               NEXT_PUBLIC_BASE_PATH=
@@ -807,7 +806,6 @@ jobs:
             arch: arm64
             smoke_args: --role web --variant agents
             dockerfile: deploy/control-plane/Dockerfile.web
-            pull_request_runner: ubuntu-24.04-arm
             runner: '["self-hosted","Linux","ARM64","image-verify-arm64"]'
             build_args: |
               NEXT_PUBLIC_BASE_PATH=/agents
@@ -816,28 +814,24 @@ jobs:
             arch: amd64
             smoke_args: --role runner
             dockerfile: deploy/host/Dockerfile.agent-runner
-            pull_request_runner: ubuntu-latest
             runner: '["self-hosted","Linux","X64","image-verify-x64"]'
             build_args: ""
           - name: sandbox
             arch: amd64
             smoke_args: --role sandbox
             dockerfile: deploy/sandbox/Dockerfile.agent-sandbox
-            pull_request_runner: ubuntu-latest
             runner: '["self-hosted","Linux","X64","image-verify-x64"]'
             build_args: ""
           - name: tunnel
             arch: amd64
             smoke_args: --role tunnel
             dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
-            pull_request_runner: ubuntu-latest
             runner: '["self-hosted","Linux","X64","image-verify-x64"]'
             build_args: ""
           - name: egress
             arch: amd64
             smoke_args: --role egress
             dockerfile: deploy/host/Dockerfile.agent-egress-proxy
-            pull_request_runner: ubuntu-latest
             runner: '["self-hosted","Linux","X64","image-verify-x64"]'
             build_args: ""
     steps:
@@ -884,18 +878,13 @@ jobs:
       # `moby/buildkit` from Docker Hub too, and that was the first thing the
       # 429 blocked.
       - name: Log in to Docker Hub
-        # Fork pull requests receive no repository secrets. Hosted runners have
-        # an isolated egress allowance, so they use anonymous pulls.
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Trusted self-hosted jobs reuse one builder per runner. Pull requests run
-      # on disposable hosted machines, whose generated RUNNER_NAME contains
-      # spaces and is not a valid buildx name; they get one job-local builder.
-      # A builder whose buildkitd will not start is removed and recreated.
+      # Reused across jobs, and self-healing: a builder whose buildkitd will not
+      # start is removed and recreated rather than failing every later cell.
       # `--bootstrap` is what proves it started, so it doubles as the check.
       #
       # The *name* carries the runner too, and that is not decoration. A config
@@ -910,16 +899,11 @@ jobs:
       - name: Reuse this runner's builder, or make one
         run: |
           set -euo pipefail
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
-            buildx_config="${RUNNER_TEMP}/buildx"
-            builder="ci-${SUFFIX}"
-          else
-            buildx_config="$(dirname "${RUNNER_WORKSPACE}")/buildx/${RUNNER_NAME}"
-            builder="ci-${RUNNER_NAME}"
-          fi
+          buildx_config="$(dirname "${RUNNER_WORKSPACE}")/buildx/${RUNNER_NAME}"
           mkdir -p "${buildx_config}"
           export BUILDX_CONFIG="${buildx_config}"
           echo "BUILDX_CONFIG=${buildx_config}" >> "${GITHUB_ENV}"
+          builder="ci-${RUNNER_NAME}"
           if ! docker buildx inspect "${builder}" --bootstrap >/dev/null 2>&1; then
             docker buildx rm "${builder}" >/dev/null 2>&1 || true
             docker buildx create --name "${builder}" --driver docker-container --use >/dev/null
@@ -1001,10 +985,7 @@ jobs:
           TEST_DB_NAME: hybridinference_test_mcp
           TEST_DB_USER: postgres
           TEST_DB_PASSWORD: mcp-conformance-only
-          # Kilo's two full native-session cases timed out when they shared a
-          # small hosted PR runner. Trusted x64 hosts keep the measured
-          # three-worker path; the disposable hosted runner runs them serially.
-          MCP_TEST_WORKERS: ${{ github.event_name == 'pull_request' && '1' || '3' }}
+          MCP_TEST_WORKERS: "3"
         run: |
           set -euo pipefail
           database="mcp-db-${SUFFIX}"
@@ -1013,11 +994,20 @@ jobs:
             --label "io.hybridinference.smoke.run=${SUFFIX}" \
             -e POSTGRES_DB="${TEST_DB_NAME}" -e POSTGRES_PASSWORD="${TEST_DB_PASSWORD}" \
             -p 127.0.0.1::5432 postgres:16-alpine
+          # Probe TCP, not the socket. The image runs initdb against a
+          # temporary server started with `listen_addresses=''` — reachable on
+          # the unix socket and nowhere else — then stops it and starts the
+          # real one. A socket probe answers "accepting connections" for that
+          # temporary server, and the createdb below then lands in the shutdown
+          # between the two: `FATAL: the database system is shutting down`.
+          # TCP is also how the tests reach it, so it is the honest question.
           for attempt in $(seq 1 30); do
-            if docker exec "${database}" pg_isready -U postgres >/dev/null 2>&1; then break; fi
+            if docker exec "${database}" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then
+              break
+            fi
             sleep 1
           done
-          docker exec "${database}" pg_isready -U postgres
+          docker exec "${database}" pg_isready -h 127.0.0.1 -U postgres
           # The test config appends pytest-xdist's worker id to TEST_DB_NAME.
           # Give each worker its own database so migrations and state cannot race;
           # the Postgres container creates only the unsuffixed database.
@@ -1072,7 +1062,7 @@ jobs:
     # The one docker job with no architecture to match: `docker compose config`
     # parses and interpolates, it does not build or start anything. Use the
     # ARM64 pool so this does not queue behind the x64 image builds.
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-24.04-arm' || fromJSON('["self-hosted", "Linux", "ARM64", "image-verify-arm64"]') }}
+    runs-on: [self-hosted, Linux, ARM64, image-verify-arm64]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -1281,7 +1271,7 @@ jobs:
     # on this workflow's conclusion, so this is what stands between a merge to
     # dev and a consumable release.
     if: always()
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted", "Linux", "ci-general"]') }}
+    runs-on: [self-hosted, Linux, ci-general]
     needs:
       - changes
       - lint

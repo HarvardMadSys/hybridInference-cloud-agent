@@ -1741,6 +1741,39 @@ describe('JobDetail', () => {
     await waitFor(() => expect(getAgentJobGit).toHaveBeenCalledWith('ajob_1'));
   });
 
+  it('says nothing in the Git header while the live workspace is still answering', async () => {
+    let settle: (value: Awaited<ReturnType<typeof getAgentJobGit>>) => void = () => {};
+    vi.mocked(getAgentJobGit)
+      .mockReset()
+      .mockReturnValue(
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+      );
+
+    render(<JobDetail job={makeJob({ state: 'done' })} />);
+    openWorkspace();
+
+    const git = screen.getByLabelText('Git workspace');
+    expect(within(git).getByRole('button', { name: 'Refreshing…' })).toBeDisabled();
+    expect(git).not.toHaveTextContent('Loading');
+    expect(git).not.toHaveTextContent('Unavailable');
+
+    await act(async () => {
+      settle({
+        available: true,
+        branch: 'agent/ajob_1',
+        changes: [],
+        patch: '',
+        commits: [],
+      });
+    });
+
+    expect(within(git).getByRole('button', { name: 'Refresh' })).toBeEnabled();
+    expect(git).toHaveTextContent('agent/ajob_1');
+    expect(git).not.toHaveTextContent('Unavailable');
+  });
+
   it('loads the terminal without warnings once the current workspace is ready', async () => {
     const view = render(
       <JobDetail

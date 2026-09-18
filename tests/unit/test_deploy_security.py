@@ -43,23 +43,22 @@ def _mounts(service: dict) -> list[str]:
 
 
 def test_trusted_ci_events_keep_the_existing_self_hosted_pools() -> None:
-    """The public-PR split must not discard trusted-event build caches."""
+    """Every job keeps the pool whose cache and hardware it was measured on."""
     workflow = yaml.safe_load((WORKFLOW_DIR / "ci.yml").read_text())
     assert workflow["permissions"] == {"contents": "read"}
     jobs = workflow["jobs"]
     special_runners = {
         "artifacts": "fromJSON(matrix.artifact.runner)",
-        "compose": "image-verify-arm64",
+        "compose": ["self-hosted", "Linux", "ARM64", "image-verify-arm64"],
         "kata": ["self-hosted", "Linux", "X64", "image-verify-x64"],
     }
     assert special_runners.keys() <= jobs.keys()
     for name, job in jobs.items():
-        expected = special_runners.get(name, "ci-general")
+        expected = special_runners.get(name, ["self-hosted", "Linux", "ci-general"])
         if isinstance(expected, list):
-            assert job["runs-on"] == expected
+            assert job["runs-on"] == expected, f"{name} left its pool"
         else:
-            assert expected in job["runs-on"], f"{name} left its trusted-event pool"
-            assert "fromJSON(" in job["runs-on"]
+            assert expected in job["runs-on"], f"{name} left its pool"
 
 
 def test_kata_validation_cannot_run_pull_request_code_on_the_deployment_host() -> None:

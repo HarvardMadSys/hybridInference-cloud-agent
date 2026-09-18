@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import hmac
 import os
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import jwt
 from fastapi import Depends, Header, HTTPException, Request
@@ -63,7 +63,20 @@ from cloud_agent.logging_utils import get_logger
 if TYPE_CHECKING:
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
+    from cloud_agent.ports import AuditRepository
     from cloud_agent.storage.assembly import Storage
+
+
+class _Audited(Protocol):
+    """What recording an admin action reaches for: the assembly's audit port.
+
+    ``Storage`` has no top-level ``record_admin_action`` — it never had one
+    after #210 split the store into capabilities — so asking the assembly for
+    the method by name found nothing and the trail was skipped in silence.
+    Naming the one attribute this needs makes the mistake a type error.
+    """
+
+    audit: AuditRepository
 
 
 # ── Wiring this service owns ───────────────────────────────────────────
@@ -355,7 +368,7 @@ def get_client_ip(request: Request) -> str:
 
 
 async def log_admin_action(
-    store: Any,
+    store: _Audited | None,
     admin_ip: str,
     action: str,
     target_user_id: str | None = None,
@@ -382,8 +395,10 @@ async def log_admin_action(
 
     Args:
         store: The agent job store, or ``None`` on a deployment with no
-            database. A store that predates ``record_admin_action`` is treated
-            the same way — the trail is skipped, not fabricated.
+            database. The row goes through ``store.audit``, the capability
+            ``Storage`` exposes; #210 removed the top-level method this used to
+            look for, and the lookup kept answering "no such method" to a store
+            that had one, so nothing was recorded at all.
         admin_ip: Best-effort caller address, from :func:`get_client_ip`.
         action: Dotted action name, e.g. ``agent.runner_host.drain``.
         actor_id: The authenticated administrator, from ``verify_admin_access``
@@ -395,11 +410,10 @@ async def log_admin_action(
     """
     from cloud_agent.logging_utils import get_logger
 
-    recorder = getattr(store, "record_admin_action", None)
-    if recorder is None:
+    if store is None:
         return
     try:
-        await recorder(
+        await store.audit.record_admin_action(
             action=action,
             actor_id=actor_id,
             admin_ip=admin_ip,

@@ -1,4 +1,17 @@
-"""Untrusted pull requests never execute on repository-owned machines."""
+"""CI runs on machines this organisation owns, while this repository is private.
+
+GitHub-hosted minutes are billed for a private repository, and every pull
+request here comes from somebody who already has push access to the code, so
+routing pull requests to hosted runners spends quota to remove a risk that does
+not exist yet. Publishing the repository inverts that: a fork's pull request
+then executes code nobody has vetted — tests, package install hooks, Docker
+builds — and a self-hosted runner is a machine of ours.
+
+The routing for that day is prepared as its own pull request and merges when
+the repository becomes public. Until then this test is what fails if it lands
+early, or if one job drifts onto a hosted runner by hand: a run that quietly
+picks `ubuntu-latest` costs money and looks exactly like a run that did not.
+"""
 
 from __future__ import annotations
 
@@ -8,75 +21,50 @@ import yaml
 
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml"
 
+HOSTED_PREFIXES = ("ubuntu-", "windows-", "macos-")
+
 
 def _document() -> dict:
     return yaml.safe_load(WORKFLOW.read_text())
 
 
-def _excludes_pull_requests(spec: dict) -> bool:
-    condition = str(spec.get("if", ""))
-    return "github.event_name != 'pull_request'" in condition
-
-
-def test_every_pull_request_reachable_job_selects_a_hosted_runner() -> None:
-    offenders = []
-    for name, spec in _document()["jobs"].items():
-        if _excludes_pull_requests(spec):
+def _runner_text(job: dict) -> str:
+    """Every runner label a job can reach, including through its matrix."""
+    runs_on = job["runs-on"]
+    parts = list(runs_on) if isinstance(runs_on, list) else [str(runs_on)]
+    for cells in job.get("strategy", {}).get("matrix", {}).values():
+        if not isinstance(cells, list):
             continue
-        runs_on = spec["runs-on"]
-        if not (
-            isinstance(runs_on, str)
-            and "github.event_name == 'pull_request'" in runs_on
-            and ("ubuntu-" in runs_on or "matrix.artifact.pull_request_runner" in runs_on)
-            and "fromJSON(" in runs_on
-        ):
+        for cell in cells:
+            if isinstance(cell, dict):
+                parts.extend(str(value) for value in cell.values())
+    return " ".join(parts)
+
+
+def test_no_job_can_spend_github_hosted_minutes() -> None:
+    offenders = []
+    for name, job in _document()["jobs"].items():
+        text = _runner_text(job)
+        if any(prefix in text for prefix in HOSTED_PREFIXES):
             offenders.append(name)
 
     assert not offenders, (
-        f"untrusted pull_request code could reach a self-hosted runner in these jobs: {offenders}"
+        "these jobs bill GitHub-hosted minutes against the organisation while "
+        f"the repository is private: {offenders}"
     )
 
 
-def test_artifact_matrix_preserves_native_architecture_on_hosted_runners() -> None:
-    artifacts = _document()["jobs"]["artifacts"]
-    assert "matrix.artifact.pull_request_runner" in artifacts["runs-on"]
+def test_every_job_names_a_pool_this_organisation_owns() -> None:
+    offenders = [
+        name for name, job in _document()["jobs"].items() if "self-hosted" not in _runner_text(job)
+    ]
 
-    for entry in artifacts["strategy"]["matrix"]["artifact"]:
-        expected = "ubuntu-24.04-arm" if entry["arch"] == "arm64" else "ubuntu-latest"
-        assert entry["pull_request_runner"] == expected
-        assert "self-hosted" in entry["runner"]
-
-
-def test_hosted_artifact_builders_use_a_valid_job_local_name() -> None:
-    artifacts = _document()["jobs"]["artifacts"]
-    setup = next(
-        step
-        for step in artifacts["steps"]
-        if step.get("name") == "Reuse this runner's builder, or make one"
-    )
-    script = setup["run"]
-    assert '[ "${GITHUB_EVENT_NAME}" = "pull_request" ]' in script
-    assert 'buildx_config="${RUNNER_TEMP}/buildx"' in script
-    assert 'builder="ci-${SUFFIX}"' in script
-    assert 'builder="ci-${RUNNER_NAME}"' in script
+    assert not offenders, f"these jobs name no self-hosted pool: {offenders}"
 
 
 def test_real_kata_probe_is_unreachable_from_pull_requests() -> None:
+    """One job runs a real sandbox, and only a reviewed dev commit may reach it."""
     kata = _document()["jobs"]["kata"]
-    assert _excludes_pull_requests(kata)
+    assert "github.event_name != 'pull_request'" in str(kata.get("if", ""))
     assert "github.ref == 'refs/heads/dev'" in kata["if"]
     assert kata["runs-on"] == ["self-hosted", "Linux", "X64", "image-verify-x64"]
-
-
-def test_pull_request_steps_do_not_require_repository_secrets() -> None:
-    offenders = []
-    for job_name, job in _document()["jobs"].items():
-        if _excludes_pull_requests(job):
-            continue
-        for step in job.get("steps", []):
-            if "secrets." not in str(step):
-                continue
-            if "github.event_name != 'pull_request'" not in str(step.get("if", "")):
-                offenders.append(f"{job_name}:{step.get('name') or step.get('uses')}")
-
-    assert not offenders, f"fork pull requests require unavailable secrets: {offenders}"
