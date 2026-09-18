@@ -172,8 +172,13 @@ async def fail_unrunnable_follow_ups(
 #: queued automatic round while its goal is being paused reproduces
 #: ``deadlock detected`` (40P01) against Postgres.
 #:
-#: So the terminal paths take the conversation first too, and the order this
-#: repository keeps is conversation -> attempt -> job throughout.
+#: The order is **attempt -> conversation -> job**, and the attempt comes first
+#: because ``append_event`` was already taking it before the conversation --
+#: every assistant message bumps ``agent_threads.updated_at`` under the attempt
+#: lock that serializes ``seq``. Putting the conversation ahead of the attempt
+#: instead trades one cycle for another, between a turn's events and the
+#: transition that ends it; that was tried, reproduced, and is why this reads
+#: the way it does.
 _LOCK_CONVERSATION_BY_JOB = """
 SELECT t.id FROM agent_threads t
 JOIN agent_jobs j ON j.thread_id = t.id

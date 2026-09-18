@@ -393,9 +393,6 @@ class PostgresAttemptCommands:
         count — see the retry budget in :meth:`reap_expired`.
         """
         async with self._pool.acquire() as conn, conn.transaction():
-            # Conversation first, as in ``transition``: a release that lands on
-            # ``cancelled`` runs the terminal sweep, and that can pause a goal.
-            await lock_conversation_by_job(conn, job_id=job_id)
             released_row = await conn.fetchrow(
                 """
                 UPDATE agent_attempts
@@ -416,6 +413,10 @@ class PostgresAttemptCommands:
             if released_row is None:
                 return False
             released = released_row["job_id"]
+            # Attempt taken, conversation next, job last — the same order
+            # ``transition`` keeps. A release that lands on ``cancelled`` runs
+            # the terminal sweep, and that sweep can pause this goal.
+            await lock_conversation_by_job(conn, job_id=released)
             # The store's own answer, not the caller's. `agent_job_events.job_id`
             # has no foreign key, so a mismatched (job_id, attempt_id) pair would
             # write a control event into a different job's stream — potentially a
@@ -537,10 +538,6 @@ class PostgresAttemptCommands:
         caller — not this method — is what has to change.
         """
         async with self._pool.acquire() as conn, conn.transaction():
-            # Conversation, then attempt, then job. The terminal sweep below can
-            # pause this conversation's goal, so the row it would write has to be
-            # taken before any job row rather than after.
-            await lock_conversation_by_job(conn, job_id=job_id)
             # Lock the attempt before its job, matching release_claim and the
             # reaper. Without an explicit first lock, the job UPDATE below and
             # a concurrent abort can each hold the row the other needs.
@@ -557,6 +554,10 @@ class PostgresAttemptCommands:
             )
             if live_attempt is None:
                 return False
+            # Then the conversation, before any job row: the terminal sweep below
+            # can pause this conversation's goal, and that write has to be taken
+            # on the way *down* the order rather than reached for at the end.
+            await lock_conversation_by_job(conn, job_id=job_id)
             # A success carries its native turn ordinal. The runner settles the
             # shared workspace before it reports success and settlement assigns
             # the ordinal; the schema refuses a succeeded row without one, and

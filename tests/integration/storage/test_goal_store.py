@@ -913,3 +913,57 @@ async def test_cancelling_a_round_takes_the_conversation_before_the_job(store, p
         if blocked is not None and not blocked.done():
             blocked.cancel()
         await pool.release(holder)
+
+
+async def test_finishing_a_turn_takes_the_attempt_before_the_conversation(store, pool):
+    """And the conversation before the job. The whole order, in one direction.
+
+    ``append_event`` already took the attempt and then bumped
+    ``agent_threads.updated_at`` under it, so a conversation lock placed *ahead*
+    of the attempt does not remove a cycle, it moves one: a turn's last event
+    and the transition that ends the turn would then hold each other's rows.
+    Reproduced that way round too, which is why the conversation sits between
+    the attempt and the job rather than in front of both.
+    """
+    job, first, _ = await _live_goal_job(store)
+    attempt_id = first["attempt_id"]
+
+    holder = await pool.acquire()
+    blocked: asyncio.Task[bool] | None = None
+    try:
+        async with holder.transaction():
+            # Hold the conversation, so a transition cannot get past it.
+            await holder.fetchval(
+                "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE", job["thread_id"]
+            )
+            blocked = asyncio.create_task(
+                store.attempt_commands.transition(
+                    job_id=first["id"],
+                    attempt_id=attempt_id,
+                    lease_generation=first["lease_generation"],
+                    from_states=("running",),
+                    to_state="failed",
+                    detail="stopped",
+                )
+            )
+            await asyncio.sleep(0.5)
+            assert not blocked.done(), "the transition should be waiting on the conversation"
+
+            # Waiting on the conversation, and already holding the attempt: that
+            # is the attempt-first half of the order, and it is what keeps this
+            # transaction out of a cycle with the turn's own events.
+            prober = await pool.acquire()
+            try:
+                with pytest.raises(asyncpg.LockNotAvailableError):
+                    async with prober.transaction():
+                        await prober.fetchval(
+                            "SELECT id FROM agent_attempts WHERE id = $1 FOR UPDATE NOWAIT",
+                            attempt_id,
+                        )
+            finally:
+                await pool.release(prober)
+        assert await blocked is True
+    finally:
+        if blocked is not None and not blocked.done():
+            blocked.cancel()
+        await pool.release(holder)
