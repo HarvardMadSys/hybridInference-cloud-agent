@@ -116,6 +116,7 @@ from cloud_agent_profiling import operation_profiling
 from cloud_agent_profiling.measurement_delivery import (
     DELIVERY_ATTEMPTS_MAX,
     DELIVERY_DRAIN_S,
+    DELIVERY_HANDOFF_DRAIN_S,
     DELIVERY_TIMEOUT_S,
     attempts_exhausted,
     classify_exception,
@@ -1507,6 +1508,7 @@ def _stream_shared_agent_turn(
     lease_token: str,
     timeout_s: float,
     measurement: operation_profiling.Measurement | None = None,
+    on_frozen: Callable[[operation_profiling.Measurement], None] | None = None,
 ) -> tuple[int, str, list[str], dict[str, Any] | None]:
     """Relay exactly one broker-framed member turn under its attempt fence.
 
@@ -1524,6 +1526,13 @@ def _stream_shared_agent_turn(
         reasoning_effort=job.reasoning_effort,
     )
     operation_profiling.finish(measurement, outcome="dispatched")
+    # Queued here, not when the turn ends. The prompt has been handed over and
+    # the startup is complete and frozen, so the sample exists now -- while the
+    # model may run for another hour. Waiting would both delay an operator's
+    # view of it and, on a long enough turn, deliver it after the experiment's
+    # grace period, which the endpoint correctly refuses.
+    if measurement is not None and on_frozen is not None:
+        on_frozen(measurement)
     frames: queue.Queue[dict[str, Any] | None] = queue.Queue()
 
     def pump() -> None:
@@ -2125,6 +2134,23 @@ def _run_shared_live_attempt(
             # plain string because a failure inside the turn is an execution
             # failure, not a startup stage.
             operation_profiling.mark(measurement, "prompt_dispatch")
+
+            def _frozen_measurement(frozen: operation_profiling.Measurement) -> None:
+                """Send a startup sample the moment it is complete.
+
+                Its own callback rather than a call here, because the freeze
+                happens inside the streaming helper: the startup ends when the
+                prompt is handed to the supervisor, not when the model is done.
+                """
+                _enqueue_delivery(
+                    frozen,
+                    job=job,
+                    # The client already holds the address it was built with,
+                    # so this path needs no extra plumbing to reach it.
+                    base_url=control._base,
+                    drain_s=DELIVERY_HANDOFF_DRAIN_S,
+                )
+
             exit_code, tail, tool_errors, result_frame = _stream_shared_agent_turn(
                 supervisor=supervisor,
                 job=job,
@@ -2405,17 +2431,41 @@ def run_turn(
             measurement=measurement,
         )
     finally:
-        if measurement is not None:
-            # On its own thread, waited for only briefly. Delivery talks to the
-            # network, and a control plane that is slow or unreachable must not
-            # hold this process open: the turn is over and its answer given.
-            # Whatever the thread has not finished by the drain bound is simply
-            # not delivered, which the delivery counts already report.
-            _deliver_in_background(job=job, base_url=base_url, measurement=measurement)
+        # A bounded sweep, not the delivery itself for the common case: the
+        # record was queued when it was frozen, and this only catches one the
+        # turn ended before. Waited for briefly, because a control plane that
+        # is slow or unreachable must not hold this process open -- the turn is
+        # over and its answer given, and whatever the thread has not finished
+        # by the drain bound is simply not delivered.
+        _enqueue_delivery(measurement, job=job, base_url=base_url, drain_s=DELIVERY_DRAIN_S)
+
+
+def _enqueue_delivery(
+    measurement: operation_profiling.Measurement | None,
+    *,
+    job: ClaimedJob,
+    base_url: str,
+    drain_s: float,
+) -> None:
+    """Send a frozen measurement once, without holding the turn open.
+
+    Idempotent by measurement id: a record is frozen once, so whichever caller
+    reaches it first sends it and the other is a no-op. That is what lets the
+    startup record go out the moment it is frozen *and* lets the turn's own
+    exit try again for anything the earlier attempt did not manage.
+    """
+    if measurement is None or measurement.measurement_id in _ENQUEUED_MEASUREMENT_IDS:
+        return
+    _ENQUEUED_MEASUREMENT_IDS.add(measurement.measurement_id)
+    _deliver_in_background(job=job, base_url=base_url, measurement=measurement, drain_s=drain_s)
 
 
 def _deliver_in_background(
-    *, job: ClaimedJob, base_url: str, measurement: operation_profiling.Measurement
+    *,
+    job: ClaimedJob,
+    base_url: str,
+    measurement: operation_profiling.Measurement,
+    drain_s: float = DELIVERY_DRAIN_S,
 ) -> None:
     """Send this turn's measurement without holding the turn open."""
 
@@ -2447,7 +2497,7 @@ def _deliver_in_background(
         return
     # A bounded wait, not a join: the thread outlives this call if the control
     # plane is slow, and the process may exit with it still running.
-    thread.join(timeout=DELIVERY_DRAIN_S)
+    thread.join(timeout=drain_s)
 
 
 def _run_turn(
@@ -3269,9 +3319,17 @@ def _profiling_descriptor() -> dict[str, Any]:
 _DELIVERED_MEASUREMENT_IDS: set[str] = set()
 
 
+#: Measurements this process has already queued for delivery. A record is
+#: frozen once and its fate is decided once, so a second enqueue would be the
+#: same sample sent twice -- and one of the two would be reported as a
+#: duplicate that never happened.
+_ENQUEUED_MEASUREMENT_IDS: set[str] = set()
+
+
 def reset_delivery_state() -> None:
-    """Forget which measurements this process delivered. Tests call this."""
+    """Forget what this process delivered and queued. Tests call this."""
     _DELIVERED_MEASUREMENT_IDS.clear()
+    _ENQUEUED_MEASUREMENT_IDS.clear()
 
 
 def _bound_measurement(

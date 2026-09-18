@@ -53,6 +53,12 @@ DELIVERY_TIMEOUT_S: Final = 10.0
 #: a destination that is not answering.
 DELIVERY_DRAIN_S: Final = 2.0
 
+#: How long a process waits at a mid-turn handoff, where it will go on working
+#: afterwards. Shorter than the exit bound on purpose: nothing is lost by
+#: returning early, because the record is already queued and the turn's own
+#: exit sweeps for it again.
+DELIVERY_HANDOFF_DRAIN_S: Final = 0.25
+
 #: Statuses worth trying again: the destination asked for time, or a proxy in
 #: front of it did. Everything else is a statement about the request.
 RETRYABLE_STATUS: Final = frozenset({408, 425, 429, 500, 502, 503, 504, 507})
@@ -189,6 +195,7 @@ __all__ = [
     "DELIVERY_ATTEMPTS_MAX",
     "DELIVERY_BYTES_MAX",
     "DELIVERY_DRAIN_S",
+    "DELIVERY_HANDOFF_DRAIN_S",
     "DELIVERY_QUEUE_MAX",
     "DELIVERY_TIMEOUT_S",
     "RETRYABLE_STATUS",

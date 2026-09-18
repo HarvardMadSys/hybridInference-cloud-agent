@@ -88,7 +88,6 @@ from cloud_agent.mcp.binding_aliases import binding_aliases
 from cloud_agent.mcp.models import ALIAS_PATTERN, ConnectionStatus, ToolPolicy
 from cloud_agent.mcp.registry import resolve_connection, resolve_for_thread
 from cloud_agent.measurement_ingest import (
-    CONTROL_PLANE_PRODUCER,
     Owner,
 )
 from cloud_agent.measurement_persistence import manifest_for_run, persist_measurement
@@ -4469,14 +4468,16 @@ async def worker_record_measurement(
         attempt_id=int(attempt_id),
         lease_generation=int(generation),
     )
-    producer = str(body.record.get("producer") or "")
-    if body.run is None and producer != CONTROL_PLANE_PRODUCER:
-        # A producer that is not this process must state its experiment. The
+    if body.run is None:
+        # The manifest is required of *every* caller of this endpoint, with no
+        # exemption for a record that names this process as its producer. The
         # checks below compare the record against the manifest, so a missing
         # one would skip the scope, the selected operations and the deadline
-        # together -- requiring it is what makes any of them bind. This
-        # process's own producers are exempt because they persist in-process,
-        # where the descriptor is already trusted.
+        # together -- and a producer's own name is a field in the payload it
+        # sent, so trusting it would let any holder of a worker token skip all
+        # three by writing "control-plane". This process's real internal
+        # producers never reach here: they persist in-process, where the
+        # descriptor is already trusted.
         raise HTTPException(
             status_code=422,
             detail={

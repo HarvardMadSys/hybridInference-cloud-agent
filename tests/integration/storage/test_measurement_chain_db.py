@@ -405,3 +405,68 @@ async def test_a_token_that_names_no_attempt_is_refused_before_any_write(chain):
     async with pool.acquire() as conn:
         count = await conn.fetchval("SELECT COUNT(*) FROM agent_operation_measurements")
     assert count == 0
+
+
+async def test_the_attempt_lookup_decodes_its_sandbox_for_a_real_row(chain):
+    """The real query hands back a mapping, which is what the ingest reads.
+
+    The chain tests above supply the attempt from a fake, so they cannot see
+    how the column arrives from Postgres: a ``to_jsonb`` projection comes back
+    as text unless it is decoded, and text fails at ``.get()`` with an
+    ``AttributeError`` -- a 500 on the write path, produced only by a real
+    database.
+    """
+    pool, _base_url, _sink = chain
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO agent_threads (id, user_id, repo, title, title_source,
+                                       execution_profile)
+            VALUES ($1, $2, 'o/n', 'chain', 'manual', 'trusted-v1')
+            ON CONFLICT (id) DO NOTHING
+            """,
+            THREAD_ID,
+            USER_ID,
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_jobs (id, user_id, thread_id, turn_no, state, task_prompt,
+                                    runtime, model)
+            VALUES ($1, $2, $3, 1, 'running', 'do it', 'claude-code', 'm')
+            ON CONFLICT (id) DO NOTHING
+            """,
+            JOB_ID,
+            USER_ID,
+            THREAD_ID,
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_attempts (id, job_id, thread_id, attempt_no, lease_generation,
+                                        lease_owner, lease_expires_at, status)
+            VALUES ($1, $2, $3, 1, 3, 'runner-1', NOW() + INTERVAL '5 minutes', 'running')
+            ON CONFLICT (id) DO NOTHING
+            """,
+            ATTEMPT_ID,
+            JOB_ID,
+            THREAD_ID,
+        )
+
+    from cloud_agent.storage.assembly import Storage
+
+    attempt = await Storage(pool).execution_queries.get_attempt(
+        job_id=JOB_ID, attempt_id=ATTEMPT_ID
+    )
+
+    assert attempt is not None
+    # A mapping, or None when this job has no sandbox row -- never text.
+    assert attempt["thread_sandbox"] is None or isinstance(attempt["thread_sandbox"], dict)
+    assert attempt["lease_generation"] == 3
+
+
+async def test_the_attempt_lookup_is_bounded_to_its_job(chain):
+    """One job's credential cannot read another job's attempt."""
+    pool, _base_url, _sink = chain
+    from cloud_agent.storage.assembly import Storage
+
+    storage = Storage(pool)
+    assert await storage.execution_queries.get_attempt(job_id="ajob_other", attempt_id=1) is None

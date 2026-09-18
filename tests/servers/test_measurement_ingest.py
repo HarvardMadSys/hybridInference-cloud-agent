@@ -230,7 +230,8 @@ async def test_a_payload_cannot_claim_a_different_owner(client: AsyncClient, sto
                 job_id=str(other["id"]),
                 owner_id="someone-else",
                 thread_id="athr_somewhere_else",
-            )
+            ),
+            "run": _manifest(),
         },
         headers={"Authorization": f"Bearer {_token_for(job)}"},
     )
@@ -276,7 +277,7 @@ async def test_a_late_measurement_is_accepted_after_its_attempt_ended(
 
     response = await client.post(
         f"/v1/agent/worker/jobs/{job['id']}/measurements",
-        json={"record": _record()},
+        json={"record": _record(), "run": _manifest()},
         headers={"Authorization": f"Bearer {_token_for(job)}"},
     )
 
@@ -296,7 +297,7 @@ async def test_a_token_for_another_job_is_refused(client: AsyncClient, store: Fa
 
     response = await client.post(
         f"/v1/agent/worker/jobs/{other['id']}/measurements",
-        json={"record": _record()},
+        json={"record": _record(), "run": _manifest()},
         headers={"Authorization": f"Bearer {_token_for(job)}"},
     )
 
@@ -333,13 +334,13 @@ async def test_an_id_that_already_names_other_contents_is_a_conflict(
     headers = {"Authorization": f"Bearer {_token_for(job)}"}
     await client.post(
         f"/v1/agent/worker/jobs/{job['id']}/measurements",
-        json={"record": _record()},
+        json={"record": _record(), "run": _manifest()},
         headers=headers,
     )
 
     response = await client.post(
         f"/v1/agent/worker/jobs/{job['id']}/measurements",
-        json={"record": _record(duration_us=9999)},
+        json={"record": _record(duration_us=9999), "run": _manifest()},
         headers=headers,
     )
 
@@ -629,7 +630,7 @@ async def test_a_token_naming_an_attempt_that_never_existed_is_refused(
 
     response = await client.post(
         f"/v1/agent/worker/jobs/{job['id']}/measurements",
-        json={"record": _record()},
+        json={"record": _record(), "run": _manifest()},
         headers={"Authorization": f"Bearer {_token_for(job)}"},
     )
 
@@ -646,7 +647,7 @@ async def test_a_token_from_a_superseded_generation_is_refused(
 
     response = await client.post(
         f"/v1/agent/worker/jobs/{job['id']}/measurements",
-        json={"record": _record()},
+        json={"record": _record(), "run": _manifest()},
         headers={"Authorization": f"Bearer {_token_for(job, generation=1)}"},
     )
 
@@ -672,7 +673,7 @@ async def test_attribution_comes_from_the_attempt_that_ran_it(
 
     response = await client.post(
         f"/v1/agent/worker/jobs/{job['id']}/measurements",
-        json={"record": _record()},
+        json={"record": _record(), "run": _manifest()},
         headers={"Authorization": f"Bearer {_token_for(job)}"},
     )
 
@@ -695,4 +696,26 @@ async def test_a_record_for_another_run_is_refused_by_the_route(
     )
 
     assert response.status_code == 422
+    assert store.measurements.rows == []
+
+
+async def test_a_named_producer_cannot_exempt_itself_from_the_manifest(
+    client: AsyncClient, store: FakeStorage
+):
+    """The internal-caller exemption is decided by the path, not the payload.
+
+    A record's ``producer`` is a field the sender chose. Trusting it would let
+    any holder of a worker token skip the scope, the selected-operation and the
+    deadline checks together by writing one word into the payload.
+    """
+    job = await _claimed_job(client, store)
+
+    response = await client.post(
+        f"/v1/agent/worker/jobs/{job['id']}/measurements",
+        json={"record": _record(producer="control-plane")},
+        headers={"Authorization": f"Bearer {_token_for(job)}"},
+    )
+
+    assert response.status_code == 422
+    assert "manifest" in response.json()["detail"]["error"]["message"]
     assert store.measurements.rows == []

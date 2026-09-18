@@ -209,6 +209,12 @@ class PostgresExecutionQueries:
 
         The generation is included because a credential names one, and a
         record that names it must be reporting on the attempt it belongs to.
+
+        ``thread_sandbox`` is decoded here rather than left as the JSONB text
+        asyncpg hands back for a ``to_jsonb`` projection. Callers read it as a
+        mapping -- the ingest needs the sandbox and host that served *this*
+        attempt -- and text fails at ``.get()`` with an ``AttributeError`` that
+        only a real database produces.
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -223,7 +229,11 @@ class PostgresExecutionQueries:
                 attempt_id,
                 job_id,
             )
-        return dict(row) if row is not None else None
+        if row is None:
+            return None
+        attempt = dict(row)
+        attempt["thread_sandbox"] = load_json(attempt.get("thread_sandbox"))
+        return attempt
 
     async def job_turn_telemetry(
         self, *, job_id: str, attempt_id: int | None = None
