@@ -899,7 +899,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
 
     from cloud_agent.api.mcp_relay import close_host, maintain_host_sessions
     from cloud_agent.broker_routing import close_broker_clients
-    from cloud_agent.capacity_history import collect_host_capacity_history
+    from cloud_agent.capacity_history import prune_host_capacity_history
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
     from cloud_agent.ledger import collect_usage_snapshots
@@ -964,10 +964,12 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             collect_usage_snapshots(storage.ledger, app.state.grants)
         )
         # Host capacity history keeps filling whether or not anybody has the
-        # admin page open — that is the whole reason it lives here rather than
-        # in the browser. Its own task and its own budgets, so a slow write
-        # cannot delay a heartbeat or the reaper.
-        capacity_history = asyncio.create_task(collect_host_capacity_history(storage.host_capacity))
+        # admin page open — that is the whole reason it is stored at all rather
+        # than accumulated in the browser. The points are written by the
+        # heartbeats that accept them; what runs here is the retention that
+        # bounds the table, in its own task, so a slow delete cannot delay a
+        # heartbeat or the reaper.
+        capacity_history = asyncio.create_task(prune_host_capacity_history(storage.host_capacity))
         _BACKGROUND_TASKS.add(reaper)
         _BACKGROUND_TASKS.add(snapshot_coordinator)
         _BACKGROUND_TASKS.add(ledger_collector)

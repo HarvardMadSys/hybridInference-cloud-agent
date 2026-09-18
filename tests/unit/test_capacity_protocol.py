@@ -27,7 +27,7 @@ from cloud_agent.capacity_protocol import (
     admin_capacity_view,
     bucket_for,
     history_point_grid,
-    history_point_write_from_row,
+    history_point_write_from_block,
     history_window,
     parse_capacity_block,
     resolve_history_range,
@@ -299,46 +299,54 @@ def test_a_future_sampled_at_never_produces_a_negative_age() -> None:
 # ── History: writing ──────────────────────────────────────────────────
 
 
-def candidate_row(**overrides: object) -> dict:
-    """A candidate row as the store projects it: every scalar as text."""
-    row: dict = {
-        "host": "gpu-box",
-        "capacity_epoch": "00000000-0000-4000-8000-0000000000ff",
-        "capacity_sample_id": SAMPLE_ID,
-        "capacity_sampled_at": datetime(2026, 9, 11, 12, 34, 56, tzinfo=UTC),
-        "linux_boot_id": BOOT_ID,
-        "cpu_percent": "37.2",
-        "cpu_logical_count": "32",
-        "cpu_window_seconds": "30.01",
-        "cpu_missing_reason": None,
-        "memory_total_bytes": "137438953472",
-        "memory_available_bytes": "92341796864",
-        "memory_missing_reason": None,
-    }
-    row.update(overrides)
-    return row
+SAMPLED_AT = datetime(2026, 9, 11, 12, 34, 56, tzinfo=UTC)
 
 
-def test_a_candidate_row_becomes_one_point_in_its_own_minute() -> None:
-    point = history_point_write_from_row(candidate_row())
+def point_from(block: dict, *, sampled_at: datetime | None = None):
+    """The history point an accepted block produces, at a fixed instant."""
+    return history_point_write_from_block(
+        block, sampled_at=sampled_at or SAMPLED_AT, sample_id=SAMPLE_ID
+    )
+
+
+def test_an_accepted_block_becomes_one_point_in_the_minute_it_measured() -> None:
+    point = point_from(capacity_block())
     assert point is not None
     assert point.bucket_at == datetime(2026, 9, 11, 12, 34, 0, tzinfo=UTC)
-    assert point.sampled_at == datetime(2026, 9, 11, 12, 34, 56, tzinfo=UTC)
+    assert point.sampled_at == SAMPLED_AT
+    assert point.sample_id == SAMPLE_ID
     assert point.cpu_percent == pytest.approx(37.2)
     assert point.memory_total_bytes == 137_438_953_472
 
 
-def test_a_row_without_a_sample_identity_is_skipped() -> None:
-    assert history_point_write_from_row(candidate_row(capacity_sample_id=None)) is None
-    assert history_point_write_from_row(candidate_row(capacity_sampled_at=None)) is None
-    assert history_point_write_from_row(candidate_row(capacity_sample_id="nope")) is None
+def test_the_instant_stamped_is_the_accepting_writes_own() -> None:
+    """The point and the snapshot must not disagree about when this was taken.
+
+    The block carries an age, not an instant, and the row is stamped from the
+    server's clock; re-deriving the instant here would let a point sit in a
+    different minute from the reading it was taken from.
+    """
+    point = point_from(capacity_block(), sampled_at=datetime(2026, 9, 11, 13, 0, 5, tzinfo=UTC))
+    assert point is not None
+    assert point.bucket_at == datetime(2026, 9, 11, 13, 0, 0, tzinfo=UTC)
+
+
+def test_an_unusable_identity_is_skipped_rather_than_stored() -> None:
+    assert (
+        history_point_write_from_block(capacity_block(), sampled_at=SAMPLED_AT, sample_id="nope")
+        is None
+    )
+    assert (
+        history_point_write_from_block(capacity_block(), sampled_at=None, sample_id=SAMPLE_ID)
+        is None
+    )  # type: ignore[arg-type]
 
 
 def test_a_corrupt_scalar_costs_only_its_own_field() -> None:
     """One bad number must not cost the other half of the same observation."""
-    point = history_point_write_from_row(
-        candidate_row(
-            cpu_percent="not-a-number", memory_total_bytes="512", memory_available_bytes="256"
+    point = point_from(
+        capacity_block(
+            cpu_percent="not-a-number", memory_total_bytes=512, memory_available_bytes=256
         )
     )
     assert point is not None
@@ -347,9 +355,14 @@ def test_a_corrupt_scalar_costs_only_its_own_field() -> None:
 
 
 def test_impossible_values_are_dropped_rather_than_stored() -> None:
-    """The table's own CHECK constraints are the reason these never reach it."""
-    point = history_point_write_from_row(
-        candidate_row(cpu_percent="250", memory_total_bytes="100", memory_available_bytes="200")
+    """The table's own CHECK constraints are the reason these never reach it.
+
+    The model refuses these before they are ever stored; this is the second
+    line, and it is the one that matters, because it runs inside the statement
+    that is keeping a live machine's reading.
+    """
+    point = point_from(
+        capacity_block(cpu_percent=250, memory_total_bytes=100, memory_available_bytes=200)
     )
     assert point is not None
     assert point.cpu_percent is None
@@ -357,9 +370,22 @@ def test_impossible_values_are_dropped_rather_than_stored() -> None:
     assert point.memory_available_bytes is None
 
 
+def test_half_a_memory_pair_is_no_memory_reading_at_all() -> None:
+    """The table stores both figures or neither, so neither is what this is."""
+    point = point_from(capacity_block(memory_available_bytes=None))
+    assert point is not None
+    assert point.memory_total_bytes is None
+    assert point.memory_available_bytes is None
+    assert point.cpu_percent == pytest.approx(37.2)
+
+
 def test_a_cpu_gap_keeps_its_memory_half() -> None:
-    point = history_point_write_from_row(
-        candidate_row(cpu_percent=None, cpu_missing_reason="warming_up")
+    point = point_from(
+        capacity_block(
+            cpu_percent=None,
+            cpu_window_seconds=None,
+            missing={"cpu": "warming_up", "memory": None, "storage": None},
+        )
     )
     assert point is not None
     assert point.cpu_percent is None
@@ -368,7 +394,7 @@ def test_a_cpu_gap_keeps_its_memory_half() -> None:
 
 
 def test_a_non_uuid_boot_id_is_stored_as_no_boot_id() -> None:
-    point = history_point_write_from_row(candidate_row(linux_boot_id="hand-edited"))
+    point = point_from(capacity_block(linux_boot_id="hand-edited"))
     assert point is not None
     assert point.linux_boot_id is None
 
@@ -746,21 +772,11 @@ def test_the_storage_sub_block_stays_inside_the_eight_kib_ceiling() -> None:
 
 
 def test_history_ignores_the_storage_sub_block() -> None:
-    """No migration and no new columns: the scalar projection reads fixed paths."""
-    report = parse_capacity_block(capacity_block(storage=storage_block()))
-    assert report is not None
-    row = {
-        "capacity_sampled_at": datetime(2026, 9, 16, 8, 0, 0, tzinfo=UTC),
-        "capacity_sample_id": SAMPLE_ID,
-        "linux_boot_id": BOOT_ID,
-        "cpu_percent": 37.2,
-        "cpu_logical_count": 32,
-        "cpu_window_seconds": 30.0,
-        "memory_total_bytes": 137_438_953_472,
-        "memory_available_bytes": 92_341_796_864,
-    }
+    """No migration and no new columns: the point carries fixed fields."""
+    block = capacity_block(storage=storage_block())
+    assert parse_capacity_block(block) is not None
 
-    point = history_point_write_from_row(row)
+    point = history_point_write_from_block(block, sampled_at=SAMPLED_AT, sample_id=SAMPLE_ID)
 
     assert point is not None
     assert point.memory_total_bytes == 137_438_953_472
