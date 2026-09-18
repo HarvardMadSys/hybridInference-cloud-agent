@@ -47,6 +47,20 @@ def test_artifact_matrix_preserves_native_architecture_on_hosted_runners() -> No
         assert "self-hosted" in entry["runner"]
 
 
+def test_hosted_artifact_builders_use_a_valid_job_local_name() -> None:
+    artifacts = _document()["jobs"]["artifacts"]
+    setup = next(
+        step
+        for step in artifacts["steps"]
+        if step.get("name") == "Reuse this runner's builder, or make one"
+    )
+    script = setup["run"]
+    assert '[ "${GITHUB_EVENT_NAME}" = "pull_request" ]' in script
+    assert 'buildx_config="${RUNNER_TEMP}/buildx"' in script
+    assert 'builder="ci-${SUFFIX}"' in script
+    assert 'builder="ci-${RUNNER_NAME}"' in script
+
+
 def test_real_kata_probe_is_unreachable_from_pull_requests() -> None:
     kata = _document()["jobs"]["kata"]
     assert _excludes_pull_requests(kata)

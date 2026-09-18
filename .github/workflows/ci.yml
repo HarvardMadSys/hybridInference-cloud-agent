@@ -892,8 +892,10 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Reused across jobs, and self-healing: a builder whose buildkitd will not
-      # start is removed and recreated rather than failing every later cell.
+      # Trusted self-hosted jobs reuse one builder per runner. Pull requests run
+      # on disposable hosted machines, whose generated RUNNER_NAME contains
+      # spaces and is not a valid buildx name; they get one job-local builder.
+      # A builder whose buildkitd will not start is removed and recreated.
       # `--bootstrap` is what proves it started, so it doubles as the check.
       #
       # The *name* carries the runner too, and that is not decoration. A config
@@ -908,11 +910,16 @@ jobs:
       - name: Reuse this runner's builder, or make one
         run: |
           set -euo pipefail
-          buildx_config="$(dirname "${RUNNER_WORKSPACE}")/buildx/${RUNNER_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            buildx_config="${RUNNER_TEMP}/buildx"
+            builder="ci-${SUFFIX}"
+          else
+            buildx_config="$(dirname "${RUNNER_WORKSPACE}")/buildx/${RUNNER_NAME}"
+            builder="ci-${RUNNER_NAME}"
+          fi
           mkdir -p "${buildx_config}"
           export BUILDX_CONFIG="${buildx_config}"
           echo "BUILDX_CONFIG=${buildx_config}" >> "${GITHUB_ENV}"
-          builder="ci-${RUNNER_NAME}"
           if ! docker buildx inspect "${builder}" --bootstrap >/dev/null 2>&1; then
             docker buildx rm "${builder}" >/dev/null 2>&1 || true
             docker buildx create --name "${builder}" --driver docker-container --use >/dev/null
