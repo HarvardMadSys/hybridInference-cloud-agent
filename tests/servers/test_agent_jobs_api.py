@@ -38,7 +38,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent import broker_routing
-from cloud_agent.api import routes as agent_jobs_router
+from cloud_agent.api import routes as agent_jobs_router, workspace as agent_workspace
 from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.tokens import mint_worker_token
@@ -3041,7 +3041,7 @@ async def test_terminal_controls_use_the_attached_session_capability(
         raise AssertionError("attached terminal controls must not call external entitlement")
 
     monkeypatch.setattr(
-        agent_jobs_router,
+        agent_workspace,
         "_require_workspace_entitlement",
         unexpected_entitlement_recheck,
     )

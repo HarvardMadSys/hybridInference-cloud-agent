@@ -101,7 +101,7 @@ if TYPE_CHECKING:
     from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
 
 
-router = APIRouter()
+router = APIRouter(prefix="/v1/agent")
 
 #: The moved handlers keep logging under the aggregator's logger name: the
 #: deployment's log pipeline selects on ``cloud_agent.api.routes``, and a
