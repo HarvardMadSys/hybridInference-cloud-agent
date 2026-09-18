@@ -10,6 +10,25 @@ const row = { id: 'main-1', thread_id: 'main', turn_no: 1, state: 'succeeded' } 
 beforeEach(() => sessionStorage.clear());
 afterEach(cleanup);
 
+it('opens with no side chat and numbers the first one the + button creates', () => {
+  const { result } = renderHook(() => useWorkspaceTabs('owner', source, [row]));
+  expect(result.current.chats).toEqual([]);
+  expect(result.current.selected).toBe('git');
+  act(() => {
+    result.current.add();
+  });
+  // The original locator is reused so a receipt from the earlier UI reopens.
+  expect(result.current.chats).toEqual([
+    { id: 'side-chat', number: 1, anchor: { jobId: 'main-1', sandboxId: 'group' } },
+  ]);
+  expect(result.current.selected).toBe('side-chat');
+  act(() => {
+    result.current.add();
+  });
+  expect(result.current.chats.at(-1)?.number).toBe(2);
+  expect(result.current.chats.at(-1)?.id).not.toBe('side-chat');
+});
+
 it('pins each new tab to its creation boundary while later main turns advance', () => {
   const { result, rerender } = renderHook(({ jobs }) => useWorkspaceTabs('owner', source, jobs), {
     initialProps: { jobs: [row] },
@@ -37,11 +56,11 @@ it('isolates open tabs and selection by account and main conversation, restoring
   });
   const created = result.current.selected;
   rerender({ userId: 'other', job: source });
-  expect(result.current.chats).toEqual([{ id: 'side-chat', number: 1 }]);
+  expect(result.current.chats).toEqual([]);
   expect(result.current.selected).toBe('git');
   rerender({ userId: 'owner', job: { ...source, threadId: 'different' } });
-  expect(result.current.chats).toHaveLength(1);
+  expect(result.current.chats).toEqual([]);
   rerender({ userId: 'owner', job: source });
-  expect(result.current.chats).toHaveLength(2);
+  expect(result.current.chats).toHaveLength(1);
   expect(result.current.selected).toBe(created);
 });

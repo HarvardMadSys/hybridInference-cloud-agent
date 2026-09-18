@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useT } from '@/components/providers';
 import type { SideChatTab, WorkspaceTab } from './useWorkspaceTabs';
 
@@ -20,10 +20,6 @@ export function WorkspaceTabBar({
   onClose: (id: SideChatTab['id']) => WorkspaceTab;
 }) {
   const t = useT();
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const addRef = useRef<HTMLButtonElement>(null);
-  const itemRef = useRef<HTMLButtonElement>(null);
   const [focusTab, setFocusTab] = useState<WorkspaceTab | null>(null);
   const tabs: { key: WorkspaceTab; label: string; chat?: SideChatTab }[] = [
     { key: 'git', label: 'Git' },
@@ -42,16 +38,6 @@ export function WorkspaceTabBar({
     tab?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
     setFocusTab(null);
   }, [focusTab]);
-  useEffect(() => {
-    if (!menuOpen) return;
-    itemRef.current?.focus();
-    const outside = (event: PointerEvent) => {
-      if (event.target instanceof Node && !menuRef.current?.contains(event.target))
-        setMenuOpen(false);
-    };
-    document.addEventListener('pointerdown', outside);
-    return () => document.removeEventListener('pointerdown', outside);
-  }, [menuOpen]);
   return (
     <div className="relative z-10 flex shrink-0 border-b border-gray-200 bg-white px-4 text-[13px] font-medium dark:border-white/10 dark:bg-gray-900">
       <nav
@@ -124,35 +110,12 @@ export function WorkspaceTabBar({
           </div>
         ))}
       </nav>
-      <div
-        ref={menuRef}
-        className="relative flex shrink-0 items-center pl-1"
-        onBlur={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setMenuOpen(false);
-        }}
-        onKeyDown={(event) => {
-          if (event.key === 'Escape' && menuOpen) {
-            event.preventDefault();
-            event.stopPropagation();
-            setMenuOpen(false);
-            addRef.current?.focus();
-          }
-        }}
-      >
+      <div className="flex shrink-0 items-center pl-1">
         <button
-          ref={addRef}
           type="button"
-          aria-label={t('sideChat.add')}
-          title={t('sideChat.add')}
-          aria-haspopup="menu"
-          aria-expanded={menuOpen}
-          onClick={() => setMenuOpen((open) => !open)}
-          onKeyDown={(event) => {
-            if (event.key === 'ArrowDown') {
-              event.preventDefault();
-              setMenuOpen(true);
-            }
-          }}
+          aria-label={t('sideChat.new')}
+          title={t('sideChat.new')}
+          onClick={() => setFocusTab(onAdd())}
           className="rounded p-2 text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-crimson dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
         >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -164,32 +127,6 @@ export function WorkspaceTabBar({
             />
           </svg>
         </button>
-        {menuOpen ? (
-          <div
-            role="menu"
-            aria-label={t('sideChat.add')}
-            className="absolute right-0 top-full mt-1 w-48 rounded-lg border border-gray-200 bg-white p-1 shadow-lg dark:border-white/10 dark:bg-gray-900"
-          >
-            <button
-              ref={itemRef}
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setMenuOpen(false);
-                setFocusTab(onAdd());
-              }}
-              className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-gray-900 hover:bg-gray-100 focus:bg-gray-100 focus:outline-none dark:text-gray-100 dark:hover:bg-white/10 dark:focus:bg-white/10"
-            >
-              <span
-                aria-hidden="true"
-                className="text-lg leading-none text-gray-400 dark:text-gray-500"
-              >
-                +
-              </span>
-              {t('sideChat.new')}
-            </button>
-          </div>
-        ) : null}
       </div>
     </div>
   );

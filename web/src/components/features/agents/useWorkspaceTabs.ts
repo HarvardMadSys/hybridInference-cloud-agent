@@ -26,11 +26,8 @@ export function sideChatAnchor(source: AgentJob, jobs: AgentJobApi[]) {
 }
 
 function read(key: string): TabsState {
-  const initial: TabsState = {
-    selected: 'git',
-    chats: [{ id: 'side-chat', number: 1 }],
-    nextNumber: 2,
-  };
+  // A workspace opens on Git with no side chat: one is created by the + button.
+  const initial: TabsState = { selected: 'git', chats: [], nextNumber: 1 };
   try {
     const raw = sessionStorage.getItem(key);
     if (!raw) return initial;
@@ -38,7 +35,7 @@ function read(key: string): TabsState {
     if (
       !Array.isArray(value.chats) ||
       !Number.isSafeInteger(value.nextNumber) ||
-      value.nextNumber < 2 ||
+      value.nextNumber < 1 ||
       value.chats.some(
         (chat) =>
           !chat ||
@@ -90,7 +87,9 @@ export function useWorkspaceTabs(
     },
     add() {
       const chat: SideChatTab = {
-        id: `side-chat-${crypto.randomUUID()}`,
+        // The first chat of a conversation keeps the original tab's locator so
+        // a receipt written by the earlier UI reopens instead of forking again.
+        id: state.nextNumber === 1 ? 'side-chat' : `side-chat-${crypto.randomUUID()}`,
         number: state.nextNumber,
         anchor: sideChatAnchor(source, jobs),
       };

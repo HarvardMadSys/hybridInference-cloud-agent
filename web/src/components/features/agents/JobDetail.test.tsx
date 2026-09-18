@@ -150,8 +150,7 @@ function openWorkspace() {
 }
 
 function addSideChat() {
-  fireEvent.click(screen.getByRole('button', { name: 'Add workspace tab' }));
-  fireEvent.click(screen.getByRole('menuitem', { name: 'New Side Chat' }));
+  fireEvent.click(screen.getByRole('button', { name: 'New Side Chat' }));
 }
 
 function sideChatFixture() {
@@ -281,7 +280,8 @@ describe('JobDetail', () => {
     const props = { job, userId, threadJobs: [source] };
     const view = render(<JobDetail {...props} />);
     openWorkspace();
-    fireEvent.click(screen.getByRole('tab', { name: 'Side Chat' }));
+    expect(screen.queryByRole('tab', { name: /Side Chat/ })).not.toBeInTheDocument();
+    addSideChat();
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1));
     fireEvent.change(screen.getByRole('textbox', { name: 'Message side chat' }), {
       target: { value: 'First draft' },
@@ -330,15 +330,16 @@ describe('JobDetail', () => {
     openWorkspace();
     addSideChat();
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1));
+    addSideChat();
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(2));
     fireEvent.click(screen.getByRole('button', { name: 'Close Side Chat 2' }));
     expect(screen.getByRole('tab', { name: 'Side Chat' })).toHaveFocus();
-    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(2));
     fireEvent.click(screen.getByRole('button', { name: 'Close Side Chat' }));
     expect(screen.getByRole('tab', { name: /Git/ })).toHaveFocus();
     expect(screen.getByRole('tab', { name: /Git/ })).toHaveAttribute('aria-selected', 'true');
     expect(screen.queryByRole('textbox', { name: 'Message side chat' })).not.toBeInTheDocument();
     expect(localStorage.getItem(sideChatKeys(userId, source.thread_id!).session)).toContain(
-      'tabs-child-2',
+      'tabs-child-1',
     );
     view.unmount();
     render(<JobDetail {...props} />);
@@ -364,7 +365,7 @@ describe('JobDetail', () => {
     );
     render(<JobDetail job={job} userId={userId} threadJobs={[source]} />);
     openWorkspace();
-    fireEvent.click(screen.getByRole('tab', { name: 'Side Chat' }));
+    addSideChat();
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole('button', { name: 'Close Side Chat' }));
     const child = {
@@ -387,16 +388,15 @@ describe('JobDetail', () => {
     expect(cancelAgentJob).not.toHaveBeenCalled();
   });
 
-  it('dismisses the add menu on Escape without stopping the main conversation', async () => {
+  it('creates and focuses a side chat from one click on + without stopping the main conversation', async () => {
     render(<JobDetail job={makeJob()} />);
     openWorkspace();
-    const add = screen.getByRole('button', { name: 'Add workspace tab' });
-    fireEvent.keyDown(add, { key: 'ArrowDown' });
-    const item = screen.getByRole('menuitem', { name: 'New Side Chat' });
-    expect(item).toHaveFocus();
-    fireEvent.keyDown(item, { key: 'Escape' });
+    expect(screen.queryByRole('tab', { name: /Side Chat/ })).not.toBeInTheDocument();
+    addSideChat();
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
-    expect(add).toHaveFocus();
+    const tab = screen.getByRole('tab', { name: 'Side Chat' });
+    expect(tab).toHaveFocus();
+    expect(tab).toHaveAttribute('aria-selected', 'true');
     expect(cancelAgentJob).not.toHaveBeenCalled();
   });
 
@@ -426,7 +426,7 @@ describe('JobDetail', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
     await screen.findByRole('button', { name: 'Stop side chat' });
-    fireEvent.keyDown(screen.getByRole('tab', { name: 'Side Chat 2' }), { key: 'Escape' });
+    fireEvent.keyDown(screen.getByRole('tab', { name: 'Side Chat' }), { key: 'Escape' });
     await waitFor(() => expect(cancelAgentJob).toHaveBeenCalledExactlyOnceWith('running-side'));
   });
 
@@ -474,8 +474,8 @@ describe('JobDetail', () => {
     expect(getAgentJob).not.toHaveBeenCalled();
     openWorkspace();
     expect(forkAgentJob).not.toHaveBeenCalled();
+    addSideChat();
     const tab = screen.getByRole('tab', { name: 'Side Chat' });
-    fireEvent.click(tab);
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1));
     fireEvent.keyDown(tab, { key: 'Escape' });
     fireEvent.keyDown(document.body, { key: 'Escape' });
@@ -489,16 +489,13 @@ describe('JobDetail', () => {
     render(<JobDetail job={makeJob()} />);
     openWorkspace();
     const workspace = screen.getByRole('region', { name: 'Job workspace' });
-    const tabs = within(
-      within(workspace).getByRole('tablist', { name: 'Workspace views' }),
-    ).getAllByRole('tab');
-    expect(tabs.map((tab) => tab.textContent?.replace(/\d+$/, '').trim())).toEqual([
-      'Git',
-      'Terminal',
-      'Files',
-      'Side Chat',
-    ]);
-    fireEvent.click(within(workspace).getByRole('tab', { name: 'Side Chat' }));
+    const names = () =>
+      within(within(workspace).getByRole('tablist', { name: 'Workspace views' }))
+        .getAllByRole('tab')
+        .map((tab) => tab.textContent?.replace(/\d+$/, '').trim());
+    expect(names()).toEqual(['Git', 'Terminal', 'Files']);
+    addSideChat();
+    expect(names()).toEqual(['Git', 'Terminal', 'Files', 'Side Chat']);
     expect(screen.getByRole('textbox', { name: 'Message side chat' })).toBeVisible();
     fireEvent.keyDown(screen.getByRole('region', { name: 'Side chat messages' }), {
       key: 'Escape',

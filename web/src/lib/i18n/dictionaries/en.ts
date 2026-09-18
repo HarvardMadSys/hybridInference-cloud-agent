@@ -11,7 +11,6 @@
  */
 export const en = {
   'sideChat.tab': 'Side Chat',
-  'sideChat.add': 'Add workspace tab',
   'sideChat.new': 'New Side Chat',
   'sideChat.close': 'Close {name}',
   'sideChat.region': 'Side chat',
