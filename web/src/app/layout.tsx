@@ -14,7 +14,7 @@ import { themeBootScript } from '@/lib/theme';
 // document inside a `<div>` — the shell keeps its shape inside the `(agents)`
 // route group, and this file provides the document around it. Route groups do
 // not appear in URLs, so `/`, `/[jobId]`, `/archived`, `/connected` and
-// `/integrations` are exactly the routes F3 asks for.
+// `/integrations` are the routes this app serves.
 //
 // `/login` sits outside the group on purpose: it runs before there is a
 // session, so it must not be behind the shell's `ProtectedRoute`. (`/callback`

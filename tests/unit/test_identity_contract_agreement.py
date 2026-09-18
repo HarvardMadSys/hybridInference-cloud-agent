@@ -7,7 +7,7 @@ tested its own half of a two-sided agreement, and a rename on either would pass
 both suites and fail at the first sign-in.
 
 `contracts/identity.openapi.yaml` is the closest thing here to the other side:
-hand-transcribed from the gateway's routers in C8, and independent of
+hand-transcribed from the gateway's routers, and independent of
 `identity.py` in the sense that matters — nobody editing the verifier is
 editing it too.
 

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-// F3's acceptance, both halves: an unauthenticated visitor is sent to the
+// Both halves of the gate: an unauthenticated visitor is sent to the
 // gateway with a PKCE challenge, and an authenticated one sees the app.
 //
 // The session BFF is mocked rather than served — what is being tested is the

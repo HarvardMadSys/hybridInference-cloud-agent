@@ -1,4 +1,4 @@
-"""Keeping a grant alive, and killing it — the fence (task E9).
+"""Keeping a grant alive, and killing it — the fence.
 
 After the split the gateway holds **no attempt or lease state at all**. It
 cannot tell a live attempt from one the reaper superseded thirty seconds ago,

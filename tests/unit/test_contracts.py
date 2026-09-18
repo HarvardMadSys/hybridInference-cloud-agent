@@ -1,4 +1,4 @@
-"""The gateway contracts under `contracts/` are real documents (task C8).
+"""The gateway contracts under `contracts/` are real documents.
 
 A cross-repo contract that nobody checks is a comment in a language nobody
 reads. Three things are checked here, in increasing order of how easily they
@@ -54,7 +54,7 @@ def test_there_is_at_least_one_contract() -> None:
 
 @pytest.mark.parametrize("path", DOCUMENTS, ids=lambda p: p.name)
 def test_a_contract_is_valid_openapi(path: Path) -> None:
-    """The plan's C8 acceptance: these lint."""
+    """The documents' own acceptance: these lint."""
     spec, base_uri = read_from_filename(str(path))
     validate(spec, base_uri=base_uri)
 

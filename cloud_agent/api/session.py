@@ -1,4 +1,4 @@
-"""The session BFF — this service's own half of sign-in (task E8).
+"""The session BFF — this service's own half of sign-in.
 
 Sign-in happens at the gateway. This service owns the round trip to it, and
 owns it **end to end on the server**: two browser-facing routes park a flow,

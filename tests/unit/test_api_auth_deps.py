@@ -1,10 +1,10 @@
-"""The auth dependencies E7 replaced (``cloud_agent.api.deps``).
+"""The auth dependencies (``cloud_agent.api.deps``).
 
-Until E7 these eight raised ``NotImplementedError`` and the ported API tests
-supplied stand-ins. They are real now, and this file is what stops them
-regressing into something permissive: nearly every case here asserts a
-*refusal*, because the failure mode that matters is a dependency that says yes
-when it cannot know.
+These eight raised ``NotImplementedError`` until they were implemented, with
+the ported API tests supplying stand-ins for them. They are real now, and this
+file is what stops them regressing into something permissive: nearly every
+case here asserts a *refusal*, because the failure mode that matters is a
+dependency that says yes when it cannot know.
 
 The credential boundaries that would be quietest if they broke:
 

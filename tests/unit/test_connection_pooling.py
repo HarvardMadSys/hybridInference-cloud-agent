@@ -34,7 +34,7 @@ def _credentials(**kwargs) -> GitHubAppCredentials:
 
 
 async def test_the_lifespan_gives_both_gateway_clients_one_pool(monkeypatch) -> None:
-    """The sharing `app.py` has claimed in a comment since E9, now actual."""
+    """The sharing `app.py` describes in a comment, now actual."""
     monkeypatch.setenv("AGENT_DATABASE_URL", "postgresql://test-only")
     monkeypatch.delenv("GATEWAY_BASE_URL", raising=False)
     monkeypatch.delenv("GATEWAY_ISSUER", raising=False)

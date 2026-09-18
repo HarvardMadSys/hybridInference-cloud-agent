@@ -1,4 +1,4 @@
-"""The grant link's SQL predicates, against a real database (task E9).
+"""The grant link's SQL predicates, against a real database.
 
 ``tests/unit/test_grant_lifecycle.py`` pins the *loops* — that they re-read the
 store every pass and act only on what it returns. What it cannot pin is the

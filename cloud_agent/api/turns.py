@@ -181,7 +181,7 @@ async def create_agent_follow_up(
         or retained.get("state") in {"stopped_dirty", "lost"}
     ):
         raise _sandbox_context_lost_error()
-    # The harness is fixed per thread (design D2): continuity is the harness
+    # The harness is fixed per thread: continuity is the harness
     # session, and no other harness can continue it. The field survives as an
     # explicit no-op so existing callers that echo the thread's runtime keep
     # working; a *different* runtime is refused rather than silently starting

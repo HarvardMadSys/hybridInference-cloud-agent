@@ -280,7 +280,7 @@ def test_claude_prepare_points_at_the_gateway_and_disables_telemetry():
     assert argv[:3] == ["claude", "-p", "do the thing"]
     assert "--output-format" in argv and "stream-json" in argv
     # Ignore both user-level and committed .mcp.json servers. Platform MCP is
-    # supplied explicitly later; P0's effective set must stay empty.
+    # supplied explicitly later; the effective set here must stay empty.
     assert "--strict-mcp-config" in argv
     assert env["ANTHROPIC_BASE_URL"] == "https://gateway.example.com"
     assert env["ANTHROPIC_API_KEY"] == "ajt.a.b"

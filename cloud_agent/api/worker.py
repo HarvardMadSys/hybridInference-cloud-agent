@@ -581,7 +581,7 @@ async def worker_claim(
     # control credential, signed with this service's own secret and verified by
     # this service — correctly local. The sandbox's credential is not: it buys
     # inference, which is the gateway's to authorize and the gateway's to meter,
-    # so it is asked for rather than minted. (E9. Before this, the claim minted
+    # so it is asked for rather than minted. Before this, the claim minted
     # a ``SCOPE_MODEL`` token signed with a root the gateway does not know —
     # which bought nothing, and failed at the sandbox's first model call.)
     token = mint_worker_token(**fence, scope=SCOPE_FULL)

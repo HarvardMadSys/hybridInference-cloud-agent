@@ -107,7 +107,7 @@ _RuntimeT = TypeVar("_RuntimeT", bound=DialectRuntime)
 _RuntimeT_co = TypeVar("_RuntimeT_co", bound=DialectRuntime, covariant=True)
 _LiveRuntimeT = TypeVar("_LiveRuntimeT", bound=ResidentLiveRuntime)
 
-# Floor events (design D9): the minimum any driver must yield around a turn,
+# Floor events: the minimum any driver must yield around a turn,
 # synthesized here so a dialect adapter cannot forget them. They are the
 # runner's control-flow signal, not stream rows — the platform's stored
 # vocabulary stays the runtimes.py kinds.
@@ -167,7 +167,7 @@ class TurnInput:
 
 @dataclass(frozen=True)
 class TurnResult:
-    """The platform-facing outcome of one turn (design D9).
+    """The platform-facing outcome of one turn.
 
     The hard guarantee: ``status == "completed"`` implies ``final_output`` is
     non-empty. A harness that produced only tool activity still yields a
@@ -214,7 +214,7 @@ class LaunchContext:
     """Everything a session needs that is not the turn itself.
 
     ``spawn`` is the sandbox boundary made explicit: the *platform* places the
-    process inside the sandbox (D7 — no driver may create a harness process
+    process inside the sandbox (no driver may create a harness process
     anywhere else), and the driver owns everything that flows over the
     returned handle's transport.
     """
@@ -317,7 +317,7 @@ class HarnessTurn(Generic[_RuntimeT]):
             return TurnResult(status="failed", final_output="", exit_code=exit_code)
         final = "\n\n".join(self._final_messages).strip()
         if not final:
-            # D9: tool-only runs still owe the owner a displayable line. This
+            # Tool-only runs still owe the owner a displayable line. This
             # text is deliberately explicit about being synthesized — a driver
             # must never put words in the agent's mouth.
             final = "(the agent finished without a closing message)"
@@ -1562,7 +1562,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         """Feed one user turn to the resident process, spawning it lazily.
 
         The first turn fixes the session's model — a resident process reads
-        its model once (D6: ``model_switch: restart``). A later turn naming a
+        its model once (``model_switch: restart``). A later turn naming a
         different model refuses here and the platform restarts the session.
         The reasoning effort is fixed the same way and for the same reason:
         it is a launch flag, read once at spawn, so a turn that wants a

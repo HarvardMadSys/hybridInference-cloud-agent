@@ -1,6 +1,6 @@
 """Gateway-owned recovery for terminal sessions left behind by settled jobs.
 
-The broker is passed in rather than read from the environment here (phase G5).
+The broker is passed in rather than read from the environment here.
 This runs for jobs that have already settled — including from the reaper's
 startup reconciliation, where there is no request and no attempt in hand — so
 "which broker" is a question only the caller can answer, by looking up the host

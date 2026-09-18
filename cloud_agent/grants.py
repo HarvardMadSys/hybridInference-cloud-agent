@@ -166,8 +166,8 @@ RENEWAL_HEADROOM_PASSES = 4
 #: literal here is a number free to drift from the loop that keeps it alive.
 GRANT_TTL_S = int(RENEWAL_INTERVAL_S * RENEWAL_HEADROOM_PASSES)
 
-#: Mirrors of the gateway's own clamps, from the C5 work this service's grant
-#: calls are written against (`serving/grants.py`: ``MAX_GRANT_TTL_S`` and
+#: Mirrors of the gateway's own clamps, which this service's grant calls are
+#: written against (`serving/grants.py`: ``MAX_GRANT_TTL_S`` and
 #: ``DEFAULT_GRANT_TTL_S``, which is also its renewal step). Mirrors because the
 #: gateway is reached over HTTP only and neither number is on the wire — asking
 #: for more than the maximum is silently clamped *down*, and a renewal always

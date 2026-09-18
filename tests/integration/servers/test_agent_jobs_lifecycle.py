@@ -86,7 +86,7 @@ class _FakeGateway:
 
 
 class _FakeGrants:
-    """The gateway's grant contract. The claim asks for one now (E9)."""
+    """The gateway's grant contract. The claim asks the gateway for one."""
 
     async def mint(self, **kwargs: Any) -> dict[str, Any]:
         return {

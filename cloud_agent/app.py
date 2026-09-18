@@ -937,7 +937,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     http = httpx.AsyncClient()
     app.state.http = http
     app.state.gateway = GatewayClient(client=http)
-    # The sandbox's credential is minted at the gateway now (E9), so the claim
+    # The sandbox's credential is minted at the gateway now, so the claim
     # path and the renewal/revocation passes share that pool rather than each
     # building their own per call. They take the same seam; until this was
     # wired, the comment here described sharing that was not happening.

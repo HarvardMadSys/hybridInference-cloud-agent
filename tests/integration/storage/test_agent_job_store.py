@@ -79,8 +79,8 @@ async def pool():
         return  # unreachable
 
     # Schema and backfills come from the baseline migration now, not from
-    # the storage layer. This is E1's acceptance: `alembic upgrade head` on a
-    # fresh database has to leave every one of these tests passing.
+    # the storage layer — and that is the acceptance: `alembic upgrade head`
+    # on a fresh database has to leave every one of these tests passing.
     apply_migrations(db_config)
 
     async with pool.acquire() as conn:

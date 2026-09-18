@@ -26,12 +26,12 @@ The gateway never sees this value, and this service never sees the gateway's.
 The domain-separation prefix survives the re-key for the same reason it existed:
 a signature over it is meaningless as anything else.
 
-The ``model`` scope is **still here, and still dead weight** — E9 removes it,
-once the runner asks the gateway for a grant instead. It is kept for now so the
-moved tests run unmodified, which is what makes them evidence that nothing else
-changed. Note what that means in the meantime: a ``model``-scoped token minted
-here is signed by a root the gateway does not know, so it buys nothing. That is
-the correct failure, but it is a failure, not a working path.
+The ``model`` scope is **still here, and still dead weight** — nothing mints
+one any more, because the runner asks the gateway for a grant instead. It is
+kept so the moved tests run unmodified, which is what makes them evidence that
+nothing else changed. Note what that means in the meantime: a ``model``-scoped
+token minted here is signed by a root the gateway does not know, so it buys
+nothing. That is the correct failure, but it is a failure, not a working path.
 
 **Re-keying invalidates every token in flight.** That is a cutover concern, not
 a bug: an attempt holding a token signed by the old root is an attempt from

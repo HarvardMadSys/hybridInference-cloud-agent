@@ -45,7 +45,7 @@ def test_no_gateway_imports() -> None:
 
 
 # The gateway's signing roots, by name. This service must never hold either:
-# control tokens re-keyed to AGENT_CONTROL_TOKEN_SECRET in E3, and inference is
+# control tokens are signed with AGENT_CONTROL_TOKEN_SECRET, and inference is
 # authorized by grants the gateway mints and verifies.
 _GATEWAY_SECRETS = ("API_KEY_SECRET", "JWT_SECRET_KEY")
 

@@ -881,8 +881,8 @@ class AgentFollowUpRequest(BaseModel):
         None,
         description=(
             "Accepted only when it names the thread's own harness — a thread's "
-            "harness is fixed (its session is the unit of continuity; design "
-            "D2). Any other value is a 400; start a new chat to switch."
+            "harness is fixed (its session is the unit of continuity). Any "
+            "other value is a 400; start a new chat to switch."
         ),
     )
     model: str | None = Field(None, description="Optional model override for this turn.")
@@ -2510,7 +2510,7 @@ class HostHeartbeatResponse(BaseModel):
     )
 
 
-# ── Session (E8) ───────────────────────────────────────────────────────
+# ── Session ────────────────────────────────────────────────────────────
 
 
 class SessionUserResponse(BaseModel):

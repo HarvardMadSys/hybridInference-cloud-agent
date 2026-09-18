@@ -10,12 +10,12 @@ longer holds are supplied by the test app instead of by an import:
 
 - **The model catalog and the MCP registry** arrive over HTTP now, so the
   route registry the source stubbed is a fake ``GatewayClient`` here.
-- **The auth dependencies** are real as of E7, so nothing stands in for them
+- **The auth dependencies** are real now, so nothing stands in for them
   any more: ``get_current_user`` verifies this service's own session token and
   ``verify_admin_access`` compares ``ADMIN_TOKEN``. There is no API-key branch
   to stand in for since 2026-08-04 — it was deleted, along with the operational
   store it read; the session is the only owner credential here.
-- **The sandbox's credential** is a gateway grant since E9, not something the
+- **The sandbox's credential** is a gateway grant now, not something the
   claim mints, so the fake gateway client has a grant-minting sibling.
 
 Workspace operations always route through the attempt's enrolled host. The
@@ -1345,7 +1345,7 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
     # The create endpoints fail fast on models the deployment cannot serve, so
     # the gateway the test answers with must contain what the tests submit.
     app.dependency_overrides[get_gateway_client] = _FakeGateway
-    # The sandbox credential comes from the gateway (E9); without this the
+    # The sandbox credential comes from the gateway; without this the
     # claim would correctly refuse, having no configured grant client.
     app.dependency_overrides[get_grant_client] = _FakeGrants
     # No GitHub App by default — the configuration most deployments start in,
@@ -2058,7 +2058,7 @@ async def test_an_unregistered_runtime_is_refused_at_create(client: AsyncClient)
 
 
 async def test_a_follow_up_cannot_switch_the_threads_harness(client: AsyncClient):
-    """The harness is fixed per thread (design D2); its session is the memory.
+    """The harness is fixed per thread; its session is the memory.
 
     Echoing the thread's own runtime stays a 201 — existing callers do that —
     and a *different* registered runtime is refused. Native fork preserves the
@@ -4080,8 +4080,8 @@ async def test_terminal_stream_drains_beyond_one_page(client: AsyncClient, store
 
 # ``test_claim_returns_a_separate_model_scoped_token`` was here. It asserted
 # that the sandbox credential parsed as a ``SCOPE_MODEL`` worker token — which
-# is precisely the credential E9 removed, because it was signed with a root the
-# gateway does not know and therefore bought nothing. The property it protected
+# is precisely the credential the claim stopped minting, because it was signed
+# with a root the gateway does not know and therefore bought nothing. The
 # (the sandbox gets a *different*, weaker credential than the runner) is pinned
 # below against the credential that replaced it.
 #
@@ -4097,7 +4097,7 @@ async def test_the_claim_hands_over_a_gateway_grant_not_a_minted_token(
 ):
     """The sandbox credential is distinct from the runner's — and is not ours.
 
-    Two separate claims, and the second is the point of E9: this service can
+    Two separate claims, and the second is the point: this service can
     mint the runner's control token because it verifies it, and it must *not*
     be able to mint the sandbox's, because the thing that credential buys is
     inference the gateway meters. So the sandbox token deliberately does not
@@ -4170,7 +4170,7 @@ async def test_the_sandbox_grant_cannot_write_job_state(client: AsyncClient):
 # code inside a migration. The wire-level half of the same guarantee is
 # ``test_sandbox_token_stays_out_of_owner_routes`` (ported; 403
 # ``insufficient_scope`` on ``/v1/agent/jobs``) and, for the worker surface,
-# ``test_the_sandbox_grant_cannot_write_job_state`` (E9's in-place replacement
+# ``test_the_sandbox_grant_cannot_write_job_state`` (the in-place replacement
 # for ``test_sandbox_token_cannot_write_job_state``; 401 against the gateway
 # grant the sandbox now carries). Recorded in MIGRATION.md's discarded-test
 # register.

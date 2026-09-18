@@ -205,7 +205,7 @@ _SAFE_DIRECTORY_ENV = {
 # A blocked egress attempt looks like a connection failure in the agent's own
 # tool output, because that is where it surfaces: on a deny-all network the
 # kernel drops the packet and the tool reports the failure. Recording these is
-# what the design asks P0 to produce — the evidence for what an external
+# what the design asks for here — the evidence for what an external
 # default should allow. Deliberately narrow: a name-resolution or connection
 # error carrying a host, not every failing command.
 _EGRESS_FAILURE = re.compile(
@@ -3128,8 +3128,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # In the source repo, importing sandbox configured root logging as a side
     # effect; the host shim removed that on purpose. This is the sanctioned
-    # replacement (MIGRATION.md deferred-behaviour register, D6 row) — without
-    # it every INFO event a runner emits goes nowhere.
+    # replacement (MIGRATION.md's deferred-behaviour register, the
+    # runner-logging row) — without it every INFO event a runner emits goes
+    # nowhere.
     configure_process_logging()
 
     if not args.base_url:

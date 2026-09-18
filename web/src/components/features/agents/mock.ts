@@ -1,6 +1,6 @@
-// P0 skeleton fixtures. Replace with the Job API client once AgentJobStore and
-// the /agents endpoints land (issue #1041) — the shapes in types.ts are the
-// contract this UI expects from that API.
+// Skeleton fixtures. Replace with the Job API client once AgentJobStore and
+// the /agents endpoints land — the shapes in types.ts are the contract this UI
+// expects from that API.
 
 import type { AgentJob } from './types';
 
