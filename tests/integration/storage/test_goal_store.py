@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import asyncpg
+
 # Imported pytest fixtures are intentionally named by test parameters.
 # ruff: noqa: F811
 import pytest
@@ -858,3 +860,56 @@ async def test_pause_stalled_goals_only_touches_quiet_conversations(store, pool)
     # The one with work still queued is not stalled, whatever its timestamps say.
     assert (await store.goals.get_goal(thread_id=quiet_job["thread_id"]))["state"] == "active"
     assert (await store.conversation_queries.get_job(queued["id"]))["state"] == "queued"
+
+
+async def test_cancelling_a_round_takes_the_conversation_before_the_job(store, pool):
+    """The lock order, asserted so that the wrong one fails rather than races.
+
+    Pausing a goal writes ``agent_threads`` and then cancels that conversation's
+    queued rounds; cancelling a round writes ``agent_jobs`` and then pauses the
+    goal. Taken in opposite orders those two are a cycle, and it is reachable
+    from the UI — the band's Pause and a turn's Cancel, on the same conversation.
+    Reproduced as ``deadlock detected`` before ``request_cancel`` took the
+    conversation first.
+
+    A concurrency test would not pin it: whichever order the code takes, two
+    writers usually just serialize. So this holds the *job* row and then asks
+    whether ``request_cancel`` has taken the conversation — which it can only
+    have done before reaching the job it is now blocked on.
+    """
+    job, first, _ = await _live_goal_job(store)
+    await _finish(pool, first)
+    queued = await _round(store, parent=job)
+
+    holder = await pool.acquire()
+    blocked: asyncio.Task[str | None] | None = None
+    try:
+        async with holder.transaction():
+            # Hold the round's own row, so a cancel cannot get past it.
+            await holder.fetchval(
+                "SELECT id FROM agent_jobs WHERE id = $1 FOR UPDATE", queued["id"]
+            )
+            blocked = asyncio.create_task(
+                store.attempt_commands.request_cancel(job_id=queued["id"])
+            )
+            await asyncio.sleep(0.5)
+            assert not blocked.done(), "the cancel should be waiting on the job row"
+
+            # It is waiting on the job — so if it holds the conversation, it took
+            # that first. ``NOWAIT`` turns "somebody holds it" into an error
+            # rather than a wait, which is what makes this deterministic.
+            prober = await pool.acquire()
+            try:
+                with pytest.raises(asyncpg.LockNotAvailableError):
+                    async with prober.transaction():
+                        await prober.fetchval(
+                            "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE NOWAIT",
+                            job["thread_id"],
+                        )
+            finally:
+                await pool.release(prober)
+        assert await blocked == "cancelled"
+    finally:
+        if blocked is not None and not blocked.done():
+            blocked.cancel()
+        await pool.release(holder)

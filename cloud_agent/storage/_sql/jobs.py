@@ -162,6 +162,35 @@ async def fail_unrunnable_follow_ups(
     )
 
 
+#: Take the conversation's row before any of its jobs'.
+#:
+#: Every terminal path that can pause a goal writes ``agent_threads`` while it
+#: already holds ``agent_jobs`` rows, and the writers on the other side --
+#: ``pause_goal``, ``clear_goal``, ``set_goal`` and ``_create_follow_up`` --
+#: take the conversation first and then reach those same job rows. Two orders
+#: over the same two rows is a cycle, and it is not theoretical: cancelling a
+#: queued automatic round while its goal is being paused reproduces
+#: ``deadlock detected`` (40P01) against Postgres.
+#:
+#: So the terminal paths take the conversation first too, and the order this
+#: repository keeps is conversation -> attempt -> job throughout.
+_LOCK_CONVERSATION_BY_JOB = """
+SELECT t.id FROM agent_threads t
+JOIN agent_jobs j ON j.thread_id = t.id
+WHERE j.id = $1
+FOR UPDATE OF t
+"""
+
+
+async def lock_conversation_by_job(conn: Any, *, job_id: str) -> str | None:
+    """Lock the conversation this job belongs to, or ``None`` if it has none.
+
+    Called first in a transaction that may end a turn. ``None`` means the job
+    is gone, which the caller's own read reports in its own words.
+    """
+    return await conn.fetchval(_LOCK_CONVERSATION_BY_JOB, job_id)
+
+
 async def fail_discontinuous_follow_ups(
     conn: Any,
     *,

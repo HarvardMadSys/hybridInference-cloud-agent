@@ -38,6 +38,7 @@ from cloud_agent.storage._sql.jobs import (
     QUALIFIED_JOB_COLUMNS,
     fail_discontinuous_follow_ups,
     fail_unrunnable_follow_ups,
+    lock_conversation_by_job,
 )
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
@@ -392,6 +393,9 @@ class PostgresAttemptCommands:
         count — see the retry budget in :meth:`reap_expired`.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            # Conversation first, as in ``transition``: a release that lands on
+            # ``cancelled`` runs the terminal sweep, and that can pause a goal.
+            await lock_conversation_by_job(conn, job_id=job_id)
             released_row = await conn.fetchrow(
                 """
                 UPDATE agent_attempts
@@ -533,6 +537,10 @@ class PostgresAttemptCommands:
         caller — not this method — is what has to change.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            # Conversation, then attempt, then job. The terminal sweep below can
+            # pause this conversation's goal, so the row it would write has to be
+            # taken before any job row rather than after.
+            await lock_conversation_by_job(conn, job_id=job_id)
             # Lock the attempt before its job, matching release_claim and the
             # reaper. Without an explicit first lock, the job UPDATE below and
             # a concurrent abort can each hold the row the other needs.
@@ -1194,6 +1202,10 @@ class PostgresAttemptCommands:
         cancel to the owner. Returns ``None`` for an unknown job.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            # Conversation first: cancelling a queued automatic round pauses its
+            # goal, and that write lands on ``agent_threads`` — which the pause
+            # and follow-up paths hold while reaching for this very job row.
+            await lock_conversation_by_job(conn, job_id=job_id)
             row = await conn.fetchrow(
                 "SELECT state, thread_id FROM agent_jobs WHERE id = $1 "
                 "AND ($2::text IS NULL OR user_id = $2) FOR UPDATE",
@@ -1256,6 +1268,7 @@ class PostgresAttemptCommands:
                        member.residency_generation
                 FROM agent_attempts a
                 JOIN agent_jobs j ON j.id = a.job_id
+                JOIN agent_threads t ON t.id = j.thread_id
                 LEFT JOIN (
                     agent_thread_sandbox_memberships member
                     JOIN agent_sandboxes sandbox
@@ -1263,7 +1276,13 @@ class PostgresAttemptCommands:
                 ) ON member.thread_id = j.thread_id
                 WHERE a.status = 'running' AND a.lease_expires_at < NOW()
                 ORDER BY a.id
-                FOR UPDATE OF a, j SKIP LOCKED
+                -- The conversation is locked here, with the attempt and the
+                -- job, rather than reached for later when this pass pauses a
+                -- goal: taken in one statement it is covered by SKIP LOCKED,
+                -- so a conversation somebody is already pausing is left for
+                -- the next pass instead of waiting on a row that is waiting
+                -- on this one.
+                FOR UPDATE OF a, j, t SKIP LOCKED
                 """
             )
             for row in expired:
