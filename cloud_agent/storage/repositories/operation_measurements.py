@@ -66,6 +66,22 @@ class PostgresOperationMeasurementRepository:
             stored.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            measurement_id = str(measurement["measurement_id"])
+            # A row lock cannot protect an id that does not exist yet. The
+            # transaction-scoped advisory lock serializes first writers for
+            # this immutable id before either can create a run manifest.
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                measurement_id,
+            )
+            existing_hash = await conn.fetchval(
+                "SELECT payload_hash FROM agent_operation_measurements WHERE measurement_id = $1",
+                measurement_id,
+            )
+            if existing_hash is not None and existing_hash != str(measurement["payload_hash"]):
+                # Refuse before touching the run catalogue: otherwise a
+                # colliding id under a fresh run commits a phantom run row.
+                return "conflict"
             if run is not None:
                 # The row is created first and locked second, in that order.
                 # ``SELECT ... FOR UPDATE`` cannot lock a row that does not
@@ -145,7 +161,7 @@ class PostgresOperationMeasurementRepository:
                 ON CONFLICT (measurement_id) DO NOTHING
                 RETURNING measurement_id
                 """,
-                str(measurement["measurement_id"]),
+                measurement_id,
                 str(measurement["interaction_id"]),
                 str(measurement["profiling_run_id"]),
                 int(measurement["schema_version"]),
@@ -188,7 +204,7 @@ class PostgresOperationMeasurementRepository:
                 return "stored"
             stored = await conn.fetchval(
                 "SELECT payload_hash FROM agent_operation_measurements WHERE measurement_id = $1",
-                str(measurement["measurement_id"]),
+                measurement_id,
             )
             if stored == str(measurement["payload_hash"]):
                 return "duplicate"

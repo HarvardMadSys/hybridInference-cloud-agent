@@ -384,7 +384,13 @@ benchmark 报告至少包含：环境 manifest、实验顺序、全部 attempt I
   `duration_us` 总耗时；最后一个阶段由 `finish()` 的收尾边界关闭，所以**失败或仍在
   进行的那一段也有时长**，不会只剩一个没有耗时的 milestone。
 - attempt/job/thread/sandbox/runtime 关联，`context_status`、`workspace_action`；
-  结构化日志加可选 JSONL。
+  结构化日志、可选 JSONL 与 Postgres/Admin。
+
+**部署使用的父子进程路径也保持同一条记录。** 长驻 host 在 claim 前选择并计时
+`claim` span，经 `_profiling` handoff 将原 measurement id、起点、已完成 span 和真正
+消费预算的 admission instance 交给 turn child；spawn 只剥离其他父进程私有字段。
+child 不重新抽样、不重新认领预算，并在 prompt dispatch 冻结后直接投递同一缓存记录，
+不依赖 JSONL，也不在读取模型输出前等待网络。
 
 **四条启动路径按实际动作分类。** supervisor 在 lease 里返回本次 activation 对容器的
 动作（`create`/`start`/`reuse`/`unknown`）和 member CLI 的动作

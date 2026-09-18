@@ -17,19 +17,16 @@ from fastapi.responses import JSONResponse
 from cloud_agent import measurement_writer
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.measurement_ingest import Owner
-from cloud_agent.measurement_persistence import (
-    manifest_for_run,
-    prepare_measurement,
-    store_prepared,
-)
-from cloud_agent.operation_measurement import Selection, current_run
+from cloud_agent.measurement_persistence import prepare_measurement, store_prepared
 from cloud_agent.schemas import AgentOperationProfilingFragment
+from cloud_agent_profiling.operation_profiling import manifest_for_measurement
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from fastapi import Response
 
+    from cloud_agent.operation_measurement import Selection
     from cloud_agent.ports.operation_measurements import OperationMeasurements
 
 logger = get_logger(__name__)
@@ -71,7 +68,7 @@ def offer_measurement(
         prepared, reason = prepare_measurement(
             record=record,
             owner=_owner(job),
-            run=manifest_for_run(current_run()),
+            run=manifest_for_measurement(measure.measurement),
             now=datetime.now(UTC),
         )
         writer = measurement_writer.writer()
@@ -106,10 +103,12 @@ def record_measurement(
     """Freeze and queue a successful or failed measured request."""
     if measure is None or not measure.measurement.selected:
         return
-    if failure is not None and measure.outcome == "incomplete":
+    if failure is not None and not measure.measurement.frozen:
         measure.outcome = failure
         if measure.failure_stage is None:
-            measure.failure_stage = failure
+            measure.failure_stage = (
+                measure.measurement.marks[-1][0] if measure.measurement.marks else "route"
+            )
     offer_measurement(capability=store.operation_measurements, job=job, measure=measure)
 
 

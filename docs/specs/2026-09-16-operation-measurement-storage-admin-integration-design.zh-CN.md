@@ -149,8 +149,8 @@ CP 必须重新验证完整性约束；声明 true 与缺失/截断矛盾的记�
 | 记录 | 当前准确起止点 | 不能声称包含 |
 | --- | --- | --- |
 | attempt.startup | runner claim 请求前 → supervisor prompt dispatch 返回 | CP 排队、模型首输出、浏览器等待 |
-| files.* server_request | CP 完成既有认证/归属/entitlement/broker 解析后 → 响应对象构建完成 | 前面的权限查询和 broker 解析、响应传输、UI commit |
-| terminal.list/create server_request | 同上 → list/create 响应对象构建完成 | xterm 加载、用户可输入、shell rc 完成 |
+| files.* server_request | CP 完成既有认证/归属/entitlement/broker 解析后 → 业务结果校验完成 | 前面的权限查询和 broker 解析、响应编码/传输、UI commit |
+| terminal.list/create server_request | 同上 → list/create 业务结果校验完成 | 响应编码、xterm 加载、用户可输入、shell rc 完成 |
 | terminal.stream_attach server_request | 同上 → 上游流校验与本地 StreamingResponse 构建完成 | 完整流生命周期、浏览器流连接与首输出 |
 
 broker 返回的 truncated、skipped、缺失应答必须保留到 CP 记录及公共 metadata。

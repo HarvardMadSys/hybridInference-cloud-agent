@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
+from cloud_agent import measurement_writer
 from cloud_agent.api._operation_measurements import (
     FILE_READ_STAGE,
     measured_call,
@@ -319,12 +320,21 @@ async def get_agent_job_workspace_file(
             return response
         finally:
             if not recorded:
-                record_measurement(
-                    store=job_store,
-                    job=job,
-                    measure=measure,
-                    failure="failed",
-                )
+                if measure is not None and safe_path and measure.request_kind == "files.read":
+                    # The failed read never produced the kind that decides
+                    # list versus open. Filing it under the provisional first
+                    # candidate corrupts that operation's failure rate.
+                    measure.discard()
+                    local_writer = measurement_writer.writer()
+                    local_writer.counts.rejected += 1
+                    local_writer.counts.note("ambiguous_file_kind")
+                else:
+                    record_measurement(
+                        store=job_store,
+                        job=job,
+                        measure=measure,
+                        failure="failed",
+                    )
 
 
 @router.put("/jobs/{job_id}/files", response_model=AgentWorkspaceResponse)

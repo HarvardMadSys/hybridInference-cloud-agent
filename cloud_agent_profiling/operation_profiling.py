@@ -107,9 +107,18 @@ COVERAGE_BROWSER_INTERACTION = "browser_interaction"
 COVERAGE_BY_OPERATION: dict[str, str] = {}
 BOUNDARIES_BY_OPERATION: dict[str, tuple[str, str]] = {
     "attempt.startup": ("runner.claim.request", "supervisor.prompt.dispatched"),
-    "files.list": ("control_plane.operation.selected", "control_plane.response.built"),
-    "files.open": ("control_plane.operation.selected", "control_plane.response.built"),
-    "terminal.open": ("control_plane.operation.selected", "control_plane.response.built"),
+    "files.list": (
+        "control_plane.operation.selected",
+        "control_plane.business_result.validated",
+    ),
+    "files.open": (
+        "control_plane.operation.selected",
+        "control_plane.business_result.validated",
+    ),
+    "terminal.open": (
+        "control_plane.operation.selected",
+        "control_plane.business_result.validated",
+    ),
 }
 
 #: The runner's root operation. Only this operation keeps the v1
@@ -313,6 +322,8 @@ class Measurement:
     #: owner and the source of its local milestones. Declared among the
     #: defaulted fields because :func:`start_operation` sets it by keyword.
     producer: str = DEFAULT_PRODUCER
+    producer_instance_id: str = PRODUCER_INSTANCE_ID
+    clock_domain_id: str = CLOCK_DOMAIN_ID
     #: How far these boundaries reach. Empty means the root never stated it,
     #: and the record then claims no coverage rather than assuming the widest.
     coverage_scope: str = ""
@@ -320,6 +331,9 @@ class Measurement:
     #: for storage, not a measurement of how long is left: a producer that
     #: derived it from its own clock would be stating a different experiment.
     run_expires_at: datetime | None = None
+    #: Admission instances that actually enforced this root selection. A
+    #: child inherits the parent's entry rather than claiming its own budget.
+    run_admission_instances: tuple[Mapping[str, Any], ...] = ()
     facts: dict[str, Any] = field(default_factory=dict)
     spans: list[_SpanRecord] = field(default_factory=list)
     marks: list[tuple[str, int]] = field(default_factory=list)
@@ -511,6 +525,8 @@ def parse_run(raw: str) -> ProfilingRun:
         raise ValueError("run descriptor selects no operations")
 
     try:
+        if isinstance(body.get("max_operations"), bool):
+            raise TypeError
         max_operations = int(body["max_operations"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("run descriptor has no valid max_operations") from exc
@@ -518,6 +534,8 @@ def parse_run(raw: str) -> ProfilingRun:
         raise ValueError("max_operations must be positive")
 
     try:
+        if isinstance(body.get("config_version"), bool):
+            raise TypeError
         config_version = int(body.get("config_version") or 1)
     except (TypeError, ValueError) as exc:
         raise ValueError("config_version must be an integer") from exc
@@ -534,9 +552,16 @@ def parse_run(raw: str) -> ProfilingRun:
         instance = str(raw_admission.get("instance") or "").strip()
         if not instance:
             raise ValueError("admission_instances entries need an instance")
+        raw_budget = raw_admission.get("max_operations")
+        if (
+            not isinstance(raw_budget, (str, int))
+            or isinstance(raw_budget, bool)
+            or not str(raw_budget).strip()
+        ):
+            raise ValueError("admission_instances entries need max_operations")
         try:
-            budget = int(raw_admission.get("max_operations"))
-        except (TypeError, ValueError) as exc:
+            budget = int(raw_budget)
+        except ValueError as exc:
             raise ValueError("admission_instances entries need max_operations") from exc
         if budget <= 0:
             raise ValueError("admission instance max_operations must be positive")
@@ -550,11 +575,11 @@ def parse_run(raw: str) -> ProfilingRun:
     unknown = sorted(str(key) for key in raw_target if str(key) not in TARGET_KEYS)
     if unknown:
         raise ValueError(f"target names unknown field(s): {', '.join(unknown)}")
-    target = {
-        str(key): str(value)
-        for key, value in raw_target.items()
-        if isinstance(value, (str, int)) and str(value).strip()
-    }
+    target: dict[str, str] = {}
+    for key, value in raw_target.items():
+        if not isinstance(value, (str, int)) or isinstance(value, bool) or not str(value).strip():
+            raise ValueError(f"target.{key} must be a non-empty string or integer")
+        target[str(key)] = str(value)
 
     raw_expiry = str(body.get("expires_at") or "")
     return ProfilingRun(
@@ -583,6 +608,20 @@ def manifest_for_run(run: ProfilingRun | None) -> dict[str, Any] | None:
         "max_operations": run.max_operations,
         "admission_instances": [dict(item) for item in run.admission_instances],
     }
+
+
+def manifest_for_measurement(measurement: Measurement | None) -> dict[str, Any] | None:
+    """Return the run manifest with the instance that admitted this root."""
+    if measurement is None:
+        return None
+    manifest = manifest_for_run(_load().run)
+    if manifest is None or manifest["run_id"] != measurement.run_id:
+        return None
+    if measurement.run_admission_instances:
+        manifest["admission_instances"] = [
+            dict(item) for item in measurement.run_admission_instances
+        ]
+    return manifest
 
 
 def _load() -> _Loaded:
@@ -692,7 +731,8 @@ def start_operation(
         producer=producer,
         coverage_scope=coverage_scope or COVERAGE_BY_OPERATION.get(operation, ""),
         run_expires_at=run.expires_at_utc,
-        facts={"operation": operation},
+        run_admission_instances=run.admission_instances,
+        facts={"operation": operation, "request_kind": operation},
     )
     if host:
         measurement.facts["host"] = host
@@ -709,12 +749,17 @@ def bind(measurement: Measurement | None, **facts: Any) -> bool:
     missing field is a mismatch, not a pass -- ``target: {sandbox_id: wanted}``
     must not select an attempt whose sandbox id is unknown.
 
-    Returns ``False`` when the measurement is ``None``, when collecting has
-    stopped, or when the scope does not match. Callers should :func:`discard`
-    it in that case, so an unselected attempt emits nothing.
+    Returns ``False`` when the measurement is absent/finalized or the scope
+    does not match. A claim that crossed the deadline is still bound and later
+    emitted as partial; erasing it would hide the slow claim being measured.
     """
-    if measurement is None or not _recording(measurement):
+    if measurement is None or measurement.finished or measurement.frozen:
         return False
+    if measurement.past_deadline():
+        # The claim happened while the experiment was live. Preserve its
+        # attribution so it can close as a partial sample at the deadline;
+        # merely noticing expiry after the claim is not grounds to erase it.
+        measurement.expired = True
     run = _load().run
     for key, value in facts.items():
         measurement.facts[key] = _bounded(value)
@@ -1020,6 +1065,8 @@ def measurement_context(
         "measurement_id": measurement.measurement_id,
         "operation": measurement.operation,
         "producer": measurement.producer,
+        "producer_instance_id": measurement.producer_instance_id,
+        "clock_domain_id": measurement.clock_domain_id,
         "coverage_scope": measurement.coverage_scope,
         "start_boundary": BOUNDARIES_BY_OPERATION.get(
             measurement.operation, ("unknown", "unknown")
@@ -1039,6 +1086,73 @@ def measurement_context(
         # otherwise every sample silently loses the queueing it exists to show.
         "started_mono_ns": measurement.started_mono_ns,
     }
+
+
+def handoff_context(measurement: Measurement | None) -> dict[str, Any] | None:
+    """Return the richer same-host context used for a runner child process."""
+    context = measurement_context(measurement)
+    if context is None or measurement is None:
+        return None
+    context["admission_instances"] = [dict(item) for item in measurement.run_admission_instances]
+    context["inherited_spans"] = [span.to_payload() for span in measurement.spans]
+    context["inherited_marks"] = [
+        {"name": name, "offset_us": offset} for name, offset in measurement.marks
+    ]
+    return context
+
+
+def _restore_handoff_spans(value: Any) -> list[_SpanRecord] | None:
+    """Validate and rebuild the bounded spans a parent already completed."""
+    if not isinstance(value, list) or len(value) > MAX_SPANS:
+        return None
+    restored: list[_SpanRecord] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            return None
+        try:
+            span_id = str(item["span_id"])
+            name = str(item["name"])
+            ordinal = int(item["ordinal"])
+            start = int(item["start_offset_us"])
+            duration = int(item["duration_us"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not span_id or not name or min(ordinal, start, duration) < 0:
+            return None
+        restored.append(
+            _SpanRecord(
+                span_id=span_id,
+                name=name,
+                ordinal=ordinal,
+                start_offset_us=start,
+                parent_span_id=(
+                    str(item["parent_span_id"]) if item.get("parent_span_id") else None
+                ),
+                duration_us=duration,
+                outcome=str(item.get("outcome") or "ok"),
+                truncated=bool(item.get("truncated")),
+                attributes=(
+                    dict(item["attributes"]) if isinstance(item.get("attributes"), Mapping) else {}
+                ),
+            )
+        )
+    return restored
+
+
+def _restore_handoff_marks(value: Any) -> list[tuple[str, int]] | None:
+    """Validate the bounded milestones a parent already recorded."""
+    if not isinstance(value, list) or len(value) > MAX_SPANS:
+        return None
+    restored: list[tuple[str, int]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            return None
+        name = str(item.get("name") or "")
+        offset = item.get("offset_us")
+        if not name or not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            return None
+        restored.append((name, offset))
+    return restored
 
 
 def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measurement | None:
@@ -1079,6 +1193,30 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
         started_mono_ns = int(started) if started is not None else time.monotonic_ns()
     except (TypeError, ValueError):
         started_mono_ns = time.monotonic_ns()
+    admissions = context.get("admission_instances")
+    inherited_admissions: tuple[Mapping[str, Any], ...] = ()
+    if admissions is not None:
+        if not isinstance(admissions, list) or len(admissions) > MAX_REMOTE_STAGES:
+            return None
+        parsed_admissions: list[Mapping[str, Any]] = []
+        for item in admissions:
+            if not isinstance(item, Mapping):
+                return None
+            instance = str(item.get("instance") or "")
+            budget = item.get("max_operations")
+            if (
+                not instance
+                or not isinstance(budget, int)
+                or isinstance(budget, bool)
+                or budget <= 0
+            ):
+                return None
+            parsed_admissions.append({"instance": instance, "max_operations": budget})
+        inherited_admissions = tuple(parsed_admissions)
+    spans = _restore_handoff_spans(context.get("inherited_spans", []))
+    marks = _restore_handoff_marks(context.get("inherited_marks", []))
+    if spans is None or marks is None:
+        return None
     measurement = Measurement(
         operation=operation,
         run_id=run.run_id,
@@ -1090,17 +1228,25 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
         started_mono_ns=started_mono_ns,
         deadline_mono=deadline,
         producer=str(context.get("producer") or producer),
+        producer_instance_id=str(context.get("producer_instance_id") or PRODUCER_INSTANCE_ID),
+        clock_domain_id=str(context.get("clock_domain_id") or CLOCK_DOMAIN_ID),
         coverage_scope=str(
             context.get("coverage_scope") or COVERAGE_BY_OPERATION.get(operation, "")
         ),
         run_expires_at=run.expires_at_utc,
-        facts={"operation": operation},
+        run_admission_instances=inherited_admissions or run.admission_instances,
+        facts={"operation": operation, "request_kind": operation},
+        spans=spans,
+        marks=marks,
         # The slot belongs to the parent, so discarding this must not return
         # one this process never took.
         reserved=False,
     )
     for key, value in (context.get("facts") or {}).items():
         measurement.facts[str(key)] = _bounded(value)
+    measurement.span_counter = len(spans)
+    for span in spans:
+        measurement.ordinals[span.name] = max(measurement.ordinals.get(span.name, 0), span.ordinal)
     measurement.bound = True
     return measurement
 
@@ -1235,29 +1381,36 @@ def parse_context(raw: Any) -> dict[str, Any] | None:
     experiment setting into a failed file read or terminal keystroke.
     """
     if isinstance(raw, Mapping):
-        return dict(raw)
-    if not isinstance(raw, str):
-        return None
-    text = raw.strip()
-    if not text or len(text) > MAX_CONTEXT_CHARS:
-        return None
-    try:
-        body = json.loads(text)
-    except (TypeError, ValueError):
-        return None
+        body = dict(raw)
+    else:
+        if not isinstance(raw, str):
+            return None
+        text = raw.strip()
+        if not text or len(text) > MAX_CONTEXT_CHARS:
+            return None
+        try:
+            body = json.loads(text)
+        except (TypeError, ValueError):
+            return None
     if not isinstance(body, dict):
         return None
     try:
         expires_at = float(str(body.get("expires_at")))
     except (TypeError, ValueError):
         return None
-    return {
+    parsed = {
         "run_id": _bounded_context_str(body.get("run_id"), MAX_RUN_ID_CHARS),
         "measurement_id": _bounded_context_str(body.get("measurement_id")),
         "operation": _bounded_context_str(body.get("operation")),
         "call_id": _bounded_context_str(body.get("call_id")),
         "expires_at": expires_at,
     }
+    operations = body.get("operations")
+    if isinstance(operations, list):
+        parsed["operations"] = [
+            _bounded_context_str(item) for item in operations[:8] if _bounded_context_str(item)
+        ]
+    return parsed
 
 
 def context_call_id(context: Any) -> str | None:
@@ -1665,13 +1818,19 @@ def to_record(
         "operation": measurement.operation,
         "boundary_version": BOUNDARY_VERSION,
         "coverage_scope": measurement.coverage_scope,
+        "start_boundary": BOUNDARIES_BY_OPERATION.get(
+            measurement.operation, ("unknown", "unknown")
+        )[0],
+        "end_boundary": BOUNDARIES_BY_OPERATION.get(measurement.operation, ("unknown", "unknown"))[
+            1
+        ],
         # A server-side record never covers the user's own wait. It becomes true
         # only when a browser interaction is joined to it, which this slice does
         # not do -- so it is stated, not left to a reader to infer.
         "end_to_end_complete": False,
         "producer": root,
-        "producer_instance_id": PRODUCER_INSTANCE_ID,
-        "clock_domain_id": CLOCK_DOMAIN_ID,
+        "producer_instance_id": measurement.producer_instance_id,
+        "clock_domain_id": measurement.clock_domain_id,
         # Who actually contributed to this record. A run needs the broker's
         # switch as well as the runner's for the container sub-stages, and a
         # missing producer is reported here rather than silently absent.
@@ -2029,6 +2188,8 @@ __all__ = [
     "flush_sink",
     "fragment_truncated",
     "frozen_record",
+    "handoff_context",
+    "manifest_for_measurement",
     "manifest_for_run",
     "mark",
     "measurement_context",

@@ -297,7 +297,7 @@ function WriterStatusPanel({ onDenied, refreshKey }: { onDenied: () => void; ref
             <ManifestItem label="Waiting">{number(data.pending)}</ManifestItem>
             <ManifestItem label="In flight">{number(data.in_flight)}</ManifestItem>
             <ManifestItem label="Queued bytes">{number(data.queued_bytes)}</ManifestItem>
-            <ManifestItem label="Stored">
+            <ManifestItem label="Accepted">
               {number(data.counts.stored + data.counts.duplicate)}
             </ManifestItem>
             <ManifestItem label="Rejected or lost">{number(lost)}</ManifestItem>

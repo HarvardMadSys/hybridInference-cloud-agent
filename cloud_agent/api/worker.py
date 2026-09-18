@@ -823,6 +823,21 @@ async def worker_record_measurement(
     job_store = _require_store(store)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
+    if (
+        str(body.record.get("producer") or "") != "runner"
+        or str(body.record.get("operation") or "") != "attempt.startup"
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": {
+                    "type": "measurement_rejected",
+                    "message": (
+                        "the worker endpoint accepts only runner-rooted attempt.startup records"
+                    ),
+                }
+            },
+        )
     attempt_id = claims.get("attempt_id")
     generation = claims.get("lease_generation")
     if attempt_id is None or generation is None:

@@ -31,8 +31,9 @@ export const SERVER_ONLY_NOTICE =
   'Server-side measurements only. Coverage is either the host startup (runner-rooted: ' +
   'from the runner claiming an attempt to the supervisor dispatching its prompt) or a ' +
   'server request (control-plane-rooted: after authentication, ownership and broker ' +
-  'resolution, up to the response object being built). Browser-to-server time is not ' +
-  'measured, and end_to_end_complete is false for every record stored so far because ' +
+  'resolution, up to the business result being validated). Response encoding and transfer ' +
+  'are not measured. Browser-to-server time is not measured, and end_to_end_complete is ' +
+  'false for every record stored so far because ' +
   'no browser-side producer exists. Nothing here is an end-to-end latency.';
 
 /** The minimum eligible sample a percentile needs before it is worth reading. */
@@ -175,6 +176,8 @@ const OUTCOME_LABELS: Record<string, string> = {
   lease_lost: 'Lease lost',
   incomplete: 'Incomplete',
   superseded: 'Superseded',
+  ok: 'OK',
+  error: 'Error',
 };
 
 /** Whether this outcome is one the summary's percentiles include. */
@@ -311,7 +314,8 @@ const SCOPES: Record<string, CoverageLabel> = {
     label: 'Server request',
     basis:
       'Control-plane-rooted: starts after authentication, ownership and broker resolution and ' +
-      'ends when the response object is built. Response transfer and browser work are outside it.',
+      'ends when the business result is validated. Response encoding, transfer and browser work ' +
+      'are outside it.',
   },
   host_startup: {
     label: 'Host startup',

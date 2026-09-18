@@ -117,8 +117,10 @@ from cloud_agent_host.source_archive import build_base_bundle, build_source_arch
 from cloud_agent_profiling import operation_profiling
 from cloud_agent_profiling.measurement_delivery import (
     DELIVERY_ATTEMPTS_MAX,
+    DELIVERY_BYTES_MAX,
     DELIVERY_DRAIN_S,
     DELIVERY_HANDOFF_DRAIN_S,
+    DELIVERY_QUEUE_MAX,
     DELIVERY_TIMEOUT_S,
     attempts_exhausted,
     classify_exception,
@@ -2543,6 +2545,25 @@ def run_turn(
         _enqueue_delivery(measurement, job=job, base_url=base_url, drain_s=DELIVERY_DRAIN_S)
 
 
+def _delivery_payload_size(measurement: operation_profiling.Measurement) -> int:
+    """Return the encoded record and manifest bytes held by one delivery."""
+    outcome = measurement.frozen_outcome or "incomplete"
+    record = operation_profiling.frozen_record(measurement, outcome)
+    manifest = operation_profiling.manifest_for_measurement(measurement)
+    if record is None or manifest is None:
+        return 0
+    try:
+        return len(
+            json.dumps(
+                {"record": record, "run": manifest},
+                separators=(",", ":"),
+                default=str,
+            ).encode()
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
 def _enqueue_delivery(
     measurement: operation_profiling.Measurement | None,
     *,
@@ -2561,25 +2582,69 @@ def _enqueue_delivery(
     """
     if measurement is None:
         return
+    global _DELIVERY_DROPPED_COUNT, _DELIVERY_DRAIN_TIMEOUTS, _DELIVERY_PENDING_BYTES
     measurement_id = measurement.measurement_id
+    payload_size = _delivery_payload_size(measurement)
+    start = False
+    dropped = False
     with _DELIVERY_STATE_LOCK:
         if measurement_id in _DELIVERED_MEASUREMENT_IDS:
             return
         thread = _IN_FLIGHT_DELIVERIES.get(measurement_id)
-    if thread is None:
+        if thread is None and measurement_id not in _STARTING_DELIVERIES:
+            if (
+                len(_IN_FLIGHT_DELIVERIES) + len(_STARTING_DELIVERIES) >= DELIVERY_QUEUE_MAX
+                or _DELIVERY_PENDING_BYTES + payload_size > DELIVERY_BYTES_MAX
+            ):
+                _DELIVERED_MEASUREMENT_IDS.add(measurement_id)
+                _DELIVERY_DROPPED_COUNT += 1
+                dropped = True
+            else:
+                _STARTING_DELIVERIES.add(measurement_id)
+                _DELIVERY_SIZES[measurement_id] = payload_size
+                _DELIVERY_PENDING_BYTES += payload_size
+                start = True
+    if dropped:
+        logger.warning(
+            "agent_measurement_delivery_queue_full",
+            extra={
+                "event": "agent_measurement_delivery_queue_full",
+                "measurement_id": measurement_id,
+                "dropped": _DELIVERY_DROPPED_COUNT,
+            },
+        )
+        return
+    if start:
         thread = _deliver_in_background(job=job, base_url=base_url, measurement=measurement)
-        # Recorded only once it is actually running. A thread that could not
-        # start leaves nothing behind, so the next caller tries again rather
-        # than finding a send that never began.
-        if thread is not None:
-            with _DELIVERY_STATE_LOCK:
-                if measurement_id not in _DELIVERED_MEASUREMENT_IDS:
-                    _IN_FLIGHT_DELIVERIES[measurement_id] = thread
+        with _DELIVERY_STATE_LOCK:
+            _STARTING_DELIVERIES.discard(measurement_id)
+            # Recorded only once it is actually running. A thread that could
+            # not start leaves nothing behind, so the next caller retries.
+            if thread is not None and measurement_id not in _DELIVERED_MEASUREMENT_IDS:
+                _IN_FLIGHT_DELIVERIES[measurement_id] = thread
+            elif thread is None:
+                _DELIVERY_PENDING_BYTES = max(
+                    0,
+                    _DELIVERY_PENDING_BYTES - _DELIVERY_SIZES.pop(measurement_id, 0),
+                )
     # Joined whether it was just started or was already on its way: the bound
     # belongs to the caller that is waiting, not to whoever happened to be
     # first.
-    if thread is not None:
+    if thread is not None and drain_s > 0:
         thread.join(timeout=drain_s)
+        if thread.is_alive():
+            with _DELIVERY_STATE_LOCK:
+                _DELIVERY_DRAIN_TIMEOUTS += 1
+                timed_out = _DELIVERY_DRAIN_TIMEOUTS
+            logger.warning(
+                "agent_measurement_delivery_outlived_drain",
+                extra={
+                    "event": "agent_measurement_delivery_outlived_drain",
+                    "measurement_id": measurement_id,
+                    "drain_s": drain_s,
+                    "count": timed_out,
+                },
+            )
 
 
 def _deliver_in_background(
@@ -2587,16 +2652,17 @@ def _deliver_in_background(
     job: ClaimedJob,
     base_url: str,
     measurement: operation_profiling.Measurement,
-    drain_s: float = DELIVERY_DRAIN_S,
 ) -> threading.Thread | None:
     """Start a send for this measurement, or ``None`` if no thread would run."""
 
     def _send() -> None:
-        control = ControlPlane(base_url, job.worker_token)
+        global _DELIVERY_PENDING_BYTES
+        control: ControlPlane | None = None
         try:
+            control = ControlPlane(base_url, job.worker_token)
             outcome = measurement.frozen_outcome or "incomplete"
             record = operation_profiling.frozen_record(measurement, outcome)
-            manifest = operation_profiling.manifest_for_run(operation_profiling.active_run())
+            manifest = operation_profiling.manifest_for_measurement(measurement)
             if record is None or manifest is None:
                 logger.warning(
                     "agent_measurement_delivery_missing_record",
@@ -2630,10 +2696,15 @@ def _deliver_in_background(
                 extra={"event": "agent_measurement_delivery_failed"},
             )
         finally:
-            control.close()
+            if control is not None:
+                control.close()
             with _DELIVERY_STATE_LOCK:
                 _DELIVERED_MEASUREMENT_IDS.add(measurement.measurement_id)
                 _IN_FLIGHT_DELIVERIES.pop(measurement.measurement_id, None)
+                _DELIVERY_PENDING_BYTES = max(
+                    0,
+                    _DELIVERY_PENDING_BYTES - _DELIVERY_SIZES.pop(measurement.measurement_id, 0),
+                )
 
     thread = threading.Thread(target=_send, name="agent-measurement-delivery", daemon=True)
     try:
@@ -2856,6 +2927,15 @@ def _start_host_capacity_collector(backend: SandboxBackend) -> HostCapacityColle
     return collector
 
 
+def _child_turn_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Strip parent bookkeeping while preserving the profiling handoff."""
+    return {
+        key: value
+        for key, value in payload.items()
+        if not key.startswith("_") or key == "_profiling"
+    }
+
+
 def _spawn_turn(
     payload: dict[str, Any],
     *,
@@ -2920,11 +3000,10 @@ def _spawn_turn(
     os.close(write_fd)
     try:
         assert process.stdin is not None
-        # Underscore-prefixed keys are this host's own bookkeeping; what the
-        # child parses is the control plane's answer and nothing else.
-        process.stdin.write(
-            encode_turn({key: value for key, value in payload.items() if not key.startswith("_")})
-        )
+        # Most underscore-prefixed keys are parent bookkeeping. Profiling is
+        # the one intentional child handoff: stripping it makes the deployed
+        # multi-process path silently measure nothing.
+        process.stdin.write(encode_turn(_child_turn_payload(payload)))
         process.stdin.close()
     except OSError as exc:
         os.close(read_fd)
@@ -3282,13 +3361,14 @@ def run_forever(
                 worker_id=turn_worker_id,
             )
             try:
-                payload = claim_payload(
-                    base_url=base_url,
-                    host_credential=pool.credential,
-                    worker_id=turn_worker_id,
-                    lease_ttl=lease_ttl,
-                    attestation=_claim_attestation(backend),
-                )
+                with operation_profiling.span(measurement, "claim"):
+                    payload = claim_payload(
+                        base_url=base_url,
+                        host_credential=pool.credential,
+                        worker_id=turn_worker_id,
+                        lease_ttl=lease_ttl,
+                        attestation=_claim_attestation(backend),
+                    )
             except ClaimUnreachable as exc:
                 operation_profiling.discard(measurement)
                 print(
@@ -3477,14 +3557,25 @@ _DELIVERED_MEASUREMENT_IDS: set[str] = set()
 #: record is frozen once -- but "already queued" must not mean "do not wait",
 #: or the handoff's short bound would silently become the only attempt.
 _IN_FLIGHT_DELIVERIES: dict[str, threading.Thread] = {}
+_STARTING_DELIVERIES: set[str] = set()
+_DELIVERY_SIZES: dict[str, int] = {}
 _DELIVERY_STATE_LOCK = threading.Lock()
+_DELIVERY_DROPPED_COUNT = 0
+_DELIVERY_DRAIN_TIMEOUTS = 0
+_DELIVERY_PENDING_BYTES = 0
 
 
 def reset_delivery_state() -> None:
     """Forget what this process delivered and queued. Tests call this."""
+    global _DELIVERY_DROPPED_COUNT, _DELIVERY_DRAIN_TIMEOUTS, _DELIVERY_PENDING_BYTES
     with _DELIVERY_STATE_LOCK:
         _DELIVERED_MEASUREMENT_IDS.clear()
         _IN_FLIGHT_DELIVERIES.clear()
+        _STARTING_DELIVERIES.clear()
+        _DELIVERY_SIZES.clear()
+        _DELIVERY_DROPPED_COUNT = 0
+        _DELIVERY_DRAIN_TIMEOUTS = 0
+        _DELIVERY_PENDING_BYTES = 0
 
 
 def _bound_measurement(
@@ -3551,7 +3642,26 @@ def _hand_over_turn(
     # does: the child runs the part worth measuring, and the parent holds the
     # budget slot. It is discarded once the child is gone, because the child's
     # record is the measurement -- this process only opened it.
-    context = operation_profiling.measurement_context(measurement)
+    context = operation_profiling.handoff_context(measurement)
+    if measurement is not None and context is None:
+        measurement.expired = measurement.expired or measurement.past_deadline()
+        operation_profiling.finish(
+            measurement,
+            outcome="incomplete",
+            failure_stage=(
+                "expired_before_handoff"
+                if measurement.expired
+                else "selection_unavailable_before_handoff"
+            ),
+        )
+        if delivery_job is not None:
+            _enqueue_delivery(
+                measurement,
+                job=delivery_job,
+                base_url=base_url,
+                drain_s=DELIVERY_HANDOFF_DRAIN_S,
+            )
+        measurement = None
     payload = {
         **payload,
         "_worker_id": worker_id,

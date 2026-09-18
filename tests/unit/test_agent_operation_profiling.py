@@ -297,6 +297,8 @@ def test_storage_and_export_reuse_the_same_frozen_record(monkeypatch, caplog):
     profiling.finish(measurement, outcome="dispatched")
 
     assert stored is not None
+    assert stored["start_boundary"] == "runner.claim.request"
+    assert stored["end_boundary"] == "supervisor.prompt.dispatched"
     assert _records(caplog) == [stored]
     assert profiling.frozen_record(measurement, "dispatched") is stored
 
@@ -610,6 +612,30 @@ def test_a_lapsed_run_stops_collecting_and_marks_the_record_partial(monkeypatch,
     ]
     assert record["duration_us"] == deadline_us
     assert deadline_us < 120_000_000
+
+
+def test_a_claim_returning_after_expiry_keeps_a_partial_attributed_sample(
+    monkeypatch, caplog, clock
+):
+    """A claim selected while live is not erased when it crosses the deadline."""
+    _enable(monkeypatch, expires_at=_expiry(minutes=1), target={"job_id": "ajob_1"})
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    measurement = profiling.start_operation(operation="attempt.startup")
+    assert measurement is not None
+    with profiling.span(measurement, "claim"):
+        clock.advance(120 * 1_000_000)
+
+    assert profiling.bind(measurement, job_id="ajob_1") is True
+    profiling.finish(
+        measurement,
+        outcome="incomplete",
+        failure_stage="expired_before_handoff",
+    )
+
+    record = _records(caplog)[0]
+    assert record["facts"]["job_id"] == "ajob_1"
+    assert record["collection_complete"] is False
+    assert record["facts"]["profiling_stopped"] == "expired"
 
 
 def test_finishing_after_the_deadline_is_partial_even_with_no_late_calls(
@@ -1152,6 +1178,34 @@ def test_the_parsed_run_preserves_manifest_identity_and_its_local_budget(monkeyp
         "instance": profiling.PRODUCER_INSTANCE_ID,
         "max_operations": 77,
     } in manifest["admission_instances"]
+
+
+def test_a_child_inherits_the_parents_claim_span_and_admission(monkeypatch):
+    """The child extends one startup; it does not invent a fresh budget owner."""
+    _enable(monkeypatch, max_operations=7)
+    parent = profiling.start_operation(operation="attempt.startup")
+    assert parent is not None
+    with profiling.span(parent, "claim"):
+        pass
+
+    context = profiling.handoff_context(parent)
+    assert context is not None
+    context["admission_instances"] = [{"instance": "parent-process", "max_operations": 7}]
+    child = profiling.attach_selection(context)
+
+    assert child is not None
+    assert [span.name for span in child.spans] == ["claim"]
+    assert child.started_mono_ns == parent.started_mono_ns
+    assert child.producer_instance_id == parent.producer_instance_id
+    assert child.clock_domain_id == parent.clock_domain_id
+    manifest = profiling.manifest_for_measurement(child)
+    assert manifest is not None
+    assert manifest["admission_instances"] == [
+        {
+            "instance": "parent-process",
+            "max_operations": 7,
+        }
+    ]
 
 
 def test_an_exporter_that_cannot_start_drops_measurements_without_failing(monkeypatch, caplog):

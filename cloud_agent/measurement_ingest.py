@@ -32,11 +32,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Final
 
 from cloud_agent_profiling.operation_profiling import (
+    BOUNDARIES_BY_OPERATION,
+    COVERAGE_HOST_STARTUP,
+    COVERAGE_SERVER_REQUEST,
     MAX_ATTRIBUTE_CHARS,
     MAX_REMOTE_STAGES,
     MAX_RUN_ID_CHARS,
     MAX_SPANS,
     RUN_ID_PATTERN,
+    STARTUP_OPERATION,
+    TARGET_KEYS,
 )
 
 #: Longest record accepted, in bytes. The collector's own ceilings bound the
@@ -462,6 +467,87 @@ def _validate_structure(record: Mapping[str, Any]) -> None:
         for item in record.get(key) or []:
             if not isinstance(item, Mapping):
                 raise MeasurementRejected(f"{key} entries must be objects")
+    for item in record.get("stages") or []:
+        _validate_stage(item, depth=0)
+    for item in record.get("spans") or []:
+        _validate_span(item)
+    for item in record.get("milestones") or []:
+        _validate_milestone(item)
+    for key in (
+        "missing_fragments",
+        "missing_producers",
+        "truncated_fragments",
+        "producers",
+        "timing_sources",
+    ):
+        value = record.get(key, [])
+        if not isinstance(value, list) or any(
+            not isinstance(item, str) or not item for item in value
+        ):
+            raise MeasurementRejected(f"{key} must be a list of non-empty strings")
+
+
+def _non_negative_int(value: Any, *, name: str, optional: bool = False) -> None:
+    """Validate one integer timing field without accepting booleans."""
+    if optional and value is None:
+        return
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise MeasurementRejected(f"{name} must be a non-negative integer")
+
+
+def _non_empty_text(value: Any, *, name: str, optional: bool = False) -> None:
+    """Validate one textual timing identity."""
+    if optional and value is None:
+        return
+    if not isinstance(value, str) or not value:
+        raise MeasurementRejected(f"{name} must be a non-empty string")
+
+
+def _validate_stage(item: Mapping[str, Any], *, depth: int) -> None:
+    """Validate one local or attached stage recursively."""
+    if depth > MAX_STAGE_DEPTH:
+        raise MeasurementRejected(f"stage nests deeper than {MAX_STAGE_DEPTH}")
+    _non_empty_text(item.get("stage"), name="stage.stage")
+    _non_negative_int(item.get("duration_us"), name="stage.duration_us")
+    _non_negative_int(item.get("start_offset_us"), name="stage.start_offset_us", optional=True)
+    _non_empty_text(item.get("outcome"), name="stage.outcome", optional=True)
+    _non_empty_text(item.get("source"), name="stage.source", optional=True)
+    _non_empty_text(item.get("call_id"), name="stage.call_id", optional=True)
+    if "truncated" in item and not isinstance(item["truncated"], bool):
+        raise MeasurementRejected("stage.truncated must be a boolean")
+    children = item.get("children", [])
+    if children is None or not isinstance(children, list):
+        raise MeasurementRejected("stage.children must be a list")
+    if len(children) > MAX_REMOTE_STAGES:
+        raise MeasurementRejected(f"stage.children exceeds {MAX_REMOTE_STAGES} entries")
+    for child in children:
+        if not isinstance(child, Mapping):
+            raise MeasurementRejected("stage children must be objects")
+        _validate_stage(child, depth=depth + 1)
+
+
+def _validate_span(item: Mapping[str, Any]) -> None:
+    """Validate one local span."""
+    _non_empty_text(item.get("span_id"), name="span.span_id")
+    _non_empty_text(item.get("name"), name="span.name")
+    _non_negative_int(item.get("ordinal"), name="span.ordinal")
+    _non_negative_int(item.get("start_offset_us"), name="span.start_offset_us")
+    _non_negative_int(item.get("duration_us"), name="span.duration_us", optional=True)
+    _non_empty_text(item.get("outcome"), name="span.outcome")
+    _non_empty_text(item.get("parent_span_id"), name="span.parent_span_id", optional=True)
+    if "truncated" in item and not isinstance(item["truncated"], bool):
+        raise MeasurementRejected("span.truncated must be a boolean")
+    if "attributes" in item and not isinstance(item["attributes"], Mapping):
+        raise MeasurementRejected("span.attributes must be an object")
+
+
+def _validate_milestone(item: Any) -> None:
+    """Validate one milestone's name, offset, and source."""
+    if not isinstance(item, Mapping):
+        raise MeasurementRejected("milestones entries must be objects")
+    _non_empty_text(item.get("name"), name="milestone.name")
+    _non_negative_int(item.get("offset_us"), name="milestone.offset_us")
+    _non_empty_text(item.get("source"), name="milestone.source")
 
 
 def _contains_truncated(items: Any) -> bool:
@@ -558,9 +644,53 @@ def validate_measurement(
     operation = _require(record, "operation")
     if operation not in KNOWN_OPERATIONS:
         raise MeasurementRejected(f"unknown operation: {operation}")
+    producer = _require(record, "producer", limit=MAX_ATTRIBUTE_CHARS)
+    coverage_scope = str(_from_either(record, "coverage_scope") or "")
+    expected_producer = "runner" if operation == STARTUP_OPERATION else CONTROL_PLANE_PRODUCER
+    expected_scope = (
+        COVERAGE_HOST_STARTUP if operation == STARTUP_OPERATION else COVERAGE_SERVER_REQUEST
+    )
+    if producer != expected_producer:
+        raise MeasurementRejected(
+            f"operation {operation!r} must be rooted by {expected_producer!r}"
+        )
+    if coverage_scope != expected_scope:
+        raise MeasurementRejected(
+            f"operation {operation!r} must use coverage_scope {expected_scope!r}"
+        )
+    request_kind = str(_from_either(record, "request_kind") or "")
+    allowed_request_kinds = {
+        "attempt.startup": {"attempt.startup"},
+        "files.list": {"files.list"},
+        "files.open": {"files.open"},
+        "terminal.open": {
+            "terminal.list",
+            "terminal.create",
+            "terminal.stream_attach",
+        },
+    }
+    if request_kind not in allowed_request_kinds[operation]:
+        raise MeasurementRejected(
+            f"operation {operation!r} cannot use request_kind {request_kind!r}"
+        )
+    expected_boundaries = BOUNDARIES_BY_OPERATION.get(operation)
+    if expected_boundaries is not None:
+        start_boundary = record.get("start_boundary")
+        end_boundary = record.get("end_boundary")
+        if start_boundary != expected_boundaries[0]:
+            raise MeasurementRejected("start_boundary does not match the operation")
+        if end_boundary != expected_boundaries[1]:
+            raise MeasurementRejected("end_boundary does not match the operation")
     outcome = _require(record, "outcome")
     if outcome not in KNOWN_OUTCOMES:
         raise MeasurementRejected(f"unknown outcome: {outcome}")
+    allowed_outcomes = (
+        {"dispatched", "failed", "cancelled", "lease_lost", "incomplete"}
+        if operation == STARTUP_OPERATION
+        else {"completed", "failed", "cancelled", "incomplete", "superseded"}
+    )
+    if outcome not in allowed_outcomes:
+        raise MeasurementRejected(f"operation {operation!r} cannot use outcome {outcome!r}")
     _validate_structure(record)
 
     duration_us = record.get("duration_us")
@@ -579,6 +709,8 @@ def validate_measurement(
     end_to_end_complete = record.get("end_to_end_complete", False)
     if not isinstance(end_to_end_complete, bool):
         raise MeasurementRejected("end_to_end_complete must be a boolean")
+    if end_to_end_complete:
+        raise MeasurementRejected("server-side schema v3 records cannot claim end-to-end coverage")
     _validate_completeness(
         record,
         outcome=outcome,
@@ -620,10 +752,10 @@ def validate_measurement(
         profiling_run_id=_require_run_id(record, "profiling_run_id"),
         schema_version=int(schema_version),
         operation=operation,
-        request_kind=str(_from_either(record, "request_kind") or "")[:MAX_ATTRIBUTE_CHARS],
+        request_kind=request_kind[:MAX_ATTRIBUTE_CHARS],
         boundary_version=int(boundary_version),
-        coverage_scope=str(_from_either(record, "coverage_scope") or "")[:MAX_ATTRIBUTE_CHARS],
-        producer=_require(record, "producer", limit=MAX_ATTRIBUTE_CHARS),
+        coverage_scope=coverage_scope[:MAX_ATTRIBUTE_CHARS],
+        producer=producer,
         producer_instance_id=str(record.get("producer_instance_id") or "")[:MAX_ATTRIBUTE_CHARS],
         duration_us=int(duration_us),
         outcome=outcome,
@@ -711,6 +843,16 @@ def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:
     target = run.get("target") or {}
     if not isinstance(target, Mapping):
         raise MeasurementRejected("run.target must be an object")
+    unknown_targets = sorted(str(key) for key in target if str(key) not in TARGET_KEYS)
+    if unknown_targets:
+        raise MeasurementRejected(
+            f"run.target names unknown field(s): {', '.join(unknown_targets)}"
+        )
+    normalized_target: dict[str, str] = {}
+    for key, value in target.items():
+        if not isinstance(value, (str, int)) or isinstance(value, bool) or not str(value).strip():
+            raise MeasurementRejected(f"run.target.{key} must be a non-empty string or integer")
+        normalized_target[str(key)] = str(value)
     max_operations = run.get("max_operations", 1)
     if not isinstance(max_operations, int) or isinstance(max_operations, bool):
         raise MeasurementRejected("run.max_operations must be an integer")
@@ -719,13 +861,33 @@ def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:
     instances = run.get("admission_instances") or []
     if not isinstance(instances, list):
         raise MeasurementRejected("run.admission_instances must be a list")
+    if len(instances) > MAX_REMOTE_STAGES:
+        raise MeasurementRejected(f"run.admission_instances exceeds {MAX_REMOTE_STAGES} entries")
+    normalized_instances: list[dict[str, Any]] = []
+    for item in instances:
+        if not isinstance(item, Mapping):
+            raise MeasurementRejected("run.admission_instances entries must be objects")
+        instance = item.get("instance")
+        budget = item.get("max_operations")
+        if not isinstance(instance, str) or not instance or len(instance) > MAX_ATTRIBUTE_CHARS:
+            raise MeasurementRejected("run admission instance must be a bounded string")
+        if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
+            raise MeasurementRejected("run admission max_operations must be a positive integer")
+        normalized_instances.append({"instance": instance, "max_operations": budget})
+    config_version = run.get("config_version", 1)
+    if (
+        not isinstance(config_version, int)
+        or isinstance(config_version, bool)
+        or config_version <= 0
+    ):
+        raise MeasurementRejected("run.config_version must be a positive integer")
     return {
         "run_id": run_id,
         "operations": operations,
-        "target": {str(key): str(value) for key, value in target.items()},
+        "target": normalized_target,
         "expires_at": _timestamp(run, "expires_at"),
-        "config_version": int(run.get("config_version") or 1),
-        "admission_instances": [dict(item) for item in instances if isinstance(item, Mapping)],
+        "config_version": config_version,
+        "admission_instances": normalized_instances,
     }
 
 

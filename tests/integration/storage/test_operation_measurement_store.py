@@ -185,6 +185,22 @@ async def test_the_same_id_with_different_contents_is_a_conflict(store):
     assert stored["duration_us"] == 1234
 
 
+async def test_a_measurement_conflict_does_not_create_a_phantom_run(store):
+    """A refused sample cannot leave an experiment with no accepted record."""
+    await store.record_operation_measurement(measurement=_measurement(), run=_run())
+
+    result = await store.record_operation_measurement(
+        measurement=_measurement(
+            profiling_run_id="run-phantom",
+            payload_hash="different",
+        ),
+        run=_run(run_id="run-phantom"),
+    )
+
+    assert result == "conflict"
+    assert await store.get_profiling_run("run-phantom") is None
+
+
 async def test_the_record_round_trips_through_jsonb(store):
     """What was frozen is what comes back, nested structure included."""
     record = {

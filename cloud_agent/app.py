@@ -38,6 +38,7 @@ from fastapi.exception_handlers import (
 )
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import PlainTextResponse
 
 from cloud_agent.gateway import GatewayError
 from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
@@ -143,8 +144,25 @@ def install_admin_no_store(
             response.headers["Cache-Control"] = "no-store"
         return response
 
+    async def unexpected_with_no_store(request: Request, exc: Exception) -> Response:
+        protected = any(
+            request.url.path == prefix or request.url.path.startswith(f"{prefix}/")
+            for prefix in normalized
+        )
+        logger.error(
+            "unhandled_request_error",
+            exc_info=exc,
+            extra={"event": "unhandled_request_error", "path": request.url.path},
+        )
+        return PlainTextResponse(
+            "Internal Server Error",
+            status_code=500,
+            headers={"Cache-Control": "no-store"} if protected else None,
+        )
+
     app.add_exception_handler(StarletteHTTPException, with_no_store)
     app.add_exception_handler(RequestValidationError, with_no_store)
+    app.add_exception_handler(Exception, unexpected_with_no_store)
 
 
 #: Held so the event loop cannot collect a running background task. Without

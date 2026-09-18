@@ -183,6 +183,25 @@ def _context(**overrides: Any) -> dict[str, Any]:
     return context
 
 
+def test_candidate_operations_survive_the_real_header_parser(monkeypatch):
+    """A file candidate sent as JSON must not become an unselected broker call."""
+    _enable(monkeypatch, operations=["files.list", "files.open"])
+    encoded = json.dumps(
+        _context(
+            operations=["files.list", "files.open"],
+            operation="",
+        )
+    )
+
+    call = operation_call.open_call(
+        encoded,
+        operations=("files.list", "files.open"),
+    )
+
+    assert call.recording is True
+    assert call.call_id == "c1"
+
+
 class _RecordingClient:
     """A broker that answers a fragment exactly the way the real broker does.
 
@@ -1702,6 +1721,71 @@ async def test_a_request_that_failed_is_stored_too(
     # An incomplete sample is stored as incomplete, never dressed up as whole.
     assert row["collection_complete"] is False
     assert row["end_to_end_complete"] is False
+
+
+async def test_a_failed_non_root_read_is_not_misfiled_as_list_or_open(
+    client: AsyncClient, store: FakeStorage, monkeypatch, _running_writer
+):
+    """Without a returned kind, neither candidate operation is evidence."""
+    _enable(monkeypatch)
+    _use_broker(
+        monkeypatch,
+        _RecordingClient(fail=WorkspaceBrokerError(503, "unavailable")),
+    )
+    job_id = await _ready_job(client, store)
+
+    response = await client.get(
+        f"/v1/agent/jobs/{job_id}/files",
+        params={"path": "unknown"},
+    )
+
+    assert response.status_code == 503
+    await asyncio.sleep(0.02)
+    assert store.rows == []
+    assert _running_writer.counts.reasons["ambiguous_file_kind"] == 1
+
+
+async def test_response_validation_failure_cannot_be_stored_as_success(
+    store: FakeStorage, monkeypatch, _running_writer
+):
+    """A malformed broker answer is a failed operation, not a percentile sample."""
+
+    class _InvalidTerminal(_RecordingClient):
+        async def create_terminal(
+            self,
+            workspace_id: str,
+            *,
+            rows: int,
+            cols: int,
+            profiling: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            del workspace_id, rows, cols
+            call = self._open(profiling, "terminal.open")
+            call.set_operation("terminal.open")
+            return call.answer(
+                {
+                    **self._descriptor,
+                    "id": "invalid-id",
+                }
+            )
+
+    _enable(monkeypatch)
+    _use_broker(monkeypatch, _InvalidTerminal())
+    async with AsyncClient(
+        transport=ASGITransport(app=_build_app(store), raise_app_exceptions=False),
+        base_url="http://test",
+    ) as client:
+        job_id = await _ready_job(client, store)
+        response = await client.post(
+            f"/v1/agent/jobs/{job_id}/terminals",
+            json={"rows": 24, "cols": 80},
+        )
+
+    assert response.status_code == 500
+    await _drain(_running_writer, 1)
+    assert len(store.rows) == 1
+    assert store.rows[0]["outcome"] == "failed"
+    assert store.rows[0]["record"]["failure_stage"] == "terminal.create"
 
 
 async def test_a_queue_with_no_room_drops_the_record_and_keeps_answering(

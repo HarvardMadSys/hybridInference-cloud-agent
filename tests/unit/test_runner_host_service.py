@@ -749,6 +749,8 @@ def test_the_host_hands_its_selection_to_the_child(monkeypatch):
     assert measurement is not None
     bound = runner_mod._bound_measurement(measurement, payload)
     assert bound is not None
+    with operation_profiling.span(bound, "claim"):
+        pass
 
     seen: list[dict[str, Any]] = []
 
@@ -772,7 +774,25 @@ def test_the_host_hands_its_selection_to_the_child(monkeypatch):
     assert context["measurement_id"] == bound.measurement_id
     assert context["facts"]["job_id"] == "ajob_1"
     assert context["expires_at"] > 0
+    assert context["inherited_spans"][0]["name"] == "claim"
+    assert context["admission_instances"][0]["instance"] == operation_profiling.PRODUCER_INSTANCE_ID
     operation_profiling.reset_cache()
+
+
+def test_the_spawn_payload_keeps_only_the_profiling_handoff():
+    """The deployed child must receive the selection the parent paid for."""
+    handed = runner_mod._child_turn_payload(
+        {
+            "job_id": "ajob_1",
+            "_worker_id": "parent-only",
+            "_profiling": {"run_id": "run-1", "measurement_id": "msm_1"},
+        }
+    )
+
+    assert handed == {
+        "job_id": "ajob_1",
+        "_profiling": {"run_id": "run-1", "measurement_id": "msm_1"},
+    }
 
 
 @pytest.mark.parametrize("outcome", [LAUNCH_NOT_STARTED, LAUNCH_UNCERTAIN])
@@ -820,6 +840,59 @@ def test_a_parent_side_handover_failure_delivers_its_measurement(monkeypatch, ou
 
     assert queued == [measurement]
     assert measurement.frozen_outcome == "incomplete"
+    operation_profiling.reset_cache()
+
+
+def test_an_expired_selection_is_delivered_by_the_parent_before_handoff(monkeypatch):
+    """The child runs unmeasured, while the partial claim sample is retained."""
+    import time
+
+    from cloud_agent_profiling import operation_profiling
+
+    _run_descriptor(monkeypatch)
+    payload = {
+        "job_id": "ajob_1",
+        "thread_id": "athr_1",
+        "attempt_id": 7,
+        "attempt_no": 1,
+        "repo": "o/n",
+        "task_prompt": "do it",
+        "runtime": "claude-code",
+        "model": "m",
+        "worker_token": "ajt.a.b",
+        "sandbox_token": "grant",
+    }
+    measurement = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION
+    )
+    assert measurement is not None
+    assert runner_mod._bound_measurement(measurement, payload) is measurement
+    measurement.deadline_mono = time.monotonic() - 1
+    queued: list[Any] = []
+    handed: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        runner_mod,
+        "_enqueue_delivery",
+        lambda selected, **_kwargs: queued.append(selected),
+    )
+
+    class _Turns:
+        def launch(self, child_payload: dict[str, Any]) -> Any:
+            handed.append(child_payload)
+            return LaunchResult(LAUNCH_STARTED, None)
+
+    runner_mod._hand_over_turn(
+        payload,
+        turns=_Turns(),
+        base_url="http://control",
+        worker_id="runner-a",
+        measurement=measurement,
+    )
+
+    assert "_profiling" not in handed[0]
+    assert queued == [measurement]
+    assert measurement.frozen_outcome == "incomplete"
+    assert measurement.frozen_failure_stage == "expired_before_handoff"
     operation_profiling.reset_cache()
 
 
@@ -1343,6 +1416,85 @@ def test_prompt_handoff_starts_delivery_without_waiting(startup_measurement, mon
         assert elapsed < 0.05
     finally:
         release.set()
+
+
+def test_concurrent_enqueues_start_only_one_delivery(startup_measurement, monkeypatch):
+    """The measurement id is reserved atomically before a thread is started."""
+    import threading
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    def _slow_start(**_kwargs: Any) -> Any:
+        calls.append("start")
+        entered.set()
+        release.wait(timeout=5)
+        thread = threading.Thread(target=lambda: None)
+        thread.start()
+        return thread
+
+    monkeypatch.setattr(runner_mod, "_deliver_in_background", _slow_start)
+    first = threading.Thread(
+        target=lambda: runner_mod._enqueue_delivery(
+            startup_measurement,
+            job=_claimed(),
+            base_url="http://control",
+            drain_s=0,
+        )
+    )
+    first.start()
+    assert entered.wait(timeout=1)
+    runner_mod._enqueue_delivery(
+        startup_measurement,
+        job=_claimed(),
+        base_url="http://control",
+        drain_s=0,
+    )
+    release.set()
+    first.join(timeout=1)
+
+    assert calls == ["start"]
+
+
+def test_delivery_byte_budget_drops_before_starting_a_thread(startup_measurement, monkeypatch):
+    """The count bound cannot hide an oversized in-memory delivery set."""
+    starts: list[str] = []
+    monkeypatch.setattr(runner_mod, "DELIVERY_BYTES_MAX", 1)
+    monkeypatch.setattr(
+        runner_mod,
+        "_deliver_in_background",
+        lambda **_kwargs: starts.append("started"),
+    )
+
+    runner_mod._enqueue_delivery(
+        startup_measurement,
+        job=_claimed(),
+        base_url="http://control",
+        drain_s=0,
+    )
+
+    assert starts == []
+    assert runner_mod._DELIVERY_DROPPED_COUNT == 1
+    assert runner_mod._DELIVERY_PENDING_BYTES == 0
+
+
+def test_delivery_client_startup_failure_releases_its_queue_bytes(startup_measurement, monkeypatch):
+    """A client constructor failure cannot permanently consume the byte bound."""
+
+    def _fail(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("client unavailable")
+
+    monkeypatch.setattr(runner_mod, "ControlPlane", _fail)
+    runner_mod._enqueue_delivery(
+        startup_measurement,
+        job=_claimed(),
+        base_url="http://control",
+        drain_s=1,
+    )
+
+    assert runner_mod._DELIVERY_PENDING_BYTES == 0
+    assert runner_mod._IN_FLIGHT_DELIVERIES == {}
 
 
 def test_a_send_that_never_started_is_retried_by_the_next_caller(

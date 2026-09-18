@@ -134,18 +134,20 @@ def _record(**overrides: Any) -> dict[str, Any]:
         "measurement_id": "msm_1",
         "interaction_id": "msm_1",
         "profiling_run_id": "run-1",
-        "operation": "files.list",
-        "request_kind": "files.list",
+        "operation": "attempt.startup",
+        "request_kind": "attempt.startup",
         "boundary_version": 1,
-        "coverage_scope": "server_request",
-        "producer": "control-plane",
+        "coverage_scope": "host_startup",
+        "start_boundary": "runner.claim.request",
+        "end_boundary": "supervisor.prompt.dispatched",
+        "producer": "runner",
         "producer_instance_id": "cp-1",
         "duration_us": 1234,
-        "outcome": "completed",
+        "outcome": "dispatched",
         "collection_complete": True,
         "end_to_end_complete": False,
         "observed_at": datetime.now(UTC).isoformat(),
-        "facts": {"operation": "files.list", "kind": "directory", "entry_count": 3},
+        "facts": {"operation": "attempt.startup"},
     }
     record.update(overrides)
     return record
@@ -155,7 +157,7 @@ def _manifest(**overrides: Any) -> dict[str, Any]:
     """One experiment manifest, as the descriptor states it."""
     run: dict[str, Any] = {
         "run_id": "run-1",
-        "operations": ["files.list", "files.open"],
+        "operations": ["attempt.startup"],
         "target": {"sandbox_id": "asbx_1"},
         "expires_at": (datetime.now(UTC) + timedelta(minutes=30)).isoformat(),
         "config_version": 1,
@@ -445,6 +447,22 @@ def test_a_manifest_naming_an_unknown_operation_is_refused():
         measurement_ingest.validate_run(_manifest(operations=["teleport.open"]))
 
 
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"target": {"unknown": "value"}},
+        {"target": {"host": None}},
+        {"config_version": "two"},
+        {"admission_instances": ["not-an-object"]},
+        {"admission_instances": [{"instance": "cp-1", "max_operations": 0}]},
+    ],
+)
+def test_a_malformed_run_manifest_is_refused(changes: dict[str, Any]):
+    """Bad manifests are terminal 422s, never uncaught conversion errors."""
+    with pytest.raises(MeasurementRejected):
+        measurement_ingest.validate_run(_manifest(**changes))
+
+
 def test_a_stored_record_keeps_no_more_than_the_whitelist_allows():
     """Validation strips before hashing, so the hash describes what is stored."""
     stored = measurement_ingest.validate_measurement(
@@ -488,7 +506,25 @@ def test_a_grouping_field_is_read_from_facts_when_it_is_only_there(
     that looked only at the top level filed every startup path as null and
     every terminal request as the same empty string.
     """
-    record = _record(operation="attempt.startup", facts={"operation": "attempt.startup", **facts})
+    if field == "request_kind":
+        record = _record(
+            operation="terminal.open",
+            producer="control-plane",
+            request_kind=expected,
+            coverage_scope="server_request",
+            outcome="completed",
+            start_boundary="control_plane.operation.selected",
+            end_boundary="control_plane.business_result.validated",
+            facts={"operation": "terminal.open", **facts},
+        )
+    else:
+        record = _record(
+            operation="attempt.startup",
+            producer="runner",
+            request_kind="attempt.startup",
+            coverage_scope="host_startup",
+            facts={"operation": "attempt.startup", **facts},
+        )
     record.pop(field, None)
 
     stored = measurement_ingest.validate_measurement(record)
@@ -499,7 +535,16 @@ def test_a_grouping_field_is_read_from_facts_when_it_is_only_there(
 def test_a_stated_top_level_field_wins_over_the_same_name_in_facts():
     """The fallback never overrides evidence stated where it belongs."""
     stored = measurement_ingest.validate_measurement(
-        _record(request_kind="terminal.list", facts={"request_kind": "terminal.create"})
+        _record(
+            operation="terminal.open",
+            producer="control-plane",
+            coverage_scope="server_request",
+            request_kind="terminal.list",
+            outcome="completed",
+            start_boundary="control_plane.operation.selected",
+            end_boundary="control_plane.business_result.validated",
+            facts={"operation": "terminal.open", "request_kind": "terminal.create"},
+        )
     )
 
     assert stored.request_kind == "terminal.list"
@@ -531,6 +576,26 @@ def test_run_ids_are_safe_admin_path_segments():
 
     with pytest.raises(MeasurementRejected, match="measurement_id"):
         measurement_ingest.validate_measurement(_record(measurement_id="msm/one"))
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"coverage_scope": "browser_interaction"},
+        {"end_to_end_complete": True},
+        {"producer": "control-plane"},
+        {"start_boundary": None},
+        {"end_boundary": None},
+        {"outcome": "completed"},
+        {"stages": [{"stage": {"not": "text"}, "duration_us": 1}]},
+        {"stages": [{"stage": "read", "duration_us": 1, "children": None}]},
+        {"milestones": [{"name": "ready", "offset_us": 1, "source": {"not": "text"}}]},
+    ],
+)
+def test_impossible_server_records_are_rejected(changes: dict[str, Any]):
+    """Stored rows must have the runtime shape the Admin page relies on."""
+    with pytest.raises(MeasurementRejected):
+        measurement_ingest.validate_measurement(_record(**changes))
 
 
 # ---------------------------------------------------------------------------
@@ -748,5 +813,60 @@ async def test_a_named_producer_cannot_exempt_itself_from_the_manifest(
     )
 
     assert response.status_code == 422
+    assert "runner-rooted" in response.json()["detail"]["error"]["message"]
+    assert store.measurements.rows == []
+
+
+async def test_a_runner_record_without_its_manifest_is_refused(
+    client: AsyncClient, store: FakeStorage
+):
+    """Run identity and expiry cannot be skipped by omitting the envelope."""
+    job = await _claimed_job(client, store)
+    response = await client.post(
+        f"/v1/agent/worker/jobs/{job['id']}/measurements",
+        json={"record": _record()},
+        headers={"Authorization": f"Bearer {_token_for(job)}"},
+    )
+
+    assert response.status_code == 422
     assert "manifest" in response.json()["detail"]["error"]["message"]
+    assert store.measurements.rows == []
+
+
+async def test_worker_http_cannot_submit_a_control_plane_file_record(
+    client: AsyncClient, store: FakeStorage
+):
+    """The producer name is constrained by the authenticated endpoint."""
+    job = await _claimed_job(client, store)
+    response = await client.post(
+        f"/v1/agent/worker/jobs/{job['id']}/measurements",
+        json={
+            "record": _record(
+                operation="files.list",
+                request_kind="files.list",
+                coverage_scope="server_request",
+                producer="control-plane",
+                outcome="completed",
+                start_boundary="control_plane.operation.selected",
+                end_boundary="control_plane.business_result.validated",
+            ),
+            "run": _manifest(operations=["files.list"]),
+        },
+        headers={"Authorization": f"Bearer {_token_for(job)}"},
+    )
+
+    assert response.status_code == 422
+    assert store.measurements.rows == []
+
+
+async def test_invalid_manifest_config_version_is_a_422(client: AsyncClient, store: FakeStorage):
+    """A bad operator manifest is rejected, not leaked as an internal error."""
+    job = await _claimed_job(client, store)
+    response = await client.post(
+        f"/v1/agent/worker/jobs/{job['id']}/measurements",
+        json={"record": _record(), "run": _manifest(config_version="two")},
+        headers={"Authorization": f"Bearer {_token_for(job)}"},
+    )
+
+    assert response.status_code == 422
     assert store.measurements.rows == []

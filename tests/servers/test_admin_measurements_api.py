@@ -115,6 +115,21 @@ async def test_reads_are_never_cached(setup):
     assert response.headers["cache-control"] == "no-store"
 
 
+async def test_an_unexpected_admin_read_failure_is_not_cacheable(setup):
+    """A generated 500 needs the same cache boundary as a successful read."""
+    app, capability = setup
+    capability.list_operation_measurements.side_effect = RuntimeError("database unavailable")
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(MEASUREMENTS, headers=ADMIN)
+
+    assert response.status_code == 500
+    assert response.headers["cache-control"] == "no-store"
+
+
 async def test_the_local_writer_exposes_its_bounds_and_loss_counts(setup):
     """Queue loss is visible and explicitly scoped to this replica."""
     from cloud_agent import measurement_writer
