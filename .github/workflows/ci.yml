@@ -1013,11 +1013,20 @@ jobs:
             --label "io.hybridinference.smoke.run=${SUFFIX}" \
             -e POSTGRES_DB="${TEST_DB_NAME}" -e POSTGRES_PASSWORD="${TEST_DB_PASSWORD}" \
             -p 127.0.0.1::5432 postgres:16-alpine
+          # Probe TCP, not the socket. The image runs initdb against a
+          # temporary server started with `listen_addresses=''` — reachable on
+          # the unix socket and nowhere else — then stops it and starts the
+          # real one. A socket probe answers "accepting connections" for that
+          # temporary server, and the createdb below then lands in the shutdown
+          # between the two: `FATAL: the database system is shutting down`.
+          # TCP is also how the tests reach it, so it is the honest question.
           for attempt in $(seq 1 30); do
-            if docker exec "${database}" pg_isready -U postgres >/dev/null 2>&1; then break; fi
+            if docker exec "${database}" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then
+              break
+            fi
             sleep 1
           done
-          docker exec "${database}" pg_isready -U postgres
+          docker exec "${database}" pg_isready -h 127.0.0.1 -U postgres
           # The test config appends pytest-xdist's worker id to TEST_DB_NAME.
           # Give each worker its own database so migrations and state cannot race;
           # the Postgres container creates only the unsuffixed database.
