@@ -852,6 +852,18 @@ describe('capacity panel', () => {
     expect(screen.getByText(/one observation, 60s apart/)).toBeInTheDocument();
   });
 
+  it('does not repeat a healthy single-source sandbox count in the panel', async () => {
+    render(<AdminHostsPage />);
+    await openPanel();
+
+    const row = (await screen.findByRole('rowheader', { name: 'runner-a' })).closest('tr')!;
+    expect(within(row).getByText('3 running · 7 stopped')).toBeInTheDocument();
+
+    const panel = panelFor();
+    expect(within(panel).getByText('Retained sandboxes')).not.toBeVisible();
+    expect(within(panel).getByText('example-agent-kata')).not.toBeVisible();
+  });
+
   it('reads one hour by default and switches window on request', async () => {
     render(<AdminHostsPage />);
     await openPanel();
@@ -1233,11 +1245,11 @@ describe('capacity panel', () => {
 
     const panel = panelFor();
     expect((await screen.findAllByText(/History is accumulating/)).length).toBe(2);
-    expect(within(panel).getByText('Retained sandboxes')).toBeInTheDocument();
-    expect(within(panel).getByText('≥3 observed · Partial')).toBeInTheDocument();
-    expect(within(panel).getByText(/outside the fixed vocabulary/)).toBeInTheDocument();
+    expect(within(panel).getByText('Retained sandboxes')).toBeVisible();
+    expect(within(panel).getByText('≥3 observed · Partial')).toBeVisible();
+    expect(within(panel).getByText(/outside the fixed vocabulary/)).toBeVisible();
     // The enrollment that contributed the count is named, not just summed.
-    expect(within(panel).getByText('example-agent-kata')).toBeInTheDocument();
+    expect(within(panel).getByText('example-agent-kata')).toBeVisible();
   });
 });
 

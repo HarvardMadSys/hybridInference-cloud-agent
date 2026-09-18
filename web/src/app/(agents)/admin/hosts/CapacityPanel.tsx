@@ -85,6 +85,15 @@ export default function CapacityPanel({
     if (line.reason !== null) namedBySource.add(line.reason);
   }
   const panelReasons = sandboxes.reasons.filter((reason) => !namedBySource.has(reason));
+  // A complete count from one source is already visible in the table row.
+  // Keep this section for provenance that changes how the total is read:
+  // several sources, incomplete coverage, stale data, or an explanation.
+  const showSandboxDiagnostics =
+    sandboxes.perSource.length > 1 ||
+    sandboxes.partial ||
+    sandboxes.stale ||
+    sandboxes.explanation !== null ||
+    sandboxes.reasons.length > 0;
   const switcherId = `${id}-source`;
 
   return (
@@ -235,7 +244,10 @@ export default function CapacityPanel({
         </>
       )}
 
-      <div className="mt-5 border-t border-gray-200 pt-4 dark:border-white/10">
+      <div
+        hidden={!showSandboxDiagnostics}
+        className="mt-5 border-t border-gray-200 pt-4 dark:border-white/10"
+      >
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
           <h4 className="text-xs font-semibold text-gray-900 dark:text-gray-100">
             Retained sandboxes
