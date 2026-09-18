@@ -2450,30 +2450,29 @@ def _enqueue_delivery(
 ) -> None:
     """Start a frozen measurement's send, or wait for the one already running.
 
-    A record is frozen once, so only the first caller starts a thread. Every
-    later caller joins *that* thread for its own bound instead of returning:
-    the handoff waits briefly because the turn goes on working, and the turn's
-    exit waits longer to finish a send the first attempt could not. Returning
-    early on "already queued" would silently reduce two bounded attempts to one
-    and make the exit's sweep a no-op for exactly the case it exists for.
+    A record is frozen once, so only the first caller starts a thread. *Every*
+    caller then waits its own bound -- including the one that started it. The
+    first version returned as soon as the thread was running, which meant a
+    turn that failed before dispatch (so the exit's sweep was the first
+    enqueue) got no wait at all, and the process could exit with the send still
+    in flight. That is exactly the case the sweep exists for.
     """
     if measurement is None:
         return
     measurement_id = measurement.measurement_id
     thread = _IN_FLIGHT_DELIVERIES.get(measurement_id)
     if thread is None:
-        thread = _deliver_in_background(
-            job=job, base_url=base_url, measurement=measurement, drain_s=drain_s
-        )
+        thread = _deliver_in_background(job=job, base_url=base_url, measurement=measurement)
         # Recorded only once it is actually running. A thread that could not
         # start leaves nothing behind, so the next caller tries again rather
         # than finding a send that never began.
         if thread is not None:
             _IN_FLIGHT_DELIVERIES[measurement_id] = thread
-        return
-    # Already on its way. Waiting for that send, rather than returning, is the
-    # difference between a bounded attempt and no attempt at all.
-    thread.join(timeout=drain_s)
+    # Joined whether it was just started or was already on its way: the bound
+    # belongs to the caller that is waiting, not to whoever happened to be
+    # first.
+    if thread is not None:
+        thread.join(timeout=drain_s)
 
 
 def _deliver_in_background(
@@ -3233,10 +3232,17 @@ def deliver_measurements(
     """
     sink = (os.environ.get(operation_profiling.ENV_PROFILING_SINK) or "").strip()
     counts = {"delivered": 0, "duplicate": 0, "dropped": 0, "retried": 0}
-    if not sink or not os.path.exists(sink):
+    if not sink:
         return counts
-    operation_profiling.flush_sink()
     wanted = set(measurement_ids or ())
+    # Drained *before* the sink is looked for. The exporter writes on its own
+    # thread, so a record can be frozen and queued in this process while the
+    # file does not exist yet -- and treating that as "nothing to send" lost
+    # the record for good, because the turn's exit only joins a send that has
+    # already finished. An empty scan must not be read as a completed send.
+    operation_profiling.flush_sink()
+    if not os.path.exists(sink):
+        return counts
     try:
         with open(sink, encoding="utf-8") as handle:
             lines = [line for line in handle if line.strip()]

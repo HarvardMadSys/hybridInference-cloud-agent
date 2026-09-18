@@ -1260,3 +1260,93 @@ def test_a_send_that_never_started_is_retried_by_the_next_caller(
         )
 
     assert len(attempts) == 2, "a send that never began must not be remembered as queued"
+
+
+def test_the_first_enqueue_also_waits_its_bound(startup_measurement, monkeypatch, tmp_path):
+    """The exit sweep is often the *first* caller, and it must still wait.
+
+    A turn that fails before dispatch never reaches the handoff, so the exit's
+    sweep starts the send. Returning as soon as the thread was running meant
+    that path got no bounded wait at all, and the process could exit with the
+    send in flight.
+    """
+    import threading
+
+    _sink_with(monkeypatch, tmp_path, [_frozen()])
+    release = threading.Event()
+    finished = threading.Event()
+
+    def _slow_send(**_kwargs: Any) -> Any:
+        def _run() -> None:
+            release.wait(timeout=10)
+            finished.set()
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        return thread
+
+    monkeypatch.setattr(runner_mod, "_deliver_in_background", _slow_send)
+    try:
+        # Released only from another thread, so the waiting call is the one
+        # being measured: with no wait it returns while `_run` is still going.
+        threading.Timer(0.2, release.set).start()
+        runner_mod._enqueue_delivery(
+            startup_measurement,
+            job=_claimed(),
+            base_url="http://control",
+            drain_s=5.0,
+        )
+        assert finished.is_set(), "the first enqueue must wait out its own bound"
+    finally:
+        release.set()
+
+
+def test_a_sink_that_does_not_exist_yet_is_not_a_completed_send(
+    startup_measurement, monkeypatch, tmp_path
+):
+    """A record queued in the exporter is not yet a file on disk.
+
+    The existence check ran before the drain, so a frozen record whose JSONL
+    had not been created yet was read as "nothing to send" -- and the turn's
+    exit only joins a send that already finished, so it was lost for good.
+    """
+    import json as _json
+
+    from cloud_agent_profiling import operation_profiling
+
+    class _Recorder:
+        """Records what a delivery would have sent, without a network."""
+
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+
+        def record_measurement(self, job_id: str, body: dict[str, Any]) -> Any:
+            """Keep the body and report it stored."""
+            self.sent.append(body)
+            return (200, {"result": "stored"})
+
+        def close(self) -> None:
+            """Release nothing."""
+
+    sink = tmp_path / "late" / "records.jsonl"
+    sink.parent.mkdir()
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_RUN, _json.dumps(_descriptor()))
+    operation_profiling.reset_cache()
+
+    # The record is frozen into the exporter while the file does not exist.
+    frozen = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+    assert frozen is not None
+    operation_profiling.finish(frozen, outcome="dispatched")
+    assert not sink.exists(), "the exporter has not written it yet"
+
+    control = _Recorder()
+    counts = runner_mod.deliver_measurements(
+        control=control, job_id="ajob_1", measurement_ids=[frozen.measurement_id]
+    )
+
+    assert counts["delivered"] == 1, "the queued record must still be delivered"
+    assert [body["record"]["measurement_id"] for body in control.sent] == [frozen.measurement_id]
+    operation_profiling.reset_cache()
