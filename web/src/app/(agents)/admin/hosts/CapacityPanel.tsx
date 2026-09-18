@@ -170,7 +170,7 @@ export default function CapacityPanel({
 
       {stale && (
         <p className="mt-3 text-xs text-amber-700 dark:text-amber-300">
-          The last observation is stale. Its value and age are still shown, and the curve is not
+          The last observation is stale. Its last values remain visible, and the curve is not
           extended to now.
         </p>
       )}
@@ -236,11 +236,6 @@ export default function CapacityPanel({
           {loading && (
             <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">Refreshing history…</p>
           )}
-          <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
-            Each point is one observation, {history.resolution_seconds}s apart: CPU averages the
-            interval before it, memory is instantaneous. Read{' '}
-            {formatUtcTimestamp(history.observed_at)}.
-          </p>
         </>
       )}
 

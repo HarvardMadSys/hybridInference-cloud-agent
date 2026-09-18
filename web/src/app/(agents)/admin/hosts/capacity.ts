@@ -1014,8 +1014,8 @@ type MeasuredHost = AgentRunnerHost & { capacity: AgentHostCapacity };
  *
  * CPU and memory describe the Docker host, not an executor, so one member's
  * numbers stand for the whole physical machine — picked, never averaged or
- * summed. A stale reading is used only when it is all there is; the age column
- * says so either way.
+ * summed. A stale reading is used only when it is all there is; the row's
+ * warning says when that happened.
  */
 function capacitySource(reports: MeasuredHost[]): MeasuredHost | null {
   return (
@@ -1034,10 +1034,9 @@ function capacitySource(reports: MeasuredHost[]): MeasuredHost | null {
  * `elapsedMs` is how long ago the pool answer arrived, by the browser's
  * monotonic clock. It is what makes staleness a live property: the server's
  * `freshness` describes the moment it answered, and a page that has been open
- * — or that has been failing to poll — goes on showing a reading that expired
- * some time ago. Without it the age ticks up in the Observed column while the
- * stale marker never appears, which is the one combination that reads as
- * current.
+ * — or that has been failing to poll — can keep the last reading while marking
+ * it stale once it expires. Without it the page would keep old numbers styled
+ * as current forever.
  */
 export function groupCapacityFacts(members: AgentRunnerHost[], elapsedMs = 0): HostGroupCapacity {
   const measured = members.filter((member): member is MeasuredHost => member.capacity !== null);

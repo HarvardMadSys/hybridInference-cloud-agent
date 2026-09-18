@@ -21,10 +21,10 @@
 //
 //   * a missing measurement is never rendered as zero, and a stale one is
 //     never rendered as current;
-//   * an age is advanced by local monotonic time — the server's figure plus
-//     `performance.now()` deltas — so a failed poll leaves the last good
-//     numbers ticking upwards rather than frozen, and a wall-clock adjustment
-//     cannot make an old reading look new;
+//   * staleness advances by local monotonic time — the server's figure plus
+//     `performance.now()` deltas — so a failed poll eventually marks the last
+//     good numbers stale, and a wall-clock adjustment cannot make an old
+//     reading look new;
 //   * a poll that was issued before an action cannot overwrite the action's
 //     answer, and a history response is dropped unless it still matches the
 //     host, epoch and range it was requested for.
@@ -87,9 +87,8 @@ const RECENT_POLL_SECONDS = 300;
 // as stale within a poll or two of actually becoming so.
 const REFRESH_MS = 30_000;
 
-// The age column advances once a second. The server figure is only refreshed
-// every thirty, and an age that steps in thirty-second jumps reads as a frozen
-// page on exactly the machine an operator is watching.
+// Re-evaluate staleness once a second so a reading crosses the freshness
+// threshold promptly even when refreshes are failing.
 const AGE_TICK_MS = 1_000;
 
 const DEFAULT_EXECUTION_PROFILE = 'untrusted-kata-v1';
@@ -154,8 +153,8 @@ function CapabilityCell({
 }) {
   return (
     <div
-      // A stale observation keeps its number and loses its confidence: grey is
-      // the whole signal that the machine stopped reporting.
+      // A stale observation keeps its number and loses its confidence; the
+      // muted value reinforces the explicit warning under Status.
       className={muted ? 'text-gray-500 dark:text-gray-400' : 'text-gray-800 dark:text-gray-200'}
       title={cell.title ?? undefined}
     >
@@ -821,7 +820,7 @@ function HostsView() {
             <p className="mt-4 text-sm text-gray-500 dark:text-gray-400">No servers available.</p>
           ) : (
             <div className="mt-4 overflow-x-auto rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 shadow-sm">
-              <table className="min-w-[1220px] w-full text-left text-sm">
+              <table className="min-w-[1120px] w-full text-left text-sm">
                 <thead className="border-b border-gray-100 bg-gray-50/60 text-xs text-gray-500 dark:border-white/5 dark:bg-white/[0.02] dark:text-gray-400">
                   <tr>
                     <th className="px-6 py-3 font-medium">Server</th>
@@ -831,7 +830,6 @@ function HostsView() {
                     <th className="px-3 py-3 font-medium">Memory</th>
                     <th className="px-3 py-3 font-medium">Storage</th>
                     <th className="px-3 py-3 font-medium whitespace-nowrap">Sandboxes</th>
-                    <th className="px-3 py-3 font-medium whitespace-nowrap">Observed</th>
                     <th className="px-6 py-3 text-right font-medium">Actions</th>
                   </tr>
                 </thead>
@@ -839,10 +837,6 @@ function HostsView() {
                   {visibleServers.map(({ name, host, members }) => {
                     if (!host) return null;
                     const facts = groupCapacityFacts(members, elapsedMs);
-                    const ageSeconds =
-                      facts.oldestSampleAgeSeconds === null
-                        ? null
-                        : liveAgeSeconds(facts.oldestSampleAgeSeconds, elapsedMs);
                     const open = expanded === name;
                     const panelId = panelIdFor(name);
                     const concurrency = concurrencyFacts(host);
@@ -887,6 +881,11 @@ function HostsView() {
                           </th>
                           <td className="px-3 py-4">
                             <StatusBadge status={host.status} />
+                            {facts.stale && (
+                              <span className="mt-1 block whitespace-nowrap text-[11px] font-medium text-amber-700 dark:text-amber-300">
+                                Capacity stale
+                              </span>
+                            )}
                           </td>
                           <td className="px-3 py-4">
                             <CapabilityCell cell={executionSlotsCell(host)} muted={facts.stale} />
@@ -997,26 +996,6 @@ function HostsView() {
                               </span>
                             )}
                           </td>
-                          <td className="px-3 py-4 whitespace-nowrap tabular-nums">
-                            {ageSeconds === null ? (
-                              <span className="text-gray-500 dark:text-gray-400">Not measured</span>
-                            ) : (
-                              <span
-                                className={
-                                  facts.stale
-                                    ? 'text-amber-700 dark:text-amber-300'
-                                    : 'text-gray-800 dark:text-gray-200'
-                                }
-                              >
-                                {formatAge(ageSeconds)}
-                              </span>
-                            )}
-                            {facts.stale && (
-                              <span className="mt-1 block text-[11px] font-medium text-amber-700 dark:text-amber-300">
-                                stale
-                              </span>
-                            )}
-                          </td>
                           <td className="px-6 py-4">
                             <div className="flex items-center justify-end gap-2">
                               <button
@@ -1053,7 +1032,7 @@ function HostsView() {
                           // detail surface, and the panel draws on it directly
                           // at the table's own first-column padding.
                           <tr className="bg-gray-50/70 dark:bg-white/[0.03]">
-                            <td colSpan={9} className="px-6 pb-6 pt-4">
+                            <td colSpan={8} className="px-6 pb-6 pt-4">
                               <CapacityPanel
                                 id={panelId}
                                 name={name}
@@ -1182,7 +1161,7 @@ function HostsView() {
 function TableSkeleton() {
   return (
     <div className="mt-4 overflow-hidden rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 shadow-sm">
-      <table className="min-w-[1220px] w-full text-left text-sm">
+      <table className="min-w-[1120px] w-full text-left text-sm">
         <thead className="border-b border-gray-100 dark:border-white/5 text-xs text-gray-500 dark:text-gray-400">
           <tr>
             <th className="px-6 py-3 font-medium">Server</th>
@@ -1192,7 +1171,6 @@ function TableSkeleton() {
             <th className="px-3 py-3 font-medium">Memory</th>
             <th className="px-3 py-3 font-medium">Storage</th>
             <th className="px-3 py-3 font-medium whitespace-nowrap">Sandboxes</th>
-            <th className="px-3 py-3 font-medium whitespace-nowrap">Observed</th>
             <th className="px-6 py-3 text-right font-medium">Actions</th>
           </tr>
         </thead>
@@ -1205,7 +1183,7 @@ function TableSkeleton() {
               <td className="px-3 py-4">
                 <div className="h-5 w-16 animate-pulse rounded-full bg-gray-100 dark:bg-white/5" />
               </td>
-              {[0, 1, 2, 3, 4, 5, 6].map((cell) => (
+              {[0, 1, 2, 3, 4, 5].map((cell) => (
                 <td key={cell} className="px-3 py-4">
                   <div className="h-4 w-20 animate-pulse rounded bg-gray-100 dark:bg-white/5" />
                 </td>
