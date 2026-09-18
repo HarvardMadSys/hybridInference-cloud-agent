@@ -32,9 +32,9 @@ function PlusIcon() {
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth={1.9}
+      strokeWidth={1.8}
       aria-hidden="true"
-      className="h-4 w-4"
+      className="h-[15px] w-[15px]"
     >
       <path strokeLinecap="round" d="M12 5v14M5 12h14" />
     </svg>
@@ -180,10 +180,13 @@ export function ComposerPlusMenu({
           event.preventDefault();
           setOpen(true);
         }}
-        className={`inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-lg border transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+        // Borderless, like the pickers beside it. A boxed button here was a
+        // third visual language in a row that already has two: unbordered
+        // controls on the left and one solid button on the right.
+        className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
           open
-            ? 'border-gray-300 bg-gray-100 text-gray-900 dark:border-white/20 dark:bg-white/10 dark:text-gray-100'
-            : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-white/10 dark:bg-transparent dark:text-gray-300 dark:hover:bg-white/5'
+            ? 'bg-gray-100 text-gray-900 dark:bg-white/10 dark:text-gray-100'
+            : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-200'
         }`}
       >
         <PlusIcon />

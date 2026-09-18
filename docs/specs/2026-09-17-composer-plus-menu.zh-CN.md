@@ -257,8 +257,14 @@ The user attached these files to this task, under /uploads (read-only):
 - **不能用的服务器说明原因，并且不给开关**：未登录、未配置完、已停用。一次尝试失败
   （比如服务器还没报告任何工具）则保留开关，因为那是可以去修好再回来重试的。
 - **runtime 不支持就在菜单里说。** `/config` 从 MCP 上线起就在返回 `mcp_runtimes`，
-  而 web 端声明了这个字段却从未读过它（issue #212）。现在 codex 这类 runtime 在菜单
-  里直接置灰并写明原因，而不是等按下运行之后收到一个 400。
+  而 web 端声明了这个字段却从未读过它。现在不支持的 runtime 在菜单里直接置灰并写明
+  原因，而不是等按下运行之后收到一个 400。
+
+  **但今天没有这样的 runtime。** PR #256（2026-09-15 合入）给五个 Agent CLI 全部
+  开了 MCP，`runtimes_supporting_mcp()` 现在返回全部五个。issue #212 的正文写于那
+  之前，它描述的 codex/kilo 阻塞已经不成立了；#212 仍然开着，但技术内容已经过期。
+  所以这个守卫是**防御性**的，不是在修一个现存的 bug：它读 `/config` 怎么说就怎么
+  显示，某个部署把某个 runtime 关掉时才会真的出现。
 
 ### 5.9 顺带打开的一扇门：Skills 也可以走这条路
 
