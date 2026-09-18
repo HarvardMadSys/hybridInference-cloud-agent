@@ -32,8 +32,8 @@ from cloud_agent.api.deps import (
     get_storage,
     require_store,
 )
-from cloud_agent.api.hosts import RESIDENCY_TTL_S, _mint_residency_grant
 from cloud_agent.application.job_admission import ENV_SANDBOX_MCP_URL
+from cloud_agent.application.residency import RESIDENCY_TTL_S, _mint_residency_grant
 from cloud_agent.attachments.models import AttachmentView
 from cloud_agent.attachments.selection import prompt_with_attachments
 from cloud_agent.broker_routing import ENV_BROKER_TOKEN, broker_for_attempt, hydrate_shared_broker

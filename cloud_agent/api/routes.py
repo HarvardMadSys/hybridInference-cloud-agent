@@ -117,7 +117,6 @@ from cloud_agent.api.threads import (
     stream_agent_job_events,  # noqa: F401 — re-exported: the identity the host namespace kept.
 )
 from cloud_agent.api.turns import (
-    SESSION_FORK_COORDINATOR_LEASE_S,  # noqa: F401 — re-exported: the identity the host namespace kept.
     _sandbox_context_lost_error,  # noqa: F401 — re-exported: the identity the host namespace kept.
     _session_archived_error,  # noqa: F401 — re-exported: the identity the host namespace kept.
     create_agent_follow_up,  # noqa: F401 — re-exported: the identity the host namespace kept.
@@ -178,12 +177,6 @@ from cloud_agent.api.workspace import (
     write_agent_job_terminal_input,  # noqa: F401 — re-exported: the identity the host namespace kept.
     write_agent_job_workspace_file,  # noqa: F401 — re-exported: the identity the host namespace kept.
 )
-
-# The shared helpers moved to their own modules (R3-a of #225). The aggregator
-# keeps binding the same objects, so a test, a ``Depends`` key or an importer
-# that still says ``routes.X`` resolves to the identity it always did. These
-# aliases exist for the transition; R5 deletes them once every caller imports
-# the new home.
 from cloud_agent.application.job_admission import (
     ENV_SANDBOX_MCP_URL,  # noqa: F401 — re-exported: the identity the host namespace kept.
     _binding_alias,  # noqa: F401 — re-exported: the identity the host namespace kept.
@@ -196,6 +189,15 @@ from cloud_agent.application.job_admission import (
     _resolve_attachment_selection,  # noqa: F401 — re-exported: the identity the host namespace kept.
     _resolve_mcp_bindings,  # noqa: F401 — re-exported: the identity the host namespace kept.
     _resolve_skill_selection,  # noqa: F401 — re-exported: the identity the host namespace kept.
+)
+
+# The shared helpers moved to their own modules (R3-a of #225). The aggregator
+# keeps binding the same objects, so a test, a ``Depends`` key or an importer
+# that still says ``routes.X`` resolves to the identity it always did. These
+# aliases exist for the transition; R5 deletes them once every caller imports
+# the new home.
+from cloud_agent.application.session_fork import (
+    SESSION_FORK_COORDINATOR_LEASE_S,  # noqa: F401 — re-exported: the identity the host namespace kept.
 )
 
 router = APIRouter()
