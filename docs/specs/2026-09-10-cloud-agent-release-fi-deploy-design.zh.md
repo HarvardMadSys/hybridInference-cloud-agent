@@ -1,7 +1,7 @@
 # Cloud Agent 通用发行与 FreeInference 部署迁移设计
 
 日期：2026-09-10  
-状态：待执行；本次交付设计文档，没有实施本方案中的代码修改或部署  
+状态：已于 2026-09-18 完成 P1–P7；staging 与 production 均由 FI 部署，上游旧部署入口已移除。下文中的“当前”描述保留为实施前基线。
 执行者：DS  
 涉及仓库：`HarvardMadSys/hybridInference-cloud-agent`、`HarvardMadSys/freeInference`；Gateway 仓库按需做独立兼容修复
 

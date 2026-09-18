@@ -1,7 +1,8 @@
 # Cloud Agent 上游 / FreeInference Distribution 边界设计
 
 - **语言：** 简体中文 · [English](2026-09-03-freeinference-cloud-agent-distribution-design.md)
-- **状态：** v1 提案——待评审（Murphy、Juncheng）
+- **状态：** 已实施——两个环境均已完成验收，上游部署工作流于 2026-09-18
+  退役。下文关于“当前”直接部署路径的描述保留为切换前基线。
 - **日期：** 2026-09-03
 - **适用仓库：**
   [HarvardMadSys/hybridInference-cloud-agent](https://github.com/HarvardMadSys/hybridInference-cloud-agent)

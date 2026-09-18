@@ -51,9 +51,10 @@ an unrelated identity domain under the same issuer is not a supported migration.
 
 ## Upgrade an existing deployment
 
-Merging to `dev` automatically deploys staging. Complete the identity
-preparation below **before merging**, separately for staging and production;
-the database contents do not reveal which issuer originally owned them.
+An upstream `dev` merge publishes a release but deploys no named environment.
+Complete the identity preparation below **before a downstream distribution
+advances its lock or deploys**, separately for staging and production; the
+database contents do not reveal which issuer originally owned them.
 
 1. Verify the original Gateway's effective issuer in its running deployment
    environment. `serving.utils.identity_tokens.issuer()` reads `IDENTITY_ISSUER`,
@@ -67,10 +68,11 @@ the database contents do not reveal which issuer originally owned them.
    preparation; the old API and MCP relay may remain running because this
    only records their existing identity namespace, without rewriting owners.
    On a database still stamped with the pre-2026-09-10 chain, `upgrade head`
-   cannot run: those databases are rebuilt from `0001_schema_baseline` first,
-   as `docs/operations.md` § *Rebuilding the agent database* describes — and
-   that rebuild runs `identity_namespace --check` before either listener
-   starts, so the issuer must be settled before it, not after.
+   cannot run: those databases require either the supported history-preserving
+   copy conversion or an intentional selected-state rebuild, as
+   `docs/operations.md` describes. The resulting deployment runs
+   `identity_namespace --check` before either listener starts, so the issuer
+   must be settled before it, not after.
 3. In the same deployment environment, explicitly acknowledge that ownership:
 
    ```sh
