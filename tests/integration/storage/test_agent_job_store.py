@@ -5707,7 +5707,7 @@ async def test_side_chat_follow_up_http_receipt_matches_retained_owner_read(
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
 
-    from cloud_agent.api import routes
+    from cloud_agent.api import routes, turns
 
     job, _claim_row, sandbox = await _reserve_shared_chat(store)
     origin = await _create_job(store)
@@ -5733,7 +5733,7 @@ async def test_side_chat_follow_up_http_receipt_matches_retained_owner_read(
     app.dependency_overrides[routes.get_storage] = lambda: store
     app.dependency_overrides[routes.get_agent_app_credentials] = lambda: None
     app.dependency_overrides[routes.get_gateway_client] = lambda: None
-    monkeypatch.setattr(routes, "require_entitled_repo", AsyncMock())
+    monkeypatch.setattr(turns, "require_entitled_repo", AsyncMock())
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         path = f"/v1/agent/jobs/{job['id']}/follow-ups"
         headers = {"Idempotency-Key": "side-receipt-contract"}

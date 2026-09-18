@@ -26,29 +26,18 @@ reconnect with ``Last-Event-ID`` and continue from the global cursor.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
-import json
 import os
-import secrets
-from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from fastapi.responses import StreamingResponse
 
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_agent_gitlab_oauth,
     get_gateway_client,
-    get_grant_client,
-    get_log_store,
     get_storage,
 )
-from cloud_agent.api.hosts import RESIDENCY_TTL_S, _mint_residency_grant
-from cloud_agent.broker_routing import broker_for_job
-from cloud_agent.domain.execution import SUCCEEDED, TERMINAL_STATES
-from cloud_agent.domain.requests import request_fingerprint
 from cloud_agent.entitlement import (
     REPO_PATTERN,
     RepoNotAllowed,
@@ -59,18 +48,10 @@ from cloud_agent.github_app import GitHubAppError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.registry import resolve_connection
 from cloud_agent.schemas import (
-    RESET_REASONING_EFFORT,
-    AgentAttemptTelemetry,
     AgentConfigResponse,
     AgentConversation,
     AgentConversationListResponse,
-    AgentFollowUpRequest,
     AgentGitWorkspaceResponse,
-    AgentJobCancelResponse,
-    AgentJobCreate,
-    AgentJobEventsResponse,
-    AgentJobListResponse,
-    AgentJobResponse,
     AgentProject,
     AgentProjectListResponse,
     AgentSessionArchiveRequest,
@@ -88,14 +69,6 @@ from cloud_agent.schemas import (
     AgentTerminalSessionResizeRequest,
     AgentTerminalSessionResponse,
     AgentThreadArchiveResponse,
-    AgentThreadEvent,
-    AgentThreadEventsResponse,
-    AgentThreadMessageResponse,
-    AgentThreadPinResponse,
-    AgentThreadRenameRequest,
-    AgentThreadRenameResponse,
-    AgentThreadResponse,
-    AgentThreadStatsResponse,
     AgentWorkspaceResponse,
     AgentWorkspaceWriteRequest,
     GitHubConnectionResponse,
@@ -117,7 +90,6 @@ from cloud_agent.source_control import (
     issue_oauth_state,
 )
 from cloud_agent.terminal_coordination import resume_settled_terminal
-from cloud_agent.thread_stats import summarize_thread
 from cloud_agent.visible_models import agent_model_reasoning_efforts, agent_visible_models
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 from cloud_agent_contracts.workspace_browser import WorkspacePathError, normalize_workspace_path
@@ -155,24 +127,24 @@ if TYPE_CHECKING:
 from cloud_agent.api._job_admission import (
     ENV_SANDBOX_MCP_URL,  # noqa: F401 — re-exported: the identity the host namespace kept.
     _binding_alias,  # noqa: F401 — re-exported: the identity the host namespace kept.
-    _create_job_as,
-    _idempotency_conflict,
+    _create_job_as,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _idempotency_conflict,  # noqa: F401 — re-exported: the identity the host namespace kept.
     _JobCreationStorage,  # noqa: F401 — re-exported: the identity the host namespace kept.
-    _require_offered_effort,
-    _require_registered_runtime,
-    _require_resolvable_model,
-    _resolve_attachment_selection,
+    _require_offered_effort,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _require_registered_runtime,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _require_resolvable_model,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _resolve_attachment_selection,  # noqa: F401 — re-exported: the identity the host namespace kept.
     _resolve_mcp_bindings,  # noqa: F401 — re-exported: the identity the host namespace kept.
-    _resolve_skill_selection,
+    _resolve_skill_selection,  # noqa: F401 — re-exported: the identity the host namespace kept.
 )
 from cloud_agent.api._job_views import (
-    _EVENT_PAGE_SIZE,
-    _SAFE_EVENT_TYPE,
+    _EVENT_PAGE_SIZE,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _SAFE_EVENT_TYPE,  # noqa: F401 — re-exported: the identity the host namespace kept.
     _attempt_duration_ms,  # noqa: F401 — re-exported: the identity the host namespace kept.
-    _attempt_resources,
-    _attempt_summary_response,
+    _attempt_resources,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _attempt_summary_response,  # noqa: F401 — re-exported: the identity the host namespace kept.
     _egress_tiers,
-    _event_response,
+    _event_response,  # noqa: F401 — re-exported: the identity the host namespace kept.
     _iso,
     _job_response,
 )
@@ -188,6 +160,45 @@ from cloud_agent.api._workspace_access import (
     _workspace_id,
     _workspace_not_materialized,
     _workspace_not_ready,
+)
+
+# The owner surface's first batch moved to its own modules (R3-c of #225). The
+# aggregator keeps binding the same objects, so a test, a ``Depends`` key or an
+# importer that still says ``routes.X`` resolves to the identity it always did.
+# These aliases exist for the transition; R5 deletes them once every caller
+# imports the new home.
+from cloud_agent.api.jobs import (
+    _job_usage,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _set_agent_thread_archived,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _set_agent_thread_pinned,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    archive_agent_thread,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    cancel_agent_job,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    create_agent_job,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    get_agent_attempt_telemetry,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    get_agent_job,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    list_agent_jobs,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    pin_agent_thread,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    rename_agent_thread,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    restore_agent_thread,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    unpin_agent_thread,  # noqa: F401 — re-exported: the identity the host namespace kept.
+)
+from cloud_agent.api.threads import (
+    _KEEPALIVE_EVERY_N_POLLS,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _POLL_INTERVAL_S,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _SSE_HEADERS,
+    _sse_frame,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    get_agent_thread,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    get_agent_thread_stats,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    list_agent_job_events,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    list_agent_thread_events,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    stream_agent_job_events,  # noqa: F401 — re-exported: the identity the host namespace kept.
+)
+from cloud_agent.api.turns import (
+    SESSION_FORK_COORDINATOR_LEASE_S,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _sandbox_context_lost_error,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    _session_archived_error,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    create_agent_follow_up,  # noqa: F401 — re-exported: the identity the host namespace kept.
+    fork_agent_job,  # noqa: F401 — re-exported: the identity the host namespace kept.
 )
 
 # The worker surface moved to its own module (R3-b of #225). The aggregator
@@ -254,38 +265,7 @@ class _RoutesStorage(Protocol):
     source_control: SourceControlPort
 
 
-# The host fork request is bounded to 180s. Keep one short recovery margin so
-# a second API worker cannot take over while the first is still recording its
-# receipt; a crashed worker becomes retryable without waiting for the 15-minute
-# stalled-saga reconciler.
-SESSION_FORK_COORDINATOR_LEASE_S = 210.0
-
-
 router = APIRouter(prefix="/v1/agent")
-
-# Same anti-buffering headers the completions SSE path uses: `no-transform`
-# stops intermediary CDNs from buffering to compress, `X-Accel-Buffering: no`
-# disables nginx buffering.
-_SSE_HEADERS = {
-    "Cache-Control": "no-cache, no-transform",
-    "Connection": "keep-alive",
-    "X-Accel-Buffering": "no",
-}
-
-_POLL_INTERVAL_S = 1.0
-_KEEPALIVE_EVERY_N_POLLS = 15
-
-
-def _sse_frame(event: dict[str, Any]) -> str:
-    """Render one stored event as an SSE frame with a safe event name."""
-    event_type = event["event_type"]
-    # fullmatch, not match: `$` also matches before a trailing newline, so
-    # `match()` would accept "message\n" — exactly the value this guard
-    # exists to reject, since the newline splits the SSE frame.
-    if not _SAFE_EVENT_TYPE.fullmatch(event_type or ""):
-        event_type = "malformed"
-    data = json.dumps(_event_response(event).model_dump(), separators=(",", ":"))
-    return f"id: {event['id']}\nevent: {event_type}\ndata: {data}\n\n"
 
 
 def _require_store(store: _RoutesStorage | None) -> _RoutesStorage:
@@ -301,29 +281,6 @@ def _require_store(store: _RoutesStorage | None) -> _RoutesStorage:
             },
         )
     return store
-
-
-async def _job_usage(log_store: Any, job_id: str) -> dict[str, Any]:
-    """Read one job's spend and token totals from the billing ledger.
-
-    Deliberately the ledger and not the agent's own report: a run that
-    misstates its usage — which is a thing models do — cannot change what the
-    owner is shown, and it is the same source the budget check already trusts.
-    Absent on a deployment with no log store, rather than a fabricated zero.
-    """
-    usage: dict[str, Any] = {}
-    cost_getter = getattr(log_store, "get_agent_job_cost", None)
-    if cost_getter is not None:
-        with contextlib.suppress(Exception):
-            usage["spent_usd"] = await cost_getter(job_id)
-    usage_getter = getattr(log_store, "get_agent_job_usage", None)
-    if usage_getter is not None:
-        with contextlib.suppress(Exception):
-            totals = await usage_getter(job_id)
-            usage["tokens_in"] = int(totals.get("tokens_in", 0))
-            usage["tokens_out"] = int(totals.get("tokens_out", 0))
-            usage["model_calls"] = int(totals.get("calls", 0))
-    return usage
 
 
 # ── Owner endpoints ────────────────────────────────────────────────────
@@ -911,54 +868,6 @@ async def _mcp_connections_for_user(store: _RoutesStorage, user_id: str) -> list
     return summaries
 
 
-@router.post("/jobs", response_model=AgentJobResponse, status_code=201)
-async def create_agent_job(
-    body: AgentJobCreate,
-    idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-    app_credentials: Any | None = Depends(get_agent_app_credentials),
-    gateway: Any = Depends(get_gateway_client),
-) -> AgentJobResponse:
-    """Queue a new agent job for the authenticated user.
-
-    An ``Idempotency-Key`` names this one submission: a resend with the same
-    key returns the job the first send created, and the same key under
-    different content is a 409 ``idempotency_conflict``.
-    """
-    job_store = _require_store(store)
-    job = await _create_job_as(
-        body,
-        user,
-        job_store=job_store,
-        app_credentials=app_credentials,
-        gateway=gateway,
-        client_request_id=idempotency_key,
-    )
-    return _job_response(job)
-
-
-@router.get("/jobs", response_model=AgentJobListResponse)
-async def list_agent_jobs(
-    limit: int = Query(50, ge=1, le=200),
-    archived: bool = Query(False),
-    repo: str | None = Query(None, pattern=REPO_PATTERN, max_length=140),
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-) -> AgentJobListResponse:
-    """List jobs from the authenticated user's active or archived threads.
-
-    ``repo`` narrows the page to one project. It is a filter over what the
-    caller already owns, not an access grant, so an unentitled repo is not an
-    error here — it simply matches none of their rows.
-    """
-    job_store = _require_store(store)
-    jobs = await job_store.conversation_queries.list_jobs(
-        user_id=user["user_id"], limit=limit, archived=archived, repo=repo
-    )
-    return AgentJobListResponse(jobs=[_job_response(job) for job in jobs])
-
-
 @router.get("/sessions", response_model=AgentSessionListResponse)
 async def list_agent_sessions(
     limit: int = Query(50, ge=1, le=200),
@@ -1121,889 +1030,6 @@ async def list_agent_projects(
             )
             for project in projects
         ]
-    )
-
-
-@router.get("/jobs/{job_id}", response_model=AgentJobResponse)
-async def get_agent_job(
-    job_id: str,
-    include_resources: bool = Query(True),
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-    log_store: Any | None = Depends(get_log_store),
-) -> AgentJobResponse:
-    """Fetch one of the caller's agent jobs, with what it has spent so far."""
-    job_store = _require_store(store)
-    job = await _owned_job(job_store.conversation_queries, job_id, user)
-    attempt_telemetry = await job_store.execution_queries.job_attempts_telemetry(job_id=job_id)
-    telemetry = attempt_telemetry[-1] if attempt_telemetry else None
-    # Existing clients keep the newest detail. The retry-aware client opts out
-    # and requests heavy rows only for the attempt currently selected.
-    if telemetry and include_resources:
-        telemetry = await job_store.execution_queries.job_turn_telemetry(
-            job_id=job_id, attempt_id=attempt_telemetry[-1]["attempt_id"]
-        )
-    return _job_response(
-        job,
-        await _job_usage(log_store, job_id),
-        telemetry,
-        attempt_telemetry,
-    )
-
-
-@router.get("/jobs/{job_id}/attempts/{attempt_id}/telemetry", response_model=AgentAttemptTelemetry)
-async def get_agent_attempt_telemetry(
-    job_id: str,
-    attempt_id: int = Path(..., ge=1),
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-) -> AgentAttemptTelemetry:
-    """Read measurements for one attempt belonging to the caller's job."""
-    job_store = _require_store(store)
-    await _owned_job(job_store.conversation_queries, job_id, user)
-    telemetry = await job_store.execution_queries.job_turn_telemetry(
-        job_id=job_id, attempt_id=attempt_id
-    )
-    if telemetry is None:
-        raise HTTPException(status_code=404, detail="Attempt not found")
-    return AgentAttemptTelemetry(
-        **_attempt_summary_response(telemetry).model_dump(),
-        resources=_attempt_resources(telemetry),
-    )
-
-
-@router.post("/jobs/{job_id}/cancel", response_model=AgentJobCancelResponse)
-async def cancel_agent_job(
-    job_id: str,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-) -> AgentJobCancelResponse:
-    """Request cancellation of one of the caller's agent jobs.
-
-    Queued jobs cancel immediately; a running job is flagged and the worker
-    performs the fenced terminal transition when it next heartbeats.
-    """
-    job_store = _require_store(store)
-    owned = await _owned_job(job_store.conversation_queries, job_id, user)
-    state = await job_store.attempt_commands.request_cancel(job_id=job_id, user_id=user["user_id"])
-    if state in TERMINAL_STATES:
-        resumed = True
-        if owned.get("thread_sandbox") is not None:
-            settled_broker = await _workspace_broker_for_job(job_store, owned)
-            resumed = await resume_settled_terminal(
-                _workspace_id(owned),
-                job_id=job_id,
-                broker=settled_broker,
-            )
-        if resumed:
-            await job_store.sandbox.mark_terminal_resume_complete(job_id=job_id)
-    job = await job_store.conversation_queries.get_job(job_id)
-    return AgentJobCancelResponse(
-        id=job_id,
-        state=state or (job or {}).get("state", "unknown"),
-        cancel_requested=bool((job or {}).get("cancel_requested")),
-    )
-
-
-async def _set_agent_thread_archived(
-    *,
-    job_id: str,
-    archived: bool,
-    user: dict[str, Any],
-    store: _RoutesStorage | None,
-) -> AgentThreadArchiveResponse:
-    """Set archive state without exposing whether another user's job exists."""
-    job_store = _require_store(store)
-    result = await job_store.conversation_commands.set_thread_archived(
-        job_id=job_id,
-        user_id=user["user_id"],
-        archived=archived,
-    )
-    if result is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
-        )
-    return AgentThreadArchiveResponse(
-        thread_id=result["thread_id"],
-        archived=archived,
-        archived_at=_iso(result["archived_at"]),
-    )
-
-
-@router.post("/jobs/{job_id}/archive", response_model=AgentThreadArchiveResponse)
-async def archive_agent_thread(
-    job_id: str,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-) -> AgentThreadArchiveResponse:
-    """Archive the entire task thread containing an owned job."""
-    return await _set_agent_thread_archived(job_id=job_id, archived=True, user=user, store=store)
-
-
-@router.delete("/jobs/{job_id}/archive", response_model=AgentThreadArchiveResponse)
-async def restore_agent_thread(
-    job_id: str,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-) -> AgentThreadArchiveResponse:
-    """Restore the entire task thread containing an owned job."""
-    return await _set_agent_thread_archived(job_id=job_id, archived=False, user=user, store=store)
-
-
-@router.patch("/jobs/{job_id}/title", response_model=AgentThreadRenameResponse)
-async def rename_agent_thread(
-    job_id: str,
-    body: AgentThreadRenameRequest,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-) -> AgentThreadRenameResponse:
-    """Rename the entire conversation containing an owned job."""
-    result = await _require_store(store).conversation_commands.set_thread_title(
-        job_id=job_id, user_id=user["user_id"], title=body.title
-    )
-    if result is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
-        )
-    return AgentThreadRenameResponse(**result)
-
-
-async def _set_agent_thread_pinned(
-    *,
-    job_id: str,
-    pinned: bool,
-    user: dict[str, Any],
-    store: _RoutesStorage | None,
-) -> AgentThreadPinResponse:
-    """Set pin state without exposing whether another user's job exists."""
-    job_store = _require_store(store)
-    result = await job_store.conversation_commands.set_thread_pinned(
-        job_id=job_id,
-        user_id=user["user_id"],
-        pinned=pinned,
-    )
-    if result is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
-        )
-    return AgentThreadPinResponse(
-        thread_id=result["thread_id"],
-        pinned=pinned,
-        pinned_at=_iso(result["pinned_at"]),
-    )
-
-
-@router.post("/jobs/{job_id}/pin", response_model=AgentThreadPinResponse)
-async def pin_agent_thread(
-    job_id: str,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-) -> AgentThreadPinResponse:
-    """Pin the entire task thread containing an owned job."""
-    return await _set_agent_thread_pinned(job_id=job_id, pinned=True, user=user, store=store)
-
-
-@router.delete("/jobs/{job_id}/pin", response_model=AgentThreadPinResponse)
-async def unpin_agent_thread(
-    job_id: str,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-) -> AgentThreadPinResponse:
-    """Unpin the entire task thread containing an owned job."""
-    return await _set_agent_thread_pinned(job_id=job_id, pinned=False, user=user, store=store)
-
-
-def _sandbox_context_lost_error() -> HTTPException:
-    """Return the stable owner-facing error for an unrunnable retained chat."""
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "sandbox_context_lost",
-                "message": (
-                    "This chat's retained sandbox has an indeterminate or lost "
-                    "context and cannot safely accept another message."
-                ),
-            }
-        },
-    )
-
-
-def _session_archived_error() -> HTTPException:
-    """Require an explicit unarchive before accepting another conversation turn."""
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "session_archived",
-                "message": "Unarchive this session before continuing the conversation.",
-            }
-        },
-    )
-
-
-@router.post("/jobs/{job_id}/follow-ups", response_model=AgentJobResponse, status_code=201)
-async def create_agent_follow_up(
-    job_id: str,
-    body: AgentFollowUpRequest,
-    idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-    app_credentials: Any | None = Depends(get_agent_app_credentials),
-    gateway: Any = Depends(get_gateway_client),
-) -> AgentJobResponse:
-    """Append a turn and queue its member in the retained shared sandbox.
-
-    An ``Idempotency-Key`` names this one submission, as for creation: a
-    resend returns the turn the first send made, different content under the
-    same key is a 409 ``idempotency_conflict``.
-    """
-    job_store = _require_store(store)
-    parent = await _owned_job(job_store.conversation_queries, job_id, user)
-    # Ownership is proved above; the resend is answered next, before the checks
-    # that can change between two sends of one submission. A first send whose
-    # response was lost, followed by the session being archived or its sandbox
-    # context going indeterminate, must still return the turn that send made —
-    # otherwise the retry is refused for a reason the first send never saw.
-    fingerprint = (
-        request_fingerprint(
-            "follow_up",
-            {
-                "parent_job_id": job_id,
-                **body.model_dump(mode="json"),
-            },
-        )
-        if idempotency_key is not None
-        else None
-    )
-    if idempotency_key is not None:
-        replayed = await job_store.conversation_commands.replayed_submission(
-            user_id=user["user_id"],
-            client_request_id=idempotency_key,
-            fingerprint=fingerprint,
-        )
-        if replayed is not None:
-            if replayed.get("error") == "client_request_conflict":
-                raise _idempotency_conflict()
-            return _job_response(
-                await _owned_job(job_store.conversation_queries, str(replayed["id"]), user)
-            )
-    if parent.get("archived_at") is not None:
-        raise _session_archived_error()
-    retained = parent.get("thread_sandbox")
-    if isinstance(retained, dict) and (
-        retained.get("context_status") == "lost"
-        or retained.get("state") in {"stopped_dirty", "lost"}
-    ):
-        raise _sandbox_context_lost_error()
-    # The harness is fixed per thread (design D2): continuity is the harness
-    # session, and no other harness can continue it. The field survives as an
-    # explicit no-op so existing callers that echo the thread's runtime keep
-    # working; a *different* runtime is refused rather than silently starting
-    # a turn the thread's memory cannot follow.
-    if body.runtime is not None:
-        _require_registered_runtime(body.runtime)
-        if body.runtime != parent["runtime"]:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": (
-                            f"this thread runs on {parent['runtime']!r} and a thread's "
-                            "harness is fixed; start a new chat to use "
-                            f"{body.runtime!r}"
-                        ),
-                    }
-                },
-            )
-    # A follow-up may switch models; the switched-to model gets the same
-    # fail-fast as a fresh job. An omitted model inherits the parent's, which
-    # was validated when it was chosen.
-    model = None
-    if body.model:
-        model = await _require_resolvable_model(body.model, gateway=gateway, user=user)
-    # Effort is per turn, like the model, and inherits when omitted. Unlike the
-    # model it needs a way *back*: null already means "no override, inherit", so
-    # clearing an inherited effort takes the explicit reset sentinel. Validated
-    # against the model this turn will run — which may be the switched-to one,
-    # and a pair that was offered last turn need not be offered this one.
-    reasoning_effort: str | None = None
-    reset_effort = body.reasoning_effort == RESET_REASONING_EFFORT
-    if body.reasoning_effort is not None and not reset_effort:
-        reasoning_effort = await _require_offered_effort(
-            body.reasoning_effort,
-            runtime=parent["runtime"],
-            model=model or parent["model"],
-            gateway=gateway,
-            user=user,
-        )
-    try:
-        await require_entitled_repo(
-            parent["repo"],
-            user["user_id"],
-            store=job_store.source_control,
-            app_credentials=app_credentials,
-        )
-    except RepoNotAllowed as exc:
-        raise HTTPException(
-            status_code=403,
-            detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
-        ) from exc
-    # An unavailable account integration must not prevent unrelated conversation
-    # work. The runner receives only usable servers, resolved when it claims
-    # this turn, and Tools retains each connection's diagnosis.
-    skills = (
-        await _resolve_skill_selection(
-            job_store.skills, user_id=user["user_id"], skill_ids=body.skill_ids
-        )
-        if body.skill_ids is not None
-        else None
-    )
-    attachments = await _resolve_attachment_selection(
-        job_store.attachments, user_id=user["user_id"], attachment_ids=body.attachment_ids
-    )
-    job = await job_store.conversation_commands.create_follow_up(
-        parent_job_id=job_id,
-        user_id=user["user_id"],
-        prompt=body.prompt,
-        runtime=body.runtime,
-        # Canonical, or the parent's when omitted — never the alias the caller
-        # typed, which the gateway's grant would not match.
-        model=model if body.model else None,
-        reasoning_effort=reasoning_effort,
-        reset_reasoning_effort=reset_effort,
-        **({"skills": skills} if skills is not None else {}),
-        **({"attachments": attachments} if attachments is not None else {}),
-        client_request_id=idempotency_key,
-        # The same value the replay lookup above used, so the pre-check and the
-        # unique index cannot disagree about what was submitted.
-        client_request_fingerprint=fingerprint,
-    )
-    if job is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
-        )
-    if job.get("error") == "client_request_conflict":
-        raise _idempotency_conflict()
-    if job.get("error") == "session_archived":
-        raise _session_archived_error()
-    if job.get("error") == "sandbox_context_lost":
-        # The durable store repeats the check under its thread/sandbox locks.
-        # It can legitimately disagree with the advisory read above when the
-        # active attempt becomes indeterminate during entitlement/tool checks.
-        raise _sandbox_context_lost_error()
-    logger.info(
-        "agent_follow_up_created",
-        extra={
-            "event": "agent_follow_up_created",
-            "job_id": job["id"],
-            "thread_id": job.get("thread_id"),
-            "parent_job_id": job.get("parent_job_id"),
-        },
-    )
-    # Command rows omit retained membership joins. Return the same owner read
-    # as GET /jobs/{id}, including the sandbox and native fork provenance.
-    return _job_response(await _owned_job(job_store.conversation_queries, str(job["id"]), user))
-
-
-@router.post("/jobs/{job_id}/fork", response_model=AgentJobResponse, status_code=201)
-async def fork_agent_job(
-    job_id: str,
-    idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-    grants: Any = Depends(get_grant_client),
-) -> AgentJobResponse:
-    """Fork one settled native session into the same shared Docker workspace."""
-    job_store = _require_store(store)
-    job = await _owned_job(job_store.conversation_queries, job_id, user)
-    not_settled = HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "not_settled",
-                "message": "This turn is still active; wait for it to settle before forking it.",
-            }
-        },
-    )
-    if job["state"] not in TERMINAL_STATES:
-        raise not_settled
-    if job["state"] != SUCCEEDED:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "anchor_not_settled",
-                    "message": "Only a successfully settled turn can be used as a Fork anchor.",
-                }
-            },
-        )
-    if job.get("thread_sandbox") is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "native_context_unavailable",
-                    "message": "This historical chat has no shared native-session sandbox.",
-                }
-            },
-        )
-
-    sandbox = job.get("thread_sandbox") or {}
-    if sandbox.get("shared_live") is not True:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "native_fork_unavailable",
-                    "message": (
-                        "This historical retained chat predates shared native-session "
-                        "forks. Start a new chat to use same-workspace Fork."
-                    ),
-                }
-            },
-        )
-
-    operation = await job_store.session_fork.prepare_session_fork(
-        source_job_id=job_id,
-        user_id=user["user_id"],
-        idempotency_key=idempotency_key or f"generated:{secrets.token_urlsafe(24)}",
-    )
-    if operation is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
-        )
-    error = operation.get("error")
-    if error:
-        error_contract = {
-            "session_archived": (
-                "session_archived",
-                "This conversation is archived. Restore it before creating a side chat.",
-            ),
-            "idempotency_conflict": (
-                "idempotency_conflict",
-                "This Idempotency-Key was already used for a different fork source.",
-            ),
-            "not_settled": (
-                "not_settled",
-                "This turn is still active; stop the run before forking it.",
-            ),
-            "anchor_not_settled": (
-                "historical_snapshot_unavailable",
-                "Native Fork requires a successfully completed assistant turn.",
-            ),
-            "not_shared_live": (
-                "native_fork_unavailable",
-                "This chat does not use a shared-native sandbox.",
-            ),
-            "native_fork_unavailable": (
-                "native_fork_unavailable",
-                "This retained sandbox version cannot fork from a historical turn.",
-            ),
-            "sandbox_not_ready": (
-                "native_context_unavailable",
-                "This chat's retained native context is not safe to fork.",
-            ),
-            "source_busy": (
-                "sandbox_busy",
-                "This chat is currently running a turn; retry after it settles.",
-            ),
-            "fork_in_progress": (
-                "fork_in_progress",
-                "Another native fork is already being prepared from this chat.",
-            ),
-            "resident_capacity_exhausted": (
-                "resident_capacity_exhausted",
-                "This shared sandbox has no free resident Agent CLI slot.",
-            ),
-            "native_context_unavailable": (
-                "native_context_unavailable",
-                "This chat has no settled native session to fork.",
-            ),
-            "runtime_mismatch": (
-                "native_fork_unavailable",
-                "The retained runtime no longer matches this chat.",
-            ),
-        }
-        error_type, message = error_contract.get(
-            str(error),
-            ("native_fork_unavailable", "The retained native session cannot be forked now."),
-        )
-        raise HTTPException(
-            status_code=409,
-            detail={"error": {"type": error_type, "message": message}},
-        )
-
-    operation_id = str(operation["id"])
-
-    if operation["state"] == "failed":
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "native_fork_failed",
-                    "message": str(
-                        operation.get("last_error") or "Native Fork could not complete."
-                    ),
-                }
-            },
-        )
-
-    async def release_failed_fork_residencies(rows: dict[str, Any]) -> None:
-        for role in ("source", "target"):
-            residency = rows[role]
-            grant_id = await job_store.residency.release_residency(
-                thread_id=str(residency["thread_id"]),
-                generation=int(residency["generation"]),
-                host=str(operation["host"]),
-            )
-            if grant_id and grants is not None:
-                with contextlib.suppress(Exception):
-                    await grants.revoke(grant_id)
-
-    if operation["state"] == "preparing":
-        # Resolve the host only for the state that still needs a native
-        # mutation.  READY and MATERIALIZED are durable control-plane states:
-        # a retry after a lost HTTP response must return/finalize the same
-        # child even when the retaining host has since become unreachable.
-        broker = await broker_for_job(job_store.host_pool, job_id)
-        if broker is None:
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "error": {
-                        "type": "sandbox_host_unavailable",
-                        "message": (
-                            "The host retaining this chat is not reachable for native Fork."
-                        ),
-                    }
-                },
-            )
-        # Validate every immutable host input before minting or rotating either
-        # residency. A malformed manifest is a control-plane defect, not a
-        # reason to leak two renewable grants into an uncallable saga.
-        source_job = operation.get("source_job") or {}
-        source_thread_id = str(operation["source_thread_id"])
-        members: list[dict[str, Any]] = []
-        for member in operation.get("group_members") or []:
-            manifest = {
-                key: member.get(key)
-                for key in (
-                    "thread_id",
-                    "native_session_id",
-                    "context_status",
-                    "activation_generation",
-                    "process_generation",
-                    "residency_generation",
-                    "resident_state",
-                    "resident_slot_id",
-                    "last_settled_job_id",
-                )
-            }
-            members.append(manifest)
-        source_member = next(
-            (member for member in members if member["thread_id"] == source_thread_id),
-            None,
-        )
-        if source_member is None or operation.get("resident_slot_id") is None:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": {
-                        "type": "native_context_unavailable",
-                        "message": "The shared sandbox manifest is incomplete.",
-                    }
-                },
-            )
-        launch_common: dict[str, Any] = {
-            "runtime_id": str(operation["runtime_id"]),
-            "runtime_version": operation.get("runtime_version"),
-            "model": str(source_job.get("model") or ""),
-            "reasoning_effort": source_job.get("reasoning_effort"),
-            # Replaced by the broker's host-local, sandbox-reachable relay.
-            "gateway_base_url": "",
-            # Fork-only does not need a tool credential. A later turn whose
-            # MCP set is non-empty performs a member-only native restart.
-            "mcp_server_ids": [],
-            "mcp_base_url": "",
-            "mcp_credential": "",
-        }
-        coordinator_token = secrets.token_urlsafe(32)
-        claimed = await job_store.session_fork.claim_session_fork_materialization(
-            operation_id=operation_id,
-            coordinator_token=coordinator_token,
-            lease_seconds=SESSION_FORK_COORDINATOR_LEASE_S,
-        )
-        if not claimed:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": {
-                        "type": "fork_in_progress",
-                        "message": "This native Fork is already being materialized; retry shortly.",
-                    }
-                },
-                headers={"Retry-After": "2"},
-            )
-        residencies = await job_store.session_fork.establish_session_fork_residencies(
-            operation_id=operation_id,
-            coordinator_token=coordinator_token,
-            ttl_seconds=RESIDENCY_TTL_S,
-        )
-        if residencies is None:
-            await job_store.session_fork.release_session_fork_materialization(
-                operation_id=operation_id,
-                coordinator_token=coordinator_token,
-            )
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": {
-                        "type": "fork_fence_changed",
-                        "message": "The source session changed before Fork could start.",
-                    }
-                },
-            )
-        for role in ("source", "target"):
-            previous_grant = residencies[role].get("previous_grant_id")
-            if previous_grant and grants is not None:
-                with contextlib.suppress(Exception):
-                    await grants.revoke(previous_grant)
-        source_credential = await _mint_residency_grant(
-            job_store.grants,
-            grants,
-            row=residencies["source"],
-        )
-        target_credential = await _mint_residency_grant(
-            job_store.grants,
-            grants,
-            row=residencies["target"],
-        )
-        if not source_credential or not target_credential:
-            await release_failed_fork_residencies(residencies)
-            await job_store.session_fork.release_session_fork_materialization(
-                operation_id=operation_id,
-                coordinator_token=coordinator_token,
-            )
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "error": {
-                        "type": "residency_grant_unavailable",
-                        "message": "Fork could not obtain two independent resident credentials.",
-                    }
-                },
-            )
-
-        source_member["residency_generation"] = int(residencies["source"]["generation"])
-        source_member["resident_state"] = "restarting"
-        try:
-            receipt = await broker.fork_shared_session(
-                source_thread_id,
-                sandbox_id=str(operation["sandbox_id"]),
-                generation=int(operation["sandbox_generation"]),
-                origin_thread_id=str(operation["origin_thread_id"]),
-                runtime_id=str(operation["runtime_id"]),
-                runtime_version=operation.get("runtime_version"),
-                sandbox_image_digest=operation.get("sandbox_image_digest"),
-                expected_container_id=str(operation["container_id"]),
-                resident_slot_capacity=int(operation["resident_slot_capacity"]),
-                memory_limit=str(operation["memory_limit"]),
-                cpu_limit=str(operation["cpu_limit"]),
-                stop_timeout_s=int(operation["stop_timeout_seconds"]),
-                members=members,
-                operation_id=operation_id,
-                source_native_session_id=str(operation["source_native_session_id"]),
-                source_native_turn_no=int(operation["source_native_turn_no"]),
-                target_thread_id=str(operation["target_thread_id"]),
-                target_slot_id=int(operation["target_resident_slot_id"]),
-                source_launch={
-                    **launch_common,
-                    "native_session_id": str(operation["source_native_session_id"]),
-                    "credential": source_credential,
-                    "slot_id": int(operation["resident_slot_id"]),
-                    "residency_generation": int(residencies["source"]["generation"]),
-                },
-                target_launch={
-                    **launch_common,
-                    "native_session_id": None,
-                    "credential": target_credential,
-                    "slot_id": int(operation["target_resident_slot_id"]),
-                    "residency_generation": int(residencies["target"]["generation"]),
-                },
-            )
-        except WorkspaceBrokerError as exc:
-            # PREPARING is intentionally retained: a retry with the same key
-            # recovers the in-container journal or safely resumes before the
-            # native mutation was reached.
-            raise _workspace_broker_http_error(exc) from exc
-        materialized = await job_store.session_fork.record_session_fork_materialized(
-            operation_id=operation_id,
-            coordinator_token=coordinator_token,
-            receipt=receipt,
-        )
-        if materialized is None:
-            raise HTTPException(
-                status_code=502,
-                detail={
-                    "error": {
-                        "type": "invalid_native_fork_receipt",
-                        "message": "The sandbox host returned a mismatched native Fork receipt.",
-                    }
-                },
-            )
-
-    forked = await job_store.session_fork.finalize_session_fork(operation_id=operation_id)
-    if forked is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "native_fork_fence_changed",
-                    "message": "The source chat changed before native Fork finalization.",
-                }
-            },
-        )
-    logger.info(
-        "agent_job_forked",
-        extra={
-            "event": "agent_job_forked",
-            "job_id": forked["id"],
-            "thread_id": forked.get("thread_id"),
-            "source_job_id": job_id,
-            "sandbox_clone": False,
-            "workspace_shared": True,
-            "fork_operation_id": operation_id,
-        },
-    )
-    return _job_response(forked)
-
-
-@router.get("/jobs/{job_id}/thread", response_model=AgentThreadResponse)
-async def get_agent_thread(
-    job_id: str,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-) -> AgentThreadResponse:
-    """Return the durable conversation containing one of the caller's jobs."""
-    job_store = _require_store(store)
-    await _owned_job(job_store.conversation_queries, job_id, user)
-    thread = await job_store.conversation_queries.get_thread_for_job(
-        job_id=job_id, user_id=user["user_id"]
-    )
-    if thread is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No thread for {job_id}"}},
-        )
-    return AgentThreadResponse(
-        thread_id=thread["id"],
-        repo=thread["repo"],
-        title=thread["title"],
-        messages=[
-            AgentThreadMessageResponse(
-                id=message["id"],
-                role=message["role"],
-                content=message["content"],
-                job_id=message["job_id"],
-                created_at=_iso(message["created_at"]),
-            )
-            for message in thread["messages"]
-        ],
-        jobs=[_job_response(job) for job in thread["jobs"]],
-        created_at=_iso(thread["created_at"]),
-        updated_at=_iso(thread["updated_at"]),
-        archived_at=_iso(thread.get("archived_at")),
-    )
-
-
-@router.get("/jobs/{job_id}/thread/stats", response_model=AgentThreadStatsResponse)
-async def get_agent_thread_stats(
-    job_id: str,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-) -> AgentThreadStatsResponse:
-    """Summarize the thread containing a job: turns, timings, tokens.
-
-    Every number is derived from rows the platform already writes, so a
-    thread that predates this endpoint answers it in full. Measures the
-    thread's runtime does not report come back ``null`` rather than zero.
-    """
-    job_store = _require_store(store)
-    await _owned_job(job_store.conversation_queries, job_id, user)
-    inputs = await job_store.execution_queries.thread_stats_inputs(
-        job_id=job_id, user_id=user["user_id"]
-    )
-    if inputs is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No thread for {job_id}"}},
-        )
-    stats = summarize_thread(
-        job_ids=inputs["job_ids"],
-        attempts=inputs["attempts"],
-        events=inputs["events"],
-    )
-    return AgentThreadStatsResponse(thread_id=inputs["thread_id"], **asdict(stats))
-
-
-@router.get("/jobs/{job_id}/thread/events", response_model=AgentThreadEventsResponse)
-async def list_agent_thread_events(
-    job_id: str,
-    after: int = Query(0, ge=0, description="Return events with a global id greater than this."),
-    limit: int = Query(_EVENT_PAGE_SIZE, ge=1, le=1000),
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-) -> AgentThreadEventsResponse:
-    """Page every turn's event log, with payloads and turn labels intact."""
-    job_store = _require_store(store)
-    await _owned_job(job_store.conversation_queries, job_id, user)
-    events = await job_store.execution_queries.list_thread_events_after(
-        job_id=job_id, user_id=user["user_id"], after_id=after, limit=limit
-    )
-    if events is None:
-        raise HTTPException(status_code=404, detail="job not found")
-    return AgentThreadEventsResponse(
-        events=[
-            AgentThreadEvent(
-                id=event["id"],
-                job_id=event["job_id"],
-                turn_no=event.get("turn_no") or 1,
-                attempt_id=event["attempt_id"],
-                seq=event["seq"],
-                event_type=event["event_type"],
-                payload=event["payload"],
-                created_at=_iso(event["created_at"]),
-            )
-            for event in events
-        ],
-        next_cursor=events[-1]["id"] if events else after,
-    )
-
-
-@router.get("/jobs/{job_id}/events", response_model=AgentJobEventsResponse)
-async def list_agent_job_events(
-    job_id: str,
-    after: int = Query(0, ge=0, description="Return events with a global id greater than this."),
-    limit: int = Query(_EVENT_PAGE_SIZE, ge=1, le=1000),
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-) -> AgentJobEventsResponse:
-    """Page through a job's append-only event log (non-streaming)."""
-    job_store = _require_store(store)
-    await _owned_job(job_store.conversation_queries, job_id, user)
-    events = await job_store.execution_queries.list_events_after(
-        job_id=job_id, after_id=after, limit=limit
-    )
-    return AgentJobEventsResponse(
-        events=[_event_response(event) for event in events],
-        next_cursor=events[-1]["id"] if events else after,
     )
 
 
@@ -2463,105 +1489,22 @@ async def get_agent_job_git_workspace(
         raise _workspace_broker_http_error(exc) from exc
 
 
-@router.get("/jobs/{job_id}/stream")
-async def stream_agent_job_events(
-    job_id: str,
-    request: Request,
-    last_event_id: str | None = Header(None, alias="Last-Event-ID"),
-    after: int = Query(0, ge=0),
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _RoutesStorage | None = Depends(get_storage),
-) -> StreamingResponse:
-    """Stream a job's events as SSE, resumable via ``Last-Event-ID``.
-
-    Each SSE frame carries the event's global id, so a client that reconnects
-    with ``Last-Event-ID`` resumes exactly where it left off — which is what
-    makes the finite stream cap (applied by the timeout middleware to
-    ``text/event-stream``) safe for jobs that outlive one connection.
-    """
-    job_store = _require_store(store)
-    await _owned_job(job_store.conversation_queries, job_id, user)
-
-    cursor = after
-    if last_event_id:
-        with contextlib.suppress(ValueError):
-            cursor = int(last_event_id)
-
-    async def event_source() -> AsyncIterator[Any]:
-        nonlocal cursor
-        idle_polls = 0
-        try:
-            while True:
-                if await request.is_disconnected():
-                    return
-                events = await job_store.execution_queries.list_events_after(
-                    job_id=job_id, after_id=cursor, limit=_EVENT_PAGE_SIZE
-                )
-                if events:
-                    idle_polls = 0
-                    for event in events:
-                        cursor = event["id"]
-                        yield _sse_frame(event)
-                else:
-                    idle_polls += 1
-                    if idle_polls % _KEEPALIVE_EVERY_N_POLLS == 0:
-                        # Comment frame: keeps proxies from reaping an idle
-                        # connection without polluting the event sequence.
-                        yield ": keepalive\n\n"
-
-                job = await job_store.conversation_queries.get_job(job_id)
-                if job is None:
-                    return
-                if job["state"] in TERMINAL_STATES:
-                    # Drain to exhaustion before announcing the end. A single
-                    # extra page is not enough: a client attaching to a
-                    # finished job with more than two pages of backlog would
-                    # see job_finished, close, and lose the rest forever.
-                    while True:
-                        tail = await job_store.execution_queries.list_events_after(
-                            job_id=job_id, after_id=cursor, limit=_EVENT_PAGE_SIZE
-                        )
-                        if not tail:
-                            break
-                        for event in tail:
-                            cursor = event["id"]
-                            yield _sse_frame(event)
-                    final = json.dumps(
-                        {
-                            "state": job["state"],
-                            "published_pr_url": job["published_pr_url"],
-                            "last_event_id": cursor,
-                        },
-                        separators=(",", ":"),
-                    )
-                    yield f"event: job_finished\ndata: {final}\n\n"
-                    return
-
-                await asyncio.sleep(_POLL_INTERVAL_S)
-        except asyncio.CancelledError:
-            # Client disconnect or the stream cap firing: nothing to clean up,
-            # the event log is durable and the client can resume by cursor.
-            raise
-
-    return StreamingResponse(
-        event_source(),
-        media_type="text/event-stream",
-        headers=_SSE_HEADERS,
-    )
-
-
 # ── Worker endpoints (capability-token authenticated) ──────────────────
 
 
-from cloud_agent.api import worker
+from cloud_agent.api import jobs, threads, turns, worker
 
-# The worker surface is a leaf the aggregator mounts. It is included last
-# because its seventeen handlers were the last contiguous block in this module,
-# so the effective match order is the order they were declared in before the
-# split — the reorder the checklist asks to be proven is not one that happens.
+# The surface leaves this aggregator mounts, in the order the concerns first
+# appear. FastAPI composes this router's own ``/v1/agent`` prefix with each
+# leaf's, so a leaf that carried one too would double it; the leaves declare
+# none while this module still holds handlers of its own. That is also why the
+# includes come last: the handlers still declared above keep their relative
+# order, and the leaves are ordered among themselves by the checklist's list.
+router.include_router(jobs.router)
+router.include_router(turns.router)
+router.include_router(threads.router)
 router.include_router(worker.router)
 
-#: The leaf routers this aggregator mounts, in the order the concerns first
-#: appear. Tests walk these rather than ``router.routes``, which holds lazy
-#: include wrappers rather than routes.
-SURFACE_ROUTERS = (worker.router,)
+#: The leaf routers this aggregator mounts. Tests walk these rather than
+#: ``router.routes``, which holds lazy include wrappers rather than routes.
+SURFACE_ROUTERS = (jobs.router, turns.router, threads.router, worker.router)
