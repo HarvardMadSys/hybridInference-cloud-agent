@@ -67,3 +67,20 @@ class EmptySkillLibrary:
     ) -> list[dict[str, Any]]:
         """Return no defaults for these execution-only scenarios."""
         return []
+
+
+class EmptyAttachments:
+    """Opt-in upload store for execution fakes whose scenarios attach nothing.
+
+    The claim path asks every turn how many uploads its conversation holds, so
+    a fake that stands in for execution needs an answer even when the scenario
+    is not about uploads at all.
+    """
+
+    async def count_thread_attachments(self, *, thread_id: str) -> int:
+        """No conversation in these scenarios carries an upload."""
+        return 0
+
+    async def list_thread_attachments(self, *, thread_id: str) -> list[dict[str, Any]]:
+        """Nothing to rebuild ``/uploads`` from."""
+        return []

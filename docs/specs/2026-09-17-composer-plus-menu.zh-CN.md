@@ -114,11 +114,19 @@ CREATE TABLE agent_job_attachments (
     id BIGSERIAL PRIMARY KEY,
     user_id TEXT NOT NULL,
     job_id TEXT,                         -- NULL = 已上传但还没被任务引用
+    thread_id TEXT,                      -- 与 job_id 同生同灭
     path TEXT NOT NULL CHECK (char_length(path) BETWEEN 1 AND 512),
     content BYTEA NOT NULL CHECK (octet_length(content) BETWEEN 1 AND 5242880),
     content_type TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    claimed_at TIMESTAMPTZ,
+    FOREIGN KEY (job_id, thread_id) REFERENCES agent_jobs (id, thread_id) ON DELETE CASCADE
 );
+
+认领（把 `job_id` 填上）发生在**创建任务的那同一个事务里**。解析 id 和创建任务是
+两步，两步之间同一个用户的第二次提交可以抢走同一批暂存文件；放在一个事务里意味着
+任务和它的文件要么都提交、要么都不提交，否则就会留下一个提示词里写着沙箱根本不会
+有的文件的任务。
 ```
 
 限额（可以后调，先定死）：
@@ -135,13 +143,22 @@ CREATE TABLE agent_job_attachments (
 
 两种做法里选前者：
 
-1. **暂存上传** —— `POST /v1/agent/uploads`（multipart）逐个返回 id，创建任务时
-   在 JSON 里带 `attachment_ids`。
+1. **暂存上传** —— `POST /v1/agent/uploads` 逐个返回 id，创建任务时在 JSON 里带
+   `attachment_ids`。
 2. **创建时一起传** —— 把 `POST /v1/agent/jobs` 改成 multipart。
 
 选 1。它让 `POST /v1/agent/jobs` 保持 JSON，`Idempotency-Key` 的提交指纹形状不变；
 而且用户还在打字的时候文件就已经在传了。没有被任何任务引用的上传
 （`job_id IS NULL`）过 24 小时清掉。
+
+**上传本身也是 JSON，字节走 base64，不用 multipart。** 这个服务的每一个接口都说
+JSON，`cloud_agent/api` 里没有任何二进制请求或响应。为一个接口引入 multipart，等于
+同时加一种新的请求形态和一个新的运行时依赖（`python-multipart`）。5 MB 的上限下，
+base64 多花三分之一的流量，换掉的是复杂度——对一个即将被没写过它的人阅读的服务，
+这笔买卖更划算。
+
+上传是这个代码库里唯一做两次限额检查的地方：浏览器查一次，好让用户在字节出发之前
+就看到哪个文件超了；控制面再查一次，因为浏览器的检查是便利，不是边界。
 
 ### 5.4 为什么这件事必须平台来做
 
@@ -161,8 +178,8 @@ CREATE TABLE agent_job_attachments (
 
 1. Runner 拿 worker token 沿已有的 worker 通道取回字节
    （新增 `GET /v1/agent/worker/jobs/{job_id}/attachments`）。
-2. 打成规范化 tar，uid/gid 归一到 `manager.backend.uid`，权限位统一成 `0644`
-   （不给执行位），路径再校验一遍。
+2. 打成规范化 tar，成员归 `uid 0`/`gid 0`，文件 `0444`、目录 `0555`，路径再校验
+   一遍，并拒绝符号链接。
 3. `import_archive` 到 `/uploads`。
 
 **不新增任何网络出口。** 没有新的网络目的地、没有新的凭据、没有新的共享工作区文件。
@@ -191,7 +208,12 @@ The user attached these files to this task, under /uploads (read-only):
 - /uploads/specs/diagrams/flow.svg
 ```
 
-追加轮次用同一个字段，文件累加进同一个目录；容器是保留的，`/uploads` 自然还在。
+追加轮次用同一个字段，文件累加进同一个目录。
+
+**什么时候真的去取。** 容器是新建的（整个会话要重建），或者这一轮自己附了文件——
+只有这两种情况才拉取。保留的容器已经有前几轮的文件了，而 `/uploads` 是 root 所有
+且只读，沙箱删不掉它，所以每轮都重下一遍等于把整个会话的字节再搬一次，只为了写回
+已经在那儿的东西。claim 响应因此带两个计数：会话的和本轮的。
 每个被接受的轮次保存自己的附件清单，Fork 和重试拿到的是同一批内容 —— 和
 `agent_jobs.skills` 的快照语义一致。
 
@@ -201,10 +223,18 @@ The user attached these files to this task, under /uploads (read-only):
   框副标题里的承诺，而上传绕过了它。第一次附上文件时，附件带下面给一句明确提示，
   不是脚注。
 - **不自动解压。** `.zip` / `.tar.gz` 原样存、原样投递，没有 zip bomb 面。
-- **不给执行位。** 全部 `0644`。
+- **只读，而且是 root 的。** 沙箱不允许任何只读挂载（`_verify_mounts` 直接拒绝
+  bind mount 和 volume），所以让 `/uploads` 只读的唯一办法就是所有权加权限位：
+  成员归 root，文件 `0444`、目录 `0555`。沙箱用户读得到、改不了，也删不掉。
+- **不跟符号链接。** checkout 来自可信的 clone，上传来自用浏览器的人。
 - **内容本身是不可信输入**，但这不是新的信任边界 —— 沙箱里跑的仓库代码本来就
   不可信。值得写下来，不值得为它加新机制。
 - **配额按用户算**，防止一个人把控制面的数据库撑爆。
+- **删除会话会真删字节。** 这一条在实现时才查清楚：owner 删除会话走的是
+  `agent_threads.deleted_at` 的**软删**，`agent_jobs` 行按设计保留（那是审计账），
+  所以外键的级联在这条路径上**永远不会触发**。因此 `delete_sessions` 里显式删掉
+  `agent_job_attachments` 的行。审计账留下，用户自己的内容不留——否则上传的字节会
+  永远留在库里。两条路径都要有：级联管硬删，显式删管软删。
 
 ### 5.9 顺带打开的一扇门：Skills 也可以走这条路
 

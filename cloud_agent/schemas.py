@@ -15,6 +15,7 @@ from typing import Annotated, Any, Final, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cloud_agent.agent_access import AgentAccess  # noqa: TC001 — Pydantic resolves this at runtime.
+from cloud_agent.attachments.models import AttachmentLimits, AttachmentRef, AttachmentView
 from cloud_agent.capacity_protocol import (
     AgentHostCapacity,
     HostCapacityReport,
@@ -145,6 +146,15 @@ class AgentJobCreate(BaseModel):
             "MCP connections this session may use, with the capabilities it may use on "
             "each. Omitted means none: there is no implicit default, because connecting "
             "a server is not the same decision as letting a task call it."
+        ),
+    )
+    attachment_ids: list[Annotated[int, Field(gt=0, strict=True)]] | None = Field(
+        None,
+        max_length=50,
+        description=(
+            "Staged uploads to place under /uploads in the sandbox. Omitted attaches "
+            "nothing: unlike skills there are no account defaults, because an upload "
+            "is something done for this one task rather than a standing preference."
         ),
     )
     metadata: dict[str, Any] | None = Field(None, description="Opaque caller metadata.")
@@ -589,6 +599,10 @@ class AgentJobResponse(BaseModel):
     # credential — those are the two things this service's MCP relay keeps off
     # the sandbox-facing wire.
     skills: list[SelectedSkill] = Field(default_factory=list)
+    #: What this turn attached, without the bytes. The rows behind these ids
+    #: are the single copy of the content, so a fork references the same
+    #: immutable uploads rather than duplicating them.
+    attachments: list[AttachmentRef] = Field(default_factory=list)
     mcp_bindings: list[McpBindingSummary] = Field(default_factory=list)
     created_at: str | None = None
     updated_at: str | None = None
@@ -853,6 +867,15 @@ class AgentFollowUpRequest(BaseModel):
         None,
         max_length=16,
         description="Omitted inherits the previous turn's skill snapshots; [] clears the selection.",
+    )
+    attachment_ids: list[Annotated[int, Field(gt=0, strict=True)]] | None = Field(
+        None,
+        max_length=50,
+        description=(
+            "Further uploads for this turn. Omitted adds none — earlier turns' files "
+            "are already under /uploads and are re-imported whenever the sandbox is "
+            "rebuilt, so inheriting here would only copy them twice."
+        ),
     )
     runtime: str | None = Field(
         None,
@@ -1186,9 +1209,34 @@ class WorkerThreadSandbox(BaseModel):
     group_members: list[WorkerSandboxMember] = Field(default_factory=list)
 
 
+class WorkerAttachmentListResponse(BaseModel):
+    """Every upload in the claimed job's conversation, without the bytes."""
+
+    attachments: list[AttachmentView] = Field(default_factory=list)
+
+
+class WorkerAttachmentContentResponse(BaseModel):
+    """One upload's bytes, base64 for the same reason the upload API is JSON."""
+
+    id: int
+    path: str
+    content_type: str
+    content_base64: str
+
+
 class WorkerClaimResponse(BaseModel):
     """A claimed job plus the capability token scoped to this attempt."""
 
+    #: How many uploads this whole conversation holds, not just this turn.
+    #: A host with zero here skips the upload fetch entirely, which is every
+    #: turn of every task that attached nothing. It counts the thread rather
+    #: than the turn because a rebuilt sandbox has to restore all of them.
+    thread_attachment_count: int = 0
+    #: How many this turn itself added. A retained container already holds the
+    #: earlier turns' files — ``/uploads`` is root-owned and read-only, so the
+    #: sandbox cannot have removed them — and re-fetching them every turn would
+    #: move the whole conversation's bytes again for nothing.
+    turn_attachment_count: int = 0
     job_id: str
     thread_id: str
     parent_job_id: str | None = None
@@ -1756,6 +1804,7 @@ class AgentConfigResponse(BaseModel):
     """
 
     skill_limits: SkillLimits = Field(default_factory=SkillLimits)
+    attachment_limits: AttachmentLimits = Field(default_factory=AttachmentLimits)
 
     repos: list[str] = Field(
         default_factory=list,

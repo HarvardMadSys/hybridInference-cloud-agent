@@ -22,6 +22,7 @@ from cloud_agent.storage.admin_conversation_queries import AdminConversationQuer
 from cloud_agent.storage.admin_queries import AdminRunQueries
 from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
 from cloud_agent.storage.repositories import (
+    PostgresAttachmentRepository,
     PostgresAttemptCommands,
     PostgresAuditRepository,
     PostgresConversationCommands,
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
     import asyncpg
 
     from cloud_agent.ports import (
+        AttachmentRepository,
         AttemptCommands,
         AuditRepository,
         ConversationCommands,
@@ -96,5 +98,6 @@ class Storage:
         self.sandbox: SandboxRepository = PostgresSandboxRepository(pool)
         self.session_fork: SessionForkRepository = PostgresSessionForkRepository(pool)
         self.skills: SkillRepository = PostgresSkillRepository(pool)
+        self.attachments: AttachmentRepository = PostgresAttachmentRepository(pool)
         self.snapshot: SnapshotRepository = PostgresSnapshotRepository(pool)
         self.source_control: SourceControlRepository = PostgresSourceControlRepository(pool)

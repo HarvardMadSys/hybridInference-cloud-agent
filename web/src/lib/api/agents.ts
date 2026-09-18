@@ -529,6 +529,8 @@ export type AgentJobFilesApi = AgentJobDirectoryApi | AgentJobFileApi | AgentJob
 
 export interface AgentConfigApi {
   skill_limits?: import('@/lib/skillLimits').SkillLimits;
+  /** Upload bounds. Absent on a control plane that predates attachments. */
+  attachment_limits?: import('@/lib/attachmentLimits').AttachmentLimits;
   repos: string[];
   runtimes: string[];
   /** Models an agent job can actually call — the create endpoint's own list. */
@@ -674,6 +676,8 @@ export async function listRepoBranches(repo: string): Promise<RepoBranchesApi> {
 export interface CreateAgentJobRequest {
   /** Omitted uses personal defaults; an empty list selects none. */
   skill_ids?: number[];
+  /** Staged uploads to place under /uploads. Omitted attaches nothing. */
+  attachment_ids?: number[];
   repo: string;
   task_prompt: string;
   model: string;

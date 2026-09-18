@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createAgentJob, getAgentConfig, listRepoBranches } from '@/lib/api/agents';
@@ -17,6 +17,12 @@ vi.mock('next/navigation', () => ({
 
 import { listSkills } from '@/lib/api/skills';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
+
+import { deleteAttachment, uploadAttachment } from '@/lib/api/attachments';
+vi.mock('@/lib/api/attachments', () => ({
+  uploadAttachment: vi.fn(),
+  deleteAttachment: vi.fn(),
+}));
 
 vi.mock('@/lib/api/agents', () => ({
   createAgentJob: vi.fn(),
@@ -37,9 +43,67 @@ function config(overrides: Partial<AgentConfigApi> = {}): AgentConfigApi {
   };
 }
 
+// Skills no longer sits in the control row: it is reached through the plus
+// menu, which is where everything a task *carries* now lives.
+function droppedFile(fullPath: string) {
+  const name = fullPath.split('/').pop()!;
+  return {
+    isFile: true,
+    isDirectory: false,
+    fullPath,
+    file: (ok: (file: File) => void) => ok(new File(['data'], name)),
+    createReader: () => ({ readEntries: (ok: (entries: never[]) => void) => ok([]) }),
+  };
+}
+
+function droppedFolder(fullPath: string, ...children: unknown[]) {
+  let read = false;
+  return {
+    isFile: false,
+    isDirectory: true,
+    fullPath,
+    file: () => {},
+    createReader: () => ({
+      readEntries: (ok: (entries: unknown[]) => void) => {
+        const page = read ? [] : children;
+        read = true;
+        ok(page);
+      },
+    }),
+  };
+}
+
+function folderFile(name: string, relative: string): File {
+  const made = new File(['data'], name);
+  Object.defineProperty(made, 'webkitRelativePath', { value: relative });
+  return made;
+}
+
+// The menu items click these inputs; a test drives them directly because the
+// operating system's picker is what sits between the two in a real browser.
+async function pick(container: HTMLElement, which: 0 | 1, files: File[]) {
+  const inputs = container.querySelectorAll<HTMLInputElement>('input[type="file"]');
+  await act(async () => {
+    fireEvent.change(inputs[which]!, { target: { files } });
+  });
+}
+
+async function openAttachMenu() {
+  fireEvent.click(await screen.findByRole('button', { name: 'Add files or skills' }));
+  return screen.findByRole('menu');
+}
+
+async function skillsMenuItem() {
+  await openAttachMenu();
+  return screen.findByRole('menuitem', { name: /Skills/ });
+}
+
 describe('TaskComposer source-control onboarding', () => {
   beforeEach(() => {
     vi.mocked(listSkills).mockResolvedValue([]);
+    vi.mocked(uploadAttachment).mockReset();
+    vi.mocked(deleteAttachment).mockReset();
+    vi.mocked(deleteAttachment).mockResolvedValue(undefined);
     navigation.push.mockReset();
     vi.mocked(createAgentJob).mockReset();
     vi.mocked(getAgentConfig).mockReset();
@@ -139,11 +203,13 @@ describe('TaskComposer source-control onboarding', () => {
     ]);
     render(<TaskComposer />);
     await screen.findByLabelText('Branch');
-    const picker = await screen.findByRole('button', { name: /1 selected/ });
-    fireEvent.click(picker);
+    const skills = await skillsMenuItem();
+    expect(skills).toHaveTextContent('1');
+    fireEvent.click(skills);
     fireEvent.click(await screen.findByRole('switch'));
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
-    expect(screen.getByRole('button', { name: /0 selected/ })).toBeInTheDocument();
+    expect(await skillsMenuItem()).toHaveTextContent('0');
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Review the diff' } });
     fireEvent.click(screen.getByRole('button', { name: /Run/ }));
     await waitFor(() =>
@@ -170,7 +236,8 @@ describe('TaskComposer source-control onboarding', () => {
     ]);
     render(<TaskComposer />);
     await screen.findByLabelText('Branch');
-    await screen.findByRole('button', { name: /1 selected/ });
+    expect(await skillsMenuItem()).toHaveTextContent('1');
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Review the diff' } });
     fireEvent.click(screen.getByRole('button', { name: /Run/ }));
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
@@ -196,7 +263,8 @@ describe('TaskComposer source-control onboarding', () => {
           'You can still start a task with your account defaults.',
         );
       }
-      expect(screen.getByText('Skills · account defaults')).toBeInTheDocument();
+      expect(await skillsMenuItem()).toHaveTextContent('defaults');
+      fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
       fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Review the diff' } });
       expect(screen.getByRole('button', { name: /Run/ })).toBeEnabled();
       fireEvent.click(screen.getByRole('button', { name: /Run/ }));
@@ -217,9 +285,154 @@ describe('TaskComposer source-control onboarding', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Skills unavailable');
     expect(screen.getByRole('button', { name: /Run/ })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'Retry loading skills' }));
-    expect(await screen.findByRole('button', { name: /0 selected/ })).toBeEnabled();
+    expect(await skillsMenuItem()).toHaveTextContent('0');
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
     await waitFor(() => expect(screen.getByRole('button', { name: /Run/ })).toBeEnabled());
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('sends the uploads it staged, and shows them in the message rather than the control row', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
+    vi.mocked(uploadAttachment).mockResolvedValue({
+      id: 41,
+      path: 'notes.md',
+      size_bytes: 12,
+      content_type: 'text/markdown',
+    });
+    const view = render(<TaskComposer />);
+    await screen.findByLabelText('Branch');
+    await pick(view.container, 0, [new File(['hello world!'], 'notes.md')]);
+
+    expect(await screen.findByText('notes.md')).toBeInTheDocument();
+    // In the composer body, with the text — not among the run settings.
+    expect(screen.getByRole('textbox').closest('div')).toContainElement(
+      screen.getByText('notes.md'),
+    );
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Read my notes' } });
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await waitFor(() =>
+      expect(createAgentJob).toHaveBeenCalledWith(
+        expect.objectContaining({ attachment_ids: [41] }),
+      ),
+    );
+  });
+
+  it('keeps a folder’s structure and shows it as one chip', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(uploadAttachment).mockImplementation(async (_file, path) => ({
+      id: path === 'specs/api.md' ? 1 : 2,
+      path: path!,
+      size_bytes: 4,
+      content_type: 'text/plain',
+    }));
+    const view = render(<TaskComposer />);
+    await screen.findByLabelText('Branch');
+    await pick(view.container, 1, [
+      folderFile('api.md', 'specs/api.md'),
+      folderFile('flow.svg', 'specs/diagrams/flow.svg'),
+    ]);
+
+    expect(await screen.findByText('specs/')).toBeInTheDocument();
+    expect(vi.mocked(uploadAttachment).mock.calls.map(([, path]) => path)).toEqual([
+      'specs/api.md',
+      'specs/diagrams/flow.svg',
+    ]);
+  });
+
+  it('refuses an oversized file next to the file, and attaches the rest', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(uploadAttachment).mockResolvedValue({
+      id: 5,
+      path: 'small.txt',
+      size_bytes: 4,
+      content_type: 'text/plain',
+    });
+    const view = render(<TaskComposer />);
+    await screen.findByLabelText('Branch');
+    const huge = new File(['x'], 'dump.sql');
+    Object.defineProperty(huge, 'size', { value: 6 * 1024 * 1024 });
+    await pick(view.container, 0, [new File(['tiny'], 'small.txt'), huge]);
+
+    expect(await screen.findByText('dump.sql')).toBeInTheDocument();
+    expect(screen.getByText(/over 5 MB, not attached/)).toBeInTheDocument();
+    expect(screen.getByText('small.txt')).toBeInTheDocument();
+    // Only the accepted one was ever sent.
+    expect(vi.mocked(uploadAttachment).mock.calls.map(([file]) => file.name)).toEqual([
+      'small.txt',
+    ]);
+  });
+
+  it('will not start a task while a file is still on its way', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    let land: (value: never) => void = () => {};
+    vi.mocked(uploadAttachment).mockReturnValue(
+      new Promise((resolve) => {
+        land = resolve as never;
+      }),
+    );
+    const view = render(<TaskComposer />);
+    await screen.findByLabelText('Branch');
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Read my notes' } });
+    await pick(view.container, 0, [new File(['hello'], 'notes.md')]);
+
+    // Running now would queue a job without the file the user can see.
+    await waitFor(() => expect(screen.getByRole('button', { name: /Run/ })).toBeDisabled());
+    await act(async () => {
+      land({ id: 9, path: 'notes.md', size_bytes: 5, content_type: 'text/plain' } as never);
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: /Run/ })).toBeEnabled());
+  });
+
+  it('drops a removed upload from the request and from the server', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
+    vi.mocked(uploadAttachment).mockResolvedValue({
+      id: 41,
+      path: 'notes.md',
+      size_bytes: 12,
+      content_type: 'text/markdown',
+    });
+    const view = render(<TaskComposer />);
+    await screen.findByLabelText('Branch');
+    await pick(view.container, 0, [new File(['hello world!'], 'notes.md')]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove notes.md' }));
+
+    await waitFor(() => expect(deleteAttachment).toHaveBeenCalledWith(41));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Read my notes' } });
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('attachment_ids');
+  });
+
+  it('attaches a folder dropped onto the composer, structure intact', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(uploadAttachment).mockImplementation(async (_file, path) => ({
+      id: 3,
+      path: path!,
+      size_bytes: 4,
+      content_type: 'text/plain',
+    }));
+    render(<TaskComposer />);
+    const textbox = await screen.findByRole('textbox');
+    const card = textbox.closest('div')!;
+
+    // A dropped folder is absent from `DataTransfer.files`; only the entries
+    // carry it, which is why the composer walks them itself.
+    const entry = droppedFolder('/specs', droppedFile('/specs/api.md'));
+    await act(async () => {
+      fireEvent.drop(card, {
+        dataTransfer: {
+          types: ['Files'],
+          items: [{ kind: 'file', webkitGetAsEntry: () => entry }],
+          files: [],
+        },
+      });
+    });
+
+    expect(await screen.findByText('specs/')).toBeInTheDocument();
+    expect(vi.mocked(uploadAttachment).mock.calls[0]![1]).toBe('specs/api.md');
   });
 
   it('preselects a requested repository that is available in backend config', async () => {

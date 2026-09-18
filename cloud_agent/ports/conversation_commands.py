@@ -30,6 +30,7 @@ class ConversationCommands(Protocol):
         metadata: dict[str, Any] | None = None,
         mcp_bindings: list[dict[str, Any]] | None = None,
         skills: list[dict[str, Any]] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any]:
@@ -60,6 +61,7 @@ class ConversationCommands(Protocol):
         reasoning_effort: str | None = None,
         reset_reasoning_effort: bool = False,
         skills: list[dict[str, Any]] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:
@@ -96,6 +98,10 @@ class ConversationCommands(Protocol):
         native-fork preparation and archive changes. Worker lifecycle access
         deliberately keeps the immutable job, residency and sandbox ledgers.
         A fork's shared workspace is never removed by a chat-history action.
+
+        Files the owner uploaded are the exception: those rows are deleted
+        rather than hidden, because they are the owner's content rather than an
+        audit trail, and nothing else would ever remove them.
         """
         ...
 

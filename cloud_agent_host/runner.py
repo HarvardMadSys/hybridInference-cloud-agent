@@ -45,7 +45,9 @@ if TYPE_CHECKING:
 
 import httpx
 
+from cloud_agent_git.source_archive import build_upload_archive
 from cloud_agent_host.chat_sandbox import (
+    CHAT_UPLOADS_DIR,
     CHAT_WORKDIR,
     ChatSandboxManager,
     ChatSandboxSpec,
@@ -119,6 +121,9 @@ HEARTBEAT_INTERVAL_S = 30.0
 # Idempotent lifecycle receipts reuse the same short retry interval.
 _CONTROL_RETRY_INTERVAL_S = 5.0
 _HEARTBEAT_TIMEOUT_S = 10.0
+#: One upload is capped at 5 MB by the control plane, but the connection can be
+#: slow; the default 30 s client timeout is too tight for a file transfer.
+_ATTACHMENT_TIMEOUT_S = 120.0
 DEFAULT_AGENT_TIMEOUT_S = 3600.0
 # How often the control checks run while the agent is silent.
 _POLL_INTERVAL_S = 0.5
@@ -304,6 +309,15 @@ class ClaimedJob:
     # claimed turn reserves its sandbox; every executable claim uses this
     # topology and remains pinned to the owning host afterwards.
     thread_sandbox: dict[str, Any] | None = None
+    # How many uploads this whole conversation holds, counted by the control
+    # plane. Zero means skip the fetch, which is every turn of every task that
+    # attached nothing. Absent from a control plane that predates uploads, and
+    # absent means the same thing as none.
+    thread_attachment_count: int = 0
+    # How many this turn itself added. A retained container already holds the
+    # earlier turns' files, so only a new container or a turn that attached
+    # something needs the import to run.
+    turn_attachment_count: int = 0
 
     @classmethod
     def from_response(cls, body: dict[str, Any]) -> ClaimedJob:
@@ -337,6 +351,8 @@ class ClaimedJob:
                 if isinstance(body.get("thread_sandbox"), dict)
                 else None
             ),
+            thread_attachment_count=int(body.get("thread_attachment_count") or 0),
+            turn_attachment_count=int(body.get("turn_attachment_count") or 0),
         )
 
 
@@ -392,6 +408,30 @@ class ControlPlane:
             self._post(f"/v1/agent/worker/jobs/{self.job_id}/events", body)
         except httpx.TransportError:
             self._post(f"/v1/agent/worker/jobs/{self.job_id}/events", body)
+
+    def _get(self, path: str, *, timeout: float | None = None) -> dict[str, Any]:
+        """Read from the worker surface, with the same fencing as a write."""
+        response = self._client.get(
+            f"{self._base}{path}",
+            timeout=self._client.timeout if timeout is None else timeout,
+        )
+        if response.status_code == 409:
+            raise LeaseLost(response.text[:200])
+        response.raise_for_status()
+        return response.json() if response.content else {}
+
+    def list_attachments(self) -> list[dict[str, Any]]:
+        """Every upload in this conversation, without the bytes."""
+        body = self._get(f"/v1/agent/worker/jobs/{self.job_id}/attachments")
+        return list(body.get("attachments") or [])
+
+    def read_attachment(self, attachment_id: int) -> tuple[str, bytes]:
+        """One upload's path and bytes."""
+        body = self._get(
+            f"/v1/agent/worker/jobs/{self.job_id}/attachments/{attachment_id}",
+            timeout=_ATTACHMENT_TIMEOUT_S,
+        )
+        return str(body["path"]), base64.b64decode(body["content_base64"])
 
     def heartbeat(self, ttl: float) -> dict[str, Any]:
         """Renew the lease and learn whether cancellation is pending."""
@@ -1327,6 +1367,44 @@ def _prepare_retained_checkout(
     return base_sha
 
 
+def _import_uploads(
+    *,
+    job: ClaimedJob,
+    control: ControlPlane,
+    manager: ChatSandboxManager,
+    spec: ChatSandboxSpec,
+    fresh_container: bool,
+) -> int:
+    """Place this conversation's uploaded files under ``/uploads``.
+
+    Always the whole thread's files, never a delta: the import overwrites the
+    same paths, so one code path serves a new container and a container that
+    gained a file this turn.
+
+    It runs when the container is new, or when this turn attached something.
+    A retained container already holds the earlier turns' files — ``/uploads``
+    is root-owned and read-only, so the sandbox cannot have removed them — and
+    re-fetching them on every follow-up would move the whole conversation's
+    bytes again to write what is already there.
+
+    The files never touch ``CHAT_WORKDIR``. The publish path stages the
+    workspace with ``git add -A -N``, so an upload written there would be
+    committed and appear in the draft pull request.
+    """
+    if job.thread_attachment_count <= 0:
+        return 0
+    if not fresh_container and job.turn_attachment_count <= 0:
+        return 0
+    files: list[tuple[str, bytes]] = []
+    for entry in control.list_attachments():
+        path, content = control.read_attachment(int(entry["id"]))
+        files.append((path, content))
+    if not files:
+        return 0
+    manager.import_archive(spec, CHAT_UPLOADS_DIR, build_upload_archive(files))
+    return len(files)
+
+
 def _import_retained_base(
     *,
     job: ClaimedJob,
@@ -1863,6 +1941,29 @@ def _run_shared_live_attempt(
                 )
             base_sha = job.base_sha or _retained_head(retained)
             reused_workspace = True
+        # Every turn, after both branches: a first turn populates a new
+        # container and a follow-up re-populates one that may have been rebuilt.
+        # Before the turn is admitted, so the agent never observes a half-written
+        # directory.
+        stage = "uploads"
+        imported_uploads = _import_uploads(
+            job=job,
+            control=control,
+            manager=manager,
+            spec=spec,
+            fresh_container=not has_context,
+        )
+        if imported_uploads:
+            control.append_event(
+                NormalizedEvent(
+                    "lifecycle",
+                    {
+                        "phase": "uploads_imported",
+                        "files": imported_uploads,
+                        "path": CHAT_UPLOADS_DIR,
+                    },
+                )
+            )
         control.append_event(
             NormalizedEvent(
                 "lifecycle",

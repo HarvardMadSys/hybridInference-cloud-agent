@@ -43,7 +43,7 @@ from cloud_agent.api.deps import (
     get_storage,
 )
 from cloud_agent.gateway import GatewayError
-from tests.support.storage import AllCapabilities
+from tests.support.storage import AllCapabilities, EmptyAttachments
 
 pytestmark = pytest.mark.asyncio
 
@@ -52,7 +52,7 @@ _ATTEMPT = 100
 _GENERATION = 1
 
 
-class _ClaimStore(AllCapabilities):
+class _ClaimStore(EmptyAttachments, AllCapabilities):
     """Only the surface ``worker_claim`` touches."""
 
     def __init__(self, *, queued: bool = True, fence_still_current: bool = True) -> None:

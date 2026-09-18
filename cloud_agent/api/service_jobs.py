@@ -65,6 +65,7 @@ from cloud_agent.schemas import (
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
+        AttachmentRepository,
         AttemptCommands,
         ConversationCommands,
         ConversationQueries,
@@ -89,6 +90,7 @@ class _ServiceJobsStorage(Protocol):
     this list rather than a call that happens to type-check.
     """
 
+    attachments: AttachmentRepository
     attempt_commands: AttemptCommands
     conversation_commands: ConversationCommands
     conversation_queries: ConversationQueries

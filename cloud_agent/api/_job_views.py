@@ -171,6 +171,7 @@ def _job_response(
         metadata=metadata or None,
         mcp_bindings=[McpBindingSummary(**entry) for entry in (job.get("mcp_bindings") or [])],
         skills=job.get("skills") or [],
+        attachments=job.get("attachments") or [],
         created_at=_iso(job["created_at"]),
         updated_at=_iso(job["updated_at"]),
         pinned_at=_iso(job.get("pinned_at")),

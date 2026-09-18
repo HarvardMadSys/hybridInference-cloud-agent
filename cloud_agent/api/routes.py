@@ -27,6 +27,7 @@ reconnect with ``Last-Event-ID`` and continue from the global cursor.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import os
@@ -55,6 +56,8 @@ from cloud_agent.api.deps import (
     get_storage,
 )
 from cloud_agent.api.hosts import RESIDENCY_TTL_S, _mint_residency_grant
+from cloud_agent.attachments.models import AttachmentView
+from cloud_agent.attachments.selection import prompt_with_attachments
 from cloud_agent.broker_routing import (
     ENV_BROKER_TOKEN,
     broker_for_attempt,
@@ -127,6 +130,8 @@ from cloud_agent.schemas import (
     SourceControlProviderResponse,
     SourceControlRepository,
     WorkerAckResponse,
+    WorkerAttachmentContentResponse,
+    WorkerAttachmentListResponse,
     WorkerClaimRequest,
     WorkerClaimResponse,
     WorkerContinuityRequest,
@@ -181,6 +186,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from cloud_agent.ports import (
+        AttachmentRepository,
         AttemptCommands,
         ConversationCommands,
         ConversationQueries,
@@ -210,6 +216,7 @@ from cloud_agent.api._job_admission import (
     _require_offered_effort,
     _require_registered_runtime,
     _require_resolvable_model,
+    _resolve_attachment_selection,
     _resolve_mcp_bindings,  # noqa: F401 — re-exported: the identity the host namespace kept.
     _resolve_skill_selection,
 )
@@ -248,6 +255,7 @@ class _RoutesStorage(Protocol):
     this list rather than a call that happens to type-check.
     """
 
+    attachments: AttachmentRepository
     attempt_commands: AttemptCommands
     conversation_commands: ConversationCommands
     conversation_queries: ConversationQueries
@@ -1486,6 +1494,9 @@ async def create_agent_follow_up(
         if body.skill_ids is not None
         else None
     )
+    attachments = await _resolve_attachment_selection(
+        job_store.attachments, user_id=user["user_id"], attachment_ids=body.attachment_ids
+    )
     job = await job_store.conversation_commands.create_follow_up(
         parent_job_id=job_id,
         user_id=user["user_id"],
@@ -1497,6 +1508,7 @@ async def create_agent_follow_up(
         reasoning_effort=reasoning_effort,
         reset_reasoning_effort=reset_effort,
         **({"skills": skills} if skills is not None else {}),
+        **({"attachments": attachments} if attachments is not None else {}),
         client_request_id=idempotency_key,
         # The same value the replay lookup above used, so the pre-check and the
         # unique index cannot disagree about what was submitted.
@@ -3116,7 +3128,15 @@ async def worker_claim(
             and resolved.usable
             and resolved.connection.status is not ConnectionStatus.ERROR
         ]
+    # Counted for the whole conversation, not this turn: a rebuilt sandbox has
+    # to restore every upload the chat ever carried, and a host that reads zero
+    # here skips the fetch entirely — which is every turn that attached nothing.
+    thread_attachment_count = await job_store.attachments.count_thread_attachments(
+        thread_id=str(claim["thread_id"])
+    )
     response = WorkerClaimResponse(
+        thread_attachment_count=thread_attachment_count,
+        turn_attachment_count=len(claim.get("attachments") or []),
         job_id=claim["id"],
         thread_id=str(claim["thread_id"]),
         parent_job_id=claim.get("parent_job_id"),
@@ -3125,7 +3145,13 @@ async def worker_claim(
         attempt_no=claim["attempt_no"],
         repo=claim["repo"],
         base_sha=claim["base_sha"],
-        task_prompt=prompt_with_skills(claim["task_prompt"], claim.get("skills")),
+        # Attachments are named inside the user task, then the skill selection
+        # wraps the whole thing: the files are context for the task, and the
+        # skills are guidance about how to approach it.
+        task_prompt=prompt_with_skills(
+            prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
+            claim.get("skills"),
+        ),
         setup_script=claim.get("setup_script"),
         runtime=claim["runtime"],
         model=claim["model"],
@@ -3206,6 +3232,66 @@ async def worker_append_event(
     if event_id is None:
         raise _lease_lost()
     return WorkerEventResponse(event_id=event_id)
+
+
+@router.get("/worker/jobs/{job_id}/attachments", response_model=WorkerAttachmentListResponse)
+async def worker_list_attachments(
+    job_id: str,
+    authorization: str | None = Header(None),
+    store: _RoutesStorage | None = Depends(get_storage),
+) -> WorkerAttachmentListResponse:
+    """List every upload in this conversation, so /uploads can be rebuilt.
+
+    Scoped to the thread rather than the claimed turn: a retry on a fresh
+    container has to restore all of them, and re-importing into a retained one
+    simply overwrites the same paths.
+    """
+    job_store = _require_store(store)
+    claims = _worker_claims(authorization)
+    _match_job(claims, job_id)
+    thread_id = await _worker_thread_id(job_store.conversation_queries, job_id)
+    rows = await job_store.attachments.list_thread_attachments(thread_id=thread_id)
+    return WorkerAttachmentListResponse(
+        attachments=[AttachmentView.model_validate(row) for row in rows]
+    )
+
+
+@router.get(
+    "/worker/jobs/{job_id}/attachments/{attachment_id}",
+    response_model=WorkerAttachmentContentResponse,
+)
+async def worker_read_attachment(
+    job_id: str,
+    attachment_id: int,
+    authorization: str | None = Header(None),
+    store: _RoutesStorage | None = Depends(get_storage),
+) -> WorkerAttachmentContentResponse:
+    """Read one upload's bytes for the host that is running this turn.
+
+    The thread from the worker token's own job is what scopes the read, so a
+    host holding a token for one conversation cannot fetch another's files.
+    """
+    job_store = _require_store(store)
+    claims = _worker_claims(authorization)
+    _match_job(claims, job_id)
+    thread_id = await _worker_thread_id(job_store.conversation_queries, job_id)
+    rows = await job_store.attachments.list_thread_attachments(thread_id=thread_id)
+    meta = next((row for row in rows if int(row["id"]) == attachment_id), None)
+    found = await job_store.attachments.read_attachment_content(
+        thread_id=thread_id, attachment_id=attachment_id
+    )
+    if meta is None or found is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"type": "upload_not_found", "message": "Upload not found."}},
+        )
+    content, content_type = found
+    return WorkerAttachmentContentResponse(
+        id=attachment_id,
+        path=str(meta["path"]),
+        content_type=content_type,
+        content_base64=base64.b64encode(content).decode("ascii"),
+    )
 
 
 @router.post("/worker/jobs/{job_id}/continuity", response_model=WorkerAckResponse)

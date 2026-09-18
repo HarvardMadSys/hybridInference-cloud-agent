@@ -16,13 +16,20 @@ import {
   SKILL_PRIMARY,
 } from './SkillDialog';
 
-function SelectionDialog({
+/**
+ * The selection surface itself, separate from any one button that opens it.
+ *
+ * The composer reaches it from the plus menu and has no picker button of its
+ * own; the follow-up composer still uses `SkillPicker` below. Both render this
+ * same dialog, so the two surfaces cannot drift apart.
+ */
+export function SkillSelectionDialog({
   selected,
   onApply,
   onClose,
-  limits,
+  limits = DEFAULT_SKILL_LIMITS,
 }: {
-  limits: SkillLimits;
+  limits?: SkillLimits;
   selected: SelectedSkillApi[];
   onApply: (skills: SelectedSkillApi[]) => void;
   onClose: () => void;
@@ -182,7 +189,7 @@ export function SkillPicker({
         ) : null}
       </button>
       {open ? (
-        <SelectionDialog
+        <SkillSelectionDialog
           limits={limits}
           selected={selected}
           onClose={() => setOpen(false)}

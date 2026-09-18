@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Protocol
 
 from fastapi import HTTPException
 
+from cloud_agent.attachments.models import AttachmentError
+from cloud_agent.attachments.selection import resolve_attachments
 from cloud_agent.domain.requests import request_fingerprint
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.execution_profiles import (
@@ -50,6 +52,7 @@ if TYPE_CHECKING:
     from typing import Any
 
     from cloud_agent.ports import (
+        AttachmentRepository,
         ConversationCommands,
         McpConnectionRepository,
         SkillRepository,
@@ -69,6 +72,7 @@ class _JobCreationStorage(Protocol):
 
     conversation_commands: ConversationCommands
     mcp: McpConnectionRepository
+    attachments: AttachmentRepository
     skills: SkillRepository
     source_control: SourceControlPort
 
@@ -386,6 +390,19 @@ async def _resolve_skill_selection(
         ) from exc
 
 
+async def _resolve_attachment_selection(
+    store: AttachmentRepository, *, user_id: str, attachment_ids: list[int] | None
+) -> list[dict[str, Any]] | None:
+    """Resolve staged uploads into the manifest a submission retains."""
+    try:
+        return await resolve_attachments(store, user_id=user_id, attachment_ids=attachment_ids)
+    except AttachmentError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"type": "invalid_attachment_selection", "message": str(exc)}},
+        ) from exc
+
+
 async def _create_job_as(
     body: AgentJobCreate,
     user: dict[str, Any],
@@ -508,6 +525,9 @@ async def _create_job_as(
     skills = await _resolve_skill_selection(
         job_store.skills, user_id=user["user_id"], skill_ids=body.skill_ids
     )
+    attachments = await _resolve_attachment_selection(
+        job_store.attachments, user_id=user["user_id"], attachment_ids=body.attachment_ids
+    )
     job = await job_store.conversation_commands.create_job(
         user_id=user["user_id"],
         repo=body.repo,
@@ -521,6 +541,7 @@ async def _create_job_as(
         metadata=metadata or None,
         mcp_bindings=mcp_bindings,
         **({"skills": skills} if skills is not None else {}),
+        **({"attachments": attachments} if attachments is not None else {}),
         client_request_id=client_request_id,
         # Over the request as sent, not as resolved: a branch that moved
         # between two sends of one submission is still one submission. The

@@ -42,7 +42,7 @@ from cloud_agent.api import routes as agent_jobs_router
 from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.tokens import mint_worker_token
-from tests.support.storage import AllCapabilities, EmptySkillLibrary
+from tests.support.storage import AllCapabilities, EmptyAttachments, EmptySkillLibrary
 
 pytestmark = pytest.mark.asyncio
 
@@ -54,7 +54,7 @@ _UPSTREAM_URL = "https://mcp.example.com/mcp/readonly"
 _UPSTREAM_TOKEN = "ghu_owner_secret"
 
 
-class FakeStorage(EmptySkillLibrary, AllCapabilities):
+class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
     """In-memory stand-in exposing the storage surface the router uses."""
 
     def __init__(self) -> None:

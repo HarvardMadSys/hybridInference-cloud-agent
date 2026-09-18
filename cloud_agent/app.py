@@ -1044,6 +1044,7 @@ def create_app() -> FastAPI:
         service_jobs,
         session,
         skills,
+        uploads,
         usage,
     )
 
@@ -1061,6 +1062,7 @@ def create_app() -> FastAPI:
     # listener separation matters more: adding a connection or approving a call
     # is owner-facing work, and a sandbox must not be able to reach it at all.
     app.include_router(skills.router)
+    app.include_router(uploads.router)
     app.include_router(mcp_connections.router)
     app.include_router(mcp_relay.router)
     app.include_router(hosts.router)

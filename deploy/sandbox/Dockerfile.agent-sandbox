@@ -299,6 +299,12 @@ RUN groupadd --gid 10001 agent \
          slot=$((slot + 1)); \
        done \
     && install -d -m 2770 -o 10001 -g 10001 /workspace /agent-state \
+    # Root-owned and unwritable: the sandbox reads its uploads and cannot add,
+    # remove or alter one. docker cp extracts as root, so the daemon can still
+    # populate it. It must exist at build time — docker cp refuses a
+    # destination directory that is not there, and the sandbox user cannot
+    # create one under /.
+    && install -d -m 0555 -o 0 -g 0 /uploads \
     && install -d -m 0700 -o 10001 -g 10001 /run/agent-activation \
     && install -d -m 0711 -o 0 -g 10001 /run/agent-members
 USER agent

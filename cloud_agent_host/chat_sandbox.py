@@ -98,6 +98,12 @@ CHAT_BOOTSTRAP_NETWORK = "bridge"
 CHAT_NULL_NETWORK = "none"
 CHAT_DNS_UPSTREAM = "127.0.0.1"
 CHAT_WORKDIR = "/workspace"
+#: Where a task's uploaded files land. Outside the worktree on purpose: the
+#: publish path stages the workspace with ``git add -A -N``, so anything
+#: written under CHAT_WORKDIR is committed and shows up in the draft pull
+#: request. Root-owned and read-only to the sandbox — see
+#: ``build_upload_archive``, and the Dockerfile that creates the directory.
+CHAT_UPLOADS_DIR = "/uploads"
 CHAT_STATE_DIR = "/agent-state"
 ACTIVATION_TMPFS = "/run/agent-activation"
 MEMBER_TMPFS_ROOT = "/run/agent-members"
@@ -3935,6 +3941,7 @@ __all__ = [
     "CHAT_SHARED_LABEL",
     "CHAT_STATE_DIR",
     "CHAT_THREAD_LABEL",
+    "CHAT_UPLOADS_DIR",
     "CHAT_WORKDIR",
     "MEMBER_TMPFS_ROOT",
     "MEMBER_UID_BASE",

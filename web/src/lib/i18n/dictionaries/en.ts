@@ -292,6 +292,22 @@ export const en = {
   'composer.network': 'Network: setup {setup} · agent {agent}',
   'composer.loadConfigFailed': 'could not load config',
   'composer.startFailed': 'could not start the job',
+
+  // ── Composer attachments ────────────────────────────────────────────────
+  'attach.open': 'Add files or skills',
+  'attach.uploadFiles': 'Upload files',
+  'attach.uploadDirectory': 'Upload folder',
+  'attach.skills': 'Skills',
+  'attach.skillsDefaults': 'defaults',
+  'attach.uploading': 'uploading…',
+  'attach.fileCount': '{count} files',
+  'attach.remove': 'Remove {name}',
+  'attach.errorPath': 'unusable path',
+  'attach.errorFileTooLarge': 'over {limit}, not attached',
+  'attach.errorTotalTooLarge': 'over the {limit} total, not attached',
+  'attach.errorTooMany': 'over {limit} files, not attached',
+  'attach.credentialWarning':
+    'Do not upload credentials. Everything attached is readable by the agent.',
   'connect.title': 'Connect GitHub to start',
   'connect.titleUnavailable': 'GitHub setup is not available yet',
   'connect.body':
