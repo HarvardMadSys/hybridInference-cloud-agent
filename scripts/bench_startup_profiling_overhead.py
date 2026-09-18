@@ -742,8 +742,8 @@ def report(payload: dict[str, object]) -> None:
         )
         if sink["records_dropped"]:
             print(
-                "  every record is dropped here because a synthetic attempt finishes every\n"
-                "  ~25 us (~40,000 records/s); a real startup produces one record, which the\n"
+                "  most records are dropped here because a synthetic attempt finishes about\n"
+                "  every 30 us; a real startup produces one record, which the\n"
                 "  exporter keeps up with trivially.  Drops never block the attempt thread,\n"
                 "  so the `onsink` timings stand -- but read `onsink - on` as the enqueue\n"
                 "  path (env lookup, lock, queue hand-off), not as disk latency: the write\n"
