@@ -122,12 +122,13 @@ async def test_the_first_claim_already_carries_the_goal(client, store):
     assert prompt.startswith("<conversation_goal>")
     assert '"make `pytest` pass"' in prompt
     assert "Round: 0/3 used" in prompt
-    # Every runtime this deployment registers can be given the relay, so the
-    # preamble names the tool rather than the text convention — a call is a
-    # structured act that lands when it happens, while the two lines are
-    # reconstructed from prose at the end of the turn.
-    assert "`report_goal`" in prompt
-    assert "GOAL_STATUS" not in prompt
+    # This claim has no MCP bindings, so there is no relay in the sandbox and
+    # the preamble must describe the text convention. Naming a tool the harness
+    # cannot reach told every model to call something that does not exist while
+    # withholding the only way left to report — and a goal with no report can
+    # never complete.
+    assert "GOAL_STATUS" in prompt
+    assert "`report_goal`" not in prompt
     # The owner's own words survive at the end, unaltered.
     assert prompt.rstrip().endswith("fix it")
 
@@ -230,6 +231,72 @@ async def test_a_failed_turn_pauses_the_goal_instead_of_continuing(client, store
     goal = await store.goals.get_goal_for_job(job_id=claim["job_id"])
     assert (goal["state"], goal["pause_reason"]) == ("paused", "turn-failed")
     assert _goal_rounds(store) == []
+
+
+async def test_resuming_a_goal_a_failed_turn_paused_starts_a_round(client, store):
+    """The only Resume button in the product, on the goal that needs it most.
+
+    A goal paused by a failed turn resumed into a decision that read
+    ``turn_state == "failed"`` on that same turn and paused it straight back, so
+    the button did nothing while answering 200. Resume means the owner asked for
+    this: the turn is continued for its parentage, not for how it ended.
+    """
+    body = await _create_goal_job(client)
+    claim = await _claim(client)
+    await _finish(client, claim, state="failed")
+    assert (await store.goals.get_goal_for_job(job_id=claim["job_id"]))["state"] == "paused"
+
+    resumed = await client.post(f"/v1/agent/jobs/{body['id']}/goal/resume")
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["goal"]["state"] == "active"
+    queued = [job for job in store.jobs.values() if job["state"] == "queued"]
+    assert len(queued) == 1
+    assert queued[0]["turn_source"] == "goal"
+
+
+async def test_resuming_after_a_cancelled_round_does_not_re_pause_the_goal(client, store):
+    """The other half of the same button: resume must not read its own cancel.
+
+    Pausing cancels the round that was waiting, and the resume then chose the
+    *newest terminal* turn as the one to continue from — which was the cancelled
+    round, whose state says "cancelled" and paused the goal again from inside
+    the resume request.
+    """
+    body = await _create_goal_job(client)
+    await _run_turn(client, store, "GOAL_STATUS: continue")
+    paused = await client.post(f"/v1/agent/jobs/{body['id']}/goal/pause")
+    assert paused.status_code == 200, paused.text
+
+    resumed = await client.post(f"/v1/agent/jobs/{body['id']}/goal/resume")
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["goal"]["state"] == "active"
+    assert (await store.goals.get_goal_for_job(job_id=body["id"]))["state"] == "active"
+
+
+async def test_editing_only_the_round_cap_keeps_the_rounds_already_spent(client, store):
+    """An edit that changes no objective mints no revision.
+
+    The revision names the objective, and it moved on every accepted write. A
+    queued round carries the revision it was created for, so raising the cap
+    alone stopped that round being counted — one free round of real inference
+    per cap edit, invisible in the budget.
+    """
+    body = await _create_goal_job(client, goal={"objective": "ship it", "max_rounds": 2})
+    # The person's turn spends nothing; the round it queues is charged when the
+    # next turn claims it.
+    first = await _run_turn(client, store, "GOAL_STATUS: continue")
+    rounds_after_turn1 = (await store.goals.get_goal_for_job(job_id=first["job_id"]))["rounds_used"]
+    await _claim(client)
+    before = await store.goals.get_goal_for_job(job_id=first["job_id"])
+    assert (rounds_after_turn1, before["rounds_used"]) == (0, 1)
+
+    edited = await client.put(
+        f"/v1/agent/jobs/{body['id']}/goal",
+        json={"goal": {"objective": "ship it", "max_rounds": 4}, "revision": before["revision"]},
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["goal"]["revision"] == before["revision"]
+    assert edited.json()["goal"]["rounds_used"] == 1
 
 
 async def test_a_queued_turn_from_the_owner_makes_the_goal_yield(client, store):

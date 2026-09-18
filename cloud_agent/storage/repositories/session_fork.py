@@ -233,12 +233,12 @@ class PostgresSessionForkRepository:
                     (id, user_id, repo, title, title_source,
                      setup_script, execution_profile,
                      goal_objective, goal_state, goal_pause_reason,
-                     goal_max_rounds, goal_revision, goal_rounds_used,
+                     goal_max_rounds, goal_revision,
                      goal_blocked_streak, goal_created_at, goal_updated_at)
                 VALUES ($1, $2, $3, $4, 'inherited', $5, $6,
                         $7, CASE WHEN $7::text IS NULL THEN NULL ELSE 'paused' END,
                         CASE WHEN $7::text IS NULL THEN NULL ELSE 'fork' END,
-                        $8, CASE WHEN $7::text IS NULL THEN 0 ELSE 1 END, 0, 0,
+                        $8, CASE WHEN $7::text IS NULL THEN 0 ELSE 1 END, 0,
                         CASE WHEN $7::text IS NULL THEN NULL ELSE NOW() END,
                         CASE WHEN $7::text IS NULL THEN NULL ELSE NOW() END)
                 """,

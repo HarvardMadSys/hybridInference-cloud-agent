@@ -31,7 +31,7 @@ The goal is conversation-level and single-valued: "no goal" is
 
 | State | Continues itself | Entered by |
 | --- | --- | --- |
-| `active` | yes | owner set / resume; fork of a paused conversation |
+| `active` | yes | owner set / resume — and nothing else |
 | `paused` | no | owner pause; and the platform, with a reason: a failed or cancelled turn, a fork, a lost context, an archive, or a stall |
 | `blocked` | no | the platform: `round-limit`, or `model-reported` after three consecutive turns |
 | `complete` | no | a verification round reporting `complete` |
@@ -84,17 +84,27 @@ the platform keeps spending it without being asked again.
 
 ## Round accounting
 
-A round is charged when it is **claimed**, not when it is queued, and only its
-first attempt pays:
+What a goal has spent is **counted, never stored**: the number of work rounds
+carrying the goal's current revision that a model actually ran for. Deriving it
+makes every rule below a property of the data rather than a write that has to be
+remembered:
 
-- A round that was queued and then cancelled never reaches a claim, so it never
-  spends the budget.
-- A retry of a round that already started does not spend it twice.
-- A round carries the `goal_revision` it was created for, and a claim only
-  charges a goal still at that revision — a round left over from a replaced
-  objective cannot spend the new one's budget.
-- Verification rounds are never charged: they check one completion claim, they
-  do not make progress.
+- A round queued and then cancelled never started, so it costs nothing.
+- A round that started costs once, however many times it is retried.
+- The revision names the *objective*. A round carries the revision it was
+  created for, so a round left over from a replaced objective cannot be counted
+  against the new one — and replacing the objective starts the budget over
+  while editing only the cap does not.
+- Verification rounds carry no work revision to be counted by: they check one
+  completion claim, they do not make progress.
+
+A stored counter was tried first and is the wrong shape twice over. It has to be
+incremented by whoever claims a round, which means the claim path writing the
+conversation's row while already holding the round's lock — the reverse of this
+repository's thread-before-job order, and a deadlock against pausing or
+messaging at the moment a runner takes a round. And it has to be fenced against
+the revision it was granted for, where every fence that was slightly wrong
+silently gave away a free round.
 
 The limit is checked *after* the verification branch, so a completion claim made
 on the last permitted round is still verified.
@@ -191,7 +201,7 @@ ran, not from the cancelled round that was waiting.
 
 ## Rollout
 
-1. Apply additive Alembic revision `0016_conversation_goal` before starting the
+1. Apply additive Alembic revision `0017_conversation_goal` before starting the
    new control plane. Every existing row has no goal, which is what the shape
    constraint asserts; nothing is backfilled.
 2. Upgrade the control plane. No host rebuild is needed: the goal reaches the

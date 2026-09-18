@@ -69,7 +69,7 @@ async def maybe_continue_goal(
     job_id: str,
     goals: GoalRepository | None = None,
     app_credentials: Any | None = None,
-    assume_report: str | None = None,
+    assume_owner_continue: bool = False,
 ) -> str:
     """Decide, write and queue the next step of a conversation's goal.
 
@@ -83,19 +83,31 @@ async def maybe_continue_goal(
     fakes in tests that predate this feature — simply has no goals to continue,
     which is a successful no-op rather than an error.
 
-    ``assume_report`` replaces the report the named turn made. It exists for one
-    caller: an owner resuming a paused goal, where the turn the decision hangs
-    from is chosen for its *parentage* — the last turn that actually ran — and
-    the outcome being continued is "the owner asked for this", not whatever that
-    turn happened to say.
+    ``assume_owner_continue`` says the turn named here is being continued
+    because its owner asked for it, not because of how it ended. It exists for
+    one caller: resuming a paused goal, where the turn the decision hangs from
+    is chosen for its *parentage* — the last turn that actually ran — and the
+    outcome being continued is "the owner asked for this".
+
+    It has to neutralise ``turn_state`` as well as the report. A goal paused by
+    a failed turn would otherwise resume into a decision that reads
+    ``turn_state == "failed"`` on that same turn and pauses it straight back,
+    which made the only "Resume" button in the product a no-op for every goal
+    that stopped because a turn failed.
     """
     if goals is None:
         return "none"
-    goal = await goals.get_goal_for_job(job_id=job_id)
-    if goal is None:
-        return "none"
     turn = await queries.get_job(job_id)
     if turn is None:
+        return "none"
+    # Every turn read already carries the conversation's goal under the job's
+    # keys, so a conversation without one costs nothing here. Asking the store
+    # first spent a query on every finish in the deployment to learn what this
+    # read already said.
+    if turn.get("goal") is None:
+        return "none"
+    goal = await goals.get_goal_for_job(job_id=job_id)
+    if goal is None:
         return "none"
     context = GoalContext(
         state=goal["state"],
@@ -104,12 +116,17 @@ async def maybe_continue_goal(
         max_rounds=goal["max_rounds"],
         rounds_used=goal["rounds_used"],
         blocked_streak=goal["blocked_streak"],
-        turn_state=str(turn["state"]),
+        turn_state="succeeded" if assume_owner_continue else str(turn["state"]),
         turn_source=str(turn.get("turn_source") or "human"),
-        turn_round_kind=cast("GoalRoundKind | None", turn.get("goal_round_kind")),
+        turn_round_kind=cast(
+            "GoalRoundKind | None",
+            turn.get("goal_round_kind")
+            if turn.get("goal_report") is not None
+            else turn.get("parent_goal_round_kind"),
+        ),
         report=cast(
             "GoalReportStatus | None",
-            assume_report if assume_report is not None else turn.get("goal_report"),
+            "continue" if assume_owner_continue else _report_of(turn),
         ),
         # The turn's own failure detail explains a failed turn; its goal reason
         # explains everything else. Only one of the two is ever present.
@@ -117,6 +134,10 @@ async def maybe_continue_goal(
         thread_has_queued_turn=False,
     )
     if context.state == "active":
+        # A cheap first answer, and the one the decision reads. It is only a
+        # hint: the authoritative check happens inside the transaction that
+        # appends the round (``yield_to_queued``), because between this read and
+        # that write somebody can send a message.
         context = replace(
             context,
             thread_has_queued_turn=await goals.has_pending_turn(thread_id=str(turn["thread_id"])),
@@ -136,7 +157,14 @@ async def maybe_continue_goal(
         written = await goals.apply_action(
             thread_id=str(turn["thread_id"]),
             revision=goal["revision"],
-            action=action,
+            # This step records the streak and nothing else. Applying the
+            # decision's own kind here too meant a ``block`` or ``pause``
+            # arrived without the code or reason it is required to carry, so
+            # the store raised and the whole turn's continuation was lost —
+            # which is what made "blocked three turns running" and "a failed
+            # turn pauses the goal" do nothing in production. The state change,
+            # with its reason, is the single write below.
+            action=replace(action, kind="none"),
         )
         if written is None:
             # The owner got there first — paused, edited or cleared the goal
@@ -199,6 +227,27 @@ async def maybe_continue_goal(
             },
         )
     return action.kind
+
+
+def _report_of(turn: dict[str, Any]) -> str | None:
+    """What this turn claimed — or, failing that, the claim still standing.
+
+    A turn that says "complete" can find a person's message already queued and
+    yield to it, and the decision is then made again from the *next* turn's
+    facts. That turn reports its own outcome, so the claim would be lost and the
+    verification round it earned never queued.
+
+    An unclaimed completion on the immediately preceding turn is therefore
+    carried forward. Only a completion: a bare ``continue`` is not evidence
+    about anything, and carrying *that* forward would let one turn's status
+    stand in for the next turn's silence.
+    """
+    own = turn.get("goal_report")
+    if own is not None:
+        return str(own)
+    if turn.get("parent_goal_report") == "complete":
+        return "complete"
+    return None
 
 
 async def _queue_round(
@@ -274,6 +323,8 @@ async def _queue_round(
         goal_round=round_number,
         goal_round_kind=kind,
         goal_revision=goal["revision"],
+        # Re-asked under the thread lock. This is the one that decides.
+        yield_to_queued=True,
         client_request_id=client_request_id_for(
             thread_id=thread_id,
             revision=goal["revision"],
@@ -288,6 +339,19 @@ async def _queue_round(
         await _pause(goals, thread_id=thread_id, revision=goal["revision"], reason="archived")
         return None
     error = created.get("error")
+    if error == "yielded":
+        # Not a failure: a person's message is already waiting, and the goal is
+        # judged again when that turn ends. Pausing here would stop a goal
+        # because somebody typed.
+        logger.info(
+            "agent_goal_round_yielded",
+            extra={
+                "event": "agent_goal_round_yielded",
+                "thread_id": thread_id,
+                "parent_job_id": job["id"],
+            },
+        )
+        return None
     if error is not None:
         await _pause(
             goals,
@@ -314,7 +378,7 @@ async def _pause(
             "event": "agent_goal_paused",
             "thread_id": thread_id,
             "reason": reason,
-            "applied": applied is not None,
+            "applied": applied,
         },
     )
 

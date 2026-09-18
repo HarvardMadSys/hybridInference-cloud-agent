@@ -327,31 +327,15 @@ class PostgresAttemptCommands:
                 job_id,
                 attempt["id"],
             )
-            # The round is charged *here*, not when it was queued, and only the
-            # first attempt pays. A round that was queued and then cancelled
-            # never reaches this statement, so it never spends the budget; a
-            # retry of a round that already started does not spend it twice.
-            # Verification rounds are deliberately not charged: they exist to
-            # check one completion claim, not to make progress.
-            if (
-                job_row["turn_source"] == "goal"
-                and job_row["goal_round_kind"] == "work"
-                and attempt["attempt_no"] == 1
-                and job_row["goal_revision"] is not None
-            ):
-                # The revision is the goal this round was created for. If the
-                # owner has since replaced it, this round's claim must not spend
-                # the new goal's budget.
-                await conn.execute(
-                    """
-                    UPDATE agent_threads
-                    SET goal_rounds_used = goal_rounds_used + 1,
-                        goal_updated_at = NOW()
-                    WHERE id = $1 AND goal_revision = $2
-                    """,
-                    job_row["thread_id"],
-                    job_row["goal_revision"],
-                )
+            # Nothing is charged here. What this goal has spent is *derived*
+            # from the rounds that have actually started — see
+            # ``PostgresGoalRepository._ROUNDS_USED_SQL`` — so a round costs
+            # nothing until this INSERT runs and costs once however often it is
+            # retried. Keeping a counter here meant this statement also had to
+            # update ``agent_threads`` while already holding this job's row
+            # lock, which is the reverse of the thread-before-job order the
+            # rest of the repository takes and deadlocked against pausing or
+            # messaging at exactly the moment a runner claimed a round.
         claim = job_row_to_dict(job_row)
         claim["state"] = RUNNING
         claim["current_attempt_id"] = attempt["id"]
@@ -452,6 +436,11 @@ class PostgresAttemptCommands:
                 UPDATE agent_jobs
                 SET state = CASE WHEN cancel_requested THEN 'cancelled' ELSE 'queued' END,
                     terminal_resume_pending = cancel_requested,
+                    -- Cleared only on the way back to the queue. A cancelled
+                    -- turn keeps whatever it reported, because that is the
+                    -- answer it ended on; the next attempt has to give its own.
+                    goal_report = CASE WHEN cancel_requested THEN goal_report END,
+                    goal_reason = CASE WHEN cancel_requested THEN goal_reason END,
                     current_attempt_id = NULL,
                     updated_at = NOW()
                 WHERE id = $1 AND current_attempt_id = $2 AND state = 'running'
@@ -1523,8 +1512,15 @@ class PostgresAttemptCommands:
                     )
                 else:
                     action = QUEUED
+                    # The next attempt answers for itself. A report the
+                    # abandoned attempt left behind is not evidence about the
+                    # retry: inheriting a `complete` from a turn that never
+                    # finished would complete the goal on the strength of a
+                    # claim whose work was thrown away.
                     await conn.execute(
-                        "UPDATE agent_jobs SET state = 'queued', updated_at = NOW() WHERE id = $1",
+                        "UPDATE agent_jobs SET state = 'queued', "
+                        "goal_report = NULL, goal_reason = NULL, updated_at = NOW() "
+                        "WHERE id = $1",
                         job_id,
                     )
                 if action in TERMINAL_STATES:

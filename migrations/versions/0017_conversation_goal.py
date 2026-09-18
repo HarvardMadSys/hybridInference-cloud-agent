@@ -48,7 +48,10 @@ def upgrade() -> None:
             ADD COLUMN goal_max_rounds INT
                 CHECK (goal_max_rounds IS NULL
                        OR goal_max_rounds BETWEEN 1 AND 50),
-            ADD COLUMN goal_rounds_used INT NOT NULL DEFAULT 0,
+            -- Rounds spent are counted from the rounds that actually started,
+            -- never stored: a stored counter has to be incremented by whoever
+            -- claims a round, and that write lands on this table while the
+            -- claimer already holds the job's row lock.
             ADD COLUMN goal_blocked_streak INT NOT NULL DEFAULT 0,
             ADD COLUMN goal_created_at TIMESTAMPTZ,
             ADD COLUMN goal_updated_at TIMESTAMPTZ,
@@ -111,7 +114,6 @@ def downgrade() -> None:
             DROP COLUMN goal_blocked_message,
             DROP COLUMN goal_revision,
             DROP COLUMN goal_max_rounds,
-            DROP COLUMN goal_rounds_used,
             DROP COLUMN goal_blocked_streak,
             DROP COLUMN goal_created_at,
             DROP COLUMN goal_updated_at

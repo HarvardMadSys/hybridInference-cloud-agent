@@ -6,12 +6,14 @@ from __future__ import annotations
 # ruff: noqa: F811
 import pytest
 
-from cloud_agent.goals.models import GoalConflict, GoalInput
+from cloud_agent.goals.decision import GoalAction
+from cloud_agent.goals.models import MAX_REASON_CHARS, GoalConflict, GoalError, GoalInput
 from cloud_agent.goals.report import GoalReport
 from tests.integration.storage.test_agent_job_store import (  # noqa: F401
     _SHARED_HOST_CAPABILITIES,
     _claim,
     _create_job,
+    _expire_attempt,
     _shared_claim_attestation,
     pool,
     store,
@@ -216,33 +218,44 @@ async def test_a_stale_revision_is_refused_and_nothing_is_written(store):
     assert (unchanged["objective"], unchanged["revision"]) == ("ship it safely", 2)
 
 
-async def test_the_round_budget_restarts_only_when_the_objective_changes(store, pool):
-    job, _ = await _goal_job(store)
-    await store.goals.set_goal(
-        thread_id=job["thread_id"],
-        user_id=job["user_id"],
-        goal=GoalInput(objective="ship it", max_rounds=5),
-    )
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE agent_threads SET goal_rounds_used = 3, goal_blocked_streak = 2 WHERE id = $1",
-            job["thread_id"],
-        )
-    # Same objective, new cap: the rounds already spent stay spent, but the
-    # streak does not survive the owner looking at the goal again.
+async def test_editing_only_the_cap_keeps_the_rounds_already_spent(store, pool):
+    """Rounds spent are derived from the rounds that started, per revision.
+
+    Two facts, one test, because they are the same fact seen twice: the count is
+    not a column anybody writes, so it cannot be reset by an unrelated edit —
+    and replacing the objective *is* related, and does reset it.
+    """
+    job, first, _ = await _live_goal_job(store)
+    await _finish(pool, first)
+    await _round(store, parent=job)
+    await _claim_round(store)
+    assert (await store.goals.get_goal(thread_id=job["thread_id"]))["rounds_used"] == 1
+
+    # Same objective, new cap: the derived count looks at the *revision*, and
+    # editing only the cap would otherwise hand back a fresh budget.
     same = await store.goals.set_goal(
         thread_id=job["thread_id"],
         user_id=job["user_id"],
         goal=GoalInput(objective="ship it", max_rounds=9),
     )
-    assert (same["rounds_used"], same["blocked_streak"], same["revision"]) == (3, 0, 3)
+    assert (same["rounds_used"], same["blocked_streak"]) == (1, 0)
 
     changed = await store.goals.set_goal(
         thread_id=job["thread_id"],
         user_id=job["user_id"],
         goal=GoalInput(objective="ship it behind a flag", max_rounds=9),
     )
-    assert (changed["rounds_used"], changed["revision"]) == (0, 4)
+    # A different objective mints a revision, and no round carries it yet.
+    assert changed["rounds_used"] == 0
+
+
+async def test_a_round_queued_but_never_started_costs_nothing(store, pool):
+    """The charge is the attempt, not the queue entry."""
+    job, first, _ = await _live_goal_job(store)
+    await _finish(pool, first)
+    queued = await _round(store, parent=job)
+    assert (await store.goals.get_goal(thread_id=job["thread_id"]))["rounds_used"] == 0
+    assert queued["state"] == "queued"
 
 
 async def test_a_new_objective_cancels_the_rounds_queued_for_the_old_one(store):
@@ -260,9 +273,8 @@ async def test_a_new_objective_cancels_the_rounds_queued_for_the_old_one(store):
 
 async def test_claiming_a_work_round_charges_it_once(store, pool):
     job, first, _ = await _live_goal_job(store)
-    goal_after_first = await store.goals.get_goal(thread_id=job["thread_id"])
     # The conversation-creating turn is a person's, and spends nothing.
-    assert goal_after_first["rounds_used"] == 0
+    assert (await store.goals.get_goal(thread_id=job["thread_id"]))["rounds_used"] == 0
 
     await _finish(pool, first)
     work = await _round(store, parent=job)
@@ -270,7 +282,8 @@ async def test_claiming_a_work_round_charges_it_once(store, pool):
     assert claimed["id"] == work["id"]
     assert (await store.goals.get_goal(thread_id=job["thread_id"]))["rounds_used"] == 1
 
-    # A second attempt at the same round does not spend the budget twice.
+    # A second attempt at the same round does not spend the budget twice: the
+    # count is over distinct rounds, not over attempts.
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET state = 'queued', current_attempt_id = NULL WHERE id = $1",
@@ -529,6 +542,236 @@ async def test_archiving_a_conversation_pauses_and_cancels_its_rounds(store):
     goal = await store.goals.get_goal(thread_id=job["thread_id"])
     assert (goal["state"], goal["pause_reason"]) == ("paused", "archived")
     assert (await store.conversation_queries.get_job(queued["id"]))["state"] == "cancelled"
+
+
+async def test_get_goal_for_job_reads_across_the_join(store):
+    """The one joined goal read. Unqualified, `goal_revision` is ambiguous here.
+
+    ``0017`` puts that column on ``agent_jobs`` as well — the revision a turn
+    was created for — so Postgres refuses the statement outright (42702) rather
+    than picking one. This read is on the path of *every* turn's continuation,
+    and the exception was swallowed into a warning, so a missing test here meant
+    no automatic round was ever queued and nothing said why.
+    """
+    job, goal = await _goal_job(store)
+    found = await store.goals.get_goal_for_job(job_id=job["id"])
+    assert found is not None
+    assert found["objective"] == goal["objective"]
+    assert found["revision"] == goal["revision"]
+
+
+async def test_the_third_consecutive_blocked_report_blocks_the_goal(store):
+    """The block action carries the code it is required to carry.
+
+    Applied through the real repository, because the fake used to skip this
+    check: a ``block`` with no ``blocked_code`` passes a lenient fake and raises
+    ``GoalError`` in Postgres, which is exactly how "blocked three turns
+    running" was green in CI and dead in production.
+    """
+    job, goal = await _goal_job(store)
+    action = GoalAction(
+        kind="block", reason_code="model-reported", message="no network", blocked_streak=3
+    )
+    written = await store.goals.apply_action(
+        thread_id=job["thread_id"],
+        revision=goal["revision"],
+        action=action,
+        blocked_code="model-reported",
+    )
+    assert written is not None
+    assert (written["state"], written["blocked_code"]) == ("blocked", "model-reported")
+    assert (written["blocked_message"], written["blocked_streak"]) == ("no network", 3)
+
+
+async def test_a_terminal_action_without_its_reason_is_refused(store):
+    """``_action_columns`` validates, and that validation is load-bearing.
+
+    A pause that cannot say why it paused is a goal the owner cannot act on;
+    refusing the write is how that stays impossible rather than merely unusual.
+    """
+    job, goal = await _goal_job(store)
+    with pytest.raises(GoalError):
+        await store.goals.apply_action(
+            thread_id=job["thread_id"],
+            revision=goal["revision"],
+            action=GoalAction(kind="pause"),
+        )
+    with pytest.raises(GoalError):
+        await store.goals.apply_action(
+            thread_id=job["thread_id"],
+            revision=goal["revision"],
+            action=GoalAction(kind="block", blocked_streak=3),
+        )
+
+
+async def test_a_streak_write_leaves_the_reason_it_is_not_changing(store):
+    """A write that changes no state does not clear why the state is what it is.
+
+    Recording a blocked streak means applying a decision whose kind is ``none``.
+    That used to null the code and the message on the way past — silently, since
+    the revision does not move either — and the band was left saying "blocked"
+    with no way to say why.
+    """
+    job, goal = await _goal_job(store)
+    await store.goals.apply_action(
+        thread_id=job["thread_id"],
+        revision=goal["revision"],
+        action=GoalAction(
+            kind="block", reason_code="model-reported", message="no network", blocked_streak=3
+        ),
+        blocked_code="model-reported",
+    )
+    blocked = await store.goals.get_goal(thread_id=job["thread_id"])
+    assert await store.goals.apply_action(
+        thread_id=job["thread_id"],
+        revision=blocked["revision"],
+        action=GoalAction(kind="none", blocked_streak=0),
+    )
+    after = await store.goals.get_goal(thread_id=job["thread_id"])
+    assert (after["state"], after["blocked_code"], after["blocked_message"]) == (
+        "blocked",
+        "model-reported",
+        "no network",
+    )
+
+
+async def test_an_overlong_reason_is_bounded_at_the_write(store):
+    """Both report paths pass through here, so the bound lives here."""
+    job, claim, _ = await _live_goal_job(store)
+    assert await store.goals.record_goal_report(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        status="continue",
+        reason="x" * (MAX_REASON_CHARS + 500),
+    )
+    saved = await store.conversation_queries.get_job(job["id"])
+    assert len(saved["goal_reason"]) == MAX_REASON_CHARS
+
+
+async def test_a_follow_up_that_replaces_the_objective_cancels_the_old_round(store):
+    """The UI's main path for setting a goal, and it has to obey the same rule.
+
+    A queued round carries a ``<goal_round>`` body naming the objective *it* was
+    created for. Leaving it queued runs a turn toward an objective its owner
+    just replaced — with the new objective prefixed to it besides — and pays
+    for it.
+    """
+    job, _, _ = await _live_goal_job(store)
+    queued = await _round(store, parent=job)
+    follow = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"],
+        user_id=job["user_id"],
+        prompt="actually, do something else",
+        goal=GoalInput(objective="roll the change back", max_rounds=5),
+    )
+    assert follow is not None and follow.get("error") is None
+    assert (await store.conversation_queries.get_job(queued["id"]))["state"] == "cancelled"
+
+
+async def test_a_round_reports_for_itself_after_a_retry(store, pool):
+    """A claim handed back clears the answer the abandoned attempt left.
+
+    Otherwise a retry inherits a ``complete`` from a turn whose work was thrown
+    away, and a verification round that *failed* on its second attempt would
+    complete the goal on the strength of its first.
+    """
+    job, first, _ = await _live_goal_job(store)
+    await _finish(pool, first)
+    await _round(store, parent=job)
+    claimed = await _claim_round(store)
+    assert claimed is not None
+    assert await store.goals.record_goal_report(
+        job_id=claimed["id"],
+        attempt_id=claimed["attempt_id"],
+        lease_generation=claimed["lease_generation"],
+        status="complete",
+        reason="prose said done",
+    )
+    assert await store.attempt_commands.release_claim(
+        job_id=claimed["id"],
+        attempt_id=claimed["attempt_id"],
+        lease_generation=claimed["lease_generation"],
+    )
+    saved = await store.conversation_queries.get_job(claimed["id"])
+    assert (saved["state"], saved["goal_report"], saved["goal_reason"]) == (
+        "queued",
+        None,
+        None,
+    )
+
+
+async def test_a_reaped_round_reports_for_itself_too(store, pool):
+    """The same rule on the reaper's requeue branch."""
+    job, first, _ = await _live_goal_job(store)
+    await _finish(pool, first)
+    await _round(store, parent=job)
+    claimed = await _claim_round(store)
+    assert claimed is not None
+    assert await store.goals.record_goal_report(
+        job_id=claimed["id"],
+        attempt_id=claimed["attempt_id"],
+        lease_generation=claimed["lease_generation"],
+        status="complete",
+        reason=None,
+    )
+    await _expire_attempt(pool, store, claimed["attempt_id"])
+    actions = await store.attempt_commands.reap_expired(max_attempts=3)
+    assert [action["action"] for action in actions] == ["queued"]
+    assert (await store.conversation_queries.get_job(claimed["id"]))["goal_report"] is None
+
+
+async def test_the_newest_turn_that_ran_is_the_one_resumed_from(store, pool):
+    """A cancelled turn is not somewhere new work can hang from.
+
+    The boolean leads and ``turn_no`` breaks the tie, and it has to sort
+    *ascending*: ``TRUE > FALSE`` in Postgres, so ``DESC`` returns the cancelled
+    turn first — which made "Resume" re-pause the goal it had just resumed, from
+    inside the resume request, because the decision read the cancelled turn's
+    state as the outcome being continued.
+
+    Built out of ordinary turns rather than automatic rounds, because cancelling
+    a round pauses the goal and a paused goal queues nothing after it.
+    """
+    job, first, _ = await _live_goal_job(store)
+    await _finish(pool, first)
+    doomed = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id=job["user_id"], prompt="never mind"
+    )
+    survivor = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id=job["user_id"], prompt="this one"
+    )
+    assert await store.attempt_commands.request_cancel(job_id=doomed["id"]) == "cancelled"
+    await _finish(pool, await _claim_round(store))
+
+    newest = await store.conversation_queries.latest_terminal_turn(thread_id=job["thread_id"])
+    assert newest is not None
+    assert newest["id"] == survivor["id"]
+    assert newest["state"] == "succeeded"
+
+
+async def test_a_queued_round_is_what_makes_a_round_yield(store):
+    """The yield rule, asked inside the transaction that would append the round.
+
+    A caller-side check leaves a window: it reads "nothing pending", somebody
+    types, and the automatic round lands *after* their message. Asking under the
+    thread lock is the only way the answer cannot go stale.
+    """
+    job, _, _ = await _live_goal_job(store)
+    await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id=job["user_id"], prompt="wait for me"
+    )
+    yielded = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"],
+        user_id=job["user_id"],
+        prompt="round",
+        turn_source="goal",
+        goal_round=1,
+        goal_round_kind="work",
+        goal_revision=1,
+        yield_to_queued=True,
+    )
+    assert yielded == {"error": "yielded"}
 
 
 async def test_has_pending_turn_sees_queued_and_running_work(store, pool):

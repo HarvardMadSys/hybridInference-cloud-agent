@@ -49,6 +49,24 @@ def test_the_preamble_falls_back_to_the_text_convention_without_a_tool():
     assert "report_goal" not in prompt
 
 
+def test_a_goal_on_a_turn_with_no_bindings_is_told_the_text_convention():
+    """The common case, and it has to be the text convention.
+
+    ``mcp_available`` means *this turn's sandbox has the relay*, and the runner
+    only opens one when the job has bindings. Asking the runtime registry
+    instead said "yes" for every harness the platform registers — so a user who
+    had connected nothing, which is the default, was told to call a tool that
+    was not there and not told how else to report. Every round then read as
+    "no report", and the goal could never complete.
+    """
+    goal = with_mcp_availability(
+        {"objective": "x", "state": "active", "rounds_used": 0, "max_rounds": 5}, False
+    )
+    prompt = prompt_with_goal("task", goal)
+    assert REPORT_INSTRUCTIONS in prompt
+    assert "`report_goal`" not in prompt
+
+
 def test_availability_is_composed_onto_the_goal_not_stored_in_it():
     """The same conversation tells two harnesses different things."""
     goal = dict(ACTIVE)

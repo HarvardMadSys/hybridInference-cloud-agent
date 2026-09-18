@@ -726,10 +726,13 @@ async def worker_claim(
                 prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
                 claim.get("skills"),
             ),
-            with_mcp_availability(
-                claim.get("goal"),
-                bool(mcp_aliases) or claim["runtime"] in runtimes_supporting_mcp(),
-            ),
+            # ``mcp_aliases`` is what this turn actually resolves, and the
+            # runner only opens the relay when the job has bindings at all — so
+            # asking the runtime registry here told every harness about a tool
+            # its sandbox could not reach, while withholding the text
+            # convention it could have used. Every runtime claims MCP now, so
+            # that predicate was always true and the report never landed.
+            with_mcp_availability(claim.get("goal"), bool(mcp_aliases)),
         ),
         setup_script=claim.get("setup_script"),
         runtime=claim["runtime"],

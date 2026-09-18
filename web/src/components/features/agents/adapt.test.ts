@@ -338,10 +338,23 @@ describe('toDisplayJob', () => {
 
   it('says nothing about a goal on a conversation that has none', () => {
     // A deployment older than this feature, and every conversation nobody set
-    // a goal on: the transcript must not grow an empty band for either.
+    // a goal on: the transcript must not grow an empty band for either, and a
+    // turn must not carry a goal relationship it does not have. Written out
+    // inline, this object was on every job in the product.
     const job = toDisplayJob(JOB);
     expect(job.goal).toBeUndefined();
-    expect(job.goalTurn).toEqual({ source: 'human' });
+    expect(job.goalTurn).toBeUndefined();
+  });
+
+  it("still records what a person's own turn reported", () => {
+    // Absent means "nothing to say", not "not a goal turn": a human turn that
+    // reported a status has one, and the band shows it as the last thing said.
+    const job = toDisplayJob({ ...JOB, goal_report: 'blocked', goal_reason: 'no network' });
+    expect(job.goalTurn).toEqual({
+      source: 'human',
+      report: 'blocked',
+      reason: 'no network',
+    });
   });
 
   it('maps the conversation pin time', () => {

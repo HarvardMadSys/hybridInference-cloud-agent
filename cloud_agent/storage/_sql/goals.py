@@ -23,6 +23,11 @@ if TYPE_CHECKING:
 #: ``$1`` is the thread id and ``$2`` the reason. A goal that is not active is
 #: left exactly as it is — a paused goal stays paused for the reason it was
 #: paused, and a complete one is not un-completed by a late reaping pass.
+#:
+#: Used by :func:`goal_after_terminal`. The owner-facing pause is
+#: the goal repository's own ``pause_goal``, which is revision-fenced; this one
+#: deliberately is not, because a reaper has no revision to offer and a
+#: revision it invented would be a fence it could not check.
 PAUSE_GOAL_SQL = """
 UPDATE agent_threads
 SET goal_state = 'paused', goal_pause_reason = $2,
@@ -44,12 +49,6 @@ SET goal_state = 'paused', goal_pause_reason = $2,
 WHERE t.id = ANY($1::text[]) AND t.goal_state = 'active'
 RETURNING t.id
 """
-
-
-async def pause_goal(conn: Any, *, thread_id: str, reason: str) -> bool:
-    """Pause one thread's active goal inside the caller's transaction."""
-    updated = await conn.fetchval(PAUSE_GOAL_SQL, thread_id, reason)
-    return updated is not None
 
 
 async def goal_after_terminal(conn: Any, *, job_id: str, state: str) -> bool:

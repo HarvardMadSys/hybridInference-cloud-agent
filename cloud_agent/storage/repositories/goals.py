@@ -11,7 +11,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.goals.models import STALLED_AFTER_S, GoalConflict, GoalError
+from cloud_agent.goals.models import (
+    MAX_REASON_CHARS,
+    STALLED_AFTER_S,
+    GoalConflict,
+    GoalError,
+)
 from cloud_agent.storage._sql.rows import thread_goal
 
 if TYPE_CHECKING:
@@ -21,20 +26,73 @@ if TYPE_CHECKING:
     from cloud_agent.goals.models import GoalBlockedCode, GoalInput, GoalPauseReason
 
 #: The goal's own columns, read back after every write so the caller always
-#: sees what the row now says rather than what it asked for. These reads touch
-#: ``agent_threads`` alone, so no alias is needed — unlike the job projections,
-#: which join the two tables and must say which revision they mean.
-_GOAL_COLUMNS = (
-    "goal_objective, goal_state, goal_pause_reason, goal_blocked_code, "
-    "goal_blocked_message, goal_revision, goal_max_rounds, goal_rounds_used, "
-    "goal_blocked_streak, goal_created_at, goal_updated_at"
+#: sees what the row now says rather than what it asked for. Written once as
+#: names because there are two projections of them and they must not drift.
+_GOAL_COLUMN_NAMES = (
+    "goal_objective",
+    "goal_state",
+    "goal_pause_reason",
+    "goal_blocked_code",
+    "goal_blocked_message",
+    "goal_revision",
+    "goal_max_rounds",
+    "goal_blocked_streak",
+    "goal_created_at",
+    "goal_updated_at",
 )
+
+#: For statements whose ``FROM`` holds ``agent_threads`` alone: ``get_goal``,
+#: and the ``RETURNING`` of ``SET_GOAL_SQL`` and ``apply_action``. There is no
+#: second table for a name to be ambiguous with, and qualifying here would be a
+#: syntax error — a ``RETURNING`` list cannot carry an alias the ``UPDATE`` did
+#: not introduce.
+_GOAL_COLUMNS = ", ".join(_GOAL_COLUMN_NAMES)
+
+#: How many automatic rounds this goal has actually spent.
+#:
+#: **Derived, not stored.** A counter has to be incremented by whoever claims a
+#: round, which meant ``claim_job`` writing ``agent_threads`` while already
+#: holding an ``agent_jobs`` row lock — the reverse of this repository's
+#: documented thread-before-job order, and therefore a deadlock against
+#: ``pause_goal`` and ``_create_follow_up``. A counter also has to be fenced
+#: against the revision it was granted for, and every fence that was slightly
+#: wrong silently gave away a round.
+#:
+#: Counting instead makes the fence structural: a round belongs to the goal it
+#: was created for (``j.goal_revision = t.goal_revision``), it costs nothing
+#: until a model actually runs for it, and it costs once however many times it
+#: is retried (``EXISTS``). A round queued for a replaced objective cannot be
+#: counted, because replacing the objective mints a revision — and cancels that
+#: round besides.
+#:
+#: ``aborted`` is the one attempt status that is free, and it means the claim
+#: was handed back before the turn began — the platform could not mint a
+#: credential, say. Every other status, ``superseded`` included, is a turn that
+#: ran and was paid for.
+_ROUNDS_USED_SQL = """(
+        SELECT count(*) FROM agent_jobs work
+        WHERE work.thread_id = t.id
+          AND work.turn_source = 'goal'
+          AND work.goal_round_kind = 'work'
+          AND work.goal_revision = t.goal_revision
+          AND EXISTS (
+                SELECT 1 FROM agent_attempts a
+                WHERE a.job_id = work.id AND a.status <> 'aborted'
+          )
+    ) AS goal_rounds_used"""
+
+#: For reads that join. ``0017`` put ``goal_revision`` on ``agent_jobs`` as well
+#: — the revision *that turn* was created for — so an unqualified name is
+#: ambiguous there, and Postgres refuses the whole statement (42702) rather than
+#: picking one. ``get_goal_for_job`` is the only such read, and using the plain
+#: constant for it made every continuation throw.
+_GOAL_COLUMNS_QUALIFIED = ", ".join(f"t.{name}" for name in _GOAL_COLUMN_NAMES)
 
 #: Creating, replacing or editing the goal. Shared with the follow-up path,
 #: which accepts a goal alongside a message and has to write it inside the very
 #: transaction that appends the turn — the objective a turn ran against and the
 #: turn itself must be one commit or neither.
-#: ``$2`` objective, ``$3`` max_rounds, ``$4`` rounds_used.
+#: ``$2`` objective, ``$3`` max_rounds.
 SET_GOAL_SQL = """
 UPDATE agent_threads
 SET goal_objective = $2,
@@ -43,9 +101,14 @@ SET goal_objective = $2,
     goal_blocked_code = NULL,
     goal_blocked_message = NULL,
     goal_max_rounds = $3,
-    goal_rounds_used = $4,
     goal_blocked_streak = 0,
-    goal_revision = goal_revision + 1,
+    -- The revision names the *objective*, so only a new objective mints one.
+    -- It did move on every accepted write, and that made editing nothing but
+    -- the round cap mint a revision no queued round carried — which silently
+    -- stopped those rounds being counted, and gave the goal a free round every
+    -- time its owner raised the limit.
+    goal_revision = CASE WHEN goal_objective IS DISTINCT FROM $2
+                         THEN goal_revision + 1 ELSE goal_revision END,
     goal_created_at = COALESCE(goal_created_at, NOW()),
     goal_updated_at = NOW(),
     updated_at = NOW()
@@ -53,18 +116,7 @@ WHERE id = $1
 """
 
 #: The columns a caller needs to decide whether the objective changed.
-GOAL_STATE_COLUMNS = "goal_objective, goal_rounds_used, goal_revision"
-
-
-def goal_rounds_used_after(objective_changed: bool, existing_rounds_used: int) -> int:
-    """The round counter a new or edited objective starts with.
-
-    The budget restarts only when the objective does. Editing the round cap of a
-    goal that has already spent rounds must not hand it a fresh budget as a
-    side effect — and replacing the objective must, or a goal that used its
-    rounds on the old objective would be born already exhausted.
-    """
-    return 0 if objective_changed else int(existing_rounds_used or 0)
+GOAL_STATE_COLUMNS = "goal_objective, goal_revision"
 
 
 #: A queued automatic round is the goal's to cancel: it exists only because the
@@ -76,18 +128,6 @@ UPDATE agent_jobs
 SET state = 'cancelled', cancel_requested = TRUE,
     terminal_resume_pending = TRUE, updated_at = NOW()
 WHERE thread_id = ANY($1::text[]) AND state = 'queued' AND turn_source = 'goal'
-"""
-
-#: Archiving a conversation pauses whatever goal was driving it. It is not the
-#: owner pausing — nothing was clicked — so the reason records the cause rather
-#: than the intent, and "resume" brings it back when the conversation does.
-GOAL_ARCHIVE_PAUSE_SQL = """
-UPDATE agent_threads t
-SET goal_state = 'paused', goal_pause_reason = 'archived',
-    goal_blocked_code = NULL, goal_blocked_message = NULL,
-    goal_revision = t.goal_revision + 1,
-    goal_updated_at = NOW(), updated_at = NOW()
-WHERE t.id = ANY($1::text[]) AND t.goal_state = 'active'
 """
 
 
@@ -107,7 +147,7 @@ class PostgresGoalRepository:
         """The conversation's goal row, or ``None`` when it has none."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                f"SELECT {_GOAL_COLUMNS} FROM agent_threads WHERE id = $1",
+                f"SELECT {_GOAL_COLUMNS}, {_ROUNDS_USED_SQL} FROM agent_threads t WHERE t.id = $1",
                 thread_id,
             )
         return None if row is None else goal_row_to_dict(row)
@@ -117,7 +157,7 @@ class PostgresGoalRepository:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                SELECT {_GOAL_COLUMNS}
+                SELECT {_GOAL_COLUMNS_QUALIFIED}, {_ROUNDS_USED_SQL}
                 FROM agent_threads t
                 JOIN agent_jobs j ON j.thread_id = t.id
                 WHERE j.id = $1
@@ -138,8 +178,9 @@ class PostgresGoalRepository:
 
         Raises ``GoalConflict`` when ``expected_revision`` no longer matches.
         The revision advances on every accepted write, so a caller that read
-        one can prove nothing changed under it. An objective that is unchanged
-        keeps the round counter; a different one starts the budget over.
+        one can prove nothing changed under it. Rounds spent are counted from
+        the rounds carrying the current revision, so replacing the objective
+        starts the budget over and editing only the cap does not.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             current = await conn.fetchrow(
@@ -158,21 +199,18 @@ class PostgresGoalRepository:
             if expected_revision is not None and expected_revision != revision:
                 raise GoalConflict("This goal changed since you read it. Reload and try again.")
             objective_changed = current["goal_objective"] != goal.objective
-            rounds_used = goal_rounds_used_after(
-                objective_changed, int(current["goal_rounds_used"] or 0)
-            )
-            row = await conn.fetchrow(
-                f"{SET_GOAL_SQL} RETURNING {_GOAL_COLUMNS}",
-                thread_id,
-                goal.objective,
-                goal.max_rounds,
-                rounds_used,
-            )
+            await conn.execute(SET_GOAL_SQL, thread_id, goal.objective, goal.max_rounds)
             if objective_changed:
                 # The rounds that were queued for the old objective are not
                 # rounds for this one.
                 await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, [thread_id])
-        return goal_row_to_dict(row)
+            # Read back rather than returned: the round count is derived from
+            # other rows, and a ``RETURNING`` list cannot carry a subquery.
+            written = await conn.fetchrow(
+                f"SELECT {_GOAL_COLUMNS}, {_ROUNDS_USED_SQL} FROM agent_threads t WHERE t.id = $1",
+                thread_id,
+            )
+        return goal_row_to_dict(written)
 
     async def pause_goal(self, *, thread_id: str, revision: int, reason: GoalPauseReason) -> bool:
         """``active`` → ``paused``, cancelling queued automatic rounds with it."""
@@ -222,7 +260,7 @@ class PostgresGoalRepository:
                 UPDATE agent_threads
                 SET goal_objective = NULL, goal_state = NULL, goal_pause_reason = NULL,
                     goal_blocked_code = NULL, goal_blocked_message = NULL,
-                    goal_max_rounds = NULL, goal_rounds_used = 0, goal_blocked_streak = 0,
+                    goal_max_rounds = NULL, goal_blocked_streak = 0,
                     goal_revision = goal_revision + 1,
                     goal_updated_at = NOW(), updated_at = NOW()
                 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
@@ -262,9 +300,17 @@ class PostgresGoalRepository:
                 f"""
                 UPDATE agent_threads
                 SET goal_state = COALESCE($3, goal_state),
-                    goal_pause_reason = $4,
-                    goal_blocked_code = $5,
-                    goal_blocked_message = $6,
+                    -- Why it stopped belongs to the stop, not to every later
+                    -- write. A ``kind="none"`` decision exists to record a
+                    -- blocked streak, and clearing the code and message on the
+                    -- way past left a blocked goal that could not say why —
+                    -- silently, because the revision does not move either.
+                    goal_pause_reason = CASE WHEN $3::text IS NULL
+                                             THEN goal_pause_reason ELSE $4 END,
+                    goal_blocked_code = CASE WHEN $3::text IS NULL
+                                             THEN goal_blocked_code ELSE $5 END,
+                    goal_blocked_message = CASE WHEN $3::text IS NULL
+                                                THEN goal_blocked_message ELSE $6 END,
                     goal_blocked_streak = $7,
                     goal_revision = CASE WHEN $3::text IS NULL THEN goal_revision
                                          ELSE goal_revision + 1 END,
@@ -323,7 +369,11 @@ class PostgresGoalRepository:
                 job_id,
                 attempt_id,
                 status,
-                reason,
+                # Bounded here rather than at the tool, so the text path and the
+                # tool path cannot disagree: the column has a 2000-character
+                # CHECK, and a model that wrote three paragraphs was answered
+                # with a constraint violation instead of a recorded report.
+                (reason or "")[:MAX_REASON_CHARS] or None,
                 lease_generation,
             )
         return updated is not None
@@ -374,6 +424,9 @@ class PostgresGoalRepository:
                 """
                 UPDATE agent_threads
                 SET goal_state = 'paused', goal_pause_reason = 'stalled',
+                    -- Every other way a goal stops clears these; leaving them
+                    -- set made a stalled goal report a block it no longer has.
+                    goal_blocked_code = NULL, goal_blocked_message = NULL,
                     goal_revision = goal_revision + 1,
                     goal_updated_at = NOW(), updated_at = NOW()
                 WHERE id = ANY($1::text[]) AND goal_state = 'active'

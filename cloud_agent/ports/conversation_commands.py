@@ -75,10 +75,16 @@ class ConversationCommands(Protocol):
         goal_round: int | None = None,
         goal_round_kind: str | None = None,
         goal_revision: int | None = None,
+        yield_to_queued: bool = False,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:
         """Append a user turn and create the run that will answer it.
+
+        ``yield_to_queued`` refuses to append while another turn of this
+        conversation is already queued or running, answering
+        ``{"error": "yielded"}``. It is asked inside this transaction's thread
+        lock, which is the only place the answer cannot go stale.
 
         ``goal`` sets or replaces the conversation's completion condition in the
         same transaction that appends this turn.

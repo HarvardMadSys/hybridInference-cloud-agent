@@ -99,7 +99,21 @@ class PostgresConversationQueries:
             row = await conn.fetchrow(
                 f"""
                 SELECT {QUALIFIED_JOB_SUMMARY_COLUMNS}, t.title, t.title_source, t.pinned_at, t.archived_at, t.deleted_at,
-                       to_jsonb(s) AS thread_sandbox
+                       to_jsonb(s) AS thread_sandbox,
+                       -- What the turn before this one claimed about the goal.
+                       -- A completion claim can land on a turn that then has to
+                       -- yield to a message a person just sent; the claim is
+                       -- still the last thing anybody said about the goal, and
+                       -- the decision has to be able to see it from the turn
+                       -- that follows.
+                       (SELECT earlier.goal_report FROM agent_jobs earlier
+                        WHERE earlier.thread_id = j.thread_id
+                          AND earlier.turn_no < j.turn_no
+                        ORDER BY earlier.turn_no DESC LIMIT 1) AS parent_goal_report,
+                       (SELECT earlier.goal_round_kind FROM agent_jobs earlier
+                        WHERE earlier.thread_id = j.thread_id
+                          AND earlier.turn_no < j.turn_no
+                        ORDER BY earlier.turn_no DESC LIMIT 1) AS parent_goal_round_kind
                 FROM agent_jobs j
                 LEFT JOIN agent_threads t ON t.id = j.thread_id
                 LEFT JOIN {THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
@@ -121,7 +135,12 @@ class PostgresConversationQueries:
             row = await conn.fetchrow(
                 f"{JOB_SELECT} WHERE j.thread_id = $1 "
                 "AND j.state IN ('succeeded', 'failed', 'cancelled') "
-                "ORDER BY (j.state = 'cancelled') DESC, j.turn_no DESC LIMIT 1",
+                # ASC, because ``TRUE > FALSE``: DESC would put the cancelled
+                # turns first, which is the exact opposite of the rule this
+                # orders by. The boolean has to lead — a cancelled round is not
+                # somewhere new work can hang from — and turn_no breaks the tie
+                # among the turns that actually ran.
+                "ORDER BY (j.state = 'cancelled') ASC, j.turn_no DESC LIMIT 1",
                 thread_id,
             )
         return None if row is None else job_row_to_dict(row)

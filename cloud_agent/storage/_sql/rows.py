@@ -54,6 +54,11 @@ def thread_goal(row: Any) -> dict[str, Any] | None:
         "blocked_message": row.get("goal_blocked_message"),
         "revision": revision or 0,
         "max_rounds": row.get("goal_max_rounds"),
+        # Derived, so only a read that asked for it has it. A list read returns
+        # the objective and the state from the thread row but no count — a page
+        # of conversations has no business counting attempts for each of them —
+        # and zero there means "not fetched", which is what ``None`` says
+        # elsewhere in this module.
         "rounds_used": row.get("goal_rounds_used") or 0,
         "blocked_streak": row.get("goal_blocked_streak") or 0,
         "created_at": row.get("goal_created_at"),
@@ -101,6 +106,11 @@ def job_row_to_dict(row: Any) -> dict[str, Any]:
         "round_goal_revision": row.get("goal_revision"),
         "goal_report": row.get("goal_report"),
         "goal_reason": row.get("goal_reason"),
+        # The immediately preceding turn's claim, when the read provided it.
+        # ``get_job`` does, because a completion claim made on a turn that had
+        # to yield would otherwise be dropped on the floor.
+        "parent_goal_report": row.get("parent_goal_report"),
+        "parent_goal_round_kind": row.get("parent_goal_round_kind"),
         # The conversation's live goal, under the job's keys as every other
         # thread-level value is. Present only on reads that join the thread.
         "goal": thread_goal(row),

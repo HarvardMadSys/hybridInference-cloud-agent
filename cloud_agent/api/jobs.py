@@ -195,6 +195,12 @@ async def get_agent_job(
     """Fetch one of the caller's agent jobs, with what it has spent so far."""
     job_store = _require_store(store)
     job = await _owned_job(job_store.conversation_queries, job_id, user)
+    # This is the read the goal band renders from, so it is the one that pays
+    # for the round count. The count is derived rather than stored (see
+    # the goal repository), and a list of conversations must not be charged for
+    # it.
+    if job.get("goal") is not None:
+        job = {**job, "goal": await job_store.goals.get_goal(thread_id=str(job["thread_id"]))}
     attempt_telemetry = await job_store.execution_queries.job_attempts_telemetry(job_id=job_id)
     telemetry = attempt_telemetry[-1] if attempt_telemetry else None
     # Existing clients keep the newest detail. The retry-aware client opts out
@@ -533,7 +539,7 @@ async def resume_agent_goal(
                 source_control=job_store.source_control,
                 job_id=str(parent["id"]),
                 app_credentials=app_credentials,
-                assume_report="continue",
+                assume_owner_continue=True,
             )
     logger.info(
         "agent_goal_resumed",

@@ -45,7 +45,10 @@ async def test_upgrade_leaves_every_existing_conversation_goalless(store):
     assert thread["goal_objective"] is None
     assert thread["goal_state"] is None and thread["goal_max_rounds"] is None
     assert thread["goal_revision"] == 0
-    assert thread["goal_rounds_used"] == 0
+    assert thread["goal_blocked_streak"] == 0
+    # Rounds spent are derived from the rounds that started, so there is no
+    # counter column to have a default.
+    assert "goal_rounds_used" not in thread
 
     # A goal written under the new revision is rejected when half of it is
     # missing: the constraint is what stops a conversation that has an

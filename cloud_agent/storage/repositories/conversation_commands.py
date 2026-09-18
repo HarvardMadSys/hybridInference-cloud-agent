@@ -17,15 +17,14 @@ from cloud_agent.domain.ids import new_job_id, new_thread_id
 from cloud_agent.domain.requests import check_client_request
 from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.storage._sql.attachments import claim_attachments
+from cloud_agent.storage._sql.goals import PAUSE_GOALS_SQL
 from cloud_agent.storage._sql.jobs import JOB_SELECT, SESSION_DELETE_BLOCK_SQL
 from cloud_agent.storage._sql.mcp import write_mcp_bindings
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 from cloud_agent.storage.repositories.goals import (
     CANCEL_QUEUED_GOAL_ROUNDS_SQL,
-    GOAL_ARCHIVE_PAUSE_SQL,
     SET_GOAL_SQL,
-    goal_rounds_used_after,
 )
 from cloud_agent.task_titles import fallback_title
 
@@ -205,10 +204,16 @@ class PostgresConversationCommands:
         goal_round: int | None = None,
         goal_round_kind: str | None = None,
         goal_revision: int | None = None,
+        yield_to_queued: bool = False,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:
         """Append a user turn and create the run that will answer it.
+
+        ``yield_to_queued`` refuses to append while another turn of this
+        conversation is already queued or running, answering
+        ``{"error": "yielded"}``. It is asked inside this transaction's thread
+        lock, which is the only place the answer cannot go stale.
 
         ``goal`` sets or replaces the conversation's completion condition in the
         same transaction that appends this turn.
@@ -261,6 +266,7 @@ class PostgresConversationCommands:
                 goal_round=goal_round,
                 goal_round_kind=goal_round_kind,
                 goal_revision=goal_revision,
+                yield_to_queued=yield_to_queued,
                 client_request_id=client_request_id,
                 client_request_fingerprint=client_request_fingerprint,
             )
@@ -330,7 +336,10 @@ class PostgresConversationCommands:
                 archived,
             )
             if archived:
-                await conn.execute(GOAL_ARCHIVE_PAUSE_SQL, thread_ids)
+                # The same statement the reaper uses for the same reason: an
+                # archived conversation is not one automatic rounds belong in,
+                # and the owner keeps the goal to resume when it comes back.
+                await conn.execute(PAUSE_GOALS_SQL, thread_ids, "archived")
                 await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, thread_ids)
         return {"sessions": [dict(row) for row in updated]}
 
@@ -427,7 +436,7 @@ class PostgresConversationCommands:
                 # owner's action authoritative and leaves the goal resumable
                 # afterwards — and it shares the transaction, so "archived" and
                 # "still running itself" are never both true.
-                await conn.execute(GOAL_ARCHIVE_PAUSE_SQL, [row["thread_id"]])
+                await conn.execute(PAUSE_GOALS_SQL, [row["thread_id"]], "archived")
                 await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, [row["thread_id"]])
             return {"thread_id": row["thread_id"], "archived_at": row["archived_at"]}
 
@@ -551,6 +560,7 @@ class PostgresConversationCommands:
         goal_round: int | None,
         goal_round_kind: str | None,
         goal_revision: int | None,
+        yield_to_queued: bool,
         client_request_id: str | None,
         client_request_fingerprint: str | None,
     ) -> dict[str, Any] | None:
@@ -566,7 +576,7 @@ class PostgresConversationCommands:
                 return None
             thread = await conn.fetchrow(
                 "SELECT id, title, title_source, pinned_at, archived_at, "
-                "goal_objective, goal_rounds_used FROM agent_threads "
+                "goal_objective FROM agent_threads "
                 "WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL FOR UPDATE",
                 requested["thread_id"],
                 user_id,
@@ -576,20 +586,35 @@ class PostgresConversationCommands:
             if thread["archived_at"] is not None:
                 return {"error": "session_archived"}
             thread_id = thread["id"]
+            if yield_to_queued:
+                # Under the lock this transaction already holds, so a message
+                # that arrives after this point either saw this round or waits
+                # behind it — there is no moment where both are queued.
+                waiting = await conn.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM agent_jobs pending
+                        WHERE pending.thread_id = $1
+                          AND pending.state IN ('queued', 'running')
+                    )
+                    """,
+                    thread_id,
+                )
+                if waiting:
+                    return {"error": "yielded"}
             if goal is not None:
                 # The objective and the message are one commit. A turn that
                 # carried a new goal into a transaction that then failed would
                 # otherwise leave a goal nothing had been asked to work on.
-                await conn.execute(
-                    SET_GOAL_SQL,
-                    thread_id,
-                    goal.objective,
-                    goal.max_rounds,
-                    goal_rounds_used_after(
-                        thread["goal_objective"] != goal.objective,
-                        int(thread["goal_rounds_used"] or 0),
-                    ),
-                )
+                objective_changed = thread["goal_objective"] != goal.objective
+                await conn.execute(SET_GOAL_SQL, thread_id, goal.objective, goal.max_rounds)
+                if objective_changed:
+                    # The same rule the goal repository's own ``set_goal``
+                    # applies, and it has to be applied here too: a round queued
+                    # for the old objective carries a `<goal_round>` body saying
+                    # what *it* was for, so leaving it queued runs a turn toward
+                    # an objective its owner just replaced — and pays for it.
+                    await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, [thread_id])
             parent = await conn.fetchrow(
                 f"{JOB_SELECT} WHERE j.thread_id = $1 "
                 "ORDER BY j.turn_no DESC LIMIT 1 FOR UPDATE OF j",

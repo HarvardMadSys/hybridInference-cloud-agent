@@ -629,9 +629,14 @@ describe('JobDetail', () => {
         ]}
       />,
     );
-    // The selection's size is on the attach menu's Skills row now, not on a
-    // control in the row — which is the point of the menu.
-    expect(screen.getByRole('button', { name: 'Add files or skills' })).toBeInTheDocument();
+    // The size is still the assertion: this job carries one skill and the
+    // latest turn carries none, so a "1" here would mean the picker had gone
+    // back to reading the URL's turn instead of the conversation's newest one.
+    // (The control moved into the attach menu; what it reports did not change.)
+    fireEvent.click(screen.getByRole('button', { name: 'Add files or skills' }));
+    expect(
+      within(screen.getByRole('menu')).getByRole('menuitem', { name: /Skills/ }),
+    ).toHaveTextContent('0');
   });
 
   it('allows clearing saved skills for the next follow-up', async () => {
@@ -671,6 +676,39 @@ describe('JobDetail', () => {
         skill_ids: [],
       }),
     );
+  });
+
+  it('does not put a goal draft on the following message', async () => {
+    // A draft belongs to the message it was written for. Left in state, it
+    // rides every follow-up after this one — including one sent after the owner
+    // paused the goal, which the write would silently reactivate, budget and
+    // all. Pausing has to mean paused.
+    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+    render(<JobDetail job={makeJob()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add files or skills' }));
+    fireEvent.click(
+      within(screen.getByRole('menu')).getByRole('menuitem', { name: /Completion condition/ }),
+    );
+    fireEvent.change(screen.getByLabelText('Objective'), {
+      target: { value: 'make `pytest` pass' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Set condition' }));
+
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'first' } });
+    fireEvent.keyDown(screen.getByLabelText('Add a follow-up'), { key: 'Enter' });
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenCalledWith(
+        'ajob_1',
+        expect.objectContaining({ goal: { objective: 'make `pytest` pass', max_rounds: 10 } }),
+      ),
+    );
+
+    vi.mocked(followUpAgentJob).mockClear();
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'second' } });
+    fireEvent.keyDown(screen.getByLabelText('Add a follow-up'), { key: 'Enter' });
+    await waitFor(() => expect(followUpAgentJob).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(followUpAgentJob).mock.calls[0][1]).not.toHaveProperty('goal');
   });
 
   it('replaces duplicate header metadata with a keyboard-accessible task menu', () => {

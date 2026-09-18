@@ -121,6 +121,12 @@ def test_yielding_still_records_a_blocked_streak():
 
 
 def test_a_queued_turn_defers_a_completion_claim_too():
+    """The claim is not lost by deferring — it is carried to the next turn.
+
+    ``continuation._report_of`` re-reads an unclaimed ``complete`` from the
+    preceding turn, so what the decision does here is decide *this* turn:
+    nothing, because a person's message is already waiting.
+    """
     action = decide(context(report="complete", thread_has_queued_turn=True))
     assert action.kind == "none"
 

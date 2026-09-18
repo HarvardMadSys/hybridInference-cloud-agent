@@ -113,19 +113,28 @@ class FakeGoals:
         ):
             raise GoalConflict("stale")
         objective_changed = current is None or current["objective"] != goal.objective
+        # The revision names the objective, so only a new objective mints one —
+        # the same rule ``SET_GOAL_SQL`` states. The count is left alone either
+        # way here and derived on read, exactly as the real reader derives it.
         updated = {
+            **(current or {}),
             "objective": goal.objective,
             "state": "active",
             "pause_reason": None,
             "blocked_code": None,
             "blocked_message": None,
-            "revision": (current or {}).get("revision", 0) + 1,
+            "revision": (current or {}).get("revision", 0) + (1 if objective_changed else 0),
             "max_rounds": goal.max_rounds,
-            "rounds_used": 0 if objective_changed else current["rounds_used"],
+            # Replacing the objective starts the budget over; editing the cap
+            # does not. Rounds are what carry a revision, so this is the same
+            # statement the real derivation makes.
+            "rounds_used": 0 if objective_changed or current is None else current["rounds_used"],
             "blocked_streak": 0,
             "created_at": None,
             "updated_at": None,
         }
+        if objective_changed:
+            self._cancel_queued_rounds(thread_id)
         self._store.thread_goals[thread_id] = updated
         return dict(updated)
 
@@ -527,6 +536,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         goal_round: int | None = None,
         goal_round_kind: str | None = None,
         goal_revision: int | None = None,
+        yield_to_queued: bool = False,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:
@@ -544,6 +554,14 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             # can continue from, and the route reports it as a gone session
             # rather than queueing work behind a turn that never happened.
             return {"error": "sandbox_context_lost"}
+        if yield_to_queued and await self.goals.has_pending_turn(
+            thread_id=str(requested["thread_id"])
+        ):
+            # Mirrors the store again, and it has to be asked here rather than
+            # by the caller: the real one asks it under the thread lock, and a
+            # fake that answered from a caller-side read would pass while the
+            # window it exists to close stayed open.
+            return {"error": "yielded"}
         parent = max(
             (job for job in self.jobs.values() if job["thread_id"] == requested["thread_id"]),
             key=lambda job: job["turn_no"],

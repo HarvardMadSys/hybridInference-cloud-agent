@@ -41,8 +41,9 @@ class GoalRepository(Protocol):
 
         Raises ``GoalConflict`` when ``expected_revision`` no longer matches.
         The revision advances on every accepted write, so a caller that read
-        one can prove nothing changed under it. An objective that is unchanged
-        keeps the round counter; a different one starts the budget over.
+        one can prove nothing changed under it. Rounds spent are counted from
+        the rounds carrying the current revision, so replacing the objective
+        starts the budget over and editing only the cap does not.
         """
         ...
 

@@ -41,7 +41,7 @@ THREAD_CONFIG_COLUMNS = (
     "t.repo, t.setup_script, t.execution_profile, "
     "t.goal_objective, t.goal_state, t.goal_pause_reason, t.goal_blocked_code, "
     "t.goal_blocked_message, t.goal_revision AS thread_goal_revision, "
-    "t.goal_max_rounds, t.goal_rounds_used, "
+    "t.goal_max_rounds, "
     "t.goal_blocked_streak, t.goal_created_at, t.goal_updated_at"
 )
 

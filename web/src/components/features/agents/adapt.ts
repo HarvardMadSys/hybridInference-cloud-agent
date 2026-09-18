@@ -796,13 +796,10 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     // conversation without a goal carries neither, and a deployment older than
     // this feature carries no fields at all.
     ...(job.goal ? { goal: toDisplayGoal(job.goal) } : {}),
-    goalTurn: {
-      source: job.turn_source === 'goal' ? 'goal' : 'human',
-      ...(typeof job.goal_round === 'number' ? { round: job.goal_round } : {}),
-      ...(job.goal_round_kind ? { kind: job.goal_round_kind } : {}),
-      ...(job.goal_report ? { report: job.goal_report } : {}),
-      ...(job.goal_reason ? { reason: job.goal_reason } : {}),
-    },
+    // Through the same helper the stored turns use, not a second copy of it:
+    // written out inline, every job got a `goalTurn` — including the ones whose
+    // conversation has no goal at all — and "absent" stopped meaning anything.
+    ...(storedGoalTurn(job) ? { goalTurn: storedGoalTurn(job) } : {}),
     // Summed server-side from api_logs. Null there means no ledger is
     // configured; 0 is the honest display for that, but the panel below reads
     // `hasLedger` so it can say so rather than imply the job was free.

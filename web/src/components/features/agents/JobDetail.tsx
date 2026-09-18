@@ -572,6 +572,10 @@ export function JobDetail({
     { turnNo: job.turnNo ?? 1, skills: job.skills ?? [] },
   ).skills;
   useEffect(() => setChosenSkills(null), [job.id]);
+  // The same rule for the goal draft. This component is deliberately not
+  // remounted when the conversation moves to its next turn, so anything that
+  // belongs to *one* message has to be reset explicitly when that turn does.
+  useEffect(() => setGoalDraft(null), [job.id]);
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
   const [models, setModels] = useState<string[]>([]);
   const [model, setModel] = useState(job.model);
@@ -906,6 +910,11 @@ export function JobDetail({
       // disabled with the sent text still in it, because nothing else ever
       // cleared either.
       setFollowUp('');
+      // The draft went with the message it was attached to. Leaving it here
+      // would put it on every follow-up after this one — including one sent
+      // after the owner paused the goal, which the write would silently
+      // reactivate, budget and all. Pausing has to mean paused.
+      setGoalDraft(null);
       setSubmitting(false);
     } catch (cause: unknown) {
       setActionError(cause instanceof Error ? cause.message : 'Could not queue the follow-up');
