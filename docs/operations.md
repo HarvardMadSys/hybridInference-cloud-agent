@@ -1092,12 +1092,64 @@ succeeds. Once it does, the bootstrap peers belong to the desired target stack:
 a later final API/web probe failure leaves that stack running for diagnosis but
 does not write `.deployed-sha`.
 
+### Preserving an old-chain database
+
+An old Alembic revision cannot be upgraded by the rewritten graph. If the
+history must survive, use `scripts/convert_legacy_database_copy.py` on a
+**separately restored copy**, not the selected-state rebuild below. The converter
+currently supports exactly `0025_retained_followup_gate`; other old revisions
+need their own audited conversion. It keeps all original rows and columns in
+`legacy_archive`, creates the real baseline with constraints enabled, copies the
+supported live state, and applies the repository's additive migrations in one
+transaction. It refuses active jobs, other clients and an already-converted copy.
+
+1. Drain before the final snapshot and stop all Agent database writers. Keep a
+   full custom-format PostgreSQL dump, its checksum, the current code/images and
+   Agent configuration. Rehearse restoring the dump in an isolated PostgreSQL
+   instance with no applications attached; do not use the live database as the
+   conversion destination.
+2. Name the restored database `agent_legacy_copy_<unique_name>`. Set
+   `LEGACY_COPY_DATABASE_URL` privately to that copy; the tool deliberately never
+   falls back to `AGENT_DATABASE_URL`. Use the intended target release checkout
+   and its Python dependencies. Audit first, then convert, using new report paths:
+
+   ```bash
+   python scripts/convert_legacy_database_copy.py \
+     --database agent_legacy_copy_rehearsal --report audit.json
+   python scripts/convert_legacy_database_copy.py \
+     --database agent_legacy_copy_rehearsal --report conversion.json --apply
+   ```
+
+   Reports contain counts/hashes, not user rows or credentials. Retain them
+   privately with the backup. A failed transaction leaves the original schema
+   intact. A report I/O error requires inspecting the copy before retrying.
+3. Verify all archived rows, retained public data and sequence high-water marks.
+   Exercise the target version's storage queries and a fresh write on the copy.
+   Retired `replay` telemetry survives in the archive; its public continuity field
+   becomes NULL, since it is not a native resume mode. Retired artifact tables
+   remain available for operator recovery in the archive, not in the current API.
+4. Establish the original Gateway issuer independently, then explicitly adopt
+   that issuer on the converted copy using the procedure in
+   [minimal-identity.md](minimal-identity.md). Conversion does not bind a namespace
+   or make the copy ready for traffic. Preserve the existing host credential,
+   owner identities and retained filesystem paths.
+5. For cutover, repeat the proven procedure from a fresh, quiescent snapshot.
+   Point only Agent at the converted database after verification. Keep ingress
+   closed while validating both roles. Before new writes, recovery can restore
+   the preserved source configuration/database. After new writes, do not point
+   old code at the new schema or discard the new database: recovery must retain
+   and reconcile the new data. Prefer a tested compatible artifact recovery.
+
+The complete conversion contract is
+[the legacy database copy plan](plans/2026-09-18-legacy-database-copy.md).
+
 ### Rebuilding the agent database
 
 The schema baseline was rewritten on 2026-09-10 (`0001_schema_baseline`), and
 a database stamped with any revision of the old chain fails
 `alembic upgrade head` with "can't locate revision". Such a database is
-rebuilt, not upgraded. The rebuild is **not** "drop the database and deploy":
+converted on a copy as above, or rebuilt only when discarding task history is
+intentional. The selected-state rebuild below is **not** "drop the database and deploy":
 the runner keeps its host credential in a file and never re-enrols while
 that file exists, so an empty `agent_runner_hosts` turns every heartbeat into
 a 401, the runner logs `agent_host_credential_rejected` and stops claiming, and
