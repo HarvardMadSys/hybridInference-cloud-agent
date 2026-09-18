@@ -46,6 +46,7 @@ import {
   factLines,
   factValue,
   groupRows,
+  isCompleteOutcome,
   listNotice,
   outcomeLabel,
   partialReasons,
@@ -452,6 +453,10 @@ function RunManifest({ runId, catalogue }: { runId: string; catalogue: Profiling
       </p>
     );
   }
+  const targets = targetLines(run.target);
+  const targetText = targets.length
+    ? targets.map((target) => `${target.name}=${target.value}`).join(', ')
+    : 'Every target';
   return (
     <dl className="grid gap-x-8 gap-y-2 border-b border-gray-100 bg-gray-50/50 px-5 py-4 text-xs sm:grid-cols-2 lg:grid-cols-3 dark:border-white/5 dark:bg-white/[0.02]">
       <ManifestItem label="Experiment">{run.run_id}</ManifestItem>
@@ -459,14 +464,8 @@ function RunManifest({ runId, catalogue }: { runId: string; catalogue: Profiling
       <ManifestItem label="Configured expiry">{dateTime(run.expires_at)}</ManifestItem>
       <ManifestItem label="Operations">
         {run.operations.length ? run.operations.join(', ') : 'No operation selected'}
-      </ManifestItem>
-      <ManifestItem label="Target">
-        {targetLines(run.target).length
-          ? targetLines(run.target)
-            .map((target) => `${target.name}=${target.value}`)
-            .join(', ')
-          : 'Every target'}
-      </ManifestItem>
+      </ManifestItem>{' '}
+      <ManifestItem label="Target">{targetText}</ManifestItem>
       <ManifestItem label="Admission instances">
         {run.admission_instances.length
           ? run.admission_instances.map(admissionLine).join(' · ')
@@ -534,11 +533,7 @@ function MeasurementsPanel({
       ),
     [selection],
   );
-  const { data, error, loading, stale } = useAdminRead<MeasurementPage>(
-    read,
-    refreshKey,
-    onDenied,
-  );
+  const { data, error, loading, stale } = useAdminRead<MeasurementPage>(read, refreshKey, onDenied);
 
   // The key carries the applied value, so a new selection re-renders each
   // field with its own default rather than leaving the previous one on screen.
@@ -778,13 +773,10 @@ function Pager({ page, selection }: { page: MeasurementPage; selection: Measurem
   const first = selection.after
     ? selectionHref(MEASUREMENTS_PATH, { ...selection, after: null, measurement: null })
     : null;
-  const next = page.next_cursor
-    ? selectionHref(MEASUREMENTS_PATH, {
-      ...selection,
-      after: page.next_cursor,
-      measurement: null,
-    })
+  const nextSelection = page.next_cursor
+    ? { ...selection, after: page.next_cursor, measurement: null }
     : null;
+  const next = nextSelection ? selectionHref(MEASUREMENTS_PATH, nextSelection) : null;
   if (!first && !next) return null;
   return (
     <div className="flex items-center justify-between gap-3 border-t border-gray-100 px-5 py-4 text-xs dark:border-white/5">
@@ -876,6 +868,10 @@ function RecordBody({ detail }: { detail: MeasurementDetail }) {
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <Badge tone={reasons.length ? 'warn' : 'plain'}>
           {reasons.length ? 'Partial or failed' : 'Nothing flags this record as partial'}
+        </Badge>
+        {/* The outcome is never shown without the completeness beside it. */}
+        <Badge tone={isCompleteOutcome(record.outcome) ? 'plain' : 'warn'}>
+          {outcomeLabel(record.outcome)}
         </Badge>
         <Badge tone="warn">{coverageLine(record.coverage_scope).split(' — ')[0]}</Badge>
         <Badge tone="plain">Total {totals.display}</Badge>
@@ -1018,8 +1014,11 @@ function RecordBody({ detail }: { detail: MeasurementDetail }) {
               {record.spans.map((span) => (
                 <li key={span.span_id} className="flex justify-between gap-3">
                   <span className="truncate">
-                    {span.name} <span className="text-gray-400">#{span.ordinal}</span>
-                    {span.parent_span_id && <span className="ml-1 text-gray-400">(child)</span>}
+                    {span.name}{' '}
+                    <span className="text-gray-400 dark:text-gray-500">#{span.ordinal}</span>
+                    {span.parent_span_id && (
+                      <span className="ml-1 text-gray-400 dark:text-gray-500">(child)</span>
+                    )}
                   </span>
                   <span className="whitespace-nowrap tabular-nums">
                     {span.duration_us === undefined
@@ -1042,6 +1041,8 @@ function RecordBody({ detail }: { detail: MeasurementDetail }) {
         Identity and provenance
       </h4>
       <dl className="mt-2 grid gap-x-8 gap-y-2 text-xs sm:grid-cols-2 lg:grid-cols-3">
+        <ManifestItem label="Outcome">{outcomeLabel(record.outcome)}</ManifestItem>
+        <ManifestItem label="Failure stage">{record.failure_stage ?? 'None recorded'}</ManifestItem>
         <ManifestItem label="Measurement">{detail.measurement_id}</ManifestItem>
         <ManifestItem label="Interaction">{detail.interaction_id}</ManifestItem>
         <ManifestItem label="Experiment">
