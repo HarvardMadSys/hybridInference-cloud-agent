@@ -150,8 +150,8 @@ export function StartupMeasurement({
             </p>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
               {emptyReason ?? 'An empty page is not zero latency.'} A missing sample is{' '}
-              <strong>not</strong> a fast startup and not a failed one: it says nothing was
-              stored, and the reason is not in this response. See the{' '}
+              <strong>not</strong> a fast startup and not a failed one: it says nothing was stored,
+              and the reason is not in this response. See the{' '}
               <Link className="underline" href={filterHref}>
                 same selection on the Measurements page
               </Link>{' '}
@@ -202,7 +202,10 @@ export function StartupMeasurement({
               {rows[0].end_to_end_complete ? 'claimed' : 'not claimed (server-side only)'}.
             </p>
             <p className="mt-3 text-xs">
-              <Link className="text-crimson hover:underline dark:text-crimson-light" href={filterHref}>
+              <Link
+                className="text-crimson hover:underline dark:text-crimson-light"
+                href={filterHref}
+              >
                 Every stored record for this attempt
               </Link>
             </p>

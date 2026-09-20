@@ -379,10 +379,7 @@ describe('admin measurements page', () => {
     // Two different precise keys, not a job-wide read: the attempt names this
     // execution and the interaction names the one logical interaction.
     const interaction = await screen.findByRole('link', { name: 'msm_1' });
-    expect(interaction).toHaveAttribute(
-      'href',
-      expect.stringContaining('interaction_id=msm_1'),
-    );
+    expect(interaction).toHaveAttribute('href', expect.stringContaining('interaction_id=msm_1'));
     const attempt = screen.getByRole('link', { name: '42' });
     expect(attempt).toHaveAttribute('href', expect.stringContaining('attempt_id=42'));
   });
@@ -492,7 +489,9 @@ describe('admin measurements page', () => {
     render(<AdminMeasurementsPage />);
     await screen.findByText(/Computed in SQL over the whole experiment/);
     expect(screen.getByText(/not filtered by the form above/)).toBeInTheDocument();
-    expect(screen.getByText(/3 with collection incomplete and 2 not successful/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/3 with collection incomplete and 2 not successful/),
+    ).toBeInTheDocument();
     expect(screen.getByText(/may count one sample twice/)).toBeInTheDocument();
     expect(
       screen.getByText(/30 stored sample\(s\), 12 interaction\(s\), 25 eligible/),

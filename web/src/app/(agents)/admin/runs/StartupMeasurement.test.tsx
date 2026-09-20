@@ -63,11 +63,14 @@ function detail(overrides: Partial<MeasurementDetail> = {}): MeasurementDetail {
     payload_hash: 'hash-1',
     record: {
       schema_version: 3,
+      measurement_id: 'msm_1',
+      interaction_id: 'msm_1',
+      profiling_run_id: 'run-1',
       operation: 'attempt.startup',
-      request_kind: 'attempt.startup',
       boundary_version: 1,
       coverage_scope: 'host_startup',
       producer: 'runner',
+      producer_instance_id: 'runner-1',
       duration_us: 250_000,
       outcome: 'dispatched',
       collection_complete: true,
@@ -82,7 +85,9 @@ function detail(overrides: Partial<MeasurementDetail> = {}): MeasurementDetail {
       milestones: [],
       missing_fragments: [],
       truncated_fragments: [],
-      dropped_spans: [],
+      // A count, not a list: the record reports how many spans collection gave
+      // up on, and zero is a statement rather than an absence.
+      dropped_spans: 0,
     },
     ...overrides,
   };
@@ -233,10 +238,7 @@ describe('the startup panel on an attempt detail', () => {
 
     await screen.findByText(/Every stored record for this attempt/);
     const link = screen.getByRole('link', { name: /Every stored record for this attempt/ });
-    expect(link).toHaveAttribute(
-      'href',
-      expect.stringContaining('attempt_id=7'),
-    );
+    expect(link).toHaveAttribute('href', expect.stringContaining('attempt_id=7'));
     expect(link).toHaveAttribute('href', expect.stringContaining('job_id=job-1'));
   });
 

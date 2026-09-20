@@ -412,10 +412,6 @@
             "title": "Latest Turn State",
             "type": "string"
           },
-          "matching_turn_count": {
-            "title": "Matching Turn Count",
-            "type": "integer"
-          },
           "repo": {
             "title": "Repo",
             "type": "string"
@@ -461,7 +457,6 @@
           "latest_turn_state",
           "latest_runtime",
           "latest_model",
-          "matching_turn_count",
           "last_matching_turn_at"
         ],
         "title": "AdminConversationMatch",

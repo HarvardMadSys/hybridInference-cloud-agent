@@ -1170,9 +1170,11 @@ function RecordBody({ detail }: { detail: MeasurementDetail }) {
             // Two different absences, said apart: a file or terminal request
             // genuinely has no attempt, while a startup record that lost its
             // attribution never got one. Neither is zero.
-            detail.operation === 'attempt.startup'
-              ? 'Not attributed'
-              : 'Not a startup record'
+            detail.operation === 'attempt.startup' ? (
+              'Not attributed'
+            ) : (
+              'Not a startup record'
+            )
           ) : (
             <Link
               className="text-crimson hover:underline dark:text-crimson-light"
