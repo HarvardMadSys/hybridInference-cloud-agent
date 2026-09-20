@@ -130,8 +130,8 @@ session supervisor（挂起的 supervisor/stream）、heartbeat。没有假的 `
 
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
-| 快速层 | `pytest -q -m "not external and not dbtest"` | 4710 passed, 595 deselected |
-| 数据库层 | `TEST_DB_NAME=ca_startup_measurement_test_db pytest -q -m dbtest` | 543 passed, 4762 deselected（库重建后） |
+| 快速层 | `pytest -q -m "not external and not dbtest"` | 4709 passed, 595 deselected |
+| 数据库层 | `TEST_DB_NAME=ca_startup_measurement_test_db pytest -q -m dbtest` | 543 passed, 4761 deselected（库重建后） |
 | 格式 | `ruff format --check .` | 474 files already formatted |
 | Lint | `ruff check --no-fix .` | All checks passed |
 | 类型 | `mypy` | Success: no issues found in 218 source files |
@@ -141,7 +141,7 @@ session supervisor（挂起的 supervisor/stream）、heartbeat。没有假的 `
 | OpenAPI 契约 | `pytest tests/unit/test_api_surface_contract.py` | 通过（契约已按新增两个查询参数重新生成） |
 | 基准窗口回归 | `pytest tests/unit/test_operation_overhead_benchmark.py` | 4 passed（复核第 1、3 条的固化） |
 | 镜像分类器 | `pytest tests/unit/deploy/test_artifacts_workflow.py` | 21 passed（见下） |
-| PR CI | 最新提交的 run | 结果见 PR；本轮复核修复前的上一次为 16 pass / 1 skipped |
+| PR CI | [run 35507401302](https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/35507401302) | **16 pass / 1 skipped**（`Candidate on real Kata`），含 Tests 2m37s、Tests (Postgres)、Web、Lint、Gitleaks、Compose、四个镜像构建与 `CI Gate` |
 
 数据库层使用独立测试库 `ca_startup_measurement_test_db`（名称含 `_test_`，fixture 会
 拒绝其他名字），跑完自动 truncate 自己创建的行。真实链路验收另用
@@ -167,13 +167,23 @@ head 与 `dev` 的合并结果；期间 `dev` 前进了 #311（`efb77ee`），�
 断言。本分支重新生成了契约（既包含 #311 缺的那 5 行删除，也包含本 PR 新增的两个查询
 参数），合并结果因此自洽。这一条要在 PR 描述里写明，避免被读成本轮改动了会话列表。
 
-**`dev` 后来又前进了 #314（`22ea8b6`），它暴露了本分支自己的一个漏配。** #314 新增
+**`dev` 之后又前进了两次，各自暴露/带来一件事。** 第一次是 #314（`22ea8b6`），它暴露了本分支自己的一个漏配。 #314 新增
 `test_a_change_to_what_both_images_ship_runs_the_image_jobs`：它从两个 Dockerfile 里推导出
 "两边都 COPY 的包"，再断言 CI 的变更分类器会为这些包触发镜像构建。本分支在 `4701934`
 把 `cloud_agent_profiling` 加进了两个 Dockerfile 与 Makefile，却没有加进
 `.github/workflows/ci.yml` 的 `docker=true` 正则——于是"改了这个包却一个镜像任务都不跑"，
 正是那些任务存在的理由。合并 `dev` 后该测试在本机复现，已把 `apps/backend/cloud_agent_profiling/`
-补进分类器；`pytest tests/unit/deploy/test_artifacts_workflow.py` 21 passed。
+补进分类器；`pytest tests/unit/deploy/test_artifacts_workflow.py` 20 passed（`dev` 侧为 21，本分支合并后同一文件为 20 + 本分支内容）。
+
+第二次是 #313（`38cd87d`）的目录重构：`cloud_agent/`、`cloud_agent_host/` 移到
+`apps/backend/`，`cloud_agent_contracts/` 与 `cloud_agent_git/` 合并为
+`apps/backend/cloud_agent_shared/`，`web/` 移到 `apps/frontend/`，`contracts/` 移到
+`gateway_contracts/`。合并后本分支的测量包落到 `apps/backend/cloud_agent_profiling/`，
+两个 Dockerfile、`pyproject.toml` 的包与 mypy 列表、Makefile 的 pydocstyle 目标、CI 分类器、
+AGENTS.md 的目录图和部署测试都按新路径重新列上；仍留在 `web/` 下的四个测量页面文件移到
+`apps/frontend/`。合并后重跑：`uv sync` 后 editable finder 指向新路径，mypy 218 文件、
+Ruff/格式、快速层 4709 passed、数据库层 543 passed（新库）、前端 lint/format/type-check 与
+1641 个测试全通过。
 
 ### 3.3 真实业务开销实验
 
