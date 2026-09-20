@@ -91,7 +91,7 @@ def _shadowing_pairs(surfaces: list[tuple[APIRouter, APIRoute]]) -> list[str]:
     overlapping: list[str] = []
     for left_surface, left in surfaces:
         for right_surface, right in surfaces:
-            if left_surface is right_surface or left.path == right.path:
+            if left_surface is right_surface:
                 continue
             if left.path_regex.match(sample(right)) or right.path_regex.match(sample(left)):
                 overlapping.append(f"{left.path} [{left.endpoint.__name__}]")
@@ -100,7 +100,7 @@ def _shadowing_pairs(surfaces: list[tuple[APIRouter, APIRoute]]) -> list[str]:
 
 
 def _fake_surface(*paths: str) -> APIRouter:
-    """A router shaped like a surface, for the two negative cases below."""
+    """A router shaped like a surface, for the negative cases below."""
     router = APIRouter(prefix=AGENT_PREFIX)
     for path in paths:
         router.add_api_route(path, lambda: None, methods=["GET"])
@@ -189,6 +189,20 @@ def test_the_shadow_check_sees_an_overlap_between_two_surfaces() -> None:
     assert _shadowing_pairs(surfaces), (
         "an overlap between two routers that share the /v1/agent prefix must not be "
         "skipped, which is what comparing prefixes did"
+    )
+
+
+def test_the_shadow_check_sees_same_path_with_different_methods() -> None:
+    """Separate methods still make the 405 Allow header depend on mount order."""
+    get_surface = _fake_surface("/jobs")
+    post_surface = APIRouter(prefix=AGENT_PREFIX)
+    post_surface.add_api_route("/jobs", lambda: None, methods=["POST"])
+    surfaces = _fake_surfaces(get_surface, post_surface)
+
+    assert not _duplicate_registrations(surfaces)
+    assert _shadowing_pairs(surfaces), (
+        "different methods at the same path are not duplicate registrations, "
+        "but the first surface decides the Allow header for an unsupported method"
     )
 
 
