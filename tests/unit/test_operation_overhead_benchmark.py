@@ -294,3 +294,23 @@ def test_the_bare_cohort_runs_no_collector_at_all(monkeypatch, enabled, tmp_path
 
     assert measurement is None, "the bare cohort must not open a measurement"
     assert elapsed_ns > 0
+
+
+def test_the_cpu_denominator_counts_every_request_in_the_window():
+    """The per-record CPU figure must divide by what the CPU was spent on.
+
+    The clock starts before warmup and stops after the last timed request, so
+    the window contains both. Dividing by the timed requests alone overstated
+    the per-record cost by iterations/(warmup+iterations) -- 13.3% at the
+    defaults, which the review measured as 689 us where 608 us was right.
+    """
+    bench = _bench()
+    args = SimpleNamespace(warmup=20, iterations=150)
+
+    assert bench._requests_in_window(args, rounds=4) == 4 * 170 * len(bench.SERVER_OPERATIONS)
+    # The denominator must be strictly larger than the timed-only count, or the
+    # warmup requests are being charged to nothing.
+    assert bench._requests_in_window(args, rounds=4) > 4 * 150 * len(bench.SERVER_OPERATIONS)
+    assert bench._requests_in_window(
+        SimpleNamespace(warmup=0, iterations=150), rounds=1
+    ) == 150 * len(bench.SERVER_OPERATIONS)

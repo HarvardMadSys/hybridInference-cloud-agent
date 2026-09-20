@@ -1231,6 +1231,19 @@ def _merge_writer_counts(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {**totals, "reasons": reasons}
 
 
+def _requests_in_window(args: argparse.Namespace, *, rounds: int) -> int:
+    """Return how many requests one cohort's CPU window really contained.
+
+    Warmup is inside the window: the clock starts before it and stops after the
+    last timed request. Dividing that CPU by the timed requests alone overstates
+    the per-record cost by ``iterations / (warmup + iterations)`` -- 13.3% at the
+    defaults -- because the same CPU is divided by fewer requests than produced
+    it. `bare` sends two analogue rounds' worth on top, which is why its CPU is
+    reported but never compared.
+    """
+    return rounds * (args.warmup + args.iterations) * len(SERVER_OPERATIONS)
+
+
 def _merge_background(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Add up one cohort's process CPU across its rounds."""
     return {
@@ -2077,7 +2090,6 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
     samples: dict[str, dict[str, list[int]]] = {
         path: {cohort: [] for cohort in COHORTS} for path in STARTUP_PATHS
     }
-    delivery: dict[str, Any] = {}
     # The runner's own hand-off closure, so `on-persist` pays for the freeze and
     # for starting the send at the same point the runner does. The alternative
     # this replaces -- collecting every record and delivering the batch after the
@@ -2110,6 +2122,9 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
         sandbox.up()
         for cohort in COHORTS:
             run_id = f"bench-startup-{cohort}-{uuid.uuid4().hex[:8]}".replace("_", "-")
+            # Per cohort, not shared: a cohort that did not deliver must not
+            # report the previous one's counts.
+            delivery = {}
             sink_path = session.path(f"sink-startup-{cohort}.jsonl")
             budget = args.startup_iterations * len(STARTUP_PATHS) * 4 + RUN_BUDGET_SLACK
             _configure_profiling(
@@ -2122,6 +2137,11 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
             )
             runner_mod.reset_delivery_state()
             on_frozen = handoff if cohort == "on-persist" else None
+            #: Rows the control plane had accepted while this cohort was still
+            #: activating. A delivery this script cannot serve is not a
+            #: delivery, so the count is checked before the cohort ends rather
+            #: than only after the join.
+            received_during_cohort = 0
             for path in STARTUP_PATHS:
                 print(
                     f"startup cohort {cohort}: {path} "
@@ -2132,11 +2152,29 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
                 # networks, the import of the supervisor path -- and charging
                 # that to whichever cohort runs first would be a confound.
                 for _ in range(args.startup_warmup):
-                    _activate_path(
-                        sandbox, path, cohort=cohort, session=session, iteration=0, timed=False
+                    await asyncio.to_thread(
+                        _activate_path,
+                        sandbox,
+                        path,
+                        cohort=cohort,
+                        session=session,
+                        iteration=0,
+                        timed=False,
                     )
                 for iteration in range(args.startup_iterations):
-                    elapsed, container_action, resident_action, _measurement = _activate_path(
+                    # In a worker thread: the control plane this script serves
+                    # runs on this same event loop, so activating here would
+                    # block the ingest endpoint the hand-off is posting to. The
+                    # sends would queue up unserved until the cohort ended, and
+                    # `on-persist` would be measuring a destination that is
+                    # switched off for the length of the measurement.
+                    (
+                        elapsed,
+                        container_action,
+                        resident_action,
+                        _measurement,
+                    ) = await asyncio.to_thread(
+                        _activate_path,
                         sandbox,
                         path,
                         cohort=cohort,
@@ -2159,6 +2197,23 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
                     paths[path].resident_actions[resident_action] = (
                         paths[path].resident_actions.get(resident_action, 0) + 1
                     )
+                    if cohort == "on-persist":
+                        received_during_cohort = max(
+                            received_during_cohort,
+                            (await _postgres_measurement_footprint(session.pool, run_id))["rows"],
+                        )
+            if cohort == "on-persist":
+                expected_so_far = args.startup_iterations * len(STARTUP_PATHS)
+                if received_during_cohort == 0:
+                    raise SystemExit(
+                        "on-persist collected nothing while the cohort was activating: the "
+                        "hand-off sends had no listener, so the startup measured a "
+                        "persistence path that was not running"
+                    )
+                delivery = dict(delivery or {})
+                delivery["rows_visible_before_cohort_end"] = received_during_cohort
+                if received_during_cohort >= expected_so_far:
+                    delivery["all_rows_visible_before_cohort_end"] = True
             operation_profiling.flush_sink()
             records = _read_sink_records(sink_path)
             recorded_counts: dict[str, int] = {}
@@ -2193,7 +2248,8 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
                     # delivered/duplicate/dropped names are the runner's, so a
                     # shortfall here is the delivery runtime's answer and not
                     # this script's bookkeeping.
-                    delivery = await _await_handoff_deliveries(runner_mod, expected=expected)
+                    waited = await _await_handoff_deliveries(runner_mod, expected=expected)
+                    delivery = {**(delivery or {}), **waited}
                     stored = await _postgres_measurement_footprint(session.pool, run_id)
                     wanted = dict.fromkeys(STARTUP_PATHS, args.startup_iterations)
                     if stored["rows"] != expected or stored["startup_paths"] != wanted:
@@ -2635,7 +2691,6 @@ def _print_drops(payload: dict[str, Any]) -> list[str]:
             f"{writer['dropped_timeout']} | {writer['rejected']} | {writer['failed']} | "
             f"{drops['destination']} |"
         )
-    print("\nprocess CPU each cohort spent on the same requests, whole process, all threads")
     print(
         f"{'cohort':<11} {'process cpu s':>14} {'vs off s':>10} {'per record us':>14} "
         f"{'peak rss MiB':>13} {'rounds':>7}"
@@ -2647,6 +2702,10 @@ def _print_drops(payload: dict[str, Any]) -> list[str]:
     lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
     off_cpu = server["cohorts"].get("off", {}).get("background", {}).get("process_cpu_s")
     records = server.get("requests_per_cohort") or 0
+    print(
+        "\nprocess CPU each cohort spent on the same requests, whole process, all threads"
+        f" ({records} requests per cohort: warmup and timed together)"
+    )
     for cohort, row in server["cohorts"].items():
         cost = row["background"]
         cpu = float(cost["process_cpu_s"])
@@ -2670,8 +2729,10 @@ def _print_drops(payload: dict[str, Any]) -> list[str]:
         "  (time.process_time() sums every thread, so this is the whole process -- request path, "
         "collector exporter and control-plane writer together. Per-thread attribution is not "
         "available on this platform, so the delta against off is the configuration's extra "
-        "process CPU and not a measurement of one named background thread. `bare` sends two "
-        "extra sibling requests per round and is therefore not comparable.)"
+        "process CPU and not a measurement of one named background thread. The per-record "
+        "column divides by every request the CPU window contained -- warmup included, because "
+        "warmup ran inside it. `bare` sends two extra sibling requests per round and is "
+        "therefore not comparable.)"
     )
     lines.append("")
     lines.append(
@@ -2679,8 +2740,9 @@ def _print_drops(payload: dict[str, Any]) -> list[str]:
         "thread, so the collector's exporter and the writer's tasks cannot be charged separately "
         "from the request path here. The delta against `off` is the configuration's extra process "
         "CPU on the same request set; because the client and server share this process, part of "
-        "it is the load generator's own extra work. `bare` is not comparable: it sends two extra "
-        "sibling requests per round."
+        "it is the load generator's own extra work. The per-record figure divides by the whole "
+        "window's request count (warmup plus timed), which is what the CPU was spent on. `bare` "
+        "is not comparable: it sends two extra sibling requests per round."
     )
     lines.append("")
     lines.append(
@@ -3241,10 +3303,7 @@ async def _run_server_section(
             "cohort_order_by_round": order_log,
             "operations": operations,
             "cohorts": cohort_blocks,
-            # Every cohort but `bare` sends this many requests; `bare` sends this
-            # many plus two analogue rounds' worth, which is why its CPU is
-            # reported but never compared.
-            "requests_per_cohort": rounds * args.iterations * len(SERVER_OPERATIONS),
+            "requests_per_cohort": _requests_in_window(args, rounds=rounds),
         },
         arms,
     )

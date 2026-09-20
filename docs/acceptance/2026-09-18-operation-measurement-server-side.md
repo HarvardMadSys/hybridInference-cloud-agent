@@ -84,8 +84,21 @@ startup 记录。已补上三个变量并由 `tests/unit/test_deploy_config.py` 
    CPU，窗口内外混着对端工作、预热与排空。现在只报同等工作量下的整进程 CPU 及其相对
    `off` 的差值，并写明无法按线程归因。
 4. **验收汇总与引用的原始输出不一致**（§3.3）：报告把一次运行的数字标成另一次的文件名。
-   现在两次运行各自留档为 `runA-overhead.md` / `runB-overhead.md`，报告里每个数字都能
-   对回它自己的文件。
+   现在每次运行各自留档，报告里每个数字都能对回它自己的文件。
+
+### 2.6 第 3 轮复核提出的问题
+
+复核又提出 3 条，同样全部成立，已修：
+
+1. **启动基准阻塞了它自己的接收端**（§3.3.0）：uvicorn 与 activation 循环同处一个事件
+   循环，整批同步执行到 cohort 结束，后台发送线程的 HTTP 请求在整个 cohort 期间无人应答
+   ——`on-persist` 因此没有模拟"启动期间正常运行的持久化链路"，样本量一大还可能人为触发
+   投递超时。改为 `asyncio.to_thread`，并让脚本在每个 cohort 内采样 Postgres 行数、
+   cohort 结束前一条都没收到就硬失败。两次运行都是 `rows_visible_before_cohort_end = 23`。
+2. **每条记录 CPU 的分母漏了预热请求**（§3.3.0）：窗口含 4080 个请求却除以 3600，
+   系统性高估 13.3%。分母改由 `_requests_in_window` 给出并有单测固定，输出里印出该数字。
+3. **汇总把两个 cohort 的数据对调**（§3.3）：`terminal.stream_attach` 的 on-local 列被写
+   进了 on-persist 列。本轮起所有性能数字都由运行 JSON 直接生成后粘贴，不再手写。
 
 ## 3. 验收证据
 
@@ -130,8 +143,8 @@ session supervisor（挂起的 supervisor/stream）、heartbeat。没有假的 `
 
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
-| 快速层 | `pytest -q -m "not external and not dbtest"` | 4709 passed, 595 deselected |
-| 数据库层 | `TEST_DB_NAME=ca_startup_measurement_test_db pytest -q -m dbtest` | 543 passed, 4761 deselected（库重建后） |
+| 快速层 | `pytest -q -m "not external and not dbtest"` | 4710 passed, 595 deselected |
+| 数据库层 | `TEST_DB_NAME=ca_startup_measurement_test_db pytest -q -m dbtest` | 543 passed, 4762 deselected（库重建后） |
 | 格式 | `ruff format --check .` | 474 files already formatted |
 | Lint | `ruff check --no-fix .` | All checks passed |
 | 类型 | `mypy` | Success: no issues found in 218 source files |
@@ -139,7 +152,7 @@ session supervisor（挂起的 supervisor/stream）、heartbeat。没有假的 `
 | Web lint / format / type | `npm run lint`、`format:check`、`type-check` | 全部通过 |
 | Web 生产构建 | `next build` | 成功，路由表含 `/admin/measurements` 与 `/admin/runs/[jobId]` |
 | OpenAPI 契约 | `pytest tests/unit/test_api_surface_contract.py` | 通过（契约已按新增两个查询参数重新生成） |
-| 基准窗口回归 | `pytest tests/unit/test_operation_overhead_benchmark.py` | 4 passed（复核第 1、3 条的固化） |
+| 基准回归 | `pytest tests/unit/test_operation_overhead_benchmark.py` | 5 passed（第 2 轮第 1/3 条与第 3 轮第 2 条的固化） |
 | 镜像分类器 | `pytest tests/unit/deploy/test_artifacts_workflow.py` | 21 passed（见下） |
 | PR CI | [run 35507401302](https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/35507401302) | **16 pass / 1 skipped**（`Candidate on real Kata`），含 Tests 2m37s、Tests (Postgres)、Web、Lint、Gitleaks、Compose、四个镜像构建与 `CI Gate` |
 
@@ -187,159 +200,172 @@ Ruff/格式、快速层 4709 passed、数据库层 543 passed（新库）、前�
 
 ### 3.3 真实业务开销实验
 
-脚本：`scripts/bench_operation_overhead.py`。第 2 轮复核后重跑两次，两次的完整原始表格按
-运行 ID 留档：
+脚本：`scripts/bench_operation_overhead.py`。第 3 轮复核后重跑两次；下表每个数字都由
+`/tmp` 里的运行 JSON 直接生成后粘贴，不经手抄（上一轮就是因为手抄把两个 cohort 的列对调
+了）。两次运行的完整原始表格按运行 ID 留档：
 
 | 运行 | 生成时间（UTC） | 原始输出 |
 | --- | --- | --- |
-| A | 2026-09-20T10:16:20Z | [runA-overhead.md](assets/2026-09-18-operation-measurement/runA-overhead.md) |
-| B | 2026-09-20T10:20:17Z | [runB-overhead.md](assets/2026-09-18-operation-measurement/runB-overhead.md) |
+| C | 2026-09-20T12:12:52Z | [runC-overhead.md](assets/2026-09-18-operation-measurement/runC-overhead.md) |
+| D | 2026-09-20T12:16:42Z | [runD-overhead.md](assets/2026-09-18-operation-measurement/runD-overhead.md) |
 
-两份文件是脚本 `--markdown` 的原始输出，未编辑；下表每个数字都取自这两份文件（百分位也
-用它们写入的 `raw_samples_ns` 独立重算过一遍，与文件一致）。本节此前的版本把一次运行的
-数字标成另一次的文件名，且引用的文件不是产出这些数字的那一次——这就是本次复核的第 4 条，
-现在每个数字都能对回它自己的原始输出了。
+```
+# run C: 2026-09-20T12:12:52.385124+00:00  docker=28.4.0 overlayfs linux
+# run D: 2026-09-20T12:16:42.636897+00:00  docker=28.4.0 overlayfs linux
+env: 3.13.9 macOS-15.7.7-arm64-arm-64bit-Mach-O cpus=14 15.17 (Homebrew)
+requests_per_cohort: 4080
+```
 
-**环境**（两次相同）：python 3.13.9、macOS 15.7.7 arm64、14 CPU、PostgreSQL 15.17
-(Homebrew, fsync=on, synchronous_commit=on)、Docker 28.4.0（colima/Lima，runc）。
-固定单进程、单 replica、串行 cohort、每 cohort 预热 20、每操作 4 轮 × 150 = **n=600**。
-百分位用 nearest-rank（Admin 页面用 SQL `percentile_cont`，会插值，两者不会逐位相同）。
-预算为设计约定的 `max(10 ms, off_p95 × 1%)`，baseline 为 `off`。
+环境（两次相同）：python 3.13.9、macOS 15.7.7 arm64、14 CPU、PostgreSQL 15.17
+(Homebrew)、Docker 28.4.0（colima/Lima，runc）。固定单进程、单 replica、串行 cohort、
+每 cohort 预热 20、每操作 4 轮 × 150。百分位 nearest-rank（Admin 页面用 SQL
+`percentile_cont`，会插值）。预算为 `max(10 ms, off_p95 × 1%)`，baseline 为 `off`。
 
-#### 3.3.0 复核后对脚本本身的两处修正
+#### 3.3.0 第 3 轮复核修掉的三处
 
-**计时窗口此前把埋点排除在外。** 上一版的时钟在第一个 `mark` 之后启动、在后续的 mark、
-`set_attributes`、`finish` 之前停止，`on-persist` 还在整批采样结束后才投递，而且
-`acquire` / `ensure_resident` 根本没有收到 profiling 上下文。复核用一个 150 ms 的注入
-延迟证明了这一点（返回样本仍是 0.012 ms）。现在：路径准备工作（为该路径创建/停止容器、
-为 `reuse_live` 预热 resident）留在时钟之外；时钟覆盖真实启动入口的整段——打开测量、绑定
-facts、两次带 profiling 上下文的 supervisor 调用、片段应答、freeze、以及 hand-off 入队。
-两个配套缺陷同时修掉：supervisor 的应答是 dataclass，而 `record_fragment` 只接受
-mapping，于是每条记录都报 `missing_fragments` 且 `collection_complete: false`——一个没有
-采到它所声称要测的东西的基准。现在用 `asdict` 转成 runner 真正收到的线上形状，记录里
-`producers` 含 `broker`、无缺失片段、`collection_complete: true`。
+**启动基准阻塞了它自己的接收端。** uvicorn 与 `_run_startup_section` 跑在同一个事件循环
+上，而整批 activation 是同步调用到 cohort 结束才 await，所以后台发送线程虽然启动了，HTTP
+接收端在整个 cohort 期间收不到请求。复核用真实 HTTP + 真实 runner 投递复现：两次
+activation 返回时接收数都是 0，进入 cohort join 才变成 2。现在每次 activation 走
+`asyncio.to_thread`，事件循环可以服务 ingest；并且脚本在每个 cohort 的 activation 之间
+采样一次 Postgres 行数，`on-persist` 若在 cohort 结束前一条都没收到就直接失败退出。
+两次运行的证据：`rows_visible_before_cohort_end = 23`（共 24），即持久化链路在启动期间
+确实在服务。修之前这个数字是 0，现在是硬失败条件。
 
-回归测试固化在 `tests/unit/test_operation_overhead_benchmark.py`：往 collector 的 mark
-里注入已知延迟，断言它在报告的时长里出现；另一条断言 freeze/入队也在窗口内，第三条断言
-上下文到达 supervisor 且片段被记为已应答。把时钟改回旧位置，这三条都会失败。
+**每条记录 CPU 的分母漏了预热请求。** CPU 窗口从预热之前开始、到最后一个计时请求之后
+结束，窗口里实际有 `rounds × (warmup + iterations) × 操作数 = 4080` 个请求，而上一版只
+除以计时的 3600，把每条成本系统性高估了 13.3%。现在分母由
+`_requests_in_window(args, rounds=...)` 统一给出（并有单测固定），输出里也印出这个数字。
+运行 A 的 `on-local` 因此从 689 µs 修正为约 608 µs 的量级；本轮 C/D 报的是修正后的
+962/953 µs（机器负载不同，不是同一批数字）。
 
-**CPU 差值此前被解释成后台线程成本。** `time.process_time()` 统计整个进程，所以
-"请求窗口内 CPU" 与 "其余线程 CPU" 两边都是全进程；窗口里还混着同进程内的对端工作，窗口
-外还包含预热、准备与排空。据此算出"每条记录后台消耗 150–200 µs"没有测量依据。现在只报
-**同等工作量下的整进程 CPU 及其相对 `off` 的差值**，并在正文与 `caveats` 里写明本平台
-（`resource.RUSAGE_THREAD` 不可用）无法把 exporter 线程和 writer 任务从请求路径里拆出来，
-差值也不能全部归给某条命名线程。`bare` 每轮多打两组兄弟路由请求，因此只报不比较。
+**汇总把两个 cohort 的数据对调了。** 报告曾把 `terminal.stream_attach` 的 on-local
+列写进 on-persist 列。现在表格由 JSON 直接生成，列顺序与表头一致，并且本轮起不再手写
+任何一行性能数字。
 
 #### 3.3.1 服务端请求（真实 HTTP + 真实 Postgres + 真实 collector/writer）
 
-单位 ms，`bare` 是同应用上未埋点的兄弟路由（写文件 / 终端 resize），不是把埋点从被测
-路由里删掉。`Δp95` 为相对同一次运行的 `off`。
+`bare` 是同应用上未埋点的兄弟路由（写文件 / 终端 resize），不是把埋点从被测路由里删掉。
+Δp95 相对同一次运行的 `off`。
 
-| 操作 | 运行 | off p50/p95 | on-persist p50/p95 | Δp95 | on-local Δp95 | 预算 | 结论 |
+| 操作 | 运行 | off p50/p95 | on-persist p50/p95 | on-persist Δp95 | on-local Δp95 | 预算 | 结论 |
 | --- | --- | --- | --- | ---: | ---: | ---: | --- |
-| files.list.root | A | 2.901 / 7.706 | 3.268 / 6.688 | −1.018 | −1.381 | 10.00 | pass |
-| | B | 3.098 / 6.999 | 3.749 / 9.276 | +2.277 | +2.006 | 10.00 | pass |
-| files.list.subdir | A | 2.926 / 6.605 | 3.314 / 6.665 | +0.060 | +0.445 | 10.00 | pass |
-| | B | 3.417 / 8.539 | 3.750 / 8.757 | +0.218 | **+7.236** | 10.00 | pass |
-| files.open | A | 3.006 / 8.294 | 3.296 / 6.805 | −1.489 | −1.721 | 10.00 | pass |
-| | B | 3.478 / 7.338 | 4.192 / 12.112 | +4.774 | +4.193 | 10.00 | pass |
-| terminal.list | A | 3.363 / 7.029 | 3.599 / 6.227 | −0.802 | −0.381 | 10.00 | pass |
-| | B | 3.510 / 8.237 | 4.349 / 13.128 | +4.891 | +3.368 | 10.00 | pass |
-| terminal.create | A | 3.282 / 7.555 | 3.683 / 7.883 | +0.328 | +1.557 | 10.00 | pass |
-| | B | 3.965 / 10.471 | 4.303 / 7.716 | −2.756 | +2.888 | 10.00 | pass |
-| terminal.stream_attach | A | 3.064 / 7.098 | 3.419 / 8.048 | +0.951 | −1.056 | 10.00 | pass |
-| | B | 3.932 / 10.614 | 4.267 / 20.359 | **+9.745** | −2.420 | 10.00 | pass |
+| files.list.root | C | 3.276 / 10.133 | 3.868 / 8.683 | -1.450 | +1.635 | 10.00 | pass |
+| files.list.subdir | C | 3.299 / 9.537 | 3.843 / 8.876 | -0.661 | +3.948 | 10.00 | pass |
+| files.open | C | 3.297 / 9.035 | 3.746 / 9.090 | +0.055 | +7.032 | 10.00 | pass |
+| terminal.list | C | 4.173 / 12.963 | 4.348 / 12.102 | -0.860 | +3.546 | 10.00 | pass |
+| terminal.create | C | 3.890 / 13.550 | 4.550 / 18.719 | +5.169 | -0.126 | 10.00 | pass |
+| terminal.stream_attach | C | 3.818 / 11.970 | 3.667 / 10.916 | -1.054 | +0.427 | 10.00 | pass |
+| files.list.root | D | 2.684 / 6.477 | 3.263 / 6.545 | +0.067 | +0.585 | 10.00 | pass |
+| files.list.subdir | D | 2.844 / 6.109 | 3.578 / 7.647 | +1.538 | +1.119 | 10.00 | pass |
+| files.open | D | 2.807 / 5.928 | 3.376 / 7.106 | +1.177 | +4.793 | 10.00 | pass |
+| terminal.list | D | 3.296 / 7.359 | 3.468 / 7.106 | -0.253 | +7.450 | 10.00 | pass |
+| terminal.create | D | 3.222 / 6.601 | 3.714 / 7.057 | +0.456 | +3.831 | 10.00 | pass |
+| terminal.stream_attach | D | 2.911 / 6.400 | 3.568 / 5.926 | -0.474 | +2.418 | 10.00 | pass |
 
-**六个操作在两次运行里都通过预算**，绝对增量都在 10 ms 下限以内。要说清楚的是：
+```
+  run C: ALL PASS
+  run D: ALL PASS
+```
 
-- 运行 B 的 `terminal.stream_attach` `on-persist` Δp95 是 **+9.745 ms**，只比 10 ms 下限
-  低 0.255 ms，同一次运行的 `on-local` 反而是 −2.420 ms。它不是一条稳定的逐操作结论，
-  而是"最坏一次观测仍在下限内"，也说明这台共享机器上剩下的余量很薄。
-- 运行 B 里 `files.list.subdir` 的 `on-local` Δp95 是 +7.236 ms；运行 A 同一格是
-  +0.445 ms。**运行间波动仍然大于多数格子的被测增量**：同一个 `off` cohort 自己的 p95
-  在两次之间从 6.6 ms 摆到 8.5 ms（`files.list.subdir`），`terminal.stream_attach` 的
-  off p95 从 7.1 ms 到 10.6 ms。因此逐格的正负号大多不能归因于埋点，能说的是"没有格子
-  超过预算"。
-- `bare` 与 `off` 的 p50 差值同样在噪声内，不能读成"关闭埋点让请求变快"。
+六个操作在两次运行里都通过预算。仍然要说清楚的：
+
+- 最接近下限的一格是运行 D 的 `terminal.list` `on-local` +7.450 ms（下限 10 ms），
+  同一次运行的 `on-persist` 是 −0.253 ms；运行 C 最接近的是 `terminal.create`
+  `on-persist` +5.169 ms，同一次 `on-local` 是 −0.126 ms。**两次运行里最接近下限的格子
+  落在不同的操作和不同的 cohort 上**，这是"最坏观测仍在下限内"，不是某个操作的稳定成本。
+- 同一个 `off` cohort 自己的 p95 在两次之间从 5.9 ms 摆到 13.6 ms（`terminal.create`
+  6.601 → 13.550），运行间波动仍大于多数格子的增量，所以逐格的正负号大多不能归因于埋点。
+- `bare` 与 `off` 的差同样在噪声内，不能读成"关闭埋点让请求变快"。
 
 #### 3.3.2 四条真实启动路径（真实 Docker 容器 + 真实分类器）
 
-`--startup` 段真实 create/start/reuse 容器，并把真实 collector 包在真实 supervisor
-activation 外，计时窗口按 §3.3.0 描述覆盖整段。每次运行每路径每 cohort n=6（预热 1），
-每个路径共 24 次真实容器动作：
-
 | 路径 | 真实 container_action | resident_action | 运行 | bare | off | on-local | on-persist |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| `new_group` | `create` ×24 | `new` ×24 | A | 543.8 | 587.2 | 577.3 | 581.9 |
-| | | | B | 501.2 | 506.2 | 549.1 | 580.2 |
-| `resume_stopped` | `start` ×24 | `new` ×24 | A | 585.5 | 549.8 | 551.7 | 573.1 |
-| | | | B | 536.9 | 525.6 | 560.7 | 705.6 |
-| `resume_running` | `reuse` ×24 | `resume` ×24 | A | 179.3 | 180.8 | 179.6 | 178.1 |
-| | | | B | 171.7 | 184.6 | 187.4 | 193.1 |
-| `reuse_live` | `reuse` ×24 | `reuse` ×24 | A | 167.1 | 168.2 | 169.7 | 168.5 |
-| | | | B | 159.5 | 168.2 | 174.0 | 180.8 |
+| `new_group` | `create` x24 | `new` | C | 560.0 | 527.7 | 573.2 | 534.4 |
+| `resume_stopped` | `start` x24 | `new` | C | 578.8 | 556.2 | 585.1 | 562.4 |
+| `resume_running` | `reuse` x24 | `resume` | C | 185.1 | 188.7 | 179.8 | 180.7 |
+| `reuse_live` | `reuse` x24 | `reuse` | C | 165.0 | 177.5 | 166.0 | 162.0 |
+| `new_group` | `create` x24 | `new` | D | 608.8 | 573.5 | 561.4 | 665.8 |
+| `resume_stopped` | `start` x24 | `new` | D | 739.4 | 641.8 | 564.8 | 565.9 |
+| `resume_running` | `reuse` x24 | `resume` | D | 183.1 | 182.1 | 186.7 | 182.6 |
+| `reuse_live` | `reuse` x24 | `reuse` | D | 169.6 | 176.5 | 167.3 | 173.9 |
 
-数值为 p50（ms）。两次运行的 `recorded_startup_paths` 都恰好是四条路径各 6 条，
-`on-persist` 的 hand-off 投递为 `{delivered: 24, dropped: 0, drain_timeouts: 0}`，
-Postgres 里 24 行且四条路径各 6 行——即"每条记录在 freeze 点就投递"这条路径本身被验证了。
+数值为 p50（ms）。两次运行的 `recorded_startup_paths` 都是四条路径各 6 条；
+`on-persist` 的 hand-off 投递与 cohort 内可见性：
 
-**这个 n 说明不了尾部**：n=6 时 nearest-rank 的 p95 就是最大值，不是尾部估计，脚本自己
-在输出里写明。四条路径的 p50 在 on/off 之间的差值（−5 到 +146 ms）与真实容器动作的
-数百毫秒同一量级且方向不一致，**没有一条能读成启动路径的采集开销**——`resume_stopped`
-在 B 里的 +146 ms 来自 6 个样本里的单个离群值。真实可用的结论只有一条：埋点新增的成本
-落在容器动作的噪声之下。要给出启动路径的尾部结论必须加大 `--startup-iterations`，并把
-`execution_profile`/runtime 分组固定下来。
+```
+   on-persist delivery: {'rows_visible_before_cohort_end': 23, 'delivered': 24, 'dropped': 0, 'drain_timeouts': 0, 'expected': 24}
+   on-persist recorded: {'new_group': 6, 'resume_stopped': 6, 'resume_running': 6, 'reuse_live': 6}
+   on-persist postgres rows: 24
+   on-persist delivery: {'rows_visible_before_cohort_end': 23, 'delivered': 24, 'dropped': 0, 'drain_timeouts': 0, 'expected': 24}
+   on-persist recorded: {'new_group': 6, 'resume_stopped': 6, 'resume_running': 6, 'reuse_live': 6}
+   on-persist postgres rows: 24
+```
 
-**窗口覆盖埋点这件事不是靠上表证明的，而是靠注入实验。** §3.3.0 的 150 ms 注入让
-`on-local`/`on-persist` 的样本从与 `bare` 齐平变成高出约 2 × 150 ms（两个 mark），而
-`bare`/`off` 不动——这正是复核用来证伪旧窗口的同一实验，现在作为
-`tests/unit/test_operation_overhead_benchmark.py` 常驻。
+**这个 n 说明不了尾部**：n=6 时 nearest-rank 的 p95 就是最大值，脚本自己在输出里写明。
+四条路径的 on/off p50 差值在两次之间方向不一致（运行 D 的 `new_group` on-persist 比 off
+高 92 ms，运行 C 同格低 7 ms），而且与真实容器动作的数百毫秒同一量级，**没有一条能读成
+启动路径的采集开销**。真实可用的结论是：埋点成本落在容器动作噪声之下，且窗口确实覆盖了
+它——后者由 §3.3.0 的注入实验与常驻回归测试证明，不由上表证明。
 
-**这些不是生产数字**：本机是 colima/Lima + runc，无 Kata；边界止于 supervisor acquire +
-resident 交接，resident CLI 是替身传输层，CLI 自身初始化不在其中。
+**这些不是生产数字**：colima/Lima + runc，无 Kata；边界止于 supervisor acquire +
+resident 交接，resident CLI 是替身传输层。
 
 #### 3.3.3 丢弃与整进程 CPU
 
-正常负载下零丢弃：两次运行的 `on-local`/`on-persist` 都是 4080/4080 条写入、`dropped_full`
-与 `dropped_timeout` 均为 0。
+正常负载下零丢弃：
 
-整进程 CPU（`time.process_time()`，含请求路径、collector exporter、控制面 writer，4 轮
-各 3600 个请求）：
+```
+run C on-persist drops: {'stored': 4080, 'duplicate': 0, 'rejected': 0, 'conflict': 0, 'dropped_full': 0, 'dropped_timeout': 0, 'dropped_shutdown': 0, 'failed': 0, 'reasons': {'stored': 4080}} postgres rows: 4080
+run D on-persist drops: {'stored': 4080, 'duplicate': 0, 'rejected': 0, 'conflict': 0, 'dropped_full': 0, 'dropped_timeout': 0, 'dropped_shutdown': 0, 'failed': 0, 'reasons': {'stored': 4080}} postgres rows: 4080
+```
+
+整进程 CPU（`time.process_time()`，含请求路径、collector exporter、控制面 writer）：
 
 | 运行 | cohort | 整进程 CPU | 相对 off | 每条记录 | 峰值 RSS |
 | --- | --- | ---: | ---: | ---: | ---: |
-| A | bare | 12.438 s | —（不可比） | n/a | 174.9 MiB |
-| | off | 8.910 s | — | — | 174.9 MiB |
-| | on-local | 11.391 s | +2.481 s | +689.1 µs | 174.9 MiB |
-| | on-persist | 11.435 s | +2.525 s | +701.4 µs | 174.9 MiB |
-| B | bare | 11.714 s | —（不可比） | n/a | 159.3 MiB |
-| | off | 9.641 s | — | — | 159.3 MiB |
-| | on-local | 13.466 s | +3.825 s | +1062.6 µs | 159.3 MiB |
-| | on-persist | 13.270 s | +3.630 s | +1008.3 µs | 159.3 MiB |
+| C | bare | 14.731 s | — | n/a | 249.4 MiB |
+| C | off | 10.377 s | — | n/a | 249.4 MiB |
+| C | on-local | 14.302 s | +3.925 | +962.0 | 249.4 MiB |
+| C | on-persist | 13.619 s | +3.242 | +794.6 | 249.3 MiB |
+| D | bare | 12.240 s | — | n/a | 175.3 MiB |
+| D | off | 8.290 s | — | n/a | 177.5 MiB |
+| D | on-local | 12.178 s | +3.888 | +952.9 | 182.9 MiB |
+| D | on-persist | 11.520 s | +3.230 | +791.6 | 172.4 MiB |
 
-即"开启后整个进程在同一批请求上多花 2.5–3.8 s CPU，约 690–1060 µs/条"。这**不是**后台
-线程的独立测量：进程内同时跑着客户端与服务端，客户端自身也因多出的记录而多做工作，而且
-本平台无法按线程拆分，因此这个差值只能读成"该配置带来的整进程额外 CPU"，不能读成
-"exporter + writer 花了多少"。峰值 RSS 两次都没有可测增长（同一 cohort 内前后相同）。
-脚本的 `not_measured` 逐条列出了没测到的东西：网络字节（loopback 无便携 per-socket
-计数器）、可分线程 CPU、WAL/索引/磁盘字节、容器 CPU/内存。
+```
+-- run C: 4080 requests in the window, 4 rounds
+-- run D: 4080 requests in the window, 4 rounds
+```
+
+即"开启后整个进程在同一批请求上多花 3.2–3.9 s CPU，约 790–960 µs/条（分母 4080）"。
+这**不是**后台线程的独立测量：进程内同时跑着客户端与服务端，客户端自身也因多出的记录而
+多做工作，本平台又无法按线程拆分，因此只能读成"该配置带来的整进程额外 CPU"。峰值 RSS
+两次都没有可归因的增长。
 
 #### 3.3.4 故意变慢
 
-| 运行 | 场景 | 合成方式 | 业务请求 | 结果 |
-| --- | --- | --- | --- | --- |
-| A | 慢目的地 | bench-local 落盘每条延迟 20 ms，跨操作累积 | 6 个操作 p95 5.0–7.9 ms | `dropped_full=389`（`queue_count`），sink 1020/1020 条仍写盘；本地目的地 631/1020 |
-| B | 慢目的地 | 同上 | p95 7.3–13.0 ms | `dropped_full=281`（`queue_count`），sink 1020/1020；本地目的地 739/1020 |
-| A | 慢数据库 | 第二条连接对 `agent_operation_measurements` 持 `ACCESS EXCLUSIVE` | **360 个请求全部应答**，p95 4.4–8.8 ms | `dropped_full=104`、`dropped_timeout=2`；释放后 0.333 s 恢复（预算 22.0 s），254 行落库 |
-| B | 慢数据库 | 同上 | 360 个请求全部应答，p95 8.4–12.0 ms | `dropped_full=104`、`dropped_timeout=2`；释放后恢复在预算内，254 行落库 |
+```
+-- run C slow_sink: p95 6.4-12.5 ms
+     local_destination: {'path': '/var/folders/zp/ntcw2tq10fsc73h4sj8mh5v40000gn/T/operation-overhead-bench-vxfs59js/local-slow-sink-r0.jsonl', 'records_expected': 1020, 'records_written': 662, 'records_dropped': 358, 'bytes': 1811666, 'bytes_per_record': 2736.7, 'synthetic_per_record_delay_ms': 20.0}
+-- run C slow_db: p95 4.2-9.9 ms
+     requests_answered: 360
+     writer_at_end_of_hold: {'stored': 0, 'duplicate': 0, 'rejected': 0, 'conflict': 0, 'dropped_full': 104, 'dropped_timeout': 2, 'dropped_shutdown': 0, 'failed': 0, 'reasons': {'queue_count': 104, 'write_timeout': 2}}
+     recovered_after_s: 0.553
+-- run D slow_sink: p95 10.0-25.5 ms
+     local_destination: {'path': '/var/folders/zp/ntcw2tq10fsc73h4sj8mh5v40000gn/T/operation-overhead-bench-lko5ax3a/local-slow-sink-r0.jsonl', 'records_expected': 1020, 'records_written': 733, 'records_dropped': 287, 'bytes': 2005327, 'bytes_per_record': 2735.8, 'synthetic_per_record_delay_ms': 20.0}
+-- run D slow_db: p95 6.6-31.5 ms
+     requests_answered: 360
+     writer_at_end_of_hold: {'stored': 0, 'duplicate': 0, 'rejected': 0, 'conflict': 0, 'dropped_full': 104, 'dropped_timeout': 2, 'dropped_shutdown': 0, 'failed': 0, 'reasons': {'queue_count': 104, 'write_timeout': 2}}
+     recovered_after_s: 0.274
+```
 
-两个 arm 都是**合成**的，脚本在报告里标注了合成在哪一层（`slow_sink` 是 bench-local
-目的地，不是控制面 ingest；`slow_db` 是 PostgreSQL，由脚本从第二条连接持锁）。它们的
-价值在于证明"诊断拥塞只丢样本、不改业务结果"这条设计承诺，而不是给出生产数字。
+两个 arm 都是**合成**的，脚本标注了合成在哪一层（`slow_sink` 是 bench-local 目的地，
+不是控制面 ingest；`slow_db` 是 PostgreSQL，由脚本从第二条连接持锁）。两次运行都是
+360 个请求全部应答、最多丢弃并计数、释放后在 22 s 预算内恢复。
 
 #### 3.3.5 这次实验**没有**证明的事
-
-脚本的 `not_what` 与 `caveats` 逐条列出，对本 PR 结论最要紧的是：
 
 - 不是端到端延迟：浏览器、网络、host agent 与沙箱都不在任何数字里，没有跑 agent CLI
   或模型。
@@ -347,11 +373,10 @@ resident 交接，resident CLI 是替身传输层，CLI 自身初始化不在其
   容器工作。
 - 服务端操作的 `bare` 是同应用上未埋点的兄弟路由，不是把被测路由的埋点删掉。
 - `on-local` 用 bench-local JSONL 替身，因为部署里没有"去掉 Postgres 仓储"的开关。
-- 启动路径 n=6，p95 即最大值；真实采集成本落在容器动作噪声之下，本次没有测出启动路径
-  的逐路径开销。
+- 启动路径 n=6，p95 即最大值；逐路径开销没有测出来。
 - 整进程 CPU 差值无法按线程归因，也包含客户端自身多出的工作。
 - 请求速率是持续每几毫秒一次，远高于人类浏览；每轮之间会等有界队列排空。
-- 未发送浏览器的 `X-Agent-Interaction-Id` 续接，所以续接多付的那次查找不在样本里。
+- 未发送浏览器的 `X-Agent-Interaction-Id` 续接。
 - `max_operations` 是每进程预算；多 replica 部署会各记各的。
 
 ## 4. 明确未验收的部分
