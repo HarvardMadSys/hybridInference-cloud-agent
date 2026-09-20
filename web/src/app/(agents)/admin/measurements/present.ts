@@ -429,14 +429,19 @@ export function dimensionValue(name: string, value: string | number | null): str
 /** What the percentiles in a group were computed over, and what was left out. */
 export function groupBasis(group: MeasurementSummaryGroup): string {
   const excluded: string[] = [];
-  if (group.incomplete_count) excluded.push(`${number(group.incomplete_count)} incomplete`);
+  if (group.incomplete_count) {
+    excluded.push(`${number(group.incomplete_count)} with collection incomplete`);
+  }
   if (group.failed_count) excluded.push(`${number(group.failed_count)} not successful`);
   const stored = `${number(group.sample_count)} stored sample(s), ${number(
     group.interaction_count,
   )} interaction(s), ${number(group.eligible_count)} eligible for the percentiles`;
-  return excluded.length
-    ? `${stored}; excluded: ${excluded.join(', ')}.`
-    : `${stored}; nothing was excluded.`;
+  if (!excluded.length) return `${stored}; nothing was excluded.`;
+  // The two counts are conditions, not categories: a sample whose collection
+  // did not close *and* whose outcome failed is in both, so their sum is an
+  // upper bound on the exclusion rather than a partition of the stored rows.
+  // Saying so here is what keeps a reader from adding them up.
+  return `${stored}; excluded: ${excluded.join(', ')}. A sample can be both, so these may overlap.`;
 }
 
 /** The caution a small sample needs before anyone reads a percentile into it. */
@@ -500,6 +505,14 @@ export interface MeasurementSelection {
   collection_complete: boolean | null;
   job_id: string | null;
   thread_id: string | null;
+  /**
+   * One execution's startup records. Kept as the raw text the URL and the form
+   * carry, because an unparseable value is a link this page cannot serve and
+   * must say so rather than quietly reading every attempt.
+   */
+  attempt_id: string | null;
+  /** Every request of one logical interaction, such as a single terminal open. */
+  interaction_id: string | null;
   /** The opaque cursor. Never carried across a filter change. */
   after: string | null;
 }
@@ -514,6 +527,8 @@ export const EMPTY_SELECTION: MeasurementSelection = {
   collection_complete: null,
   job_id: null,
   thread_id: null,
+  attempt_id: null,
+  interaction_id: null,
   after: null,
 };
 
@@ -525,6 +540,8 @@ const SINGLE_KEYS = [
   'collection_complete',
   'job_id',
   'thread_id',
+  'attempt_id',
+  'interaction_id',
   'after',
 ] as const;
 
@@ -542,9 +559,37 @@ export const FORM_KEYS = [
   'collection_complete',
   'job_id',
   'thread_id',
+  'attempt_id',
+  'interaction_id',
 ] as const;
 
 export type FormKey = (typeof FORM_KEYS)[number];
+
+/**
+ * Parse one attempt id, or explain why this page will not read it.
+ *
+ * The API takes a non-negative integer and this page must not send anything
+ * else: an unparseable value dropped on the way out would read the whole
+ * experiment while the address bar still said one attempt.
+ */
+export function parseAttemptId(value: string): { attemptId: number | null; error: string | null } {
+  const trimmed = value.trim();
+  if (!trimmed) return { attemptId: null, error: null };
+  if (!/^\d+$/.test(trimmed)) {
+    return {
+      attemptId: null,
+      error: `This link asks for attempt_id=${trimmed}, which is not an attempt number.`,
+    };
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed)) {
+    return {
+      attemptId: null,
+      error: `This link asks for attempt_id=${trimmed}, which is not an attempt number.`,
+    };
+  }
+  return { attemptId: parsed, error: null };
+}
 
 /**
  * Read the page's selection out of its URL.
@@ -569,6 +614,8 @@ export function selectionFromQuery(query: string): {
       error: `This link asks for collection_complete=${complete}, which is not true or false.`,
     };
   }
+  const attempt = parseAttemptId(params.get('attempt_id') ?? '');
+  if (attempt.error) return { selection: EMPTY_SELECTION, error: attempt.error };
   const selection: MeasurementSelection = {
     ...EMPTY_SELECTION,
     run: params.get('run'),
@@ -580,6 +627,10 @@ export function selectionFromQuery(query: string): {
     collection_complete: complete === null ? null : complete === 'true',
     job_id: params.get('job_id'),
     thread_id: params.get('thread_id'),
+    // Stored as the text the URL carries; `listMeasurements` parses it once,
+    // through the same function, so the page and the query cannot disagree.
+    attempt_id: params.get('attempt_id'),
+    interaction_id: params.get('interaction_id'),
     after: params.get('after'),
   };
   // An empty string is how a URL spells "absent"; keep it out of the selection
@@ -650,6 +701,8 @@ export function selectionFromForm(
     collection_complete: complete === 'true' ? true : complete === 'false' ? false : null,
     job_id: read('job_id').trim() || null,
     thread_id: read('thread_id').trim() || null,
+    attempt_id: read('attempt_id').trim() || null,
+    interaction_id: read('interaction_id').trim() || null,
   };
 }
 
@@ -669,6 +722,13 @@ export function selectionSummary(selection: MeasurementSelection): string {
   }
   if (selection.job_id) parts.push(`job ${selection.job_id}`);
   if (selection.thread_id) parts.push(`thread ${selection.thread_id}`);
+  if (selection.attempt_id) parts.push(`attempt ${selection.attempt_id}`);
+  if (selection.interaction_id) parts.push(`interaction ${selection.interaction_id}`);
+  // An attempt and an interaction select different records, so a selection
+  // carrying both is stated as the intersection it is rather than as one key.
+  if (selection.attempt_id && selection.interaction_id) {
+    parts.push('both, so only a record carrying each is listed');
+  }
   return `Showing ${parts.join(' · ')}.`;
 }
 
@@ -681,7 +741,9 @@ export function isFiltered(selection: MeasurementSelection): boolean {
     selection.outcome !== null ||
     selection.collection_complete !== null ||
     selection.job_id !== null ||
-    selection.thread_id !== null
+    selection.thread_id !== null ||
+    selection.attempt_id !== null ||
+    selection.interaction_id !== null
   );
 }
 

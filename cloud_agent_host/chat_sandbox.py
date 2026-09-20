@@ -1576,7 +1576,13 @@ class ChatSandboxManager:
             self._verify_identity(raced, spec)
             return self._require_phase_network(spec, raced, network_phase)
         if facts is not None:
-            facts.note("created")
+            # The literal the startup-path classifier reads. Emitting anything
+            # else -- "created", say -- hid every brand-new group: the guard in
+            # ``SandboxActionFacts.note`` would not recognise it either, so the
+            # ``start`` that always follows overwrote it, and a container this
+            # attempt really paid to create was reported as a wake from
+            # stopped. Two of the four measured paths became indistinguishable.
+            facts.note("create")
         inspected = self.inspect(spec.container_name)
         if inspected is None:
             raise SandboxError("Docker created the chat sandbox but it cannot be inspected")

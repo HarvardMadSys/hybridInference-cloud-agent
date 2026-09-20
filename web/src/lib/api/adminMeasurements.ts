@@ -279,6 +279,17 @@ export interface MeasurementFilters {
   collection_complete?: boolean;
   job_id?: string;
   thread_id?: string;
+  /**
+   * One execution's startup samples. Only `attempt.startup` records carry an
+   * attempt, so this selects a startup and never a file or terminal request.
+   */
+  attempt_id?: number;
+  /**
+   * Every request of one logical interaction -- the list, create and
+   * stream-attach of a single terminal open. The key to read an operation that
+   * has no attempt at all.
+   */
+  interaction_id?: string;
   /** Opaque cursor: the measurement id to continue after. */
   after?: string;
   limit?: number;
@@ -335,6 +346,10 @@ export async function listMeasurements(
   }
   if (filters.job_id) params.set('job_id', filters.job_id);
   if (filters.thread_id) params.set('thread_id', filters.thread_id);
+  // Attempt 0 is not a real attempt, but the number is sent whenever it is
+  // defined so `undefined` stays the only "either" state.
+  if (filters.attempt_id !== undefined) params.set('attempt_id', String(filters.attempt_id));
+  if (filters.interaction_id) params.set('interaction_id', filters.interaction_id);
   if (filters.after) params.set('after', filters.after);
   if (filters.limit !== undefined) params.set('limit', String(filters.limit));
   const query = params.size ? `?${params}` : '';

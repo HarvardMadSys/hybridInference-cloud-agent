@@ -128,6 +128,14 @@ services:
       AGENT_EGRESS_CHAT_NETWORK_POOL: ${LOCAL_CHAT_NETWORK_POOL:-10.240.0.0/16}
       AGENT_EGRESS_SETUP_TIER: platform_only
       AGENT_EGRESS_AGENT_TIER: platform_only
+      # The runner, the broker and the control plane are separate processes and
+      # each reads the profiling switch itself. Without these three the local
+      # stack would measure only the control plane's own file and terminal
+      # requests: a startup record would arrive with no container or CLI
+      # sub-stages, and the four startup paths could not be compared at all.
+      AGENT_OPERATION_PROFILING_ENABLED: ${AGENT_OPERATION_PROFILING_ENABLED:-false}
+      AGENT_OPERATION_PROFILING_RUN: ${AGENT_OPERATION_PROFILING_RUN:-}
+      AGENT_OPERATION_PROFILING_SINK: ${AGENT_OPERATION_PROFILING_SINK:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks: [control-plane]

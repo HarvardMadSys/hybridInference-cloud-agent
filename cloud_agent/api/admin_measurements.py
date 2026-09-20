@@ -24,7 +24,7 @@ from __future__ import annotations
 from datetime import datetime  # noqa: TC003 — FastAPI resolves this at runtime.
 from typing import Any, Protocol
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from cloud_agent import measurement_writer
 from cloud_agent.api.deps import get_storage, require_store, verify_admin_access
@@ -38,6 +38,28 @@ MAX_PAGE_SIZE = 200
 #: Experiments one catalogue page may return.
 MAX_RUNS = 200
 
+#: The selectors the sample list accepts. Anything else is refused rather than
+#: ignored, because FastAPI drops an unknown query parameter silently: a caller
+#: that asked for one attempt's startup and mistyped the key would be handed the
+#: whole experiment's page and no way to notice. The Admin page has the same
+#: rule, so the API and the UI cannot disagree about what was asked for.
+_MEASUREMENT_LIST_QUERY = frozenset(
+    {
+        "run_id",
+        "operation",
+        "request_kind",
+        "coverage_scope",
+        "outcome",
+        "collection_complete",
+        "job_id",
+        "thread_id",
+        "attempt_id",
+        "interaction_id",
+        "after",
+        "limit",
+    }
+)
+
 
 class _MeasurementStorage(Protocol):
     """The one capability this module's handlers reach the storage layer for."""
@@ -48,6 +70,21 @@ class _MeasurementStorage(Protocol):
 def _require_store(store: _MeasurementStorage | None) -> _MeasurementStorage:
     """The storage layer, or 503."""
     return require_store(store)
+
+
+def _reject_unknown_query(request: Request, allowed: frozenset[str]) -> None:
+    """Refuse a selector this endpoint does not accept, before any work."""
+    unknown = sorted(set(request.query_params) - allowed)
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": {
+                    "type": "unexpected_query_parameter",
+                    "message": f"Unsupported query parameter: {unknown[0]}.",
+                }
+            },
+        )
 
 
 def _no_store(response: Response) -> None:
@@ -112,6 +149,7 @@ async def summarize_profiling_run(
 
 @router.get("/measurements")
 async def list_measurements(
+    request: Request,
     store: _MeasurementStorage | None = Depends(get_storage),
     run_id: str | None = Query(None, max_length=128),
     operation: list[str] | None = Query(None),
@@ -121,6 +159,14 @@ async def list_measurements(
     collection_complete: bool | None = None,
     job_id: str | None = Query(None, max_length=128),
     thread_id: str | None = Query(None, max_length=128),
+    attempt_id: int | None = Query(
+        None, ge=0, description="One execution's startup samples; startup records carry one."
+    ),
+    interaction_id: str | None = Query(
+        None,
+        max_length=128,
+        description="Every request of one logical interaction, such as a terminal open.",
+    ),
     after: str | None = Query(
         None, description="Opaque cursor: the measurement_id to continue after."
     ),
@@ -134,7 +180,15 @@ async def list_measurements(
     arrival here -- a caller cannot forge an arrival time, and the pair
     ``(received_at, measurement_id)`` is what makes the page stable while new
     samples land.
+
+    ``attempt_id`` and ``interaction_id`` are not two spellings of one filter.
+    An attempt selects the startup record of exactly one execution; an
+    interaction selects the list, create and stream-attach requests of one
+    terminal open, which have no attempt at all. A caller that wants the whole
+    of one terminal open asks by interaction, and gets three rows that are
+    three measurements rather than one.
     """
+    _reject_unknown_query(request, _MEASUREMENT_LIST_QUERY)
     capability = _require_store(store).operation_measurements
     keyset = None
     if after:
@@ -154,6 +208,8 @@ async def list_measurements(
         collection_complete=collection_complete,
         job_id=job_id,
         thread_id=thread_id,
+        attempt_id=attempt_id,
+        interaction_id=interaction_id,
         after=keyset,
         limit=limit + 1,
     )

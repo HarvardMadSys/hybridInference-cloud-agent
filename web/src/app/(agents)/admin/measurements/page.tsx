@@ -37,6 +37,7 @@ import {
 import {
   ATTACHED_STAGE_NOTE,
   DISTRIBUTION_BASIS,
+  EMPTY_SELECTION,
   MEASUREMENTS_PATH,
   SERVER_ONLY_NOTICE,
   TRUNCATED_STAGE_NOTE,
@@ -51,6 +52,7 @@ import {
   isCompleteOutcome,
   listNotice,
   outcomeLabel,
+  parseAttemptId,
   partialReasons,
   rowCompleteness,
   rowIsPartial,
@@ -575,6 +577,7 @@ function MeasurementsPanel({
   onDenied: () => void;
   refreshKey: number;
 }) {
+  const [formError, setFormError] = useState<string | null>(null);
   const read = useCallback(
     (signal: AbortSignal, _nonce: number) =>
       listMeasurements(
@@ -587,6 +590,12 @@ function MeasurementsPanel({
           collection_complete: selection.collection_complete ?? undefined,
           job_id: selection.job_id ?? undefined,
           thread_id: selection.thread_id ?? undefined,
+          // Parsed once, here, so an unparseable value can never be silently
+          // dropped on the way to a wider read. The URL reader refuses those
+          // links before this panel runs; the form is the other way in, and it
+          // reaches the same parser.
+          attempt_id: parseAttemptId(selection.attempt_id ?? '').attemptId ?? undefined,
+          interaction_id: selection.interaction_id ?? undefined,
           after: selection.after ?? undefined,
         },
         signal,
@@ -619,6 +628,18 @@ function MeasurementsPanel({
     { key: 'outcome', label: 'Outcome', placeholder: 'Any', value: selection.outcome ?? '' },
     { key: 'job_id', label: 'Job ID', placeholder: 'Any', value: selection.job_id ?? '' },
     { key: 'thread_id', label: 'Thread ID', placeholder: 'Any', value: selection.thread_id ?? '' },
+    {
+      key: 'attempt_id',
+      label: 'Attempt ID',
+      placeholder: 'Any',
+      value: selection.attempt_id ?? '',
+    },
+    {
+      key: 'interaction_id',
+      label: 'Interaction ID',
+      placeholder: 'Any',
+      value: selection.interaction_id ?? '',
+    },
   ];
 
   function apply(event: FormEvent<HTMLFormElement>) {
@@ -630,7 +651,17 @@ function MeasurementsPanel({
         ? field.value
         : '';
     };
-    onApply(selectionFromForm(value, selection.run));
+    const next = selectionFromForm(value, selection.run);
+    // Refused here rather than parsed later: applying an attempt id this page
+    // cannot send would clear the filter and list every attempt while the
+    // field still showed the one that was asked for.
+    const attempt = parseAttemptId(next.attempt_id ?? '');
+    if (attempt.error) {
+      setFormError(attempt.error);
+      return;
+    }
+    setFormError(null);
+    onApply(next);
   }
 
   return (
@@ -685,8 +716,16 @@ function MeasurementsPanel({
         <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
           A comma or space separates several values in one field. Applying resets the cursor,
           because a cursor is a position in one ordering and resuming it under different filters
-          would splice two selections together.
+          would splice two selections together. Attempt ID and Interaction ID are different keys,
+          not two spellings of one: an attempt selects that execution&rsquo;s startup record, while
+          an interaction selects the list, create and stream-attach requests of one terminal open
+          &mdash; three records that carry no attempt at all.
         </p>
+        {formError && (
+          <div className="mt-3">
+            <ErrorNotice>{formError} Nothing was re-read.</ErrorNotice>
+          </div>
+        )}
         <div className="mt-4 flex justify-end border-t border-gray-100 pt-4 dark:border-white/5">
           <button type="submit" className={BUTTON}>
             Apply filters
@@ -1114,21 +1153,45 @@ function RecordBody({ detail }: { detail: MeasurementDetail }) {
         <ManifestItem label="Outcome">{outcomeLabel(record.outcome)}</ManifestItem>
         <ManifestItem label="Failure stage">{record.failure_stage ?? 'None recorded'}</ManifestItem>
         <ManifestItem label="Measurement">{detail.measurement_id}</ManifestItem>
-        <ManifestItem label="Interaction">{detail.interaction_id}</ManifestItem>
+        <ManifestItem label="Interaction">
+          <Link
+            className="text-crimson hover:underline dark:text-crimson-light"
+            href={selectionHref(MEASUREMENTS_PATH, {
+              ...EMPTY_SELECTION,
+              run: detail.profiling_run_id,
+              interaction_id: detail.interaction_id,
+            })}
+          >
+            {detail.interaction_id}
+          </Link>
+        </ManifestItem>
+        <ManifestItem label="Attempt">
+          {detail.attempt_id === null ? (
+            // Two different absences, said apart: a file or terminal request
+            // genuinely has no attempt, while a startup record that lost its
+            // attribution never got one. Neither is zero.
+            detail.operation === 'attempt.startup'
+              ? 'Not attributed'
+              : 'Not a startup record'
+          ) : (
+            <Link
+              className="text-crimson hover:underline dark:text-crimson-light"
+              href={selectionHref(MEASUREMENTS_PATH, {
+                ...EMPTY_SELECTION,
+                run: detail.profiling_run_id,
+                attempt_id: String(detail.attempt_id),
+              })}
+            >
+              {detail.attempt_id}
+            </Link>
+          )}
+        </ManifestItem>
         <ManifestItem label="Experiment">
           <Link
             className="text-crimson hover:underline dark:text-crimson-light"
             href={selectionHref(MEASUREMENTS_PATH, {
+              ...EMPTY_SELECTION,
               run: detail.profiling_run_id,
-              measurement: null,
-              operation: [],
-              request_kind: [],
-              coverage_scope: [],
-              outcome: null,
-              collection_complete: null,
-              job_id: null,
-              thread_id: null,
-              after: null,
             })}
           >
             {detail.profiling_run_id}
@@ -1376,8 +1439,10 @@ function summaryLine(response: MeasurementSummaryResponse): string {
   return (
     `${number(totals.samples)} stored sample(s) across ${number(response.groups.length)} group(s), ` +
     `${number(totals.eligible)} eligible for the percentiles; ` +
-    `${number(totals.incomplete)} incomplete and ${number(totals.failed)} not successful were kept out ` +
-    'of them but are counted here. Interactions are not additive across groups, so the largest group ' +
+    `${number(totals.incomplete)} with collection incomplete and ${number(totals.failed)} not ` +
+    'successful were kept out of them but are counted here. A sample can be both, so those two ' +
+    'numbers may count one sample twice and are not a partition of the stored rows. Interactions ' +
+    'are not additive across groups, so the largest group ' +
     `reports ${number(totals.interactions)} distinct rather than a total this page cannot compute.`
   );
 }

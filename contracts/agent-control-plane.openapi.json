@@ -12534,7 +12534,7 @@
     },
     "/admin/agent/measurements": {
       "get": {
-        "description": "Return one page of measurement summaries, newest first.\n\nSummaries only: the frozen record is the largest thing this surface holds\nand a list needs none of it, so a page of them would be a page of payload.\nThe cursor is the ``measurement_id`` of the last row, resolved to its own\narrival here -- a caller cannot forge an arrival time, and the pair\n``(received_at, measurement_id)`` is what makes the page stable while new\nsamples land.",
+        "description": "Return one page of measurement summaries, newest first.\n\nSummaries only: the frozen record is the largest thing this surface holds\nand a list needs none of it, so a page of them would be a page of payload.\nThe cursor is the ``measurement_id`` of the last row, resolved to its own\narrival here -- a caller cannot forge an arrival time, and the pair\n``(received_at, measurement_id)`` is what makes the page stable while new\nsamples land.\n\n``attempt_id`` and ``interaction_id`` are not two spellings of one filter.\nAn attempt selects the startup record of exactly one execution; an\ninteraction selects the list, create and stream-attach requests of one\nterminal open, which have no attempt at all. A caller that wants the whole\nof one terminal open asks by interaction, and gets three rows that are\nthree measurements rather than one.",
         "operationId": "list_measurements_admin_agent_measurements_get",
         "parameters": [
           {
@@ -12676,6 +12676,44 @@
                 }
               ],
               "title": "Thread Id"
+            }
+          },
+          {
+            "description": "One execution's startup samples; startup records carry one.",
+            "in": "query",
+            "name": "attempt_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "One execution's startup samples; startup records carry one.",
+              "title": "Attempt Id"
+            }
+          },
+          {
+            "description": "Every request of one logical interaction, such as a terminal open.",
+            "in": "query",
+            "name": "interaction_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Every request of one logical interaction, such as a terminal open.",
+              "title": "Interaction Id"
             }
           },
           {

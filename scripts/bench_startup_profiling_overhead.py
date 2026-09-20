@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """Measure what the opt-in operation profiler costs one sandbox startup.
 
-``cloud_agent_host/operation_profiling.py`` is default-off timing for platform
-operations, and the whole design rests on one claim: leaving the switch in the
-tree is cheap enough that nobody ever notices it.  This script measures that
-claim against the call pattern the runner actually uses, instead of leaving it
-as an assertion in a docstring.
+``cloud_agent_profiling/operation_profiling.py`` is default-off timing for
+platform operations, and the whole design rests on one claim: leaving the switch
+in the tree is cheap enough that nobody ever notices it.  This script measures
+that claim against the call pattern the runner actually uses, instead of leaving
+it as an assertion in a docstring.
+
+This is a **collector** benchmark, and it is deliberately not the whole
+overhead story the design requires. It measures the instrumentation's own cost
+on a synthetic attempt sequence -- see the limits section below -- and the
+business-overhead experiment that drives the real routes, the real database and
+the four real startup paths is a separate script,
+``scripts/bench_operation_overhead.py``.
 
 What is measured
 ----------------

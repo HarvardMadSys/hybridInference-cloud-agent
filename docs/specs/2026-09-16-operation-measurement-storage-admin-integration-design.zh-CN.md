@@ -257,14 +257,30 @@ worker 写入验证：有效签名/用途、job/attempt/lease_generation 精确�
 | 接口 | 用途 |
 | --- | --- |
 | `GET /admin/agent/profiling-runs` | 有界时间窗内的实验目录 |
-| `GET /admin/agent/measurements?run_id=...` | 按 operation、request_kind、scope、path、outcome、完整性筛选；游标分页 |
+| `GET /admin/agent/measurements?run_id=...` | 按 operation、request_kind、scope、path、outcome、完整性、job、thread、attempt、interaction 筛选；游标分页 |
 | `GET /admin/agent/measurements/{measurement_id}` | 单条摘要、阶段、原始完整性与缺失原因 |
 | `GET /admin/agent/profiling-runs/{run_id}/summary` | 同口径的 count、p50/p95、失败/partial 数；SQL 聚合而非只算当前页 |
 | `GET /admin/agent/measurement-writer` | 当前 CP replica 的队列、in-flight 与拒绝/丢弃计数 |
 
-路径基于既有应用 API 前缀挂载；启动面板继续放在 #218 选择的 Admin run detail 中，
-按 job+attempt 精确读取本次启动。文件/终端通过 thread 与 interaction 查询，不伪装
-成当前 attempt 的一部分。普通 owner API 不默认附带跨用户诊断详情。
+`attempt_id` 与 `interaction_id` 是两把不同的精确键，不是同一筛选的两种拼写。
+attempt 选中一次执行，且只有 `attempt.startup` 记录带 attempt；interaction 选中一次
+终端打开的 list/create/stream_attach 三个请求，它们都没有 attempt。查询按两者分别
+过滤，Admin 列表、表单、URL 与记录详情各自提供入口；把两者当成一个会让“这次启动”
+的读取返回三条终端请求。接口不再静默忽略不认识的查询参数（返回 422
+`unexpected_query_parameter`），因为 FastAPI 默认会丢弃未知参数，那会让一次写错键的
+精确筛选变成整段实验的宽读取，而调用方看不出来。
+
+路径基于既有应用 API 前缀挂载；启动面板放在 Admin run detail 的 attempt 明细里
+（`StartupMeasurement`，按 job+attempt 精确读取本次启动）。文件/终端通过 thread 与
+interaction 查询，不伪装成当前 attempt 的一部分。普通 owner API 不默认附带跨用户
+诊断详情。
+
+四条启动路径由真实 container/resident action 分类（`_classify_startup_path`）。这一轮
+修掉了一个让 `new_group` 永远不可能出现的缺陷：`ChatSandboxManager.create` 写入的字面
+量是 `"created"`，而 `SandboxActionFacts.note` 的最强事实守卫和分类器都判 `"create"`，
+于是守卫不生效、随后必然执行的 `start` 覆盖了它，每个新建 group 都被记成
+`resume_stopped`。测试替身写的是 `"create"` 并注释“与真实 manager 一致”，所以单元测试
+一直通过。现在字面量取分类器认识的值，并有一条回归测试驱动真实 `create` 交给真实分类器。
 
 复用 #218 的加载/错误/无数据状态与阶段排序交互；数据类型及路径分类改成 v3：
 
@@ -323,11 +339,22 @@ broker 解析/wake 前段、eBPF 资源窗口、#265 磁盘容量保持各自边
 真实数据库锁拥塞、持续 terminal SSE、失败请求、关闭快路径、迁移单 head，以及 web
 类型/单测/生产构建。最终提交仍须以本分支 `make check`、`make test-db` 和 CI 为准。
 
+**整条真实链路验收。** 上一轮的“整链”测试用替身换掉了 job/attempt 查询，文件/终端路由
+也用存储替身，所以它证明不了这些接缝。这一轮新增的验收把真实
+job/attempt/sandbox/membership 行、真实身份与归属查询、collector、投递、真实 HTTP、
+真实 Postgres 与 Admin API 接在同一条链上，并覆盖：模型仍在运行时启动记录已入库；
+启动失败也能投递且退出等待有界；SSE 持续打开时 terminal attach 已入库；文件/终端失败
+请求按既定分类规则记录；真实数据库拥塞下业务继续响应且队列容量/并发/超时/丢弃计数
+正确；关闭时没有新增采集任务、投递或测量写入。
+
 性能实验分别比较 bare / off / on-local / on-persist，以及 CP/DB 故意变慢时的业务
 延迟、队列长度和丢弃数。分别覆盖四条启动路径、目录/文件读取、terminal list/create/
 stream_attach；固定部署/镜像/缓存/并发并给出 n、p50、p95。预先约定的新增 p95
 预算为 `max(10 ms, baseline p95 × 1%)`；另报绝对差值，不能用微基准代替业务结果。
 实验要同时说明后台 CPU/内存/网络成本；异步并不意味着没有系统开销。
+
+浏览器点击到可见、纯浏览器缓存命中、跨 replica 全局采样与自动保留清理仍延期，
+不阻塞本切片的服务端交付，也不得在 Admin 中声称已覆盖。
 
 最终可交付结果是：开启一个有范围、有期限的实验，运行三类服务端操作，在 Admin
 找到同一批原始样本，解释每项耗时、边界与缺失，并能关闭采集恢复原业务路径。

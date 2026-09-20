@@ -365,8 +365,12 @@ benchmark 报告至少包含：环境 manifest、实验顺序、全部 attempt I
    call ID 片段协议、有界导出与持久化；见 §9.1。
 2. **文件/终端服务端切片（已实现）**：复用通用采集器并接入 CP/broker；浏览器
    点击与可见/可交互终点仍按平台清单 §3–§5 延期。
-3. **真实 benchmark 与基线报告**：固定 fixture、四启动路径、文件与终端各场景，
-   原始样本与 JSONL/CSV 分析；分别验证采集开销和 profiler 关闭时的实际优化收益。
+3. **真实 benchmark 与基线报告（已实现）**：`scripts/bench_operation_overhead.py` 用真实
+   HTTP + 真实 Postgres 跑文件与终端的六个服务端操作，`--startup` 段用真实 Docker 容器
+   产生四条启动路径；固定 fixture、报告 n/p50/p95、增量、丢弃数与后台成本，并按
+   `max(10 ms, baseline p95 × 1%)` 逐操作给出结论。结果见
+   [服务端验收报告](../../acceptance/2026-09-18-operation-measurement-server-side.md) §3.3。
+   仍未纳入该实验的：真实 agent CLI 初始化、生产 Kata 隔离、跨 replica。
 4. **持久化和 Admin 读面（已实现）**：#218 的能力已改为消费统一 schema v3 记录，
    含实验目录、样本列表/详情、分布与本地 writer 丢弃计数。
 
@@ -510,8 +514,15 @@ CPython 3.12.13 / macOS arm64：
 - 本基准测的是**埋点自身的开销**，不是端到端启动：没有 claim、容器、supervisor、
   CLI 或网络。合成速率（约 40k 记录/秒）下 exporter 会丢弃大部分记录，这是预期且有计数
   的；真实启动一次只产生一条记录。
-- **broker 侧尚未纳入本基准**：它只增加若干次单调时钟读取与字典追加，但随请求继承选择
-  与截止时间校验的路径没有实测数字，属于待补。
+- **broker 侧未纳入本基准，已由业务实验覆盖**：`scripts/bench_operation_overhead.py`
+  在真实 HTTP 路由后接真实 collector 与真实 Postgres（broker 用真实片段协议的进程内替身），
+  六个服务端操作在 `on-local`/`on-persist` 下的 Δp95 都远在 `max(10 ms, off_p95 × 1%)`
+  预算内，两次独立运行都通过。结论不能更细：同一 `off` cohort 自己的 p95 在两次运行间
+  就摆动 2.9 倍，任何小于该摆动的逐操作增量都不能归因于埋点；第一次运行里
+  `terminal.list` 的 `on-local` 曾出现 p95 +3.46 ms，第二次未能复现（−3.13 ms），
+  记为运行间波动。四条启动路径在同一脚本的 `--startup` 段用真实 Docker 容器产生
+  （`create`/`start`/`reuse`/`reuse` 计数非零），n=5/6 时 p95 就是最大值而不是尾部估计，
+  真实容器动作是数百毫秒级。详见[服务端验收报告](../../acceptance/2026-09-18-operation-measurement-server-side.md) §3.3。
 
 与目标形态的差距，后续切片补齐：
 

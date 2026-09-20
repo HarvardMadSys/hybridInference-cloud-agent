@@ -1629,6 +1629,9 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
 
     sent: list[str] = []
     turn_is_running = threading.Event()
+    #: Set by the recorder the instant the record arrives, so the test thread
+    #: waits on the send itself instead of polling a list for it.
+    delivered = threading.Event()
     release_delivery = threading.Event()
     release_turn = threading.Event()
 
@@ -1641,6 +1644,7 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
             first and the ordering being tested would go unobserved.
             """
             sent.append(str(body["record"]["measurement_id"]))
+            delivered.set()
             release_delivery.wait(timeout=10)
             return (200, {"result": "stored"})
 
@@ -1691,12 +1695,7 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
         )
         turn.start()
         assert turn_is_running.wait(timeout=5), "the turn must have started"
-        for _ in range(200):
-            if sent:
-                break
-            import time as _time
-
-            _time.sleep(0.01)
+        assert delivered.wait(timeout=5), "the startup sample must reach the destination"
 
         # The record is out while the model is still working. The delivery is
         # held open, so the turn cannot have finished before this was sent.
@@ -1705,7 +1704,11 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
         )
         assert not release_delivery.is_set()
         assert turn.is_alive(), "the turn was still running when the sample was sent"
-        # And the frozen record really is the startup's, not a placeholder.
+        # And the frozen record really is the startup's, not a placeholder. The
+        # sink is written by the exporter thread, so drain it first rather than
+        # reading a file the record has been queued for but not yet reached --
+        # which is a race, not the ordering under test.
+        operation_profiling.flush_sink()
         written = [json.loads(line) for line in sink.read_text().splitlines() if line.strip()]
         assert written and written[0]["operation"] == "attempt.startup"
     finally:

@@ -332,11 +332,25 @@ describe('distribution groups', () => {
 
   it('states what was stored, what was eligible, and what was excluded', () => {
     expect(groupBasis(group())).toBe(
-      '30 stored sample(s), 12 interaction(s), 25 eligible for the percentiles; excluded: 3 incomplete, 2 not successful.',
+      '30 stored sample(s), 12 interaction(s), 25 eligible for the percentiles; excluded: 3 with collection incomplete, 2 not successful. A sample can be both, so these may overlap.',
     );
     expect(groupBasis(group({ incomplete_count: 0, failed_count: 0 }))).toMatch(
       /nothing was excluded/,
     );
+  });
+
+  it('does not present the two exclusion counts as a partition of the stored rows', () => {
+    // A sample whose collection never closed and whose outcome failed is in
+    // both counts, so their sum can exceed what was actually excluded. The
+    // sentence has to say that rather than invite the addition.
+    const both = group({
+      sample_count: 10,
+      eligible_count: 4,
+      incomplete_count: 4,
+      failed_count: 4,
+    });
+    expect(groupBasis(both)).toContain('may overlap');
+    expect(groupBasis(both)).not.toMatch(/\bexcluded: 8\b/);
   });
 
   it('flags a sample too small for its percentile to be read as a distribution', () => {
@@ -385,7 +399,8 @@ describe('selection and links', () => {
   it('reads a full selection out of a URL, repeats included', () => {
     const { selection, error } = selectionFromQuery(
       'run=run-1&operation=files.list&operation=files.open&coverage_scope=server_request' +
-        '&outcome=completed&collection_complete=false&job_id=ajob_1&thread_id=athr_1&after=msm_9',
+        '&outcome=completed&collection_complete=false&job_id=ajob_1&thread_id=athr_1' +
+        '&attempt_id=42&interaction_id=aint_1&after=msm_9',
     );
     expect(error).toBeNull();
     expect(selection).toEqual({
@@ -398,8 +413,23 @@ describe('selection and links', () => {
       collection_complete: false,
       job_id: 'ajob_1',
       thread_id: 'athr_1',
+      attempt_id: '42',
+      interaction_id: 'aint_1',
       after: 'msm_9',
     });
+  });
+
+  it('refuses an attempt id that is not a number rather than widening to every attempt', () => {
+    // Dropping it would list the whole experiment while the address bar still
+    // said one attempt, which is the failure this page refuses everywhere else.
+    expect(selectionFromQuery('attempt_id=latest').error).toMatch(
+      /attempt_id=latest, which is not an attempt number/,
+    );
+    expect(selectionFromQuery('attempt_id=-1').error).toMatch(/not an attempt number/);
+    expect(selectionFromQuery('attempt_id=1.5').error).toMatch(/not an attempt number/);
+    // A well-formed one is carried as the text the URL holds.
+    expect(selectionFromQuery('attempt_id=0').error).toBeNull();
+    expect(selectionFromQuery('attempt_id=0').selection.attempt_id).toBe('0');
   });
 
   it('refuses a parameter it cannot express instead of widening the read', () => {

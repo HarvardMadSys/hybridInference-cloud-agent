@@ -70,6 +70,8 @@ describe('admin measurements client', () => {
       collection_complete: true,
       job_id: 'ajob_1',
       thread_id: 'athr_1',
+      attempt_id: 42,
+      interaction_id: 'aint_1',
       after: 'msm_9',
       limit: 50,
     });
@@ -83,8 +85,26 @@ describe('admin measurements client', () => {
     expect(url.searchParams.get('collection_complete')).toBe('true');
     expect(url.searchParams.get('job_id')).toBe('ajob_1');
     expect(url.searchParams.get('thread_id')).toBe('athr_1');
+    // An attempt and an interaction are distinct keys, not two spellings of
+    // one: they select different records and the server treats them so.
+    expect(url.searchParams.get('attempt_id')).toBe('42');
+    expect(url.searchParams.get('interaction_id')).toBe('aint_1');
     expect(url.searchParams.get('after')).toBe('msm_9');
     expect(url.searchParams.get('limit')).toBe('50');
+  });
+
+  it('sends attempt_id=0 rather than treating a defined number as absent', async () => {
+    const fetch = stub();
+    await listMeasurements({ attempt_id: 0 });
+    // Only `undefined` means "any attempt": a defined number is sent, so the
+    // client cannot silently widen a selection it was handed.
+    expect(urlOf(fetch).searchParams.get('attempt_id')).toBe('0');
+  });
+
+  it('omits an empty interaction id instead of filtering for the empty string', async () => {
+    const fetch = stub();
+    await listMeasurements({ interaction_id: '' });
+    expect(urlOf(fetch).search).toBe('');
   });
 
   it('sends collection_complete=false rather than dropping it', async () => {

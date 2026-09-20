@@ -61,6 +61,18 @@ vi.mock('@/lib/api/adminRuns', () => ({
   getAdminLlmRequestSources: vi.fn(),
   getAdminLlmRequests: vi.fn(),
 }));
+// The startup panel reads the measurement surface, a different client. Mocked
+// for the same reason the run client is: jsdom has no control plane to answer,
+// and a real fetch would fail these tests for a reason unrelated to what they
+// assert. The panel's own honesty rules are proven in its own test file.
+const measurements = vi.hoisted(() => ({
+  listMeasurements: vi.fn(),
+  getMeasurement: vi.fn(),
+}));
+vi.mock('@/lib/api/adminMeasurements', () => ({
+  listMeasurements: measurements.listMeasurements,
+  getMeasurement: measurements.getMeasurement,
+}));
 
 import {
   getAdminRuns,
@@ -69,6 +81,7 @@ import {
   getAdminLlmRequestSources,
   getAdminLlmRequests,
 } from '@/lib/api/adminRuns';
+import { listMeasurements } from '@/lib/api/adminMeasurements';
 import AdminRunsPageComponent from './AllRuns';
 import AdminRunPage from './[jobId]/page';
 import {
@@ -364,6 +377,16 @@ beforeEach(() => {
     sources: [],
     next_cursor: null,
     reason: null,
+  });
+  // The attempt detail also renders the startup panel. Its default answer here
+  // is "nothing stored", which is what an attempt that was never selected by an
+  // experiment legitimately has; the panel's own tests cover the other states.
+  vi.mocked(listMeasurements).mockResolvedValue({
+    measurements: [],
+    count: 0,
+    limit: 5,
+    next_cursor: null,
+    empty_reason: 'no stored samples match this selection',
   });
 });
 afterEach(cleanup);

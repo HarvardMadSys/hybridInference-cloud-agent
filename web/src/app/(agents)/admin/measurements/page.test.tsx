@@ -369,6 +369,36 @@ describe('admin measurements page', () => {
     expect(within(stages).getByText(/not part of the total above/)).toBeInTheDocument();
   });
 
+  it('links a record to the exact attempt and interaction it belongs to', async () => {
+    vi.mocked(getMeasurement).mockResolvedValue(detail({ attempt_id: 42 }));
+    render(<AdminMeasurementsPage />);
+    await screen.findByText('msm_1');
+    search.set('measurement=msm_1');
+    await act(async () => {});
+
+    // Two different precise keys, not a job-wide read: the attempt names this
+    // execution and the interaction names the one logical interaction.
+    const interaction = await screen.findByRole('link', { name: 'msm_1' });
+    expect(interaction).toHaveAttribute(
+      'href',
+      expect.stringContaining('interaction_id=msm_1'),
+    );
+    const attempt = screen.getByRole('link', { name: '42' });
+    expect(attempt).toHaveAttribute('href', expect.stringContaining('attempt_id=42'));
+  });
+
+  it('says an unattributed startup and a non-startup differ when neither has an attempt', async () => {
+    // A file or terminal request genuinely has no attempt; a startup whose
+    // attribution never arrived is a different absence. Rendering both as
+    // "no attempt" would hide which one an operator is looking at.
+    vi.mocked(getMeasurement).mockResolvedValue(detail({ attempt_id: null }));
+    render(<AdminMeasurementsPage />);
+    await screen.findByText('msm_1');
+    search.set('measurement=msm_1');
+    await act(async () => {});
+    expect(await screen.findByText('Not a startup record')).toBeInTheDocument();
+  });
+
   it('shows a partial record as partial, with its failure stage and missing fragments', async () => {
     vi.mocked(getMeasurement).mockResolvedValue(
       detail({
@@ -462,11 +492,14 @@ describe('admin measurements page', () => {
     render(<AdminMeasurementsPage />);
     await screen.findByText(/Computed in SQL over the whole experiment/);
     expect(screen.getByText(/not filtered by the form above/)).toBeInTheDocument();
-    expect(screen.getByText(/3 incomplete and 2 not successful/)).toBeInTheDocument();
+    expect(screen.getByText(/3 with collection incomplete and 2 not successful/)).toBeInTheDocument();
+    expect(screen.getByText(/may count one sample twice/)).toBeInTheDocument();
     expect(
       screen.getByText(/30 stored sample\(s\), 12 interaction\(s\), 25 eligible/),
     ).toBeInTheDocument();
-    expect(screen.getByText(/excluded: 3 incomplete, 2 not successful/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/excluded: 3 with collection incomplete, 2 not successful/),
+    ).toBeInTheDocument();
     const distribution = screen
       .getByRole('heading', { name: 'Distribution over the whole experiment' })
       .closest('section')!;
@@ -524,6 +557,50 @@ describe('admin measurements page', () => {
     expect(written).toContain('collection_complete=false');
     expect(written).not.toContain('after=');
     replace.mockRestore();
+  });
+
+  it('filters by an attempt and by an interaction as two distinct keys', async () => {
+    search.value = 'run=run-1';
+    const replace = vi.spyOn(window.history, 'replaceState');
+    render(<AdminMeasurementsPage />);
+    await screen.findByText('msm_1');
+
+    fireEvent.change(screen.getByLabelText('Attempt ID'), { target: { value: '42' } });
+    fireEvent.change(screen.getByLabelText('Interaction ID'), { target: { value: 'aint_1' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+
+    await waitFor(() => expect(listMeasurements).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(listMeasurements).mock.calls[1][0]).toMatchObject({
+      run_id: 'run-1',
+      attempt_id: 42,
+      interaction_id: 'aint_1',
+    });
+    const written = String(replace.mock.calls.at(-1)?.[2]);
+    expect(written).toContain('attempt_id=42');
+    expect(written).toContain('interaction_id=aint_1');
+    replace.mockRestore();
+  });
+
+  it('refuses an attempt id that is not a number instead of reading every attempt', async () => {
+    search.value = 'run=run-1';
+    render(<AdminMeasurementsPage />);
+    await screen.findByText('msm_1');
+
+    fireEvent.change(screen.getByLabelText('Attempt ID'), { target: { value: 'latest' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+
+    await screen.findByText(/attempt_id=latest, which is not an attempt number/);
+    // Nothing was re-read: a widened page under the old heading would be the
+    // one outcome this page exists to avoid.
+    expect(listMeasurements).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses an attempt_id link it cannot serve, before reading anything', async () => {
+    search.value = 'run=run-1&attempt_id=latest';
+    render(<AdminMeasurementsPage />);
+    await screen.findByRole('alert');
+    expect(screen.getByText(/not an attempt number/)).toBeInTheDocument();
+    expect(listMeasurements).not.toHaveBeenCalled();
   });
 
   it('reports a revoked session instead of keeping the records it already read', async () => {

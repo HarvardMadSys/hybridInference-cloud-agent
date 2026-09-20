@@ -377,6 +377,83 @@ async def test_a_measurement_can_be_filtered_by_what_it_measured(store):
     assert await store.list_operation_measurements(operations=["terminal.open"]) == []
 
 
+async def test_an_attempt_and_an_interaction_select_different_rows(store):
+    """Two precise keys, and neither is a spelling of the other.
+
+    The Runs detail joins on ``attempt_id`` because a startup record is the
+    only kind that carries one; a terminal open has no attempt at all and is
+    read by ``interaction_id`` instead. A query that treated the two as
+    interchangeable would answer "this attempt's startup" with three terminal
+    requests, which is exactly the confusion the Admin page must not create.
+    """
+    # Two startups for two attempts of one job, sharing no interaction.
+    await store.record_operation_measurement(
+        measurement=_measurement(
+            measurement_id="msm_startup_1",
+            interaction_id="msm_startup_1",
+            payload_hash="h-s1",
+            operation="attempt.startup",
+            request_kind="attempt.startup",
+            coverage_scope="host_startup",
+            attempt_id=101,
+            lease_generation=1,
+            producer="runner",
+            startup_path="new",
+        ),
+        run=_run(),
+    )
+    await store.record_operation_measurement(
+        measurement=_measurement(
+            measurement_id="msm_startup_2",
+            interaction_id="msm_startup_2",
+            payload_hash="h-s2",
+            operation="attempt.startup",
+            request_kind="attempt.startup",
+            coverage_scope="host_startup",
+            attempt_id=202,
+            lease_generation=1,
+            producer="runner",
+            startup_path="new",
+        ),
+        run=_run(),
+    )
+    # Three requests of one terminal open, correlated and with no attempt.
+    for index, kind in enumerate(("terminal.list", "terminal.create", "terminal.stream_attach")):
+        await store.record_operation_measurement(
+            measurement=_measurement(
+                measurement_id=f"msm_terminal_{index}",
+                interaction_id="aint_1",
+                payload_hash=f"h-t{index}",
+                operation="terminal.open",
+                request_kind=kind,
+            ),
+            run=_run(),
+        )
+
+    by_attempt = await store.list_operation_measurements(attempt_id=101)
+    assert [row["measurement_id"] for row in by_attempt] == ["msm_startup_1"]
+    assert by_attempt[0]["attempt_id"] == 101
+    assert by_attempt[0]["coverage_scope"] == "host_startup"
+
+    # The interaction is the only way to read one terminal open whole, and it
+    # returns three rows because the open really is three measurements.
+    by_interaction = await store.list_operation_measurements(interaction_id="aint_1")
+    assert sorted(row["request_kind"] for row in by_interaction) == [
+        "terminal.create",
+        "terminal.list",
+        "terminal.stream_attach",
+    ]
+    assert all(row["attempt_id"] is None for row in by_interaction)
+
+    # Neither filter answers with the other's rows.
+    assert await store.list_operation_measurements(attempt_id=999) == []
+    assert await store.list_operation_measurements(interaction_id="msm_startup_1") != []
+    assert all(
+        row["operation"] == "attempt.startup"
+        for row in await store.list_operation_measurements(interaction_id="msm_startup_1")
+    )
+
+
 async def test_the_experiment_catalogue_is_readable(store):
     """A stored run explains which samples belong together and why."""
     await store.record_operation_measurement(measurement=_measurement(), run=_run())

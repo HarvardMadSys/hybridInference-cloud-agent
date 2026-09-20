@@ -204,13 +204,28 @@ compose, because they name the stack rather than configure it.
 | `AGENT_OPERATION_PROFILING_SINK` | **NEW** | Optional JSONL path for the finished measurements, which are logged as well. An external benchmark reads this file to aggregate a baseline. It is **not** an outbox and is not required for Postgres/Admin delivery: root producers send the same cached frozen record directly through their bounded delivery path. Log and JSONL publication still use one bounded background exporter, so a slow file or log handler never runs on the measured thread. The runner sends selected context to the broker in `X-Agent-Operation-Profiling`; file/terminal response metadata returns in JSON or `x-agent-profiling-*` headers. Browser continuation uses `X-Agent-Interaction-Id` (the older measurement header is compatibility-only). |
 
 The supported control-plane and host Compose files explicitly pass all three
-profiling variables to the control plane, runner, and workspace broker.
+profiling variables to the control plane, runner, and workspace broker, and so
+does the local development stack (`deploy/local/docker-compose.yml`): without
+them a local experiment silently collects only the control plane's own file and
+terminal requests and no startup record at all.
 Profiling remains inert by default. When enabled, `config_version` and each
 root producer's local `max_operations` admission identity are preserved in the
 run catalogue; different runtimes and execution profiles remain separate in
 Admin distributions. A 2026-09-18 local rerun measured roughly 30 microseconds
 of collector work per synthetic startup; this does not include a real
 container, broker, network, or database.
+
+Two benchmarks answer two different questions, and neither substitutes for the
+other. `scripts/bench_startup_profiling_overhead.py` measures the collector's
+own cost on a synthetic attempt sequence — no claim, container, supervisor,
+agent CLI or network — and its own output says so.
+`scripts/bench_operation_overhead.py` drives the real control-plane routes over
+a real socket against a real database and, with a container runtime available,
+the real supervisor activation that produces each of the four startup paths. It
+reports per-operation p50/p95, the delta against the uninstrumented cohort,
+queue drop counts, the background cost, and the agreed
+`max(10 ms, baseline p95 × 1%)` budget verdict. Read each script's
+`what`/`not_what` block before quoting either.
 
 ## Sandbox isolation (host agent reads, sandbox inherits)
 

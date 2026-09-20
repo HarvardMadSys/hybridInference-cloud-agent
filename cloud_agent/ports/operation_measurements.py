@@ -88,6 +88,8 @@ class OperationMeasurements(Protocol):
         collection_complete: bool | None = None,
         job_id: str | None = None,
         thread_id: str | None = None,
+        attempt_id: int | None = None,
+        interaction_id: str | None = None,
         after: tuple[datetime, str] | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
@@ -96,6 +98,12 @@ class OperationMeasurements(Protocol):
         Keyset on ``(received_at, measurement_id)`` rather than ``OFFSET``: a
         new sample arriving mid-page would shift every later row and make an
         offset cursor skip one and repeat another.
+
+        ``attempt_id`` and ``interaction_id`` are the two precise keys the
+        Admin surface joins on. They are not interchangeable: an attempt names
+        one execution and only startup records carry one, while an interaction
+        correlates the list, create and stream-attach requests of one terminal
+        open and is the only way to read those three together.
         """
         ...
 

@@ -229,6 +229,29 @@ def test_complete_local_stack_exposes_only_its_loopback_edge(local_compose: dict
     assert "ports" not in services["local-repo"]
 
 
+def test_the_local_stack_can_switch_profiling_on_for_every_producer(local_compose: dict):
+    """A local experiment must be able to measure more than the control plane.
+
+    The runner, the broker and the control plane are separate processes and each
+    reads the switch itself. Only the control-plane compose file passed it on,
+    so a local stack with profiling enabled collected the file and terminal
+    requests and silently nothing else: no startup record at all, and the four
+    startup paths the experiment exists to compare could not be produced.
+    """
+    services = local_compose["services"]
+    for name in ("runner", "workspace-broker"):
+        environment = services[name]["environment"]
+        assert environment["AGENT_OPERATION_PROFILING_ENABLED"] == (
+            "${AGENT_OPERATION_PROFILING_ENABLED:-false}"
+        )
+        # Passed through rather than defaulted to a literal: the experiment's
+        # run descriptor and sink path come from the operator's env file.
+        assert environment["AGENT_OPERATION_PROFILING_RUN"] == "${AGENT_OPERATION_PROFILING_RUN:-}"
+        assert environment["AGENT_OPERATION_PROFILING_SINK"] == (
+            "${AGENT_OPERATION_PROFILING_SINK:-}"
+        )
+
+
 def test_complete_local_sandbox_network_has_only_narrow_relays(local_compose: dict):
     on_egress = {
         name

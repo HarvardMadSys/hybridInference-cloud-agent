@@ -254,7 +254,8 @@ async def test_filters_reach_the_query_as_they_were_asked(setup):
         app,
         f"{MEASUREMENTS}?run_id=run-1&operation=files.list&operation=files.open"
         "&request_kind=terminal.create&coverage_scope=server_request"
-        "&outcome=completed&collection_complete=true&job_id=ajob_1",
+        "&outcome=completed&collection_complete=true&job_id=ajob_1&thread_id=athr_1"
+        "&attempt_id=42&interaction_id=aint_1",
     )
 
     kwargs = capability.list_operation_measurements.await_args.kwargs
@@ -265,6 +266,48 @@ async def test_filters_reach_the_query_as_they_were_asked(setup):
     assert kwargs["outcome"] == "completed"
     assert kwargs["collection_complete"] is True
     assert kwargs["job_id"] == "ajob_1"
+    assert kwargs["thread_id"] == "athr_1"
+    # The Runs detail joins on the attempt; a terminal open has no attempt and
+    # is read by its interaction. Both must arrive as the caller stated them.
+    assert kwargs["attempt_id"] == 42
+    assert kwargs["interaction_id"] == "aint_1"
+
+
+async def test_the_precise_keys_are_absent_when_they_were_not_asked_for(setup):
+    """An unfiltered read must not narrow to attempt ``0`` or an empty id."""
+    app, capability = setup
+
+    await get(app, MEASUREMENTS)
+
+    kwargs = capability.list_operation_measurements.await_args.kwargs
+    assert kwargs["attempt_id"] is None
+    assert kwargs["interaction_id"] is None
+
+
+async def test_a_negative_attempt_id_is_refused(setup):
+    """An attempt id is a positive generation; 422 rather than an empty page."""
+    app, _capability = setup
+
+    response = await get(app, f"{MEASUREMENTS}?attempt_id=-1")
+
+    assert response.status_code == 422
+
+
+async def test_a_selector_this_surface_does_not_accept_is_refused(setup):
+    """An ignored query parameter is a wider read than the caller asked for.
+
+    FastAPI drops an unknown parameter silently, so a misspelt key would return
+    the whole experiment's page and look exactly like a filter that matched
+    everything. The Admin page refuses the same situation, and the API must not
+    answer a different question than the one it was asked.
+    """
+    app, capability = setup
+
+    response = await get(app, f"{MEASUREMENTS}?attempt=42")
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"]["type"] == "unexpected_query_parameter"
+    capability.list_operation_measurements.assert_not_awaited()
 
 
 async def test_the_summary_is_computed_over_the_experiment(setup):

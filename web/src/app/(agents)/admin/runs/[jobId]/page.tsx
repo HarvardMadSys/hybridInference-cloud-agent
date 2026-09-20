@@ -15,6 +15,7 @@ import { AdminNavigation } from '../../AdminNavigation';
 import { LLMRequests } from '../LLMRequests';
 import { Resources } from '../Resources';
 import { SessionStatistics } from '../SessionStatistics';
+import { StartupMeasurement } from '../StartupMeasurement';
 import {
   accessDenied,
   AdminRequired,
@@ -225,6 +226,16 @@ function RunDetails({ jobId }: { jobId: string }) {
                 // not an attempt one: a total over three of five executions
                 // must not read as the run's total in this panel either.
                 attemptCoverage={detail.run.resource_summary ?? null}
+                onAccessDenied={onAccessDenied}
+              />
+            )}
+            {attemptId !== null && (
+              // Keyed by the attempt, so switching the selector above remounts
+              // it: one attempt's startup must never sit under another's row.
+              <StartupMeasurement
+                key={`startup:${attemptId}:${revision}`}
+                jobId={jobId}
+                attemptId={attemptId}
                 onAccessDenied={onAccessDenied}
               />
             )}
