@@ -1,4 +1,5 @@
 import type { SelectedSkillApi } from '@/lib/api/skills';
+import type { GoalPauseReason, GoalReportOutcome, GoalReportParse } from '@/lib/api/agents';
 // UI types for the cloud agent sandbox (roadmap: issue #1041).
 //
 // The normalized event kinds mirror the agent_job_events schema decided in the
@@ -236,23 +237,28 @@ export interface TurnResources {
 /** The conversation's completion goal, as the job band reads it. */
 export interface AgentGoal {
   objective: string;
-  state: 'active' | 'paused' | 'blocked' | 'complete';
+  state: 'active' | 'paused' | 'complete';
   revision: number;
   roundsUsed: number;
   maxRounds: number;
-  blockedStreak: number;
-  pauseReason?: string;
-  blockedCode?: 'round-limit' | 'model-reported';
-  blockedMessage?: string;
+  /** Set while paused, paired with the sentence behind it. */
+  pauseReason?: GoalPauseReason;
+  pauseDetail?: string;
+  /** The basis the platform recorded when it accepted a completion. */
+  completionBasis?: 'model_reported';
 }
 
 /** How one turn came to exist, and what it said about the goal. */
 export interface GoalTurn {
   source: 'human' | 'goal';
   round?: number;
-  kind?: 'work' | 'verify';
-  report?: 'continue' | 'complete' | 'blocked';
-  reason?: string;
+  kind?: 'work' | 'repair';
+  /** How the platform read this turn's final message. */
+  reportParse?: GoalReportParse;
+  /** Set only when the parse was valid. */
+  reportOutcome?: GoalReportOutcome;
+  /** A failed parse's explanation, or the reason a valid report carried. */
+  reportDetail?: string;
 }
 
 export interface AgentJob {

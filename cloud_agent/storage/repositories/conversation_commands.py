@@ -16,20 +16,46 @@ from cloud_agent.domain.execution import QUEUED, SUCCEEDED
 from cloud_agent.domain.ids import new_job_id, new_thread_id
 from cloud_agent.domain.requests import check_client_request
 from cloud_agent.execution_profiles import default_execution_profile
+from cloud_agent.goals.models import GOAL_REPORT_PROTOCOL
 from cloud_agent.storage._sql.attachments import claim_attachments
-from cloud_agent.storage._sql.goals import PAUSE_GOALS_SQL
+from cloud_agent.storage._sql.goals import (
+    CANCEL_QUEUED_GOAL_ROUNDS_SQL,
+    EDITED_WHILE_PAUSED_DETAIL,
+    PAUSE_GOALS_SQL,
+    SET_GOAL_SQL,
+    arm_goal_wakeup,
+)
 from cloud_agent.storage._sql.jobs import JOB_SELECT, SESSION_DELETE_BLOCK_SQL
 from cloud_agent.storage._sql.mcp import write_mcp_bindings
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
-from cloud_agent.storage.repositories.goals import (
-    CANCEL_QUEUED_GOAL_ROUNDS_SQL,
-    SET_GOAL_SQL,
-)
+from cloud_agent.storage.repositories.goals import new_goal_id
 from cloud_agent.task_titles import fallback_title
 
 if TYPE_CHECKING:
     from cloud_agent.goals.models import GoalInput
+
+
+def _goal_round_metadata(inherited: Any) -> dict[str, Any]:
+    """The parent turn's metadata, plus what an automatic round requires.
+
+    A goal round is only useful on a host that can deliver a turn's final
+    assistant message before any log truncation, because that message is the
+    only place the report exists. The claim path already routes work by
+    ``metadata.requires`` against the host's advertised capabilities, so saying
+    so here is what keeps a round off a host that would run it and report
+    nothing — which is a goal that spends its budget in silence.
+
+    ``requires`` is a reserved key: it is not part of what a client may set, and
+    the controller is the only writer of an automatic round.
+    """
+    metadata = dict(inherited) if isinstance(inherited, dict) else {}
+    requires = metadata.get("requires")
+    required = list(requires) if isinstance(requires, list) else []
+    if GOAL_REPORT_PROTOCOL not in required:
+        required.append(GOAL_REPORT_PROTOCOL)
+    metadata["requires"] = required
+    return metadata
 
 
 class PostgresConversationCommands:
@@ -107,14 +133,17 @@ class PostgresConversationCommands:
                     INSERT INTO agent_threads
                         (id, user_id, repo, title, title_source,
                          setup_script, execution_profile,
-                         goal_objective, goal_state, goal_max_rounds,
-                         goal_revision, goal_created_at, goal_updated_at)
+                         goal_id, goal_objective, goal_state, goal_max_rounds,
+                         goal_revision, goal_created_at, goal_updated_at,
+                         user_input_seq)
                     VALUES ($1, $2, $3, $4, 'fallback', $5, $6,
+                            CASE WHEN $7::text IS NULL THEN NULL ELSE $9 END,
                             $7, CASE WHEN $7::text IS NULL THEN NULL ELSE 'active' END,
                             $8,
                             CASE WHEN $7::text IS NULL THEN 0 ELSE 1 END,
                             CASE WHEN $7::text IS NULL THEN NULL ELSE NOW() END,
-                            CASE WHEN $7::text IS NULL THEN NULL ELSE NOW() END)
+                            CASE WHEN $7::text IS NULL THEN NULL ELSE NOW() END,
+                            1)
                     """,
                     thread_id,
                     user_id,
@@ -124,6 +153,7 @@ class PostgresConversationCommands:
                     execution_profile,
                     goal.objective if goal is not None else None,
                     goal.max_rounds if goal is not None else None,
+                    new_goal_id(),
                 )
                 await write_mcp_bindings(conn, thread_id=thread_id, bindings=mcp_bindings)
                 await conn.execute(
@@ -339,7 +369,12 @@ class PostgresConversationCommands:
                 # The same statement the reaper uses for the same reason: an
                 # archived conversation is not one automatic rounds belong in,
                 # and the owner keeps the goal to resume when it comes back.
-                await conn.execute(PAUSE_GOALS_SQL, thread_ids, "archived")
+                await conn.execute(
+                    PAUSE_GOALS_SQL,
+                    thread_ids,
+                    "archived",
+                    "the conversation was archived; resume the goal to continue it",
+                )
                 await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, thread_ids)
         return {"sessions": [dict(row) for row in updated]}
 
@@ -436,7 +471,12 @@ class PostgresConversationCommands:
                 # owner's action authoritative and leaves the goal resumable
                 # afterwards — and it shares the transaction, so "archived" and
                 # "still running itself" are never both true.
-                await conn.execute(PAUSE_GOALS_SQL, [row["thread_id"]], "archived")
+                await conn.execute(
+                    PAUSE_GOALS_SQL,
+                    [row["thread_id"]],
+                    "archived",
+                    "the conversation was archived; resume the goal to continue it",
+                )
                 await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, [row["thread_id"]])
             return {"thread_id": row["thread_id"], "archived_at": row["archived_at"]}
 
@@ -543,6 +583,164 @@ class PostgresConversationCommands:
             return None
         return {"thread_id": row["thread_id"], "pinned_at": row["pinned_at"]}
 
+    async def create_goal_round(
+        self,
+        *,
+        conn: Any | None = None,
+        thread_id: str,
+        goal_id: str,
+        revision: int,
+        kind: str,
+        round_number: int,
+        prompt: str,
+        client_request_id: str,
+        client_request_fingerprint: str,
+        wakeup_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Append one automatic round inside the caller's transaction.
+
+        The scheduling obligation and the turn it produced commit together —
+        that pair is the whole reason this is not a second call to
+        :meth:`create_follow_up`. ``conn`` is already holding the conversation's
+        lock, taken by the controller before it read the state this decision was
+        made from, so nothing can be appended between the read and this write.
+
+        Returns ``None`` when this event already produced a round. That is not
+        an error: a replayed wakeup is supposed to find the work it already did
+        rather than starting a second turn, and the identity that makes it find
+        it is the turn that triggered the decision. It also returns ``None``
+        when the conversation is gone.
+
+        ``conn`` is the caller's transaction, and the controller always passes
+        one: this insert commits with the wakeup's completion. The fallback is
+        for a caller that wants a round on its own, and in that case this method
+        owns the transaction.
+        """
+        if conn is not None:
+            return await self._create_goal_round_on(
+                conn,
+                thread_id=thread_id,
+                goal_id=goal_id,
+                revision=revision,
+                kind=kind,
+                round_number=round_number,
+                prompt=prompt,
+                client_request_id=client_request_id,
+                client_request_fingerprint=client_request_fingerprint,
+                wakeup_id=wakeup_id,
+            )
+        async with self._pool.acquire() as acquired, acquired.transaction():
+            return await self._create_goal_round_on(
+                acquired,
+                thread_id=thread_id,
+                goal_id=goal_id,
+                revision=revision,
+                kind=kind,
+                round_number=round_number,
+                prompt=prompt,
+                client_request_id=client_request_id,
+                client_request_fingerprint=client_request_fingerprint,
+                wakeup_id=wakeup_id,
+            )
+
+    async def _create_goal_round_on(
+        self,
+        conn: Any,
+        *,
+        thread_id: str,
+        goal_id: str,
+        revision: int,
+        kind: str,
+        round_number: int,
+        prompt: str,
+        client_request_id: str,
+        client_request_fingerprint: str,
+        wakeup_id: str | None,
+    ) -> dict[str, Any] | None:
+        """The one-transaction body of :meth:`create_goal_round`."""
+        existing = await conn.fetchval(
+            """
+            SELECT j.id FROM agent_jobs j
+            JOIN agent_threads t ON t.id = j.thread_id
+            WHERE t.id = $1 AND j.client_request_id = $2
+            """,
+            thread_id,
+            client_request_id,
+        )
+        if existing is not None:
+            if wakeup_id is not None:
+                await conn.execute(
+                    "UPDATE agent_goal_wakeups SET state = 'processed', "
+                    "lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW() "
+                    "WHERE id = $1",
+                    wakeup_id,
+                )
+            return None
+        parent = await conn.fetchrow(
+            f"{JOB_SELECT} WHERE j.thread_id = $1 ORDER BY j.turn_no DESC LIMIT 1 FOR UPDATE OF j",
+            thread_id,
+        )
+        if parent is None:  # Defensive: every thread is created with turn one.
+            return None
+        job_id = new_job_id()
+        await conn.execute(
+            """
+            INSERT INTO agent_jobs
+                (id, thread_id, parent_job_id, turn_no, user_id, base_sha,
+                 task_prompt, runtime, model, reasoning_effort, state, metadata,
+                 client_request_id, client_request_fingerprint, skills,
+                 turn_source, goal_round, goal_round_kind, goal_revision, goal_id,
+                 input_seq_at_create)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
+                    $13, $14, $15::jsonb, 'goal', $16, $17, $18, $19,
+                    -- The input counter as this round was created, so that a
+                    -- completion it reports can be checked against whether the
+                    -- owner has spoken since. Zero here would make every round
+                    -- look older than the first person's message, and rule 7
+                    -- would refuse every completion the platform ever read.
+                    (SELECT user_input_seq FROM agent_threads WHERE id = $2))
+            """,
+            job_id,
+            thread_id,
+            parent["id"],
+            parent["turn_no"] + 1,
+            parent["user_id"],
+            parent["published_commit_sha"] or parent["base_sha"],
+            prompt,
+            parent["runtime"],
+            parent["model"],
+            parent["reasoning_effort"],
+            QUEUED,
+            json.dumps(_goal_round_metadata(load_json(parent["metadata"]))),
+            client_request_id,
+            client_request_fingerprint,
+            parent["skills"],
+            round_number,
+            kind,
+            revision,
+            goal_id,
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_thread_messages (thread_id, job_id, role, content)
+            VALUES ($1, $2, 'user', $3)
+            """,
+            thread_id,
+            job_id,
+            prompt,
+        )
+        await conn.execute("UPDATE agent_threads SET updated_at = NOW() WHERE id = $1", thread_id)
+        if wakeup_id is not None:
+            # The obligation and the turn it produced, one commit. A crash
+            # before this cannot leave a round nobody accounted for.
+            await conn.execute(
+                "UPDATE agent_goal_wakeups SET state = 'processed', lease_owner = NULL, "
+                "lease_expires_at = NULL, updated_at = NOW() WHERE id = $1",
+                wakeup_id,
+            )
+        row = await conn.fetchrow(f"{JOB_SELECT} WHERE j.id = $1", job_id)
+        return job_row_to_dict(row)
+
     async def _create_follow_up(
         self,
         *,
@@ -576,7 +774,7 @@ class PostgresConversationCommands:
                 return None
             thread = await conn.fetchrow(
                 "SELECT id, title, title_source, pinned_at, archived_at, "
-                "goal_objective FROM agent_threads "
+                "goal_id, goal_objective, goal_state FROM agent_threads "
                 "WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL FOR UPDATE",
                 requested["thread_id"],
                 user_id,
@@ -606,15 +804,27 @@ class PostgresConversationCommands:
                 # The objective and the message are one commit. A turn that
                 # carried a new goal into a transaction that then failed would
                 # otherwise leave a goal nothing had been asked to work on.
-                objective_changed = thread["goal_objective"] != goal.objective
-                await conn.execute(SET_GOAL_SQL, thread_id, goal.objective, goal.max_rounds)
-                if objective_changed:
-                    # The same rule the goal repository's own ``set_goal``
-                    # applies, and it has to be applied here too: a round queued
-                    # for the old objective carries a `<goal_round>` body saying
-                    # what *it* was for, so leaving it queued runs a turn toward
-                    # an objective its owner just replaced — and pays for it.
-                    await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, [thread_id])
+                # A goal that had already finished is being authorized
+                # again even when its words are identical: the previous
+                # authorization was spent, and its identity must not be reused.
+                # A paused goal stays paused however it is edited — the owner
+                # stopped it, and only the owner starts it again.
+                await conn.execute(
+                    SET_GOAL_SQL,
+                    thread_id,
+                    goal.objective,
+                    goal.max_rounds,
+                    new_goal_id(),
+                    "paused" if thread["goal_state"] == "paused" else "active",
+                    thread["goal_state"] == "complete",
+                    EDITED_WHILE_PAUSED_DETAIL,
+                )
+                # The same rule the goal repository's own ``set_goal`` applies,
+                # and it has to be applied here too: a round queued for the old
+                # objective carries a `<goal_round>` body saying what *it* was
+                # for, so leaving it queued runs a turn toward an objective its
+                # owner just replaced — and pays for it.
+                await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, [thread_id])
             parent = await conn.fetchrow(
                 f"{JOB_SELECT} WHERE j.thread_id = $1 "
                 "ORDER BY j.turn_no DESC LIMIT 1 FOR UPDATE OF j",
@@ -675,9 +885,10 @@ class PostgresConversationCommands:
                     (id, thread_id, parent_job_id, turn_no, user_id, base_sha,
                      task_prompt, runtime, model, reasoning_effort, state, metadata,
                      client_request_id, client_request_fingerprint, skills, attachments,
-                     turn_source, goal_round, goal_round_kind, goal_revision)
+                     turn_source, goal_round, goal_round_kind, goal_revision, goal_id,
+                     input_seq_at_create)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14,
-                        $15::jsonb, $16::jsonb, $17, $18, $19, $20)
+                        $15::jsonb, $16::jsonb, $17, $18, $19, $20, $21, $22)
                 """,
                 job_id,
                 thread_id,
@@ -706,6 +917,12 @@ class PostgresConversationCommands:
                 goal_round,
                 goal_round_kind,
                 goal_revision,
+                thread["goal_id"],
+                # A person's turn is what "the owner has moved on" is measured
+                # against: the sequence it lands on is stamped below, after the
+                # thread's counter has moved. An automatic round carries zero
+                # and never advances it.
+                0,
             )
             await claim_attachments(
                 conn,
@@ -724,9 +941,41 @@ class PostgresConversationCommands:
                 job_id,
                 prompt,
             )
-            await conn.execute(
-                "UPDATE agent_threads SET updated_at = NOW() WHERE id = $1", thread_id
-            )
+            if turn_source != "goal":
+                # The bump and the turn are one commit. A completion claim is
+                # honored only while the thread's counter still equals the one
+                # its turn was created at, so the message that would make an
+                # in-flight claim stale is stamped by the same transaction that
+                # accepts it.
+                stamped = await conn.fetchval(
+                    """
+                    UPDATE agent_threads
+                    SET user_input_seq = user_input_seq + 1, updated_at = NOW()
+                    WHERE id = $1
+                    RETURNING user_input_seq
+                    """,
+                    thread_id,
+                )
+                await conn.execute(
+                    "UPDATE agent_jobs SET input_seq_at_create = $2 WHERE id = $1",
+                    job_id,
+                    stamped,
+                )
+                # The same commit records that this conversation's active goal
+                # has to be looked at again. Without it, a goal whose one
+                # obligation was consumed before the message arrived — which is
+                # exactly what a message racing a decision looks like — would
+                # wait for a finish that no longer owes it anything.
+                await arm_goal_wakeup(
+                    conn,
+                    thread_id=thread_id,
+                    trigger="finish",
+                    trigger_ref=f"input:{stamped}",
+                )
+            else:
+                await conn.execute(
+                    "UPDATE agent_threads SET updated_at = NOW() WHERE id = $1", thread_id
+                )
         result = job_row_to_dict(row)
         result["title"] = thread["title"]
         result["title_source"] = thread["title_source"]

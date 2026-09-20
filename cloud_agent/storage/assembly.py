@@ -30,6 +30,7 @@ from cloud_agent.storage.repositories import (
     PostgresCredentialQueries,
     PostgresExecutionQueries,
     PostgresGoalRepository,
+    PostgresGoalWakeupRepository,
     PostgresGrantRepository,
     PostgresHostCapacityRepository,
     PostgresHostPoolRepository,
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
         CredentialQueries,
         ExecutionQueries,
         GoalRepository,
+        GoalWakeupRepository,
         GrantRepository,
         HostCapacityRepository,
         HostPoolRepository,
@@ -91,6 +93,7 @@ class Storage:
         self.credential_queries: CredentialQueries = PostgresCredentialQueries(pool)
         self.execution_queries: ExecutionQueries = PostgresExecutionQueries(pool)
         self.goals: GoalRepository = PostgresGoalRepository(pool)
+        self.goal_wakeups: GoalWakeupRepository = PostgresGoalWakeupRepository(pool)
         self.grants: GrantRepository = PostgresGrantRepository(pool)
         self.host_capacity: HostCapacityRepository = PostgresHostCapacityRepository(pool)
         self.host_pool: HostPoolRepository = PostgresHostPoolRepository(pool)

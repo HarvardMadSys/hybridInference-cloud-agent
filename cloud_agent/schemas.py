@@ -26,9 +26,17 @@ from cloud_agent.execution_profiles import ExecutionProfile
 from cloud_agent.goals.models import (
     GoalInput,
     GoalLimits,
-    GoalReportStatus,
     GoalRoundKind,
     GoalView,
+)
+
+# Runtime imports, and they have to be: this module has `from __future__ import
+# annotations`, but pydantic resolves every annotation when it builds the model,
+# so hiding these behind TYPE_CHECKING leaves the job view unbuilt and raises at
+# the first request instead of at import.
+from cloud_agent.goals.report import (  # noqa: TC001
+    GoalReportOutcome,
+    GoalReportParse,
 )
 from cloud_agent.host_pool import ENROLL_TOKEN_TTL_S
 from cloud_agent.skills.models import (
@@ -617,8 +625,15 @@ class AgentJobResponse(BaseModel):
     turn_source: Literal["human", "goal"] = "human"
     goal_round: int | None = None
     goal_round_kind: GoalRoundKind | None = None
-    goal_report: GoalReportStatus | None = None
-    goal_reason: str | None = None
+    # What this turn's final message said about the goal, and how it read.
+    # ``goal_report_parse`` is the platform's own reading — ``absent``,
+    # ``valid``, ``invalid`` or ``unavailable`` — and is what the owner's page
+    # renders the block from. ``goal_report_detail`` explains a parse that
+    # failed, or the sentence a valid report carried.
+    goal_report_parse: GoalReportParse | None = None
+    goal_report_outcome: GoalReportOutcome | None = None
+    goal_report_detail: str | None = None
+    goal_repair_round: int | None = None
     # The conversation's *live* goal, on every turn of it, the way ``title`` is.
     # Editing the objective is visible here immediately; ``goal_round`` above is
     # what this particular turn ran against.
@@ -716,26 +731,38 @@ class GoalRequest(BaseModel):
     revision: int | None = Field(None, ge=0)
 
 
+class GoalRevisionRequest(BaseModel):
+    """An optional compare-and-set guard on a goal operation.
+
+    Omitted means "act on whatever the goal currently is", which is what the
+    pause and resume buttons send: they are idempotent by nature, and refusing
+    to press one because a round advanced a counter would be a worse answer than
+    doing what was asked.
+    """
+
+    revision: int | None = Field(None, ge=0)
+
+
 class GoalResponse(BaseModel):
     """The conversation's goal after a write that changed it.
 
-    Carries the whole job as well, because the caller's view of the
-    conversation is a job view: the goal band, the turn list and the polling
-    predicate all read from it, and a goal write that returned only the goal
-    would leave the page rebuilding the rest from what it already had.
+    Answered from the *thread*, not from a turn: a goal belongs to the
+    conversation, and a conversation whose newest turn has been deleted still
+    has one. ``revision`` is echoed even when there is no goal, so a client can
+    compare and set without a separate read.
     """
 
     thread_id: str
-    job: AgentJobResponse
-    goal: GoalView
+    goal: GoalView | None = None
+    revision: int
 
 
 class GoalClearedResponse(BaseModel):
     """The conversation after removing its goal."""
 
     thread_id: str
-    job: AgentJobResponse
     cleared: bool = True
+    revision: int
 
 
 AgentSessionState = Literal[

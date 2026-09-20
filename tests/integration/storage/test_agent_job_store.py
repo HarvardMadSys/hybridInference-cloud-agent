@@ -24,6 +24,7 @@ from cloud_agent.schemas import WorkerEventRequest
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.thread_stats import summarize_thread
 from cloud_agent_host.shared_protocol import (
+    GOAL_REPORT_CAPABILITY,
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
@@ -41,6 +42,10 @@ _SHARED_HOST_CAPABILITIES = [
     SHARED_SANDBOX_CAPABILITY,
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     shared_deployment_capability("test-deployment"),
+    # Every automatic goal round requires this, because the report only exists
+    # in the turn's final assistant message. A host without it is a host the
+    # claim path correctly refuses to hand goal work to.
+    GOAL_REPORT_CAPABILITY,
 ]
 
 

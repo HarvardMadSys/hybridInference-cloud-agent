@@ -41,9 +41,9 @@ from cloud_agent.domain.execution import QUEUED, RUNNING, TERMINAL_STATES
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.gateway import GatewayError
 from cloud_agent.github_app import AppNotInstalled
-from cloud_agent.goals.continuation import maybe_continue_goal
-from cloud_agent.goals.prompts import prompt_with_goal, with_mcp_availability
-from cloud_agent.goals.report import parse_goal_report
+from cloud_agent.goals.controller import continue_after_finish
+from cloud_agent.goals.prompts import prompt_with_goal
+from cloud_agent.goals.report import GoalReportEnvelope, parse_goal_report, source_digest
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.models import ConnectionStatus
@@ -95,6 +95,7 @@ if TYPE_CHECKING:
         ConversationCommands,
         ConversationQueries,
         GoalRepository,
+        GoalWakeupRepository,
         GrantRepository,
         HostPoolRepository,
         McpConnectionRepository,
@@ -124,6 +125,7 @@ class _WorkerStorage(Protocol):
     attempt_commands: AttemptCommands
     conversation_commands: ConversationCommands
     conversation_queries: ConversationQueries
+    goal_wakeups: GoalWakeupRepository
     goals: GoalRepository
     grants: GrantRepository
     host_pool: HostPoolRepository
@@ -726,13 +728,11 @@ async def worker_claim(
                 prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
                 claim.get("skills"),
             ),
-            # ``mcp_aliases`` is what this turn actually resolves, and the
-            # runner only opens the relay when the job has bindings at all — so
-            # asking the runtime registry here told every harness about a tool
-            # its sandbox could not reach, while withholding the text
-            # convention it could have used. Every runtime claims MCP now, so
-            # that predicate was always true and the report never landed.
-            with_mcp_availability(claim.get("goal"), bool(mcp_aliases)),
+            # The goal preamble is the same for every runtime and every turn.
+            # It used to branch on whether this turn's sandbox could reach a
+            # goal tool, which meant the turns that could not reach it were
+            # never told to report at all — and those were the ordinary turns.
+            claim.get("goal"),
         ),
         setup_script=claim.get("setup_script"),
         runtime=claim["runtime"],
@@ -1441,18 +1441,25 @@ async def worker_release(
     return WorkerAckResponse(ok=True, state=QUEUED)
 
 
-async def _goal_report_for_turn(job: dict[str, Any], queries: ConversationQueries) -> Any | None:
-    """What this turn said about its conversation's goal, if it said anything.
+async def _goal_envelope_for_turn(
+    job: dict[str, Any], queries: ConversationQueries
+) -> GoalReportEnvelope | None:
+    """How this turn's final message read, if it was a goal round at all.
 
-    Only asked about a turn that is part of a conversation with a goal: parsing
-    every turn's last message for a convention the turn was never told about
-    would be reading tea leaves, and would put a report on rows whose only
-    relationship to a goal is that someone set one later.
+    Only asked about an *automatic round*: a person's turn is not part of the
+    completion protocol, and parsing it would put a report on rows whose only
+    relationship to a goal is that one was set while they ran.
+
+    A turn that produced no assistant text at all made no report — it is
+    ``absent``, and an absent report simply means "keep going". A turn whose
+    message could not be read is different in kind, and is reported as such
+    rather than being quietly treated as silence.
     """
-    if job.get("goal") is None:
+    if job.get("goal_id") is None or job.get("turn_source") != "goal":
         return None
     text = await queries.latest_assistant_message(job_id=str(job["id"]))
-    return parse_goal_report(text)
+    parsed = parse_goal_report(text)
+    return GoalReportEnvelope.from_parsed(parsed, source_digest=source_digest(text))
 
 
 @router.post("/worker/jobs/{job_id}/finish", response_model=WorkerAckResponse)
@@ -1516,7 +1523,7 @@ async def worker_finish(
     # Read the turn's self-report before its outcome is committed, so both land
     # in the same transaction: a terminal turn is never one whose goal answer is
     # missing because the read happened to be scheduled after the write.
-    goal_report = await _goal_report_for_turn(job, job_store.conversation_queries)
+    goal_envelope = await _goal_envelope_for_turn(job, job_store.conversation_queries)
     try:
         ok = await job_store.attempt_commands.transition(
             job_id=job_id,
@@ -1526,7 +1533,7 @@ async def worker_finish(
             to_state=body.state,
             detail=body.detail,
             base_sha=body.base_sha,
-            goal_report=goal_report,
+            goal_envelope=goal_envelope,
         )
     except Exception:
         await _restore_terminal_suspension(
@@ -1550,16 +1557,15 @@ async def worker_finish(
     # would stop polling — so the round the user is waiting to see would be the
     # one round nobody fetched.
     #
-    # In its own guard, because the turn itself is already decided: an error
-    # while *starting the next* turn must not turn a successful finish into a
-    # 500 the runner will retry. Retrying would not help, and the retry would
-    # find no transition left to make.
+    # The obligation itself is already durable: it was written inside the
+    # terminal transition above, and this only drains it now rather than at the
+    # next tick. In its own guard, because the turn is already decided — an
+    # error while *starting the next* turn must not turn a successful finish
+    # into a 500 the runner will retry. Retrying would not help, and the retry
+    # would find no transition left to make.
     try:
-        await maybe_continue_goal(
-            goals=job_store.goals,
-            conversations=job_store.conversation_commands,
-            queries=job_store.conversation_queries,
-            source_control=job_store.source_control,
+        await continue_after_finish(
+            store=job_store,
             job_id=job_id,
             app_credentials=app_credentials,
         )

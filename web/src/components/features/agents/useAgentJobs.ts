@@ -26,6 +26,7 @@ import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import type { AgentJob } from './types';
 import { getConversationState } from './conversationState';
 import { isActiveJobState, isActiveConversationState } from './conversationJob';
+import { hasActiveGoal } from './goal/liveWork';
 
 const ACTIVE_ATTEMPT_PHASES = new Set([
   'started',
@@ -497,9 +498,16 @@ export function useAgentJob(
   // and its publication have both settled.
   const publicationActive = hasActiveWorkspacePublication(api);
   const conversationActive = isActiveConversationState(api?.conversation_state);
+  // An active goal outlives the turn on screen: the previous round has settled
+  // and the next one may not be queued yet, so `conversation_state` alone
+  // reports idle while the platform still owes this conversation a round. The
+  // goal row is the only field that knows, and it is read from this same row.
+  const goalActive = hasActiveGoal(api?.goal);
   const metadataActive =
     api?.id === jobId &&
-    (publicationActive || (state !== 'running' && state !== 'publishing' && conversationActive));
+    (publicationActive ||
+      goalActive ||
+      (state !== 'running' && state !== 'publishing' && conversationActive));
   useEffect(() => {
     if (!active || !jobId || !metadataActive) return undefined;
     let cancelled = false;

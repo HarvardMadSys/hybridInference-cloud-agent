@@ -47,11 +47,11 @@ def thread_goal(row: Any) -> dict[str, Any] | None:
     if revision is None:
         revision = row.get("goal_revision")
     return {
+        "goal_id": row.get("goal_id"),
         "objective": row["goal_objective"],
         "state": row["goal_state"],
         "pause_reason": row.get("goal_pause_reason"),
-        "blocked_code": row.get("goal_blocked_code"),
-        "blocked_message": row.get("goal_blocked_message"),
+        "pause_detail": row.get("goal_pause_detail"),
         "revision": revision or 0,
         "max_rounds": row.get("goal_max_rounds"),
         # Derived, so only a read that asked for it has it. A list read returns
@@ -60,7 +60,9 @@ def thread_goal(row: Any) -> dict[str, Any] | None:
         # and zero there means "not fetched", which is what ``None`` says
         # elsewhere in this module.
         "rounds_used": row.get("goal_rounds_used") or 0,
-        "blocked_streak": row.get("goal_blocked_streak") or 0,
+        "repairs_used": row.get("goal_repairs_used") or 0,
+        "completion_basis": row.get("goal_completion_basis"),
+        "completed_by_job_id": row.get("goal_completed_by_job_id"),
         "created_at": row.get("goal_created_at"),
         "updated_at": row.get("goal_updated_at"),
     }
@@ -97,20 +99,25 @@ def job_row_to_dict(row: Any) -> dict[str, Any]:
         "skills": load_json(row.get("skills")),
         "attachments": load_json(row.get("attachments")),
         "fork_source_job_id": row["fork_source_job_id"],
-        # This turn's immutable goal snapshot: what it was told, what kind of
-        # round it was, and what it reported. Distinct from the conversation's
-        # live goal below — this one never changes when the objective is edited.
+        # This turn's immutable goal snapshot: the objective it was created for,
+        # what kind of round it was, and how its final message read. Distinct
+        # from the conversation's live goal below — this one never changes when
+        # the objective is edited.
         "turn_source": row.get("turn_source") or "human",
         "goal_round": row.get("goal_round"),
         "goal_round_kind": row.get("goal_round_kind"),
         "round_goal_revision": row.get("goal_revision"),
-        "goal_report": row.get("goal_report"),
-        "goal_reason": row.get("goal_reason"),
-        # The immediately preceding turn's claim, when the read provided it.
-        # ``get_job`` does, because a completion claim made on a turn that had
-        # to yield would otherwise be dropped on the floor.
-        "parent_goal_report": row.get("parent_goal_report"),
-        "parent_goal_round_kind": row.get("parent_goal_round_kind"),
+        "goal_id": row.get("goal_id"),
+        "goal_report_parse": row.get("goal_report_parse"),
+        "goal_report_outcome": row.get("goal_report_outcome"),
+        "goal_report_reason": row.get("goal_report_reason"),
+        "goal_report_detail": row.get("goal_report_detail"),
+        "goal_repair_round": row.get("goal_repair_round"),
+        "input_seq_at_create": row.get("input_seq_at_create") or 0,
+        "thread_user_input_seq": row.get("thread_user_input_seq") or 0,
+        # The immediately preceding turn's report, when the read provided it.
+        "parent_goal_report_parse": row.get("parent_goal_report_parse"),
+        "parent_goal_report_outcome": row.get("parent_goal_report_outcome"),
         # The conversation's live goal, under the job's keys as every other
         # thread-level value is. Present only on reads that join the thread.
         "goal": thread_goal(row),

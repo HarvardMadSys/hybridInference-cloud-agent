@@ -297,43 +297,74 @@ describe('toDisplayJob', () => {
     expect(toDisplayJob(JOB).branch).toBe('agent/ajob_1');
   });
 
-  it("carries the conversation goal and this turn's report", () => {
+  it("carries the conversation goal and this round's report", () => {
     const job = toDisplayJob({
       ...JOB,
       turn_source: 'goal',
       goal_round: 3,
-      goal_round_kind: 'verify',
-      goal_report: 'continue',
-      goal_reason: 'two tests still fail',
+      goal_round_kind: 'repair',
+      goal_report_parse: 'valid',
+      goal_report_outcome: 'needs_input',
+      goal_report_detail: 'which environment should this deploy to?',
       goal: {
+        goal_id: 'goal_1',
         objective: 'make `pytest` pass',
-        state: 'active',
+        state: 'paused',
         revision: 4,
         max_rounds: 10,
         rounds_used: 3,
-        blocked_streak: 0,
-        pause_reason: null,
-        blocked_code: null,
-        blocked_message: null,
+        pause_reason: 'needs_input',
+        pause_detail: 'the agent stopped and asked for input',
+        completion_basis: null,
+        completed_by_job_id: null,
         created_at: null,
         updated_at: null,
       },
     });
     expect(job.goal).toEqual({
       objective: 'make `pytest` pass',
-      state: 'active',
+      state: 'paused',
       revision: 4,
       roundsUsed: 3,
       maxRounds: 10,
-      blockedStreak: 0,
+      pauseReason: 'needs_input',
+      pauseDetail: 'the agent stopped and asked for input',
     });
     expect(job.goalTurn).toEqual({
       source: 'goal',
       round: 3,
-      kind: 'verify',
-      report: 'continue',
-      reason: 'two tests still fail',
+      kind: 'repair',
+      reportParse: 'valid',
+      reportOutcome: 'needs_input',
+      reportDetail: 'which environment should this deploy to?',
     });
+  });
+
+  it('carries a completion as the model report it is', () => {
+    const job = toDisplayJob({
+      ...JOB,
+      turn_source: 'goal',
+      goal_round: 4,
+      goal_round_kind: 'work',
+      goal_report_parse: 'valid',
+      goal_report_outcome: 'complete',
+      goal: {
+        goal_id: 'goal_1',
+        objective: 'make `pytest` pass',
+        state: 'complete',
+        revision: 4,
+        max_rounds: 10,
+        rounds_used: 4,
+        pause_reason: null,
+        pause_detail: null,
+        completion_basis: 'model_reported',
+        completed_by_job_id: 'ajob_1',
+        created_at: null,
+        updated_at: null,
+      },
+    });
+    expect(job.goal?.completionBasis).toBe('model_reported');
+    expect(job.goalTurn?.reportOutcome).toBe('complete');
   });
 
   it('says nothing about a goal on a conversation that has none', () => {
@@ -346,15 +377,18 @@ describe('toDisplayJob', () => {
     expect(job.goalTurn).toBeUndefined();
   });
 
-  it("still records what a person's own turn reported", () => {
-    // Absent means "nothing to say", not "not a goal turn": a human turn that
-    // reported a status has one, and the band shows it as the last thing said.
-    const job = toDisplayJob({ ...JOB, goal_report: 'blocked', goal_reason: 'no network' });
-    expect(job.goalTurn).toEqual({
-      source: 'human',
-      report: 'blocked',
-      reason: 'no network',
+  it("reads no completion report out of a person's own turn", () => {
+    // The platform parses the final message of the rounds it queued itself.
+    // A report-shaped row on a turn the owner sent is not a report the platform
+    // made, and the transcript must not present one as the goal's last word.
+    const job = toDisplayJob({
+      ...JOB,
+      turn_source: 'human',
+      goal_report_parse: 'valid',
+      goal_report_outcome: 'complete',
+      goal_report_detail: 'all green',
     });
+    expect(job.goalTurn).toBeUndefined();
   });
 
   it('maps the conversation pin time', () => {

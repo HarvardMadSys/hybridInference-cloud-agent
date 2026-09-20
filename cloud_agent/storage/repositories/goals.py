@@ -5,17 +5,31 @@ queued automatic rounds that belong to it. Every write here is fenced by the
 goal's ``revision``, because two very different writers reach it — an owner
 editing an objective, and the platform applying the decision a finished turn
 produced — and neither may silently overwrite the other.
+
+The other half of this repository is the *scheduling obligation*. Any write that
+leaves an active goal with something to do also records a wakeup, in the same
+transaction. That is what removes the window between "this turn ended" and "the
+next turn exists" in which a crash used to lose a goal forever.
 """
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.goals.models import (
+    ARM_AFTER_S,
     MAX_REASON_CHARS,
     STALLED_AFTER_S,
     GoalConflict,
-    GoalError,
+)
+from cloud_agent.storage._sql.goals import (
+    CANCEL_QUEUED_GOAL_ROUNDS_SQL,
+    EDITED_WHILE_PAUSED_DETAIL,
+    PAUSE_GOALS_SQL,
+    REPAIRS_USED_SQL,
+    ROUNDS_USED_SQL,
+    SET_GOAL_SQL,
 )
 from cloud_agent.storage._sql.rows import thread_goal
 
@@ -23,20 +37,21 @@ if TYPE_CHECKING:
     import asyncpg
 
     from cloud_agent.goals.decision import GoalAction
-    from cloud_agent.goals.models import GoalBlockedCode, GoalInput, GoalPauseReason
+    from cloud_agent.goals.models import GoalInput, GoalPauseReason
 
 #: The goal's own columns, read back after every write so the caller always
 #: sees what the row now says rather than what it asked for. Written once as
 #: names because there are two projections of them and they must not drift.
 _GOAL_COLUMN_NAMES = (
+    "goal_id",
     "goal_objective",
     "goal_state",
     "goal_pause_reason",
-    "goal_blocked_code",
-    "goal_blocked_message",
+    "goal_pause_detail",
     "goal_revision",
     "goal_max_rounds",
-    "goal_blocked_streak",
+    "goal_completion_basis",
+    "goal_completed_by_job_id",
     "goal_created_at",
     "goal_updated_at",
 )
@@ -48,87 +63,28 @@ _GOAL_COLUMN_NAMES = (
 #: not introduce.
 _GOAL_COLUMNS = ", ".join(_GOAL_COLUMN_NAMES)
 
-#: How many automatic rounds this goal has actually spent.
-#:
-#: **Derived, not stored.** A counter has to be incremented by whoever claims a
-#: round, which meant ``claim_job`` writing ``agent_threads`` while already
-#: holding an ``agent_jobs`` row lock — the reverse of this repository's
-#: documented thread-before-job order, and therefore a deadlock against
-#: ``pause_goal`` and ``_create_follow_up``. A counter also has to be fenced
-#: against the revision it was granted for, and every fence that was slightly
-#: wrong silently gave away a round.
-#:
-#: Counting instead makes the fence structural: a round belongs to the goal it
-#: was created for (``j.goal_revision = t.goal_revision``), it costs nothing
-#: until a model actually runs for it, and it costs once however many times it
-#: is retried (``EXISTS``). A round queued for a replaced objective cannot be
-#: counted, because replacing the objective mints a revision — and cancels that
-#: round besides.
-#:
-#: ``aborted`` is the one attempt status that is free, and it means the claim
-#: was handed back before the turn began — the platform could not mint a
-#: credential, say. Every other status, ``superseded`` included, is a turn that
-#: ran and was paid for.
-_ROUNDS_USED_SQL = """(
-        SELECT count(*) FROM agent_jobs work
-        WHERE work.thread_id = t.id
-          AND work.turn_source = 'goal'
-          AND work.goal_round_kind = 'work'
-          AND work.goal_revision = t.goal_revision
-          AND EXISTS (
-                SELECT 1 FROM agent_attempts a
-                WHERE a.job_id = work.id AND a.status <> 'aborted'
-          )
-    ) AS goal_rounds_used"""
-
 #: For reads that join. ``0017`` put ``goal_revision`` on ``agent_jobs`` as well
 #: — the revision *that turn* was created for — so an unqualified name is
 #: ambiguous there, and Postgres refuses the whole statement (42702) rather than
-#: picking one. ``get_goal_for_job`` is the only such read, and using the plain
-#: constant for it made every continuation throw.
+#: picking one.
 _GOAL_COLUMNS_QUALIFIED = ", ".join(f"t.{name}" for name in _GOAL_COLUMN_NAMES)
 
-#: Creating, replacing or editing the goal. Shared with the follow-up path,
-#: which accepts a goal alongside a message and has to write it inside the very
-#: transaction that appends the turn — the objective a turn ran against and the
-#: turn itself must be one commit or neither.
-#: ``$2`` objective, ``$3`` max_rounds.
-SET_GOAL_SQL = """
-UPDATE agent_threads
-SET goal_objective = $2,
-    goal_state = 'active',
-    goal_pause_reason = NULL,
-    goal_blocked_code = NULL,
-    goal_blocked_message = NULL,
-    goal_max_rounds = $3,
-    goal_blocked_streak = 0,
-    -- The revision names the *objective*, so only a new objective mints one.
-    -- It did move on every accepted write, and that made editing nothing but
-    -- the round cap mint a revision no queued round carried — which silently
-    -- stopped those rounds being counted, and gave the goal a free round every
-    -- time its owner raised the limit.
-    goal_revision = CASE WHEN goal_objective IS DISTINCT FROM $2
-                         THEN goal_revision + 1 ELSE goal_revision END,
-    goal_created_at = COALESCE(goal_created_at, NOW()),
-    goal_updated_at = NOW(),
-    updated_at = NOW()
-WHERE id = $1
-"""
+#: Everything a caller needs to decide what a write means, with the two derived
+#: counters, formatted for a read that has ``agent_threads t`` in scope.
+_GOAL_READ_COLUMNS = f"{_GOAL_COLUMNS}, {ROUNDS_USED_SQL}, {REPAIRS_USED_SQL}"
+_GOAL_READ_COLUMNS_QUALIFIED = f"{_GOAL_COLUMNS_QUALIFIED}, {ROUNDS_USED_SQL}, {REPAIRS_USED_SQL}"
 
-#: The columns a caller needs to decide whether the objective changed.
-GOAL_STATE_COLUMNS = "goal_objective, goal_revision"
+#: The columns a caller needs to decide whether the objective changed, and
+#: whether the goal being set is one that was already complete.
+GOAL_STATE_COLUMNS = (
+    "goal_id, goal_objective, goal_state, goal_revision, goal_max_rounds, "
+    "goal_pause_reason, goal_pause_detail"
+)
 
 
-#: A queued automatic round is the goal's to cancel: it exists only because the
-#: goal asked for it, and leaving it in the queue would run one more turn in a
-#: conversation whose goal just stopped. Takes a ``text[]`` of thread ids, so
-#: one statement serves a single round, a whole conversation, or a page of them.
-CANCEL_QUEUED_GOAL_ROUNDS_SQL = """
-UPDATE agent_jobs
-SET state = 'cancelled', cancel_requested = TRUE,
-    terminal_resume_pending = TRUE, updated_at = NOW()
-WHERE thread_id = ANY($1::text[]) AND state = 'queued' AND turn_source = 'goal'
-"""
+def new_goal_id() -> str:
+    """A fresh goal identity. Opaque and never reused."""
+    return uuid.uuid4().hex
 
 
 def goal_row_to_dict(row: Any) -> dict[str, Any] | None:
@@ -137,27 +93,59 @@ def goal_row_to_dict(row: Any) -> dict[str, Any] | None:
 
 
 class PostgresGoalRepository:
-    """Conversation goals: revisions, counters, and the rounds they own."""
+    """Conversation goals: identities, revisions, and the rounds they own."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
 
-    async def get_goal(self, *, thread_id: str) -> dict[str, Any] | None:
-        """The conversation's goal row, or ``None`` when it has none."""
-        async with self._pool.acquire() as conn:
+    # -- reads --------------------------------------------------------------
+    async def get_goal(self, *, thread_id: str, conn: Any | None = None) -> dict[str, Any] | None:
+        """The conversation's goal row, or ``None`` when it has none.
+
+        ``conn`` runs the read inside a transaction the caller already owns,
+        which is what lets a decision re-read the goal under the same lock it
+        writes under.
+        """
+        if conn is not None:
             row = await conn.fetchrow(
-                f"SELECT {_GOAL_COLUMNS}, {_ROUNDS_USED_SQL} FROM agent_threads t WHERE t.id = $1",
+                f"SELECT {_GOAL_READ_COLUMNS} FROM agent_threads t WHERE t.id = $1",
+                thread_id,
+            )
+            return None if row is None else goal_row_to_dict(row)
+        async with self._pool.acquire() as acquired:
+            row = await acquired.fetchrow(
+                f"SELECT {_GOAL_READ_COLUMNS} FROM agent_threads t WHERE t.id = $1",
                 thread_id,
             )
         return None if row is None else goal_row_to_dict(row)
+
+    async def lock_goal_state(self, *, thread_id: str, conn: Any) -> dict[str, Any] | None:
+        """Read the goal inside the caller's transaction, taking its row lock."""
+        row = await conn.fetchrow(
+            f"SELECT {_GOAL_READ_COLUMNS} FROM agent_threads t WHERE t.id = $1 FOR UPDATE OF t",
+            thread_id,
+        )
+        return None if row is None else goal_row_to_dict(row)
+
+    async def live_turn_id(self, *, thread_id: str, conn: Any | None = None) -> str | None:
+        """The id of the turn that is queued or running right now, if any."""
+        sql = (
+            "SELECT id FROM agent_jobs WHERE thread_id = $1 "
+            "AND state IN ('queued', 'running') "
+            "ORDER BY CASE WHEN state = 'running' THEN 0 ELSE 1 END, turn_no DESC LIMIT 1"
+        )
+        if conn is not None:
+            return await conn.fetchval(sql, thread_id)
+        async with self._pool.acquire() as acquired:
+            return await acquired.fetchval(sql, thread_id)
 
     async def get_goal_for_job(self, *, job_id: str) -> dict[str, Any] | None:
         """The goal of the conversation the job belongs to, or ``None``."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                SELECT {_GOAL_COLUMNS_QUALIFIED}, {_ROUNDS_USED_SQL}
+                SELECT {_GOAL_READ_COLUMNS_QUALIFIED}
                 FROM agent_threads t
                 JOIN agent_jobs j ON j.thread_id = t.id
                 WHERE j.id = $1
@@ -166,6 +154,39 @@ class PostgresGoalRepository:
             )
         return None if row is None else goal_row_to_dict(row)
 
+    async def get_thread_goal_state(self, *, user_id: str, thread_id: str) -> dict[str, Any] | None:
+        """A conversation's goal *and* its control version, owner-checked.
+
+        ``None`` when the conversation is not this owner's. A conversation with
+        no goal answers with ``goal=None`` and the revision it is at, because
+        the next write has to be compared against something.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT {_GOAL_READ_COLUMNS}
+                FROM agent_threads t
+                WHERE t.id = $1 AND t.user_id = $2 AND t.deleted_at IS NULL
+                """,
+                thread_id,
+                user_id,
+            )
+        if row is None:
+            return None
+        return {"goal": goal_row_to_dict(row), "revision": int(row["goal_revision"] or 0)}
+
+    async def has_pending_turn(self, *, thread_id: str, conn: Any | None = None) -> bool:
+        """Is any turn of this conversation queued or running right now?"""
+        sql = (
+            "SELECT EXISTS (SELECT 1 FROM agent_jobs "
+            "WHERE thread_id = $1 AND state IN ('queued', 'running'))"
+        )
+        if conn is not None:
+            return bool(await conn.fetchval(sql, thread_id))
+        async with self._pool.acquire() as acquired:
+            return bool(await acquired.fetchval(sql, thread_id))
+
+    # -- owner writes -------------------------------------------------------
     async def set_goal(
         self,
         *,
@@ -177,15 +198,15 @@ class PostgresGoalRepository:
         """Create, replace or edit the goal, returning it or ``None`` if not owned.
 
         Raises ``GoalConflict`` when ``expected_revision`` no longer matches.
-        The revision advances on every accepted write, so a caller that read
-        one can prove nothing changed under it. Rounds spent are counted from
-        the rounds carrying the current revision, so replacing the objective
-        starts the budget over and editing only the cap does not.
+        Replacing the objective mints a new ``goal_id`` and starts the round
+        budget over; editing only the cap keeps both. A completed goal set again
+        is a new authorization and mints a new identity even when the text is
+        identical. A paused goal that is edited stays paused.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             current = await conn.fetchrow(
                 f"""
-                SELECT {_GOAL_COLUMNS}
+                SELECT {GOAL_STATE_COLUMNS}
                 FROM agent_threads
                 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
                 FOR UPDATE
@@ -198,28 +219,65 @@ class PostgresGoalRepository:
             revision = int(current["goal_revision"] or 0)
             if expected_revision is not None and expected_revision != revision:
                 raise GoalConflict("This goal changed since you read it. Reload and try again.")
-            objective_changed = current["goal_objective"] != goal.objective
-            await conn.execute(SET_GOAL_SQL, thread_id, goal.objective, goal.max_rounds)
-            if objective_changed:
-                # The rounds that were queued for the old objective are not
-                # rounds for this one.
-                await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, [thread_id])
-            # Read back rather than returned: the round count is derived from
-            # other rows, and a ``RETURNING`` list cannot carry a subquery.
+            # A goal that had finished is being authorized again, even though
+            # its words are unchanged: the last authorization was spent, and
+            # reusing its identity would make an old report look current.
+            reauthorized = current["goal_state"] == "complete"
+            # A paused goal that is edited stays paused, whatever was edited.
+            # The owner stopped it; only the owner starts it again.
+            state = "paused" if current["goal_state"] == "paused" else "active"
+            await conn.execute(
+                SET_GOAL_SQL,
+                thread_id,
+                goal.objective,
+                goal.max_rounds,
+                new_goal_id(),
+                state,
+                reauthorized,
+                EDITED_WHILE_PAUSED_DETAIL,
+            )
+            # A queued round belongs to the objective it was written for. Both
+            # paths that replace an objective — this one and the follow-up
+            # append — cancel it, or the next claim would run a prompt about the
+            # goal the owner just replaced.
+            await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, [thread_id])
             written = await conn.fetchrow(
-                f"SELECT {_GOAL_COLUMNS}, {_ROUNDS_USED_SQL} FROM agent_threads t WHERE t.id = $1",
+                f"SELECT {_GOAL_READ_COLUMNS} FROM agent_threads t WHERE t.id = $1",
                 thread_id,
             )
+            if state == "active" and written is not None:
+                # The set is the owner's authorization: record that this goal
+                # has to be looked at, in the transaction that created it.
+                await _arm(
+                    conn,
+                    thread_id=thread_id,
+                    goal_id=str(written["goal_id"]),
+                    revision=int(written["goal_revision"]),
+                    trigger="owner",
+                    trigger_ref=f"set:{written['goal_revision']}",
+                )
         return goal_row_to_dict(written)
 
-    async def pause_goal(self, *, thread_id: str, revision: int, reason: GoalPauseReason) -> bool:
-        """``active`` → ``paused``, cancelling queued automatic rounds with it."""
+    async def pause_goal(
+        self,
+        *,
+        thread_id: str,
+        revision: int,
+        reason: GoalPauseReason,
+        detail: str | None = None,
+    ) -> dict[str, Any] | None:
+        """``active`` → ``paused``, cancelling queued automatic rounds with it.
+
+        A pause never interrupts a turn that is already running: the owner's
+        "stop this" is the stop button, and this is "do not start another one".
+        """
         async with self._pool.acquire() as conn, conn.transaction():
-            updated = await conn.fetchval(
+            written = await conn.fetchrow(
                 """
                 UPDATE agent_threads
                 SET goal_state = 'paused', goal_pause_reason = $3,
-                    goal_blocked_code = NULL, goal_blocked_message = NULL,
+                    goal_pause_detail = $4,
+                    goal_completion_basis = NULL, goal_completed_by_job_id = NULL,
                     goal_revision = goal_revision + 1,
                     goal_updated_at = NOW(), updated_at = NOW()
                 WHERE id = $1 AND goal_revision = $2 AND goal_state = 'active'
@@ -228,29 +286,74 @@ class PostgresGoalRepository:
                 thread_id,
                 revision,
                 reason,
+                detail if detail is not None else _pause_detail(reason),
             )
-            if updated is None:
-                return False
+            if written is None:
+                return None
             await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, [thread_id])
-        return True
+            # The rounds that were queued for this goal are gone, so any wakeup
+            # that was going to schedule one is void: leaving it pending would
+            # let a consumer resurrect a goal the owner just stopped.
+            await conn.execute(
+                "UPDATE agent_goal_wakeups SET state = 'processed', detail = 'goal paused', "
+                "lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW() "
+                "WHERE thread_id = $1 AND state = 'pending'",
+                thread_id,
+            )
+            row = await conn.fetchrow(
+                f"SELECT {_GOAL_READ_COLUMNS} FROM agent_threads t WHERE t.id = $1", thread_id
+            )
+        return goal_row_to_dict(row)
 
-    async def resume_goal(self, *, thread_id: str, revision: int) -> bool:
-        """``paused`` → ``active`` and clear the pause reason."""
-        async with self._pool.acquire() as conn:
-            updated = await conn.fetchval(
+    async def resume_goal(
+        self, *, thread_id: str, user_id: str, revision: int
+    ) -> dict[str, Any] | None:
+        """``paused`` → ``active``, and record the obligation to schedule.
+
+        Returns the goal as written, or ``None`` when the revision moved under
+        the caller. The owner's authorization is the trigger: no model report is
+        needed to start working again.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            written = await conn.fetchrow(
                 """
                 UPDATE agent_threads
                 SET goal_state = 'active', goal_pause_reason = NULL,
-                    goal_blocked_code = NULL, goal_blocked_message = NULL,
+                    goal_pause_detail = NULL,
+                    goal_completion_basis = NULL, goal_completed_by_job_id = NULL,
                     goal_revision = goal_revision + 1,
                     goal_updated_at = NOW(), updated_at = NOW()
-                WHERE id = $1 AND goal_revision = $2 AND goal_state = 'paused'
-                RETURNING id
+                WHERE id = $1 AND user_id = $2 AND goal_revision = $3
+                  AND goal_state = 'paused'
+                RETURNING id, goal_id, goal_revision
                 """,
                 thread_id,
+                user_id,
                 revision,
             )
-        return updated is not None
+            if written is None:
+                return None
+            await conn.execute(
+                """
+                UPDATE agent_goal_wakeups
+                SET state = 'processed', detail = 'superseded by resume',
+                    lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW()
+                WHERE thread_id = $1 AND state = 'pending'
+                """,
+                thread_id,
+            )
+            await _arm(
+                conn,
+                thread_id=thread_id,
+                goal_id=str(written["goal_id"]),
+                revision=int(written["goal_revision"]),
+                trigger="owner",
+                trigger_ref=f"resume:{written['goal_revision']}",
+            )
+            row = await conn.fetchrow(
+                f"SELECT {_GOAL_READ_COLUMNS} FROM agent_threads t WHERE t.id = $1", thread_id
+            )
+        return goal_row_to_dict(row)
 
     async def clear_goal(self, *, thread_id: str, user_id: str) -> bool:
         """Remove the goal entirely, cancelling any queued automatic round."""
@@ -258,9 +361,10 @@ class PostgresGoalRepository:
             cleared = await conn.fetchval(
                 """
                 UPDATE agent_threads
-                SET goal_objective = NULL, goal_state = NULL, goal_pause_reason = NULL,
-                    goal_blocked_code = NULL, goal_blocked_message = NULL,
-                    goal_max_rounds = NULL, goal_blocked_streak = 0,
+                SET goal_objective = NULL, goal_id = NULL, goal_state = NULL,
+                    goal_pause_reason = NULL, goal_pause_detail = NULL,
+                    goal_max_rounds = NULL, goal_repairs_used = 0,
+                    goal_completion_basis = NULL, goal_completed_by_job_id = NULL,
                     goal_revision = goal_revision + 1,
                     goal_updated_at = NOW(), updated_at = NOW()
                 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
@@ -273,8 +377,15 @@ class PostgresGoalRepository:
             if cleared is None:
                 return False
             await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, [thread_id])
+            await conn.execute(
+                "UPDATE agent_goal_wakeups SET state = 'processed', detail = 'goal cleared', "
+                "lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW() "
+                "WHERE thread_id = $1 AND state = 'pending'",
+                thread_id,
+            )
         return True
 
+    # -- the decision's write ----------------------------------------------
     async def apply_action(
         self,
         *,
@@ -282,175 +393,244 @@ class PostgresGoalRepository:
         revision: int,
         action: GoalAction,
         pause_reason: GoalPauseReason | None = None,
-        blocked_code: GoalBlockedCode | None = None,
+        pause_detail: str | None = None,
+        completed_by_job_id: str | None = None,
+        conn: Any | None = None,
     ) -> dict[str, Any] | None:
         """Write what the decision returned, if the goal has not moved since.
 
         Returns the goal as written, or ``None`` when the revision changed — the
         owner edited, paused or cleared the goal while this turn was finishing,
-        and their write is the one that stands. The row is returned rather than
-        a flag because a decision can be applied twice in one turn — a blocked
-        streak, then the action that streak implies — and the second write has
-        to be fenced against the first one's revision.
+        and their write is the one that stands.
         """
-        state, pause, code, message = _action_columns(action, pause_reason, blocked_code)
-        cancel_rounds = action.kind in ("pause", "block", "complete")
-        async with self._pool.acquire() as conn, conn.transaction():
-            row = await conn.fetchrow(
-                f"""
-                UPDATE agent_threads
-                SET goal_state = COALESCE($3, goal_state),
-                    -- Why it stopped belongs to the stop, not to every later
-                    -- write. A ``kind="none"`` decision exists to record a
-                    -- blocked streak, and clearing the code and message on the
-                    -- way past left a blocked goal that could not say why —
-                    -- silently, because the revision does not move either.
-                    goal_pause_reason = CASE WHEN $3::text IS NULL
-                                             THEN goal_pause_reason ELSE $4 END,
-                    goal_blocked_code = CASE WHEN $3::text IS NULL
-                                             THEN goal_blocked_code ELSE $5 END,
-                    goal_blocked_message = CASE WHEN $3::text IS NULL
-                                                THEN goal_blocked_message ELSE $6 END,
-                    goal_blocked_streak = $7,
-                    goal_revision = CASE WHEN $3::text IS NULL THEN goal_revision
-                                         ELSE goal_revision + 1 END,
-                    goal_updated_at = NOW(), updated_at = NOW()
-                WHERE id = $1 AND goal_revision = $2 AND goal_state IS NOT NULL
-                RETURNING {_GOAL_COLUMNS}
-                """,
+        state, reason, detail, basis, completed_by = _action_columns(
+            action, pause_reason, pause_detail, completed_by_job_id
+        )
+        cancel_rounds = action.kind in ("pause", "complete")
+        if conn is not None:
+            return await self._apply_action_on(
+                conn, thread_id, revision, state, reason, detail, basis, completed_by, cancel_rounds
+            )
+        async with self._pool.acquire() as acquired, acquired.transaction():
+            return await self._apply_action_on(
+                acquired,
                 thread_id,
                 revision,
                 state,
-                pause,
-                code,
-                message,
-                action.blocked_streak,
+                reason,
+                detail,
+                basis,
+                completed_by,
+                cancel_rounds,
             )
-            if row is None:
-                return None
-            if cancel_rounds:
-                await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, [thread_id])
+
+    async def _apply_action_on(
+        self,
+        conn: Any,
+        thread_id: str,
+        revision: int,
+        state: str | None,
+        reason: str | None,
+        detail: str | None,
+        basis: str | None,
+        completed_by: str | None,
+        cancel_rounds: bool,
+    ) -> dict[str, Any] | None:
+        """The one statement, on whichever connection owns the transaction."""
+        row = await conn.fetchrow(
+            f"""
+            UPDATE agent_threads
+            SET goal_state = COALESCE($3, goal_state),
+                -- Why it stopped belongs to the stop. A ``none`` decision
+                -- exists to record that a turn was judged and nothing
+                -- followed from it, and clearing the reason on the way past
+                -- left a paused goal that could not say why.
+                goal_pause_reason = CASE WHEN $3::text IS NULL
+                                         THEN goal_pause_reason ELSE $4 END,
+                goal_pause_detail = CASE WHEN $3::text IS NULL
+                                         THEN goal_pause_detail ELSE $5 END,
+                goal_completion_basis = CASE WHEN $3::text IS NULL
+                                             THEN goal_completion_basis ELSE $6 END,
+                goal_completed_by_job_id = CASE WHEN $3::text IS NULL
+                                                THEN goal_completed_by_job_id ELSE $7 END,
+                goal_revision = CASE WHEN $3::text IS NULL THEN goal_revision
+                                     ELSE goal_revision + 1 END,
+                goal_updated_at = NOW(), updated_at = NOW()
+            WHERE id = $1 AND goal_revision = $2 AND goal_state IS NOT NULL
+            RETURNING {_GOAL_COLUMNS}
+            """,
+            thread_id,
+            revision,
+            state,
+            reason,
+            detail,
+            basis,
+            completed_by,
+        )
+        if row is None:
+            return None
+        if cancel_rounds:
+            await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, [thread_id])
+            await conn.execute(
+                "UPDATE agent_goal_wakeups SET state = 'processed', "
+                "detail = $2, lease_owner = NULL, lease_expires_at = NULL, "
+                "updated_at = NOW() "
+                "WHERE thread_id = $1 AND state = 'pending'",
+                thread_id,
+                f"goal {state}",
+            )
         return goal_row_to_dict(row)
 
-    async def record_goal_report(
-        self,
-        *,
-        job_id: str,
-        attempt_id: int,
-        lease_generation: int,
-        status: str,
-        reason: str | None,
-    ) -> bool:
-        """Store one turn's goal report on its job row, under the live lease.
+    # -- the finished turn's report ----------------------------------------
+    # -- recovery -----------------------------------------------------------
+    async def sweep_goal_scheduling(self) -> dict[str, list[str]]:
+        """Recover goals whose scheduling obligation was lost, and pause the rest.
 
-        The same two columns the message parser writes, so a report made
-        through a tool and one written as text are the same fact by the time
-        anything reads them. Returns ``False`` when the attempt is no longer
-        the running one — a superseded turn must not relabel what its successor
-        is doing.
+        Three shapes are looked for, in this order:
+
+        * ``rearmed`` — an ``active`` goal whose parked wakeup is no longer
+          waiting on anything, or whose conversation has gone idle with no
+          wakeup at all. The decision is made again.
+        * ``stalled`` — an ``active`` goal with nothing queued, running or
+          pending for longer than :data:`STALLED_AFTER_S`. No path can explain
+          it, so it is paused and said so.
+
+        Returns the thread ids by shape, for the caller's log line.
         """
-        async with self._pool.acquire() as conn:
-            updated = await conn.fetchval(
-                """
-                UPDATE agent_jobs j
-                SET goal_report = $3, goal_reason = $4, updated_at = NOW()
-                WHERE j.id = $1
-                  AND j.state = 'running'
-                  AND j.current_attempt_id = $2
-                  AND EXISTS (
-                        SELECT 1 FROM agent_attempts a
-                        WHERE a.id = $2 AND a.job_id = j.id
-                          AND a.lease_generation = $5
-                          AND a.status = 'running'
-                          AND a.lease_expires_at > NOW()
-                  )
-                RETURNING j.id
-                """,
-                job_id,
-                attempt_id,
-                status,
-                # Bounded here rather than at the tool, so the text path and the
-                # tool path cannot disagree: the column has a 2000-character
-                # CHECK, and a model that wrote three paragraphs was answered
-                # with a constraint violation instead of a recorded report.
-                (reason or "")[:MAX_REASON_CHARS] or None,
-                lease_generation,
-            )
-        return updated is not None
-
-    async def has_pending_turn(self, *, thread_id: str) -> bool:
-        """Is any turn of this conversation queued or running right now?"""
-        async with self._pool.acquire() as conn:
-            return bool(
-                await conn.fetchval(
-                    "SELECT EXISTS (SELECT 1 FROM agent_jobs "
-                    "WHERE thread_id = $1 AND state IN ('queued', 'running'))",
-                    thread_id,
-                )
-            )
-
-    async def pause_stalled_goals(self) -> list[str]:
-        """Pause active goals whose conversation has gone quiet; return their ids."""
         async with self._pool.acquire() as conn, conn.transaction():
-            stalled = await conn.fetch(
+            rearm = await conn.fetch(
                 """
-                SELECT t.id
+                SELECT t.id AS thread_id, t.goal_id, t.goal_revision
                 FROM agent_threads t
-                WHERE t.goal_state = 'active'
-                  AND t.goal_objective IS NOT NULL
+                WHERE t.goal_state = 'active' AND t.goal_objective IS NOT NULL
                   AND NOT EXISTS (
                         SELECT 1 FROM agent_jobs pending
                         WHERE pending.thread_id = t.id
                           AND pending.state IN ('queued', 'running')
                   )
-                  AND EXISTS (
-                        SELECT 1 FROM agent_jobs recent
-                        WHERE recent.thread_id = t.id
+                  AND NOT EXISTS (
+                        SELECT 1 FROM agent_goal_wakeups w
+                        WHERE w.thread_id = t.id AND w.state = 'pending'
                   )
+                  AND t.goal_updated_at > NOW() - make_interval(secs => $1)
+                ORDER BY t.goal_updated_at
+                LIMIT 200
+                """,
+                ARM_AFTER_S,
+            )
+            rearmed: list[str] = []
+            for row in rearm:
+                # An ``active`` goal with nothing queued, running or pending, and
+                # a write recent enough that a consumer may still be about to
+                # act on it. Arming is idempotent, so a recovery pass racing a
+                # live consumer costs one INSERT that does nothing.
+                await _arm(
+                    conn,
+                    thread_id=str(row["thread_id"]),
+                    goal_id=str(row["goal_id"]),
+                    revision=int(row["goal_revision"]),
+                    trigger="owner",
+                    trigger_ref=f"recovery:{row['goal_revision']}",
+                )
+                rearmed.append(str(row["thread_id"]))
+            # A queued automatic round that no longer matches its goal can never
+            # be claimed — the claim statement re-checks the identity — so it
+            # would wait in the queue forever and make its conversation look
+            # busy. Cancelling it here is what keeps that check honest.
+            cancelled = await conn.fetch(
+                """
+                UPDATE agent_jobs j
+                SET state = 'cancelled', cancel_requested = TRUE,
+                    terminal_resume_pending = TRUE, updated_at = NOW()
+                FROM agent_threads t
+                WHERE j.thread_id = t.id AND j.state = 'queued'
+                  AND j.turn_source = 'goal'
                   AND (
-                        SELECT MAX(settled.updated_at) FROM agent_jobs settled
-                        WHERE settled.thread_id = t.id
-                          AND settled.state IN ('succeeded', 'failed', 'cancelled')
-                  ) < NOW() - make_interval(secs => $1)
-                ORDER BY t.id
+                        t.goal_state IS DISTINCT FROM 'active'
+                        OR t.goal_id IS DISTINCT FROM j.goal_id
+                        OR t.goal_revision IS DISTINCT FROM j.goal_revision
+                  )
+                RETURNING j.thread_id, t.goal_state, t.goal_id, t.goal_revision
+                """
+            )
+            for row in cancelled:
+                if row["goal_state"] != "active" or row["goal_id"] is None:
+                    continue
+                # The goal is still live and still authorized; only the round
+                # was stale. Record a fresh obligation so the decision is made
+                # again against the revision that stands now.
+                await _arm(
+                    conn,
+                    thread_id=str(row["thread_id"]),
+                    goal_id=str(row["goal_id"]),
+                    revision=int(row["goal_revision"]),
+                    trigger="owner",
+                    trigger_ref=f"stale-round:{row['goal_revision']}",
+                )
+                rearmed.append(str(row["thread_id"]))
+            stalled = await conn.fetch(
+                """
+                SELECT t.id
+                FROM agent_threads t
+                WHERE t.goal_state = 'active' AND t.goal_objective IS NOT NULL
+                  AND NOT EXISTS (
+                        SELECT 1 FROM agent_jobs pending
+                        WHERE pending.thread_id = t.id
+                          AND pending.state IN ('queued', 'running')
+                  )
+                  AND NOT EXISTS (
+                        SELECT 1 FROM agent_goal_wakeups w
+                        WHERE w.thread_id = t.id AND w.state = 'pending'
+                  )
+                  AND t.goal_updated_at < NOW() - make_interval(secs => $1)
+                ORDER BY t.goal_updated_at
+                LIMIT 200
                 FOR UPDATE OF t SKIP LOCKED
                 """,
                 STALLED_AFTER_S,
             )
-            thread_ids = [str(row["id"]) for row in stalled]
-            if not thread_ids:
-                return []
-            await conn.execute(
-                """
-                UPDATE agent_threads
-                SET goal_state = 'paused', goal_pause_reason = 'stalled',
-                    -- Every other way a goal stops clears these; leaving them
-                    -- set made a stalled goal report a block it no longer has.
-                    goal_blocked_code = NULL, goal_blocked_message = NULL,
-                    goal_revision = goal_revision + 1,
-                    goal_updated_at = NOW(), updated_at = NOW()
-                WHERE id = ANY($1::text[]) AND goal_state = 'active'
-                """,
-                thread_ids,
-            )
-            await conn.execute(
-                """
-                UPDATE agent_jobs
-                SET state = 'cancelled', cancel_requested = TRUE,
-                    terminal_resume_pending = TRUE, updated_at = NOW()
-                WHERE thread_id = ANY($1::text[]) AND state = 'queued'
-                  AND turn_source = 'goal'
-                """,
-                thread_ids,
-            )
-        return thread_ids
+            stalled_ids = [str(row["id"]) for row in stalled]
+            if stalled_ids:
+                await conn.execute(
+                    PAUSE_GOALS_SQL,
+                    stalled_ids,
+                    "scheduling_failed",
+                    "the platform stopped scheduling this goal and could not "
+                    "explain why; resume it to try again",
+                )
+        return {"rearmed": rearmed, "stalled": stalled_ids}
+
+
+def _pause_detail(reason: str) -> str:
+    """The user-readable half of a pause the *platform* decided.
+
+    An owner's own pause needs no explanation. Every other reason is something
+    the owner has to be told, in words, or the badge is a dead end.
+    """
+    return {
+        "user": "paused by the user",
+        "fork": "copied from another conversation; resume it to start working",
+        "needs_input": "the agent stopped and asked for input",
+        "round_limit": "the goal used its whole automatic round budget",
+        "execution_failed": "the automatic round that was running did not finish",
+        "cancelled": "the automatic round was cancelled",
+        "report_invalid": "the agent's completion report could not be read",
+        "report_unavailable": "the agent's final message could not be read",
+        "runtime_unsupported": "this session's runtime cannot report goal progress",
+        "context_lost": "the conversation's session is gone",
+        "access_denied": "this conversation no longer has access to its repository",
+        "quota_unavailable": "the account's inference quota is not available",
+        "scheduling_failed": "the platform could not schedule the next round",
+        "archived": "the conversation was archived",
+    }.get(reason, reason)
 
 
 def _action_columns(
     action: GoalAction,
     pause_reason: GoalPauseReason | None,
-    blocked_code: GoalBlockedCode | None,
-) -> tuple[str | None, str | None, str | None, str | None]:
+    pause_detail: str | None,
+    completed_by_job_id: str | None,
+) -> tuple[str | None, str | None, str | None, str | None, str | None]:
     """The state columns one of the decision's actions implies.
 
     A ``None`` state leaves the row's state alone: continuing a goal is not a
@@ -458,13 +638,47 @@ def _action_columns(
     would be exactly the lost update the revision fence exists to prevent.
     """
     if action.kind == "pause":
-        if pause_reason is None:
-            raise GoalError("a pause action must name the reason it paused")
-        return "paused", pause_reason, None, None
+        reason = pause_reason or action.reason
+        detail = (pause_detail or action.message or _pause_detail(reason or ""))[:MAX_REASON_CHARS]
+        return "paused", reason, detail, None, None
     if action.kind == "complete":
-        return "complete", None, None, None
-    if action.kind == "block":
-        if blocked_code is None:
-            raise GoalError("a block action must name the code it blocked with")
-        return "blocked", None, blocked_code, action.message
-    return None, None, None, None
+        # A completion names the turn that earned it. Without one there is
+        # nothing to show the owner, and the shape constraint refuses the row.
+        return (
+            "complete",
+            None,
+            None,
+            action.completion_basis or "model_reported",
+            completed_by_job_id,
+        )
+    return None, None, None, None, None
+
+
+async def _arm(
+    conn: Any,
+    *,
+    thread_id: str,
+    goal_id: str | None,
+    revision: int,
+    trigger: str,
+    trigger_ref: str,
+    waiting_job_id: str | None = None,
+) -> str | None:
+    """Insert one scheduling obligation, or nothing when it already exists."""
+    return await conn.fetchval(
+        """
+        INSERT INTO agent_goal_wakeups
+            (id, thread_id, goal_id, revision, trigger, trigger_ref, waiting_job_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (thread_id, trigger, trigger_ref) WHERE state = 'pending'
+        DO NOTHING
+        RETURNING id
+        """,
+        uuid.uuid4().hex,
+        thread_id,
+        goal_id,
+        revision,
+        trigger,
+        trigger_ref,
+        waiting_job_id,
+    )

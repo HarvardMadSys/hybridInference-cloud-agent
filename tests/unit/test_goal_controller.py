@@ -1,0 +1,631 @@
+"""The wakeup consumer: what the platform writes after it judges a goal.
+
+The decision itself is pure and tested on its own. This module is everything
+around it — reading the facts a decision needs, running it, and writing the
+answer *together with* the wakeup's completion. The store below is a small,
+stateful model of the four repositories the consumer reaches, so each case can
+assert on the rows it actually wrote: the round that was queued, the goal that
+was paused, the wakeup that was finished or parked.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from cloud_agent.goals.controller import client_request_id_for, consume_wakeup, run_goal_wakeups
+from cloud_agent.goals.models import MAX_WAKEUP_ATTEMPTS
+from cloud_agent.storage.repositories.goal_wakeups import wakeup_backoff
+from cloud_agent.storage.repositories.goals import _action_columns
+
+pytestmark = pytest.mark.asyncio
+
+THREAD_ID = "athr_1"
+GOAL_ID = "goal-1"
+REPO = "owner/name"
+
+
+def goal_row(
+    *,
+    state: str = "active",
+    goal_id: str = GOAL_ID,
+    revision: int = 1,
+    objective: str = "ship it",
+    max_rounds: int = 10,
+    rounds_used: int = 0,
+    repairs_used: int = 0,
+    pause_reason: str | None = None,
+    pause_detail: str | None = None,
+) -> dict[str, Any]:
+    """One conversation's goal, as the store reads it back."""
+    return {
+        "goal_id": goal_id,
+        "objective": objective,
+        "state": state,
+        "revision": revision,
+        "max_rounds": max_rounds,
+        "rounds_used": rounds_used,
+        "repairs_used": repairs_used,
+        "pause_reason": pause_reason,
+        "pause_detail": pause_detail,
+        "completion_basis": None,
+        "completed_by_job_id": None,
+    }
+
+
+def turn(
+    *,
+    id: str,
+    state: str = "succeeded",
+    turn_source: str = "human",
+    goal_id: str | None = None,
+    round_kind: str | None = None,
+    report_parse: str | None = None,
+    report_outcome: str | None = None,
+    report_reason: str | None = None,
+    report_detail: str | None = None,
+    detail: str | None = None,
+    input_seq_at_create: int = 0,
+    turn_no: int = 1,
+) -> dict[str, Any]:
+    """One turn of the conversation, with only the fields a decision reads.
+
+    ``input_seq_at_create`` is the person-message counter this turn was created
+    at, which is what ``_has_newer_input`` compares against the thread's. A
+    person's turn lands on the value it produced; an automatic round carries
+    the value it saw when the platform created it.
+    """
+    return {
+        "id": id,
+        "thread_id": THREAD_ID,
+        "user_id": "user-1",
+        "repo": REPO,
+        "state": state,
+        "turn_no": turn_no,
+        "turn_source": turn_source,
+        "goal_id": goal_id,
+        "round_goal_revision": 1 if round_kind else None,
+        "goal_round_kind": round_kind,
+        "goal_report_parse": report_parse,
+        "goal_report_outcome": report_outcome,
+        # The model's own sentence and the parser's reason it refused a block
+        # are two different columns, and only the first is a report's content.
+        "goal_report_reason": report_reason,
+        "goal_report_detail": report_detail,
+        "detail": detail,
+        "runtime": "claude-code",
+        "input_seq_at_create": input_seq_at_create,
+        "archived_at": None,
+        "thread_sandbox": None,
+    }
+
+
+class _Transaction:
+    """One fake transaction, over the single thread these cases run on."""
+
+    async def __aenter__(self) -> _Transaction:
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> bool:
+        return False
+
+
+class FakeWakeups:
+    """The durable queue, modelled with a clock the test advances."""
+
+    def __init__(self, store: FakeStore) -> None:
+        self._store = store
+        self.rows: list[dict[str, Any]] = []
+
+    def arm(
+        self,
+        *,
+        trigger: str,
+        trigger_ref: str,
+        goal_id: str | None = GOAL_ID,
+        revision: int = 1,
+    ) -> dict[str, Any]:
+        """Record one obligation, idempotent on the event while it is pending."""
+        for row in self.rows:
+            if (
+                row["state"] == "pending"
+                and row["trigger"] == trigger
+                and row["trigger_ref"] == trigger_ref
+            ):
+                return row
+        row = {
+            "id": f"wakeup_{len(self.rows) + 1}",
+            "thread_id": THREAD_ID,
+            "goal_id": goal_id,
+            "revision": revision,
+            "trigger": trigger,
+            "trigger_ref": trigger_ref,
+            "state": "pending",
+            "waiting_job_id": None,
+            "attempts": 0,
+            "detail": None,
+            "lease_expires_at": None,
+            "not_before": 0.0,
+        }
+        self.rows.append(row)
+        return row
+
+    async def claim_wakeups(self, *, limit: int = 1) -> list[dict[str, Any]]:
+        """Lease what is due: pending, unparked, past any backoff, unleased."""
+        now = self._store.clock
+        due = [
+            row
+            for row in self.rows
+            if row["state"] == "pending"
+            and row["waiting_job_id"] is None
+            and row["not_before"] <= now
+            and (row["lease_expires_at"] is None or row["lease_expires_at"] < now)
+        ][:limit]
+        for row in due:
+            row["attempts"] += 1
+            row["lease_expires_at"] = now + 120.0
+        return [dict(row) for row in due]
+
+    async def release_wakeup(
+        self,
+        *,
+        wakeup_id: str,
+        waiting_job_id: str | None = None,
+        retry_in_seconds: float | None = None,
+        detail: str | None = None,
+        conn: Any | None = None,
+    ) -> None:
+        """Give the lease back, parking behind a turn or waiting out a backoff."""
+        row = self._row(wakeup_id)
+        row["lease_expires_at"] = None
+        if retry_in_seconds is not None:
+            # A backoff defers ``not_before``, never the lease: "do not touch
+            # this yet" and "a worker may have died" are different facts.
+            row["not_before"] = self._store.clock + retry_in_seconds
+        if waiting_job_id is not None:
+            row["waiting_job_id"] = waiting_job_id
+        if detail is not None:
+            row["detail"] = detail
+
+    async def finish_wakeup(
+        self,
+        *,
+        wakeup_id: str,
+        processed: bool = True,
+        detail: str | None = None,
+        conn: Any | None = None,
+    ) -> None:
+        """Mark the obligation settled, with what was decided about it."""
+        row = self._row(wakeup_id)
+        row["state"] = "processed" if processed else "pending"
+        row["lease_expires_at"] = None
+        if detail is not None:
+            row["detail"] = detail
+
+    def transaction(self) -> _Transaction:
+        """One transaction over the state a whole decision reads and writes."""
+        return _Transaction()
+
+    def _row(self, wakeup_id: str) -> dict[str, Any]:
+        return next(row for row in self.rows if row["id"] == wakeup_id)
+
+
+class FakeGoals:
+    """Goal state, fenced by the revision the decision was made against."""
+
+    def __init__(self, store: FakeStore) -> None:
+        self._store = store
+
+    def _goal(self, thread_id: str) -> dict[str, Any] | None:
+        return self._store.goal
+
+    async def get_goal(self, *, thread_id: str, conn: Any | None = None) -> dict[str, Any] | None:
+        return None if self._store.goal is None else dict(self._store.goal)
+
+    async def lock_goal_state(self, *, thread_id: str, conn: Any) -> dict[str, Any] | None:
+        return None if self._store.goal is None else dict(self._store.goal)
+
+    async def has_pending_turn(self, *, thread_id: str, conn: Any | None = None) -> bool:
+        return self._store.live_turn() is not None
+
+    async def live_turn_id(self, *, thread_id: str, conn: Any | None = None) -> str | None:
+        live = self._store.live_turn()
+        return None if live is None else str(live["id"])
+
+    async def apply_action(
+        self,
+        *,
+        thread_id: str,
+        revision: int,
+        action: Any,
+        pause_reason: str | None = None,
+        pause_detail: str | None = None,
+        completed_by_job_id: str | None = None,
+        conn: Any | None = None,
+    ) -> dict[str, Any] | None:
+        goal = self._store.goal
+        if goal is None or goal["revision"] != revision:
+            return None
+        # The real column mapping, so a terminal action that cannot name its
+        # reason or its completing turn fails here the way Postgres refuses it.
+        state, reason, detail, basis, completed_by = _action_columns(
+            action, pause_reason, pause_detail, completed_by_job_id
+        )
+        if state is None:
+            return dict(goal)
+        if state == "complete" and not completed_by:
+            raise ValueError("a completed goal has to name the turn that earned it")
+        goal.update(
+            state=state,
+            pause_reason=reason,
+            pause_detail=detail,
+            completion_basis=basis,
+            completed_by_job_id=completed_by,
+            revision=revision + 1,
+        )
+        self._store.cancel_queued_rounds()
+        return dict(goal)
+
+
+class FakeConversationCommands:
+    """Appending turns, including the automatic rounds a decision creates."""
+
+    def __init__(self, store: FakeStore) -> None:
+        self._store = store
+
+    async def create_goal_round(
+        self,
+        *,
+        conn: Any,
+        thread_id: str,
+        goal_id: str,
+        revision: int,
+        kind: str,
+        round_number: int,
+        prompt: str,
+        client_request_id: str,
+        client_request_fingerprint: str,
+        wakeup_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if self._store.fail_rounds > 0:
+            self._store.fail_rounds -= 1
+            raise RuntimeError("the queue is unavailable")
+        if any(
+            existing["thread_id"] == thread_id
+            and existing.get("client_request_id") == client_request_id
+            for existing in self._store.turns
+        ):
+            # This event already produced a round; a replayed decision finds it
+            # rather than starting a second turn.
+            if wakeup_id is not None:
+                await self._store.goal_wakeups.finish_wakeup(wakeup_id=wakeup_id, detail="replayed")
+            return None
+        created = turn(
+            id=f"round_{round_number}",
+            state="queued",
+            turn_source="goal",
+            goal_id=goal_id,
+            round_kind=kind,
+            input_seq_at_create=self._store.input_seq,
+            turn_no=len(self._store.turns) + 1,
+        )
+        created.update(
+            {
+                "parent_job_id": self._store.latest_turn_id(),
+                "goal_round": round_number,
+                "task_prompt": prompt,
+                "client_request_id": client_request_id,
+            }
+        )
+        self._store.turns.append(created)
+        if wakeup_id is not None:
+            await self._store.goal_wakeups.finish_wakeup(wakeup_id=wakeup_id)
+        return created
+
+
+class FakeConversationQueries:
+    """Reading turns, with the thread's live input counter stamped on them."""
+
+    def __init__(self, store: FakeStore) -> None:
+        self._store = store
+
+    async def latest_turn(self, *, thread_id: str) -> dict[str, Any] | None:
+        newest = self._store.latest_turn()
+        return None if newest is None else self._stamped(newest)
+
+    async def get_job(self, job_id: str) -> dict[str, Any] | None:
+        for existing in self._store.turns:
+            if existing["id"] == job_id:
+                return self._stamped(existing)
+        return None
+
+    def _stamped(self, row: dict[str, Any]) -> dict[str, Any]:
+        # ``JOB_SELECT`` reads the thread's counter live, not the turn's copy.
+        return {**row, "thread_user_input_seq": self._store.input_seq}
+
+
+class FakeSourceControl:
+    """The entitlement port ``_check_access`` may consult; never reached here."""
+
+    async def list_repo_grants(self, *, user_id: str) -> list[dict[str, Any]]:
+        return []
+
+
+class FakeStore:
+    """The four repositories the consumer reaches, over one conversation."""
+
+    def __init__(
+        self,
+        *,
+        goal: dict[str, Any] | None = None,
+        turns: list[dict[str, Any]] | None = None,
+        input_seq: int = 0,
+    ) -> None:
+        self.clock = 1_000.0
+        self.goal = dict(goal) if goal is not None else None
+        self.turns = [dict(row) for row in (turns or [])]
+        self.input_seq = input_seq
+        #: How many automatic-round inserts fail before they are allowed through.
+        self.fail_rounds = 0
+        self.goal_wakeups = FakeWakeups(self)
+        self.goals = FakeGoals(self)
+        self.conversation_commands = FakeConversationCommands(self)
+        self.conversation_queries = FakeConversationQueries(self)
+        self.source_control = FakeSourceControl()
+
+    def wakeup(self, wakeup_id: str) -> dict[str, Any]:
+        return self.goal_wakeups._row(wakeup_id)
+
+    def latest_turn(self) -> dict[str, Any] | None:
+        return max(self.turns, key=lambda row: row["turn_no"], default=None)
+
+    def latest_turn_id(self) -> str | None:
+        newest = self.latest_turn()
+        return None if newest is None else str(newest["id"])
+
+    def live_turn(self) -> dict[str, Any] | None:
+        return next(
+            (row for row in self.turns if row["state"] in ("queued", "running")),
+            None,
+        )
+
+    def rounds(self) -> list[dict[str, Any]]:
+        return [row for row in self.turns if row["turn_source"] == "goal"]
+
+    def queued_rounds(self) -> list[dict[str, Any]]:
+        return [row for row in self.rounds() if row["state"] == "queued"]
+
+    def cancel_queued_rounds(self) -> None:
+        """The goal stopped; the automatic rounds it asked for stop with it."""
+        for row in self.turns:
+            if row["state"] == "queued" and row["turn_source"] == "goal":
+                row["state"] = "cancelled"
+
+
+async def _consume(store: FakeStore) -> str:
+    """Claim the next due wakeup and judge the goal, as the consumer loop does."""
+    claimed = await store.goal_wakeups.claim_wakeups(limit=1)
+    assert claimed, "no wakeup was due"
+    return await consume_wakeup(store=store, wakeup=claimed[0])
+
+
+@pytest.fixture(autouse=True)
+def _entitled_repo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The repository every case here runs against is one this deployment allows."""
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", REPO)
+
+
+async def test_an_owner_wakeup_on_an_idle_conversation_queues_the_first_work_round():
+    store = FakeStore(goal=goal_row(), turns=[turn(id="job-1", input_seq_at_create=1)], input_seq=1)
+    wakeup = store.goal_wakeups.arm(trigger="owner", trigger_ref="set:1")
+
+    assert await _consume(store) == "queue_work_round"
+
+    rounds = store.rounds()
+    assert len(rounds) == 1
+    queued = rounds[0]
+    assert (queued["turn_source"], queued["goal_round_kind"], queued["goal_round"]) == (
+        "goal",
+        "work",
+        1,
+    )
+    assert (queued["goal_id"], queued["round_goal_revision"]) == (GOAL_ID, 1)
+    assert '<goal_round kind="work" round="1" of="10">' in queued["task_prompt"]
+    assert queued["client_request_id"] == client_request_id_for(
+        thread_id=THREAD_ID, goal_id=GOAL_ID, kind="work", trigger_ref="set:1"
+    )
+    assert store.wakeup(wakeup["id"])["state"] == "processed"
+
+
+async def test_a_finish_wakeup_with_an_absent_report_queues_the_next_work_round():
+    store = FakeStore(
+        goal=goal_row(rounds_used=1),
+        turns=[
+            turn(id="job-1", input_seq_at_create=1),
+            turn(
+                id="job-2",
+                turn_source="goal",
+                goal_id=GOAL_ID,
+                round_kind="work",
+                report_parse="absent",
+                input_seq_at_create=1,
+                turn_no=2,
+            ),
+        ],
+        input_seq=1,
+    )
+    store.goal_wakeups.arm(trigger="finish", trigger_ref="job:job-2")
+
+    assert await _consume(store) == "queue_work_round"
+
+    assert len(store.queued_rounds()) == 1
+    queued = store.queued_rounds()[0]
+    assert queued["goal_round"] == 2
+    assert queued["parent_job_id"] == "job-2"
+    assert queued["client_request_id"] == client_request_id_for(
+        thread_id=THREAD_ID, goal_id=GOAL_ID, kind="work", trigger_ref="job:job-2"
+    )
+
+
+async def test_a_complete_report_completes_the_goal_on_the_turn_that_earned_it():
+    store = FakeStore(
+        goal=goal_row(rounds_used=1),
+        turns=[
+            turn(id="job-1", input_seq_at_create=1),
+            turn(
+                id="job-2",
+                turn_source="goal",
+                goal_id=GOAL_ID,
+                round_kind="work",
+                report_parse="valid",
+                report_outcome="complete",
+                report_reason="pytest: 42 passed",
+                input_seq_at_create=1,
+                turn_no=2,
+            ),
+        ],
+        input_seq=1,
+    )
+    wakeup = store.goal_wakeups.arm(trigger="finish", trigger_ref="job:job-2")
+
+    assert await _consume(store) == "complete"
+
+    assert store.goal["state"] == "complete"
+    assert store.goal["completion_basis"] == "model_reported"
+    assert store.goal["completed_by_job_id"] == "job-2"
+    # Nothing follows a completed goal, and the obligation says what happened.
+    assert store.queued_rounds() == []
+    assert store.wakeup(wakeup["id"])["detail"] == "complete"
+
+
+async def test_a_needs_input_report_pauses_and_names_what_is_missing():
+    store = FakeStore(
+        goal=goal_row(rounds_used=1),
+        turns=[
+            turn(id="job-1", input_seq_at_create=1),
+            turn(
+                id="job-2",
+                turn_source="goal",
+                goal_id=GOAL_ID,
+                round_kind="work",
+                report_parse="valid",
+                report_outcome="needs_input",
+                report_reason="which region should I deploy to?",
+                input_seq_at_create=1,
+                turn_no=2,
+            ),
+        ],
+        input_seq=1,
+    )
+    store.goal_wakeups.arm(trigger="finish", trigger_ref="job:job-2")
+
+    assert await _consume(store) == "pause"
+
+    assert (store.goal["state"], store.goal["pause_reason"]) == ("paused", "needs_input")
+    assert store.goal["pause_detail"] == "which region should I deploy to?"
+    assert store.queued_rounds() == []
+
+
+async def test_a_wakeup_for_a_replaced_goal_is_dropped_without_touching_it():
+    store = FakeStore(
+        goal=goal_row(goal_id="goal-2"),
+        turns=[turn(id="job-1", input_seq_at_create=1)],
+        input_seq=1,
+    )
+    wakeup = store.goal_wakeups.arm(trigger="finish", trigger_ref="job:job-1", goal_id=GOAL_ID)
+
+    assert await _consume(store) == "none"
+
+    assert (store.goal["goal_id"], store.goal["state"]) == ("goal-2", "active")
+    assert store.rounds() == []
+    assert store.wakeup(wakeup["id"])["detail"] == "superseded goal"
+
+
+async def test_a_wakeup_for_a_goal_that_has_moved_on_is_dropped():
+    store = FakeStore(
+        goal=goal_row(revision=2),
+        turns=[turn(id="job-1", input_seq_at_create=1)],
+        input_seq=1,
+    )
+    wakeup = store.goal_wakeups.arm(trigger="owner", trigger_ref="set:1", revision=1)
+
+    assert await _consume(store) == "none"
+
+    assert store.goal["revision"] == 2
+    assert store.rounds() == []
+    assert store.wakeup(wakeup["id"])["detail"] == "superseded revision"
+
+
+async def test_a_wakeup_for_a_goal_that_is_not_active_is_dropped():
+    store = FakeStore(
+        goal=goal_row(state="paused", pause_reason="user", pause_detail="paused by the user"),
+        turns=[turn(id="job-1", input_seq_at_create=1)],
+        input_seq=1,
+    )
+    wakeup = store.goal_wakeups.arm(trigger="owner", trigger_ref="resume:2")
+
+    assert await _consume(store) == "none"
+
+    assert (store.goal["state"], store.goal["pause_reason"]) == ("paused", "user")
+    assert store.rounds() == []
+    assert store.wakeup(wakeup["id"])["detail"] == "goal paused"
+
+
+async def test_a_live_turn_parks_the_wakeup_instead_of_queueing_behind_it():
+    store = FakeStore(
+        goal=goal_row(),
+        turns=[
+            turn(id="job-1", input_seq_at_create=1),
+            turn(id="job-2", state="queued", input_seq_at_create=2, turn_no=2),
+        ],
+        input_seq=2,
+    )
+    wakeup = store.goal_wakeups.arm(trigger="owner", trigger_ref="set:1")
+
+    assert await _consume(store) == "wait"
+
+    parked = store.wakeup(wakeup["id"])
+    assert (parked["state"], parked["waiting_job_id"]) == ("pending", "job-2")
+    assert store.rounds() == []
+
+
+async def test_a_replayed_wakeup_creates_no_second_round():
+    """The event identity is the key: the same decision finds the round it made."""
+    store = FakeStore(goal=goal_row(), turns=[turn(id="job-1", input_seq_at_create=1)], input_seq=1)
+    store.goal_wakeups.arm(trigger="owner", trigger_ref="set:1")
+    assert await _consume(store) == "queue_work_round"
+    assert len(store.rounds()) == 1
+
+    # The round it created has since settled, and the same owner write is
+    # replayed (a client retry, or a consumer that crashed after committing).
+    store.rounds()[0].update(state="succeeded", report_parse="absent")
+    store.goal["rounds_used"] = 1
+    store.goal_wakeups.arm(trigger="owner", trigger_ref="set:1")
+
+    assert await _consume(store) == "none"
+    assert len(store.rounds()) == 1
+
+
+async def test_a_failing_consumer_backs_off_and_then_pauses_with_scheduling_failed():
+    store = FakeStore(goal=goal_row(), turns=[turn(id="job-1", input_seq_at_create=1)], input_seq=1)
+    wakeup = store.goal_wakeups.arm(trigger="owner", trigger_ref="set:1")
+    store.fail_rounds = MAX_WAKEUP_ATTEMPTS
+
+    for attempt in range(1, MAX_WAKEUP_ATTEMPTS + 1):
+        store.clock += 3_600.0
+        assert await run_goal_wakeups(store=store) == 1
+        row = store.wakeup(wakeup["id"])
+        if attempt < MAX_WAKEUP_ATTEMPTS:
+            assert row["state"] == "pending"
+            assert row["attempts"] == attempt
+            assert row["not_before"] == store.clock + wakeup_backoff(attempt)
+            assert row["lease_expires_at"] is None
+            assert store.goal["state"] == "active"
+            # The backoff is real: an immediate second pass finds nothing due.
+            assert await store.goal_wakeups.claim_wakeups(limit=1) == []
+        else:
+            assert row["state"] == "processed"
+
+    assert (store.goal["state"], store.goal["pause_reason"]) == ("paused", "scheduling_failed")
+    assert store.rounds() == []

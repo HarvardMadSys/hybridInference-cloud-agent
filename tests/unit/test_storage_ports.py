@@ -26,9 +26,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PORTS_DIR = REPO_ROOT / "cloud_agent" / "ports"
 REPOSITORIES_DIR = REPO_ROOT / "cloud_agent" / "storage" / "repositories"
 
-#: Nothing is exempt any more. ``initialize`` was the one public method no port
-#: claimed, and it left with the store: the schema is Alembic's, so there is no
-#: startup call for a port to describe.
+#: Names whose *signature* a port cannot describe, though it does claim them.
+#: ``transaction`` is the one: it opens the transaction a decision is written
+#: in, so at runtime it is an async context manager rather than a coroutine or a
+#: value. It is still required to exist — that is ``missing`` above — and its
+#: name is still claimed exactly once.
+SIGNATURE_EXEMPT: set[str] = {"transaction"}
+
+#: Nothing is left unclaimed.
 UNPORTED: set[str] = set()
 
 
@@ -39,15 +44,25 @@ def _methods(path: Path, class_name: str | None = None) -> dict[str, tuple[str, 
     if class_name is not None:
         classes = [c for c in classes if c.name == class_name]
     assert len(classes) == 1, f"{path}: expected one class, found {len(classes)}"
+    functions = [
+        node
+        for node in classes[0].body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    generators = {
+        node.name
+        for node in functions
+        if any(ast.unparse(d).endswith("asynccontextmanager") for d in node.decorator_list)
+    }
     found: dict[str, tuple[str, str, str, str]] = {}
-    for node in classes[0].body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            found[node.name] = (
-                type(node).__name__,
-                ast.unparse(node.args),
-                ast.unparse(node.returns) if node.returns else "",
-                ast.get_docstring(node, clean=True) or "",
-            )
+    for node in functions:
+        asynchronous = isinstance(node, ast.AsyncFunctionDef) or node.name in generators
+        found[node.name] = (
+            "AsyncFunctionDef" if asynchronous else "FunctionDef",
+            ast.unparse(node.args),
+            ast.unparse(node.returns) if node.returns else "",
+            ast.get_docstring(node, clean=True) or "",
+        )
     return found
 
 
@@ -78,7 +93,7 @@ def _implementations() -> dict[str, tuple[str, str, str, str]]:
 
 def test_the_ports_directory_is_not_empty() -> None:
     """A scan that silently matches nothing would pass every test below."""
-    assert len(_port_files()) == 20
+    assert len(_port_files()) == 21
 
 
 @pytest.mark.parametrize("path", _port_files(), ids=lambda p: p.stem)
@@ -90,6 +105,8 @@ def test_every_port_method_matches_its_implementation(path: Path) -> None:
     assert not missing, f"{path.name}: implemented nowhere: {missing}"
     for name, described in port.items():
         actual = store[name]
+        if name in SIGNATURE_EXEMPT:
+            continue
         assert described[0] == actual[0], f"{path.name}.{name}: async-ness differs"
         assert described[1] == actual[1], f"{path.name}.{name}: arguments differ"
         assert described[2] == actual[2], f"{path.name}.{name}: return annotation differs"

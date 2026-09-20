@@ -40,6 +40,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from cloud_agent.gateway import GatewayError
+from cloud_agent.goals.controller import run_goal_wakeups
 from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
 from cloud_agent.host_pool import HEARTBEAT_INTERVAL_S, MISSED_HEARTBEATS_BEFORE_OFFLINE
 from cloud_agent.logging_utils import configure_process_logging, get_logger
@@ -49,14 +50,17 @@ if TYPE_CHECKING:
 
     from cloud_agent.ports import (
         AttemptCommands,
+        ConversationCommands,
         ConversationQueries,
         GoalRepository,
+        GoalWakeupRepository,
         GrantRepository,
         HostPoolRepository,
         ResidencyRepository,
         SandboxRepository,
         SessionForkRepository,
         SnapshotRepository,
+        SourceControlRepository,
     )
     from cloud_agent.publish_worker import PublishStorage
 
@@ -93,9 +97,12 @@ class _Reaping(Protocol):
     """
 
     attempt_commands: AttemptCommands
+    conversation_commands: ConversationCommands
     conversation_queries: ConversationQueries
+    goal_wakeups: GoalWakeupRepository
     goals: GoalRepository
     grants: GrantRepository
+    source_control: SourceControlRepository
     host_pool: HostPoolRepository
     residency: ResidencyRepository
     sandbox: SandboxRepository
@@ -742,25 +749,32 @@ async def reap_expired_attempts(
             await store.attempt_commands.sweep_queued_follow_ups()
         except Exception:
             logger.warning("Queued follow-up sweep failed", exc_info=True)
-        # After the sweeps that can leave a goal with nothing to run it, and
-        # before the pass that reports on the queue. This is a backstop and
-        # nothing else: every ordinary way an active goal stops being able to
-        # continue pauses it where it happens. Anything found here arrived
-        # through a path missing one of those, so it is logged as the warning
-        # it is rather than corrected quietly.
+        # Goals, after the sweeps that can leave one with nothing to run it.
+        #
+        # The consumer goes first: a wakeup is the ordinary way a goal advances,
+        # and it is normally drained synchronously by the finish that armed it —
+        # this pass exists for a process that died between the two. The sweep
+        # after it is the backstop for a *missing* obligation, and the only
+        # thing that pauses a goal: every ordinary way an active goal stops
+        # being able to continue says so where and when it happens.
         try:
-            stalled_goals = await store.goals.pause_stalled_goals()
-            if stalled_goals:
+            await run_goal_wakeups(store=store)
+        except Exception:
+            logger.warning("Goal wakeup consumer pass failed", exc_info=True)
+        try:
+            swept = await store.goals.sweep_goal_scheduling()
+            if swept["rearmed"] or swept["stalled"]:
                 logger.warning(
-                    "agent_goals_stalled",
+                    "agent_goals_recovered",
                     extra={
-                        "event": "agent_goals_stalled",
-                        "count": len(stalled_goals),
-                        "thread_ids": stalled_goals,
+                        "event": "agent_goals_recovered",
+                        "rearmed": len(swept["rearmed"]),
+                        "stalled": len(swept["stalled"]),
+                        "stalled_thread_ids": swept["stalled"],
                     },
                 )
         except Exception:
-            logger.warning("Stalled goal sweep failed", exc_info=True)
+            logger.warning("Goal scheduling sweep failed", exc_info=True)
         try:
             actions = await store.attempt_commands.reap_expired(max_attempts=max_attempts)
             await _cleanup_reaped_shared_residencies(store.host_pool, actions, grants)

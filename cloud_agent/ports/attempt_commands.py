@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
-    from cloud_agent.goals.report import GoalReport
+    from cloud_agent.goals.report import GoalReportEnvelope
 
 #: Every outcome of :meth:`AttemptCommands.record_attempt_turn_summary`.
 #: ``stored`` and ``duplicate`` are success -- a retried post is the same
@@ -137,7 +137,7 @@ class AttemptCommands(Protocol):
         to_state: str,
         detail: str | None = None,
         base_sha: str | None = None,
-        goal_report: GoalReport | None = None,
+        goal_envelope: GoalReportEnvelope | None = None,
     ) -> bool:
         """Move a job between states, fenced by the attempt's live lease.
 
@@ -145,8 +145,10 @@ class AttemptCommands(Protocol):
         False when the caller lost the lease or the job is not in
         ``from_states`` — the caller must stop.
 
-        ``goal_report`` is what the turn said about its conversation's goal; it
-        is stored in the same transaction as the outcome.
+        ``goal_envelope`` is how the turn's final message read, and it is
+        stored with the terminal state *and* the scheduling obligation it
+        implies, in one transaction: either the turn ended and the goal was told
+        to look at itself, or neither happened and the finish is retried.
 
         ``base_sha`` fills in the commit the worker resolved, and only when the
         job does not already have one: an owner who pinned a commit must get a

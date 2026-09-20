@@ -28,6 +28,7 @@ still has callers.
 
 from cloud_agent_contracts.shared_protocol import (
     ENV_DEPLOYMENT_SHA,
+    GOAL_REPORT_CAPABILITY,
     HOST_CONCURRENCY_CAPABILITY,
     HOST_CONCURRENCY_MAX_SLOTS,
     HOST_CONCURRENCY_MIN_SLOTS,
@@ -46,6 +47,7 @@ from cloud_agent_contracts.shared_protocol import (
 #: The whole surface of the moved module, so the re-export reads as one.
 __all__ = [
     "ENV_DEPLOYMENT_SHA",
+    "GOAL_REPORT_CAPABILITY",
     "HOST_CONCURRENCY_CAPABILITY",
     "HOST_CONCURRENCY_MAX_SLOTS",
     "HOST_CONCURRENCY_MIN_SLOTS",

@@ -16,6 +16,7 @@ from cloud_agent.storage._sql.jobs import JOB_SELECT
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import NATIVE_FORK_CAPABILITY_JSON, THREAD_SANDBOX_SOURCE
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
+from cloud_agent.storage.repositories.goals import new_goal_id
 
 if TYPE_CHECKING:
     import asyncpg
@@ -232,13 +233,16 @@ class PostgresSessionForkRepository:
                 INSERT INTO agent_threads
                     (id, user_id, repo, title, title_source,
                      setup_script, execution_profile,
-                     goal_objective, goal_state, goal_pause_reason,
-                     goal_max_rounds, goal_revision,
-                     goal_blocked_streak, goal_created_at, goal_updated_at)
+                     goal_id, goal_objective, goal_state, goal_pause_reason,
+                     goal_pause_detail, goal_max_rounds, goal_revision,
+                     goal_created_at, goal_updated_at)
                 VALUES ($1, $2, $3, $4, 'inherited', $5, $6,
+                        CASE WHEN $7::text IS NULL THEN NULL ELSE $9 END,
                         $7, CASE WHEN $7::text IS NULL THEN NULL ELSE 'paused' END,
                         CASE WHEN $7::text IS NULL THEN NULL ELSE 'fork' END,
-                        $8, CASE WHEN $7::text IS NULL THEN 0 ELSE 1 END, 0,
+                        CASE WHEN $7::text IS NULL THEN NULL
+                             ELSE 'copied from another conversation; resume it to start working' END,
+                        $8, CASE WHEN $7::text IS NULL THEN 0 ELSE 1 END,
                         CASE WHEN $7::text IS NULL THEN NULL ELSE NOW() END,
                         CASE WHEN $7::text IS NULL THEN NULL ELSE NOW() END)
                 """,
@@ -250,6 +254,7 @@ class PostgresSessionForkRepository:
                 source_thread["execution_profile"],
                 source_thread["goal_objective"],
                 source_thread["goal_max_rounds"],
+                new_goal_id(),
             )
             await conn.execute(
                 """

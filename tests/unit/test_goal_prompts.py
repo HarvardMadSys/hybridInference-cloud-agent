@@ -1,13 +1,19 @@
-"""The two prompts a goal adds: the per-turn preamble, and an automatic round."""
+"""The two prompts a goal adds: the per-turn preamble, and an automatic round.
+
+Both reach the model through the ordinary task prompt, so what they say is the
+entire contract the model has to work from. The report block is the part that
+matters: it is named in every one of them, it is the same for a person's turn
+and an automatic one, and it never points at a tool the sandbox may not have.
+"""
 
 from __future__ import annotations
 
+from cloud_agent.goals.models import MAX_REPORT_REPAIRS
 from cloud_agent.goals.prompts import (
     REPORT_INSTRUCTIONS,
-    REPORT_TOOL_INSTRUCTIONS,
     prompt_with_goal,
+    render_repair_prompt,
     render_round_prompt,
-    with_mcp_availability,
 )
 
 ACTIVE = {
@@ -27,61 +33,31 @@ def test_a_goal_without_an_objective_is_not_a_goal():
 
 
 def test_a_goal_that_is_not_active_adds_nothing():
-    for state in ("paused", "blocked", "complete"):
+    """A preamble promising a judgement the platform will not make is worse than none."""
+    for state in ("paused", "complete"):
         assert prompt_with_goal("fix it", {**ACTIVE, "state": state}) == "fix it"
 
 
-def test_the_preamble_names_the_tool_when_the_session_can_reach_it():
-    """A harness the relay serves is told about the tool, and nothing else.
-
-    Both ways of reporting work, and both are accepted at once — but a preamble
-    that described both would leave the model choosing, and the text convention
-    exists for the case where there is no tool to choose.
-    """
-    prompt = prompt_with_goal("fix it", with_mcp_availability(ACTIVE, True) or {})
-    assert REPORT_TOOL_INSTRUCTIONS in prompt
-    assert "GOAL_STATUS" not in prompt
-
-
-def test_the_preamble_falls_back_to_the_text_convention_without_a_tool():
-    prompt = prompt_with_goal("fix it", with_mcp_availability(ACTIVE, False) or {})
-    assert REPORT_INSTRUCTIONS in prompt
-    assert "report_goal" not in prompt
-
-
-def test_a_goal_on_a_turn_with_no_bindings_is_told_the_text_convention():
-    """The common case, and it has to be the text convention.
-
-    ``mcp_available`` means *this turn's sandbox has the relay*, and the runner
-    only opens one when the job has bindings. Asking the runtime registry
-    instead said "yes" for every harness the platform registers — so a user who
-    had connected nothing, which is the default, was told to call a tool that
-    was not there and not told how else to report. Every round then read as
-    "no report", and the goal could never complete.
-    """
-    goal = with_mcp_availability(
-        {"objective": "x", "state": "active", "rounds_used": 0, "max_rounds": 5}, False
-    )
-    prompt = prompt_with_goal("task", goal)
-    assert REPORT_INSTRUCTIONS in prompt
-    assert "`report_goal`" not in prompt
-
-
-def test_availability_is_composed_onto_the_goal_not_stored_in_it():
-    """The same conversation tells two harnesses different things."""
-    goal = dict(ACTIVE)
-    assert with_mcp_availability(goal, True)["mcp_available"] is True
-    assert "mcp_available" not in goal
-    assert with_mcp_availability(None, True) is None
-
-
-def test_the_preamble_goes_first_and_carries_the_report_convention():
+def test_the_preamble_goes_first_and_carries_the_report_block():
     prompt = prompt_with_goal("fix it", ACTIVE)
     assert prompt.startswith("<conversation_goal>\n")
     assert prompt.endswith("\n\nfix it")
     assert REPORT_INSTRUCTIONS in prompt
     assert '"make `pytest` pass"' in prompt
-    assert "Round: 2/10 used" in prompt
+    assert "Automatic rounds used: 2/10" in prompt
+
+
+def test_the_report_instructions_name_the_fence_and_its_schema():
+    assert "```cloud-agent-goal-report" in REPORT_INSTRUCTIONS
+    assert '"outcome":"complete"' in REPORT_INSTRUCTIONS
+    assert '"version":1' in REPORT_INSTRUCTIONS
+    assert "needs_input" in REPORT_INSTRUCTIONS
+
+
+def test_the_report_instructions_never_name_a_tool_or_the_old_convention():
+    """The report is the model's own final message; no runtime needs a tool for it."""
+    for forbidden in ("GOAL_STATUS", "report_goal", "get_goal", "tool call"):
+        assert forbidden not in REPORT_INSTRUCTIONS
 
 
 def test_an_objective_with_quotes_stays_one_line():
@@ -91,53 +67,58 @@ def test_an_objective_with_quotes_stays_one_line():
     assert "\n" not in objective_line.removeprefix("Objective: ")
 
 
-def test_a_work_round_names_its_number_and_the_prior_reason():
+def test_a_counter_that_is_missing_reads_as_zero_rather_than_raising():
+    """The goal arrives as the store's dict; a prompt that cannot be built is a turn that cannot run."""
+    prompt = prompt_with_goal("x", {"objective": "ship it", "state": "active"})
+    assert "Automatic rounds used: 0/0" in prompt
+
+
+def test_a_work_round_names_its_number_and_what_the_last_turn_reported():
     prompt = render_round_prompt(
         objective="make `pytest` pass",
-        kind="work",
         round_number=3,
         max_rounds=10,
         previous="two tests still fail",
     )
     assert '<goal_round kind="work" round="3" of="10">' in prompt
-    assert "The previous turn reported: two tests still fail" in prompt
+    assert "What the previous turn reported: two tests still fail" in prompt
     assert "as authoritative" in prompt
+    assert REPORT_INSTRUCTIONS in prompt
     assert prompt.endswith("</goal_round>")
 
 
-def test_a_work_round_after_an_unaccepted_blocked_says_so():
+def test_a_work_round_with_nothing_reported_says_nothing_about_it():
+    prompt = render_round_prompt(objective="ship it", round_number=2, max_rounds=5)
+    assert "What the previous turn reported" not in prompt
+    assert "was paused since the last turn" not in prompt
+
+
+def test_a_work_round_after_a_pause_reminds_the_model_it_was_stopped():
     prompt = render_round_prompt(
         objective="ship it",
-        kind="work",
         round_number=2,
         max_rounds=5,
         previous="no network access",
-        previous_blocked=True,
+        previous_paused=True,
     )
-    assert "Your previous turn reported blocked: no network access" in prompt
-    assert "has not accepted it yet" in prompt
-
-
-def test_an_unaccepted_blocked_with_no_reason_still_says_so():
-    prompt = render_round_prompt(
-        objective="ship it",
-        kind="work",
-        round_number=2,
-        max_rounds=5,
-        previous=None,
-        previous_blocked=True,
+    assert (
+        "The goal was paused since the last turn and the user asked for it to continue. "
+        "What was recorded then: no network access" in prompt
     )
-    assert "the platform has not accepted it yet" in prompt
 
 
-def test_a_verify_round_forbids_editing():
-    prompt = render_round_prompt(
-        objective="make `pytest` pass",
-        kind="verify",
-        round_number=3,
-        max_rounds=10,
-    )
-    assert '<goal_round kind="verify">' in prompt
-    assert "do not modify code" in prompt
-    assert "re-run the check the objective names" in prompt
+def test_a_repair_round_forbids_more_work():
+    prompt = render_repair_prompt(objective="make `pytest` pass", detail="malformed_json")
+    assert '<goal_round kind="repair">' in prompt
+    assert "Do not run more tools and do not do more work." in prompt
+    assert "What was wrong with it: malformed_json" in prompt
     assert '"make `pytest` pass"' in prompt
+    assert REPORT_INSTRUCTIONS in prompt
+    assert f"You get at most {MAX_REPORT_REPAIRS} attempt at this." in prompt
+    assert prompt.endswith("</goal_round>")
+
+
+def test_a_repair_round_without_a_detail_still_asks_for_the_block():
+    prompt = render_repair_prompt(objective="ship it")
+    assert "What was wrong with it:" not in prompt
+    assert "end this message with the block again" in prompt

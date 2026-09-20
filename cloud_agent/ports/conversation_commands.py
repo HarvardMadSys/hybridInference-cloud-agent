@@ -114,6 +114,41 @@ class ConversationCommands(Protocol):
         """
         ...
 
+    async def create_goal_round(
+        self,
+        *,
+        conn: Any | None = None,
+        thread_id: str,
+        goal_id: str,
+        revision: int,
+        kind: str,
+        round_number: int,
+        prompt: str,
+        client_request_id: str,
+        client_request_fingerprint: str,
+        wakeup_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Append one automatic round inside the caller's transaction.
+
+        The scheduling obligation and the turn it produced commit together —
+        that pair is the whole reason this is not a second call to
+        :meth:`create_follow_up`. ``conn`` is already holding the conversation's
+        lock, taken by the controller before it read the state this decision was
+        made from, so nothing can be appended between the read and this write.
+
+        Returns ``None`` when this event already produced a round. That is not
+        an error: a replayed wakeup is supposed to find the work it already did
+        rather than starting a second turn, and the identity that makes it find
+        it is the turn that triggered the decision. It also returns ``None``
+        when the conversation is gone.
+
+        ``conn`` is the caller's transaction, and the controller always passes
+        one: this insert commits with the wakeup's completion. The fallback is
+        for a caller that wants a round on its own, and in that case this method
+        owns the transaction.
+        """
+        ...
+
     async def set_sessions_archived(
         self, *, thread_ids: list[str], user_id: str, archived: bool
     ) -> dict[str, Any]:

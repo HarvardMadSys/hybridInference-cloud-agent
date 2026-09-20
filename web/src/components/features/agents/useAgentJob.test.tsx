@@ -204,6 +204,104 @@ describe('useAgentJob live turn rows', () => {
     },
   );
 
+  it('keeps observing a goal that owes the conversation its next round', async () => {
+    vi.useFakeTimers();
+    // The round on screen has settled and the next one has not been queued yet,
+    // so the conversation reads idle while the platform still owes this goal a
+    // round. The goal row is the only thing that says so.
+    const initial = {
+      id: 'settled-round',
+      state: 'succeeded',
+      conversation_state: 'idle',
+      thread_id: 'live-thread',
+      turn_no: 1,
+      task_prompt: 'An automatic round',
+      runtime: 'codex',
+      model: 'test',
+      title_source: 'generated',
+      goal: {
+        goal_id: 'goal_1',
+        objective: 'make the tests pass',
+        state: 'active',
+        revision: 2,
+        max_rounds: 10,
+        rounds_used: 1,
+        pause_reason: null,
+        pause_detail: null,
+        completion_basis: null,
+        completed_by_job_id: null,
+        created_at: null,
+        updated_at: null,
+      },
+    } as AgentJobApi;
+    vi.mocked(getAgentJob)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValue({
+        ...initial,
+        conversation_state: 'queued',
+        goal: { ...initial.goal!, rounds_used: 2 },
+      });
+    vi.mocked(getAgentJobThread).mockResolvedValue({
+      thread_id: 'live-thread',
+      jobs: [initial],
+      messages: [],
+    } as unknown as AgentThreadApi);
+    vi.mocked(listAllAgentThreadEvents).mockResolvedValue([]);
+
+    const { result } = renderHook(() => useAgentJob(initial.id));
+    await act(async () => {});
+    expect(result.current.job?.conversationState).toBe('idle');
+    expect(result.current.job?.goal?.roundsUsed).toBe(1);
+    expect(streamAgentJob).not.toHaveBeenCalled();
+
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    expect(getAgentJob).toHaveBeenCalledTimes(2);
+    expect(result.current.job?.conversationState).toBe('queued');
+    expect(result.current.job?.goal?.roundsUsed).toBe(2);
+  });
+
+  it('stops observing once the goal is no longer active', async () => {
+    vi.useFakeTimers();
+    const initial = {
+      id: 'finished-goal',
+      state: 'succeeded',
+      conversation_state: 'idle',
+      thread_id: 'live-thread',
+      turn_no: 4,
+      task_prompt: 'The last round',
+      runtime: 'codex',
+      model: 'test',
+      title_source: 'generated',
+      goal: {
+        goal_id: 'goal_1',
+        objective: 'make the tests pass',
+        state: 'complete',
+        revision: 3,
+        max_rounds: 10,
+        rounds_used: 4,
+        pause_reason: null,
+        pause_detail: null,
+        completion_basis: 'model_reported',
+        completed_by_job_id: 'finished-goal',
+        created_at: null,
+        updated_at: null,
+      },
+    } as AgentJobApi;
+    vi.mocked(getAgentJob).mockResolvedValue(initial);
+    vi.mocked(getAgentJobThread).mockResolvedValue({
+      thread_id: 'live-thread',
+      jobs: [initial],
+      messages: [],
+    } as unknown as AgentThreadApi);
+    vi.mocked(listAllAgentThreadEvents).mockResolvedValue([]);
+
+    const { result } = renderHook(() => useAgentJob(initial.id));
+    await act(async () => {});
+    expect(result.current.job?.goal?.state).toBe('complete');
+    await act(async () => vi.advanceTimersByTimeAsync(20_000));
+    expect(getAgentJob).toHaveBeenCalledTimes(1);
+  });
+
   it('carries a replaced attempt into the rows that scope the inspector', async () => {
     const initial = {
       id: 'live-job',

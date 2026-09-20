@@ -8,6 +8,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
 import {
   archiveAgentJob,
+  clearAgentGoal,
   connectGitHub,
   connectGitLab,
   createAgentTerminal,
@@ -16,6 +17,7 @@ import {
   createAgentJob,
   followUpAgentJob,
   forkAgentJob,
+  getAgentGoal,
   getAgentIntegrations,
   getAgentJob,
   getAgentAttemptTelemetry,
@@ -27,11 +29,14 @@ import {
   listAgentConversations,
   listAgentTerminals,
   listAgentJobs,
+  pauseAgentGoal,
   pinAgentJob,
   renameAgentJob,
   resizeAgentTerminal,
+  resumeAgentGoal,
   refreshAgentJobUsage,
   restoreAgentJob,
+  setAgentGoal,
   streamAgentTerminal,
   streamAgentJob,
   unpinAgentJob,
@@ -769,5 +774,69 @@ describe('agents api', () => {
     controller.abort();
     await streamAgentJob('ajob_1', { onEvent: () => {}, signal: controller.signal });
     expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
+  // The goal belongs to the conversation, not to a turn: a conversation whose
+  // newest turn has been deleted still has one, so every route names the thread.
+  it('reads and writes the goal through its conversation', async () => {
+    fetchWithAuth.mockResolvedValue(
+      jsonResponse({ thread_id: 'thread/1', goal: null, revision: 4 }),
+    );
+    await expect(getAgentGoal('thread/1')).resolves.toEqual({
+      thread_id: 'thread/1',
+      goal: null,
+      revision: 4,
+    });
+    expect(fetchWithAuth).toHaveBeenLastCalledWith(
+      expect.any(String),
+      '/v1/agent/threads/thread%2F1/goal',
+    );
+
+    fetchWithAuth.mockResolvedValue(
+      jsonResponse({ thread_id: 'thread/1', goal: null, revision: 5 }),
+    );
+    await setAgentGoal('thread/1', {
+      goal: { objective: 'ship it', max_rounds: 3 },
+      revision: 4,
+    });
+    expect(fetchWithAuth).toHaveBeenLastCalledWith(
+      expect.any(String),
+      '/v1/agent/threads/thread%2F1/goal',
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ goal: { objective: 'ship it', max_rounds: 3 }, revision: 4 }),
+      },
+    );
+  });
+
+  it('pauses, resumes and clears without a revision, because those buttons are idempotent', async () => {
+    fetchWithAuth.mockResolvedValue(jsonResponse({ thread_id: 'thread-1', revision: 6 }));
+    await pauseAgentGoal('thread-1');
+    expect(fetchWithAuth).toHaveBeenLastCalledWith(
+      expect.any(String),
+      '/v1/agent/threads/thread-1/goal/pause',
+      { method: 'POST' },
+    );
+    fetchWithAuth.mockResolvedValue(jsonResponse({ thread_id: 'thread-1', revision: 7 }));
+    await resumeAgentGoal('thread-1');
+    expect(fetchWithAuth).toHaveBeenLastCalledWith(
+      expect.any(String),
+      '/v1/agent/threads/thread-1/goal/resume',
+      { method: 'POST' },
+    );
+    fetchWithAuth.mockResolvedValue(
+      jsonResponse({ thread_id: 'thread-1', cleared: true, revision: 8 }),
+    );
+    await expect(clearAgentGoal('thread-1')).resolves.toEqual({
+      thread_id: 'thread-1',
+      cleared: true,
+      revision: 8,
+    });
+    expect(fetchWithAuth).toHaveBeenLastCalledWith(
+      expect.any(String),
+      '/v1/agent/threads/thread-1/goal',
+      { method: 'DELETE' },
+    );
   });
 });

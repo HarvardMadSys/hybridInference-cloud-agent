@@ -33,6 +33,26 @@ class ConversationQueries(Protocol):
         """
         ...
 
+    async def latest_turn(self, *, thread_id: str) -> dict[str, Any] | None:
+        """The newest turn of this conversation, whatever state it is in.
+
+        Deliberately not :meth:`latest_terminal_turn`: the decision has to be
+        able to see a turn that is still running, because "a person's turn is in
+        flight" is the reason to wait rather than the reason to schedule.
+        """
+        ...
+
+    async def get_job_for_update(self, *, conn: Any, job_id: str) -> dict[str, Any] | None:
+        """Read one turn inside the caller's transaction, taking its row lock.
+
+        The decision re-reads the turn it is about to judge under the same
+        transaction that writes the outcome. Between the read that built the
+        context and this one the turn can have been reaped, retried or
+        superseded, and a decision made about a turn that has since changed is a
+        decision about nothing.
+        """
+        ...
+
     async def latest_assistant_message(self, *, job_id: str) -> str | None:
         """The last thing this turn said, or ``None`` if it said nothing.
 

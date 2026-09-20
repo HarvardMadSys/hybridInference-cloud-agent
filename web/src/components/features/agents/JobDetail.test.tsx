@@ -20,6 +20,7 @@ import {
   getAgentJobUsage,
   getAgentThreadStats,
   listAgentTerminals,
+  pauseAgentGoal,
   resizeAgentTerminal,
   refreshAgentJobUsage,
   restoreAgentJob,
@@ -82,6 +83,7 @@ vi.mock('@/lib/api/agents', () => ({
   renameAgentJob: vi.fn(),
   pinAgentJob: vi.fn(),
   unpinAgentJob: vi.fn(),
+  pauseAgentGoal: vi.fn(),
   streamAgentTerminal: vi.fn(),
   writeAgentTerminalInput: vi.fn(),
   writeAgentJobFile: vi.fn(),
@@ -559,6 +561,7 @@ describe('JobDetail', () => {
     vi.mocked(forkAgentJob).mockReset();
     vi.mocked(restoreAgentJob).mockReset();
     vi.mocked(renameAgentJob).mockReset();
+    vi.mocked(pauseAgentGoal).mockReset();
     vi.mocked(pinAgentJob).mockReset();
     vi.mocked(unpinAgentJob).mockReset();
     vi.mocked(getAgentConfig).mockReset();
@@ -709,6 +712,35 @@ describe('JobDetail', () => {
     fireEvent.keyDown(screen.getByLabelText('Add a follow-up'), { key: 'Enter' });
     await waitFor(() => expect(followUpAgentJob).toHaveBeenCalledTimes(1));
     expect(vi.mocked(followUpAgentJob).mock.calls[0][1]).not.toHaveProperty('goal');
+  });
+
+  it('manages the goal through its conversation, not through the turn on screen', async () => {
+    // A goal belongs to the conversation, and every route that touches it names
+    // the thread. The turn in the URL is not that identity: a conversation
+    // whose newest turn has been deleted still has a goal.
+    vi.mocked(pauseAgentGoal).mockResolvedValue({
+      thread_id: 'thread_9',
+      goal: null,
+      revision: 2,
+    });
+    render(
+      <JobDetail
+        job={makeJob({
+          threadId: 'thread_9',
+          goal: {
+            objective: 'make `pytest` pass',
+            state: 'active',
+            revision: 1,
+            roundsUsed: 2,
+            maxRounds: 10,
+          },
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
+    await waitFor(() => expect(pauseAgentGoal).toHaveBeenCalledWith('thread_9'));
+    expect(vi.mocked(pauseAgentGoal).mock.calls[0][0]).not.toBe('ajob_1');
   });
 
   it('replaces duplicate header metadata with a keyboard-accessible task menu', () => {

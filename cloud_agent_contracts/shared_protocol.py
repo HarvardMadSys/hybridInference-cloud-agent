@@ -11,6 +11,11 @@ from __future__ import annotations
 
 SHARED_SANDBOX_CAPABILITY = "shared-sandbox-v1"
 NATIVE_FORK_AT_ANCHOR_CAPABILITY = "native-fork-at-anchor-v1"
+#: Advertised by a host that can deliver the final assistant message of a turn
+#: before any log truncation, so the platform can read the goal report block
+#: out of it. An automatic conversation-goal round may be routed only to a
+#: host that declares this; a host without it keeps running ordinary turns.
+GOAL_REPORT_CAPABILITY = "goal_report_v1"
 #: Advertised by a runner that takes its concurrency limit from the control
 #: plane's ``slots_desired`` rather than from the count it was deployed with.
 #: The admin page reads it to tell "this host will apply your number" from

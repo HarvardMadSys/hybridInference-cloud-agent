@@ -182,8 +182,10 @@ def _job_response(
         turn_source=job.get("turn_source") or "human",
         goal_round=job.get("goal_round"),
         goal_round_kind=job.get("goal_round_kind"),
-        goal_report=job.get("goal_report"),
-        goal_reason=job.get("goal_reason"),
+        goal_report_parse=job.get("goal_report_parse"),
+        goal_report_outcome=job.get("goal_report_outcome"),
+        goal_report_detail=job.get("goal_report_reason") or job.get("goal_report_detail"),
+        goal_repair_round=job.get("goal_repair_round"),
         # The conversation's *live* goal, on every turn of it, the way
         # ``title`` is.
         goal=_goal_view(job.get("goal")),

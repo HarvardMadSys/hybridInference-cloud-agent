@@ -1,4 +1,4 @@
-import type { AgentJob } from '../types';
+import type { AgentGoal, AgentJob } from '../types';
 
 /**
  * Whether anything in this conversation is still moving.
@@ -16,4 +16,17 @@ import type { AgentJob } from '../types';
 export function hasLiveWork(job: Pick<AgentJob, 'state' | 'conversationState'>): boolean {
   if (job.state === 'running' || job.state === 'queued') return true;
   return job.conversationState === 'running' || job.conversationState === 'queued';
+}
+
+/**
+ * Whether this conversation's goal still owes the platform another round.
+ *
+ * An ``active`` goal is legitimately idle for a moment — the previous round has
+ * settled and the next one has not been queued yet — so the state of the turn
+ * on screen cannot answer whether there is more to come. Observation that
+ * stopped with the turn would freeze the owner's view on a state the platform
+ * has already moved past.
+ */
+export function hasActiveGoal(goal: Pick<AgentGoal, 'state'> | null | undefined): boolean {
+  return goal?.state === 'active';
 }

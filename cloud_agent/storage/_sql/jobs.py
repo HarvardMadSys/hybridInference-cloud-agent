@@ -24,8 +24,10 @@ JOB_OWN_COLUMNS = (
     "cancel_requested, terminal_resume_pending, current_attempt_id, "
     "published_pr_url, published_commit_sha, detail, "
     "metadata, skills, attachments, fork_source_job_id, "
-    "turn_source, goal_round, goal_round_kind, goal_revision, goal_report, goal_reason, "
-    "created_at, updated_at"
+    "turn_source, goal_round, goal_round_kind, goal_revision, goal_id, "
+    "goal_report_parse, goal_report_outcome, goal_report_reason, goal_report_detail, "
+    "goal_repair_round, "
+    "input_seq_at_create, created_at, updated_at"
 )
 
 # What a conversation shares with every one of its turns: where it runs, and —
@@ -39,10 +41,13 @@ JOB_OWN_COLUMNS = (
 # report the conversation's revision as its own snapshot.
 THREAD_CONFIG_COLUMNS = (
     "t.repo, t.setup_script, t.execution_profile, "
-    "t.goal_objective, t.goal_state, t.goal_pause_reason, t.goal_blocked_code, "
-    "t.goal_blocked_message, t.goal_revision AS thread_goal_revision, "
-    "t.goal_max_rounds, "
-    "t.goal_blocked_streak, t.goal_created_at, t.goal_updated_at"
+    "t.goal_id, t.goal_objective, t.goal_state, t.goal_pause_reason, "
+    "t.goal_pause_detail, t.goal_revision AS thread_goal_revision, "
+    "t.goal_max_rounds, t.goal_completion_basis, t.goal_completed_by_job_id, "
+    "t.goal_created_at, t.goal_updated_at, "
+    # The conversation's input counter, carried on every turn so that "has the
+    # owner spoken since this turn was created?" is answerable from one read.
+    "t.user_input_seq AS thread_user_input_seq"
 )
 
 # Probe the unfinished-turn index before the latest-turn index: a cancelled
@@ -244,4 +249,9 @@ async def fail_discontinuous_follow_ups(
     # failure elsewhere cannot pause a goal that is still moving.
     failed_threads = sorted({str(row["thread_id"]) for row in invalid})
     if failed_threads:
-        await conn.execute(PAUSE_GOALS_SQL, failed_threads, "context-lost")
+        await conn.execute(
+            PAUSE_GOALS_SQL,
+            failed_threads,
+            "context_lost",
+            "the conversation's session is gone; it cannot be resumed from a transcript",
+        )

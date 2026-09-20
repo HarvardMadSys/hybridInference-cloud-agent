@@ -105,6 +105,7 @@ from cloud_agent_host.session_supervisor_client import (
 )
 from cloud_agent_host.setup import run_setup
 from cloud_agent_host.shared_protocol import (
+    GOAL_REPORT_CAPABILITY,
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
@@ -1112,7 +1113,12 @@ def _shared_live_host_capabilities(
     backend: SandboxBackend,
     stamp: dict[str, Any],
 ) -> list[str]:
-    """Advertise shared-v1 only when this exact host can honor its contract."""
+    """The capabilities this replica may advertise, given what it proves.
+
+    Empty means "not a shared-live host at all". Register, beat and claim all
+    read this one list, so a replica that cannot prove the sandbox contract
+    cannot advertise anything that depends on it either.
+    """
     if not isinstance(backend, ContainerBackend):
         return []
     # One child process runs one claimed turn, and the host claims only while
@@ -1163,7 +1169,15 @@ def _shared_live_host_capabilities(
             or not runtime_capabilities.concurrent_shared_workspace
         ):
             return []
-    capabilities = [SHARED_SANDBOX_CAPABILITY, NATIVE_FORK_AT_ANCHOR_CAPABILITY]
+    capabilities = [
+        SHARED_SANDBOX_CAPABILITY,
+        NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+        # A live resident session is also what makes a turn's final message
+        # readable: the settle path that ends the turn is the one that reports
+        # it whole, before anything bounds it. This host therefore never
+        # advertises the goal report without the contract it rides on.
+        GOAL_REPORT_CAPABILITY,
+    ]
     deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
     ready_file = _shared_live_ready_file()
     if deployment_sha and ready_file:

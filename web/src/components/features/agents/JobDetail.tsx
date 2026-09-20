@@ -1477,18 +1477,16 @@ export function JobDetail({
                 ) : null}
                 {job.goal ? (
                   <GoalBar
-                    jobId={job.id}
+                    threadId={job.threadId ?? job.id}
                     goal={job.goal}
                     limits={config?.goal_limits}
                     state={{
                       live: hasLiveWork(job),
-                      verifying: job.goalTurn?.kind === 'verify' && isActive,
-                      ...(job.goalTurn?.reason ? { lastReason: job.goalTurn.reason } : {}),
-                      forked: job.goal.pauseReason === 'fork',
+                      repairing: job.goalTurn?.kind === 'repair' && isActive,
                     }}
                     onChanged={() => {
-                      // The server answers with the whole job row; the page's
-                      // own reload is what re-renders it. Reimplementing
+                      // The goal belongs to the conversation, so the page's own
+                      // reload is what re-reads it. Reimplementing
                       // fetch-and-adapt here would be a second reader of the
                       // same endpoint, and the two would drift.
                       onReload?.();

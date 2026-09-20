@@ -32,7 +32,7 @@ from cloud_agent.execution_profiles import (
 )
 from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
 from cloud_agent.storage._sql.events import insert_event
-from cloud_agent.storage._sql.goals import goal_after_terminal
+from cloud_agent.storage._sql.goals import arm_finish_wakeup, goal_after_terminal
 from cloud_agent.storage._sql.hosts import host_slots_exhausted, release_host_slot
 from cloud_agent.storage._sql.jobs import (
     QUALIFIED_JOB_COLUMNS,
@@ -44,7 +44,7 @@ from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 
 if TYPE_CHECKING:
-    from cloud_agent.goals.report import GoalReport
+    from cloud_agent.goals.report import GoalReportEnvelope
     from cloud_agent.ports.attempt_commands import TurnSummaryWrite
 
 #: What the ordering rules decide, before the caller writes anything.
@@ -194,6 +194,23 @@ class PostgresAttemptCommands:
                         WHERE earlier.thread_id = j.thread_id
                           AND earlier.turn_no < j.turn_no
                           AND earlier.state IN ('queued', 'running')
+                  )
+                  -- An automatic round is re-checked against the goal it was
+                  -- created for, here, immediately before it is handed to a
+                  -- host. A round that was queued for an objective the owner
+                  -- has since replaced, paused or cleared must never run: it
+                  -- would work toward a withdrawn objective and pay for it.
+                  -- The sweep in ``sweep_goal_scheduling`` cancels what this
+                  -- skips, so nothing waits here forever.
+                  AND (
+                        j.turn_source <> 'goal'
+                        OR EXISTS (
+                            SELECT 1 FROM agent_threads goal_thread
+                            WHERE goal_thread.id = j.thread_id
+                              AND goal_thread.goal_state = 'active'
+                              AND goal_thread.goal_id = j.goal_id
+                              AND goal_thread.goal_revision = j.goal_revision
+                        )
                   )
                   AND COALESCE(j.metadata->'requires', '[]'::jsonb) <@ $1::jsonb
                   AND (
@@ -444,8 +461,10 @@ class PostgresAttemptCommands:
                     -- Cleared only on the way back to the queue. A cancelled
                     -- turn keeps whatever it reported, because that is the
                     -- answer it ended on; the next attempt has to give its own.
-                    goal_report = CASE WHEN cancel_requested THEN goal_report END,
-                    goal_reason = CASE WHEN cancel_requested THEN goal_reason END,
+                    goal_report_parse = CASE WHEN cancel_requested
+                                             THEN goal_report_parse END,
+                    goal_report_outcome = CASE WHEN cancel_requested
+                                               THEN goal_report_outcome END,
                     current_attempt_id = NULL,
                     updated_at = NOW()
                 WHERE id = $1 AND current_attempt_id = $2 AND state = 'running'
@@ -517,7 +536,7 @@ class PostgresAttemptCommands:
         to_state: str,
         detail: str | None = None,
         base_sha: str | None = None,
-        goal_report: GoalReport | None = None,
+        goal_envelope: GoalReportEnvelope | None = None,
     ) -> bool:
         """Move a job between states, fenced by the attempt's live lease.
 
@@ -525,8 +544,10 @@ class PostgresAttemptCommands:
         False when the caller lost the lease or the job is not in
         ``from_states`` — the caller must stop.
 
-        ``goal_report`` is what the turn said about its conversation's goal; it
-        is stored in the same transaction as the outcome.
+        ``goal_envelope`` is how the turn's final message read, and it is
+        stored with the terminal state *and* the scheduling obligation it
+        implies, in one transaction: either the turn ended and the goal was told
+        to look at itself, or neither happened and the finish is retried.
 
         ``base_sha`` fills in the commit the worker resolved, and only when the
         job does not already have one: an owner who pinned a commit must get a
@@ -582,24 +603,31 @@ class PostgresAttemptCommands:
                 ) from exc
             if updated is None:
                 return False
-            if goal_report is not None:
-                # A report the turn made through the goal tool wins. It was
-                # written while the tool call happened, it is a structured act
-                # rather than a sentence the model may have restated mid-answer,
-                # and overwriting it with whatever its closing prose happened to
-                # say would replace the better evidence with the worse. The text
-                # convention is the fallback for a turn that called nothing,
-                # which is exactly what the ``goal_report IS NULL`` predicate
-                # selects. Re-sending the same finish writes the same value.
+            if goal_envelope is not None:
+                # The report and the outcome are one commit. Written here rather
+                # than after the transition because a terminal turn whose report
+                # landed later would be a turn the decision judged blind.
                 await conn.execute(
                     """
                     UPDATE agent_jobs
-                    SET goal_report = $2, goal_reason = $3
-                    WHERE id = $1 AND goal_report IS NULL
+                    SET goal_report_parse = $2, goal_report_outcome = $3,
+                        goal_report_reason = $4, goal_report_detail = $5,
+                        goal_report_evidence = $6, goal_report_digest = $7,
+                        updated_at = NOW()
+                    WHERE id = $1
                     """,
                     job_id,
-                    goal_report.status,
-                    goal_report.reason,
+                    goal_envelope.parse_result,
+                    goal_envelope.outcome,
+                    goal_envelope.reason,
+                    goal_envelope.detail,
+                    # Serialized here rather than handed over as a list: this
+                    # pool has no JSONB codec registered, so the driver wants
+                    # the text a JSON column is written from.
+                    json.dumps(goal_envelope.evidence)
+                    if goal_envelope.evidence is not None
+                    else None,
+                    goal_envelope.source_digest,
                 )
             if to_state in TERMINAL_STATES:
                 sandbox_transition = None
@@ -761,6 +789,7 @@ class PostgresAttemptCommands:
                     and sandbox_transition["context_status"] == "lost"
                 ):
                     await fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
+                await arm_finish_wakeup(conn, updated, job_id=job_id)
         return True
 
     async def append_event(
@@ -1228,7 +1257,11 @@ class PostgresAttemptCommands:
                 # which a cancelled round leaves an active goal with nothing to
                 # run it.
                 await goal_after_terminal(
-                    conn, job_id=job_id, thread_id=row["thread_id"], state=CANCELLED
+                    conn,
+                    job_id=job_id,
+                    thread_id=row["thread_id"],
+                    state=CANCELLED,
+                    detail="the automatic round was cancelled before it ran",
                 )
                 await fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
                 return CANCELLED
@@ -1541,7 +1574,10 @@ class PostgresAttemptCommands:
                     # claim whose work was thrown away.
                     await conn.execute(
                         "UPDATE agent_jobs SET state = 'queued', "
-                        "goal_report = NULL, goal_reason = NULL, updated_at = NOW() "
+                        "goal_report_parse = NULL, goal_report_outcome = NULL, "
+                        "goal_report_reason = NULL, goal_report_detail = NULL, "
+                        "goal_report_evidence = NULL, "
+                        "goal_report_digest = NULL, updated_at = NOW() "
                         "WHERE id = $1",
                         job_id,
                     )
@@ -1616,7 +1652,8 @@ class PostgresAttemptCommands:
                       AND a.status = 'running'
                       AND a.lease_expires_at > NOW()
               )
-            RETURNING j.id, j.thread_id
+            RETURNING j.id, j.thread_id, j.goal_id, j.goal_revision,
+                      j.turn_source, j.parent_job_id
             """,
             job_id,
             attempt_id,

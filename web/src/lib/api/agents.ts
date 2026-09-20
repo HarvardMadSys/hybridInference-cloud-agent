@@ -356,10 +356,18 @@ export interface AgentJobApi {
   /** How this turn came to exist. `goal` turns are the platform's own rounds. */
   turn_source?: 'human' | 'goal';
   goal_round?: number | null;
-  goal_round_kind?: 'work' | 'verify' | null;
-  /** What this turn reported about the goal, as the platform recorded it. */
-  goal_report?: 'continue' | 'complete' | 'blocked' | null;
-  goal_reason?: string | null;
+  /** `repair` is the one bounded chance a malformed report gets to restate. */
+  goal_round_kind?: 'work' | 'repair' | null;
+  /**
+   * How the platform read this turn's report block. Only an automatic round
+   * carries one: a person's turn is not part of the completion protocol.
+   */
+  goal_report_parse?: GoalReportParse | null;
+  /** What a valid report said; null unless `goal_report_parse` is `valid`. */
+  goal_report_outcome?: GoalReportOutcome | null;
+  /** A failed parse's explanation, or the reason a valid report carried. */
+  goal_report_detail?: string | null;
+  goal_repair_round?: number | null;
   /** The conversation's live goal, on every turn of it. */
   goal?: GoalApi | null;
   title?: string | null;
@@ -538,18 +546,46 @@ export type AgentJobFilesApi = AgentJobDirectoryApi | AgentJobFileApi | AgentJob
 
 /** A completion condition the platform judges at the end of every turn. */
 export interface GoalApi {
+  /** Identity of the objective; replacing the objective mints a new one. */
+  goal_id: string;
   objective: string;
-  state: 'active' | 'paused' | 'blocked' | 'complete';
+  state: 'active' | 'paused' | 'complete';
   revision: number;
   max_rounds: number;
   rounds_used: number;
-  blocked_streak: number;
-  pause_reason: string | null;
-  blocked_code: 'round-limit' | 'model-reported' | null;
-  blocked_message: string | null;
+  /** Why an active goal stopped continuing; null in every other state. */
+  pause_reason: GoalPauseReason | null;
+  /** The sentence behind the reason. Always set while paused. */
+  pause_detail: string | null;
+  /** The only basis a first-version goal completes on. */
+  completion_basis: 'model_reported' | null;
+  completed_by_job_id: string | null;
   created_at: string | null;
   updated_at: string | null;
 }
+
+/** Why a goal stopped continuing itself, as the goal record names it. */
+export type GoalPauseReason =
+  | 'user'
+  | 'fork'
+  | 'needs_input'
+  | 'round_limit'
+  | 'execution_failed'
+  | 'cancelled'
+  | 'report_invalid'
+  | 'report_unavailable'
+  | 'runtime_unsupported'
+  | 'context_lost'
+  | 'access_denied'
+  | 'quota_unavailable'
+  | 'scheduling_failed'
+  | 'archived';
+
+/** How the platform read one turn's report block. */
+export type GoalReportParse = 'absent' | 'valid' | 'invalid' | 'unavailable';
+
+/** What a valid report said about the objective. */
+export type GoalReportOutcome = 'complete' | 'needs_input';
 
 /** What a client sends to set one. */
 export interface GoalInputApi {
@@ -1066,50 +1102,70 @@ export interface GoalWriteApi {
   revision?: number;
 }
 
-/** The conversation after a goal write, as the server now holds it. */
+/** The conversation's goal after a read or a write, and its control revision. */
 export interface GoalResponseApi {
   thread_id: string;
-  job: AgentJobApi;
-  goal: GoalApi;
+  goal: GoalApi | null;
+  revision: number;
+}
+
+/** The conversation after removing its goal. */
+export interface GoalClearedApi {
+  thread_id: string;
+  cleared: boolean;
+  revision: number;
+}
+
+/** The conversation's goal, and the revision a compare-and-set write needs. */
+export async function getAgentGoal(threadId: string): Promise<GoalResponseApi> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/threads/${encodeURIComponent(threadId)}/goal`,
+  );
+  return jsonOrThrow(resp);
 }
 
 /** Set, replace or edit the conversation's completion condition. */
-export async function setAgentGoal(jobId: string, body: GoalWriteApi): Promise<GoalResponseApi> {
-  const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/goal`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+export async function setAgentGoal(threadId: string, body: GoalWriteApi): Promise<GoalResponseApi> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/threads/${encodeURIComponent(threadId)}/goal`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  );
   return jsonOrThrow(resp);
 }
 
-/** Stop the goal continuing itself; the running turn is left alone. */
-export async function pauseAgentGoal(jobId: string): Promise<GoalResponseApi> {
+/** Stop the goal continuing itself; the turn already running is left alone. */
+export async function pauseAgentGoal(threadId: string): Promise<GoalResponseApi> {
   const resp = await fetchWithAuth(
     API_BASE,
-    `/v1/agent/jobs/${encodeURIComponent(jobId)}/goal/pause`,
+    `/v1/agent/threads/${encodeURIComponent(threadId)}/goal/pause`,
     { method: 'POST' },
   );
   return jsonOrThrow(resp);
 }
 
-/** Start a paused goal moving again, queueing a round when nothing is pending. */
-export async function resumeAgentGoal(jobId: string): Promise<GoalResponseApi> {
+/** Start a paused goal moving again, scheduling a round when nothing is pending. */
+export async function resumeAgentGoal(threadId: string): Promise<GoalResponseApi> {
   const resp = await fetchWithAuth(
     API_BASE,
-    `/v1/agent/jobs/${encodeURIComponent(jobId)}/goal/resume`,
+    `/v1/agent/threads/${encodeURIComponent(threadId)}/goal/resume`,
     { method: 'POST' },
   );
   return jsonOrThrow(resp);
 }
 
-/** Remove the goal and the automatic round queued for it. */
-export async function clearAgentGoal(
-  jobId: string,
-): Promise<{ thread_id: string; job: AgentJobApi; cleared: boolean }> {
-  const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/goal`, {
-    method: 'DELETE',
-  });
+/** Remove the goal and every automatic round queued for it. */
+export async function clearAgentGoal(threadId: string): Promise<GoalClearedApi> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/threads/${encodeURIComponent(threadId)}/goal`,
+    { method: 'DELETE' },
+  );
   return jsonOrThrow(resp);
 }
 

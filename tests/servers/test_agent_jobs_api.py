@@ -42,7 +42,7 @@ from cloud_agent.api import routes as agent_jobs_router, workspace as agent_work
 from cloud_agent.api.deps import get_storage
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
-from cloud_agent.storage.repositories.goals import _action_columns
+from cloud_agent.storage.repositories.goals import _pause_detail
 from cloud_agent.tokens import mint_worker_token
 from tests.support.storage import AllCapabilities, EmptyAttachments, EmptySkillLibrary
 
@@ -56,43 +56,158 @@ _UPSTREAM_URL = "https://mcp.example.com/mcp/readonly"
 _UPSTREAM_TOKEN = "ghu_owner_secret"
 
 
-def _goal_row(goal: Any, *, revision: int = 1, rounds_used: int = 0) -> dict[str, Any]:
+def _goal_row(
+    goal: Any,
+    *,
+    goal_id: str = "goal_1",
+    state: str = "active",
+    revision: int = 1,
+    rounds_used: int = 0,
+    pause_reason: str | None = None,
+    pause_detail: str | None = None,
+) -> dict[str, Any]:
     """The conversation row a goal write leaves, as ``agent_threads`` holds it."""
     return {
+        "goal_id": goal_id,
         "objective": goal.objective,
-        "state": "active",
-        "pause_reason": None,
-        "blocked_code": None,
-        "blocked_message": None,
+        "state": state,
+        "pause_reason": pause_reason,
+        "pause_detail": pause_detail,
+        "completion_basis": None,
+        "completed_by_job_id": None,
         "revision": revision,
         "max_rounds": goal.max_rounds,
         "rounds_used": rounds_used,
-        "blocked_streak": 0,
         "created_at": None,
         "updated_at": None,
     }
 
 
-class FakeGoals:
-    """The conversation goal, as the router reaches for it.
+class FakeGoalWakeups:
+    """The durable scheduling queue, as the owner-facing writes touch it.
 
-    Stateful on purpose: the decision function's whole job is to look at what
-    the last turn reported and change this, so a fake that returned a fixed row
-    would make every continuation test pass and prove nothing.
+    Consumption has its own unit tests (``tests/unit/test_goal_controller.py``)
+    with a store that models the lease and the decision; here the queue only has
+    to record what an accepted write owes, so that a route test can assert the
+    obligation was written in the same breath as the goal.
     """
 
     def __init__(self, store: FakeStorage) -> None:
         self._store = store
+        self.rows: list[dict[str, Any]] = []
+
+    async def arm(
+        self,
+        *,
+        thread_id: str,
+        goal_id: str | None,
+        revision: int,
+        trigger: str,
+        trigger_ref: str,
+        waiting_job_id: str | None = None,
+        conn: Any | None = None,
+    ) -> str | None:
+        """Record one obligation, or return the pending one it duplicates."""
+        for row in self.rows:
+            if (
+                row["state"] == "pending"
+                and row["thread_id"] == thread_id
+                and row["trigger"] == trigger
+                and row["trigger_ref"] == trigger_ref
+            ):
+                return row["id"]
+        row = {
+            "id": f"wakeup_{len(self.rows) + 1}",
+            "thread_id": thread_id,
+            "goal_id": goal_id,
+            "revision": revision,
+            "trigger": trigger,
+            "trigger_ref": trigger_ref,
+            "state": "pending",
+            "waiting_job_id": waiting_job_id,
+            "attempts": 0,
+            "detail": None,
+        }
+        self.rows.append(row)
+        return row["id"]
+
+    async def claim_wakeups(self, *, limit: int = 1) -> list[dict[str, Any]]:
+        """Nothing is consumed here; the decision's own tests own that path."""
+        return []
+
+    async def pending_wakeup(self, *, thread_id: str) -> dict[str, Any] | None:
+        for row in self.rows:
+            if row["thread_id"] == thread_id and row["state"] == "pending":
+                return dict(row)
+        return None
+
+    def invalidate(self, thread_id: str, detail: str) -> None:
+        """Pause, clear and resume void every obligation waiting on that goal."""
+        for row in self.rows:
+            if row["thread_id"] == thread_id and row["state"] == "pending":
+                row["state"] = "processed"
+                row["detail"] = detail
+                row["waiting_job_id"] = None
+
+
+class FakeGoals:
+    """The conversation goal, as the owner routes reach for it.
+
+    Stateful and rule-faithful on purpose: what these routes *are* is the rules
+    about identity, revision and state that the Postgres repository applies, so
+    a fake that returned a fixed row would make every case pass and prove
+    nothing. The rules below are the repository's, restated for one process.
+    """
+
+    def __init__(self, store: FakeStorage) -> None:
+        self._store = store
+        self._next_goal = 1
+
+    def _mint(self) -> str:
+        goal_id = f"goal_{self._next_goal}"
+        self._next_goal += 1
+        return goal_id
+
+    def _owned(self, thread_id: str, user_id: str) -> bool:
+        return self._store.thread_owners.get(thread_id) == user_id
 
     def _goal(self, thread_id: str) -> dict[str, Any] | None:
         return self._store.thread_goals.get(thread_id)
 
+    # -- reads --------------------------------------------------------------
     async def get_goal(self, *, thread_id: str) -> dict[str, Any] | None:
-        return self._goal(thread_id)
+        goal = self._goal(thread_id)
+        return None if goal is None else dict(goal)
 
     async def get_goal_for_job(self, *, job_id: str) -> dict[str, Any] | None:
         job = self._store.jobs.get(job_id)
-        return None if job is None else self._goal(str(job["thread_id"]))
+        return None if job is None else await self.get_goal(thread_id=str(job["thread_id"]))
+
+    async def get_thread_goal_state(self, *, user_id: str, thread_id: str) -> dict[str, Any] | None:
+        """The goal and its control version, or ``None`` for a foreign thread.
+
+        The revision is answered even with no goal, because it is what the next
+        write's ``expected_revision`` is compared against.
+        """
+        if not self._owned(thread_id, user_id):
+            return None
+        return {
+            "goal": await self.get_goal(thread_id=thread_id),
+            "revision": self._store.goal_revisions.get(thread_id, 0),
+        }
+
+    async def has_pending_turn(self, *, thread_id: str, conn: Any | None = None) -> bool:
+        return any(
+            job["thread_id"] == thread_id and job["state"] in {"queued", "running"}
+            for job in self._store.jobs.values()
+        )
+
+    # -- owner writes -------------------------------------------------------
+    def create_with_job(self, thread_id: str, goal: Any) -> None:
+        """The goal a job-creating request writes, in the same transaction."""
+        written = _goal_row(goal, goal_id=self._mint(), revision=1)
+        self._store.thread_goals[thread_id] = written
+        self._store.goal_revisions[thread_id] = written["revision"]
 
     async def set_goal(
         self,
@@ -102,114 +217,116 @@ class FakeGoals:
         goal: Any,
         expected_revision: int | None = None,
     ) -> dict[str, Any] | None:
-        owned = any(
-            job["thread_id"] == thread_id and job["user_id"] == user_id
-            for job in self._store.jobs.values()
-        )
-        if not owned:
+        if not self._owned(thread_id, user_id):
             return None
         current = self._goal(thread_id)
-        if expected_revision is not None and expected_revision != (current or {}).get(
-            "revision", 0
-        ):
-            raise GoalConflict("stale")
+        revision = self._store.goal_revisions.get(thread_id, 0)
+        if expected_revision is not None and expected_revision != revision:
+            raise GoalConflict("This goal changed since you read it. Reload and try again.")
         objective_changed = current is None or current["objective"] != goal.objective
-        # The revision names the objective, so only a new objective mints one —
-        # the same rule ``SET_GOAL_SQL`` states. The count is left alone either
-        # way here and derived on read, exactly as the real reader derives it.
-        updated = {
-            **(current or {}),
+        # A goal that had finished is authorized again, even in identical words:
+        # the last authorization was spent, so reusing its identity would let an
+        # old report look current.
+        reauthorized = current is not None and current["state"] == "complete"
+        restart = objective_changed or current is None or current["state"] != "paused"
+        minted = objective_changed or reauthorized
+        written = {
+            "goal_id": self._mint() if minted else current["goal_id"],
             "objective": goal.objective,
-            "state": "active",
-            "pause_reason": None,
-            "blocked_code": None,
-            "blocked_message": None,
-            "revision": (current or {}).get("revision", 0) + (1 if objective_changed else 0),
+            "state": "active" if restart else "paused",
+            "pause_reason": None if restart else (current["pause_reason"] or "user"),
+            "pause_detail": (
+                None if restart else (current["pause_detail"] or "the goal was edited while paused")
+            ),
+            "completion_basis": None,
+            "completed_by_job_id": None,
+            # Every accepted write moves the control version, even one that
+            # only changed the cap.
+            "revision": revision + 1,
             "max_rounds": goal.max_rounds,
-            # Replacing the objective starts the budget over; editing the cap
-            # does not. Rounds are what carry a revision, so this is the same
-            # statement the real derivation makes.
-            "rounds_used": 0 if objective_changed or current is None else current["rounds_used"],
-            "blocked_streak": 0,
-            "created_at": None,
+            # Rounds belong to the identity, so a minted one starts from zero.
+            "rounds_used": 0 if minted else current["rounds_used"],
+            "created_at": (current or {}).get("created_at"),
             "updated_at": None,
         }
-        if objective_changed:
-            self._cancel_queued_rounds(thread_id)
-        self._store.thread_goals[thread_id] = updated
-        return dict(updated)
-
-    async def pause_goal(self, *, thread_id: str, revision: int, reason: str) -> bool:
-        current = self._goal(thread_id)
-        if current is None or current["revision"] != revision or current["state"] != "active":
-            return False
-        current.update(
-            state="paused",
-            pause_reason=reason,
-            revision=revision + 1,
-            blocked_code=None,
-            blocked_message=None,
-        )
+        self._store.thread_goals[thread_id] = written
+        self._store.goal_revisions[thread_id] = written["revision"]
         self._cancel_queued_rounds(thread_id)
-        return True
+        if restart:
+            await self._store.goal_wakeups.arm(
+                thread_id=thread_id,
+                goal_id=written["goal_id"],
+                revision=written["revision"],
+                trigger="owner",
+                trigger_ref=f"set:{written['revision']}",
+            )
+        return dict(written)
 
-    async def resume_goal(self, *, thread_id: str, revision: int) -> bool:
-        current = self._goal(thread_id)
-        if current is None or current["revision"] != revision or current["state"] != "paused":
-            return False
-        current.update(state="active", pause_reason=None, revision=revision + 1)
-        return True
-
-    async def clear_goal(self, *, thread_id: str, user_id: str) -> bool:
-        if self._goal(thread_id) is None:
-            return False
-        del self._store.thread_goals[thread_id]
-        self._cancel_queued_rounds(thread_id)
-        return True
-
-    async def apply_action(
+    async def pause_goal(
         self,
         *,
         thread_id: str,
         revision: int,
-        action: Any,
-        pause_reason: str | None = None,
-        blocked_code: str | None = None,
+        reason: str,
+        detail: str | None = None,
     ) -> dict[str, Any] | None:
         current = self._goal(thread_id)
-        if current is None or current["revision"] != revision:
+        if current is None or current["revision"] != revision or current["state"] != "active":
             return None
-        # The real column mapping, not a second copy of its rules. A fake that
-        # branched on the kind itself skipped the requirement that a terminal
-        # action carry its code or reason, so a `block` with no code passed here
-        # and raised in Postgres — which is how "three consecutive blocked
-        # reports" was green in CI and dead in production.
-        state, pause, code, message = _action_columns(action, pause_reason, blocked_code)
-        # The streak moves on its own; the revision does not. Continuing is not
-        # a change to what the goal *is*, so a later turn's decision is still
-        # made against the same revision the owner last wrote.
-        current["blocked_streak"] = action.blocked_streak
-        if state is None:
-            return dict(current)
-        current.update(
-            state=state,
-            pause_reason=pause,
-            blocked_code=code,
-            blocked_message=message,
-            # A state change mints a revision; a streak write does not.
-            revision=revision + 1,
-        )
+        written = {
+            **current,
+            "state": "paused",
+            "pause_reason": reason,
+            "pause_detail": detail if detail is not None else _pause_detail(reason),
+            "completion_basis": None,
+            "completed_by_job_id": None,
+            "revision": revision + 1,
+        }
+        self._store.thread_goals[thread_id] = written
+        self._store.goal_revisions[thread_id] = written["revision"]
         self._cancel_queued_rounds(thread_id)
-        return dict(current)
+        self._store.goal_wakeups.invalidate(thread_id, "goal paused")
+        return dict(written)
 
-    async def has_pending_turn(self, *, thread_id: str) -> bool:
-        return any(
-            job["thread_id"] == thread_id and job["state"] in {"queued", "running"}
-            for job in self._store.jobs.values()
+    async def resume_goal(
+        self, *, thread_id: str, user_id: str, revision: int
+    ) -> dict[str, Any] | None:
+        if not self._owned(thread_id, user_id):
+            return None
+        current = self._goal(thread_id)
+        if current is None or current["revision"] != revision or current["state"] != "paused":
+            return None
+        written = {
+            **current,
+            "state": "active",
+            "pause_reason": None,
+            "pause_detail": None,
+            "completion_basis": None,
+            "completed_by_job_id": None,
+            "revision": revision + 1,
+        }
+        self._store.thread_goals[thread_id] = written
+        self._store.goal_revisions[thread_id] = written["revision"]
+        self._store.goal_wakeups.invalidate(thread_id, "superseded by resume")
+        await self._store.goal_wakeups.arm(
+            thread_id=thread_id,
+            goal_id=written["goal_id"],
+            revision=written["revision"],
+            trigger="owner",
+            trigger_ref=f"resume:{written['revision']}",
         )
+        return dict(written)
 
-    async def pause_stalled_goals(self) -> list[str]:
-        return []
+    async def clear_goal(self, *, thread_id: str, user_id: str) -> bool:
+        if not self._owned(thread_id, user_id) or self._goal(thread_id) is None:
+            return False
+        del self._store.thread_goals[thread_id]
+        # The version keeps moving: the next write compares against the revision
+        # clear left behind, not the one before it.
+        self._store.goal_revisions[thread_id] = self._store.goal_revisions.get(thread_id, 0) + 1
+        self._cancel_queued_rounds(thread_id)
+        self._store.goal_wakeups.invalidate(thread_id, "goal cleared")
+        return True
 
     def _cancel_queued_rounds(self, thread_id: str) -> None:
         """The rounds belong to the goal; when it stops, they stop with it."""
@@ -232,8 +349,14 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         self.messages: list[dict[str, Any]] = []
         self.archived_threads: dict[str, datetime] = {}
         self.pinned_threads: dict[str, datetime] = {}
-        #: The conversation-level goal, exactly as ``agent_threads`` holds it.
+        #: The conversation-level goal, exactly as ``agent_threads`` holds it,
+        #: and the control version that outlives a cleared one.
         self.thread_goals: dict[str, dict[str, Any]] = {}
+        self.goal_revisions: dict[str, int] = {}
+        #: Which owner each conversation belongs to, the way
+        #: ``agent_threads.user_id`` scopes every goal read and write.
+        self.thread_owners: dict[str, str] = {}
+        self.goal_wakeups = FakeGoalWakeups(self)
         self.goals = FakeGoals(self)
         self.turn_telemetry: dict[str, dict[str, Any]] = {}
         self.turn_summaries: dict[int, dict[str, Any]] = {}
@@ -453,6 +576,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         # ``goal`` is the conversation's, not the turn's: it is written below
         # and read back per request, exactly as ``JOB_SELECT`` reports it.
         goal = kwargs.pop("goal", None)
+        self.thread_owners[thread_id] = str(kwargs["user_id"])
         job = {
             "id": job_id,
             "thread_id": thread_id,
@@ -486,7 +610,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         job.setdefault("execution_profile", "trusted-v1")
         job.setdefault("reasoning_effort", None)
         if goal is not None:
-            self.thread_goals[thread_id] = _goal_row(goal)
+            self.goals.create_with_job(thread_id, goal)
         job["goal"] = self.thread_goals.get(thread_id)
         self.jobs[job_id] = job
         self.messages.append(
@@ -605,11 +729,17 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "goal_round": goal_round,
             "goal_round_kind": goal_round_kind,
             "round_goal_revision": goal_revision,
-            "goal_report": None,
-            "goal_reason": None,
+            # A fresh turn has its own report columns, whatever its parent
+            # ended on.
+            "goal_report_parse": None,
+            "goal_report_outcome": None,
+            "goal_report_detail": None,
             "created_at": None,
             "updated_at": None,
             "pinned_at": self.pinned_threads.get(parent["thread_id"]),
+            # The live goal, under the job's keys, the way every join read
+            # reports it.
+            "goal": self.thread_goals.get(str(parent["thread_id"])),
             # The child is its own submission, so it carries its own key
             # rather than inheriting the parent's.
             "client_request_id": client_request_id,
@@ -1413,7 +1543,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         to_state: str,
         detail: str | None = None,
         base_sha: str | None = None,
-        goal_report: Any | None = None,
+        goal_envelope: Any | None = None,
     ) -> bool:
         job = self.jobs.get(job_id)
         if job is None or not self._fenced(attempt_id, lease_generation):
@@ -1422,12 +1552,15 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             return False
         job["state"] = to_state
         # The store writes this in the same transaction as the outcome, so a
-        # terminal turn always carries the answer it ended on. A report the turn
-        # made through the goal tool wins — it is the deliberate act, and the
-        # prose is only what the turn happened to close with.
-        if goal_report is not None and job.get("goal_report") is None:
-            job["goal_report"] = goal_report.status
-            job["goal_reason"] = goal_report.reason
+        # terminal turn always carries the answer it ended on. There is no tool
+        # half any more: the report is the turn's own final message.
+        if goal_envelope is not None:
+            job["goal_report_parse"] = goal_envelope.parse_result
+            job["goal_report_outcome"] = goal_envelope.outcome
+            # The model's sentence and the parser's refusal reason are two
+            # columns, the way ``transition`` writes them.
+            job["goal_report_reason"] = goal_envelope.reason
+            job["goal_report_detail"] = goal_envelope.detail
         if to_state in {"succeeded", "failed", "cancelled"}:
             job["terminal_resume_pending"] = False
         job["detail"] = detail
