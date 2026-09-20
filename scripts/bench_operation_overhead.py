@@ -62,10 +62,22 @@ Cohorts, and what each one really is
 ``on-persist``
     ``on-local`` plus the real destination: for a server-request operation the
     real ``Storage.operation_measurements`` repository, writing the real
-    ``agent_operation_measurements`` table; for ``--startup`` the real
-    ``deliver_measurements`` runtime posting the frozen record to the real ingest
-    route (``POST /v1/agent/worker/jobs/{job_id}/measurements``) and into the
-    same table.
+    ``agent_operation_measurements`` table; for ``--startup`` the runner's own
+    hand-off delivery, started at the freeze point, posting the frozen record to
+    the real ingest route
+    (``POST /v1/agent/worker/jobs/{job_id}/measurements``) and into the same
+    table.
+
+For ``--startup`` the timed window is the whole measured path, not only the
+container work: the measurement is opened, the run's facts are bound, both
+supervisor calls run *with the profiling context the runner passes them*, their
+answers are recorded as fragments, the record is frozen, and the hand-off
+delivery is started -- all between two reads of this process's clock. A window
+that began after the first mark and ended before the freeze would have measured
+the container and exempted the instrumentation, which is the comparison the
+cohorts exist to make. What a path needs as preparation (creating or stopping
+the container that defines it, warming a resident for ``reuse_live``) stays
+outside the clock, because it is not a cost a startup pays.
 
 Two synthetic arms run on top of ``on-persist`` / ``on-local``:
 
@@ -135,7 +147,7 @@ import tempfile
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -149,6 +161,8 @@ from cloud_agent.operation_measurement import reset as reset_selections
 from cloud_agent_profiling import operation_call, operation_profiling
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import asyncpg
     import httpx
     from fastapi import FastAPI
@@ -1072,7 +1086,6 @@ async def _run_server_cohort(
     cpu_before = time.process_time()
     rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     threads_before = threading.active_count()
-    request_cpu_s = 0.0
     drain_waits: list[dict[str, Any]] = []
     try:
         for label, _description in SERVER_OPERATIONS:
@@ -1080,11 +1093,9 @@ async def _run_server_cohort(
                 response = await _send_operation(session.client, session.job_id, label)
                 _require_ok(response, label)
             for _ in range(args.iterations):
-                request_cpu_before = time.process_time()
                 started = time.perf_counter_ns()
                 response = await _send_operation(session.client, session.job_id, label)
                 elapsed = time.perf_counter_ns() - started
-                request_cpu_s += time.process_time() - request_cpu_before
                 _require_ok(response, label)
                 samples[label].append(elapsed)
             # Between operations the queue is allowed to finish what this
@@ -1109,11 +1120,9 @@ async def _run_server_cohort(
                 for _ in range(args.warmup):
                     await _send_bare_analogue(session.client, session.job_id, family)
                 for _ in range(args.iterations):
-                    request_cpu_before = time.process_time()
                     started = time.perf_counter_ns()
                     response = await _send_bare_analogue(session.client, session.job_id, family)
                     elapsed = time.perf_counter_ns() - started
-                    request_cpu_s += time.process_time() - request_cpu_before
                     _require_ok(response, f"bare:{family}")
                     samples[f"bare:{family}"].append(elapsed)
         # Drain both destinations before counting, so a shortfall is a real
@@ -1165,10 +1174,18 @@ async def _run_server_cohort(
 
     cpu_after = time.process_time()
     rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # One number, and it is the whole process: ``time.process_time`` sums every
+    # thread, so there is no per-thread split to report here. The earlier
+    # revision subtracted "CPU inside the request-await windows" and called the
+    # remainder background-thread cost; both halves were process-wide, the
+    # windows also carried the peer's work on this shared loop, and the
+    # remainder also carried warmup, preparation and the draining sweeps. It was
+    # not a measurement of the exporter or the writer. What is measurable is the
+    # total process CPU one configuration spends on the same request set, which
+    # is what is reported and what the cohort-to-cohort delta is computed from.
     background = {
-        "cohort_cpu_s": round(cpu_after - cpu_before, 4),
-        "request_window_cpu_s": round(request_cpu_s, 4),
-        "other_threads_cpu_s": round(max(0.0, (cpu_after - cpu_before) - request_cpu_s), 4),
+        "process_cpu_s": round(cpu_after - cpu_before, 4),
+        "cpu_scope": "whole process, every thread, over this cohort's warmup and timed rounds",
         "threads_before": threads_before,
         "threads_after": threading.active_count(),
         "peak_rss_mb_before": round(_rss_mb(rss_before), 2),
@@ -1177,7 +1194,11 @@ async def _run_server_cohort(
         "not_measured": [
             "network bytes: a loopback HTTP exchange has no portable per-socket counter here",
             "per-thread CPU: resource.RUSAGE_THREAD is unavailable on this platform, so the "
-            "request/background split is (process CPU in request windows) vs (the remainder)",
+            "collector's exporter thread and the writer's tasks cannot be charged separately "
+            "from the request path; only the cohort's total process CPU is measured",
+            "CPU attributable to the measurement machinery alone: the delta against `off` is "
+            "the whole configuration's extra process CPU, and the client and server share this "
+            "process, so part of any delta is the load generator's own extra work",
             "WAL, index and disk bytes: the Postgres number is payload bytes only",
             "container CPU and memory: no container is involved in a server-request cohort",
         ],
@@ -1211,17 +1232,15 @@ def _merge_writer_counts(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _merge_background(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Add up the background cost of one cohort across its rounds."""
+    """Add up one cohort's process CPU across its rounds."""
     return {
         "rounds": len(rows),
-        "cohort_cpu_s": round(sum(row["cohort_cpu_s"] for row in rows), 4),
-        "request_window_cpu_s": round(sum(row["request_window_cpu_s"] for row in rows), 4),
-        "other_threads_cpu_s": round(sum(row["other_threads_cpu_s"] for row in rows), 4),
+        "process_cpu_s": round(sum(row["process_cpu_s"] for row in rows), 4),
+        "cpu_scope": rows[-1]["cpu_scope"],
         "sink_bytes_written": sum(int(row["sink_bytes_written"]) for row in rows),
         "peak_rss_mb_before": min(row["peak_rss_mb_before"] for row in rows),
         "peak_rss_mb_after": max(row["peak_rss_mb_after"] for row in rows),
-        "per_round_cpu_s": [row["cohort_cpu_s"] for row in rows],
-        "per_round_request_cpu_s": [row["request_window_cpu_s"] for row in rows],
+        "per_round_process_cpu_s": [row["process_cpu_s"] for row in rows],
         "not_measured": rows[-1]["not_measured"],
     }
 
@@ -1739,16 +1758,31 @@ def _activate_once(
     native_session_id: str | None,
     activation_generation: int,
     measurement: Any,
-) -> tuple[int, str, str]:
-    """Run one real activation and return its duration, actions and classification.
+    on_frozen: Callable[[Any], None] | None = None,
+) -> tuple[str, str]:
+    """Run one real activation on the path the runner actually walks.
 
-    The timed window is the supervisor's own activation -- ``acquire`` plus the
-    resident hand-off -- which is the container and process work a startup pays
-    for. The collector wraps it exactly as the runner wraps an attempt: a mark
-    before, the facts after, and a finish at the end.
+    Everything the startup pays for is here, in the runner's own order: the
+    marks, the fragment registrations, the two supervisor calls *carrying the
+    profiling context to the broker*, their answers recorded as fragments, the
+    facts, the freeze and the handoff enqueue. The caller owns the clock, so the
+    collection and the background enqueue are inside the measured window rather
+    than beside it.
+
+    The profiling context is the part that was missing: without
+    ``measurement_context`` the supervisor and the container manager take their
+    unprofiled branch, so an ``on`` cohort measured a startup that had not in
+    fact collected the container-side sub-stages the runner collects.
+
+    The answers are converted with ``dataclasses.asdict`` because that is what
+    the runner receives: it talks to a broker over HTTP and gets a mapping back,
+    and ``record_fragment`` will only accept a mapping. Passing the dataclass
+    itself silently answered nothing, which left every record with
+    ``missing_fragments`` and ``collection_complete: false`` -- a benchmark that
+    had not collected what it claimed to be measuring.
     """
     operation_profiling.mark(measurement, "supervisor_acquire")
-    started = time.perf_counter_ns()
+    acquire_call = operation_profiling.expect_fragment(measurement, "broker", "supervisor_acquire")
     lease = supervisor.acquire(
         sandbox.spec,
         thread_id=BENCH_STARTUP_THREAD,
@@ -1757,24 +1791,47 @@ def _activate_once(
         has_settled_context=has_settled_context,
         manifest=_startup_manifest(native_session_id=native_session_id),
         expected_container_id=expected_container_id,
+        profiling=operation_profiling.measurement_context(measurement, acquire_call),
     )
+    operation_profiling.record_fragment(
+        measurement,
+        producer="broker",
+        call_id=acquire_call,
+        stage="supervisor_acquire",
+        response=asdict(lease),
+    )
+    operation_profiling.mark(measurement, "resident_start")
+    resident_call = operation_profiling.expect_fragment(measurement, "broker", "resident_start")
     resident = supervisor.ensure_resident(
         BENCH_STARTUP_THREAD,
         lease.token,
         _startup_launch(native_session_id=native_session_id),
+        profiling=operation_profiling.measurement_context(measurement, resident_call),
     )
-    elapsed = time.perf_counter_ns() - started
+    operation_profiling.record_fragment(
+        measurement,
+        producer="broker",
+        call_id=resident_call,
+        stage="resident_start",
+        response=asdict(resident),
+    )
     container_action = str(getattr(lease, "container_action", "unknown"))
     resident_action = str(getattr(resident, "resident_action", "unknown"))
     path = _classify(container_action, resident_action)
-    operation_profiling.mark(measurement, "resident_start")
     operation_profiling.set_attributes(
         measurement,
         startup_path=path,
         container_action=container_action,
         resident_action=resident_action,
     )
-    return elapsed, container_action, resident_action
+    # The freeze and the handoff queue are on the measured path too: the runner
+    # pays for the record it serializes and for starting the send before the
+    # prompt goes out, and a benchmark that stopped before them would report a
+    # cost the runner does not pay.
+    _finish_collector(measurement)
+    if on_frozen is not None:
+        on_frozen(measurement)
+    return container_action, resident_action
 
 
 def _start_collector(cohort: str) -> Any:
@@ -1798,38 +1855,112 @@ def _finish_collector(measurement: Any) -> None:
     operation_profiling.finish(measurement, outcome="dispatched")
 
 
+def _measured_activation(
+    sandbox: StartupSandbox,
+    supervisor: Any,
+    *,
+    cohort: str,
+    session: BenchSession,
+    on_frozen: Callable[[Any], None] | None,
+    expected_container_id: str | None,
+    has_settled_context: bool,
+    native_session_id: str | None,
+    activation_generation: int,
+) -> tuple[int, str, str, Any]:
+    """Time the whole measured startup path, collection and handoff included.
+
+    The clock is this process's own wall clock and it brackets everything the
+    runner does for one attempt: opening the measurement, binding the facts the
+    route resolved, both supervisor calls with their profiling context, the
+    fragment answers, the facts, the freeze and the hand-off enqueue. Starting
+    it after the first mark and stopping it before the last two would have
+    charged the container's work to the cohort but not the instrumentation's,
+    which is the number the comparison exists to produce.
+    """
+    started = time.perf_counter_ns()
+    measurement = _start_collector(cohort)
+    if measurement is not None:
+        bound = operation_profiling.bind(
+            measurement,
+            job_id=session.job_id,
+            attempt_id=session.attempt_id,
+            sandbox_id=BENCH_SANDBOX_ID,
+            runtime_id=BENCH_RUNTIME_ID,
+            runtime_version=BENCH_RUNTIME_VERSION,
+            execution_profile=session.execution_profile,
+        )
+        if not bound:  # pragma: no cover - fixture failure
+            raise SystemExit("the startup measurement fell out of the run's scope")
+    container_action, resident_action = _activate_once(
+        sandbox,
+        supervisor,
+        expected_container_id=expected_container_id,
+        has_settled_context=has_settled_context,
+        native_session_id=native_session_id,
+        activation_generation=activation_generation,
+        measurement=measurement,
+        on_frozen=on_frozen,
+    )
+    elapsed = time.perf_counter_ns() - started
+    return elapsed, container_action, resident_action, measurement
+
+
 def _activate_path(
     sandbox: StartupSandbox,
     path: str,
     *,
-    measurement: Any,
+    cohort: str,
+    session: BenchSession,
+    on_frozen: Callable[[Any], None] | None = None,
     iteration: int,
-) -> tuple[int, str, str]:
+    timed: bool = True,
+) -> tuple[int, str, str, Any]:
     """Produce one declared startup path with a real container action.
 
-    Each path is *prepared* into the state that forces its container action and
-    then activated by the same call the runner makes, so the classifier sees a
-    real ``create`` / ``start`` / ``reuse`` rather than a timeline this script
-    labelled.
+    Each path is *prepared* into the state that forces its container action --
+    always outside the clock, because a container this benchmark stopped on
+    purpose is not a cost the startup pays -- and then activated by the same call
+    the runner makes, so the classifier sees a real ``create`` / ``start`` /
+    ``reuse`` rather than a timeline this script labelled.
+
+    ``timed`` exists for the warmup: a warmup activation runs the same code with
+    no measurement open, and its duration is discarded.
     """
     from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+
+    def run(supervisor: Any, **kwargs: Any) -> tuple[int, str, str, Any]:
+        if not timed:
+            _activate_once(
+                sandbox,
+                supervisor,
+                measurement=None,
+                on_frozen=None,
+                activation_generation=iteration + 1,
+                **kwargs,
+            )
+            return 0, "", "", None
+        return _measured_activation(
+            sandbox,
+            supervisor,
+            cohort=cohort,
+            session=session,
+            on_frozen=on_frozen,
+            activation_generation=iteration + 1,
+            **kwargs,
+        )
 
     if path == "new_group":
         # No supervisor state, no container: the activation must create both.
         sandbox.remove_container()
-        factory = BenchTransportFactory()
         supervisor = SharedChatSessionSupervisor(
-            sandbox.manager, idle_timeout_s=3600, transport_factory=factory
+            sandbox.manager, idle_timeout_s=3600, transport_factory=BenchTransportFactory()
         )
         try:
-            return _activate_once(
-                sandbox,
+            return run(
                 supervisor,
                 expected_container_id=None,
                 has_settled_context=False,
                 native_session_id=None,
-                activation_generation=iteration + 1,
-                measurement=measurement,
             )
         finally:
             supervisor.close()
@@ -1850,14 +1981,11 @@ def _activate_path(
             sandbox.manager, idle_timeout_s=3600, transport_factory=BenchTransportFactory()
         )
         try:
-            return _activate_once(
-                sandbox,
+            return run(
                 resume,
                 expected_container_id=stopped.container_id,
                 has_settled_context=True,
                 native_session_id=None,
-                activation_generation=iteration + 1,
-                measurement=measurement,
             )
         finally:
             resume.close()
@@ -1866,19 +1994,15 @@ def _activate_path(
         # A replacement broker: the container is running and durable, the local
         # process pipe is gone, and the native session has to be resumed.
         inspection = _ensure_running_container(sandbox)
-        factory = BenchTransportFactory()
         supervisor = SharedChatSessionSupervisor(
-            sandbox.manager, idle_timeout_s=3600, transport_factory=factory
+            sandbox.manager, idle_timeout_s=3600, transport_factory=BenchTransportFactory()
         )
         try:
-            return _activate_once(
-                sandbox,
+            return run(
                 supervisor,
                 expected_container_id=inspection.container_id,
                 has_settled_context=True,
                 native_session_id="native-bench-resume",
-                activation_generation=iteration + 1,
-                measurement=measurement,
             )
         finally:
             supervisor.close()
@@ -1886,11 +2010,12 @@ def _activate_path(
     if path == "reuse_live":
         # Prepare a live resident transport in this supervisor, settle it the way
         # a completed turn does, and then measure the next activation, which must
-        # find the same container and the same process.
+        # find the same container and the same process. The warm activation is
+        # preparation and is deliberately unprofiled: it is not the startup under
+        # measurement, and profiling it would spend the run's budget on it.
         prepared = _ensure_running_container(sandbox)
-        factory = BenchTransportFactory()
         supervisor = SharedChatSessionSupervisor(
-            sandbox.manager, idle_timeout_s=3600, transport_factory=factory
+            sandbox.manager, idle_timeout_s=3600, transport_factory=BenchTransportFactory()
         )
         warm = supervisor.acquire(
             sandbox.spec,
@@ -1913,14 +2038,11 @@ def _activate_path(
             context_status="live",
         )
         try:
-            return _activate_once(
-                sandbox,
+            return run(
                 supervisor,
                 expected_container_id=prepared.container_id,
                 has_settled_context=True,
                 native_session_id=None,
-                activation_generation=iteration + 1,
-                measurement=measurement,
             )
         finally:
             supervisor.close()
@@ -1944,7 +2066,8 @@ def _ensure_running_container(sandbox: StartupSandbox) -> Any:
 
 async def _run_startup_section(session: BenchSession, args: argparse.Namespace) -> dict[str, Any]:
     """Measure the four startup paths, per cohort, on a real container."""
-    from cloud_agent_host.runner import ControlPlane, deliver_measurements
+    from cloud_agent_host import runner as runner_mod
+    from cloud_agent_host.runner import ClaimedJob
 
     sandbox = StartupSandbox()
     results: dict[str, dict[str, Any]] = {}
@@ -1955,6 +2078,34 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
         path: {cohort: [] for cohort in COHORTS} for path in STARTUP_PATHS
     }
     delivery: dict[str, Any] = {}
+    # The runner's own hand-off closure, so `on-persist` pays for the freeze and
+    # for starting the send at the same point the runner does. The alternative
+    # this replaces -- collecting every record and delivering the batch after the
+    # cohort -- measured a startup that deferred its own delivery, which no
+    # runner does.
+    bench_job = ClaimedJob(
+        job_id=session.job_id,
+        thread_id=session.thread_id,
+        attempt_id=session.attempt_id,
+        attempt_no=1,
+        repo=BENCH_REPO,
+        base_sha=None,
+        task_prompt="",
+        runtime=BENCH_RUNTIME_ID,
+        model="bench-model",
+        worker_token=session.worker_token,
+        sandbox_token="",
+        execution_profile=session.execution_profile,
+    )
+
+    def handoff(_frozen: Any) -> None:
+        runner_mod._enqueue_delivery(
+            _frozen,
+            job=bench_job,
+            base_url=session.url,
+            drain_s=runner_mod.DELIVERY_HANDOFF_DRAIN_S,
+        )
+
     try:
         sandbox.up()
         for cohort in COHORTS:
@@ -1969,6 +2120,8 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
                 operations=(STARTUP_OPERATION,),
                 target={"job_id": session.job_id},
             )
+            runner_mod.reset_delivery_state()
+            on_frozen = handoff if cohort == "on-persist" else None
             for path in STARTUP_PATHS:
                 print(
                     f"startup cohort {cohort}: {path} "
@@ -1979,25 +2132,18 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
                 # networks, the import of the supervisor path -- and charging
                 # that to whichever cohort runs first would be a confound.
                 for _ in range(args.startup_warmup):
-                    _activate_path(sandbox, path, measurement=None, iteration=0)
-                for iteration in range(args.startup_iterations):
-                    measurement = _start_collector(cohort)
-                    if measurement is not None:
-                        bound = operation_profiling.bind(
-                            measurement,
-                            job_id=session.job_id,
-                            attempt_id=session.attempt_id,
-                            sandbox_id=BENCH_SANDBOX_ID,
-                            runtime_id=BENCH_RUNTIME_ID,
-                            runtime_version=BENCH_RUNTIME_VERSION,
-                            execution_profile=session.execution_profile,
-                        )
-                        if not bound:  # pragma: no cover - fixture failure
-                            raise SystemExit("the startup measurement fell out of the run's scope")
-                    elapsed, container_action, resident_action = _activate_path(
-                        sandbox, path, measurement=measurement, iteration=iteration
+                    _activate_path(
+                        sandbox, path, cohort=cohort, session=session, iteration=0, timed=False
                     )
-                    _finish_collector(measurement)
+                for iteration in range(args.startup_iterations):
+                    elapsed, container_action, resident_action, _measurement = _activate_path(
+                        sandbox,
+                        path,
+                        cohort=cohort,
+                        session=session,
+                        on_frozen=on_frozen,
+                        iteration=iteration,
+                    )
                     classified = _classify(container_action, resident_action)
                     if classified != path:
                         raise SystemExit(
@@ -2042,13 +2188,12 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
                         f"they were measured ({args.startup_iterations} each)"
                     )
                 if cohort == "on-persist":
-                    delivery = await asyncio.to_thread(
-                        _deliver_startup_records,
-                        session,
-                        ControlPlane,
-                        deliver_measurements,
-                        [str(record.get("measurement_id")) for record in records],
-                    )
+                    # The sends were started at each handoff. Wait for the ones
+                    # still in flight, then read the runner's own counters; the
+                    # delivered/duplicate/dropped names are the runner's, so a
+                    # shortfall here is the delivery runtime's answer and not
+                    # this script's bookkeeping.
+                    delivery = await _await_handoff_deliveries(runner_mod, expected=expected)
                     stored = await _postgres_measurement_footprint(session.pool, run_id)
                     wanted = dict.fromkeys(STARTUP_PATHS, args.startup_iterations)
                     if stored["rows"] != expected or stored["startup_paths"] != wanted:
@@ -2058,7 +2203,7 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
                         )
                     if int(delivery.get("delivered", 0)) != expected:
                         raise SystemExit(
-                            f"on-persist: the delivery runtime reported {delivery} for "
+                            f"on-persist: the handoff delivery reported {delivery} for "
                             f"{expected} records"
                         )
             operation_profiling.close_sink()
@@ -2131,23 +2276,32 @@ def _recorded_startup_path(record: dict[str, Any]) -> str:
     return str(record.get("startup_path") or "")
 
 
-def _deliver_startup_records(
-    session: BenchSession,
-    control_plane: Any,
-    deliver_measurements: Any,
-    measurement_ids: list[str],
-) -> dict[str, Any]:
-    """Deliver this cohort's frozen records to the real ingest route, off the loop."""
-    control = control_plane(session.url, session.worker_token)
-    try:
-        counts = deliver_measurements(
-            control=control,
-            job_id=session.job_id,
-            measurement_ids=measurement_ids,
-        )
-        return dict(counts)
-    finally:
-        control.close()
+async def _await_handoff_deliveries(runner_mod: Any, *, expected: int) -> dict[str, Any]:
+    """Wait for the sends the handoff started, and report the runner's counts.
+
+    The enqueue at the freeze point deliberately does not wait -- that is the
+    runner's own ``DELIVERY_HANDOFF_DRAIN_S`` behaviour, and charging a
+    synchronous send to the startup would measure something the runner does not
+    do. So the cohort has to join those threads afterwards, off the event loop,
+    before the destination's row count means anything.
+    """
+
+    def _join() -> dict[str, Any]:
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            state = runner_mod._IN_FLIGHT_DELIVERIES
+            if not state:
+                break
+            for thread in list(state.values()):
+                thread.join(timeout=1.0)
+        return {
+            "delivered": len(runner_mod._DELIVERED_MEASUREMENT_IDS),
+            "dropped": int(runner_mod._DELIVERY_DROPPED_COUNT),
+            "drain_timeouts": int(runner_mod._DELIVERY_DRAIN_TIMEOUTS),
+            "expected": expected,
+        }
+
+    return await asyncio.to_thread(_join)
 
 
 def _classify(container_action: str, resident_action: str) -> str:
@@ -2203,8 +2357,10 @@ def build_payload(
             "percentile_cont in SQL, which interpolates, so a number here will not reproduce "
             "the page numerically",
             "per-cohort peak RSS is a process high-water mark and is reported as an absolute, "
-            "not as a delta; thread CPU is not separable on this platform, so the split "
-            "between the request path and the background threads is an approximation",
+            "not as a delta; CPU is the whole process because time.process_time() sums every "
+            "thread, so the collector's exporter and the writer's tasks cannot be charged "
+            "separately from the request path -- the delta against `off` is the extra process "
+            "CPU the configuration cost, not a measurement of one named thread",
             "network bytes are not measured: there is no portable per-socket counter for the "
             "loopback HTTP this script uses, and the numbers that are reported for the "
             "destinations are payload bytes, not WAL, index or disk bytes",
@@ -2479,34 +2635,52 @@ def _print_drops(payload: dict[str, Any]) -> list[str]:
             f"{writer['dropped_timeout']} | {writer['rejected']} | {writer['failed']} | "
             f"{drops['destination']} |"
         )
-    print("\nbackground cost of the measurement machinery, per cohort")
+    print("\nprocess CPU each cohort spent on the same requests, whole process, all threads")
     print(
-        f"{'cohort':<11} {'cpu s':>8} {'request cpu s':>14} {'other threads s':>16} "
-        f"{'peak rss MiB':>13} {'rounds':>12}"
+        f"{'cohort':<11} {'process cpu s':>14} {'vs off s':>10} {'per record us':>14} "
+        f"{'peak rss MiB':>13} {'rounds':>7}"
     )
     lines.append("")
-    lines.append("## Background cost")
+    lines.append("## Process CPU at equal work")
     lines.append("")
-    lines.append(
-        "| cohort | rounds | CPU s | request-window CPU s | other threads CPU s | peak RSS MiB |"
-    )
+    lines.append("| cohort | rounds | process CPU s | vs `off` s | per record µs | peak RSS MiB |")
     lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
+    off_cpu = server["cohorts"].get("off", {}).get("background", {}).get("process_cpu_s")
+    records = server.get("requests_per_cohort") or 0
     for cohort, row in server["cohorts"].items():
         cost = row["background"]
+        cpu = float(cost["process_cpu_s"])
+        comparable = off_cpu is not None and cohort not in {"bare", "off"}
+        delta = f"{cpu - float(off_cpu):+.3f}" if comparable else "—"
+        # `bare` is excluded from the comparison and says so: it sends two extra
+        # sibling requests per round, so its CPU is not the same work. `off` is
+        # the baseline itself, so its delta is nothing rather than zero.
+        per_record = (
+            f"{(cpu - float(off_cpu)) / records * 1e6:+.1f}" if comparable and records else "n/a"
+        )
         print(
-            f"{cohort:<11} {cost['cohort_cpu_s']:>8.3f} {cost['request_window_cpu_s']:>14.3f} "
-            f"{cost['other_threads_cpu_s']:>16.3f} {cost['peak_rss_mb_after']:>13.1f} "
-            f"{cost.get('rounds', 1):>12}"
+            f"{cohort:<11} {cpu:>14.3f} {delta:>10} {per_record:>14} "
+            f"{cost['peak_rss_mb_after']:>13.1f} {cost.get('rounds', 1):>7}"
         )
         lines.append(
-            f"| {cohort} | {cost.get('rounds', 1)} | {cost['cohort_cpu_s']:.3f} | "
-            f"{cost['request_window_cpu_s']:.3f} | {cost['other_threads_cpu_s']:.3f} | "
-            f"{cost['peak_rss_mb_after']:.1f} |"
+            f"| {cohort} | {cost.get('rounds', 1)} | {cpu:.3f} | {delta} | "
+            f"{per_record} | {cost['peak_rss_mb_after']:.1f} |"
         )
     print(
-        "  (request cpu s is process CPU measured only across the measured request windows; "
-        "other threads s is the remainder, which includes the collector's exporter thread and "
-        "the control plane's writer workers; thread CPU is not separable on this platform)"
+        "  (time.process_time() sums every thread, so this is the whole process -- request path, "
+        "collector exporter and control-plane writer together. Per-thread attribution is not "
+        "available on this platform, so the delta against off is the configuration's extra "
+        "process CPU and not a measurement of one named background thread. `bare` sends two "
+        "extra sibling requests per round and is therefore not comparable.)"
+    )
+    lines.append("")
+    lines.append(
+        "One number per cohort, and it is the whole process: `time.process_time()` sums every "
+        "thread, so the collector's exporter and the writer's tasks cannot be charged separately "
+        "from the request path here. The delta against `off` is the configuration's extra process "
+        "CPU on the same request set; because the client and server share this process, part of "
+        "it is the load generator's own extra work. `bare` is not comparable: it sends two extra "
+        "sibling requests per round."
     )
     lines.append("")
     lines.append(
@@ -3067,6 +3241,10 @@ async def _run_server_section(
             "cohort_order_by_round": order_log,
             "operations": operations,
             "cohorts": cohort_blocks,
+            # Every cohort but `bare` sends this many requests; `bare` sends this
+            # many plus two analogue rounds' worth, which is why its CPU is
+            # reported but never compared.
+            "requests_per_cohort": rounds * args.iterations * len(SERVER_OPERATIONS),
         },
         arms,
     )

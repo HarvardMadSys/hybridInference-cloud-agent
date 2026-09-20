@@ -82,11 +82,17 @@ export function StartupMeasurement({
         setEmptyReason(page.empty_reason ?? null);
         const newest = page.measurements[0];
         if (!newest) return;
-        // One extra read for the newest record's stages. Failures here leave
-        // the summary row on screen rather than replacing it with an error:
-        // the list is already a true answer to the question that was asked.
+        // One extra read for the newest record's stages. A failed detail read
+        // leaves the summary row on screen rather than replacing it with an
+        // error, because the list is already a true answer to the question that
+        // was asked -- except when the failure is the session being refused.
+        // Swallowing that one would leave revoked Admin data on screen and tell
+        // the page above nothing, so a refusal is handed straight back.
         const full = await getMeasurement(newest.measurement_id, controller.signal).catch(
-          () => null,
+          (e: unknown) => {
+            if (accessDenied(e)) throw e;
+            return null;
+          },
         );
         if (!controller.signal.aborted) setDetail(full);
       })

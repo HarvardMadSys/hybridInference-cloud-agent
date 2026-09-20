@@ -93,10 +93,8 @@ function detail(overrides: Partial<MeasurementDetail> = {}): MeasurementDetail {
   };
 }
 
-function renderPanel() {
-  return render(
-    <StartupMeasurement jobId="job-1" attemptId={7} onAccessDenied={() => undefined} />,
-  );
+function renderPanel(onAccessDenied: () => void = () => undefined) {
+  return render(<StartupMeasurement jobId="job-1" attemptId={7} onAccessDenied={onAccessDenied} />);
 }
 
 async function pageOf(rows: MeasurementSummary[], emptyReason?: string) {
@@ -221,6 +219,26 @@ describe('the startup panel on an attempt detail', () => {
 
     await screen.findByText('250 ms');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('hands a refused detail read to the page instead of keeping the records', async () => {
+    // Revocation is not a failed detail read. Swallowing it would leave the
+    // summary of a session that is no longer allowed to see it on screen and
+    // would tell the page above nothing.
+    await pageOf([row()]);
+    vi.mocked(getMeasurement).mockRejectedValue(new APIError('INVALID_TOKEN', 'no', 403));
+    const onAccessDenied = vi.fn();
+    renderPanel(onAccessDenied);
+
+    await waitFor(() => expect(onAccessDenied).toHaveBeenCalledTimes(1));
+  });
+
+  it('hands a refused list read to the page too', async () => {
+    vi.mocked(listMeasurements).mockRejectedValue(new APIError('INVALID_TOKEN', 'no', 401));
+    const onAccessDenied = vi.fn();
+    renderPanel(onAccessDenied);
+
+    await waitFor(() => expect(onAccessDenied).toHaveBeenCalledTimes(1));
   });
 
   it('reports a failed list read rather than showing an empty panel', async () => {
