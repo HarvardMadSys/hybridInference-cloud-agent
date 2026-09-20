@@ -945,7 +945,13 @@ class CodexRuntime(AgentRuntime):
                     },
                 )
             if item_type in ("agent_message", "assistant_message"):
-                return NormalizedEvent(MESSAGE, {"text": _truncate(item.get("text"))})
+                return NormalizedEvent(
+                    MESSAGE,
+                    {
+                        "text": _truncate(item.get("text")),
+                        "truncated": _clipped(item.get("text")),
+                    },
+                )
             if item_type in ("reasoning", "thinking"):
                 return NormalizedEvent(THINKING, {"text": _truncate(item.get("text"))})
             if item_type in ("patch", "file_change"):
@@ -1285,7 +1291,13 @@ class PiRuntime(GenericRuntime):
             # The one event the owner is actually waiting for: `message` is
             # what the control plane copies into agent_thread_messages, which
             # is both the visible reply and the next turn's context.
-            return NormalizedEvent(MESSAGE, {"text": _truncate(update.get("content"))})
+            return NormalizedEvent(
+                MESSAGE,
+                {
+                    "text": _truncate(update.get("content")),
+                    "truncated": _clipped(update.get("content")),
+                },
+            )
         tool_call = update.get("toolCall")
         if not isinstance(tool_call, dict):
             return self._raw(line, "toolcall_end without a toolCall")
@@ -1842,6 +1854,17 @@ def _reported_mcp_servers(value: Any) -> list[dict[str, Any]]:
 def _truncate(value: Any, limit: int = 4000) -> str:
     """Render any payload fragment as bounded text."""
     return _payload_text(value)[:limit]
+
+
+def _clipped(value: Any, limit: int = 4000) -> bool:
+    """Whether ``_truncate`` would drop any of ``value``.
+
+    A message that was clipped is not the model's whole answer, and the part
+    that was dropped may be the part that matters — the goal report is at the
+    *end* of a final message. The reader has to be able to tell that apart from
+    a message that simply stopped, so the fact travels with the text.
+    """
+    return len(_payload_text(value)) > limit
 
 
 def _payload_text(value: Any) -> str:

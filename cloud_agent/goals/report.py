@@ -163,12 +163,14 @@ def parse_goal_report(text: str | None) -> ParsedGoalReport:
     """
     if text is None:
         return absent()
-    if GOAL_REPORT_FENCE not in text:
+    # The *fence* is what makes a block, not the protocol's name: a message that
+    # merely mentions the name in prose has made no attempt at a report, and
+    # searching for the name alone found nothing to open and raised.
+    start = text.find(_FENCE)
+    if start == -1:
         return absent()
-    starts = [index for index in range(len(text)) if text.startswith(_FENCE, index)]
-    if len(starts) > 1:
+    if text.find(_FENCE, start + len(_FENCE)) != -1:
         return invalid("duplicate_block")
-    start = starts[0]
     open_end = text.find("\n", start)
     if open_end == -1:
         return invalid("unclosed_block")

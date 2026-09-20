@@ -293,6 +293,17 @@ def upgrade() -> None:
             )
         """
     )
+    # Whether a runtime clipped the assistant message it stored. The goal report
+    # lives at the *end* of a final message, and a truncated message is not
+    # evidence that the model said nothing — it is a message whose ending was
+    # removed. Recorded at the point the truncation happens so the reader does
+    # not have to guess from a length.
+    op.execute(
+        """
+        ALTER TABLE agent_thread_messages
+            ADD COLUMN truncated BOOLEAN NOT NULL DEFAULT FALSE
+        """
+    )
     # The per-owner input sequence. It is read under the thread lock on every
     # finish, so nothing beyond the primary key is needed to find it.
     op.execute(
@@ -379,6 +390,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Put the previous four-state goal and its two-line report back."""
     op.execute("DROP INDEX idx_agent_threads_active_goal")
+    op.execute("ALTER TABLE agent_thread_messages DROP COLUMN truncated")
     op.execute("DROP TABLE agent_goal_wakeups")
     op.execute(
         """

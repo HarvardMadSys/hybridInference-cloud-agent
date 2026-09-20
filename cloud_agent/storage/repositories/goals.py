@@ -498,6 +498,23 @@ class PostgresGoalRepository:
         Returns the thread ids by shape, for the caller's log line.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            # A wakeup parked behind a turn that has since settled is due, and
+            # may never have been released: registering the wait is a second
+            # write, so the turn can finish between the read that chose it and
+            # the write that names it. This is where that lost race is repaired,
+            # and it is deliberately unconditional — a pending wakeup is not a
+            # reason to leave a settled wait alone.
+            unparked = await conn.fetch(
+                """
+                UPDATE agent_goal_wakeups w
+                SET waiting_job_id = NULL, updated_at = NOW()
+                FROM agent_jobs blocker
+                WHERE blocker.id = w.waiting_job_id
+                  AND blocker.state IN ('succeeded', 'failed', 'cancelled')
+                  AND w.state = 'pending'
+                RETURNING w.id
+                """
+            )
             rearm = await conn.fetch(
                 """
                 SELECT t.id AS thread_id, t.goal_id, t.goal_revision
@@ -518,7 +535,9 @@ class PostgresGoalRepository:
                 """,
                 ARM_AFTER_S,
             )
-            rearmed: list[str] = []
+            # The ids of wakeups this pass made due again. Populated before the
+            # arming loop below, which appends the goals it newly armed.
+            rearmed: list[str] = [str(row["id"]) for row in unparked]
             for row in rearm:
                 # An ``active`` goal with nothing queued, running or pending, and
                 # a write recent enough that a consumer may still be about to

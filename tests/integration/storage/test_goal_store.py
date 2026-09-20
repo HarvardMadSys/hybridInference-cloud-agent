@@ -59,6 +59,18 @@ async def _goal_job(store, **job_overrides) -> tuple[dict, dict]:
     return job, goal
 
 
+async def _create_job_with_goal(store, *, objective: str = "ship it", **overrides):
+    """A conversation created *with* a goal, the way the composer creates one.
+
+    Through ``create_job``'s own ``goal`` parameter rather than a follow-up
+    ``set_goal``: that is the path where the thread is created already owning a
+    goal, and it is the one whose counters have to line up.
+    """
+    from cloud_agent.goals.models import GoalInput
+
+    return await _create_job(store, goal=GoalInput(objective=objective, max_rounds=5), **overrides)
+
+
 async def _claim_round(store, *, worker_id: str = "goal-worker", host_credential_hash=None):
     """Claim the next queued turn of the goal group."""
     return await _claim(
@@ -927,3 +939,72 @@ async def test_a_replayed_round_creation_makes_one_row(store, pool):
     assert created is not None and replayed is None
     turns = await store.conversation_queries.list_jobs(user_id=job["user_id"])
     assert len([turn for turn in turns if turn["turn_source"] == "goal"]) == 1
+
+
+async def test_a_goal_created_with_the_first_message_queues_its_first_round(store, pool):
+    """The whole first-round path, on the rows a real conversation writes.
+
+    A goal created alongside the opening message is the ordinary way a goal
+    starts, and it is the case where three separate counters have to agree: the
+    conversation's input count, the count its first turn was stamped with, and
+    the count an automatic round inherits. A zero anywhere in that chain makes
+    the platform read "the owner has spoken since" on every round it ever
+    queues — so the goal stays active for ever and no completion is ever
+    accepted — which is what this walks on real rows.
+    """
+    from cloud_agent.goals.controller import consume_wakeup, continue_after_finish
+    from cloud_agent.goals.models import GOAL_REPORT_PROTOCOL
+
+    job = await _create_job_with_goal(store, objective="ship it")
+    thread_id = str(job["thread_id"])
+    assert await store.goals.get_goal(thread_id=thread_id) is not None
+
+    # The wakeup the creation owed is there, and the first turn carries the
+    # conversation's own count — not zero, which would make it older than the
+    # message that created it.
+    armed = await store.goal_wakeups.pending_wakeup(thread_id=thread_id)
+    assert armed is not None and armed["trigger"] == "owner"
+    first = await store.conversation_queries.get_job(str(job["id"]))
+    assert first["input_seq_at_create"] == first["thread_user_input_seq"] == 1
+
+    # The owner's own turn is live, so the obligation waits behind it rather
+    # than queueing a second turn on top of it.
+    claim = await _claim_round(store)
+    assert claim["id"] == job["id"]
+    claimed = await store.goal_wakeups.claim_wakeups(limit=1)
+    assert claimed and claimed[0]["id"] == armed["id"]
+    assert await consume_wakeup(store=store, wakeup=claimed[0]) == "wait"
+
+    # It finishes without reporting anything, which is the ordinary shape of a
+    # first turn. That finish releases the wait behind it and records the
+    # decision the turn owes. Through ``transition``, not the raw helper, for
+    # exactly that reason: the release and the record live in its transaction.
+    # Cancelled rather than succeeded so the turn needs no native settlement —
+    # the arithmetic below is the same either way.
+    assert await store.attempt_commands.transition(
+        job_id=str(job["id"]),
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="cancelled",
+    )
+    assert await continue_after_finish(store=store, job_id=str(job["id"])) >= 1
+
+    turns = await _thread_turns(store, pool, thread_id)
+    rounds = [row for row in turns if row["turn_source"] == "goal"]
+    assert len(rounds) == 1, "round one was not queued"
+    assert rounds[0]["goal_round"] == 1
+    # The round inherits the count the owner's message left, which is what lets
+    # a completion it reports be accepted later.
+    assert rounds[0]["input_seq_at_create"] == 1
+    # And it asks for a host that can deliver that report.
+    assert GOAL_REPORT_PROTOCOL in (rounds[0]["metadata"] or {}).get("requires", [])
+
+
+async def _thread_turns(store, pool, thread_id: str) -> list[dict[str, Any]]:
+    """Every turn of one conversation, oldest first."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id FROM agent_jobs WHERE thread_id = $1 ORDER BY turn_no", thread_id
+        )
+    return [await store.conversation_queries.get_job(str(row["id"])) for row in rows]

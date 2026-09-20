@@ -53,6 +53,18 @@ class ConversationQueries(Protocol):
         """
         ...
 
+    async def latest_assistant_message_state(self, *, job_id: str) -> dict[str, Any] | None:
+        """The last assistant message, and whether the runtime clipped it.
+
+        ``truncated`` is the difference between "the model said nothing more"
+        and "the transport stopped carrying what it said". A report reader has
+        to tell those apart: the report block is at the *end* of a message, so a
+        clipped one is a message whose answer may have been removed, and reading
+        it as silence is exactly the failure the completeness rule exists to
+        prevent.
+        """
+        ...
+
     async def latest_assistant_message(self, *, job_id: str) -> str | None:
         """The last thing this turn said, or ``None`` if it said nothing.
 

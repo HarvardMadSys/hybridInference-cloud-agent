@@ -124,6 +124,12 @@ class PostgresConversationCommands:
                 return replayed
         job_id = new_job_id()
         thread_id = new_thread_id()
+        # How many person-authored messages this conversation has accepted. The
+        # first one is the task itself, so a conversation created with a goal
+        # starts at one and one created with a plain task starts at zero; the
+        # first turn stamps whatever this is, and the goal's completion check
+        # compares against it.
+        user_input_seq = 1 if goal is not None else 0
         try:
             async with self._pool.acquire() as conn, conn.transaction():
                 # What every turn of this conversation shares is written once,
@@ -143,7 +149,11 @@ class PostgresConversationCommands:
                             CASE WHEN $7::text IS NULL THEN 0 ELSE 1 END,
                             CASE WHEN $7::text IS NULL THEN NULL ELSE NOW() END,
                             CASE WHEN $7::text IS NULL THEN NULL ELSE NOW() END,
-                            1)
+                            -- The same counter the first turn below stamps
+                            -- itself with: a thread that says one while its own
+                            -- first turn says zero makes that turn look older
+                            -- than the message that created it.
+                            $10)
                     """,
                     thread_id,
                     user_id,
@@ -154,6 +164,7 @@ class PostgresConversationCommands:
                     goal.objective if goal is not None else None,
                     goal.max_rounds if goal is not None else None,
                     new_goal_id(),
+                    user_input_seq,
                 )
                 await write_mcp_bindings(conn, thread_id=thread_id, bindings=mcp_bindings)
                 await conn.execute(
@@ -162,9 +173,9 @@ class PostgresConversationCommands:
                         (id, thread_id, turn_no, user_id, base_sha, task_prompt,
                          runtime, model, reasoning_effort, metadata,
                          client_request_id, client_request_fingerprint, skills,
-                         attachments)
+                         attachments, input_seq_at_create)
                     VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12::jsonb,
-                            $13::jsonb)
+                            $13::jsonb, $14)
                     """,
                     job_id,
                     thread_id,
@@ -181,6 +192,12 @@ class PostgresConversationCommands:
                     # An empty selection needs no clearing context in its prompt.
                     json.dumps(skills) if skills else None,
                     json.dumps(attachments) if attachments else None,
+                    # The conversation's counter as this first turn saw it. Zero
+                    # here while the thread says one would make the very first
+                    # turn look older than its own message: a completion it
+                    # reported would be refused as "the owner has spoken since",
+                    # and no goal on a fresh conversation could ever complete.
+                    user_input_seq,
                 )
                 await claim_attachments(
                     conn,
@@ -199,6 +216,19 @@ class PostgresConversationCommands:
                     job_id,
                     task_prompt,
                 )
+                if goal is not None:
+                    # A conversation created with a goal already owes a
+                    # decision, and it is recorded in the transaction that
+                    # created it: the first turn does the work, and this
+                    # obligation is what queues the round after it. Without it
+                    # the goal would wait for a finish that owes it nothing,
+                    # and the only repair would be the recovery sweep.
+                    await arm_goal_wakeup(
+                        conn,
+                        thread_id=thread_id,
+                        trigger="owner",
+                        trigger_ref="set:1",
+                    )
         except asyncpg.UniqueViolationError as exc:
             # Two sends of one submission racing: the loser reads the winner.
             if exc.constraint_name != "uq_agent_jobs_client_request":

@@ -231,7 +231,13 @@ class FakeGoals:
 
     async def live_turn_id(self, *, thread_id: str, conn: Any | None = None) -> str | None:
         live = self._store.live_turn()
-        return None if live is None else str(live["id"])
+        if live is not None:
+            # The read succeeded; whether the turn is still live for the *next*
+            # write is the race this models.
+            self._store.settle_live_turn()
+            return str(live["id"])
+        self._store.settle_live_turn()
+        return None
 
     async def apply_action(
         self,
@@ -340,6 +346,15 @@ class FakeConversationQueries:
                 return self._stamped(existing)
         return None
 
+    async def get_job_for_update(self, *, conn: Any, job_id: str) -> dict[str, Any] | None:
+        """The same read, under the caller's transaction.
+
+        A real one takes the turn's row lock; this fake is single-threaded, so
+        obeying ``conn`` and answering the same row is the whole of it.
+        """
+        assert conn is not None
+        return await self.get_job(job_id)
+
     def _stamped(self, row: dict[str, Any]) -> dict[str, Any]:
         # ``JOB_SELECT`` reads the thread's counter live, not the turn's copy.
         return {**row, "thread_user_input_seq": self._store.input_seq}
@@ -368,6 +383,10 @@ class FakeStore:
         self.input_seq = input_seq
         #: How many automatic-round inserts fail before they are allowed through.
         self.fail_rounds = 0
+        #: The race that used to attach a wait to a job that had already ended:
+        #: the first read that finds a turn live settles it, so the read the
+        #: parking write makes finds nothing to wait for.
+        self.settle_live_turn_after_reads = 0
         self.goal_wakeups = FakeWakeups(self)
         self.goals = FakeGoals(self)
         self.conversation_commands = FakeConversationCommands(self)
@@ -389,6 +408,17 @@ class FakeStore:
             (row for row in self.turns if row["state"] in ("queued", "running")),
             None,
         )
+
+    def settle_live_turn(self) -> None:
+        """Let the turn the last live read found settle, if a race was asked for."""
+        if not self.settle_live_turn_after_reads:
+            return
+        self.settle_live_turn_after_reads -= 1
+        if self.settle_live_turn_after_reads:
+            return
+        live = next((row for row in self.turns if row["state"] in ("queued", "running")), None)
+        if live is not None:
+            live["state"] = "succeeded"
 
     def rounds(self) -> list[dict[str, Any]]:
         return [row for row in self.turns if row["turn_source"] == "goal"]
@@ -629,3 +659,95 @@ async def test_a_failing_consumer_backs_off_and_then_pauses_with_scheduling_fail
 
     assert (store.goal["state"], store.goal["pause_reason"]) == ("paused", "scheduling_failed")
     assert store.rounds() == []
+
+
+async def test_an_owner_wakeup_does_not_re_judge_the_turn_that_paused_the_goal():
+    """The Resume button has to start work, not read the round that stopped it.
+
+    A pause cancels the queued automatic round, so the newest turn of a paused
+    goal is a *cancelled* one. Judging that on resume paused the goal straight
+    back, which made the only Resume control in the product a no-op.
+    """
+    store = FakeStore(
+        goal=goal_row(),
+        turns=[
+            turn(id="job-1", input_seq_at_create=1),
+            turn(
+                id="job-2",
+                state="cancelled",
+                turn_source="goal",
+                goal_id=GOAL_ID,
+                round_kind="work",
+                turn_no=2,
+            ),
+        ],
+        input_seq=1,
+    )
+    store.goal_wakeups.arm(trigger="owner", trigger_ref="resume:2")
+
+    assert await _consume(store) == "queue_work_round"
+    assert store.goal["state"] == "active"
+    queued = store.queued_rounds()
+    assert len(queued) == 1
+    assert queued[0]["goal_round"] == 1
+
+
+async def test_a_wakeup_is_not_parked_behind_a_turn_that_already_finished():
+    """The registration can lose its race, and the loss must not be permanent.
+
+    Parking is a second write: the consumer reads "still running", the turn
+    finishes, its finish finds nothing parked to release, and the wait would be
+    attached to a job that has already ended. The consumer re-reads before it
+    registers the wait, so the wakeup is left due instead — and the sweep
+    repairs the same shape if it ever gets through.
+    """
+    store = FakeStore(
+        goal=goal_row(),
+        turns=[
+            turn(id="job-1", input_seq_at_create=1),
+            turn(id="job-2", state="running", input_seq_at_create=2, turn_no=2),
+        ],
+        input_seq=2,
+    )
+    wakeup = store.goal_wakeups.arm(trigger="owner", trigger_ref="resume:2")
+    # The turn is live for the read that chooses it, and finished by the read
+    # the parking write makes.
+    store.settle_live_turn_after_reads = 1
+
+    assert await _consume(store) in ("wait", "queue_work_round")
+
+    held = store.wakeup(wakeup["id"])
+    assert held["waiting_job_id"] is None, "a wakeup is never parked behind a finished turn"
+
+
+async def test_a_completion_is_refused_when_a_person_spoke_while_it_was_decided():
+    """A message does not move the goal's revision, so it is checked separately.
+
+    The decision is made outside the transaction that applies it. An owner's
+    message accepted in between leaves the goal exactly where it was — same
+    identity, same revision, still active — and only the conversation's own
+    input counter shows that the round being completed is no longer current.
+    """
+    store = FakeStore(
+        goal=goal_row(rounds_used=1),
+        turns=[
+            turn(id="job-1", input_seq_at_create=1),
+            turn(
+                id="job-2",
+                turn_source="goal",
+                goal_id=GOAL_ID,
+                round_kind="work",
+                report_parse="valid",
+                report_outcome="complete",
+                report_reason="done",
+                input_seq_at_create=1,
+                turn_no=2,
+            ),
+        ],
+        input_seq=2,
+    )
+    store.goal_wakeups.arm(trigger="finish", trigger_ref="job:job-2")
+
+    assert await _consume(store) == "none"
+    assert store.goal["state"] == "active"
+    assert store.goal["completion_basis"] is None

@@ -169,15 +169,31 @@ class PostgresConversationQueries:
         rather than the previous turn's words, which is what makes "no report"
         distinguishable from "reported".
         """
+        message = await self.latest_assistant_message_state(job_id=job_id)
+        return None if message is None else message["content"]
+
+    async def latest_assistant_message_state(self, *, job_id: str) -> dict[str, Any] | None:
+        """The last assistant message, and whether the runtime clipped it.
+
+        ``truncated`` is the difference between "the model said nothing more"
+        and "the transport stopped carrying what it said". A report reader has
+        to tell those apart: the report block is at the *end* of a message, so a
+        clipped one is a message whose answer may have been removed, and reading
+        it as silence is exactly the failure the completeness rule exists to
+        prevent.
+        """
         async with self._pool.acquire() as conn:
-            return await conn.fetchval(
+            row = await conn.fetchrow(
                 """
-                SELECT content FROM agent_thread_messages
+                SELECT content, truncated FROM agent_thread_messages
                 WHERE job_id = $1 AND role = 'assistant'
                 ORDER BY id DESC LIMIT 1
                 """,
                 job_id,
             )
+        if row is None or row["content"] is None:
+            return None
+        return {"content": str(row["content"]), "truncated": bool(row["truncated"])}
 
     async def list_jobs(
         self,

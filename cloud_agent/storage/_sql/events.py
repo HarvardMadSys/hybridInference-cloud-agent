@@ -57,11 +57,16 @@ async def insert_event(
     )
     text = (payload or {}).get("text")
     if event_type == "message" and isinstance(text, str) and text.strip():
+        # ``truncated`` travels with the text because it is a fact about the
+        # text: the runtime clipped this message, so it is not the model's whole
+        # answer and the part that was cut off may be the part that matters. A
+        # reader that needs the *final* message — the goal report is one — has
+        # to be able to tell that from a message that simply ended.
         await conn.execute(
             """
                 INSERT INTO agent_thread_messages
-                    (thread_id, job_id, role, content, source_event_id)
-                SELECT thread_id, id, 'assistant', $2, $3
+                    (thread_id, job_id, role, content, source_event_id, truncated)
+                SELECT thread_id, id, 'assistant', $2, $3, $4
                 FROM agent_jobs
                 WHERE id = $1 AND thread_id IS NOT NULL
                 ON CONFLICT (source_event_id) DO NOTHING
@@ -69,6 +74,7 @@ async def insert_event(
             job_id,
             text,
             event_id,
+            (payload or {}).get("truncated") is True,
         )
         await conn.execute(
             """

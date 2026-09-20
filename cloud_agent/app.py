@@ -697,6 +697,7 @@ async def reap_expired_attempts(
     interval_seconds: float = REAP_INTERVAL_S,
     max_attempts: int = MAX_ATTEMPTS,
     grants: Any | None = None,
+    app_credentials: Any | None = None,
 ) -> None:
     """Periodically close attempts whose lease expired.
 
@@ -707,6 +708,11 @@ async def reap_expired_attempts(
         grants: The grant client, when this deployment mints grants. ``None``
             skips both grant passes entirely — the capabilities then expire at
             their own TTL, which is the same backstop revocation accelerates.
+        app_credentials: The GitHub App credential minter. A goal decision
+            checks the repository's entitlement before it schedules, and with no
+            minter that check can only see the deployment's allowlist — so a
+            repository the owner installed the App on would be reported as
+            access denied.
     """
     try:
         await _reconcile_settled_terminals(store)
@@ -758,7 +764,7 @@ async def reap_expired_attempts(
         # thing that pauses a goal: every ordinary way an active goal stops
         # being able to continue says so where and when it happens.
         try:
-            await run_goal_wakeups(store=store)
+            await run_goal_wakeups(store=store, app_credentials=app_credentials)
         except Exception:
             logger.warning("Goal wakeup consumer pass failed", exc_info=True)
         try:
@@ -993,7 +999,13 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     if background:
         app.state.mcp_catalog = McpCatalog(storage.mcp_catalog, http)
         app.state.mcp_catalog_task = asyncio.create_task(app.state.mcp_catalog.run())
-        reaper = asyncio.create_task(reap_expired_attempts(storage, grants=app.state.grants))
+        reaper = asyncio.create_task(
+            reap_expired_attempts(
+                storage,
+                grants=app.state.grants,
+                app_credentials=app.state.app_credentials,
+            )
+        )
         snapshot_coordinator = asyncio.create_task(coordinate_shared_snapshots(storage))
         ledger_collector = asyncio.create_task(
             collect_usage_snapshots(storage.ledger, app.state.grants)

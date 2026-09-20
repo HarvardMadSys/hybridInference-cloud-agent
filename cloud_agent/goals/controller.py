@@ -184,24 +184,41 @@ async def consume_wakeup(
             wakeup_id=str(wakeup["id"]), processed=True, detail=f"goal {goal.get('state')}"
         )
         return "none"
-    turn = await _turn_to_judge(store=store, wakeup=wakeup)
-    if turn is not None and turn.get("state") in ("queued", "running"):
-        # A turn is already live and it is not a settled outcome to judge. This
-        # is the ordinary "a person is waiting" answer, and the turn's own
-        # finish re-arms this wakeup.
-        await store.goal_wakeups.release_wakeup(
-            wakeup_id=str(wakeup["id"]),
-            waiting_job_id=str(turn["id"]),
-            detail="waiting for the turn already in this conversation",
-        )
-        return "wait"
-    context = _context_for(goal=goal, turn=turn)
+    if wakeup.get("trigger") == "owner":
+        # The owner asked for this. Their authorization is the trigger, and the
+        # last turn that happened is *not* an outcome to judge again: resuming a
+        # goal paused by a cancelled round would otherwise read that cancelled
+        # round and pause it straight back, which makes the only Resume button
+        # in the product a no-op. The decision below is "can new work start
+        # now", and it is made from the goal and the queue, not from history.
+        queued = await store.goals.live_turn_id(thread_id=thread_id)
+        if queued is not None:
+            await _park(store, wakeup=wakeup, job_id=queued)
+            return "wait"
+        turn = None
+        context = _context_for(goal=goal, turn=None)
+    else:
+        turn = await _turn_to_judge(store=store, wakeup=wakeup)
+        if turn is not None and turn.get("state") in ("queued", "running"):
+            # A turn is already live and it is not a settled outcome to judge.
+            # This is the ordinary "a person is waiting" answer, and the turn's
+            # own finish re-arms this wakeup.
+            await _park(store, wakeup=wakeup, job_id=str(turn["id"]))
+            return "wait"
+        context = _context_for(goal=goal, turn=turn)
     # A read that may reach the network happens *before* the decision's
     # transaction opens. Holding the conversation's lock across a GitHub call
     # would serialize every finish in the deployment behind one outage.
-    blocked = await _check_access(store, turn)
+    blocked = await _check_access(store, turn, app_credentials=app_credentials)
     if blocked is not None:
-        return await _stop(store, wakeup=wakeup, thread_id=thread_id, goal=goal, action=blocked)
+        return await _stop(
+            store,
+            wakeup=wakeup,
+            thread_id=thread_id,
+            goal=goal,
+            action=blocked,
+            context=context,
+        )
     return await _apply(
         store=store,
         wakeup=wakeup,
@@ -209,6 +226,34 @@ async def consume_wakeup(
         goal=goal,
         turn=turn,
         context=context,
+    )
+
+
+async def _park(store: _GoalStore, *, wakeup: dict[str, Any], job_id: str) -> None:
+    """Wait behind a turn, and make sure the wait is registered exactly once.
+
+    The registration is a second write, so it can lose a race with the very
+    turn it names: read "still running", the turn finishes, its finish finds
+    nothing parked to release, and this then attaches the wakeup to a job that
+    has already ended. The sweep repairs exactly that shape — it re-arms a
+    pending wakeup whose waiting turn has settled — and it runs every reaper
+    tick, so the worst case is a delay rather than a lost goal. Parking is still
+    worth doing: it is what makes the common case immediate.
+    """
+    live = await store.goals.live_turn_id(thread_id=str(wakeup["thread_id"]), conn=None)
+    if live is None or live != job_id:
+        # The turn ended between the read that chose it and this write. Nothing
+        # is left to wait behind, so the decision is made again rather than
+        # parked on a dead job.
+        await store.goal_wakeups.release_wakeup(
+            wakeup_id=str(wakeup["id"]),
+            detail="the turn it was waiting for had already ended",
+        )
+        return
+    await store.goal_wakeups.release_wakeup(
+        wakeup_id=str(wakeup["id"]),
+        waiting_job_id=job_id,
+        detail="waiting for the turn already in this conversation",
     )
 
 
@@ -309,7 +354,12 @@ def _repair_supported(runtime: str) -> bool:
     return runtime in REPORT_REPAIR_RUNTIMES
 
 
-async def _check_access(store: _GoalStore, turn: dict[str, Any] | None) -> GoalAction | None:
+async def _check_access(
+    store: _GoalStore,
+    turn: dict[str, Any] | None,
+    *,
+    app_credentials: Any | None = None,
+) -> GoalAction | None:
     """The one eligibility read that may reach outside the database.
 
     ``turn`` arrives in one of two shapes — ``latest_turn``'s job-summary
@@ -337,11 +387,16 @@ async def _check_access(store: _GoalStore, turn: dict[str, Any] | None) -> GoalA
             message=("the conversation's session is gone; it cannot be resumed from a transcript"),
         )
     try:
+        # The caller's own credential minter, not ``None``: with no App
+        # credentials the check can only see the deployment's allowlist, so a
+        # repository the owner legitimately installed the App on is reported as
+        # access denied. This runs on the request path and on the background
+        # consumer, and both have the same minter the rest of the service uses.
         await require_entitled_repo(
             turn["repo"],
             turn["user_id"],
             store=store.source_control,
-            app_credentials=None,
+            app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:
         logger.warning(
@@ -386,7 +441,14 @@ async def _apply(
             context=context,
             repair=action.kind == "queue_repair_round",
         )
-    return await _stop(store, wakeup=wakeup, thread_id=thread_id, goal=goal, action=action)
+    return await _stop(
+        store,
+        wakeup=wakeup,
+        thread_id=thread_id,
+        goal=goal,
+        action=action,
+        context=context,
+    )
 
 
 async def _stop(
@@ -396,22 +458,30 @@ async def _stop(
     thread_id: str,
     goal: dict[str, Any],
     action: GoalAction,
+    context: GoalContext,
 ) -> str:
-    """Apply a terminal decision and finish the wakeup in the same commit."""
+    """Apply a terminal decision and finish the wakeup in the same commit.
+
+    The decision was made outside this transaction, so everything it depended on
+    is checked again inside it — including the things an owner's message changes,
+    which the goal's revision does not. A completion in particular: a person who
+    writes while the decision is being made has *moved on* from the round it
+    would finish, and finishing the goal over their message is the one outcome
+    the whole "user input wins" rule exists to prevent.
+    """
     detail = (action.message or "")[:MAX_REASON_CHARS] or None
     decision = store.goal_wakeups.transaction()
     async with decision as conn:
-        current = await store.goals.lock_goal_state(thread_id=thread_id, conn=conn)
-        if (
-            current is None
-            or str(current.get("goal_id") or "") != str(goal["goal_id"])
-            or int(current.get("revision") or 0) != int(goal["revision"])
-            or current.get("state") != "active"
-        ):
+        stale = await _superseded_in_transaction(store, conn=conn, thread_id=thread_id, goal=goal)
+        if stale is None and action.kind == "complete":
+            stale = await _completion_superseded(
+                store, conn=conn, thread_id=thread_id, context=context
+            )
+        if stale is not None:
             # The owner got there first. Their write stands, and this decision
             # is stale — recorded as such rather than retried.
             await store.goal_wakeups.finish_wakeup(
-                wakeup_id=str(wakeup["id"]), processed=True, detail="superseded", conn=conn
+                wakeup_id=str(wakeup["id"]), processed=True, detail=stale, conn=conn
             )
             return "none"
         written = await store.goals.apply_action(
@@ -440,6 +510,55 @@ async def _stop(
         },
     )
     return action.kind
+
+
+async def _superseded_in_transaction(
+    store: _GoalStore, *, conn: Any, thread_id: str, goal: dict[str, Any]
+) -> str | None:
+    """Why this decision no longer applies, or ``None`` when it still does.
+
+    The goal's identity, its revision and its state are the three things an
+    owner write moves; a check that finds all three unchanged has proved the
+    goal did not move under the decision.
+    """
+    current = await store.goals.lock_goal_state(thread_id=thread_id, conn=conn)
+    if current is None:
+        return "goal gone"
+    if str(current.get("goal_id") or "") != str(goal["goal_id"]):
+        return "superseded goal"
+    if int(current.get("revision") or 0) != int(goal["revision"]):
+        return "superseded revision"
+    if current.get("state") != "active":
+        return f"goal {current.get('state')}"
+    return None
+
+
+async def _completion_superseded(
+    store: _GoalStore, *, conn: Any, thread_id: str, context: GoalContext
+) -> str | None:
+    """Whether a person has spoken since the completed round was created.
+
+    A message does not move the goal's revision, so the fence above cannot see
+    it. The conversation's own counter can: every person's turn advances it, and
+    every turn records the value it saw. A completion whose round is older than
+    the counter is a completion of a conversation that no longer exists.
+    """
+    if context.turn_job_id == "":
+        return "no round to complete"
+    turn = await store.conversation_queries.get_job_for_update(
+        conn=conn, job_id=context.turn_job_id
+    )
+    if turn is None:
+        return "the round is gone"
+    if turn.get("state") != "succeeded":
+        return f"the round ended {turn.get('state')}"
+    if str(turn.get("goal_report_outcome") or "") != "complete":
+        return "the round no longer reports completion"
+    if _has_newer_input(turn):
+        return "the owner has spoken since"
+    if await store.goals.has_pending_turn(thread_id=thread_id, conn=conn):
+        return "a turn is waiting"
+    return None
 
 
 def _completed_by(wakeup: dict[str, Any]) -> str | None:
@@ -483,15 +602,10 @@ async def _queue_round(
         # Re-read under the lock this transaction holds: between the read that
         # built the context and this write, the owner can have paused the goal,
         # replaced the objective, or sent a message.
-        current = await store.goals.lock_goal_state(thread_id=thread_id, conn=conn)
-        if (
-            current is None
-            or str(current.get("goal_id") or "") != str(goal["goal_id"])
-            or int(current.get("revision") or 0) != int(goal["revision"])
-            or current.get("state") != "active"
-        ):
+        stale = await _superseded_in_transaction(store, conn=conn, thread_id=thread_id, goal=goal)
+        if stale is not None:
             await store.goal_wakeups.finish_wakeup(
-                wakeup_id=str(wakeup["id"]), processed=True, detail="superseded", conn=conn
+                wakeup_id=str(wakeup["id"]), processed=True, detail=stale, conn=conn
             )
             return "none"
         if await store.goals.has_pending_turn(thread_id=thread_id, conn=conn):
@@ -575,6 +689,7 @@ async def _retry_or_pause(store: _GoalStore, wakeup: dict[str, Any]) -> None:
             reason="scheduling_failed",
             message="the platform could not schedule the next round; resume to try again",
         ),
+        context=_context_for(goal=goal, turn=None),
     )
 
 
