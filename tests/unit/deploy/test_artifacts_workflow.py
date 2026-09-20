@@ -13,15 +13,19 @@ table, and the job is only the wiring that runs it.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from deploy.release import release_manifest as rm, smoke
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CI = REPO_ROOT / ".github/workflows/ci.yml"
+CONSOLE_DOCKERFILE = REPO_ROOT / "deploy/control-plane/Dockerfile"
+RUNNER_DOCKERFILE = REPO_ROOT / "deploy/host/Dockerfile.agent-runner"
 
 
 def workflow() -> dict[str, Any]:
@@ -192,6 +196,45 @@ def test_the_build_passes_the_commit_every_image_must_name() -> None:
     assert "SOURCE_COMMIT=${{ github.sha }}" in str(build["with"]["build-args"])
 
 
+def _docker_patterns() -> list[str]:
+    """The regexes the classifier's docker decision is actually made of.
+
+    Read out of the `changes` job rather than restated here: a test that keeps
+    its own copy of the pattern stops testing the pattern the moment either one
+    is edited.
+    """
+    classify = str(step("Classify changed paths", job="changes")["run"])
+    block = classify.split("# Docker:", 1)[1].split("# A change to CI itself", 1)[0]
+    return re.findall(r"matches '([^']+)'", block)
+
+
+def _runs_the_image_jobs(path: str) -> bool:
+    return any(re.search(pattern, path) for pattern in _docker_patterns())
+
+
+def _copied_paths(dockerfile: Path) -> set[str]:
+    """Repository paths one Dockerfile COPYs out of the build context.
+
+    The full relative source, not its first component: the layouts this has to
+    survive put the shared packages at the root today and under a common parent
+    after the R5 move, and only the full path keeps the check meaningful in both.
+    """
+    sources = set()
+    for line in dockerfile.read_text().splitlines():
+        if not line.startswith("COPY") or "--from=" in line:
+            continue
+        source = line.split()[1]
+        if source.startswith("/"):  # a stage or an absolute path, not the context
+            continue
+        sources.add(source.rstrip("/"))
+    return sources
+
+
+def _packages_both_images_ship() -> set[str]:
+    """What the console and the runner images both COPY, read from the files."""
+    return _copied_paths(CONSOLE_DOCKERFILE) & _copied_paths(RUNNER_DOCKERFILE)
+
+
 def test_a_change_to_the_console_runs_the_image_jobs() -> None:
     """web/ is half of the console image, and used to skip every docker job.
 
@@ -199,8 +242,26 @@ def test_a_change_to_the_console_runs_the_image_jobs() -> None:
     changed what that image contains and ran none of the jobs that build it —
     which is how the image went unverified in the first place.
     """
-    classify = str(step("Classify changed paths", job="changes")["run"])
-    assert "cloud_agent_host/|web/" in classify
+    assert _runs_the_image_jobs("web/src/app/page.tsx")
+
+
+@pytest.mark.parametrize("entry", sorted(_packages_both_images_ship()))
+def test_a_change_to_what_both_images_ship_runs_the_image_jobs(entry: str) -> None:
+    """Both images COPY and import the shared packages, so both must rebuild.
+
+    `cloud_agent_git/` and `cloud_agent_contracts/` reached both Dockerfiles
+    when the R2/R3 moves created them, and the classifier was never told: a
+    change to the shared Git algorithms or the shared protocol alone ran no
+    docker job at all. The failure mode is the one those jobs exist for — it
+    imports in this checkout and not in the image.
+
+    The set comes from the Dockerfiles, so the next package that reaches both
+    images cannot be forgotten the same way.
+    """
+    probe = f"{entry}/module.py" if (REPO_ROOT / entry).is_dir() else entry
+    assert _runs_the_image_jobs(probe), (
+        f"{entry} is COPYed into both images but a change to it builds neither"
+    )
 
 
 def test_a_failed_run_leaves_nothing_behind() -> None:

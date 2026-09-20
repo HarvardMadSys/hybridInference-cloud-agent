@@ -33,6 +33,9 @@ SHARED_ROOTS = {
 #: one direction of the boundary no compatibility shim can bridge.
 CONTROL_PLANE_PACKAGE = "cloud_agent"
 
+#: The host package, which the control plane may only reach into by name.
+HOST_PACKAGE = "cloud_agent_host"
+
 #: Top-level packages that depend on the host side of the deployment; a shared
 #: package can never import one of these.
 IMPLEMENTATION_PACKAGES = frozenset({"cloud_agent", "cloud_agent_host"})
@@ -62,10 +65,31 @@ def _host_import_pairs(path: Path) -> set[tuple[str, str]]:
     for node in ast.walk(_parse(path)):
         if not isinstance(node, ast.ImportFrom) or node.module is None:
             continue
-        if node.module != "cloud_agent_host" and not node.module.startswith("cloud_agent_host."):
+        if node.module != HOST_PACKAGE and not node.module.startswith(f"{HOST_PACKAGE}."):
             continue
         pairs.update((node.module, alias.name) for alias in node.names)
     return pairs
+
+
+def _host_module_imports(path: Path) -> set[str]:
+    """Modules one file imports *whole* from ``cloud_agent_host``.
+
+    A scan of its own because it is a different node: ``import a.b as c`` is an
+    ``ast.Import``, and walking only ``ast.ImportFrom`` never saw one. The
+    allowlist below is a set of symbols, and importing the module hands over
+    every name it holds — strictly more than any single entry permits — so these
+    cannot be expressed as pairs and are reported separately.
+    """
+    modules: set[str] = set()
+    for node in ast.walk(_parse(path)):
+        if not isinstance(node, ast.Import):
+            continue
+        modules.update(
+            alias.name
+            for alias in node.names
+            if alias.name == HOST_PACKAGE or alias.name.startswith(f"{HOST_PACKAGE}.")
+        )
+    return modules
 
 
 def _imported_modules(path: Path) -> set[str]:
@@ -87,15 +111,46 @@ def test_control_plane_host_imports_are_the_transition_allowlist() -> None:
     keep blessing a moved module's phantom entry forever and the boundary would
     only ever appear to improve. Equality makes both directions speak — a new
     import fails, and an entry left behind by work that already moved fails.
+
+    Both import forms are scanned. ``from cloud_agent_host.x import y`` is the
+    allowlist's subject; ``import cloud_agent_host.x`` is reported separately
+    because no symbol entry can bound it.
     """
     scanned = set()
+    whole_modules: dict[str, set[str]] = {}
     for path in sorted(CONTROL_PLANE_ROOT.rglob("*.py")):
         scanned |= _host_import_pairs(path)
+        imported = _host_module_imports(path)
+        if imported:
+            whole_modules[str(path.relative_to(REPO_ROOT))] = imported
+
+    assert whole_modules == {}, (
+        "these files import a cloud_agent_host module whole, which reaches every "
+        "name in it and is more than the symbol allowlist below can grant; import "
+        "the name you need instead:\n"
+        + "\n".join(f"{path}: {sorted(modules)}" for path, modules in sorted(whole_modules.items()))
+    )
+
     allowlist = set(HOST_IMPORT_ALLOWLIST)
     assert scanned == allowlist, (
         f"imports missing from the allowlist: {sorted(scanned - allowlist)}\n"
         f"stale allowlist entries to delete: {sorted(allowlist - scanned)}"
     )
+
+
+def test_the_scanner_sees_a_whole_module_import(tmp_path: Path) -> None:
+    """The negative case for the check above.
+
+    ``import cloud_agent_host.sandbox as host_impl`` is an ``ast.Import``. The
+    file used to walk only ``ast.ImportFrom``, so a line exactly like this one
+    left the allowlist equal to itself and the boundary unbroken as far as the
+    test could tell.
+    """
+    offender = tmp_path / "offender.py"
+    offender.write_text("import cloud_agent_host.sandbox as host_impl\n", encoding="utf-8")
+
+    assert _host_import_pairs(offender) == set()
+    assert _host_module_imports(offender) == {"cloud_agent_host.sandbox"}
 
 
 @pytest.mark.parametrize("package", sorted(SHARED_ROOTS))

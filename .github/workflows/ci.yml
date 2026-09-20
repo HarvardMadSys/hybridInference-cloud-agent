@@ -133,7 +133,13 @@ jobs:
           # web/ is here because the console image is built from web/ plus
           # deploy/control-plane/Dockerfile.web: a change to the app alone used
           # to skip every docker job, which is how that image went unverified.
-          if matches '^(deploy/|cloud_agent_host/|web/)' \
+          # cloud_agent_contracts/ and cloud_agent_git/ are here because *both*
+          # images COPY and import them, and "it imports in this checkout and
+          # not in the image" is the failure these jobs exist to catch. The set
+          # is pinned by test_a_change_to_what_both_images_ship_runs_the_image_
+          # jobs, which derives it from the two Dockerfiles rather than listing
+          # it here a second time.
+          if matches '^(deploy/|cloud_agent_host/|cloud_agent_contracts/|cloud_agent_git/|web/)' \
              || matches '^(pyproject\.toml|uv\.lock|README\.md)$'; then
             docker=true
           else
