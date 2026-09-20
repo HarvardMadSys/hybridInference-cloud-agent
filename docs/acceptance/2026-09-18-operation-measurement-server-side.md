@@ -130,17 +130,18 @@ session supervisor（挂起的 supervisor/stream）、heartbeat。没有假的 `
 
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
-| 快速层 | `pytest -q -m "not external and not dbtest"` | 4700 passed, 595 deselected |
-| 数据库层 | `TEST_DB_NAME=ca_startup_measurement_test_db pytest -q -m dbtest` | 543 passed, 4748 deselected |
+| 快速层 | `pytest -q -m "not external and not dbtest"` | 4710 passed, 595 deselected |
+| 数据库层 | `TEST_DB_NAME=ca_startup_measurement_test_db pytest -q -m dbtest` | 543 passed, 4762 deselected（库重建后） |
 | 格式 | `ruff format --check .` | 474 files already formatted |
 | Lint | `ruff check --no-fix .` | All checks passed |
 | 类型 | `mypy` | Success: no issues found in 218 source files |
 | Web 单测 | `vitest run` | 102 files, 1641 tests passed |
 | Web lint / format / type | `npm run lint`、`format:check`、`type-check` | 全部通过 |
 | Web 生产构建 | `next build` | 成功，路由表含 `/admin/measurements` 与 `/admin/runs/[jobId]` |
-| OpenAPI 契约 | `pytest tests/unit/test_api_surface_contract.py` | 4 passed（契约已按新增两个查询参数重新生成） |
+| OpenAPI 契约 | `pytest tests/unit/test_api_surface_contract.py` | 通过（契约已按新增两个查询参数重新生成） |
 | 基准窗口回归 | `pytest tests/unit/test_operation_overhead_benchmark.py` | 4 passed（复核第 1、3 条的固化） |
-| PR CI | [run 35503608447](https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/35503608447) | **16 pass / 1 skipped**（`Candidate on real Kata`）；本次复核后的提交另有一次 CI，结果见 PR |
+| 镜像分类器 | `pytest tests/unit/deploy/test_artifacts_workflow.py` | 21 passed（见下） |
+| PR CI | 最新提交的 run | 结果见 PR；本轮复核修复前的上一次为 16 pass / 1 skipped |
 
 数据库层使用独立测试库 `ca_startup_measurement_test_db`（名称含 `_test_`，fixture 会
 拒绝其他名字），跑完自动 truncate 自己创建的行。真实链路验收另用
@@ -151,6 +152,13 @@ session supervisor（挂起的 supervisor/stream）、heartbeat。没有假的 `
 失败一次；单独重跑该文件 5 passed，串行重跑整个层级 543 passed。这是两个会话同时动数据库
 造成的互相干扰，不是本轮改动；记在这里以免下次把它当成回归。
 
+同一个文件在负载下还会留下**更难看的余波**，值得单独记一笔：它自己会改
+`alembic_version`，一旦失败，共享测试库就被留在 `0007_attempt_turn_resources` 且 schema
+已被改过。后续测试再跑 `apply_migrations` 会试图在旧 revision 上叠加迁移，直接撞上
+`tables can have at most 1600 columns`。级联表现为十几个不同文件的失败与 error，看起来
+像大面积回归。处理方式是 `dropdb` / `createdb` 后重跑——重建后同一次 `-m dbtest` 是
+**543 passed**。库里没有本轮代码的问题。
+
 **CI 在 `dev` 合并结果上失败过一次，原因不在本轮改动。** 本 PR 的 CI 跑的是
 head 与 `dev` 的合并结果；期间 `dev` 前进了 #311（`efb77ee`），它从会话列表响应模型里
 删掉了 `matching_turn_count` 却没有重新生成
@@ -158,6 +166,14 @@ head 与 `dev` 的合并结果；期间 `dev` 前进了 #311（`efb77ee`），�
 就是 failure。合并 `dev` 后本分支也复现了同一个 `test_the_served_openapi_is_the_committed_contract`
 断言。本分支重新生成了契约（既包含 #311 缺的那 5 行删除，也包含本 PR 新增的两个查询
 参数），合并结果因此自洽。这一条要在 PR 描述里写明，避免被读成本轮改动了会话列表。
+
+**`dev` 后来又前进了 #314（`22ea8b6`），它暴露了本分支自己的一个漏配。** #314 新增
+`test_a_change_to_what_both_images_ship_runs_the_image_jobs`：它从两个 Dockerfile 里推导出
+"两边都 COPY 的包"，再断言 CI 的变更分类器会为这些包触发镜像构建。本分支在 `4701934`
+把 `cloud_agent_profiling` 加进了两个 Dockerfile 与 Makefile，却没有加进
+`.github/workflows/ci.yml` 的 `docker=true` 正则——于是"改了这个包却一个镜像任务都不跑"，
+正是那些任务存在的理由。合并 `dev` 后该测试在本机复现，已把 `cloud_agent_profiling/`
+补进分类器；`pytest tests/unit/deploy/test_artifacts_workflow.py` 21 passed。
 
 ### 3.3 真实业务开销实验
 
