@@ -154,7 +154,7 @@ session supervisor（挂起的 supervisor/stream）、heartbeat。没有假的 `
 | OpenAPI 契约 | `pytest tests/unit/test_api_surface_contract.py` | 通过（契约已按新增两个查询参数重新生成） |
 | 基准回归 | `pytest tests/unit/test_operation_overhead_benchmark.py` | 5 passed（第 2 轮第 1/3 条与第 3 轮第 2 条的固化） |
 | 镜像分类器 | `pytest tests/unit/deploy/test_artifacts_workflow.py` | 21 passed（见下） |
-| PR CI | [run 35507401302](https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/35507401302) | **16 pass / 1 skipped**（`Candidate on real Kata`），含 Tests 2m37s、Tests (Postgres)、Web、Lint、Gitleaks、Compose、四个镜像构建与 `CI Gate` |
+| PR CI | [run 35510697218](https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/35510697218) | **16 pass / 1 skipped**（`Candidate on real Kata`），含 Tests 2m42s、Tests (Postgres)、Web、Lint、Gitleaks、Compose、四个镜像构建与 `CI Gate` |
 
 数据库层使用独立测试库 `ca_startup_measurement_test_db`（名称含 `_test_`，fixture 会
 拒绝其他名字），跑完自动 truncate 自己创建的行。真实链路验收另用
