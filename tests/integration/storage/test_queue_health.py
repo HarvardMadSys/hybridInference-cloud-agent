@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
-from cloud_agent_host.sandbox import KATA_RUNTIME
 from tests.integration.storage.test_agent_job_store import (
     _SHARED_HOST_CAPABILITIES,
     _create_job,
@@ -12,6 +10,8 @@ from tests.integration.storage.test_agent_job_store import (
     pool as pool,
     store as store,
 )
+
+from cloud_agent_host.sandbox import KATA_RUNTIME
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

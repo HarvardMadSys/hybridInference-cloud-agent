@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 import pytest
+from tests.support.storage import AllCapabilities
 
 from cloud_agent import publish_worker
 from cloud_agent.publish_worker import (
@@ -22,7 +23,6 @@ from cloud_agent.publish_worker import (
     publish_one,
 )
 from cloud_agent.publisher import PublishError, PublishResult
-from tests.support.storage import AllCapabilities
 
 pytestmark = pytest.mark.asyncio
 

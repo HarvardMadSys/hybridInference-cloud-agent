@@ -7,14 +7,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
+from tests.unit.test_mcp_connections_api import FakeStore
+from tests.unit.test_mcp_host_sessions_and_results import Transport
 
 from cloud_agent.api import mcp_connections
 from cloud_agent.mcp import host, protocol
 from cloud_agent.mcp.models import CapabilitySnapshot
 from cloud_agent.mcp.refresh import RefreshRefused
 from cloud_agent.mcp.registry import mcp_cipher
-from tests.unit.test_mcp_connections_api import FakeStore
-from tests.unit.test_mcp_host_sessions_and_results import Transport
 
 pytestmark = pytest.mark.asyncio
 

@@ -282,7 +282,7 @@ services:
         NEXT_PUBLIC_AGENT_API_URL: ${AGENT_WEB_API_URL:?control-plane base URL as the browser calls it, e.g. /agents/api}
         NEXT_PUBLIC_BUILD_SHA: ${BUILD_SHA:-}
         NEXT_PUBLIC_BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-}
-    # Read per request by `web/src/config/site.server.ts`. Display values only:
+    # Read per request by `apps/frontend/src/config/site.server.ts`. Display values only:
     # this container is the one a browser can reach, so a secret in this block
     # is one log line away from being public. Empty optional values are a
     # legitimate configuration and hide the corresponding link; an illegal one

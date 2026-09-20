@@ -26,7 +26,7 @@ from pathlib import Path
 
 from cloud_agent.identity import AUDIENCE
 
-CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "identity.openapi.yaml"
+CONTRACT = Path(__file__).resolve().parents[2] / "gateway_contracts" / "identity.openapi.yaml"
 
 
 def test_the_audience_matches_the_transcribed_gateway_contract() -> None:

@@ -48,11 +48,11 @@ from typing import Any
 import asyncpg
 import pytest
 import uvicorn
+from tests.support.migrations import apply_migrations
 
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_MCP, mint_worker_token
-from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.external, pytest.mark.asyncio]
 

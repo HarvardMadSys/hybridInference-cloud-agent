@@ -9,7 +9,7 @@ Three properties the R3 split established and nothing would notice breaking:
   §6.4), so a new pattern that could match a sibling's URL has to fail here
   rather than change which handler answers;
 * the OpenAPI document the app produces is the one committed as
-  `contracts/agent-control-plane.openapi.json`, key-sorted, so that a change to
+  `gateway_contracts/agent-control-plane.openapi.json`, key-sorted, so that a change to
   the published shape is a diff somebody chose rather than a drift.
 
 What this file deliberately does **not** pin: absolute route positions, the
@@ -31,7 +31,7 @@ from cloud_agent.api import routes
 from cloud_agent.app import create_app
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CONTRACT_FILE = REPO_ROOT / "contracts" / "agent-control-plane.openapi.json"
+CONTRACT_FILE = REPO_ROOT / "gateway_contracts" / "agent-control-plane.openapi.json"
 
 #: The prefix every surface router carries, and this test's scope.
 AGENT_PREFIX = "/v1/agent"
@@ -216,9 +216,9 @@ def test_the_served_openapi_is_the_committed_contract() -> None:
         f"{CONTRACT_FILE.relative_to(REPO_ROOT)}.\n"
         "If the change is intended, regenerate it with:\n"
         '    python -c "import json,pathlib;from cloud_agent.app import create_app;'
-        "pathlib.Path('contracts/agent-control-plane.openapi.json').write_text("
+        f"pathlib.Path('{CONTRACT_FILE.relative_to(REPO_ROOT)}').write_text("
         "json.dumps(create_app().openapi(), sort_keys=True, indent=2, "
-        'ensure_ascii=False) + "\\n")"\n'
+        'ensure_ascii=False) + \\"\\n\\")"\n'
         "and say in the pull request what moved."
     )
 

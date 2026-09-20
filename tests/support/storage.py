@@ -19,7 +19,7 @@ from __future__ import annotations
 import pathlib
 from typing import Any
 
-_PORTS = pathlib.Path(__file__).resolve().parents[2] / "cloud_agent" / "ports"
+_PORTS = pathlib.Path(__file__).resolve().parents[2] / "apps" / "backend" / "cloud_agent" / "ports"
 
 #: One name per port module, which is also the assembly's attribute name.
 CAPABILITIES = frozenset(p.stem for p in _PORTS.glob("*.py") if p.name != "__init__.py") | {

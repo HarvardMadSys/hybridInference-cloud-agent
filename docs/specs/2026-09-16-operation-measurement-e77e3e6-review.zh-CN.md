@@ -98,7 +98,7 @@ stored/log record: truncated=true, measurement_complete=false
 ## R5 · P2：子目录被当作 files.open，files.list 实验漏测展开
 
 位置：[routes.py:2979](../../cloud_agent/api/routes.py#L2979) 与
-[workspace_broker.py:1926](../../cloud_agent_host/workspace_broker.py#L1926)。
+[workspace_broker.py:1926](../../apps/backend/cloud_agent_host/workspace_broker.py#L1926)。
 
 CP 和 broker 都按 path 是否为空分类。配置只选 `files.list`，依次请求根目录与
 `path=src`，让 broker 对两者都返回 kind=directory，真实 CP HTTP 路由复现：

@@ -369,8 +369,8 @@ def test_docker_build_context_excludes_local_dependency_trees():
     ignored = (REPO_ROOT / ".dockerignore").read_text().splitlines()
 
     assert ".venv" in ignored
-    assert "web/node_modules" in ignored
-    assert "web/.next" in ignored
+    assert "apps/frontend/node_modules" in ignored
+    assert "apps/frontend/.next" in ignored
 
 
 def test_egress_network_is_internal(compose: dict):

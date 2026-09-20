@@ -14,13 +14,13 @@ from typing import TYPE_CHECKING
 import asyncpg
 import pytest
 import pytest_asyncio
-
-from cloud_agent.domain.requests import request_fingerprint
 from tests.integration.storage.test_agent_job_store import (
     _create_job,
     pool as _shared_pool,  # noqa: F401
     store as _shared_store,  # noqa: F401
 )
+
+from cloud_agent.domain.requests import request_fingerprint
 
 if TYPE_CHECKING:
     from cloud_agent.storage.assembly import Storage

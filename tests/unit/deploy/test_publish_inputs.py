@@ -15,7 +15,6 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
-
 from deploy.release import publish_inputs as pi, release_manifest as rm, smoke
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only

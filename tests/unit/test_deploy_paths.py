@@ -42,21 +42,31 @@ _COPY = re.compile(r"^COPY(?:\s+--\S+)*\s+(\S+)\s+\S+\s*$", re.MULTILINE)
 # four prefixes while claiming to verify every path, and missed real breakage in
 # `distributions/` and `docs/` references precisely because they were not on it.
 _OWN_DIRS = (
-    "cloud_agent",
-    "cloud_agent_host",
-    "contracts",
+    "apps",
     "deploy",
     "docs",
+    "gateway_contracts",
     "migrations",
     "tests",
-    "web",
 )
 
-# Top-level directories that exist only in the SOURCE repository — plus
-# `backend` and `host`, the one-package src roots this tree carried until the
-# flatten moved both packages to the top level. Any occurrence is stale by
-# construction — there is nothing here for it to resolve to.
-_SOURCE_ONLY_DIRS = ("apps", "ops", "config", "distributions", "services", "backend", "host")
+# Top-level directories that exist only in the SOURCE repository — plus the
+# names this tree carried until the consolidation moved them: `web/` is
+# `apps/frontend/` now, `contracts/` is `gateway_contracts/`, and the two
+# shared packages are one package with `git/` inside it. `backend` and `host`
+# came off this list in the same commit: `apps/backend/` is ours now, so a
+# bare `backend/` is no longer the source repo's root but a missing directory
+# under a path this guard already checks.
+_SOURCE_ONLY_DIRS = (
+    "ops",
+    "config",
+    "distributions",
+    "services",
+    "web",
+    "contracts",
+    "cloud_agent_contracts",
+    "cloud_agent_git",
+)
 
 # Trailing dots are excluded: these paths are frequently named mid-prose in
 # comments, and a sentence-ending period is not part of the filename.
@@ -85,11 +95,11 @@ _SOURCE_ONLY_PATH = re.compile(
 
 @pytest.mark.parametrize("path", DEPLOY_FILES, ids=lambda p: str(p.relative_to(REPO)))
 def test_no_deploy_file_references_the_source_repo_layout(path: Path) -> None:
-    """No `apps/backend`, `serving.`, `ops/`, or `deploy/docker` survives."""
+    """No `serving.`, `ops/`, or `deploy/docker` survives."""
     text = path.read_text(encoding="utf-8")
     stale = [
         marker
-        for marker in ("apps/backend", "serving.agent_jobs", "deploy/docker/", "ops/deploy/")
+        for marker in ("serving.agent_jobs", "deploy/docker/", "ops/deploy/")
         if marker in text
     ]
     assert not stale, f"{path.relative_to(REPO)} still points at the source repo: {stale}"
@@ -113,13 +123,13 @@ def test_every_dockerfile_copy_source_exists(dockerfile: Path) -> None:
 
 def test_the_runner_image_runs_the_host_package() -> None:
     text = (HOST / "Dockerfile.agent-runner").read_text(encoding="utf-8")
-    assert "COPY cloud_agent_host/ cloud_agent_host/" in text
+    assert "COPY apps/backend/cloud_agent_host/ cloud_agent_host/" in text
     assert '"cloud_agent_host.runner"' in text
 
 
 def test_the_runner_entrypoint_does_not_import_the_control_plane_package() -> None:
     """The slim runner image carries only the host package at runtime."""
-    source = (REPO / "cloud_agent_host/runner.py").read_text(encoding="utf-8")
+    source = (REPO / "apps" / "backend" / "cloud_agent_host/runner.py").read_text(encoding="utf-8")
     imports = {
         node.module
         for node in ast.walk(ast.parse(source))

@@ -31,7 +31,9 @@ import yaml
 
 from cloud_agent.grants import GrantClient
 
-CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "inference-grants.openapi.yaml"
+CONTRACT = (
+    Path(__file__).resolve().parents[2] / "gateway_contracts" / "inference-grants.openapi.yaml"
+)
 
 
 def _declared_fields() -> set[str]:

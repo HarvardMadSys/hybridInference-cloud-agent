@@ -116,7 +116,7 @@ jobs:
           # top-level directory runs the backend checks rather than skipping
           # them unnoticed.
           if printf '%s\n' "${files}" \
-             | grep -vE '^(docs/|web/)' \
+             | grep -vE '^(docs/|apps/frontend/)' \
              | grep -vE '(\.md|LICENSE|\.gitignore)$' \
              | grep . >/dev/null; then
             backend=true
@@ -125,24 +125,25 @@ jobs:
           fi
 
           # Web: the app itself.
-          if matches '^web/'; then web=true; else web=false; fi
+          if matches '^apps/frontend/'; then web=true; else web=false; fi
 
           # Docker: the deploy files and what they COPY. README.md is here
           # because Dockerfile.agent-runner COPYs it alongside pyproject/uv.lock,
           # so deleting or renaming it breaks the build and nothing else notices.
-          # web/ is here because the console image is built from web/ plus
+          # apps/frontend/ is here because the console image is built from it plus
           # deploy/control-plane/Dockerfile.web: a change to the app alone used
           # to skip every docker job, which is how that image went unverified.
-          # cloud_agent_contracts/, cloud_agent_git/ and cloud_agent_profiling/
-          # are here because *both* images COPY and import them, and "it imports
-          # in this checkout and not in the image" is the failure these jobs
-          # exist to catch. The set is pinned by
-          # test_a_change_to_what_both_images_ship_runs_the_image_jobs, which
-          # derives it from the two Dockerfiles rather than listing it here a
-          # second time -- which is how cloud_agent_profiling was missed: this
-          # branch put it in both Dockerfiles and the Makefile and left the
-          # classifier behind.
-          if matches '^(deploy/|cloud_agent_host/|cloud_agent_contracts/|cloud_agent_git/|cloud_agent_profiling/|web/)' \
+          # apps/backend/cloud_agent_shared/ and
+          # apps/backend/cloud_agent_profiling/ are here because *both* images
+          # COPY and import them, and "it imports in this checkout and not in
+          # the image" is the failure these jobs exist to catch. The set is
+          # pinned by test_a_change_to_what_both_images_ship_runs_the_image_
+          # jobs, which derives it from the two Dockerfiles rather than listing
+          # it here a second time -- which is how cloud_agent_profiling was
+          # missed once: it reached both Dockerfiles and the Makefile and the
+          # classifier was left behind.
+          if matches '^(deploy/|apps/backend/cloud_agent_host/|apps/backend/cloud_agent_shared/|apps/backend/cloud_agent_profiling/|apps/frontend/)' \
+
              || matches '^(pyproject\.toml|uv\.lock|README\.md)$'; then
             docker=true
           else
@@ -233,7 +234,7 @@ jobs:
       - name: Pydocstyle
         id: pydocstyle
         continue-on-error: true
-        run: uv run pydocstyle cloud_agent cloud_agent_host
+        run: uv run pydocstyle apps/backend/cloud_agent apps/backend/cloud_agent_host apps/backend/cloud_agent_shared
 
       # Blocking, and the store is inside it on purpose: a checker that cannot
       # see the class it validates callers against proves nothing about the
@@ -572,17 +573,17 @@ jobs:
           # failing random checkouts on this pool.
           fetch-depth: 0
 
-      # web/ is an empty placeholder until task F1 lands the Next.js app. Until
+      # apps/frontend/ is an empty placeholder until task F1 lands the Next.js app. Until
       # then this workflow is a deliberate no-op rather than a red X: gating on
       # the manifest keeps the required-check list stable across that boundary.
       - name: Detect web app
         id: detect
         run: |
-          if [ -f web/package.json ]; then
+          if [ -f apps/frontend/package.json ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "web/package.json not present yet — skipping (task F1)"
+            echo "apps/frontend/package.json not present yet — skipping (task F1)"
           fi
 
       - name: Isolate the npm cache dir
@@ -604,11 +605,11 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: apps/frontend/package-lock.json
 
       - name: Install dependencies
         if: steps.detect.outputs.present == 'true'
-        working-directory: ./web
+        working-directory: ./apps/frontend
         run: npm ci
 
       # Ordered cheapest-first so a formatting slip is reported in seconds
@@ -618,28 +619,28 @@ jobs:
         id: eslint
         if: steps.detect.outputs.present == 'true'
         continue-on-error: true
-        working-directory: ./web
+        working-directory: ./apps/frontend
         run: npm run lint
 
       - name: Prettier
         id: prettier
         if: steps.detect.outputs.present == 'true'
         continue-on-error: true
-        working-directory: ./web
+        working-directory: ./apps/frontend
         run: npm run format:check
 
       - name: TypeScript
         id: typescript
         if: steps.detect.outputs.present == 'true'
         continue-on-error: true
-        working-directory: ./web
+        working-directory: ./apps/frontend
         run: npm run type-check
 
       - name: Tests
         id: tests
         if: steps.detect.outputs.present == 'true'
         continue-on-error: true
-        working-directory: ./web
+        working-directory: ./apps/frontend
         run: npm run test
 
       # A Client Component importing the server config reader must fail the
@@ -650,7 +651,7 @@ jobs:
         id: server-only
         if: steps.detect.outputs.present == 'true'
         continue-on-error: true
-        working-directory: ./web
+        working-directory: ./apps/frontend
         run: node scripts/check-server-only-guard.mjs
 
       # Builds both web variants — root and `/agents` — and boots each under
@@ -663,10 +664,10 @@ jobs:
         id: runtime-config
         if: steps.detect.outputs.present == 'true'
         continue-on-error: true
-        working-directory: ./web
+        working-directory: ./apps/frontend
         run: node scripts/check-runtime-site-config.mjs
 
-      # Skipped along with the checks when web/ is absent, so this stays the
+      # Skipped along with the checks when apps/frontend/ is absent, so this stays the
       # deliberate no-op the `Detect web app` step describes rather than
       # reading six empty outcomes as six failures.
       - name: Every check passed

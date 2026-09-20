@@ -13,7 +13,9 @@ from jsonschema import Draft202012Validator, FormatChecker
 from cloud_agent.grant_usage import GrantUsageReport, GrantUsageRequestPage
 from cloud_agent.grants import GrantClient
 
-CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "inference-grants.openapi.yaml"
+CONTRACT = (
+    Path(__file__).resolve().parents[2] / "gateway_contracts" / "inference-grants.openapi.yaml"
+)
 
 
 def _request_page() -> dict[str, Any]:

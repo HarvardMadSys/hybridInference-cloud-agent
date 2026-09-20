@@ -36,6 +36,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.storage import AllCapabilities, EmptyAttachments, EmptySkillLibrary
 
 from cloud_agent import broker_routing
 from cloud_agent.api import routes as agent_jobs_router, worker, workspace as agent_workspace
@@ -43,7 +44,6 @@ from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.tokens import mint_worker_token
-from tests.support.storage import AllCapabilities, EmptyAttachments, EmptySkillLibrary
 
 pytestmark = pytest.mark.asyncio
 

@@ -20,10 +20,10 @@ import os
 
 import pytest
 import pytest_asyncio
+from tests.support.migrations import apply_migrations
 
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage.repositories.audit import PostgresAuditRepository
-from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

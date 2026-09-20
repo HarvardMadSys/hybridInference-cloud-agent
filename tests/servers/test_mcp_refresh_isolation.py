@@ -6,10 +6,6 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
-
-from cloud_agent.api import mcp_relay
-from cloud_agent.mcp.refresh import RefreshRefused
-from cloud_agent.mcp.registry import mcp_cipher
 from tests.servers.test_mcp_relay_host import (
     _auth,
     _rpc,
@@ -18,6 +14,10 @@ from tests.servers.test_mcp_relay_host import (
     host as host,
     store as store,
 )
+
+from cloud_agent.api import mcp_relay
+from cloud_agent.mcp.refresh import RefreshRefused
+from cloud_agent.mcp.registry import mcp_cipher
 
 pytestmark = pytest.mark.asyncio
 

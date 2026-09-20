@@ -8,14 +8,6 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-
-from cloud_agent.api import mcp_relay
-from cloud_agent.api.deps import get_storage
-from cloud_agent.mcp.host import McpHost
-from cloud_agent.mcp.jsonrpc import JsonRpcError
-from cloud_agent.mcp.protocol import Handshake, ProtocolError
-from cloud_agent.mcp.registry import mcp_cipher
-from cloud_agent.mcp.transports import TransportError
 from tests.servers.test_mcp_relay_host import (
     FakeStore,
     StubHost,
@@ -24,6 +16,14 @@ from tests.servers.test_mcp_relay_host import (
     _rpc,
     _secrets as _secrets,
 )
+
+from cloud_agent.api import mcp_relay
+from cloud_agent.api.deps import get_storage
+from cloud_agent.mcp.host import McpHost
+from cloud_agent.mcp.jsonrpc import JsonRpcError
+from cloud_agent.mcp.protocol import Handshake, ProtocolError
+from cloud_agent.mcp.registry import mcp_cipher
+from cloud_agent.mcp.transports import TransportError
 
 pytestmark = pytest.mark.asyncio
 

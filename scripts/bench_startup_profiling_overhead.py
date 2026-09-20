@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure what the opt-in operation profiler costs one sandbox startup.
 
-``cloud_agent_profiling/operation_profiling.py`` is default-off timing for
+``apps/backend/cloud_agent_profiling/operation_profiling.py`` is default-off timing for
 platform operations, and the whole design rests on one claim: leaving the switch
 in the tree is cheap enough that nobody ever notices it.  This script measures
 that claim against the call pattern the runner actually uses, instead of leaving
@@ -18,7 +18,7 @@ What is measured
 ----------------
 
 One *simulated* startup attempt, shaped after ``run_once`` and
-``_run_shared_live_attempt`` in ``cloud_agent_host/runner.py``:
+``_run_shared_live_attempt`` in ``apps/backend/cloud_agent_host/runner.py``:
 
 * one ``start_operation(operation="attempt.startup", host=..., worker_id=...)``,
 * one ``span`` around a stand-in for the attestation and claim call,

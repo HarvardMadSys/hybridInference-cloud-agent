@@ -151,7 +151,9 @@ def test_a_service_that_is_not_running_is_refused() -> None:
 def test_a_recipe_root_may_not_carry_the_source_it_replaces(tmp_path: Path) -> None:
     """The claim is "deploys without source", so the check is on the directory."""
     aa.source_free(tmp_path)
-    for name in (".git", "web", "cloud_agent_host"):
+    # Three names until the consolidation -- `web`, `cloud_agent` and
+    # `cloud_agent_host` -- are one directory now, so one case covers them.
+    for name in (".git", "apps"):
         (tmp_path / name).mkdir()
         with pytest.raises(aa.AcceptanceError) as raised:
             aa.source_free(tmp_path)

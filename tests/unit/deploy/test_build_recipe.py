@@ -20,7 +20,6 @@ from typing import Any
 
 import pytest
 import yaml
-
 from deploy.release import build_recipe as br
 
 REPO_ROOT = Path(__file__).resolve().parents[3]

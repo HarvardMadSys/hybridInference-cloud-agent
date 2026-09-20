@@ -18,6 +18,8 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+from tests.support.db import reset_agent_tables
+from tests.support.migrations import apply_migrations
 
 from cloud_agent.mcp.registry import binding_from_row
 from cloud_agent.schemas import WorkerEventRequest
@@ -31,8 +33,6 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
-from tests.support.db import reset_agent_tables
-from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

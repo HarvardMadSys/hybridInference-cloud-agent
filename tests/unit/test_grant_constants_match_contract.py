@@ -29,7 +29,9 @@ import yaml
 
 from cloud_agent import grants
 
-CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "inference-grants.openapi.yaml"
+CONTRACT = (
+    Path(__file__).resolve().parents[2] / "gateway_contracts" / "inference-grants.openapi.yaml"
+)
 
 
 @pytest.fixture(scope="module")

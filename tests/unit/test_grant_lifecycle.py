@@ -37,6 +37,7 @@ import math
 from typing import Any
 
 import pytest
+from tests.support.storage import AllCapabilities
 
 from cloud_agent import grants as grant_client, grants as grants_mod
 from cloud_agent.gateway import GatewayError
@@ -48,7 +49,6 @@ from cloud_agent.workers.attempts import (
     _renew_live_grants,
     _revoke_dead_grants,
 )
-from tests.support.storage import AllCapabilities
 
 pytestmark = pytest.mark.asyncio
 

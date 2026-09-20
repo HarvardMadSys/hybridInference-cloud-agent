@@ -7,7 +7,6 @@ import json
 import sys
 
 import pytest
-
 from deploy import watch_peer
 
 

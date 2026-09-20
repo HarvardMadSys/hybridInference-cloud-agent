@@ -19,7 +19,6 @@ from typing import Any
 
 import pytest
 import yaml
-
 from deploy.release import release_manifest as rm, smoke
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -236,13 +235,13 @@ def _packages_both_images_ship() -> set[str]:
 
 
 def test_a_change_to_the_console_runs_the_image_jobs() -> None:
-    """web/ is half of the console image, and used to skip every docker job.
+    """apps/frontend/ is half of the console image, and used to skip every docker job.
 
-    Dockerfile.web copies `web/`, so a pull request that only touched the app
+    Dockerfile.web copies `apps/frontend/`, so a pull request that only touched the app
     changed what that image contains and ran none of the jobs that build it —
     which is how the image went unverified in the first place.
     """
-    assert _runs_the_image_jobs("web/src/app/page.tsx")
+    assert _runs_the_image_jobs("apps/frontend/src/app/page.tsx")
 
 
 @pytest.mark.parametrize("entry", sorted(_packages_both_images_ship()))

@@ -1,0 +1,536 @@
+"""Explicit Postgres projections for cross-user admin observation reads.
+
+The default paths never fetch prompts, arbitrary event payloads or raw errors.
+Content access is deliberately a separate, single-event operation. All SQL
+identifiers are source constants; user selectors are bound parameters.
+"""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING, Any
+
+from cloud_agent.admin_observability import (
+    SOURCE_LEDGER_SENTINEL,
+    ActivityCursor,
+    AdminActivity,
+    AdminActivityPage,
+    AdminRun,
+    AdminRunList,
+    LlmRequestSourceCursor,
+    RunCursor,
+    RunFilters,
+    cursor_scope,
+    encode_cursor,
+)
+from cloud_agent.schemas import AttemptResources, ProcessObservation, ToolCallResources
+from cloud_agent.storage._sql.attempts import NEXT_ATTEMPT_START_SQL
+from cloud_agent.storage._sql.ledger import LEDGER_WINDOW_UNTIL_SQL
+from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.thread_stats import _TOKEN_KEY_GROUPS
+from cloud_agent_shared.event_payloads import MAX_EVENT_PAYLOAD_BYTES, bound_event_payload
+from cloud_agent_shared.turn_resources import summarize_run_resources
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from datetime import datetime
+
+    import asyncpg
+
+
+_RUN_COLUMNS = """
+    j.id, j.thread_id,
+    CASE WHEN t.title_source IN ('generated', 'manual')
+         THEN LEFT(t.title, 160) END AS title,
+    j.turn_no,
+    LEFT(j.user_id, 256) AS user_id, LEFT(t.repo, 256) AS repo,
+    LEFT(j.runtime, 128) AS runtime, LEFT(j.model, 256) AS model,
+    LEFT(j.reasoning_effort, 64) AS reasoning_effort,
+    t.execution_profile, j.state, j.created_at, j.updated_at,
+    ARRAY(SELECT DISTINCT LEFT(a.host_id, 256) FROM agent_attempts a
+          WHERE a.job_id = j.id AND a.host_id IS NOT NULL
+          ORDER BY 1) AS hosts,
+    ARRAY(SELECT DISTINCT LEFT(COALESCE(
+              CASE WHEN jsonb_typeof(h.labels->'physical_host') = 'string'
+                   THEN NULLIF(BTRIM(h.labels->>'physical_host'), '') END,
+              a.host_id), 256)
+          FROM agent_attempts a LEFT JOIN agent_runner_hosts h ON h.host = a.host_id
+          WHERE a.job_id = j.id AND a.host_id IS NOT NULL
+          ORDER BY 1) AS physical_hosts,
+    (SELECT COUNT(*) FROM agent_job_events e
+     WHERE e.job_id = j.id AND e.event_type = 'tool_use') AS tool_calls,
+    (SELECT jsonb_agg(jsonb_build_object(
+                'summary', r.turn_summary,
+                'received_at', r.turn_summary_received_at,
+                'terminal', a.status <> 'running')
+            ORDER BY a.id)
+     FROM agent_attempts a
+     LEFT JOIN agent_attempt_resources r ON r.attempt_id = a.id
+     WHERE a.job_id = j.id) AS resource_summary_attempts
+"""
+
+# The derived, non-scalar keys of ``AttemptResources``. ``turn_summary`` is a
+# real JSONB column but not a scalar one: emitting it from the generated list
+# would hand the model a JSON document where it expects the reducer's derived
+# projection (state rewritten to ``interrupted``, per-metric envelope). The
+# child collections are fetched separately anyway, because one row per call or
+# process does not belong in a single flat SELECT.
+_RESOURCE_DERIVED_FIELDS = frozenset({"tool_calls", "processes", "turn_summary"})
+
+_EVENT_COLUMNS = """
+    e.id, e.attempt_id, a.attempt_no, e.seq,
+    LEFT(e.event_type, 64) AS event_type, e.created_at,
+    CASE WHEN e.event_type = 'tool_use'
+              AND jsonb_typeof(e.payload->'id') = 'string'
+              AND LENGTH(e.payload->>'id') <= 256 THEN e.payload->>'id'
+         WHEN e.event_type = 'tool_result'
+              AND jsonb_typeof(e.payload->'tool_use_id') = 'string'
+              AND LENGTH(e.payload->>'tool_use_id') <= 256 THEN e.payload->>'tool_use_id'
+    END AS tool_use_id,
+    CASE WHEN e.event_type IN ('tool_use', 'tool_result')
+              AND jsonb_typeof(e.payload->'name') = 'string'
+         THEN LEFT(e.payload->>'name', 160) END AS tool_name,
+    CASE WHEN e.event_type = 'tool_result'
+              AND jsonb_typeof(e.payload->'is_error') = 'boolean'
+         THEN (e.payload->>'is_error')::boolean END AS is_error,
+    -- Content means something a reveal would actually return. An empty object
+    -- is not content, and neither is a payload reduced to the truncation
+    -- markers alone: advertising a reveal there leads to an empty payload.
+    (jsonb_typeof(e.payload) = 'object' AND EXISTS (
+        SELECT 1 FROM jsonb_each(e.payload) AS field(key, value)
+        WHERE value <> 'null'::jsonb
+          AND key NOT IN ('truncated', 'original_payload_bytes', 'truncation_notice')
+     )) AS has_content
+"""
+
+# Share exactly the spellings understood by the accounting implementation.
+# Values must also be numbers, so an arbitrary object hidden under a familiar
+# usage key cannot reach the application on a default metadata request.
+_USAGE_KEYS_SQL = ", ".join(f"'{key}'" for group in _TOKEN_KEY_GROUPS for key in group)
+_RESOURCE_FIELDS = tuple(
+    key for key in AttemptResources.model_fields if key not in _RESOURCE_DERIVED_FIELDS
+)
+_RESOURCE_COLUMNS = ", ".join(
+    [
+        *(
+            f"LEFT(r.{key}, 128) AS {key}"
+            if key in {"sampler_version", "process_observer"}
+            else f"r.{key}"
+            for key in _RESOURCE_FIELDS
+        ),
+        # Explicit, not generated: the stored snapshot is projected as JSONB
+        # and handed to the shared reducer, which is the only thing allowed to
+        # decide what a reader sees. Selecting it as a plain column would leak
+        # the stored ``collecting`` state into a terminal attempt's response.
+        "r.turn_summary AS turn_summary",
+    ]
+)
+_CALL_COLUMNS = ", ".join(
+    f"LEFT({key}, 256) AS {key}" if key in {"tool_use_id", "tool_name", "timing_source"} else key
+    for key in ToolCallResources.model_fields
+)
+_PROCESS_COLUMNS = ", ".join(
+    f"LEFT({key}, 256) AS {key}" if key in {"comm", "executable"} else key
+    for key in ProcessObservation.model_fields
+)
+_MAX_CALLS = 512
+_MAX_PROCESSES = 2048
+
+# One stored attribution reference, in the shape the admin read models expect.
+# The effective window end is the ledger accounting definition, shared with the
+# summary query rather than re-derived here; ``window_open`` asks the same
+# definition a second question instead of duplicating its successor lookup.
+_SOURCE_COLUMNS = f"""
+    a.id AS attempt_id, a.attempt_no, a.status AS attempt_status,
+    a.started_at, a.finished_at, j.thread_id,
+    l.id AS ledger_id, l.grant_id, l.binding_id, l.residency_generation,
+    l.window_since, {LEDGER_WINDOW_UNTIL_SQL} AS window_until,
+    (a.finished_at IS NULL AND {NEXT_ATTEMPT_START_SQL} IS NULL) AS window_open
+"""
+
+
+def _fold_run_resource_summary(row: dict[str, Any]) -> dict[str, Any]:
+    """Turn one run row's per-attempt snapshots into its compact summary.
+
+    The list query returns the raw snapshots of the current page's attempts;
+    the fold itself belongs to the shared reducer, so the list and the detail
+    view cannot disagree about what a run's CPU or memory peak is. A run with
+    no measured attempt keeps ``None`` — "not measured here" is not zero.
+    """
+    attempts = load_json(row.pop("resource_summary_attempts", None)) or []
+    summaries = [
+        item.get("summary") if isinstance(item, dict) else None
+        for item in attempts
+        if isinstance(item, dict)
+    ]
+    terminal = [bool(item.get("terminal")) if isinstance(item, dict) else True for item in attempts]
+    received = [item.get("received_at") if isinstance(item, dict) else None for item in attempts]
+    row["resource_summary"] = summarize_run_resources(
+        summaries,
+        terminal_by_attempt=terminal or None,
+        received_at_by_attempt=received or None,
+    )
+    return row
+
+
+class AdminRunQueries:
+    """Admin-only queries, kept separate from ownership-enforcing store reads."""
+
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        """Use the Agent database's existing connection pool."""
+        self._pool = pool
+
+    @asynccontextmanager
+    async def _read(self) -> AsyncIterator[asyncpg.Connection]:
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(isolation="repeatable_read", readonly=True),
+        ):
+            await conn.execute("SET LOCAL statement_timeout = '5s'")
+            yield conn
+
+    async def list_runs(
+        self,
+        *,
+        filters: RunFilters,
+        since: datetime,
+        until: datetime,
+        cursor: RunCursor | None,
+        limit: int,
+    ) -> AdminRunList:
+        """Read a page of turns across owners, with a creation-time tie breaker."""
+        async with self._read() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT {_RUN_COLUMNS}
+                FROM agent_jobs j LEFT JOIN agent_threads t ON t.id = j.thread_id
+                WHERE j.created_at >= $1 AND j.created_at < $2
+                  AND ($3::text IS NULL OR j.user_id = $3)
+                  AND ($4::text IS NULL OR t.repo = $4)
+                  AND ($5::text IS NULL OR j.state = $5)
+                  AND ($6::text IS NULL OR j.runtime = $6)
+                  AND ($7::text IS NULL OR j.model = $7)
+                  AND ($8::text IS NULL OR EXISTS (
+                      SELECT 1 FROM agent_attempts a WHERE a.job_id = j.id AND a.host_id = $8
+                  ))
+                  AND ($9::timestamptz IS NULL OR (j.created_at, j.id) < ($9, $10::text))
+                ORDER BY j.created_at DESC, j.id DESC
+                LIMIT $11
+                """,
+                since,
+                until,
+                filters.user_id,
+                filters.repo,
+                filters.state,
+                filters.runtime,
+                filters.model,
+                filters.host,
+                cursor.created_at if cursor else None,
+                cursor.job_id if cursor else None,
+                limit + 1,
+            )
+        page = [
+            AdminRun.model_validate(_fold_run_resource_summary(dict(row))) for row in rows[:limit]
+        ]
+        next_cursor = None
+        if len(rows) > limit:
+            last = page[-1]
+            next_cursor = encode_cursor(
+                RunCursor(
+                    scope=cursor_scope(filters.model_dump()),
+                    since=since,
+                    until=until,
+                    created_at=last.created_at,
+                    job_id=last.id,
+                )
+            )
+        return AdminRunList(runs=page, since=since, until=until, next_cursor=next_cursor)
+
+    async def get_run(self, job_id: str) -> dict[str, Any] | None:
+        """Fetch the same explicit metadata fields as the list, never SELECT *."""
+        async with self._read() as conn:
+            row = await conn.fetchrow(
+                f"""SELECT {_RUN_COLUMNS}
+                FROM agent_jobs j LEFT JOIN agent_threads t ON t.id = j.thread_id
+                WHERE j.id = $1""",
+                job_id,
+            )
+        if row is None:
+            return None
+        return _fold_run_resource_summary(dict(row))
+
+    async def attempts(self, job_id: str) -> list[dict[str, Any]]:
+        """Read execution identities without lease credentials or failure text."""
+        async with self._read() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id AS attempt_id, attempt_no, LEFT(host_id, 256) AS host,
+                       status, started_at, finished_at
+                FROM agent_attempts WHERE job_id = $1 ORDER BY attempt_no, id
+                """,
+                job_id,
+            )
+        return [dict(row) for row in rows]
+
+    async def llm_request_sources(
+        self,
+        job_id: str,
+        *,
+        attempt_id: int | None,
+        cursor: LlmRequestSourceCursor | None,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Read one page of stored attribution references, in execution order.
+
+        An attempt without a reference is returned as well, ordered after every
+        attempt that has one by a sentinel ledger id. Omitting it would answer
+        "this execution made no requests" where the truth is "this execution
+        was never attributed", and the two must stay distinguishable.
+
+        Returns:
+            The page, and whether another page exists.
+        """
+        async with self._read() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT {_SOURCE_COLUMNS}, COALESCE(l.id, $6::bigint) AS ledger_key
+                FROM agent_attempts a
+                JOIN agent_jobs j ON j.id = a.job_id
+                LEFT JOIN agent_attempt_ledger l ON l.attempt_id = a.id
+                WHERE a.job_id = $1
+                  AND ($2::bigint IS NULL OR a.id = $2)
+                  AND ($3::integer IS NULL
+                       OR (a.attempt_no, a.id, COALESCE(l.id, $6::bigint))
+                          > ($3, $4::bigint, $5::bigint))
+                ORDER BY a.attempt_no, a.id, COALESCE(l.id, $6::bigint)
+                LIMIT $7
+                """,
+                job_id,
+                attempt_id,
+                cursor.attempt_no if cursor else None,
+                cursor.attempt_id if cursor else None,
+                cursor.ledger_key if cursor else None,
+                SOURCE_LEDGER_SENTINEL,
+                limit + 1,
+            )
+        return [dict(row) for row in rows[:limit]], len(rows) > limit
+
+    async def llm_request_source(self, job_id: str, source_id: int) -> dict[str, Any] | None:
+        """Read one stored reference, scoped to the job in the path.
+
+        The job is part of the predicate rather than checked afterwards, so a
+        reference belonging to another run is indistinguishable from one that
+        does not exist.
+        """
+        async with self._read() as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT {_SOURCE_COLUMNS}
+                FROM agent_attempts a
+                JOIN agent_jobs j ON j.id = a.job_id
+                JOIN agent_attempt_ledger l ON l.attempt_id = a.id
+                WHERE a.job_id = $1 AND l.id = $2
+                """,
+                job_id,
+                source_id,
+            )
+        return dict(row) if row is not None else None
+
+    async def usage_inputs(self, job_id: str) -> dict[str, Any]:
+        """Project numeric usage and hashed identities for accounting and timing.
+
+        Hashing response and tool IDs preserves equality without fetching their
+        arbitrary text. Tool pairs stay within an execution. Attempt totals,
+        duplicate blocks, zero-output detection and each runtime's cache
+        convention still use the shared summarizer.
+        """
+        async with self._read() as conn:
+            attempts = await conn.fetch(
+                "SELECT id AS attempt_id, job_id, started_at FROM agent_attempts WHERE job_id = $1",
+                job_id,
+            )
+            rows = await conn.fetch(
+                f"""
+                SELECT e.job_id, e.attempt_id, e.seq, e.event_type, e.created_at,
+                       jsonb_build_object(
+                           'usage', COALESCE((
+                               SELECT jsonb_object_agg(key, value)
+                               FROM jsonb_each(CASE
+                                   WHEN jsonb_typeof(e.payload->'usage') = 'object'
+                                       THEN e.payload->'usage'
+                                   WHEN e.event_type = 'usage'
+                                       AND jsonb_typeof(e.payload) = 'object' THEN e.payload
+                                   ELSE '{{}}'::jsonb END)
+                               WHERE key IN ({_USAGE_KEYS_SQL})
+                                 AND jsonb_typeof(value) = 'number'
+                                 AND LENGTH(value::text) <= 32
+                           ), '{{}}'::jsonb),
+                           'usage_id', CASE
+                               WHEN jsonb_typeof(e.payload->'usage_id') = 'string'
+                                 AND e.payload->>'usage_id' <> ''
+                               THEN encode(sha256(convert_to(e.payload->>'usage_id', 'UTF8')), 'hex')
+                           END,
+                           'usage_scope', CASE WHEN e.payload->>'usage_scope' = 'attempt'
+                               THEN 'attempt' END,
+                           'id', CASE WHEN e.event_type = 'tool_use'
+                               AND jsonb_typeof(e.payload->'id') = 'string'
+                               AND e.payload->>'id' <> ''
+                               THEN encode(sha256(convert_to(e.payload->>'id', 'UTF8')), 'hex')
+                           END,
+                           'tool_use_id', CASE WHEN e.event_type = 'tool_result'
+                               AND jsonb_typeof(e.payload->'tool_use_id') = 'string'
+                               AND e.payload->>'tool_use_id' <> ''
+                               THEN encode(sha256(convert_to(e.payload->>'tool_use_id', 'UTF8')), 'hex')
+                           END,
+                           'has_text', COALESCE(e.payload->>'text', '') ~ '[^[:space:]]'
+                       ) AS payload
+                FROM agent_job_events e
+                WHERE e.job_id = $1 ORDER BY e.attempt_id, e.seq
+                """,
+                job_id,
+            )
+        return {
+            "job_ids": [job_id],
+            "attempts": [dict(row) for row in attempts],
+            "events": [{**dict(row), "payload": load_json(row["payload"])} for row in rows],
+        }
+
+    async def activity(
+        self,
+        job_id: str,
+        *,
+        attempt_id: int | None,
+        cursor: ActivityCursor | None,
+        limit: int,
+    ) -> AdminActivityPage:
+        """Page across attempt-local sequences without reordering late arrivals.
+
+        A cursor fixes the upper global event ID. A fresh first page sees new
+        events; subsequent pages finish the same snapshot even if older attempts
+        receive a late control event meanwhile.
+        """
+        async with self._read() as conn:
+            snapshot_id = (
+                cursor.snapshot_id
+                if cursor
+                else await conn.fetchval(
+                    "SELECT COALESCE(MAX(id), 0) FROM agent_job_events WHERE job_id = $1", job_id
+                )
+            )
+            rows = await conn.fetch(
+                f"""
+                SELECT {_EVENT_COLUMNS}
+                FROM agent_job_events e JOIN agent_attempts a ON a.id = e.attempt_id
+                WHERE e.job_id = $1 AND a.job_id = $1 AND e.id <= $2
+                  AND ($3::bigint IS NULL OR e.attempt_id = $3)
+                  AND ($4::integer IS NULL
+                       OR (a.attempt_no, e.attempt_id, e.seq) > ($4, $5::bigint, $6::integer))
+                ORDER BY a.attempt_no, e.attempt_id, e.seq
+                LIMIT $7
+                """,
+                job_id,
+                snapshot_id,
+                attempt_id,
+                cursor.attempt_no if cursor else None,
+                cursor.attempt_id if cursor else None,
+                cursor.seq if cursor else None,
+                limit + 1,
+            )
+        page = [AdminActivity.model_validate(dict(row)) for row in rows[:limit]]
+        next_cursor = None
+        if len(rows) > limit:
+            last = page[-1]
+            next_cursor = encode_cursor(
+                ActivityCursor(
+                    scope=cursor_scope([job_id, attempt_id]),
+                    snapshot_id=snapshot_id,
+                    attempt_no=last.attempt_no,
+                    attempt_id=last.attempt_id,
+                    seq=last.seq,
+                )
+            )
+        return AdminActivityPage(events=page, next_cursor=next_cursor)
+
+    async def resources(self, job_id: str, attempt_id: int) -> dict[str, Any] | None:
+        """Read one attempt's resource rows with their original source and gaps.
+
+        ``turn_summary`` is returned as the stored snapshot, not as the
+        response projection: the caller runs it through the shared reducer,
+        which is also what the Runs list uses. Selecting the projection here
+        would be a second implementation of the same rules.
+        """
+        async with self._read() as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT a.id AS attempt_id, a.attempt_no, a.started_at, a.finished_at,
+                       a.continuity_mode, a.context_status,
+                       a.status <> 'running' AS attempt_terminal, {_RESOURCE_COLUMNS}
+                FROM agent_attempts a
+                LEFT JOIN agent_attempt_resources r ON r.attempt_id = a.id
+                WHERE a.job_id = $1 AND a.id = $2
+                """,
+                job_id,
+                attempt_id,
+            )
+            if row is None:
+                return None
+            telemetry = dict(row)
+            telemetry["turn_summary"] = load_json(telemetry.get("turn_summary"))
+            calls = await conn.fetch(
+                f"SELECT {_CALL_COLUMNS} FROM agent_tool_call_resources "
+                "WHERE attempt_id = $1 ORDER BY call_seq LIMIT $2",
+                attempt_id,
+                _MAX_CALLS + 1,
+            )
+            processes = await conn.fetch(
+                f"SELECT {_PROCESS_COLUMNS} FROM agent_process_observations "
+                "WHERE attempt_id = $1 ORDER BY process_seq LIMIT $2",
+                attempt_id,
+                _MAX_PROCESSES + 1,
+            )
+        telemetry["tool_calls"] = [dict(row) for row in calls[:_MAX_CALLS]]
+        telemetry["processes"] = [dict(row) for row in processes[:_MAX_PROCESSES]]
+        telemetry["tool_calls_truncated"] = bool(telemetry["tool_calls_truncated"]) or (
+            len(calls) > _MAX_CALLS
+        )
+        telemetry["processes_truncated"] = bool(telemetry["processes_truncated"]) or (
+            len(processes) > _MAX_PROCESSES
+        )
+        if telemetry["processes_truncated"]:
+            telemetry["process_observation_complete"] = False
+        return telemetry
+
+    async def event_content(self, job_id: str, event_id: int) -> dict[str, Any] | None:
+        """Fetch one payload, including a bounded preview for oversized old rows.
+
+        Postgres bounds the legacy preview before sending it over the wire.
+        The shared final limiter also counts JSON escaping and UTF-8 bytes.
+        This method must only be called by an authenticated, audited reveal.
+        """
+        async with self._read() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT e.id, e.attempt_id, e.seq, LEFT(e.event_type, 64) AS event_type,
+                       e.created_at,
+                       CASE WHEN OCTET_LENGTH(e.payload::text) > $3 THEN
+                           jsonb_build_object(
+                               'preview', LEFT(e.payload::text, 32768),
+                               'truncated', TRUE,
+                               'original_payload_bytes', OCTET_LENGTH(e.payload::text),
+                               'truncation_notice', 'Stored event exceeds 256 KiB; showing a preview.'
+                           )
+                       WHEN jsonb_typeof(e.payload) = 'object' THEN e.payload
+                       ELSE '{}'::jsonb END AS payload
+                FROM agent_job_events e JOIN agent_attempts a ON a.id = e.attempt_id
+                WHERE e.job_id = $1 AND a.job_id = $1 AND e.id = $2
+                """,
+                job_id,
+                event_id,
+                MAX_EVENT_PAYLOAD_BYTES,
+            )
+        if row is None:
+            return None
+        result = dict(row)
+        result["payload"] = bound_event_payload(load_json(row["payload"]) or {})
+        result["truncated"] = result["payload"].get("truncated") is True
+        return result

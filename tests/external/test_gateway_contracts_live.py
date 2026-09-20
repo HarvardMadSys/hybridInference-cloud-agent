@@ -65,7 +65,7 @@ from cloud_agent.workers.attempts import DEAD_GRANT_REFUSALS
 
 pytestmark = [pytest.mark.external, pytest.mark.asyncio]
 
-CONTRACTS = Path(__file__).resolve().parents[2] / "contracts"
+CONTRACTS = Path(__file__).resolve().parents[2] / "gateway_contracts"
 GRANTS_CONTRACT = "inference-grants.openapi.yaml"
 LOOKUPS_CONTRACT = "internal-lookups.openapi.yaml"
 

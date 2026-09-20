@@ -274,7 +274,7 @@ def test_the_egress_proxy_hands_its_log_pipes_to_the_user_it_becomes() -> None:
     disappearing from the CMD in an edit that never runs CI.
     """
     dockerfile = (REPO / "deploy/host/Dockerfile.agent-egress-proxy").read_text()
-    config = (REPO / "cloud_agent_host/egress_proxy.py").read_text()
+    config = (REPO / "apps" / "backend" / "cloud_agent_host/egress_proxy.py").read_text()
 
     logs_to_pipes = "stdio:/dev/stdout" in config or "stdio:/dev/stderr" in config
     if not logs_to_pipes:

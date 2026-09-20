@@ -6,10 +6,10 @@ import threading
 from pathlib import Path
 
 import pytest
+from tests.unit.test_live_sessions import _LiveProcess, _protocol_context, _turn_lines
 
 from cloud_agent_host.drivers import KiloDriver, OpenCodeDriver, TurnInput
 from cloud_agent_host.runtimes import KiloRuntime, OpencodeRuntime
-from tests.unit.test_live_sessions import _LiveProcess, _protocol_context, _turn_lines
 
 
 def test_bridge_preserves_nested_message_metadata_only_for_its_session():

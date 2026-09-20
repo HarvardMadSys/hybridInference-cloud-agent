@@ -50,6 +50,8 @@ import asyncpg
 import httpx
 import pytest
 import pytest_asyncio
+from tests.support.db import reset_agent_tables
+from tests.support.migrations import apply_migrations
 
 from cloud_agent import broker_routing, measurement_writer, operation_measurement
 from cloud_agent.api.deps import get_agent_app_credentials, get_gateway_client
@@ -74,8 +76,6 @@ from cloud_agent_profiling.measurement_delivery import (
     DELIVERY_DRAIN_S,
     DELIVERY_HANDOFF_DRAIN_S,
 )
-from tests.support.db import reset_agent_tables
-from tests.support.migrations import apply_migrations
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping

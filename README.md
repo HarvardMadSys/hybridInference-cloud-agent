@@ -9,7 +9,7 @@ Model calls go through a [HybridInference](https://github.com/HarvardMadSys/hybr
 (FreeInference is the hosted deployment of one),
 and **HTTP is the only thing these two services share** — no database, no
 signing secret, no Python import. Three contracts, each written down in
-[`contracts/`](contracts/):
+[`gateway_contracts/`](gateway_contracts/):
 
 | Contract | What it answers | Why it cannot live here |
 |---|---|---|
@@ -41,7 +41,7 @@ the service", not "fine".
 ## Architecture
 
 ```text
-browser ──▶ web/ (Next.js + BFF)
+browser ──▶ apps/frontend/ (Next.js + BFF)
                  │ session cookie
                  ▼
          cloud_agent/ — control plane ◀── HTTP ──▶ HybridInference gateway
@@ -97,17 +97,17 @@ Three deployment units, one repository:
 
 | Unit | Path | Runs where |
 |---|---|---|
-| Web + BFF | `web/` | alongside the control plane |
+| Web + BFF | `apps/frontend/` | alongside the control plane |
 | Control plane | `cloud_agent/` | one service, owns the Postgres database |
 | Host agent | `cloud_agent_host/` | every enrolled host; runner, workspace broker, egress proxy, and gateway/control-plane/MCP tunnels deploy together |
 
 ## Repository layout
 
 ```text
-cloud_agent/           control plane: API, auth adapter, scheduler, publishing
-cloud_agent_host/      runner, sandbox, runtimes, workspace broker
-web/                   Next.js app (user UI + admin dashboard)
-contracts/             OpenAPI documents for the three gateway contracts
+apps/backend/          the three Python packages: control plane, host agent,
+                       and the shared vocabulary both images ship
+apps/frontend/         Next.js app (user UI + admin dashboard)
+gateway_contracts/     OpenAPI documents for the three gateway contracts
 migrations/            Alembic migrations for the agent-owned database
 deploy/                control-plane / host / sandbox deployment
 tests/                 unit, servers, integration (dbtest), external (external)

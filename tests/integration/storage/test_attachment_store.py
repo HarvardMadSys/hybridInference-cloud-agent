@@ -5,17 +5,17 @@ from __future__ import annotations
 # Imported pytest fixtures are intentionally named by test parameters.
 # ruff: noqa: F811
 import pytest
+from tests.integration.storage.test_agent_job_store import (
+    _create_job,
+    pool,  # noqa: F401 - pytest fixture
+    store,  # noqa: F401 - pytest fixture
+)
 
 from cloud_agent.attachments.models import (
     MAX_ATTACHMENT_FILE_BYTES,
     AttachmentError,
 )
 from cloud_agent.attachments.selection import resolve_attachments
-from tests.integration.storage.test_agent_job_store import (
-    _create_job,
-    pool,  # noqa: F401 - pytest fixture
-    store,  # noqa: F401 - pytest fixture
-)
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

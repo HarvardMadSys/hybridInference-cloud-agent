@@ -41,10 +41,10 @@ import re
 import shutil
 
 import pytest
+from tests.support.claude_cli import ClaudeCli, FakeAnthropicGateway
 
 from cloud_agent.thread_stats import summarize_thread
 from cloud_agent_host.runtimes import ClaudeCodeRuntime
-from tests.support.claude_cli import ClaudeCli, FakeAnthropicGateway
 
 pytestmark = pytest.mark.external
 

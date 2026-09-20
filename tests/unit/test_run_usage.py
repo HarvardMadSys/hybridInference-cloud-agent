@@ -5,10 +5,10 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from tests.unit.test_ledger_snapshots import END, ledger_row, report_payload
 
 from cloud_agent.ledger import summarize_conversation
 from cloud_agent.thread_stats import normalized_runtime_input_tokens
-from tests.unit.test_ledger_snapshots import END, ledger_row, report_payload
 
 
 def _event(usage, *, attempt_id=1, seq=1, **payload):

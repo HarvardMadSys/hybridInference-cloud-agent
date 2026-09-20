@@ -127,9 +127,11 @@ def test_the_image_ships_the_host_package() -> None:
     host-only, which was wrong; an image without it builds, starts, serves, and
     fails at the first publish."""
     dockerfile = DOCKERFILE_PATH.read_text()
-    assert re.search(r"^COPY cloud_agent_host/ cloud_agent_host/", dockerfile, re.MULTILINE), (
-        "the control-plane image drops cloud_agent_host/, so publishing will fail at runtime"
-    )
+    assert re.search(
+        r"^COPY apps/backend/cloud_agent_host/ apps/backend/cloud_agent_host/",
+        dockerfile,
+        re.MULTILINE,
+    ), "the control-plane image drops cloud_agent_host/, so publishing will fail at runtime"
 
 
 def test_the_image_ships_the_migrations_it_is_told_to_run() -> None:
@@ -155,8 +157,8 @@ def test_the_compose_only_sets_variables_the_code_reads(control_plane_env: dict)
     sources = "\n".join(
         path.read_text()
         for root in (
-            REPO_ROOT / "cloud_agent",
-            REPO_ROOT / "cloud_agent_profiling",
+            REPO_ROOT / "apps" / "backend" / "cloud_agent",
+            REPO_ROOT / "apps" / "backend" / "cloud_agent_profiling",
         )
         for path in root.rglob("*.py")
         if "__pycache__" not in str(path)

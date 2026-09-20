@@ -1,6 +1,6 @@
 """The import boundary between the shared packages and the two implementations.
 
-``cloud_agent_contracts`` and ``cloud_agent_git`` are the packages both images
+``cloud_agent_shared`` and ``cloud_agent_shared.git`` are the packages both images
 ship, so neither may import an implementation package. The control plane may
 still reach into ``cloud_agent_host`` for what has not moved yet, but only
 through a transition allowlist that may shrink and never grow. In the other
@@ -17,17 +17,22 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CONTROL_PLANE_ROOT = REPO_ROOT / "cloud_agent"
-CONTRACTS_ROOT = REPO_ROOT / "cloud_agent_contracts"
-GIT_ROOT = REPO_ROOT / "cloud_agent_git"
-HOST_ROOT = REPO_ROOT / "cloud_agent_host"
+CONTROL_PLANE_ROOT = REPO_ROOT / "apps" / "backend" / "cloud_agent"
+SHARED_ROOT = REPO_ROOT / "apps" / "backend" / "cloud_agent_shared"
+HOST_ROOT = REPO_ROOT / "apps" / "backend" / "cloud_agent_host"
 
-#: The packages both images ship. Each is scanned on its own so a failure names
-#: the package that broke the boundary rather than only the offender's path.
-SHARED_ROOTS = {
-    "cloud_agent_contracts": CONTRACTS_ROOT,
-    "cloud_agent_git": GIT_ROOT,
-}
+#: The packages both images ship. One entry where there were two: the Git
+#: algorithms became ``cloud_agent_shared.git``, and a subpackage is not a
+#: second root to scan on its own — the I/O rule below is what keeps the one
+#: thing that made it separate from spreading.
+SHARED_ROOTS = {"cloud_agent_shared": SHARED_ROOT}
+
+#: The only subpackage of the shared package allowed to touch the outside
+#: world, and the two modules that do it: Git drives ``subprocess`` and the
+#: source archives are ``tarfile``. Everything else there is vocabulary two
+#: images agree on, and a parser or a network client in it would ride into both.
+IO_SUBPACKAGE = "git"
+IO_MODULES = frozenset({"subprocess", "tarfile"})
 
 #: The control-plane package, which the runner image does not ship. This is the
 #: one direction of the boundary no compatibility shim can bridge.
@@ -135,6 +140,36 @@ def test_control_plane_host_imports_are_the_transition_allowlist() -> None:
     assert scanned == allowlist, (
         f"imports missing from the allowlist: {sorted(scanned - allowlist)}\n"
         f"stale allowlist entries to delete: {sorted(allowlist - scanned)}"
+    )
+
+
+def test_only_the_git_subpackage_reaches_outside_the_process() -> None:
+    """I/O lives in one subpackage, and it is still there to be found.
+
+    The exemption has two halves and both are asserted: nothing outside
+    ``git/`` imports the I/O modules, and ``git/`` still does — so the day the
+    algorithms stop needing ``subprocess``, this fails and the exemption goes
+    rather than quietly covering an empty set.
+    """
+
+    def _io_imports(path: Path) -> set[str]:
+        return _imported_modules(path) & IO_MODULES
+
+    offenders: dict[str, set[str]] = {}
+    doing_io: set[str] = set()
+    for path in sorted(SHARED_ROOT.rglob("*.py")):
+        found = _io_imports(path)
+        if not found:
+            continue
+        if path.parent.name == IO_SUBPACKAGE:
+            doing_io |= found
+        else:
+            offenders[str(path.relative_to(REPO_ROOT))] = found
+
+    assert not offenders, f"only {IO_SUBPACKAGE}/ may do I/O in the shared package: {offenders}"
+    assert doing_io == IO_MODULES, (
+        f"{IO_SUBPACKAGE}/ no longer imports {sorted(IO_MODULES - doing_io)}; "
+        "the exemption above now covers nothing and should go"
     )
 
 

@@ -11,9 +11,9 @@ from urllib.parse import quote, urlencode
 import asyncpg
 import pytest
 import pytest_asyncio
+from tests.support.migrations import apply_migrations
 
 from cloud_agent.identity_namespace import IdentityNamespaceError, ensure_gateway_namespace
-from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 ISSUER = "https://gateway.example"

@@ -21,9 +21,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from tests.support.migrations import apply_migrations
 
 from cloud_agent.storage.repositories.source_control import PostgresSourceControlRepository
-from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

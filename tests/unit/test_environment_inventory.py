@@ -63,7 +63,7 @@ _DOCKERFILE_ARG = re.compile(r"^ARG\s+(NEXT_PUBLIC_[A-Z0-9_]+)", re.MULTILINE)
 _RUNTIME_WEB_VAR = re.compile(r'["\'](AGENT_WEB_[A-Z0-9_]+)["\']')
 
 #: `next.config.js` reads them too, and it is not under `src/`.
-_WEB_SOURCES = ("web/src/**/*.ts", "web/src/**/*.tsx", "web/*.js")
+_WEB_SOURCES = ("apps/frontend/src/**/*.ts", "apps/frontend/src/**/*.tsx", "apps/frontend/*.js")
 
 #: Read by the control plane, and correctly absent from its compose file.
 #: Each entry needs a reason, because "add it to the exemption list" is the
@@ -155,7 +155,7 @@ def test_web_build_arguments_are_wired() -> None:
     already on.
     """
     read = _vars_read(_sources(*_WEB_SOURCES), _PUBLIC_VAR)
-    assert read, "no NEXT_PUBLIC_* reads found under web/ — regex drift?"
+    assert read, "no NEXT_PUBLIC_* reads found under apps/frontend/ — regex drift?"
 
     undeclared = sorted(read - set(_DOCKERFILE_ARG.findall(WEB_DOCKERFILE.read_text())))
     assert not undeclared, (
@@ -182,10 +182,10 @@ def test_web_runtime_variables_are_wired() -> None:
     the neutral default with nothing to say the value was ignored.
     """
     read = _vars_read(
-        _sources("web/src/config/site.ts", "web/src/config/site.server.ts"),
+        _sources("apps/frontend/src/config/site.ts", "apps/frontend/src/config/site.server.ts"),
         _RUNTIME_WEB_VAR,
     )
-    assert read, "no AGENT_WEB_* reads found under web/src/config/ — regex drift?"
+    assert read, "no AGENT_WEB_* reads found under apps/frontend/src/config/ — regex drift?"
 
     missing = sorted(read - _web_runtime_env_keys())
     assert not missing, (

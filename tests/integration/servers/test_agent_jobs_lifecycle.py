@@ -21,6 +21,8 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.db import reset_agent_tables
+from tests.support.migrations import apply_migrations
 
 from cloud_agent.api import routes as agent_jobs_router
 from cloud_agent.api._owner_auth import authenticate_agent_owner
@@ -41,8 +43,6 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
-from tests.support.db import reset_agent_tables
-from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

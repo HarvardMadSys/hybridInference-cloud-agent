@@ -23,8 +23,8 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PORTS_DIR = REPO_ROOT / "cloud_agent" / "ports"
-REPOSITORIES_DIR = REPO_ROOT / "cloud_agent" / "storage" / "repositories"
+PORTS_DIR = REPO_ROOT / "apps" / "backend" / "cloud_agent" / "ports"
+REPOSITORIES_DIR = REPO_ROOT / "apps" / "backend" / "cloud_agent" / "storage" / "repositories"
 
 #: Nothing is exempt any more. ``initialize`` was the one public method no port
 #: claimed, and it left with the store: the schema is Alembic's, so there is no
@@ -142,7 +142,7 @@ def test_the_ports_cover_every_capability_the_callers_reach_for() -> None:
     claimed = {name for path in _port_files() for name in _methods(path)}
 
     reached: dict[str, set[str]] = {}
-    for path in sorted((REPO_ROOT / "cloud_agent").rglob("*.py")):
+    for path in sorted((REPO_ROOT / "apps" / "backend" / "cloud_agent").rglob("*.py")):
         if path.parent == REPOSITORIES_DIR:
             continue
         for node in ast.walk(ast.parse(path.read_text())):

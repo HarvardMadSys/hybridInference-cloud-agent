@@ -16,7 +16,10 @@ import cloud_agent
 import cloud_agent_host
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_PACKAGE_ROOTS = (_REPO_ROOT / "cloud_agent", _REPO_ROOT / "cloud_agent_host")
+_PACKAGE_ROOTS = (
+    _REPO_ROOT / "apps" / "backend" / "cloud_agent",
+    _REPO_ROOT / "apps" / "backend" / "cloud_agent_host",
+)
 
 # Matches `import serving...` and `from serving... import ...`, which would mean
 # a moved file still reaches into the HybridInference gateway package.

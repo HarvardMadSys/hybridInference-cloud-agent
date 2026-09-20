@@ -32,10 +32,10 @@ lint:  ## Run linters (ruff format check, ruff lint, pydocstyle)
 	@echo "$(YELLOW)Running linters...$(RESET)"
 	$(UV_RUN) ruff format --check .
 	$(UV_RUN) ruff check --no-fix .
-	$(UV_RUN) pydocstyle cloud_agent cloud_agent_host cloud_agent_contracts cloud_agent_git cloud_agent_profiling
+	$(UV_RUN) pydocstyle apps/backend/cloud_agent apps/backend/cloud_agent_host apps/backend/cloud_agent_shared apps/backend/cloud_agent_profiling
 	@echo "$(GREEN)OK Linting passed$(RESET)"
 
-typecheck:  ## Type-check both packages (mypy; config in pyproject.toml)
+typecheck:  ## Type-check all three packages (mypy; config in pyproject.toml)
 	@echo "$(YELLOW)Running mypy...$(RESET)"
 	$(UV_RUN) mypy
 	@echo "$(GREEN)OK Type check passed$(RESET)"

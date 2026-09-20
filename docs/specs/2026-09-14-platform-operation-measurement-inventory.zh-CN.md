@@ -57,7 +57,7 @@
 | `profiling` | 仅对本次实验选中的目标和操作计时；到截止时间或样本上限后结束 |
 
 部署级主开关为 `AGENT_OPERATION_PROFILING_ENABLED`，缺省为 `false`。
-**2026-09-14 已实现**（`cloud_agent_profiling/operation_profiling.py`，目前接入 runner 的
+**2026-09-14 已实现**（`apps/backend/cloud_agent_profiling/operation_profiling.py`，目前接入 runner 的
 `attempt.startup`；变量说明见 [ENVIRONMENT.md](../../ENVIRONMENT.md)）。仅设为 `true`
 不代表所有请求自动被采集；还需配置有明确范围和截止时间的 profiling run
 （`AGENT_OPERATION_PROFILING_RUN`，未配置或不合法时开关不生效并只记一条 warning）。
@@ -207,8 +207,8 @@ input HTTP 确认只能证明写入链路完成，不能证明字符已回显或
 ### 文件
 
 [文件 API](../../cloud_agent/api/routes.py) 会做 ownership、repo entitlement 与 broker
-解析。[broker](../../cloud_agent_host/workspace_broker.py) 为文件读取打开 workspace
-operation、验证网络，再通过 [retained_workspace](../../cloud_agent_host/retained_workspace.py)
+解析。[broker](../../apps/backend/cloud_agent_host/workspace_broker.py) 为文件读取打开 workspace
+operation、验证网络，再通过 [retained_workspace](../../apps/backend/cloud_agent_host/retained_workspace.py)
 在 guest 内执行固定 Python helper。文件读取的 wall time 包含容器 exec 和解释器启动；
 不能把 API 总耗时直接命名为磁盘 read latency。
 
@@ -222,7 +222,7 @@ operation、验证网络，再通过 [retained_workspace](../../cloud_agent_host
 
 ### 沙盒被其他操作唤醒
 
-[supervisor](../../cloud_agent_host/shared_session_supervisor.py) 的 `operation_opened()`
+[supervisor](../../apps/backend/cloud_agent_host/shared_session_supervisor.py) 的 `operation_opened()`
 和 `terminal_opened()` 都会调用 `_ensure_running()`。因此点文件和点终端也可能触发
 容器唤醒，无需有新的 agent attempt。现有 attempt-only measurement 无法覆盖全部操作。
 

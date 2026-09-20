@@ -31,7 +31,7 @@ group 都被记成 `resume_stopped`**；四条声明路径实际只剩三条，�
 所以单元测试一直通过——这是测试替身与生产字面量漂移，只有把真实 `create` 交给真实
 分类器才能发现。
 
-修复：`cloud_agent_host/chat_sandbox.py` 写入分类器认识的值；新增回归测试
+修复：`apps/backend/cloud_agent_host/chat_sandbox.py` 写入分类器认识的值；新增回归测试
 `tests/unit/test_chat_sandbox.py::TestSandboxActionFacts::test_a_real_creation_reports_the_action_the_classifier_reads`
 驱动真实 `create` 并把结果交给真实 `_classify_startup_path`，断言 `new_group`。
 
@@ -172,7 +172,7 @@ head 与 `dev` 的合并结果；期间 `dev` 前进了 #311（`efb77ee`），�
 "两边都 COPY 的包"，再断言 CI 的变更分类器会为这些包触发镜像构建。本分支在 `4701934`
 把 `cloud_agent_profiling` 加进了两个 Dockerfile 与 Makefile，却没有加进
 `.github/workflows/ci.yml` 的 `docker=true` 正则——于是"改了这个包却一个镜像任务都不跑"，
-正是那些任务存在的理由。合并 `dev` 后该测试在本机复现，已把 `cloud_agent_profiling/`
+正是那些任务存在的理由。合并 `dev` 后该测试在本机复现，已把 `apps/backend/cloud_agent_profiling/`
 补进分类器；`pytest tests/unit/deploy/test_artifacts_workflow.py` 21 passed。
 
 ### 3.3 真实业务开销实验

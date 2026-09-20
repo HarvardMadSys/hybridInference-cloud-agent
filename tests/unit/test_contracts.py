@@ -32,14 +32,14 @@ from openapi_spec_validator import validate
 from openapi_spec_validator.readers import read_from_filename
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CONTRACTS = REPO_ROOT / "contracts"
+CONTRACTS = REPO_ROOT / "gateway_contracts"
 
 DOCUMENTS = sorted(CONTRACTS.glob("*.yaml"))
 
 #: The client modules whose calls must be described by some document.
 CLIENT_SOURCES = (
-    REPO_ROOT / "cloud_agent" / "gateway.py",
-    REPO_ROOT / "cloud_agent" / "grants.py",
+    REPO_ROOT / "apps" / "backend" / "cloud_agent" / "gateway.py",
+    REPO_ROOT / "apps" / "backend" / "cloud_agent" / "grants.py",
 )
 
 

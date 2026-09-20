@@ -10,11 +10,6 @@ from datetime import datetime, timedelta, timezone
 import asyncpg
 import pytest
 import pytest_asyncio
-
-from cloud_agent.ledger import summarize_conversation
-from cloud_agent.storage.assembly import Storage
-from cloud_agent.storage.repositories.ledger import PostgresLedgerRepository
-from cloud_agent.thread_stats import summarize_thread
 from tests.integration.storage.test_agent_job_store import (
     _claim,
     _create_job,
@@ -23,6 +18,11 @@ from tests.integration.storage.test_agent_job_store import (
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 from tests.unit.test_ledger_snapshots import report_payload
+
+from cloud_agent.ledger import summarize_conversation
+from cloud_agent.storage.assembly import Storage
+from cloud_agent.storage.repositories.ledger import PostgresLedgerRepository
+from cloud_agent.thread_stats import summarize_thread
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

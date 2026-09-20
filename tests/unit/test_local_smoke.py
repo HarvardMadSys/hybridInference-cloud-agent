@@ -3,7 +3,6 @@
 from types import SimpleNamespace
 
 import pytest
-
 from deploy.local.smoke import require_assistant_reply
 
 

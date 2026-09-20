@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import asyncpg
 import pytest
-
-from cloud_agent.storage.assembly import Storage
 from tests.integration.storage.test_mcp_connection_store import (
     _OWNER,
     _connect,
@@ -20,6 +18,8 @@ from tests.integration.storage.test_mcp_connection_store import (
     pool as pool,
 )
 from tests.support.migrations import apply_migrations, downgrade_to
+
+from cloud_agent.storage.assembly import Storage
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

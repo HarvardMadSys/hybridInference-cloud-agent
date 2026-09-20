@@ -99,7 +99,7 @@ instead: older Agent binaries do not enforce the database's stored issuer, and
 existing profile cookies must be replaced through a fresh login.
 
 The API's wire schema and errors are recorded in
-[`internal-lookups.openapi.yaml`](../contracts/internal-lookups.openapi.yaml).
+[`internal-lookups.openapi.yaml`](../gateway_contracts/internal-lookups.openapi.yaml).
 Source changes alone do not update pinned images or deploy any service.
 
 ## Local verification (2026-09-10)

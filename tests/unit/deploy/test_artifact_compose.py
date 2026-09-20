@@ -18,7 +18,6 @@ from typing import Any
 
 import pytest
 import yaml
-
 from deploy.release import artifact_compose as ac
 
 REPO_ROOT = Path(__file__).resolve().parents[3]

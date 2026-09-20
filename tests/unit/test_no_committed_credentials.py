@@ -54,7 +54,7 @@ KNOWN_FIXTURES = {
 }
 
 # Binary and vendored trees carry no hand-written credentials and cost time.
-SKIP_PREFIXES = ("web/node_modules/", "web/.next/")
+SKIP_PREFIXES = ("apps/frontend/node_modules/", "apps/frontend/.next/")
 SKIP_SUFFIXES = (
     ".png",
     ".jpg",

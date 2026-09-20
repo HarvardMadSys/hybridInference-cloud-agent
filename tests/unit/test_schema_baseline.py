@@ -17,7 +17,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 VERSIONS = REPO / "migrations/versions"
 BASELINE = VERSIONS / "0001_schema_baseline.py"
-STORAGE = REPO / "cloud_agent/storage"
+STORAGE = REPO / "apps" / "backend" / "cloud_agent/storage"
 
 
 def _storage_source() -> str:

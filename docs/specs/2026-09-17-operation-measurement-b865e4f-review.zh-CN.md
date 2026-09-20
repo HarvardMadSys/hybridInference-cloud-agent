@@ -26,10 +26,10 @@ Admin 目录或 ingest 使用的截止时间不一致。
 “相同配置每个进程重新推导，有微秒漂移”混淆了两种值：
 
 - 原始实验配置的绝对截止：`ProfilingRun.expires_at` 直接保存 descriptor 的值，见
-  [operation_profiling.py:492](../../cloud_agent_host/operation_profiling.py#L492)。相同配置
+  [operation_profiling.py:492](../../apps/backend/cloud_agent_host/operation_profiling.py#L492)。相同配置
   表示同一个绝对时间，规范化为 UTC datetime 后可以精确比较。
 - 当前 RPC 继承的有效截止：measurement_context 从单调期限换算回墙钟，见
-  [operation_profiling.py:933](../../cloud_agent_host/operation_profiling.py#L933)。这个值
+  [operation_profiling.py:933](../../apps/backend/cloud_agent_host/operation_profiling.py#L933)。这个值
   可以有换算误差，并可能被 producer 缩短；不应用它重新定义 run manifest。
 
 修复建议：run manifest 一直携带配置中的原始绝对时间，比较规范化后的 UTC instant。

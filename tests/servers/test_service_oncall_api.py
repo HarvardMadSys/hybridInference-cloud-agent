@@ -20,6 +20,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.storage import AllCapabilities, EmptySkillLibrary
 
 from cloud_agent.api import service_jobs
 from cloud_agent.api.deps import (
@@ -28,7 +29,6 @@ from cloud_agent.api.deps import (
     get_storage,
 )
 from cloud_agent.schemas import BASE_REF_METADATA_KEY
-from tests.support.storage import AllCapabilities, EmptySkillLibrary
 
 pytestmark = pytest.mark.asyncio
 

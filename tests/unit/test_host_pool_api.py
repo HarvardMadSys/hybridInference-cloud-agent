@@ -23,6 +23,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.storage import AllCapabilities
 
 from cloud_agent.api import admin_hosts, hosts
 from cloud_agent.api.deps import get_grant_client, get_storage, verify_admin_access
@@ -42,7 +43,6 @@ from cloud_agent.host_pool import (
     normalize_capabilities,
     transition_allowed,
 )
-from tests.support.storage import AllCapabilities
 
 ADMIN = {"Authorization": "Bearer test-admin"}
 

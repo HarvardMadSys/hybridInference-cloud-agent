@@ -74,7 +74,7 @@ same_interaction = false
 
 ## 3. P2：响应完整性与最终记录仍有截止点竞态
 
-位置：[operation_profiling.py:1330](../../cloud_agent_host/operation_profiling.py#L1330)
+位置：[operation_profiling.py:1330](../../apps/backend/cloud_agent_host/operation_profiling.py#L1330)
 与 [routes.py:2953](../../cloud_agent/api/routes.py#L2953)。
 
 settle 只检查当时是否过期，没有冻结结束边界或最终完整性。响应生成 metadata 后，

@@ -7,15 +7,15 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
-from cloud_agent.skills.models import SkillConflict, SkillError
-from cloud_agent.skills.selection import prompt_with_skills, resolve_skills
 from tests.integration.storage.test_agent_job_store import (
     _claim,
     _create_job,
     pool,  # noqa: F401 - pytest fixture
     store,  # noqa: F401 - pytest fixture
 )
+
+from cloud_agent.skills.models import SkillConflict, SkillError
+from cloud_agent.skills.selection import prompt_with_skills, resolve_skills
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

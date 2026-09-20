@@ -278,7 +278,7 @@ volume or resets its password automatically.
 
 The five default versions live in both
 `deploy/sandbox/Dockerfile.agent-sandbox` and
-`cloud_agent_contracts/shared_protocol.py`. They are one reviewed protocol unit:
+`cloud_agent_shared/shared_protocol.py`. They are one reviewed protocol unit:
 the image installs and labels them, while every runner and the control plane
 use the matching constants to decide whether `shared-sandbox-v1` may be
 advertised or claimed. They are therefore source pins, not per-host `.env`
@@ -342,7 +342,7 @@ dies at its first turn.
 | `OPENCODE_EXTRA_VERSIONS` | **NEW** | Extra `opencode-ai` versions. |
 | `KILO_EXTRA_VERSIONS` | **NEW** | Extra `@kilocode/cli` versions. |
 
-## Web (`web/`)
+## Web (`apps/frontend/`)
 
 Two classes of configuration, and the difference is what changing one costs.
 Both are **public** — one is compiled into a bundle a browser downloads, the
@@ -365,7 +365,7 @@ rather than shipping an image whose every request misses the reverse proxy —
 a 404 on a page that looks correct. An absolute value is the cross-origin shape
 (a deployment's own CORS decision) and is left alone, as is an empty one, which
 is the same-origin shape for a deployment that owns its hostname; compose is
-what requires the value under a mount prefix. `web/src/config/variantPairing.test.ts`
+what requires the value under a mount prefix. `apps/frontend/src/config/variantPairing.test.ts`
 runs the real config file, so the rule is pinned where it is written.
 
 | Variable | New? | Compose build argument | Notes |
@@ -377,7 +377,7 @@ runs the real config file, so the rule is pinned where it is written.
 
 ### Runtime: the deployment's identity
 
-Read by the web server on every request (`web/src/config/site.server.ts`), so
+Read by the web server on every request (`apps/frontend/src/config/site.server.ts`), so
 the same built image serves any deployment and changing one is a restart, not a
 rebuild. Each must be a key under the `web` service's `environment:`;
 `test_web_runtime_variables_are_wired` fails on one that is not.

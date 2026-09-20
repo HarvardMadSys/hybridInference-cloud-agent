@@ -26,10 +26,10 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 # Dependencies first, so a source-only change does not reinstall them.
-COPY web/package.json web/package-lock.json ./
+COPY apps/frontend/package.json apps/frontend/package-lock.json ./
 RUN npm ci
 
-COPY web/ ./
+COPY apps/frontend/ ./
 
 # Declared here because Docker only passes a build argument to the stage that
 # names it. Empty defaults so a plain `docker build` still produces a working

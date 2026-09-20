@@ -24,10 +24,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from tests.support.storage import OneFake
 
 from cloud_agent.workers.attempts import _reconcile_settled_terminals
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
-from tests.support.storage import OneFake
 
 pytestmark = pytest.mark.asyncio
 

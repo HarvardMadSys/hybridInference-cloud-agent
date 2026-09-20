@@ -34,7 +34,9 @@ from cloud_agent.api.deps import resolve_agent_access
 from cloud_agent.api.errors import AgentConfigurationError
 from cloud_agent.gateway import GatewayClient
 
-CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "internal-lookups.openapi.yaml"
+CONTRACT = (
+    Path(__file__).resolve().parents[2] / "gateway_contracts" / "internal-lookups.openapi.yaml"
+)
 
 #: Field → the code that reads it. A read that is not here is one nobody
 #: checked against the gateway.

@@ -20,7 +20,7 @@ import re
 import pytest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-API_DIR = REPO_ROOT / "cloud_agent" / "api"
+API_DIR = REPO_ROOT / "apps" / "backend" / "cloud_agent" / "api"
 
 #: Every module in the API package. Enumerated rather than listed: a surface that
 #: moves into its own module must be covered without editing this tuple, and a
@@ -44,7 +44,7 @@ def port_names() -> set[str]:
     the ports those assemblies hold.
     """
     found: set[str] = set()
-    for path in (REPO_ROOT / "cloud_agent" / "ports").glob("*.py"):
+    for path in (REPO_ROOT / "apps" / "backend" / "cloud_agent" / "ports").glob("*.py"):
         found |= set(PORT_CLASS.findall(path.read_text(encoding="utf-8")))
     assert found, "no capability ports were found; the ports package moved"
     return found

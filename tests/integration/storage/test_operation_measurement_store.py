@@ -25,12 +25,12 @@ from typing import Any
 import asyncpg
 import pytest
 import pytest_asyncio
+from tests.support.db import backdate_measurement_arrival, reset_agent_tables
+from tests.support.migrations import apply_migrations
 
 from cloud_agent.storage.repositories.operation_measurements import (
     PostgresOperationMeasurementRepository,
 )
-from tests.support.db import backdate_measurement_arrival, reset_agent_tables
-from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

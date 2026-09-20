@@ -15,10 +15,10 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.storage import AllCapabilities
 
 from cloud_agent.api import admin_hosts as admin_router
 from cloud_agent.api.deps import get_storage
-from tests.support.storage import AllCapabilities
 
 ADMIN = {"Authorization": "Bearer test-admin"}
 

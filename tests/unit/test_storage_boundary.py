@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PRODUCTION = REPO_ROOT / "cloud_agent"
+PRODUCTION = REPO_ROOT / "apps" / "backend" / "cloud_agent"
 STORAGE = PRODUCTION / "storage"
 TESTS = REPO_ROOT / "tests"
 
