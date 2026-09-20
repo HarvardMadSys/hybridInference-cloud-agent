@@ -44,11 +44,11 @@ the service", not "fine".
 browser ──▶ apps/frontend/ (Next.js + BFF)
                  │ session cookie
                  ▼
-         cloud_agent/ — control plane ◀── HTTP ──▶ HybridInference gateway
+         cloud_agent — control plane ◀── HTTP ──▶ HybridInference gateway
          jobs · scheduling · publishing           identity · grants · lookups
                  │ claim / heartbeat / workspace
                  ▼
-         cloud_agent_host/ — enrolled host
+         cloud_agent_host — enrolled host
          runner · workspace broker · group supervisor
                  │ Docker lifecycle / per-member live transports
                  ▼
@@ -98,8 +98,8 @@ Three deployment units, one repository:
 | Unit | Path | Runs where |
 |---|---|---|
 | Web + BFF | `apps/frontend/` | alongside the control plane |
-| Control plane | `cloud_agent/` | one service, owns the Postgres database |
-| Host agent | `cloud_agent_host/` | every enrolled host; runner, workspace broker, egress proxy, and gateway/control-plane/MCP tunnels deploy together |
+| Control plane | `apps/backend/cloud_agent/` | one service, owns the Postgres database |
+| Host agent | `apps/backend/cloud_agent_host/` | every enrolled host; runner, workspace broker, egress proxy, and gateway/control-plane/MCP tunnels deploy together |
 
 ## Repository layout
 
@@ -107,7 +107,7 @@ Three deployment units, one repository:
 apps/backend/          the three Python packages: control plane, host agent,
                        and the shared vocabulary both images ship
 apps/frontend/         Next.js app (user UI + admin dashboard)
-gateway_contracts/     OpenAPI documents for the three gateway contracts
+gateway_contracts/     Gateway contract mirrors and the control-plane API snapshot
 migrations/            Alembic migrations for the agent-owned database
 deploy/                control-plane / host / sandbox deployment
 tests/                 unit, servers, integration (dbtest), external (external)
@@ -123,12 +123,15 @@ make setup-dev
 make check
 ```
 
-`make check` = format + lint + test. Every change must leave it green.
+`make check` = format + lint + type-check + test. Every change must leave it green.
+The [developer guide](docs/development.md) explains the package boundaries,
+where common changes belong, and how to run backend, frontend, and API checks.
 
 | Command | What it does |
 |---|---|
 | `make format` | `ruff format` then `ruff check --fix` |
 | `make lint` | ruff format check, ruff lint, pydocstyle |
+| `make typecheck` | mypy over the control plane, host, and shared packages |
 | `make test` | pytest, excluding `external` and `dbtest` |
 | `make test-db` | the `dbtest` tier (needs Postgres) |
 
@@ -151,9 +154,10 @@ for the topology and commands.
 
 ## Contributing
 
-Read [AGENTS.md](AGENTS.md) first — it is the onboarding guide for both humans
-and AI coding agents, including the current workflow and permanent service
-boundaries.
+Start with the [developer guide](docs/development.md) and
+[contribution workflow](CONTRIBUTING.md). [AGENTS.md](AGENTS.md) also records
+the repository rules and permanent service boundaries for people and coding
+agents.
 
 Branch off `dev` as `<user>/<scope>/<name>`; pull requests target `dev`.
 

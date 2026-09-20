@@ -447,7 +447,7 @@ Claude Code expands `${AGENT_MCP_TOKEN}`; the OpenCode family substitutes
 it. Both were checked against the pinned binaries, and the wrong one fails
 silently: the literal placeholder is sent as the bearer token and every call is
 refused with a 401 that reads as a broken server. The address is decided once in
-`cloud_agent_host/runtimes.py` and the reference is written next to the CLI that
+`apps/backend/cloud_agent_host/runtimes.py` and the reference is written next to the CLI that
 has to expand it, in `deploy/sandbox/`. Either way the token travels in the
 environment, never in argv and never in the config file.
 

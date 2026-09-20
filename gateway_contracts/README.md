@@ -8,9 +8,9 @@ drifts silently.
 
 | Document | Gateway module | Consumed here by |
 |---|---|---|
-| [`identity.openapi.yaml`](identity.openapi.yaml) | `serving/servers/routers/identity.py` | `cloud_agent/identity.py` (E7), `api/session.py` (E8) |
-| [`inference-grants.openapi.yaml`](inference-grants.openapi.yaml) | `serving/servers/routers/agent_grants.py` | `cloud_agent/grants.py` (E9) |
-| [`internal-lookups.openapi.yaml`](internal-lookups.openapi.yaml) | `serving/servers/routers/internal_lookups.py` | `cloud_agent/gateway.py` (E4, E6, E7, E8) |
+| [`identity.openapi.yaml`](identity.openapi.yaml) | `serving/servers/routers/identity.py` | [`identity.py`](../apps/backend/cloud_agent/identity.py), [`api/session.py`](../apps/backend/cloud_agent/api/session.py) |
+| [`inference-grants.openapi.yaml`](inference-grants.openapi.yaml) | `serving/servers/routers/agent_grants.py` | [`grants.py`](../apps/backend/cloud_agent/grants.py) |
+| [`internal-lookups.openapi.yaml`](internal-lookups.openapi.yaml) | `serving/servers/routers/internal_lookups.py` | [`gateway.py`](../apps/backend/cloud_agent/gateway.py) |
 
 ## What these are, and what they are not
 
@@ -93,28 +93,29 @@ losing its authorization mid-run — far from the constant that moved.
 gateway contract. It is the API **this** service serves, generated from
 `create_app().openapi()` and committed key-sorted so that a change to the
 published shape is a diff somebody chose. `tests/unit/test_api_surface_contract.py`
-regenerates it and fails when the two disagree, which is the only thing that
-notices a route quietly changing its parameters or disappearing while every
-behavioural test still passes.
+compares the served document with the committed file and fails when they
+disagree, catching a route changing its parameters or disappearing even if
+the behavioural tests still pass. The test does not overwrite the snapshot.
 
 It is checked in rather than produced during CI on purpose: a document generated
 at test time agrees with whatever the code does by construction, which is the
 opposite of a contract. Regenerate it deliberately, in the pull request that
-changes the API, with the command in that test's failure message.
+changes the API, with the command in the
+[developer guide](../docs/development.md#changing-an-api) or that test's failure
+message.
 
 ## Checking them
 
 ```bash
-uv run python -m openapi_spec_validator contracts/*.yaml
+uv run pytest -q tests/unit/test_contracts.py
 ```
 
-CI validates them through `tests/unit/test_contracts.py`, which runs exactly
-that plus two things the bare command cannot: every test path cited in an
-`x-pinned-by` list exists, and every `/internal/` or `/v1/` path literal in
-`gateway.py` and `grants.py` appears in some document. It checks the documents
-are well-formed OpenAPI and that they cover the client's calls; it cannot check
-they describe the gateway, which is what the `x-source` references and the
-paired tests are for.
+CI runs these same tests. They validate each document as OpenAPI, check that
+every consumer test path cited in an `x-pinned-by` list exists, and verify that
+every `/internal/` or `/v1/` path literal in `gateway.py` and `grants.py` appears
+in some document. They cannot check whether the documents describe the
+gateway's current implementation; that is what the `x-source` references and
+the paired tests are for.
 
 A fourth family is consumed but not documented here as a separate document:
 `/internal/users/{user_id}/agent-access`, which lives in

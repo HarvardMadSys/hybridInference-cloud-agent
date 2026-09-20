@@ -3,9 +3,9 @@
 Every variable the cloud agent stack reads, which deployment unit reads it, and
 who provisions it.
 
-Names carried over from HybridInference are kept **unchanged** so that moved
-files work without edits (see the move-as-is rule in [AGENTS.md](AGENTS.md)).
-Rows marked **NEW** are introduced by the split.
+Names carried over from HybridInference were preserved during the extraction.
+Rows marked **NEW** were introduced by that split; the label is historical.
+For local setup and validation commands, see the [developer guide](docs/development.md).
 
 > **This file is public. It names variables, never values.**
 >
@@ -130,7 +130,7 @@ gateway serves models and answers nothing about MCP.
 adds a standard MCP server — a remote URL, an imported `mcpServers` snippet, or
 a stdio launch spec — and the platform discovers what it offers. There is no
 variable that adds a server and no variable that grants one to somebody.
-Catalogued templates (`cloud_agent/api/mcp_connections.py`) only prefill a form;
+Catalogued templates (`apps/backend/cloud_agent/api/mcp_connections.py`) only prefill a form;
 a server with no template is added the same way. Credentials live per user in
 `agent_mcp_connections`, wrapped with
 [`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`](#own-secrets). The variables below
@@ -251,7 +251,7 @@ volume or resets its password automatically.
 
 The five default versions live in both
 `deploy/sandbox/Dockerfile.agent-sandbox` and
-`cloud_agent_shared/shared_protocol.py`. They are one reviewed protocol unit:
+`apps/backend/cloud_agent_shared/shared_protocol.py`. They are one reviewed protocol unit:
 the image installs and labels them, while every runner and the control plane
 use the matching constants to decide whether `shared-sandbox-v1` may be
 advertised or claimed. They are therefore source pins, not per-host `.env`
