@@ -416,9 +416,6 @@ function ConversationsTable({
               </td>
               <td className="whitespace-nowrap px-5 py-4 text-gray-700 dark:text-gray-200">
                 {conversation.turn_count}
-                <span className="mt-1 block text-xs text-gray-500 dark:text-gray-400">
-                  {conversation.matching_turn_count} matching
-                </span>
               </td>
               <td className="whitespace-nowrap px-5 py-4 text-xs text-gray-500 dark:text-gray-400">
                 {dateTime(conversation.last_activity_at)}

@@ -34,7 +34,6 @@ def conversation():
         "latest_turn_state": "succeeded",
         "latest_runtime": "claude-code",
         "latest_model": "model",
-        "matching_turn_count": 1,
         "last_matching_turn_at": START,
         "task_prompt": "PRIVATE prompt",
         "metadata": {"token": "PRIVATE credential"},
