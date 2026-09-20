@@ -117,6 +117,7 @@ session supervisor（挂起的 supervisor/stream）、heartbeat。没有假的 `
 | Web 单测 | `vitest run` | 102 files, 1637 tests passed |
 | Web 生产构建 | `next build` | 成功，路由表含 `/admin/measurements` 与 `/admin/runs/[jobId]` |
 | OpenAPI 契约 | `pytest tests/unit/test_api_surface_contract.py` | 4 passed（契约已按新增两个查询参数重新生成） |
+| PR CI | [run 35503319310](https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/35503319310) | **16 pass / 1 skipped**（`Candidate on real Kata`），含 Tests 3m07s、Tests (Postgres)、Web、Lint、Gitleaks、Compose、四个镜像构建与 `CI Gate` |
 
 数据库层使用独立测试库 `ca_startup_measurement_test_db`（名称含 `_test_`，fixture 会
 拒绝其他名字），跑完自动 truncate 自己创建的行。真实链路验收另用
@@ -126,6 +127,14 @@ session supervisor（挂起的 supervisor/stream）、heartbeat。没有假的 `
 `test_legacy_database_copy.py::test_cross_owner_row_rolls_back_archive_and_entire_schema`
 失败一次；单独重跑该文件 5 passed，串行重跑整个层级 543 passed。这是两个会话同时动数据库
 造成的互相干扰，不是本轮改动；记在这里以免下次把它当成回归。
+
+**CI 在 `dev` 合并结果上失败过一次，原因不在本轮改动。** 本 PR 的 CI 跑的是
+head 与 `dev` 的合并结果；期间 `dev` 前进了 #311（`efb77ee`），它从会话列表响应模型里
+删掉了 `matching_turn_count` 却没有重新生成
+`contracts/agent-control-plane.openapi.json`，因此 `dev` 自己的 CI（run 对应 `efb77ee`）
+就是 failure。合并 `dev` 后本分支也复现了同一个 `test_the_served_openapi_is_the_committed_contract`
+断言。本分支重新生成了契约（既包含 #311 缺的那 5 行删除，也包含本 PR 新增的两个查询
+参数），合并结果因此自洽。这一条要在 PR 描述里写明，避免被读成本轮改动了会话列表。
 
 ### 3.3 真实业务开销实验
 
