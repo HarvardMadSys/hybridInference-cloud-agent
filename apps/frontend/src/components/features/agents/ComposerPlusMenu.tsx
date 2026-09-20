@@ -103,6 +103,7 @@ export function ComposerPlusMenu({
   skillSummary,
   mcp,
   mcpBlockedReason,
+  onOpen,
   disabled = false,
 }: {
   onFiles: (files: File[]) => void;
@@ -119,6 +120,7 @@ export function ComposerPlusMenu({
   };
   /** Set when the chosen runtime cannot be given MCP connections at all. */
   mcpBlockedReason?: string;
+  onOpen?: () => void;
   disabled?: boolean;
 }) {
   const t = useT();
@@ -174,10 +176,14 @@ export function ComposerPlusMenu({
         aria-expanded={open}
         aria-label={t('attach.open')}
         title={t('attach.open')}
-        onClick={() => setOpen((was) => !was)}
+        onClick={() => {
+          if (!open) onOpen?.();
+          setOpen((was) => !was);
+        }}
         onKeyDown={(event) => {
           if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
           event.preventDefault();
+          if (!open) onOpen?.();
           setOpen(true);
         }}
         // Borderless, like the pickers beside it. A boxed button here was a

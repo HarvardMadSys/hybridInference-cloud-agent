@@ -35,7 +35,15 @@ import {
 } from '@/lib/api/agents';
 
 import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
-import { decideMcpInvocation, listMcpInvocations, type McpInvocationApi } from '@/lib/api/mcp';
+import {
+  decideMcpInvocation,
+  getMcpThreadBindings,
+  listMcpInvocations,
+  updateMcpThreadBinding,
+  type McpBindingApi,
+  type McpInvocationApi,
+} from '@/lib/api/mcp';
+import { deleteAttachment, uploadAttachment } from '@/lib/api/attachments';
 
 import { installSideChatLocks } from './sideChatTestSupport';
 import { sideChatKeys } from './sideChatStorage';
@@ -54,6 +62,12 @@ vi.mock('@/lib/api/mcp', async (importOriginal) => ({
   decideMcpInvocation: vi.fn(),
   getMcpThreadBindings: vi.fn().mockResolvedValue({ bindings: [] }),
   listMcpConnections: vi.fn().mockResolvedValue({ connections: [] }),
+  updateMcpThreadBinding: vi.fn(),
+}));
+
+vi.mock('@/lib/api/attachments', () => ({
+  uploadAttachment: vi.fn(),
+  deleteAttachment: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { listSkills } from '@/lib/api/skills';
@@ -553,6 +567,10 @@ describe('JobDetail', () => {
     vi.mocked(getAgentJobThread).mockReset();
     vi.mocked(listAllAgentThreadEvents).mockReset();
     vi.mocked(listMcpInvocations).mockReset().mockResolvedValue({ invocations: [] });
+    vi.mocked(getMcpThreadBindings).mockReset().mockResolvedValue({ bindings: [] });
+    vi.mocked(updateMcpThreadBinding).mockReset();
+    vi.mocked(uploadAttachment).mockReset();
+    vi.mocked(deleteAttachment).mockClear();
     navigation.push.mockReset();
     vi.mocked(cancelAgentJob).mockReset();
     vi.mocked(followUpAgentJob).mockReset();
@@ -629,7 +647,8 @@ describe('JobDetail', () => {
         ]}
       />,
     );
-    expect(screen.getByRole('button', { name: /0 selected/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Add files or skills' }));
+    expect(screen.getByRole('menuitem', { name: /Skills\s*0/ })).toBeInTheDocument();
   });
 
   it('allows clearing saved skills for the next follow-up', async () => {
@@ -655,7 +674,8 @@ describe('JobDetail', () => {
         })}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: /1 selected/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add files or skills' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: /Skills\s*1/ }));
     fireEvent.click(await screen.findByRole('switch'));
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
     fireEvent.change(screen.getByLabelText('Add a follow-up'), {
@@ -668,6 +688,140 @@ describe('JobDetail', () => {
         skill_ids: [],
       }),
     );
+  });
+
+  it('opens the shared plus menu from the follow-up and restores keyboard focus', () => {
+    render(<JobDetail job={makeJob({ state: 'done' })} />);
+    const plus = screen.getByRole('button', { name: 'Add files or skills' });
+    expect(screen.queryByRole('button', { name: /Skills for this conversation/ })).toBeNull();
+    fireEvent.keyDown(plus, { key: 'ArrowDown' });
+    expect(screen.getByRole('menuitem', { name: 'Upload files' })).toHaveFocus();
+    expect(screen.getByRole('menuitem', { name: /Skills\s*0/ })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: /MCP/ })).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+    expect(plus).toHaveFocus();
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('waits for uploads, keeps them after a failed send, then clears them after success', async () => {
+    let finishUpload!: (value: Awaited<ReturnType<typeof uploadAttachment>>) => void;
+    vi.mocked(uploadAttachment).mockReturnValue(
+      new Promise((resolve) => {
+        finishUpload = resolve;
+      }),
+    );
+    vi.mocked(followUpAgentJob)
+      .mockRejectedValueOnce(new Error('Try sending again'))
+      .mockResolvedValue({ id: 'ajob_child' } as never);
+    const { container } = render(<JobDetail job={makeJob()} />);
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'Use this spec' } });
+    const file = new File(['requirements'], 'spec.txt');
+    fireEvent.click(screen.getByRole('button', { name: 'Add files or skills' }));
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const pick = vi.spyOn(input, 'click');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Upload files' }));
+    expect(pick).toHaveBeenCalledOnce();
+    fireEvent.change(input, { target: { files: [file] } });
+    expect(uploadAttachment).toHaveBeenCalledWith(file, 'spec.txt');
+    expect(screen.getByText('spec.txt')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeDisabled();
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(followUpAgentJob).not.toHaveBeenCalled();
+    await act(async () =>
+      finishUpload({ id: 42, path: 'spec.txt', size_bytes: 12, content_type: 'text/plain' }),
+    );
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(await screen.findByText('Try sending again')).toBeInTheDocument();
+    expect(screen.getByText('spec.txt')).toBeInTheDocument();
+    expect(box).toHaveValue('Use this spec');
+    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    await waitFor(() => expect(box).toHaveValue(''));
+    expect(followUpAgentJob).toHaveBeenLastCalledWith('ajob_1', {
+      prompt: 'Use this spec',
+      attachment_ids: [42],
+    });
+    expect(screen.queryByText('spec.txt')).toBeNull();
+    expect(deleteAttachment).not.toHaveBeenCalled();
+    fireEvent.change(box, { target: { value: 'Next message' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenLastCalledWith('ajob_1', { prompt: 'Next message' }),
+    );
+  });
+
+  it('accepts dropped files and removes them before sending', async () => {
+    vi.mocked(uploadAttachment).mockResolvedValue({
+      id: 12,
+      path: 'notes.txt',
+      size_bytes: 4,
+      content_type: 'text/plain',
+    });
+    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+    render(<JobDetail job={makeJob()} />);
+    const box = screen.getByLabelText('Add a follow-up');
+    const file = new File(['data'], 'notes.txt');
+    fireEvent.drop(box.closest('form')!, {
+      dataTransfer: { files: [file], items: [], types: ['Files'] },
+    });
+    await waitFor(() => expect(uploadAttachment).toHaveBeenCalledWith(file, 'notes.txt'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove notes.txt' }));
+    await waitFor(() => expect(deleteAttachment).toHaveBeenCalledWith(12));
+    fireEvent.change(box, { target: { value: 'Without the file' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', { prompt: 'Without the file' }),
+    );
+  });
+
+  it('uses current thread MCP bindings and preserves permissions when switching a server off', async () => {
+    const binding: McpBindingApi = {
+      connection_id: 7,
+      connection_label: 'Notion',
+      alias: 'notes',
+      enabled: true,
+      selection_pending: false,
+      available: true,
+      error: null,
+      capabilities: [
+        { kind: 'tool', name: 'search', description: '', input_schema: {}, annotations: {} },
+      ],
+      tools: { search: 'allow' },
+      resources: {},
+      prompts: {},
+      config_revision: 1,
+      authorization_epoch: 1,
+      capability_revision: 1,
+      policy_revision: 1,
+    };
+    vi.mocked(getMcpThreadBindings).mockResolvedValue({ bindings: [binding] });
+    let finishSave!: (value: { bindings: McpBindingApi[] }) => void;
+    vi.mocked(updateMcpThreadBinding).mockReturnValue(
+      new Promise((resolve) => {
+        finishSave = resolve;
+      }),
+    );
+    render(<JobDetail job={makeJob({ threadId: 'thread-existing' })} />);
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'Continue' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add files or skills' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: /MCP/ }));
+    const toggle = await screen.findByRole('switch', { name: 'Notion' });
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+    expect(getMcpThreadBindings).toHaveBeenCalledWith('thread-existing');
+    fireEvent.click(toggle);
+    expect(updateMcpThreadBinding).toHaveBeenCalledWith('thread-existing', {
+      connection_id: 7,
+      alias: 'notes',
+      enabled: false,
+      use_defaults: false,
+      tools: { search: 'allow' },
+      resources: {},
+      prompts: {},
+    });
+    expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeDisabled();
+    await act(async () => finishSave({ bindings: [{ ...binding, enabled: false }] }));
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeEnabled();
   });
 
   it('replaces duplicate header metadata with a keyboard-accessible task menu', () => {

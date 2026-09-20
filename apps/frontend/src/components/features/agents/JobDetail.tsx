@@ -42,7 +42,12 @@ import { highestEffort, offeredEfforts } from './effort';
 import { LedgerUsage, useLedgerUsage } from './LedgerUsage';
 import { PaneResizer } from './PaneResizer';
 import { Picker } from './Picker';
-import { SkillPicker } from './skills/SkillPicker';
+import { SkillSelectionDialog } from './skills/SkillPicker';
+import { ComposerPlusMenu } from './ComposerPlusMenu';
+import { AttachmentStrip } from './attachments/AttachmentStrip';
+import { useAttachments } from './attachments/useAttachments';
+import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
+import { useThreadComposerMcp } from './mcp/useThreadComposerMcp';
 import type { SelectedSkillApi } from '@/lib/api/skills';
 import { BackToBottom, TurnRail } from './TurnNavigator';
 import { TerminalWorkspace } from './TerminalWorkspace';
@@ -554,6 +559,9 @@ export function JobDetail({
   }, [events, threadJobs, job.id, job.prompt, job.turnNo, job.createdAt]);
   const [followUp, setFollowUp] = useState('');
   const [chosenSkills, setChosenSkills] = useState<SelectedSkillApi[] | null>(null);
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [dropping, setDropping] = useState(false);
+  const [readingFiles, setReadingFiles] = useState(false);
   // Follow-ups append to the thread's latest turn, even from an older URL.
   const inheritedSkills = threadJobs.reduce(
     (latest, turn) =>
@@ -564,6 +572,13 @@ export function JobDetail({
   ).skills;
   useEffect(() => setChosenSkills(null), [job.id]);
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
+  const attachments = useAttachments(t, config?.attachment_limits);
+  const mcp = useThreadComposerMcp(job.threadId);
+  const selectedSkills = chosenSkills ?? inheritedSkills;
+  const mcpBlockedReason =
+    config?.mcp_runtimes && !config.mcp_runtimes.includes(job.runtime)
+      ? t('attach.mcpUnsupported', { runtime: job.runtime })
+      : undefined;
   const [models, setModels] = useState<string[]>([]);
   const [model, setModel] = useState(job.model);
   const [effort, setEffort] = useState(job.reasoningEffort ?? '');
@@ -863,13 +878,23 @@ export function JobDetail({
   async function submitFollowUp(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const prompt = followUp.trim();
-    if (!prompt || submitting || contextLost || isArchived) return;
+    if (
+      !prompt ||
+      submitting ||
+      contextLost ||
+      isArchived ||
+      attachments.uploading ||
+      readingFiles ||
+      mcp.saving
+    )
+      return;
     setSubmitting(true);
     setActionError(null);
     try {
       const child = await followUpAgentJob(job.id, {
         prompt,
         ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
+        ...(attachments.ids.length ? { attachment_ids: attachments.ids } : {}),
         // Omitted controls inherit the parent's validated model and effort.
         ...composerOverrides(job, model, effort),
       });
@@ -885,6 +910,7 @@ export function JobDetail({
       // disabled with the sent text still in it, because nothing else ever
       // cleared either.
       setFollowUp('');
+      attachments.reset();
       setSubmitting(false);
     } catch (cause: unknown) {
       setActionError(cause instanceof Error ? cause.message : 'Could not queue the follow-up');
@@ -1469,7 +1495,31 @@ export function JobDetail({
                 ) : (
                   <form
                     onSubmit={(event) => void submitFollowUp(event)}
-                    className="rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 shadow-[0_16px_40px_-28px_rgba(17,24,39,0.55)] transition focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05]"
+                    onDragOver={(event) => {
+                      if (contextLost || submitting || !event.dataTransfer.types.includes('Files'))
+                        return;
+                      event.preventDefault();
+                      setDropping(true);
+                    }}
+                    onDragLeave={(event) => {
+                      if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+                      setDropping(false);
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      setDropping(false);
+                      if (contextLost || submitting) return;
+                      setReadingFiles(true);
+                      void filesFromDataTransfer(event.dataTransfer)
+                        .then(attachments.add)
+                        .catch((cause: unknown) => {
+                          setActionError(
+                            cause instanceof Error ? cause.message : 'Could not read dropped files',
+                          );
+                        })
+                        .finally(() => setReadingFiles(false));
+                    }}
+                    className={`rounded-xl border bg-white dark:bg-gray-900 shadow-[0_16px_40px_-28px_rgba(17,24,39,0.55)] transition focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05] ${dropping ? 'border-crimson/40 ring-4 ring-crimson/[0.08]' : 'border-gray-200/90 dark:border-white/10'}`}
                   >
                     <ComposerTextarea
                       rows={2}
@@ -1482,7 +1532,22 @@ export function JobDetail({
                       aria-label="Add a follow-up"
                       className="w-full resize-none rounded-t-xl border-0 bg-transparent px-4 pt-3 text-sm leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
                     />
-                    <div className="flex flex-wrap items-center gap-1.5 px-3 pb-2.5">
+                    <AttachmentStrip
+                      entries={attachments.entries}
+                      onRemove={attachments.remove}
+                      disabled={contextLost || submitting}
+                    />
+                    <div className="relative flex flex-wrap items-center gap-1.5 border-t border-gray-100/90 dark:border-white/5 px-3 py-2.5">
+                      <ComposerPlusMenu
+                        onFiles={attachments.add}
+                        onOpenSkills={() => setSkillsOpen(true)}
+                        skillSummary={String(selectedSkills.length)}
+                        mcp={mcp}
+                        onOpen={mcp.reload}
+                        mcpBlockedReason={mcpBlockedReason}
+                        disabled={contextLost || submitting}
+                      />
+                      <span className="h-4 w-px bg-gray-200 dark:bg-white/10" />
                       {modelOptions.length > 0 ? (
                         <>
                           {/* The harness stays the thread's; the model is offered
@@ -1524,21 +1589,39 @@ export function JobDetail({
                           {isActive ? ' · queued after this run' : ''}
                         </span>
                       )}
-                      <SkillPicker
-                        limits={config?.skill_limits}
-                        selected={chosenSkills ?? inheritedSkills}
-                        onChange={setChosenSkills}
-                        disabled={contextLost || submitting}
-                      />
                       <ComposerSendButton
                         label="Send follow-up"
                         title="Send follow-up — ⏎ to send, ⇧⏎ for a new line"
-                        disabled={contextLost || !followUp.trim() || submitting}
+                        disabled={
+                          contextLost ||
+                          !followUp.trim() ||
+                          submitting ||
+                          attachments.uploading ||
+                          readingFiles ||
+                          mcp.saving
+                        }
                         busy={submitting}
                       />
                     </div>
                   </form>
                 )}
+                {skillsOpen ? (
+                  <SkillSelectionDialog
+                    limits={config?.skill_limits}
+                    selected={selectedSkills}
+                    onClose={() => setSkillsOpen(false)}
+                    onApply={(skills) => {
+                      const originalIds = new Set(selectedSkills.map((skill) => skill.id));
+                      if (
+                        skills.length !== originalIds.size ||
+                        skills.some((skill) => !originalIds.has(skill.id))
+                      ) {
+                        setChosenSkills(skills);
+                      }
+                      setSkillsOpen(false);
+                    }}
+                  />
+                ) : null}
                 <ThreadStatsBar job={job} />
                 {actionError ? (
                   <p

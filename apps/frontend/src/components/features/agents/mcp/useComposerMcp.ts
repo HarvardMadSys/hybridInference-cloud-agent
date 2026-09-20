@@ -25,7 +25,7 @@ import type { Translator } from '@/lib/i18n/translate';
  * time the owner sees what the server actually wants to do.
  */
 export interface McpChoice {
-  connection: McpConnectionApi;
+  connection: Pick<McpConnectionApi, 'id' | 'label'>;
   selected: boolean;
   toolCount: number;
   busy: boolean;
@@ -83,7 +83,7 @@ export function useComposerMcp(t: Translator) {
   }, [reload]);
 
   const toggle = useCallback(
-    async (connection: McpConnectionApi, on: boolean) => {
+    async (connection: McpChoice['connection'], on: boolean) => {
       const id = connection.id;
       if (!on) {
         setChosen((old) => {

@@ -1030,6 +1030,8 @@ export async function cancelAgentJob(
 }
 
 export interface FollowUpAgentJobRequest {
+  /** Staged uploads to deliver with this turn. */
+  attachment_ids?: number[];
   /** Omitted inherits saved content; explicit ids snapshot the current library. */
   skill_ids?: number[];
   prompt: string;

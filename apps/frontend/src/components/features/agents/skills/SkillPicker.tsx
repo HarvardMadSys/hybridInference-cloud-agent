@@ -20,9 +20,7 @@ import {
 /**
  * The selection surface itself, separate from any one button that opens it.
  *
- * The composer reaches it from the plus menu and has no picker button of its
- * own; the follow-up composer still uses `SkillPicker` below. Both render this
- * same dialog, so the two surfaces cannot drift apart.
+ * New tasks and follow-ups both reach this dialog through the plus menu.
  */
 export function SkillSelectionDialog({
   selected,
