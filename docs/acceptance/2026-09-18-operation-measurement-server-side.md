@@ -271,10 +271,10 @@ activation 返回时接收数都是 0，进入 cohort join 才变成 2。现在�
 六个操作在两次运行里都通过预算。仍然要说清楚的：
 
 - 最接近下限的一格是运行 D 的 `terminal.list` `on-local` +7.450 ms（下限 10 ms），
-  同一次运行的 `on-persist` 是 −0.253 ms；运行 C 最接近的是 `terminal.create`
-  `on-persist` +5.169 ms，同一次 `on-local` 是 −0.126 ms。**两次运行里最接近下限的格子
-  落在不同的操作和不同的 cohort 上**，这是"最坏观测仍在下限内"，不是某个操作的稳定成本。
-- 同一个 `off` cohort 自己的 p95 在两次之间从 5.9 ms 摆到 13.6 ms（`terminal.create`
+  同一次运行的 `on-persist` 是 −0.253 ms；运行 C 最接近的是 `files.open`
+  `on-local` 约 +7.03 ms，同一次 `on-persist` 是 +0.055 ms。**两次运行里最接近下限的格子
+  落在不同的操作上，cohort 都是 `on-local`**，这是"最坏观测仍在下限内"，不是某个操作的稳定成本。
+- 同一个 `off` cohort 自己的 p95 在两次之间从 6.6 ms 摆到 13.6 ms（`terminal.create`
   6.601 → 13.550），运行间波动仍大于多数格子的增量，所以逐格的正负号大多不能归因于埋点。
 - `bare` 与 `off` 的差同样在噪声内，不能读成"关闭埋点让请求变快"。
 
