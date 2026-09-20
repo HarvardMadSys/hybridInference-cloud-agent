@@ -143,7 +143,6 @@ jobs:
           # missed once: it reached both Dockerfiles and the Makefile and the
           # classifier was left behind.
           if matches '^(deploy/|apps/backend/cloud_agent_host/|apps/backend/cloud_agent_shared/|apps/backend/cloud_agent_profiling/|apps/frontend/)' \
-
              || matches '^(pyproject\.toml|uv\.lock|README\.md)$'; then
             docker=true
           else
