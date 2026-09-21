@@ -203,15 +203,33 @@ compose, because they name the stack rather than configure it.
 | `AGENT_OPERATION_PROFILING_RUN` | **NEW** | JSON descriptor for the current profiling run: `run_id`, a non-empty `operations` list (this slice implements `attempt.startup`), an absolute UTC `expires_at`, a positive `max_operations`, and an optional `target` naming `host`, `job_id`, `thread_id` or `sandbox_id` — any other target field rejects the whole descriptor, because a filter that can never match would silently measure nothing. A descriptor missing any other required part leaves profiling off and logs one warning instead of refusing to start. `expires_at` becomes a monotonic deadline when first read, so a service restart or a wall-clock jump cannot extend a run, and it is enforced while collecting: past it nothing more is recorded, the record ends at the deadline rather than when someone noticed, and it is emitted as partial (`measurement_complete: false`, `profiling_stopped: "expired"`). `max_operations` is a per-process budget in this slice, not a fleet-wide admission: two replicas can each spend it. A slot is only spent on an operation that was actually selected — targets are matched with every configured field present and equal, so an unknown value is a mismatch, and a rejected candidate returns its slot. `operations` may also name `files.list`, `files.open` and `terminal.open`, which the **control plane** roots; a control plane that is not enabled neither selects nor reports them. |
 | `AGENT_OPERATION_PROFILING_SINK` | **NEW** | Optional JSONL path for the finished measurements, which are logged as well. An external benchmark reads this file to aggregate a baseline. It is **not** an outbox and is not required for Postgres/Admin delivery: root producers send the same cached frozen record directly through their bounded delivery path. Log and JSONL publication still use one bounded background exporter, so a slow file or log handler never runs on the measured thread. The runner sends selected context to the broker in `X-Agent-Operation-Profiling`; file/terminal response metadata returns in JSON or `x-agent-profiling-*` headers. Browser continuation uses `X-Agent-Interaction-Id` (the older measurement header is compatibility-only). |
 
-The supported control-plane and host Compose files explicitly pass all three
+| `AGENT_OPERATION_PROFILING_MODE` | **NEW** | Which control source a deployment allows: `disabled`, `environment` or `admin`. **Unset keeps the old `ENABLED` + `RUN` semantics exactly**, so a deployment that never sets it behaves as it did before runtime control existed. `disabled` forbids collection deployment-wide and makes Admin report the control as unavailable rather than offering a Start that would do nothing. `environment` reads only the static descriptor and makes Admin say the deployment is configuration-managed, with no fake Stop. `admin` uses the persisted control state **only**: a leftover `ENABLED=false` no longer vetoes an administrator's Start, and a leftover `RUN` may not be used as a fallback after an Admin Stop — an off that can be undone by stale configuration is not off. Read once per process, because the mode is *how* a deployment may be controlled and never the per-experiment switch; changing it is a redeploy, and the whole point of the feature is that changing it is not how an experiment starts or stops. An unrecognised value disables collection and warns. **The runner, the control plane, the workspace broker and the turn child all need it.** The runner and the broker are separate containers; the turn child inherits the runner's process environment, and its selection also travels in the handoff JSON, so a child binds to the experiment its parent selected rather than to whatever its own snapshot happens to say. Under `admin` an idle control plane polls the control row every 30 s and an active one every 5 s, and a host syncs its policy on the same cadence over the authenticated heartbeat and `POST /v1/agent/hosts/profiling-policy`; each authorization is valid for at most 15 s, so a node that loses contact stops collecting on its own. That is a real, stated background cost — a deployment under `admin` can no longer claim zero I/O while switched off. |
+| `AGENT_OPERATION_PROFILING_DEPLOYMENT` | **NEW** | Which deployment's control row this control-plane process commands; defaults to `default`. The singleton control row is keyed by this name, and the name comes from trusted configuration and never from a request: a browser that could name its namespace could see — and stop — another deployment's experiment, because a Stop only has to name a run id. Set it when two deployments share one database (staging and production, or two preview stacks). Read by the control-plane process only; the host agent and the broker never read it, because they cannot act on a name they do not hold. A missing or malformed value falls back to `default` rather than refusing to boot. |
+
+The supported control-plane and host Compose files explicitly pass all of these
 profiling variables to the control plane, runner, and workspace broker, and so
 does the local development stack (`deploy/local/docker-compose.yml`): without
 them a local experiment silently collects only the control plane's own file and
-terminal requests and no startup record at all.
-Profiling remains inert by default. When enabled, `config_version` and each
-root producer's local `max_operations` admission identity are preserved in the
-run catalogue; different runtimes and execution profiles remain separate in
-Admin distributions. A 2026-09-18 local rerun measured roughly 30 microseconds
+terminal requests and no startup record at all. `AGENT_OPERATION_PROFILING_MODE`
+is part of that set for the same reason — a producer that never receives it
+stays on the legacy environment switch no matter what the operator sets — and
+the deployment namespace is passed to the control plane so two stacks on one
+database cannot reach each other's control row.
+Profiling remains inert by default, and unset `MODE` means the paragraphs above
+describe it completely: nothing polls, nothing syncs, and the collector reads a
+process-cached environment value. Under `MODE=admin` the same collector is
+driven by the persisted control row instead, and an administrator starts and
+stops an experiment from **Admin → Measurements** without editing this file or
+restarting a service. `config_version` (which immutable experiment this is),
+`revision` (which start/stop command was applied last) and the in-memory renewal
+sequence (which authorization refresh a process has seen) are three different
+orders and are kept as three different things; the run's configured `expires_at`
+is never rewritten on a Stop, because the delivery path validates an arriving
+manifest against it and a rewritten expiry would refuse every in-flight upload.
+`max_operations` stays a per-producer-instance allowance — the Admin API reports
+`budget_scope=producer_instance` and does not present it as a deployment-wide
+cap. Different runtimes and execution profiles remain separate in Admin
+distributions. A 2026-09-18 local rerun measured roughly 30 microseconds
 of collector work per synthetic startup; this does not include a real
 container, broker, network, or database.
 

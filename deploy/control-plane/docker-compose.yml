@@ -121,6 +121,15 @@ services:
       AGENT_OPERATION_PROFILING_ENABLED: ${AGENT_OPERATION_PROFILING_ENABLED:-false}
       AGENT_OPERATION_PROFILING_RUN: ${AGENT_OPERATION_PROFILING_RUN:-}
       AGENT_OPERATION_PROFILING_SINK: ${AGENT_OPERATION_PROFILING_SINK:-}
+      # Who may control collection at runtime. Unset keeps the legacy
+      # ENABLED/RUN semantics exactly; `admin` is what makes the Admin page's
+      # Start and Stop take effect without a redeploy, and it is the only mode
+      # in which the control row below is consulted.
+      AGENT_OPERATION_PROFILING_MODE: ${AGENT_OPERATION_PROFILING_MODE:-}
+      # Which deployment's control row this process commands. Two deployments
+      # sharing one database must not be able to see or stop each other's
+      # experiment, so each names itself.
+      AGENT_OPERATION_PROFILING_DEPLOYMENT: ${AGENT_OPERATION_PROFILING_DEPLOYMENT:-default}
       AGENT_ALERT_WEBHOOK_URL: ${AGENT_ALERT_WEBHOOK_URL:-}
       AGENT_DEFAULT_EXECUTION_PROFILE: ${AGENT_DEFAULT_EXECUTION_PROFILE:-untrusted-kata-v1}
       # --- Publishing and source control ------------------------------------

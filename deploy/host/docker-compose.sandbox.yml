@@ -241,6 +241,12 @@ services:
       AGENT_OPERATION_PROFILING_ENABLED: ${AGENT_OPERATION_PROFILING_ENABLED:-false}
       AGENT_OPERATION_PROFILING_RUN: ${AGENT_OPERATION_PROFILING_RUN:-}
       AGENT_OPERATION_PROFILING_SINK: ${AGENT_OPERATION_PROFILING_SINK:-}
+      # `admin` lets the Admin page's Start and Stop reach this producer
+      # without a redeploy. Unset keeps the legacy semantics. The broker needs
+      # it as well as the runner: it is a separate container, and it will not
+      # honour a selection the runner hands it unless its own mode says a
+      # control plane may decide what to collect.
+      AGENT_OPERATION_PROFILING_MODE: ${AGENT_OPERATION_PROFILING_MODE:-}
       # A broker-only secret. Host enrollment/claim uses its persisted host
       # credential; neither credential is accepted at the other's surface.
       AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?a secret for this host's workspace broker}
@@ -316,6 +322,9 @@ services:
       AGENT_OPERATION_PROFILING_ENABLED: ${AGENT_OPERATION_PROFILING_ENABLED:-false}
       AGENT_OPERATION_PROFILING_RUN: ${AGENT_OPERATION_PROFILING_RUN:-}
       AGENT_OPERATION_PROFILING_SINK: ${AGENT_OPERATION_PROFILING_SINK:-}
+      # `admin` lets the Admin page's Start and Stop reach this producer
+      # without a redeploy. Unset keeps the legacy semantics.
+      AGENT_OPERATION_PROFILING_MODE: ${AGENT_OPERATION_PROFILING_MODE:-}
       # The tunnel, by the name both this container and the sandboxes resolve.
       # Overriding it with the gateway's real address is a mistake worth naming:
       # the runner would reach it and the sandbox — on the closed network —
