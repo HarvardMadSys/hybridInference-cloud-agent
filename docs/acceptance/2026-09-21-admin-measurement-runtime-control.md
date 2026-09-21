@@ -27,6 +27,20 @@
 broker 也拒绝更低 revision 的推送。这是防"旧配置覆盖新配置"的全部机制，没有第二套续租
 协议。
 
+## 0.1 复核修复（`52b6505` 复核后的三项）
+
+外部复核在简化版上找到三个真实缺陷，本轮修复并各补了回归证据。**没有恢复短租约、参与者
+ACK 或复杂状态机。**
+
+| 问题 | 根因 | 修复 | 回归证据 |
+| --- | --- | --- | --- |
+| **[P1] 全新 runner 子进程接不上 Admin 选择** | `attach_selection()` 在解析继承 manifest 之前要求 `_load().run` 非空且 run id 相同；真实子进程是新解释器，Admin 模式下没有本地配置 | 子进程**从 context 自带的不可变 manifest 恢复**该次测量，不再要求它自己选中实验；仍强制实验未过期、操作列表合法、不占第二个名额 | `test_a_real_child_process_continues_an_admin_selection`——**真实 subprocess 新解释器**，Admin 模式、无 provider、无静态 descriptor，断言 attached、同 measurement_id、同计时起点、同 run/target、预算未增加，且写出的记录 `profiling_run_id` 正确 |
+| **[P2] broker 推送失败后不再同步** | 只在 `changed` 时推送；失败后 revision 已记为 applied，后续轮询不再重发；broker 独立重启同样收不到 | 每次同步都重发当前配置（receiver 按 revision 幂等，同 revision 直接返回不改状态）；推送结果仍只作本地诊断，不构成 ACK | `test_a_failed_broker_push_is_offered_again`（连续两轮共 4 次失败后第三轮送达）、`test_a_restarted_broker_is_given_the_configuration_again` |
+| **[P2] Disable 后丢掉在途操作的后续片段** | `start_stage_recording()` 要求 broker 本地配置里的 run 与上下文一致，Disable 后为空即拒绝；于是"记录在、阶段缺" | 区分**延续**与**新选择**：带不可变 manifest 的 context 是延续，按原实验身份继续；只声明操作的 context 仍要求本地配置匹配，调用方不能靠声明覆盖 broker 配置 | `test_a_selected_operation_keeps_its_later_stages_after_a_stop`、`test_a_continuation_cannot_widen_the_operations_it_was_given`、`test_a_context_without_a_manifest_still_needs_the_local_configuration`，以及 HTTP 级 `test_a_configuration_change_does_not_truncate_an_in_flight_request` 与验收链里新增的 post-switch broker 片段断言（`missing_fragments` 不存在，`admission` 阶段在记录里） |
+
+展示收尾（非阻断）：状态词统一为 **Enabled / Disabled**；停用说明写清"停止选择新操作，
+已开始的测量会继续完成"；同步提示改为"正常约 30 秒"而非硬保证。
+
 ## 1. 交付范围
 
 管理员在 **Admin → Measurements** 顶部的一张卡片上点 **Enable measurement /
@@ -81,8 +95,8 @@ AGENT_OPERATION_PROFILING_DEPLOYMENT=staging
 
 | 展示状态 | 判据 |
 | --- | --- |
-| `Off` | 有控制行，且没有未到期的实验；按钮为 Enable |
-| `Measuring`（`on`） | 配置里的实验尚未到期；按钮为 Disable |
+| `Disabled`（`off`） | 有控制行，且没有未到期的实验；按钮为 Enable |
+| `Enabled`（`on`） | 配置里的实验尚未到期；按钮为 Disable |
 | `Unavailable` | 部署没有控制行（从未启用运行时控制）；不提供按钮 |
 | `Managed by deployment configuration` | 部署未处于 `admin` 模式；不提供按钮 |
 
@@ -110,7 +124,8 @@ cd apps/frontend && npm run lint && npm run format:check && npm run type-check &
 | 命令 | 结果 |
 | --- | --- |
 | `pytest tests/unit tests/servers -q` | **4767 passed, 1 failed**（本机 `os.openpty` 被拒，§6.1）+ 1 个需重新生成的 OpenAPI 契约（已生成，重跑 8 passed） |
-| `pytest -q -m dbtest`（真实 PostgreSQL 16 容器，Alembic 迁移到 head） | **549 passed** |
+| `pytest -q -m dbtest`（真实 PostgreSQL 16 容器，Alembic 迁移到 head） | **546 passed, 3 failed**（本轮）/ 上一轮 **549 passed** —— 失败的是同一组到期边界用例，属 base 上已有的时序抖动，见 §6.8 |
+| 其中与本功能相关的 DB 用例 | **47 passed**（两个验收链 + measurement store/chain） |
 
 ### 3.3 真实链路验收
 
@@ -137,9 +152,12 @@ Alembic 迁移、真实 `asyncpg` 连接池、两个真实 FastAPI 应用各自�
    `last_stopped_run.run_id == run_id`、`status == "off"`；换一个 request id 再停一次仍是
    同一 revision。
 7. **停用之后**：再读一次文件，响应里**没有** `profiling` 块，已入库行数仍为 1。
-8. **在途测量照常完成入库**（本轮新增）：请求 A 在实验进行时选根并把 block 保持打开，
-   期间用真实 HTTP 停用，然后 A 走**真实进程内持久化路径** `record_measurement`。断言行已
-   入库、`outcome == "completed"`、`collection_complete is True`、没有 `profiling_stopped`。
+8. **在途测量照常完成入库**：请求 A 在实验进行时选根并把 block 保持打开，期间用真实 HTTP
+   停用，然后 A 走**真实进程内持久化路径** `record_measurement`。断言行已入库、
+   `outcome == "completed"`、`collection_complete is True`、没有 `profiling_stopped`。
+9. **停用之后发出的 broker 片段仍然收齐**（复核补充）：同一个 block 里，停用之后再用 A 的
+   context 调 `start_stage_recording`，断言 recorder 非空、阶段被记录，最终记录里
+   `missing_fragments` 不存在且 `admission` 阶段出现在 `stages[].children`。
 
 另外 4 个用例覆盖：第二个启用被 409 `already_active` 拒绝并带回当前 revision；非 Admin
 模式返回 409 `not_admin_mode` 且状态 `unmanaged`；未知操作/未知 host/超时长/未知字段在
@@ -195,6 +213,7 @@ Alembic 迁移、真实 `asyncpg` 连接池、两个真实 FastAPI 应用各自�
 | 单次配置请求超时 | 2 s | 同上 |
 | 一次变更在所有进程生效上限 | 30 s（UI 写出该数字） | 同上 + `sync_note` |
 | 断联节点停止选取的边界 | 实验自己的 `expires_at` | 采集器 |
+| broker 配置重发 | 每次同步（活动 5 s / 空闲 30 s） | `cloud_agent_host/profiling_policy.py` |
 
 **没有** 15 秒租约，也**没有** 20 秒全量失效承诺 —— 那套机制已随本次简化删除。
 
@@ -213,9 +232,12 @@ Alembic 迁移、真实 `asyncpg` 连接池、两个真实 FastAPI 应用各自�
    点过 Enable/Disable。
 6. **FI staging 配置未改**：见 `docs/acceptance/2026-09-21-admin-measurement-runtime-control-fi.md`。
 7. **没有性能基准**：只给出轮询频率与量级，没有跑 `scripts/bench_*`。
-8. **`dbtest` 全量跑过一次 549 passed**；更早一轮里有 5 个到期边界用例失败
-   （attempt ledger / MCP 连接 / OAuth state），在未打本 PR 的干净 worktree 上同样失败，
-   属时序相关而非分支问题。最终一轮全绿。
+8. **`dbtest` 全量有 5 个到期边界用例会间歇失败**（attempt ledger reconciliation ×2、
+   MCP 连接 deadline ×2、source control OAuth state ×1）。它们用真实时钟断言"某个到期
+   瞬间之后不能再使用"，在本机负载下会跨过边界；其中两个已在**未打本 PR 的干净
+   `9c88596` worktree** 上复现同样失败。跨轮次结果是 549 passed / 546 passed 交替，
+   **与本功能无关的领域**（attempt ledger / MCP / OAuth），本功能相关的 DB 用例
+   47 个稳定通过。
 
 ## 7. 已知取舍
 

@@ -91,8 +91,8 @@ Changes reach every process through a background sync; allow up to 30 seconds.
 
 | 展示状态 | 判据 |
 | --- | --- |
-| `Off` | 有控制行，且当前没有未到期的实验；按钮显示 **Enable measurement** |
-| `Measuring`（`on`） | 配置里的实验尚未到期；按钮显示 **Disable measurement** |
+| `Disabled`（`off`） | 有控制行，且当前没有未到期的实验；按钮显示 **Enable measurement** |
+| `Enabled`（`on`） | 配置里的实验尚未到期；按钮显示 **Disable measurement** |
 | `Unavailable` | 部署没有控制行（从未启用运行时控制）；不提供按钮 |
 | `Managed by deployment configuration` | 部署未处于 `admin` 模式；不提供按钮 |
 
@@ -100,7 +100,8 @@ Changes reach every process through a background sync; allow up to 30 seconds.
 "配置传播到哪一步"，只有一张 ACK 注册表才能回答；而本功能并不问这个问题。
 
 必须展示的内容：选中的操作（用自然语言）、目标 host、到期时间、剩余时间（本地倒数，
-不低于 0）、已入库样本数、一句同步延迟提示。**暂时没有样本时**要明确提示"开启后需要
+不低于 0）、已入库样本数、一句同步延迟提示。**状态词是 Enabled / Disabled**，不是
+Measuring / Off：前者说的是配置，后者会暗示样本正在到达。**暂时没有样本时**要明确提示"开启后需要
 先执行对应操作才会产生记录"，不能让它看起来像失败。关闭状态下若上一轮实验刚结束，
 用 `last_stopped_run` 说明"刚关掉的是哪个实验、原因是什么"。诊断信息（mode、revision、
 deployment、run_id、预算口径）折叠在 Details 里，不堆在主区域。
@@ -203,12 +204,24 @@ flowchart LR
 2. runner 父进程以已有 host 身份调用 `POST /v1/agent/hosts/profiling-policy`，拿到本
    host 的配置后发布到自己的快照；关闭时 30 秒、活动时 5 秒、失败重试 10 秒，请求超时
    2 秒，加小幅抖动。
-3. runner 在后台经现有鉴权 broker RPC 下发同一配置，broker 应用到自己的快照；broker
-   只接受**不低于**已应用版本的配置。
-4. 已被选中的 turn 子进程通过现有可信 broker 连接读取控制快照，并**继承父进程的选择**
-   （run id、manifest、计时起点、名额），不重新决定 run。
-5. broker 不因收到普通 profiling header 自行开启配置：只有可信服务控制消息能更新它的
-   本地配置，普通调用还必须有匹配的已选中 context。
+3. runner 在后台经现有鉴权 broker RPC 下发配置，broker 应用到自己的快照；broker 只接受
+   **不低于**已应用版本的配置。**每次同步都重发**，不只重发"变化过的"配置：首次推送可能
+   失败（broker 还在启动），而 broker 的配置在内存里，它自己重启也会丢——这两种情况在
+   runner 侧都不可见，而接收端按 revision 幂等，重发是安全的。这不是 ACK 系统：runner
+   不等确认，上游也不依赖它。
+4. 已被选中的 turn 子进程**从 `_profiling` 里自带的不可变 manifest 恢复该次测量**，不需要
+   自己先选中实验。部署路径启动的是一个**全新 Python 进程**：Admin 模式下它没有任何本地
+   配置（自己的同步循环还没跑），也不读静态 descriptor。要求它"先自己选中当前实验"会让
+   交接只在父进程里成立，真实子进程静默不采集。安全性来自通道而不是本地复查——这段
+   context 由已经证明过该选择的父进程经管道交给它；子进程只重新声明，并仍然强制实验未过期。
+5. broker 的判定分两种情况，不能混为一谈：
+   - **延续**：context 带着不可变 manifest（`run` 对象）。这是"已经选中的操作在 Disable
+     之后继续调用 broker"，必须放行，否则根记录会以缺失 broker 阶段的形式悄悄入库——比
+     拒绝更糟。它带 `run` 这一点本身就说明它来自持有该实验的可信生产者，且只经 broker 的
+     共享令牌通道到达。
+   - **新选择**：context 只声明操作、不带 manifest。这时**本进程的配置说了算**：run 必须
+     匹配且选中该操作。调用方不能靠声明 `operations` 覆盖 broker 的配置。
+   普通 profiling header 单独不能让 broker 开启采集。
 
 时限（实现值）：
 
@@ -217,7 +230,7 @@ flowchart LR
 | CP 快照轮询（空闲 / 活动） | 30 s / 5 s |
 | host 配置同步（空闲 / 活动 / 失败重试） | 30 s / 5 s / 10 s |
 | 单次配置请求超时 | 2 s |
-| 一次变更在所有进程生效的上限 | 30 s（UI 明确写出这个数） |
+| 一次变更在所有进程生效的常见延迟 | 约 30 s（UI 说明这是正常情况下的预期，不是硬保证：空闲 30 s 加抖动与请求耗时） |
 | 断联节点停止选取的边界 | 实验自己的 `expires_at` |
 
 **没有 15 秒可续租授权，也没有 20 秒全量失效承诺。** 停止不需要跨机器同步时限：它只
@@ -251,6 +264,9 @@ flowchart LR
 - 已冻结记录原样投递，不能因为 UI Stop 就丢掉或修改成功结果。
 - 已经开始的 measurement 正常完成、正常投递，仍受**原有实验截止时间**与采集边界约束：
   不因 Disable 被提前截断，manifest 与 `expires_at` 也不被修改。
+- **它在 Disable 之后发出的 broker 调用仍然采集**：root 只是第一步，容器与 CLI 阶段发生在
+  之后，那些片段属于选中它的那个实验。拒绝它们会得到"记录在、阶段缺"的样本，读起来像
+  慢启动而不像配置变更。
 - 未冻结记录只在**实验自己的 `expires_at`** 截止，保留已采集阶段，标为
   `profiling_stopped="expired"` 且 `collection_complete=false`；不能把部分耗时当完整样本
   算进 p50/p95。
