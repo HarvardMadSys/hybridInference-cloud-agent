@@ -6817,17 +6817,6 @@
             "description": "Physical server name for admin grouping only; never a scheduling or credential identity.",
             "title": "Physical Host"
           },
-          "profiling": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ProfilingHostReport"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "What this host has applied of the operation-profiling policy, and what its workspace broker confirmed. Present so the answer can carry the current policy back on the same authenticated channel the host already uses, and so the Admin page can tell 'applied' from 'never heard about it'."
-          },
           "residencies": {
             "anyOf": [
               {
@@ -6973,17 +6962,6 @@
           "host": {
             "title": "Host",
             "type": "string"
-          },
-          "profiling": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ProfilingPolicy"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The operation-profiling policy this host must apply, or null when this deployment is not under Admin control. Carried on the beat so a Stop reaches a runner without a second channel and without a second credential: the host already holds this one, and the sandbox never sees it."
           },
           "residencies_lost": {
             "description": "The reported beats whose generation no longer holds its residency — echoed back with the generation, so a late answer to an old beat cannot end the successor the host has since established. The host fences those member processes; the retained container still owns their native session files.",
@@ -8102,236 +8080,6 @@
           "started_offset_ms"
         ],
         "title": "ProcessObservation",
-        "type": "object"
-      },
-      "ProfilingHostReport": {
-        "description": "What a host agent reports about its own profiling policy state.\n\nRead as evidence rather than as a claim: the control plane records these\nvalues to decide whether an experiment is fully active, so every field says\nwhat the host *observed*, not what it was configured with. ``applied_revision``\nis the revision in force locally, which is the only number that can answer\n\"has this host heard about the Stop\".",
-        "properties": {
-          "applied_revision": {
-            "anyOf": [
-              {
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Control revision this host has applied.",
-            "title": "Applied Revision"
-          },
-          "broker_capability": {
-            "anyOf": [
-              {
-                "maxLength": 128,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Broker Capability"
-          },
-          "broker_detail": {
-            "anyOf": [
-              {
-                "maxLength": 500,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Broker Detail"
-          },
-          "broker_revision": {
-            "anyOf": [
-              {
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The revision this host's workspace broker has confirmed, when it has one. Null means the host could not confirm its broker, which the Admin page reports as a gap rather than rounding up.",
-            "title": "Broker Revision"
-          },
-          "budget": {
-            "additionalProperties": true,
-            "title": "Budget",
-            "type": "object"
-          },
-          "capability": {
-            "anyOf": [
-              {
-                "maxLength": 128,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The runtime-control capability this host advertises. A host without it is reported as unsupported rather than as one that has not answered.",
-            "title": "Capability"
-          },
-          "detail": {
-            "anyOf": [
-              {
-                "maxLength": 500,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Detail"
-          },
-          "participant_id": {
-            "anyOf": [
-              {
-                "maxLength": 128,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Stable per-process identity, so a restart is not a second participant.",
-            "title": "Participant Id"
-          },
-          "run_id": {
-            "anyOf": [
-              {
-                "maxLength": 128,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Run Id"
-          }
-        },
-        "title": "ProfilingHostReport",
-        "type": "object"
-      },
-      "ProfilingPolicy": {
-        "description": "What a host agent must collect for, and until when.\n\nRead the three orders as three different fields, because they are three\ndifferent questions and collapsing any two of them is how an experiment\ngets extended or a Stop ignored:\n\n* ``revision`` -- which control command was applied last. A host that sees\n  a revision it has not applied must adopt the whole policy, including the\n  case where the answer is \"nothing\".\n* ``run.config_version`` -- which immutable experiment this is. It never\n  changes for a given run.\n* ``lease`` -- how long this answer may be acted on. The host's own\n  renewal sequence is local and never crosses this boundary: a renewal is\n  not a command and must not look like one.",
-        "properties": {
-          "lease": {
-            "$ref": "#/components/schemas/ProfilingPolicyLease"
-          },
-          "mode": {
-            "description": "``admin`` means the persisted control state decides, so this policy is authoritative. ``environment`` and ``disabled`` mean the host keeps its own deployment configuration and must ignore the run below, which is empty in both cases.",
-            "title": "Mode",
-            "type": "string"
-          },
-          "revision": {
-            "description": "Control revision this policy states.",
-            "title": "Revision",
-            "type": "integer"
-          },
-          "run": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ProfilingPolicyRun"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The experiment in force, or null when the deployment is not collecting. Null is a command, not an absence: a host that applied a previous revision must stop."
-          },
-          "server_time": {
-            "description": "The control plane's instant for this answer.",
-            "format": "date-time",
-            "title": "Server Time",
-            "type": "string"
-          }
-        },
-        "required": [
-          "mode",
-          "revision",
-          "lease",
-          "server_time"
-        ],
-        "title": "ProfilingPolicy",
-        "type": "object"
-      },
-      "ProfilingPolicyLease": {
-        "description": "How long the policy may be acted on without hearing from the control plane.",
-        "properties": {
-          "issued_at": {
-            "description": "The control plane's own instant when this lease was minted. The host uses it as a wall-clock anchor so it never has to compare two machines' monotonic clocks.",
-            "format": "date-time",
-            "title": "Issued At",
-            "type": "string"
-          },
-          "seconds": {
-            "description": "Remaining lifetime of this authorization, already reduced by the request's round trip. A host that applies the policy past this instant is collecting on a lease the control plane no longer stands behind, which is how an isolated node stops by itself.",
-            "title": "Seconds",
-            "type": "number"
-          }
-        },
-        "required": [
-          "seconds",
-          "issued_at"
-        ],
-        "title": "ProfilingPolicyLease",
-        "type": "object"
-      },
-      "ProfilingPolicyRun": {
-        "description": "The immutable experiment a policy names, as a host receives it.",
-        "properties": {
-          "admission_instances": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "title": "Admission Instances",
-            "type": "array"
-          },
-          "config_version": {
-            "default": 1,
-            "title": "Config Version",
-            "type": "integer"
-          },
-          "expires_at": {
-            "format": "date-time",
-            "title": "Expires At",
-            "type": "string"
-          },
-          "max_operations": {
-            "title": "Max Operations",
-            "type": "integer"
-          },
-          "operations": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Operations",
-            "type": "array"
-          },
-          "run_id": {
-            "title": "Run Id",
-            "type": "string"
-          },
-          "target": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Target",
-            "type": "object"
-          }
-        },
-        "required": [
-          "run_id",
-          "operations",
-          "expires_at",
-          "max_operations"
-        ],
-        "title": "ProfilingPolicyRun",
         "type": "object"
       },
       "RegisterConnectorRequest": {
@@ -13097,7 +12845,7 @@
     },
     "/admin/agent/profiling-control": {
       "get": {
-        "description": "Return the control mode, the current experiment and what has confirmed it.\n\n``mode`` is the deployment's answer to \"who may control this\", and it is\nwhat stops the page from offering a Start that would do nothing. The three\nanswers are deliberately different:\n\n* ``disabled`` -- no control at all, and no collection either.\n* ``environment`` -- a static descriptor decides; Admin reports that the\n  deployment is configuration-managed and offers no Stop, because there is\n  nothing for this API to stop.\n* ``admin`` -- the persisted control state decides, and everything below\n  applies.\n\nA deployment whose mode is not ``admin`` still gets an answer rather than a\n404: \"you cannot control this here, and here is why\" is the useful reply.",
+        "description": "Return the control mode, the current experiment and what has confirmed it.\n\n``mode`` is the deployment's answer to \"who may control this\", and it is\nwhat stops the page from offering a switch that would do nothing. The three\nanswers are deliberately different:\n\n* ``disabled`` -- no control at all, and no collection either.\n* ``environment`` -- a static descriptor decides; Admin reports that the\n  deployment is configuration-managed and offers no switch, because there is\n  nothing for this API to turn off.\n* ``admin`` -- the persisted configuration decides, and everything below\n  applies.\n\nA deployment whose mode is not ``admin`` still gets an answer rather than a\n404: \"you cannot control this here, and here is why\" is the useful reply.",
         "operationId": "get_profiling_control_admin_agent_profiling_control_get",
         "parameters": [
           {
