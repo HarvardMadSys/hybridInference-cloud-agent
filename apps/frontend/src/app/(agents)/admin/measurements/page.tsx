@@ -34,6 +34,7 @@ import {
   INPUT,
   number,
 } from '../runs/shared';
+import { MeasurementControlPanel } from './MeasurementControlPanel';
 import {
   ATTACHED_STAGE_NOTE,
   DISTRIBUTION_BASIS,
@@ -194,6 +195,7 @@ function MeasurementsView({ initialQuery }: { initialQuery: string }) {
           </ErrorNotice>
         ) : (
           <>
+            <MeasurementControlPanel onDenied={onDenied} refreshKey={refreshKey} />
             <CoverageNotice />
             <WriterStatusPanel onDenied={onDenied} refreshKey={refreshKey} />
             <RunsPanel selection={selection} onDenied={onDenied} refreshKey={refreshKey} />
