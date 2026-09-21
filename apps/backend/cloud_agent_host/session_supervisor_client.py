@@ -181,9 +181,15 @@ class SessionSupervisorClient:
         prompt: str,
         model: str,
         reasoning_effort: str | None,
+        read_timeout_s: float,
     ) -> SharedTurnStream:
         """Start one resident turn and return its framed response stream."""
         path = f"/shared-sandboxes/{quote(thread_id, safe='')}/turn"
+        # The broker emits CLI events, which may be silent throughout model
+        # thinking or a tool call. Let the runner's execution/interrupt budget
+        # bound that wait without extending ordinary lifecycle requests.
+        stream_timeout = httpx.Timeout(self._client.timeout)
+        stream_timeout.read = read_timeout_s
         try:
             request = self._client.build_request(
                 "POST",
@@ -194,6 +200,7 @@ class SessionSupervisorClient:
                     "model": model,
                     "reasoning_effort": reasoning_effort,
                 },
+                timeout=stream_timeout,
             )
             response = self._client.send(request, stream=True)
         except httpx.HTTPError as exc:

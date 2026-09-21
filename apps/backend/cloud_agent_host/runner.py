@@ -143,7 +143,8 @@ _POLL_INTERVAL_S = 0.5
 # The broker closes guest telemetry and enforces the member activation
 # boundary after an interrupt. Keep draining its terminal frame so a cancel or
 # timeout cannot strand the member lock or discard the already-closed resource
-# report. The broker client itself has the same 180 second request ceiling.
+# report. Broker lifecycle requests have the same 180 second request ceiling;
+# the turn stream gets the execution budget plus this drain window.
 _SHARED_TURN_INTERRUPT_DRAIN_S = 180.0
 _GIT_TIMEOUT_S = 300.0
 
@@ -1604,6 +1605,9 @@ def _stream_shared_agent_turn(
         prompt=job.task_prompt,
         model=job.model,
         reasoning_effort=job.reasoning_effort,
+        # Keep a quiet stream open through the watchdog's execution deadline
+        # and terminal-resource drain, including its next control-loop poll.
+        read_timeout_s=max(0.0, timeout_s) + _SHARED_TURN_INTERRUPT_DRAIN_S + _POLL_INTERVAL_S,
     )
     operation_profiling.finish(measurement, outcome="dispatched")
     # Queued here, not when the turn ends. The prompt has been handed over and
