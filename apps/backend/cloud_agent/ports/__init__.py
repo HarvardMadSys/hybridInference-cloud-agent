@@ -25,6 +25,7 @@ from cloud_agent.ports.operation_measurements import (
     MeasurementWriteResult,
     OperationMeasurements,
 )
+from cloud_agent.ports.profiling_control import ProfilingControl
 from cloud_agent.ports.residency import ResidencyRepository
 from cloud_agent.ports.sandbox import SandboxRepository
 from cloud_agent.ports.session_fork import SessionForkRepository
@@ -48,6 +49,7 @@ __all__ = [
     "McpConnectionRepository",
     "MeasurementWriteResult",
     "OperationMeasurements",
+    "ProfilingControl",
     "ResidencyRepository",
     "SandboxRepository",
     "SessionForkRepository",

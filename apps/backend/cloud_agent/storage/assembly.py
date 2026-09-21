@@ -36,6 +36,7 @@ from cloud_agent.storage.repositories import (
     PostgresMcpCatalogRepository,
     PostgresMcpConnectionRepository,
     PostgresOperationMeasurementRepository,
+    PostgresProfilingControlRepository,
     PostgresResidencyRepository,
     PostgresSandboxRepository,
     PostgresSessionForkRepository,
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
         McpCatalogRepository,
         McpConnectionRepository,
         OperationMeasurements,
+        ProfilingControl,
         ResidencyRepository,
         SandboxRepository,
         SessionForkRepository,
@@ -99,6 +101,7 @@ class Storage:
             pool
         )
         self.mcp_catalog: McpCatalogRepository = PostgresMcpCatalogRepository(pool)
+        self.profiling_control: ProfilingControl = PostgresProfilingControlRepository(pool)
         self.residency: ResidencyRepository = PostgresResidencyRepository(pool)
         self.sandbox: SandboxRepository = PostgresSandboxRepository(pool)
         self.session_fork: SessionForkRepository = PostgresSessionForkRepository(pool)
