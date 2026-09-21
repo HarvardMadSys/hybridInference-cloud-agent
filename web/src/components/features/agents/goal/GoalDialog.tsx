@@ -59,10 +59,24 @@ export function GoalDialog({
   const titleId = useId();
   const [objective, setObjective] = useState(initial?.objective ?? '');
   const [rounds, setRounds] = useState(String(initial?.maxRounds ?? limits.default_rounds));
+  const wasOpen = useRef(false);
 
-  // Reopening after an edit shows what the goal says now, not the last draft.
+  // Opening shows what the goal says now, not the last draft.
+  //
+  // On the *transition* into open, and never again while it stays open. The
+  // caller's `initial` moves under this dialog whenever the page re-reads the
+  // conversation — a compare-and-set refusal makes it re-read by design — and
+  // resetting on that would type the other tab's goal over the words this
+  // owner is holding. Those words are the retry: the new revision is the only
+  // thing that re-read is for. They are replaced when the owner closes the
+  // dialog and opens it again, which is how a draft is abandoned.
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      wasOpen.current = false;
+      return;
+    }
+    if (wasOpen.current) return;
+    wasOpen.current = true;
     setObjective(initial?.objective ?? '');
     setRounds(String(initial?.maxRounds ?? limits.default_rounds));
   }, [open, initial?.objective, initial?.maxRounds, limits.default_rounds]);

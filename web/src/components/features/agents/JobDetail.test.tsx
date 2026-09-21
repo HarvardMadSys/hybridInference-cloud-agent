@@ -2667,6 +2667,61 @@ describe('JobDetail', () => {
       expect(box).toHaveValue('and then update the docs');
     });
 
+    it('keeps the command dialog draft through the re-read a conflict forces', async () => {
+      // The refusal makes the page re-read the conversation, which moves the
+      // dialog's `initial` under it. The new revision is what that re-read is
+      // for; the owner's words are the retry, and they stay.
+      vi.mocked(setAgentGoal).mockRejectedValueOnce(
+        new APIError('goal_revision_conflict', 'This goal changed while you were editing it.'),
+      );
+      const withGoal = (overrides: { objective: string; revision: number; maxRounds: number }) =>
+        makeJob({
+          threadId: 'thread_9',
+          goal: { state: 'active', roundsUsed: 2, ...overrides },
+        });
+      const { rerender } = render(
+        <JobDetail
+          job={withGoal({ objective: 'make `pytest` pass', revision: 4, maxRounds: 10 })}
+        />,
+      );
+      const box = await screen.findByLabelText('Add a follow-up');
+      fireEvent.change(box, { target: { value: '/goal' } });
+      fireEvent.keyDown(box, { key: 'Enter' });
+      const dialog = await screen.findByRole('dialog');
+      fireEvent.change(within(dialog).getByLabelText('Objective'), {
+        target: { value: 'ship the release notes' },
+      });
+      fireEvent.change(within(dialog).getByLabelText('Maximum automatic rounds'), {
+        target: { value: '15' },
+      });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Set condition' }));
+      await waitFor(() => expect(setAgentGoal).toHaveBeenCalledTimes(1));
+
+      rerender(
+        <JobDetail
+          job={withGoal({ objective: 'the other tab’s objective', revision: 5, maxRounds: 20 })}
+        />,
+      );
+
+      expect(within(screen.getByRole('dialog')).getByLabelText('Objective')).toHaveValue(
+        'ship the release notes',
+      );
+      expect(
+        within(screen.getByRole('dialog')).getByLabelText('Maximum automatic rounds'),
+      ).toHaveValue(15);
+
+      vi.mocked(setAgentGoal).mockResolvedValue({ thread_id: 'thread_9', goal: null, revision: 6 });
+      fireEvent.click(
+        within(screen.getByRole('dialog')).getByRole('button', { name: 'Set condition' }),
+      );
+      await waitFor(() =>
+        expect(setAgentGoal).toHaveBeenLastCalledWith('thread_9', {
+          goal: { objective: 'ship the release notes', max_rounds: 15 },
+          revision: 5,
+        }),
+      );
+    });
+
     it('clears the goal from the command dialog without touching the conversation', async () => {
       vi.mocked(clearAgentGoal).mockResolvedValue({
         thread_id: 'thread_9',

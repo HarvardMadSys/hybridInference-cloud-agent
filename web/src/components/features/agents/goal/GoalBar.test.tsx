@@ -424,6 +424,50 @@ describe('GoalBar controls', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
+  it('keeps the draft through the re-read a conflict forces', async () => {
+    // A 409 makes the page re-read the goal, and the re-read moves `initial`
+    // under the open dialog. Typing the other tab's goal over this owner's
+    // words would throw away the retry the open dialog exists to allow.
+    vi.mocked(setAgentGoal).mockRejectedValueOnce(
+      new APIError('goal_revision_conflict', 'This goal changed while you were editing it.'),
+    );
+    const { rerender } = render(
+      <GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('Objective'), {
+      target: { value: 'ship the release notes' },
+    });
+    fireEvent.change(screen.getByLabelText('Maximum automatic rounds'), {
+      target: { value: '15' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Set condition' }));
+    await waitFor(() => expect(setAgentGoal).toHaveBeenCalledTimes(1));
+
+    // What the other tab wrote, arriving as the re-read the refusal caused.
+    rerender(
+      <GoalBar
+        threadId="thread_1"
+        goal={goal({ objective: 'the other tab’s objective', revision: 4, maxRounds: 20 })}
+        state={idle}
+        onChanged={() => {}}
+      />,
+    );
+
+    expect(screen.getByLabelText('Objective')).toHaveValue('ship the release notes');
+    expect(screen.getByLabelText('Maximum automatic rounds')).toHaveValue(15);
+
+    // And the retry goes out as written, against the revision the re-read brought.
+    vi.mocked(setAgentGoal).mockResolvedValue({ thread_id: 'thread_1', goal: null, revision: 5 });
+    fireEvent.click(screen.getByRole('button', { name: 'Set condition' }));
+    await waitFor(() =>
+      expect(setAgentGoal).toHaveBeenLastCalledWith('thread_1', {
+        goal: { objective: 'ship the release notes', max_rounds: 15 },
+        revision: 4,
+      }),
+    );
+  });
+
   it('shows the whole objective on demand, however long it is', () => {
     const objective =
       'make every unit test pass, then update the changelog, then open a draft pull request against dev and leave the tree clean';
