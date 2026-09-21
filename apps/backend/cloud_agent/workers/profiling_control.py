@@ -15,10 +15,10 @@ Four numbers run this loop, and each is here for a different reason:
   immediately instead of waiting out the interval. It moves only this process:
   the other replicas still learn through the same database read, which is what
   keeps one code path authoritative.
-* **A 15 s authorization lease.** No file or terminal request ever queries the
-  database. It mints a bounded authorization from the snapshot instead, so a
-  control plane that loses the database stops collecting within the lease
-  rather than at the experiment's original deadline.
+* **No lease, and no query on the hot path.** No file or terminal request ever
+  reads the database: it consults this process's published snapshot, which the
+  loop below keeps current. The experiment's own absolute deadline is what ends
+  collection if the loop itself cannot run.
 * **A sweep.** Landing the terminal state of a lapsed run is bookkeeping, not
   authority: readers already treat a past deadline as over. Doing it here keeps
   the control row honest for the *next* Start, which is the one place the
@@ -60,12 +60,6 @@ IDLE_INTERVAL_S = 30.0
 #: After a failed read, come back sooner than a full idle interval but not in a
 #: tight loop: a database that is down must not be hammered by every replica.
 ERROR_INTERVAL_S = 10.0
-
-#: How long an authorization minted here may outlive the last successful read.
-#: The collector's contract: every downstream process re-reads this process's
-#: snapshot before it marks, spans or fragments anything, so this is the
-#: ceiling on how long a stopped experiment can still be collected for.
-AUTHORIZATION_TTL_S = 15.0
 
 
 class ProfilingPolicyWorker:
@@ -130,20 +124,19 @@ class ProfilingPolicyWorker:
         """Read the control state once, publish it, and say when to read again."""
         now = datetime.now(timezone.utc)
         try:
+            # The sweep first: it may end a lapsed experiment, and the snapshot
+            # published below should describe the state after that rather than
+            # before it.
+            await self._service.sweep(now=now)
             snapshot = await self._service.control_snapshot(now=now)
-            swept = await self._service.sweep(now=now)
-            if swept:
-                # The sweep may have just ended the run the snapshot described,
-                # so the snapshot is re-read rather than published stale.
-                snapshot = await self._service.control_snapshot(now=now)
-            await self._service.prune_participants(now=now)
         except asyncio.CancelledError:
             raise
         except Exception:
             # A control plane that cannot read the control row must not keep
             # collecting on the strength of its last answer. Publishing "no
             # run" is the fail-closed direction: the business path is untouched,
-            # and collection stops at the lease.
+            # and the experiment's own deadline bounds anything already
+            # selected.
             logger.warning(
                 "operation profiling control read failed; pausing collection",
                 exc_info=True,
@@ -156,7 +149,6 @@ class ProfilingPolicyWorker:
         # page can name it; publishing it here would keep every producer
         # collecting for the experiment an administrator just ended.
         run = snapshot.get("run") if snapshot.get("run_active") else None
-        status = str(snapshot.get("status") or "")
         published = self._publish(run, revision=int(snapshot.get("revision") or 0))
         if published is None:
             return ERROR_INTERVAL_S
@@ -165,26 +157,15 @@ class ProfilingPolicyWorker:
         # an administrator's Start for as long as the idle interval.
         if run is not None and published.run is None:
             return ERROR_INTERVAL_S
-        live = published.run is not None and status in {
-            "pending",
-            "starting",
-            "collecting",
-            "partially_active",
-            "stopping",
-        }
-        return ACTIVE_INTERVAL_S if live else IDLE_INTERVAL_S
+        # Poll quickly only while there is something to notice quickly: an
+        # experiment in force is the state in which a Stop has to land soon.
+        return ACTIVE_INTERVAL_S if published.run is not None else IDLE_INTERVAL_S
 
     def _publish(self, run: Mapping[str, Any] | None, *, revision: int = 0) -> Any:
-        """Publish one control answer, or the fail-closed "nothing"."""
+        """Publish one configuration, or the fail-closed "nothing"."""
         if run is None:
             return policy_store().publish(
-                ControlState(
-                    mode=MODE_ADMIN,
-                    control_revision=revision,
-                    run=None,
-                    authority_epoch=datetime.now(timezone.utc).timestamp(),
-                    authorization_ttl_s=AUTHORIZATION_TTL_S,
-                )
+                ControlState(mode=MODE_ADMIN, config_version=revision, run=None)
             )
         parsed = _descriptor_for_run(run)
         if parsed is None:
@@ -198,21 +179,13 @@ class ProfilingPolicyWorker:
             return policy_store().publish(
                 ControlState(
                     mode=MODE_ADMIN,
-                    control_revision=revision,
+                    config_version=revision,
                     run=None,
-                    authority_epoch=datetime.now(timezone.utc).timestamp(),
                     stop_reason="descriptor_unusable",
-                    authorization_ttl_s=AUTHORIZATION_TTL_S,
                 )
             )
         return policy_store().publish(
-            ControlState(
-                mode=MODE_ADMIN,
-                control_revision=revision,
-                run=parsed,
-                authority_epoch=datetime.now(timezone.utc).timestamp(),
-                authorization_ttl_s=AUTHORIZATION_TTL_S,
-            ),
+            ControlState(mode=MODE_ADMIN, config_version=revision, run=parsed),
             run=parsed,
         )
 
@@ -260,7 +233,6 @@ def _descriptor_for_run(run: Mapping[str, Any]) -> ProfilingRun | None:
 
 __all__ = [
     "ACTIVE_INTERVAL_S",
-    "AUTHORIZATION_TTL_S",
     "ERROR_INTERVAL_S",
     "IDLE_INTERVAL_S",
     "ProfilingPolicyWorker",

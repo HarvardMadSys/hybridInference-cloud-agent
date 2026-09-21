@@ -10,11 +10,13 @@ from the authoritative clock rather than from a stored boolean. A page that is
 closed, a sweep that never ran and a process that restarted all leave the
 experiment ending at the instant it was asked to end.
 
-**Nothing is reported that is not evidenced.** ``collecting`` is not "Start
-returned 200": it is the participants this experiment actually needs having
-confirmed the revision that started it. Anything less is ``starting`` or
-``partially_active`` with a reason, and a deployment whose control row does not
-exist is ``unavailable`` rather than a comforting ``off``.
+**The card reports the configuration, not a consensus.** ``on`` means the
+deployment's stored configuration names an experiment that has not expired; it
+does not claim that every process has applied it yet. Sync is allowed to lag and
+the page says so, which is the honest version of a distributed switch -- the
+alternative was a status derived from acknowledgements nobody needed. A
+deployment whose control row does not exist is ``unavailable`` rather than a
+comforting ``off``, and one that is not under Admin control is ``unmanaged``.
 
 **A run is written before it is pointed at.** The manifest row is inserted and
 the control row is advanced in one transaction, so there is no instant at which
@@ -33,7 +35,7 @@ import hashlib
 import json
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -42,16 +44,7 @@ from cloud_agent.domain.profiling_control import (
     ControlCommandResult,
 )
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.storage.repositories.profiling_control import (
-    LIFECYCLE_EXPIRED,
-    LIFECYCLE_PENDING,
-    PARTICIPANT_APPLIED,
-    PARTICIPANT_BROKER,
-    PARTICIPANT_CONTROL_PLANE,
-    PARTICIPANT_EXHAUSTED,
-    PARTICIPANT_RUNNER,
-    TERMINAL_LIFECYCLES,
-)
+from cloud_agent.storage.repositories.profiling_control import TERMINAL_LIFECYCLES
 from cloud_agent_profiling.operation_profiling import profile_mode
 
 if TYPE_CHECKING:
@@ -104,28 +97,17 @@ DEFAULT_MAX_OPERATIONS = 100
 #: caller cannot ask for an unbounded experiment through the same field.
 MAX_MAX_OPERATIONS = 1000
 
-#: The capability a host agent must advertise to be a participant in a
-#: runtime-controlled experiment. A host without it is visibly unsupported
-#: rather than counted as a participant that has not answered yet.
-PROFILING_CONTROL_CAPABILITY = "operation-profiling-control-v1"
-
-#: How long a participant confirmation is believed. Longer than the idle sync
-#: interval so a quiet deployment is not reported as lost, short enough that a
-#: decommissioned replica leaves the page.
-PARTICIPANT_TTL_SECONDS = 300
-
-#: The statuses the Admin page renders. ``unavailable`` and ``unknown`` are
+#: The statuses the Admin page renders. ``unavailable`` and ``unmanaged`` are
 #: deliberately distinct from ``off``: a deployment that cannot be controlled
 #: must not look like one that chose not to collect.
+#:
+#: There is no ``starting``, ``collecting``, ``partially_active`` or
+#: ``stopping``. Those existed to describe how far a configuration had
+#: propagated, which only a registry of acknowledgements could answer -- and
+#: nothing in this feature asks that question.
 STATUS_OFF = "off"
-STATUS_STARTING = "starting"
-STATUS_COLLECTING = "collecting"
-STATUS_PARTIALLY_ACTIVE = "partially_active"
-STATUS_STOPPING = "stopping"
-STATUS_STOPPED = "stopped"
-STATUS_EXPIRED = "expired"
+STATUS_ON = "on"
 STATUS_UNAVAILABLE = "unavailable"
-STATUS_UNKNOWN = "unknown"
 STATUS_UNMANAGED = "unmanaged"
 
 #: Run ids are generated here and appear in Admin URL path segments, so they
@@ -189,47 +171,6 @@ class Refusal:
 
     reason: str
     detail: str
-
-
-@dataclass
-class ParticipantView:
-    """What one participant reported, and whether it counts as confirmed."""
-
-    participant_id: str
-    kind: str
-    host: str | None
-    run_id: str | None
-    applied_revision: int
-    capability: str | None
-    state: str
-    detail: str
-    budget: Mapping[str, Any] = field(default_factory=dict)
-    confirmed_at: datetime | None = None
-    expires_at: datetime | None = None
-    #: Fixed expectations this participant is being judged against. An entry
-    #: that has never reported is synthesised with ``missing=True`` rather than
-    #: being left out, because "host gpu-2 never answered" is the finding.
-    expected: bool = False
-    missing: bool = False
-
-    def to_payload(self) -> dict[str, Any]:
-        """Return this participant as the Admin surface reads it."""
-        return {
-            "participant_id": self.participant_id,
-            "kind": self.kind,
-            "host": self.host,
-            "run_id": self.run_id,
-            "applied_revision": self.applied_revision,
-            "capability": self.capability,
-            "supported": self.capability == PROFILING_CONTROL_CAPABILITY,
-            "state": self.state,
-            "detail": self.detail,
-            "budget": dict(self.budget),
-            "confirmed_at": self.confirmed_at,
-            "expires_at": self.expires_at,
-            "expected": self.expected,
-            "missing": self.missing,
-        }
 
 
 class ProfilingControlService:
@@ -422,10 +363,6 @@ class ProfilingControlService:
             return [run_id]
         return []
 
-    async def prune_participants(self, *, now: datetime) -> int:
-        """Drop participant rows nobody has refreshed."""
-        return await self._control.prune_participants(deployment=self._deployment, now=now)
-
     # -- reads -------------------------------------------------------------
 
     async def control_snapshot(self, *, now: datetime) -> dict[str, Any]:
@@ -434,42 +371,33 @@ class ProfilingControlService:
         One call rather than four, because the card polls and a page assembled
         from four reads taken at four instants is a page whose status can
         contradict its own revision.
+
+        Everything here describes the *configuration*: what the deployment is
+        currently set to collect, until when, and what that configuration has
+        stored so far. It deliberately says nothing about which processes have
+        applied it -- sync lags by design, and the page states the lag instead
+        of pretending to have measured it.
         """
         control = await self._control.get_control_state(deployment=self._deployment)
         revision = int(control["revision"]) if control is not None else 0
         run: dict[str, Any] | None = None
-        participants: list[dict[str, Any]] = []
-        stored = 0
         stopped_run: dict[str, Any] | None = None
-        if control is not None and not control.get("current_run_id"):
-            # Nothing is running. If something was stopped, the page still has
-            # to be able to say so: "off" and "you stopped it four seconds ago"
-            # are different findings, and only the second one tells an operator
-            # whether the Stop they just issued landed. The tombstone the Stop
-            # wrote is what makes that answer possible without guessing.
-            #
-            # It is *context*, never the run in force -- see ``run_active``
-            # below. A caller that could not tell the two apart would keep
-            # collecting for an experiment that was already stopped, which is
-            # exactly the failure this whole feature exists to prevent.
-            stopped_run = await self._last_stopped_run(control)
+        stored = 0
         if control is not None and control.get("current_run_id"):
             run_id = str(control["current_run_id"])
             run = await self._control.get_run(run_id=run_id)
-            # The revision is read once and passed down. Re-reading it inside
-            # the participant list would let a Start or a Stop that landed
-            # between the two reads produce a payload whose own status and
-            # whose participant details disagree about which revision is in
-            # force -- precisely the contradiction this method exists to
-            # prevent.
-            participants = await self._expected_participants(run=run, now=now, revision=revision)
             stored = await self._control.count_stored_measurements(run_id=run_id)
-        status, gaps = self.effective_status(
-            control=control,
-            run=run if run is not None else stopped_run,
-            participants=participants,
-            now=now,
-        )
+        elif control is not None:
+            # Nothing is configured right now. If something was stopped, the
+            # page can still name it: "off" and "you stopped it four seconds
+            # ago" are different findings, and only the second one tells an
+            # operator whether the change they just made landed.
+            #
+            # It is *context*, never the run in force -- see ``run_active``
+            # below. A reader that confused the two would keep collecting for
+            # an experiment that was already over.
+            stopped_run = await self._last_stopped_run(control)
+        status = self.effective_status(control=control, run=run, now=now)
         return {
             "deployment": self._deployment,
             "mode": profile_mode(),
@@ -477,23 +405,23 @@ class ProfilingControlService:
             "configured": control is not None,
             "server_time": now,
             "status": status,
-            "gaps": gaps,
-            # ``run`` is the experiment *in force*. A stopped one is reported
-            # beside it rather than as it, so a reader -- the policy worker, a
-            # host, the page -- cannot mistake a tombstone for a live command.
-            "run": _run_payload(run, now=now) if run is not None else None,
+            "run": _run_payload(run, now=now),
             "run_active": run is not None,
-            "last_stopped_run": (
-                _run_payload(stopped_run, now=now) if stopped_run is not None else None
-            ),
+            "last_stopped_run": _run_payload(stopped_run, now=now),
             "stored_samples": stored,
             "budget_scope": "producer_instance",
             "budget_note": (
                 "max_operations is per root producer process, not a deployment-wide "
                 "cap; a run on two replicas may admit up to that number on each"
             ),
-            "participants": participants,
-            "participant_ttl_seconds": PARTICIPANT_TTL_SECONDS,
+            # How stale a page may be. Stated as a number because the honest
+            # version of a background switch is "this takes a few seconds", and
+            # a page that did not say so would be implying instant agreement.
+            "sync_note": (
+                "the configuration reaches the control plane, runners and brokers "
+                "through a background sync; allow up to 30 seconds for a change to "
+                "take effect everywhere"
+            ),
             "operations": {
                 "selectable": {
                     group: list(names) for group, names in SELECTABLE_OPERATIONS.items()
@@ -513,8 +441,8 @@ class ProfilingControlService:
 
         Only the deployment's *most recent* stop, and only until a new
         experiment replaces it. A catalogue replay is not the point: this exists
-        so the control card can show why collection is not happening, and a Stop
-        from last week is not why.
+        so the control card can say what was switched off, and a Stop from last
+        week is not what an operator is asking about.
         """
         run_id = control.get("last_stopped_run_id")
         if not run_id:
@@ -526,252 +454,38 @@ class ProfilingControlService:
         *,
         control: Mapping[str, Any] | None,
         run: Mapping[str, Any] | None,
-        participants: Sequence[Mapping[str, Any]],
         now: datetime,
-    ) -> tuple[str, list[dict[str, str]]]:
-        """Decide what this deployment is actually doing, and why.
+    ) -> str:
+        """Return what the deployment is configured to do right now.
 
-        The order of the questions is the order of their authority: a control
-        row that does not exist outranks a run, a lapsed deadline outranks a
-        confirmation, and an unconfirmed participant outranks a stored sample.
+        Four answers, and each is a different fact:
 
-        Returns the status and the gaps that explain anything short of
-        ``collecting``.
+        ``unavailable``
+            There is no control row: runtime control was never enabled for this
+            deployment. Not "off" -- off is a state somebody chose.
+        ``off``
+            There is a control row and it is not collecting. This covers "never
+            switched on" and "switched off" and "the experiment ended"; the page
+            names the last experiment separately when there is one.
+        ``on``
+            The configured experiment has not reached its deadline.
+
+        The deadline is checked here rather than trusted from a sweep having
+        run. A lapsed experiment is over whether or not anything recorded it,
+        and reporting otherwise would be the page claiming collection it cannot
+        stop.
         """
-        gaps: list[dict[str, str]] = []
         if control is None:
-            # No control row: runtime control was never enabled for this
-            # deployment. That is not "off" -- off is a state somebody chose.
-            return STATUS_UNAVAILABLE, [
-                {
-                    "kind": "control_row_missing",
-                    "detail": "this deployment has no profiling control state",
-                }
-            ]
+            return STATUS_UNAVAILABLE
         if run is None:
-            # Never commanded, or commanded and since stopped with the
-            # tombstone already cleared. Either way nothing is being collected,
-            # and there is no experiment to name.
-            return STATUS_OFF, []
-        lifecycle = str(run.get("lifecycle") or "")
+            return STATUS_OFF
         expires_at = run.get("expires_at")
         if expires_at is not None and expires_at <= now:
-            # The authoritative deadline, not a sweep. A run whose sweep has
-            # not run yet is over, and saying otherwise would be the page
-            # reporting an experiment it cannot stop.
-            return STATUS_EXPIRED, [
-                {
-                    "kind": "deadline_passed",
-                    "detail": f"the experiment ended at {expires_at.isoformat()}",
-                }
-            ]
+            return STATUS_OFF
+        lifecycle = str(run.get("lifecycle") or "")
         if lifecycle in TERMINAL_LIFECYCLES:
-            reason = str(run.get("stop_reason") or lifecycle)
-            status = STATUS_EXPIRED if lifecycle == LIFECYCLE_EXPIRED else STATUS_STOPPED
-            return status, [{"kind": "terminal", "detail": reason}]
-        if run.get("stopped_at") is not None and control.get("current_run_id") is None:
-            return STATUS_STOPPED, [
-                {"kind": "stopped", "detail": str(run.get("stop_reason") or "stopped")}
-            ]
-        # From here the experiment is, as far as the database knows, live.
-        stopped_at = control.get("last_stopped_at")
-        wanted = [item for item in participants if item.get("expected")]
-        missing = [item for item in wanted if item.get("missing")]
-        unsupported = [
-            item for item in wanted if not item.get("missing") and not item.get("supported")
-        ]
-        stale = [
-            item
-            for item in wanted
-            if not item.get("missing")
-            and item.get("applied_revision", 0) < int(control["revision"])
-        ]
-        exhausted = [
-            item
-            for item in wanted
-            if not item.get("missing") and item.get("state") == PARTICIPANT_EXHAUSTED
-        ]
-        if stopped_at is not None and not wanted:
-            # A Stop was issued and nothing is expected to still hold the old
-            # authorization: reporting "off" is exact, and the run keeps its
-            # history.
-            return STATUS_STOPPED, [{"kind": "stopped", "detail": "collection was stopped"}]
-        for name, bucket in (
-            ("participant_missing", missing),
-            ("participant_unsupported", unsupported),
-            ("participant_behind", stale),
-            ("participant_budget_exhausted", exhausted),
-        ):
-            for item in bucket:
-                gaps.append(
-                    {
-                        "kind": name,
-                        "detail": _gap_detail(name, item),
-                    }
-                )
-        if gaps:
-            # Somebody in the selected scope is not collecting. The experiment
-            # is real and partial, and the page must not round that up.
-            if lifecycle == LIFECYCLE_PENDING and not any(
-                item.get("applied_revision", 0) >= int(control["revision"]) for item in wanted
-            ):
-                return STATUS_STARTING, gaps
-            return STATUS_PARTIALLY_ACTIVE, gaps
-        if not wanted:
-            # Nothing in the selected scope has a process to confirm with --
-            # for example a host that has never enrolled. The run is live but
-            # unobserved, and saying "collecting" would be a claim with no
-            # evidence behind it.
-            return STATUS_STARTING, [
-                {
-                    "kind": "no_participants",
-                    "detail": "no process in the selected scope has reported yet",
-                }
-            ]
-        if lifecycle == LIFECYCLE_PENDING:
-            # Every expected participant is already on the current revision,
-            # which is what "confirmed" means; the run is collecting.
-            return STATUS_COLLECTING, []
-        return STATUS_COLLECTING, []
-
-    async def _expected_participants(
-        self,
-        *,
-        run: Mapping[str, Any] | None,
-        now: datetime,
-        revision: int = 0,
-    ) -> list[dict[str, Any]]:
-        """Return the participants this run expects, with what each reported.
-
-        The expectation is derived from the run's own manifest: which
-        operations it selects decides which *kinds* of process are needed, and
-        its target decides which hosts. A host added to the pool after the run
-        started is expected too, because it will claim turns and its broker will
-        serve calls; a host the run did not target is not, because nothing was
-        asked of it.
-        """
-        if run is None:
-            return []
-        reported = await self._control.list_participants(
-            deployment=self._deployment, now=now, run_id=str(run["run_id"])
-        )
-        # The hosts this run actually asked something of. A process on a host
-        # the run did not target is reported (its revision is real evidence)
-        # but is *not* judged against the revision, because nothing was asked
-        # of it: counting it would flip a run that no target host has answered
-        # for from "starting" to "partially active" on the strength of a
-        # machine that was never in scope.
-        target_hosts = await self._target_hosts(run.get("target") or {})
-        in_scope = set(target_hosts)
-        views = [
-            _view(item, expected=(item.get("host") in in_scope) if item.get("host") else True)
-            for item in reported
-        ]
-        # The control plane's own root producers are one process each, and there
-        # is no registry of replicas to compare against: the ones that report
-        # are counted, and a replica that has never reported is simply not
-        # listed rather than invented. Runners and brokers *are* enumerable --
-        # by host, from the run's target -- so a slot nobody filled is added as
-        # missing, because "that host never answered" is the finding the page
-        # exists to show.
-        for kind, host in await self._required_slots(run=run, hosts=target_hosts):
-            if kind == PARTICIPANT_CONTROL_PLANE:
-                continue
-            if any(view.kind == kind and (view.host or "") == (host or "") for view in views):
-                continue
-            views.append(
-                ParticipantView(
-                    participant_id=f"{kind}:{host or 'any'}",
-                    kind=kind,
-                    host=host,
-                    run_id=None,
-                    applied_revision=-1,
-                    capability=None,
-                    state=PARTICIPANT_APPLIED,
-                    detail="has not reported this experiment yet",
-                    confirmed_at=None,
-                    expires_at=None,
-                    expected=True,
-                    missing=True,
-                )
-            )
-        for view in views:
-            if view.expected and not view.missing and view.applied_revision < revision:
-                view.detail = view.detail or (
-                    f"applied revision {view.applied_revision}, deployment is on {revision}"
-                )
-        views.sort(key=lambda item: (item.kind, item.host or "", item.participant_id))
-        return [view.to_payload() for view in views]
-
-    async def _required_slots(
-        self, *, run: Mapping[str, Any], hosts: Sequence[str | None] | None = None
-    ) -> list[tuple[str, str | None]]:
-        """Return the (kind, host) pairs this run needs to be collecting.
-
-        Sandbox startup is rooted in the runner and its container work happens
-        in the broker, so both are required per selected host. File and terminal
-        operations are rooted in the control plane but still served by the
-        host's broker, so a target host's broker is required for those too.
-        """
-        operations = {str(item) for item in run.get("operations") or ()}
-        selected = (
-            list(hosts) if hosts is not None else await self._target_hosts(run.get("target") or {})
-        )
-        slots: list[tuple[str, str | None]] = [(PARTICIPANT_CONTROL_PLANE, None)]
-        if OPERATION_STARTUP in operations:
-            for host in selected:
-                slots.append((PARTICIPANT_RUNNER, host))
-        for host in selected:
-            slots.append((PARTICIPANT_BROKER, host))
-        return slots
-
-    async def _target_hosts(self, target: Mapping[str, Any]) -> list[str | None]:
-        """Return the hosts a run's target names, or every enrolled host."""
-        wanted = str(target.get("host") or "").strip()
-        if wanted:
-            return [wanted]
-        if self._host_pool is None:
-            return []
-        try:
-            hosts = await self._host_pool.list_runner_hosts()
-        except Exception:  # pragma: no cover - a read that must not break the page
-            logger.warning("agent_profiling_host_list_failed", exc_info=True)
-            return []
-        return [str(item.get("host")) for item in hosts if item.get("host")]
-
-
-def _view(item: Mapping[str, Any], *, expected: bool) -> ParticipantView:
-    """Return one reported participant as a view."""
-    return ParticipantView(
-        participant_id=str(item.get("participant_id") or ""),
-        kind=str(item.get("kind") or ""),
-        host=item.get("host"),
-        run_id=item.get("run_id"),
-        applied_revision=int(item.get("applied_revision") or 0),
-        capability=item.get("capability"),
-        state=str(item.get("state") or PARTICIPANT_APPLIED),
-        detail=str(item.get("detail") or ""),
-        budget=item.get("budget") or {},
-        confirmed_at=item.get("confirmed_at"),
-        expires_at=item.get("expires_at"),
-        expected=expected,
-    )
-
-
-def _gap_detail(kind: str, item: Mapping[str, Any]) -> str:
-    """Return a one-line explanation for one participant's gap."""
-    who = item.get("host") or item.get("participant_id") or "a participant"
-    if kind == "participant_missing":
-        return f"{who} has not reported this experiment"
-    if kind == "participant_unsupported":
-        return f"{who} does not support runtime profiling control"
-    if kind == "participant_behind":
-        return (
-            f"{who} applied revision {item.get('applied_revision')}, which is behind the deployment"
-        )
-    if kind == "participant_budget_exhausted":
-        return f"{who} spent its local operation allowance"
-    return f"{who} is not confirmed"
+            return STATUS_OFF
+        return STATUS_ON
 
 
 def _run_payload(run: Mapping[str, Any] | None, *, now: datetime) -> dict[str, Any] | None:
@@ -819,21 +533,12 @@ __all__ = [
     "OPERATION_FILES_OPEN",
     "OPERATION_STARTUP",
     "OPERATION_TERMINAL_OPEN",
-    "PARTICIPANT_TTL_SECONDS",
-    "PROFILING_CONTROL_CAPABILITY",
     "SELECTABLE_GROUPS",
     "SELECTABLE_OPERATIONS",
-    "STATUS_COLLECTING",
-    "STATUS_EXPIRED",
     "STATUS_OFF",
-    "STATUS_PARTIALLY_ACTIVE",
-    "STATUS_STARTING",
-    "STATUS_STOPPED",
-    "STATUS_STOPPING",
+    "STATUS_ON",
     "STATUS_UNAVAILABLE",
-    "STATUS_UNKNOWN",
     "STATUS_UNMANAGED",
-    "ParticipantView",
     "ProfilingControlService",
     "Refusal",
     "StartRequest",

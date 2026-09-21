@@ -11,22 +11,22 @@ and splitting them would let them drift:
   administrator's request id. A response that was lost is retried with the same
   id and the same action, and the answer is the run that was already created
   rather than a second experiment.
-* **Participant state** -- which control-plane process, runner or broker has
-  applied which revision, bounded by a TTL so a decommissioned replica stops
-  being reported as missing.
+Deliberately absent is any per-process state. A participant registry would exist
+to answer "has every process applied this yet", and nothing asks that: sync is
+allowed to lag, the page reports the configuration rather than a consensus, and
+a process that has not caught up keeps selecting until the experiment's own
+deadline. Adding the registry back would mean inventing acknowledgements to fill
+it.
 
 Three orders that must never be confused, and each is a different column or a
 different object:
 
 * ``config_version`` on the run manifest says *which immutable experiment* this
   is. It never changes for a given run.
-* ``revision`` says *which control command was applied last*. It advances on
-  every Start and every Stop, including a Stop of an experiment that had
-  already expired.
-* the renewal sequence lives only in memory, in the collector, and says *which
-  authorization refresh a process has seen*. It is deliberately not stored: a
-  renewal is not a command and must never advance the revision, or a lease that
-  quietly lapsed would look like an administrator's decision.
+* ``revision`` says *which configuration was applied last*. It advances on every
+  Start and every Stop, including a Stop of an experiment that had already
+  expired, and it is what a host compares against so a delayed answer cannot
+  undo a newer one. There is no renewal sequence: nothing here renews.
 """
 
 from __future__ import annotations
@@ -84,35 +84,6 @@ class ProfilingControl(Protocol):
         self, *, deployment: str, run_id: str, now: datetime
     ) -> ControlCommandResult:
         """Land the terminal state of a run whose deadline has passed."""
-        ...
-
-    async def record_participant(
-        self,
-        *,
-        deployment: str,
-        participant_id: str,
-        kind: str,
-        host: str | None,
-        run_id: str | None,
-        applied_revision: int,
-        capability: str | None,
-        state: str,
-        detail: str,
-        budget: Mapping[str, Any] | None,
-        ttl_seconds: int,
-        now: datetime,
-    ) -> None:
-        """Record one process's applied revision and what it reported."""
-        ...
-
-    async def list_participants(
-        self, *, deployment: str, now: datetime, run_id: str | None = None
-    ) -> list[dict[str, Any]]:
-        """Return the participants that have not expired, newest first."""
-        ...
-
-    async def prune_participants(self, *, deployment: str, now: datetime) -> int:
-        """Delete expired participant rows and return how many went."""
         ...
 
     async def count_stored_measurements(self, *, run_id: str) -> int:

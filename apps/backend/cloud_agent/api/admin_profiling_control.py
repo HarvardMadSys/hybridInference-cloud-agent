@@ -47,7 +47,6 @@ from cloud_agent.domain.profiling_control import (
     CONTROL_REFUSED_INVALID,
     CONTROL_REFUSED_NOT_ADMIN_MODE,
     CONTROL_REFUSED_STALE_REVISION,
-    CONTROL_REFUSED_STOPPING,
     CONTROL_REFUSED_UNKNOWN_RUN,
 )
 from cloud_agent.logging_utils import get_logger
@@ -73,7 +72,6 @@ _REFUSAL_STATUS: dict[str, int] = {
     CONTROL_REFUSED_INVALID: 422,
     CONTROL_REFUSED_STALE_REVISION: 409,
     CONTROL_REFUSED_ALREADY_ACTIVE: 409,
-    CONTROL_REFUSED_STOPPING: 409,
     CONTROL_REFUSED_UNKNOWN_RUN: 409,
     CONTROL_REFUSED_ALREADY_FINISHED: 409,
     CONTROL_REFUSED_CONFLICTING_REQUEST: 409,
@@ -127,14 +125,14 @@ async def get_profiling_control(
     """Return the control mode, the current experiment and what has confirmed it.
 
     ``mode`` is the deployment's answer to "who may control this", and it is
-    what stops the page from offering a Start that would do nothing. The three
+    what stops the page from offering a switch that would do nothing. The three
     answers are deliberately different:
 
     * ``disabled`` -- no control at all, and no collection either.
     * ``environment`` -- a static descriptor decides; Admin reports that the
-      deployment is configuration-managed and offers no Stop, because there is
-      nothing for this API to stop.
-    * ``admin`` -- the persisted control state decides, and everything below
+      deployment is configuration-managed and offers no switch, because there is
+      nothing for this API to turn off.
+    * ``admin`` -- the persisted configuration decides, and everything below
       applies.
 
     A deployment whose mode is not ``admin`` still gets an answer rather than a
@@ -143,6 +141,11 @@ async def get_profiling_control(
     mode = profile_mode()
     now = datetime.now(timezone.utc)
     if mode != MODE_ADMIN:
+        # Not under Admin control, so there is no configuration to read. The
+        # answer still has the same *shape* as a real one -- every key present,
+        # the vocabulary empty -- so the page can render it without a special
+        # case, and it says why in the mode it reports rather than in a field a
+        # reader would have to interpret.
         return {
             "deployment": profiling_control_deployment(),
             "mode": mode,
@@ -150,18 +153,13 @@ async def get_profiling_control(
             "revision": 0,
             "server_time": now,
             "status": "unmanaged" if mode == MODE_ENVIRONMENT else "unavailable",
-            "gaps": [
-                {
-                    "kind": "mode_not_admin",
-                    "detail": _mode_explanation(mode),
-                }
-            ],
             "run": None,
+            "run_active": False,
+            "last_stopped_run": None,
             "stored_samples": 0,
             "budget_scope": "producer_instance",
             "budget_note": "",
-            "participants": [],
-            "participant_ttl_seconds": 0,
+            "sync_note": "",
             "operations": {"selectable": {}, "all": []},
             "bounds": {},
         }
@@ -331,9 +329,8 @@ async def _revision(capability: _ControlStorage) -> int:
     """Return the deployment's current revision, for a refusal to state.
 
     Read from the control row rather than from the whole snapshot: a refusal
-    only has to carry the number the caller must re-read, and building the
-    participant list to answer "somebody else moved it" would make the cheapest
-    refusal the most expensive one.
+    only has to carry the number the caller must re-read, and the page needs no
+    further detail to recover from "somebody else moved it".
     """
     control = await capability.profiling_control.get_control_state(
         deployment=profiling_control_deployment()

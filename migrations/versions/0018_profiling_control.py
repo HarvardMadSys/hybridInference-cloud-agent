@@ -2,9 +2,15 @@
 
 Revision 0017 made an experiment something the database could describe after
 the fact. This one makes it something the database can *command*: a singleton
-control row an Admin Start/Stop advances, an idempotency record so a lost
-response is retried rather than duplicated, and a bounded participant table so
-the page can say which process has actually applied the current revision.
+control row an Admin Start/Stop advances, and an idempotency record so a lost
+response is retried rather than duplicated.
+
+Deliberately absent is any per-process state. A participant table would exist
+to answer "has every process applied this revision", and the feature does not
+ask that question: the control card reports the *configuration*, the sync is
+allowed to lag, and a process that has not caught up yet simply keeps selecting
+until the experiment's own deadline. Adding the table back would mean inventing
+the acknowledgements that would fill it.
 
 Four decisions are worth reading before changing anything here.
 
@@ -74,14 +80,8 @@ _LIFECYCLE_COMMENT = (
     "predates runtime control and no control state was ever recorded for it."
 )
 
-#: How long a participant row survives without a fresh confirmation. Long
-#: enough that a 30-second idle sync is not treated as a lost process, short
-#: enough that a decommissioned replica does not sit in the page forever.
-PARTICIPANT_TTL_SECONDS = 300
-
-
 def upgrade() -> None:
-    """Add the control row, its command log, participant state and lifecycle."""
+    """Add the control row, its command log and the run lifecycle columns."""
     op.execute(
         f"""
         CREATE TABLE IF NOT EXISTS agent_operation_profiling_control (
@@ -159,38 +159,6 @@ def upgrade() -> None:
         """
     )
 
-    op.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS agent_operation_profiling_participants (
-            deployment TEXT NOT NULL,
-            participant_id TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            host TEXT,
-            run_id TEXT,
-            applied_revision BIGINT NOT NULL DEFAULT 0,
-            capability TEXT,
-            state TEXT NOT NULL DEFAULT 'unknown',
-            detail TEXT,
-            budget JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-            confirmed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '{PARTICIPANT_TTL_SECONDS} seconds',
-            PRIMARY KEY (deployment, participant_id),
-            CONSTRAINT ck_agent_operation_profiling_participants_kind
-                CHECK (kind IN ('control_plane', 'runner', 'broker')),
-            CONSTRAINT ck_agent_operation_profiling_participants_state
-                CHECK (state IN ('applied', 'unsupported', 'unconfirmed', 'exhausted')),
-            CONSTRAINT ck_agent_operation_profiling_participants_budget_object
-                CHECK (jsonb_typeof(budget) = 'object')
-        )
-        """
-    )
-    op.execute(
-        """
-        CREATE INDEX IF NOT EXISTS ix_agent_operation_profiling_participants_expiry
-            ON agent_operation_profiling_participants (deployment, expires_at)
-        """
-    )
-
     # Lifecycle is additive and nullable on purpose: a run catalogued by a
     # producer before this revision existed has no lifecycle, and "this
     # experiment predates runtime control" is an answer the Admin surface can
@@ -265,8 +233,6 @@ def downgrade() -> None:
             DROP COLUMN IF EXISTS source
         """
     )
-    op.execute("DROP INDEX IF EXISTS ix_agent_operation_profiling_participants_expiry")
-    op.execute("DROP TABLE IF EXISTS agent_operation_profiling_participants")
     op.execute("DROP INDEX IF EXISTS ix_agent_operation_profiling_commands_created")
     op.execute("DROP TABLE IF EXISTS agent_operation_profiling_commands")
     op.execute("DROP TABLE IF EXISTS agent_operation_profiling_control")

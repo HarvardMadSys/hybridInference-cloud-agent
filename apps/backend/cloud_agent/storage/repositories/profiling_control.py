@@ -9,6 +9,12 @@ has to be created on demand is a row two writers can both decide to create, and
 a lock on a row that does not exist protects nothing -- the mistake the design
 calls out by name.
 
+**A Stop is a configuration change, not a withdrawal.** It moves the version and
+records the tombstone; it waits for nothing to acknowledge it and reaches into
+no work that already started. An operation selected before the Stop finishes and
+delivers under the manifest that selected it, and the only thing bounding a
+process that never hears the Stop is the experiment's own ``expires_at``.
+
 **The request is checked before the revision.** A Start whose response was lost
 is retried with the same request id and the same body, and it must return the
 experiment that was already created rather than refusing on a revision that the
@@ -26,7 +32,6 @@ rewriting it would refuse every record that was already in flight -- the exact
 from __future__ import annotations
 
 import json
-from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.domain.profiling_control import (
@@ -37,7 +42,6 @@ from cloud_agent.domain.profiling_control import (
     CONTROL_REFUSED_ALREADY_FINISHED,
     CONTROL_REFUSED_CONFLICTING_REQUEST,
     CONTROL_REFUSED_STALE_REVISION,
-    CONTROL_REFUSED_STOPPING,
     CONTROL_REFUSED_UNKNOWN_RUN,
     ControlCommandResult,
 )
@@ -59,21 +63,9 @@ LIFECYCLE_FAILED = "failed"
 #: new experiment may start.
 TERMINAL_LIFECYCLES = frozenset({LIFECYCLE_STOPPED, LIFECYCLE_EXPIRED, LIFECYCLE_FAILED})
 
-#: Participant kinds. The control plane's own root producers are one kind
-#: because they share a process and therefore a policy snapshot.
-PARTICIPANT_CONTROL_PLANE = "control_plane"
-PARTICIPANT_RUNNER = "runner"
-PARTICIPANT_BROKER = "broker"
-
-#: What a participant reported about the revision it holds.
-PARTICIPANT_APPLIED = "applied"
-PARTICIPANT_UNSUPPORTED = "unsupported"
-PARTICIPANT_UNCONFIRMED = "unconfirmed"
-PARTICIPANT_EXHAUSTED = "exhausted"
-
 
 class PostgresProfilingControlRepository:
-    """The deployment control row, its command log and its participant state."""
+    """The deployment control row and its command log."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Wrap the pool the control plane already owns."""
@@ -174,19 +166,6 @@ class PostgresProfilingControlRepository:
                         f"deployment is on {control['revision']}"
                     ),
                 )
-            stopping = await _stop_propagation_pending(conn, deployment=deployment, now=now)
-            if stopping is not None:
-                # Starting while the previous experiment's authorizations may
-                # still be live would let two experiments collect at once, and
-                # the resulting samples would be filed under whichever run the
-                # producer happened to hold. Waiting is the only safe answer.
-                return _refuse(
-                    CONTROL_REFUSED_STOPPING,
-                    revision=int(control["revision"]),
-                    run_id=stopping,
-                    detail="the previous experiment is still propagating its stop",
-                )
-
             revision = int(control["revision"]) + 1
             await _insert_run(conn, run=run, deployment=deployment, actor_id=actor_id, now=now)
             await conn.execute(
@@ -428,100 +407,6 @@ class PostgresProfilingControlRepository:
                 reason="expired",
             )
 
-    # -- participants ------------------------------------------------------
-
-    async def record_participant(
-        self,
-        *,
-        deployment: str,
-        participant_id: str,
-        kind: str,
-        host: str | None,
-        run_id: str | None,
-        applied_revision: int,
-        capability: str | None,
-        state: str,
-        detail: str,
-        budget: Mapping[str, Any] | None,
-        ttl_seconds: int,
-        now: datetime,
-    ) -> None:
-        """Record one process's applied revision and what it reported."""
-        expires_at = now + timedelta(seconds=max(1, int(ttl_seconds)))
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO agent_operation_profiling_participants (
-                    deployment, participant_id, kind, host, run_id,
-                    applied_revision, capability, state, detail, budget,
-                    confirmed_at, expires_at
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
-                ON CONFLICT (deployment, participant_id) DO UPDATE
-                SET kind = EXCLUDED.kind,
-                    host = EXCLUDED.host,
-                    run_id = EXCLUDED.run_id,
-                    applied_revision = EXCLUDED.applied_revision,
-                    capability = EXCLUDED.capability,
-                    state = EXCLUDED.state,
-                    detail = EXCLUDED.detail,
-                    budget = EXCLUDED.budget,
-                    confirmed_at = EXCLUDED.confirmed_at,
-                    expires_at = EXCLUDED.expires_at
-                """,
-                deployment,
-                participant_id,
-                kind,
-                host,
-                run_id,
-                int(applied_revision),
-                capability,
-                state,
-                detail,
-                json.dumps(dict(budget or {})),
-                now,
-                expires_at,
-            )
-
-    async def list_participants(
-        self, *, deployment: str, now: datetime, run_id: str | None = None
-    ) -> list[dict[str, Any]]:
-        """Return the participants that have not expired, newest first."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT deployment, participant_id, kind, host, run_id,
-                       applied_revision, capability, state, detail, budget,
-                       confirmed_at, expires_at
-                FROM agent_operation_profiling_participants
-                WHERE deployment = $1
-                  AND expires_at > $2
-                  AND ($3::text IS NULL OR run_id = $3)
-                ORDER BY confirmed_at DESC, participant_id DESC
-                """,
-                deployment,
-                now,
-                run_id,
-            )
-        return [_participant_row(row) for row in rows]
-
-    async def prune_participants(self, *, deployment: str, now: datetime) -> int:
-        """Delete expired participant rows and return how many went."""
-        async with self._pool.acquire() as conn:
-            deleted = await conn.execute(
-                """
-                DELETE FROM agent_operation_profiling_participants
-                WHERE deployment = $1 AND expires_at <= $2
-                """,
-                deployment,
-                now,
-            )
-        # asyncpg answers a DELETE with its command tag, e.g. "DELETE 3".
-        try:
-            return int(str(deleted).rsplit(" ", 1)[-1])
-        except (TypeError, ValueError):  # pragma: no cover - driver tag shape
-            return 0
-
     # -- runs --------------------------------------------------------------
 
     async def count_stored_measurements(self, *, run_id: str) -> int:
@@ -649,23 +534,6 @@ def _run_detail_row(row: Any) -> dict[str, Any]:
     }
 
 
-def _participant_row(row: Any) -> dict[str, Any]:
-    """Return one participant row as plain data."""
-    return {
-        "participant_id": row["participant_id"],
-        "kind": row["kind"],
-        "host": row["host"],
-        "run_id": row["run_id"],
-        "applied_revision": int(row["applied_revision"]),
-        "capability": row["capability"],
-        "state": row["state"],
-        "detail": row["detail"],
-        "budget": json.loads(row["budget"]),
-        "confirmed_at": row["confirmed_at"],
-        "expires_at": row["expires_at"],
-    }
-
-
 #: The row that answers for a deployment which has never been commanded under
 #: its own name. The migration seeds it, so naming a deployment does not disable
 #: Admin control until somebody inserts a row by hand.
@@ -729,60 +597,6 @@ async def _read_control(conn: Any, *, deployment: str) -> dict[str, Any]:
         deployment,
     )
     return _control_row(row) if row is not None else {}
-
-
-async def _stop_propagation_pending(conn: Any, *, deployment: str, now: Any) -> str | None:
-    """Return the run whose stop may still be propagating, if any.
-
-    A Stop is not instantaneous across processes: a runner that has not yet
-    synced still holds an authorization with up to its own lease left. Starting
-    a new experiment inside that window would let two runs collect at once, so a
-    Start waits for the window to close.
-
-    The window is measured from the tombstone the Stop wrote, and it is bounded
-    rather than waiting for acknowledgements: an offline host must not be able
-    to block an administrator indefinitely, which is exactly the failure the
-    design forbids.
-    """
-    row = await conn.fetchrow(
-        """
-        SELECT last_stopped_run_id, last_stopped_at, revision
-        FROM agent_operation_profiling_control
-        WHERE deployment = $1
-        """,
-        deployment,
-    )
-    if row is None or row["last_stopped_at"] is None or not row["last_stopped_run_id"]:
-        return None
-    elapsed = (now - row["last_stopped_at"]).total_seconds()
-    if elapsed >= _STOP_PROPAGATION_SECONDS:
-        return None
-    # A participant that has already confirmed the stopping revision proves the
-    # window is closed *for that process*; the guard is only about the ones that
-    # have not answered, so it clears as soon as none are outstanding.
-    outstanding = await conn.fetchval(
-        """
-        SELECT COUNT(*) FROM agent_operation_profiling_participants
-        WHERE deployment = $1
-          AND expires_at > $2
-          AND run_id = $3
-          AND applied_revision < $4
-        """,
-        deployment,
-        now,
-        str(row["last_stopped_run_id"]),
-        int(row["revision"]),
-    )
-    if not outstanding:
-        return None
-    return str(row["last_stopped_run_id"])
-
-
-#: How long a stopped experiment's outstanding authorizations are assumed to
-#: live. It is the collector's authorization ceiling plus the client's own
-#: worst-case sync, stated here because the guard is a database concern; the
-#: design's contract is 20 seconds for every old authorization to lapse.
-_STOP_PROPAGATION_SECONDS = 20.0
 
 
 async def _insert_run(
@@ -904,13 +718,6 @@ __all__ = [
     "LIFECYCLE_FAILED",
     "LIFECYCLE_PENDING",
     "LIFECYCLE_STOPPED",
-    "PARTICIPANT_APPLIED",
-    "PARTICIPANT_BROKER",
-    "PARTICIPANT_CONTROL_PLANE",
-    "PARTICIPANT_EXHAUSTED",
-    "PARTICIPANT_RUNNER",
-    "PARTICIPANT_UNCONFIRMED",
-    "PARTICIPANT_UNSUPPORTED",
     "TERMINAL_LIFECYCLES",
     "PostgresProfilingControlRepository",
 ]

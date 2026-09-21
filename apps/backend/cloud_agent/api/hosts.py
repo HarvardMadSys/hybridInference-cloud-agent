@@ -36,7 +36,6 @@ from cloud_agent.schemas import (
     HostHeartbeatResponse,
     HostRegisterRequest,
     HostRegisterResponse,
-    ProfilingPolicy,
     ResidencyBeat,
     RetainedSandboxStop,
 )
@@ -355,7 +354,6 @@ async def heartbeat_host(
             )
             if due is not None:
                 retained_stops.append(RetainedSandboxStop.model_validate(due))
-    policy = await _profiling_policy_for(body, host=updated, store=job_store)
     return HostHeartbeatResponse(
         host=updated["host"],
         status=updated["status"],
@@ -374,37 +372,7 @@ async def heartbeat_host(
         # already wrong when the host enrolled — which is how the first remote
         # host was misconfigured, and it stayed invisible for a day.
         broker_error=await _probed_broker_error(updated["host"], body.broker_url),
-        # The policy rides the beat so a Start or a Stop reaches a host without
-        # a second channel: the host is already here, already authenticated,
-        # and already being answered. A control plane that cannot read its own
-        # control row answers with no run rather than failing the beat --
-        # liveness must never depend on a monitoring feature.
-        profiling=policy,
     )
-
-
-async def _profiling_policy_for(
-    body: HostHeartbeatRequest, *, host: dict[str, Any], store: Any
-) -> ProfilingPolicy | None:
-    """Return this host's profiling policy, or ``None`` when it cannot be read.
-
-    Never raises. A heartbeat is a host's liveness signal, and turning a
-    monitoring feature's failure into "this machine is gone" would take a host
-    out of the pool because an administrator's experiment could not be
-    described.
-    """
-    from cloud_agent.api.host_profiling import build_policy_for_host
-
-    try:
-        answer = await build_policy_for_host(
-            host=host,
-            reported=(body.profiling.model_dump() if body.profiling is not None else {}),
-            store=store,
-        )
-        return ProfilingPolicy.model_validate(answer)
-    except Exception:
-        logger.warning("agent_profiling_policy_failed", exc_info=True)
-        return None
 
 
 from cloud_agent.application.residency import RESIDENCY_TTL_S

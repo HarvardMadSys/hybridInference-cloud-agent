@@ -236,9 +236,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         logger.info("cloud agent control plane started")
     else:
         # The relay listener roots no file or terminal request, so it has no
-        # policy to apply. Publishing one there would be a second process
-        # collecting under the same revision, which is what the participant
-        # table exists to make visible rather than to hide.
+        # configuration to apply and nothing to collect.
         app.state.profiling_control_service = None
         app.state.profiling_policy_worker = None
         app.state.profiling_policy_task = None
