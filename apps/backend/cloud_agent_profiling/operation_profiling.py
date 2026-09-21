@@ -65,7 +65,7 @@ import time
 import uuid
 from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -80,8 +80,44 @@ ENV_PROFILING_ENABLED = "AGENT_OPERATION_PROFILING_ENABLED"
 #: JSON descriptor for the current profiling run. See :class:`ProfilingRun`.
 ENV_PROFILING_RUN = "AGENT_OPERATION_PROFILING_RUN"
 
+#: Which control source this deployment allows. One of :data:`PROFILING_MODES`.
+#: Absent keeps the pre-control semantics exactly (``ENABLED`` + ``RUN``, read
+#: once per process); ``admin`` is what makes an Admin Start/Stop take effect
+#: without a restart, and the only mode in which a runtime policy replaces the
+#: environment. It is read once per process: it is deployment configuration,
+#: and the design says the mode is *how* a deployment may be controlled, never
+#: the per-experiment switch itself.
+ENV_PROFILING_MODE = "AGENT_OPERATION_PROFILING_MODE"
+
 #: Optional JSONL path. Each finished measurement is appended as one line.
 ENV_PROFILING_SINK = "AGENT_OPERATION_PROFILING_SINK"
+
+#: The three answers to "who decides whether this deployment collects".
+#:
+#: ``disabled``  -- nobody does. Admin shows the control as unavailable rather
+#:                  than offering a Start that would do nothing.
+#: ``environment`` -- only the static ``ENABLED``/``RUN`` pair does, re-read
+#:                  only when the process restarts. Admin says the deployment
+#:                  is managed by configuration and offers no fake Stop.
+#: ``admin``     -- only the persisted control state does. ``ENABLED=false``
+#:                  no longer vetoes an Admin Start, and no old ``RUN`` may be
+#:                  used as a fallback after an Admin Stop: a Stop has to mean
+#:                  stopped, and a leftover descriptor silently re-enabling a
+#:                  lapsed experiment is exactly the "off that is not off" the
+#:                  design forbids.
+MODE_DISABLED = "disabled"
+MODE_ENVIRONMENT = "environment"
+MODE_ADMIN = "admin"
+
+#: Declared explicitly rather than derived, so a typo in the environment is
+#: refused instead of being read as "the default".
+PROFILING_MODES = (MODE_DISABLED, MODE_ENVIRONMENT, MODE_ADMIN)
+
+#: Who rooted a run. A record carries this so a reader can tell a static
+#: env experiment from one an administrator started, which is what makes the
+#: "no control state" compatibility answer possible instead of a guess.
+SOURCE_ENVIRONMENT = "environment"
+SOURCE_ADMIN = "admin"
 
 #: Major is bumped when a reader of an older record would misread a new one;
 #: minor when fields are only added. v2 is additive over v1: ``outcome`` joins
@@ -268,6 +304,360 @@ class ProfilingRun:
     target: Mapping[str, str] = field(default_factory=dict)
     config_version: int = 1
     admission_instances: tuple[Mapping[str, Any], ...] = ()
+    #: Who rooted this run: a static deployment descriptor or an administrator.
+    #: It travels into every measurement, so a record says which control source
+    #: produced it rather than leaving a reader to infer it from a run id.
+    source: str = SOURCE_ENVIRONMENT
+
+
+@dataclass(frozen=True)
+class RunAuthorization:
+    """One bounded, revocable authorization to collect for one run.
+
+    This is the unit the design calls "有期限的授权": a downstream process is
+    told which run it may collect for, until when, and under which control
+    revision, and it stops at that instant whether or not it ever hears from
+    the control plane again. A renewed authorization is a *new* instance with a
+    later deadline; the old one is never mutated, so two threads that read the
+    same authorization cannot disagree about when it lapsed.
+
+    An authorization is also the revocation handle. Because the collector reads
+    the run's authorization again before every mark, span or fragment, a Stop
+    that publishes an authorization for a different run (or none at all) ends
+    collection in this process at the next observation -- with no signal, no
+    connection and no cooperation from the network.
+    """
+
+    run_id: str
+    #: Deployment control order. This is *not* the immutable configuration
+    #: version of :class:`ProfilingRun` and not the renewal sequence: it is the
+    #: authority's "which command was last applied", which is what lets a
+    #: downstream process tell a late renewal from a newer Stop.
+    control_revision: int
+    #: Renewal sequence, monotonic per control revision. A repeated delivery of
+    #: the same authorization carries the same sequence and therefore cannot
+    #: push a local deadline further out.
+    renewal_seq: int
+    #: This process's monotonic deadline. Derived from the authority's expiry
+    #: with the request's round trip already deducted, and never compared with
+    #: another machine's monotonic value.
+    deadline_mono: float
+    #: The authority's own wall-clock expiry, carried for the wire so a
+    #: downstream process can re-derive its own monotonic deadline. Absent for
+    #: a purely local authorization.
+    expires_at_epoch: float | None = None
+    #: The immutable manifest this authorization is for. Carried on the wire so
+    #: a child binds to the experiment it was selected under even if its own
+    #: policy snapshot has already moved on; ``None`` keeps the legacy
+    #: environment behaviour, where the descriptor is process configuration.
+    operations: frozenset[str] | None = None
+    target: Mapping[str, str] | None = None
+    expires_at_utc: datetime | None = None
+    config_version: int | None = None
+    max_operations: int | None = None
+    admission_instances: tuple[Mapping[str, Any], ...] = ()
+    source: str = SOURCE_ENVIRONMENT
+
+    @property
+    def sequence(self) -> tuple[int, int]:
+        """Return the ordering key a renewal must be compared by."""
+        return (self.control_revision, self.renewal_seq)
+
+
+@dataclass(frozen=True)
+class ControlState:
+    """What a control source answers when asked for the current experiment.
+
+    ``authority_epoch`` is the authority's wall clock at the moment the answer
+    was produced on this machine -- the local receive time for a snapshot read
+    from the database, the local issue time for an authorization minted here.
+    For admin control it is also the tombstone that makes a Stop sticky: a
+    command is in force from the revision it created, so an authorization that
+    predates it can never be re-created from a stale snapshot.
+    """
+
+    mode: str = MODE_DISABLED
+    control_revision: int = 0
+    run: ProfilingRun | None = None
+    authority_epoch: float = 0.0
+    #: Why there is no run, when there is none.
+    stop_reason: str = ""
+    #: How long an authorization minted here may run without renewal. The
+    #: design's ceiling for a node that loses contact with the control source.
+    authorization_ttl_s: float = 0.0
+
+
+#: Why an admin experiment is not collecting. Declared because the UI shows
+#: them and a name invented at the display layer would be a second vocabulary.
+STOP_REASON_EXPIRED = "expired"
+STOP_REASON_STOPPED = "stopped"
+STOP_REASON_SUPERSEDED = "superseded"
+STOP_REASON_REVOKED = "stopped_locally"
+
+
+@dataclass(frozen=True)
+class _Published:
+    """One immutable pair of policy and derived run, swapped as one object."""
+
+    policy: ControlState
+    run: ProfilingRun | None
+    authorization_ttl_s: float
+    #: Monotonic order of publication in this process. A caller compares the
+    #: authorization it holds with this to detect a Stop that happened after
+    #: its own collection began, without trusting any remote clock.
+    generation: int
+
+
+class RuntimePolicyStore:
+    """Inside-process, thread-safe holder for the current control snapshot.
+
+    Two properties are load-bearing and both are about *stopping*:
+
+    * **A snapshot is replaced whole.** Readers never see a new run id paired
+      with the previous run's operations, deadline or budget, because there is
+      no moment at which the two are separate objects.
+    * **A later snapshot always wins, even if it says "nothing".** A stale
+      snapshot that arrives late cannot re-activate a run that has since been
+      stopped: an authorization is only minted for the run the snapshot itself
+      names, from the authority instant that snapshot carried, and a Stop is a
+      tombstone rather than an absence.
+    """
+
+    def __init__(self) -> None:
+        """Start with no policy: nothing may collect until one is published."""
+        self._lock = threading.Lock()
+        self._state: _Published | None = None
+        self._generation = 0
+        self._renewal_seq = 0
+
+    def publish(self, policy: ControlState, *, run: ProfilingRun | None = None) -> _Published:
+        """Replace the whole snapshot and return what was installed."""
+        with self._lock:
+            self._generation += 1
+            parsed = run if run is not None else policy.run
+            if policy.run is not None and parsed is not None and parsed.run_id != policy.run.run_id:
+                # A caller may hand over an already-parsed descriptor, but it
+                # must describe the run the state names. Publishing a mismatch
+                # would create exactly the torn snapshot this class prevents.
+                raise ValueError("run descriptor does not describe the policy's run")
+            self._renewal_seq += 1
+            published = _Published(
+                policy=policy,
+                run=parsed,
+                authorization_ttl_s=max(0.0, float(policy.authorization_ttl_s)),
+                generation=self._generation,
+            )
+            self._state = published
+            return published
+
+    def clear(self) -> None:
+        """Forget the snapshot entirely. Tests call this."""
+        with self._lock:
+            self._state = None
+            self._generation = 0
+            self._renewal_seq = 0
+
+    def published(self) -> _Published | None:
+        """Return the current snapshot, or ``None`` when none was installed."""
+        with self._lock:
+            return self._state
+
+    def run(self) -> ProfilingRun | None:
+        """Return the run this process may collect for, if any."""
+        with self._lock:
+            return self._state.run if self._state is not None else None
+
+    def control(self) -> ControlState:
+        """Return the control state this process is acting on."""
+        with self._lock:
+            if self._state is None:
+                return ControlState()
+            return self._state.policy
+
+    def authorization(self, *, now: float | None = None) -> RunAuthorization | None:
+        """Mint an authorization for the current run, or ``None`` if stopped.
+
+        The deadline is the run's own end, clamped by this process's contact
+        with the control source -- ``authority + ttl`` -- and never extended by
+        being asked twice: an identical request a second later gets a later
+        ceiling only because the authority moved, which is what renewal is.
+        """
+        with self._lock:
+            state = self._state
+            if state is None or state.run is None:
+                return None
+            moment = time.monotonic() if now is None else now
+            authority_left = state.policy.authority_epoch - time.time()
+            deadline = state.run.deadline_mono
+            if state.authorization_ttl_s > 0:
+                # A run that outlives this process's last contact with the
+                # control source must stop when that contact lapses, so the
+                # ceiling is the contact, not the run.
+                deadline = min(
+                    deadline, moment + max(0.0, authority_left + state.authorization_ttl_s)
+                )
+            return RunAuthorization(
+                run_id=state.run.run_id,
+                control_revision=state.policy.control_revision,
+                renewal_seq=self._renewal_seq,
+                deadline_mono=deadline,
+                expires_at_epoch=time.time() + max(0.0, deadline - moment),
+                operations=state.run.operations,
+                target=dict(state.run.target),
+                expires_at_utc=state.run.expires_at_utc,
+                config_version=state.run.config_version,
+                max_operations=state.run.max_operations,
+                admission_instances=state.run.admission_instances,
+                source=state.run.source,
+            )
+
+    def revoked(self, authorization: RunAuthorization | None) -> bool:
+        """Whether an authorization this process holds has been withdrawn.
+
+        Withdrawn means the run it names is no longer the run this process is
+        allowed to collect for, or its own deadline has passed. Both are local
+        facts: a node that never hears the Stop still stops.
+        """
+        if authorization is None:
+            return True
+        with self._lock:
+            state = self._state
+        if state is None or state.run is None or state.run.run_id != authorization.run_id:
+            return True
+        return time.monotonic() > authorization.deadline_mono
+
+    def admits(
+        self, run_id: str, *, operations: frozenset[str] | None = None
+    ) -> RunAuthorization | None:
+        """Mint an authorization for an inherited selection, if it is current.
+
+        This is how a downstream producer answers "may I collect for this
+        selection". The caller names the run it inherited; this process answers
+        only if that is still the run the policy allows and the policy still
+        selects one of the operations in play. A selection from a previous
+        experiment is refused rather than reported as if this experiment had
+        made it.
+        """
+        with self._lock:
+            state = self._state
+            if state is None or state.run is None or state.run.run_id != run_id:
+                return None
+            if operations:
+                allowed = state.run.operations & operations
+                if not allowed:
+                    return None
+            moment = time.monotonic()
+            authority_left = state.policy.authority_epoch - time.time()
+            deadline = state.run.deadline_mono
+            if state.authorization_ttl_s > 0:
+                deadline = min(
+                    deadline, moment + max(0.0, authority_left + state.authorization_ttl_s)
+                )
+            return RunAuthorization(
+                run_id=state.run.run_id,
+                control_revision=state.policy.control_revision,
+                renewal_seq=self._renewal_seq,
+                deadline_mono=deadline,
+                expires_at_epoch=time.time() + max(0.0, deadline - moment),
+                operations=state.run.operations,
+                target=dict(state.run.target),
+                expires_at_utc=state.run.expires_at_utc,
+                config_version=state.run.config_version,
+                max_operations=state.run.max_operations,
+                admission_instances=state.run.admission_instances,
+                source=state.run.source,
+            )
+
+
+class PolicyProvider(Protocol):
+    """Supplies the control snapshot for whichever source this process uses.
+
+    The control plane implements it over the database and the host agent over
+    the internal policy exchange; the collector only ever calls it. A provider
+    that cannot answer publishes nothing, which reads as "no run" -- the safe
+    direction, because a control source that is unreachable must never be
+    mistaken for one that said "collect".
+    """
+
+    def snapshot(self) -> ControlState:
+        """Return the control state this process should act on."""
+        ...
+
+
+#: The installed store, and the provider that fills it. Both process-global for
+#: the same reason the collector's other state is: one process has one control
+#: source, and a second one would make "is collection on" depend on which
+#: thread asked.
+_STORE = RuntimePolicyStore()
+_STORE_LOCK = threading.Lock()
+_PROVIDER: PolicyProvider | None = None
+#: How many times the installed provider has been read. A control-plane route
+#: that answers before its background loop's first pass must not report
+#: "unavailable" just because nobody has read the database yet, so the first
+#: question forces one read. One integer, checked only when the store is empty.
+_REFRESHED = 0
+
+
+def install_policy_provider(provider: PolicyProvider | None) -> None:
+    """Install the process's control provider and drop the cached policy.
+
+    Replacing a provider also drops the load cache, so the very next call
+    re-reads the control source rather than answering from the previous one's
+    answer. A caller that installs a provider and then collects without
+    publishing anything collects nothing -- there is no "previous run" to fall
+    back to, which is what makes a Stop survive a restart.
+    """
+    global _PROVIDER, _REFRESHED
+    with _STORE_LOCK:
+        _PROVIDER = provider
+        _REFRESHED = 0
+    reset_policy()
+    if provider is not None:
+        refresh_policy()
+
+
+def policy_provider() -> PolicyProvider | None:
+    """Return the installed provider, for the process that owns it."""
+    with _STORE_LOCK:
+        return _PROVIDER
+
+
+def policy_store() -> RuntimePolicyStore:
+    """Return the process's policy store.
+
+    Callers that own the control source (the control plane's snapshot loop, the
+    host's policy client) publish into it; the collector only reads it.
+    """
+    return _STORE
+
+
+def refresh_policy() -> _Published:
+    """Read the installed provider once and publish what it answered.
+
+    Provider failures are published as "no run" rather than raised: a control
+    source that is unreachable must not be read as an experiment, and it must
+    not fail the business request that was merely looking for one.
+    """
+    global _REFRESHED
+    with _STORE_LOCK:
+        provider = _PROVIDER
+        _REFRESHED += 1
+    if provider is None:
+        return _STORE.publish(ControlState())
+    try:
+        state = provider.snapshot()
+    except Exception:
+        logger.warning("operation profiling control source is unavailable", exc_info=True)
+        state = ControlState()
+    return _STORE.publish(state)
+
+
+def reset_policy() -> None:
+    """Clear the published policy and the load cache. Tests call this."""
+    global _CACHE
+    with _CACHE_LOCK:
+        _CACHE = None
+    _STORE.clear()
 
 
 @dataclass
@@ -314,10 +704,31 @@ class Measurement:
     run_id: str
     measurement_id: str
     started_mono_ns: int
-    #: The run's monotonic deadline, carried per measurement so expiry is
-    #: enforced while collecting and not only when a new measurement starts.
+    #: The run's monotonic deadline when the experiment cannot be revoked mid
+    #: flight -- a static descriptor, which is deployment configuration and not
+    #: something an administrator can reach. Kept beside the authorization
+    #: because the two answer different questions: this one says when the
+    #: experiment ends, the authorization says whether it is still in force.
     deadline_mono: float
-    #: Which producer rooted this operation: the runner for an attempt startup,
+    #: The revocable handle this measurement collects under. Every deadline
+    #: check goes through it, so a Stop that lands while the measurement is
+    #: open is observed on the next mark instead of at the next request.
+    authorization: RunAuthorization | None = None
+    #: The immutable experiment this measurement belongs to. Copied at
+    #: selection rather than re-read later, because "later" may be another
+    #: experiment: an in-flight record, its manifest and its delivery must keep
+    #: naming the run that selected them no matter what the deployment is
+    #: configured to do now.
+    run_operations: frozenset[str] = frozenset()
+    run_target: Mapping[str, str] = field(default_factory=dict)
+    run_max_operations: int = 0
+    run_config_version: int = 1
+    #: Which control source selected this measurement. A reader can then tell a
+    #: legacy static-descriptor experiment from an administrator's, which is
+    #: what makes "this old run has no control state" an answer rather than a
+    #: guess.
+    run_source: str = SOURCE_ENVIRONMENT
+    #: Producer that rooted this operation: the runner for an attempt startup,
     #: the control plane for a file or terminal request. It names the record's
     #: owner and the source of its local milestones. Declared among the
     #: defaulted fields because :func:`start_operation` sets it by keyword.
@@ -384,6 +795,12 @@ class Measurement:
     truncated_fragments: set[tuple[str, str]] = field(default_factory=set)
     #: Set once the run's deadline passed with collecting still open.
     expired: bool = False
+    #: Why it stopped: the experiment's own end, or a control Stop / a lapsed
+    #: authorization reaching this process. Stated separately from ``expired``
+    #: because "the experiment ran out" and "an administrator stopped it" are
+    #: different findings, and a reader that could not tell them apart would
+    #: report a truncated sample as ordinary expiry.
+    expired_reason: str = ""
     #: Set by :func:`finalize` when the end boundary and completeness are
     #: frozen. After this, no report about the measurement re-reads the clock.
     frozen: bool = False
@@ -406,6 +823,52 @@ class Measurement:
         now = time.monotonic_ns() if mono_ns is None else mono_ns
         return (now - self.started_mono_ns) // 1000
 
+    def effective_deadline_mono(self) -> float:
+        """Return the earliest instant this measurement may still collect.
+
+        The run's own end, plus the control revocation when there is one. A
+        stopped experiment therefore has a deadline in the past for every
+        measurement already open, which is what makes "stop" reach work that
+        started before it rather than only the work that comes after.
+        """
+        if self.authorization is None:
+            return self.deadline_mono
+        return min(self.deadline_mono, self.authorization.deadline_mono)
+
+    def stop_reason(self) -> str:
+        """Return why collection stopped, for the record to state."""
+        if self.expired_reason:
+            return self.expired_reason
+        return STOP_REASON_EXPIRED
+
+    def past_deadline(self) -> bool:
+        """Return whether collecting must stop, and remember why.
+
+        Two different ends are collapsed into one answer on purpose: a
+        measurement that reached the experiment's deadline and one that was
+        revoked are both "not collecting any more", and every caller has to
+        treat them identically. The difference is preserved for the record,
+        which is where a reader can act on it.
+        """
+        # Only a runtime-controlled experiment can be withdrawn. A static
+        # descriptor's authorization is its own deadline, and re-reading the
+        # local store for it would let a later Admin Stop refuse work that this
+        # deployment's configuration still asks for.
+        authorization = self.authorization
+        if (
+            authorization is not None
+            and self.run_source == SOURCE_ADMIN
+            and _STORE.revoked(authorization)
+        ):
+            self.expired = True
+            self.expired_reason = STOP_REASON_REVOKED
+            return True
+        if time.monotonic() > self.effective_deadline_mono():
+            self.expired = True
+            self.expired_reason = self.expired_reason or STOP_REASON_EXPIRED
+            return True
+        return False
+
     def deadline_offset_us(self) -> int:
         """Return the offset at which this measurement's run expires.
 
@@ -413,11 +876,8 @@ class Measurement:
         moment someone noticed, so a partial record never reports time the
         experiment was not collecting for.
         """
-        return int(self.deadline_mono * 1_000_000) - self.started_mono_ns // 1000
-
-    def past_deadline(self) -> bool:
-        """Return whether the run expired while this measurement was open."""
-        return time.monotonic() > self.deadline_mono
+        deadline = self.effective_deadline_mono()
+        return int(deadline * 1_000_000) - self.started_mono_ns // 1000
 
 
 class _NullSpan:
@@ -441,16 +901,58 @@ _EMPTY_SPAN: AbstractContextManager[None] = nullcontext()
 
 @dataclass(frozen=True)
 class _Loaded:
-    """Cached result of reading the switch and the run descriptor once."""
+    """Cached answer to "may this process collect, and for which run".
+
+    ``mode`` is the deployment's control source rather than an experiment's
+    switch, so it is answered even when there is no run -- that is what lets the
+    Admin surface say "this deployment is managed by configuration" instead of
+    the false "off" a boolean would produce.
+
+    ``generation`` is the policy publication this answer was derived from. An
+    admin-mode process re-reads on every load and compares one integer; every
+    other process never re-reads at all.
+    """
 
     run: ProfilingRun | None
     reason: str
+    mode: str = MODE_DISABLED
+    control: ControlState = field(default_factory=ControlState)
+    generation: int = 0
 
 
 _CACHE: _Loaded | None = None
+#: Guards the derived read cache. Never held while parsing or logging.
 _CACHE_LOCK = threading.Lock()
+#: Guards the parse-once state below. Parsing happens outside it, because the
+#: parse itself reads the environment and may log.
+_MODE_LOCK = threading.Lock()
+#: Parsed once per process: the deployment's mode, and the static descriptor it
+#: names. Both are deployment configuration, which a restart is what changes.
+_MODE: str | None = None
+_INVALID_MODE = ""
+_ENV_RUN: ProfilingRun | None = None
+_ENV_RUN_READ = False
 _BUDGET_LOCK = threading.Lock()
-_USED_OPERATIONS = 0
+
+
+@dataclass
+class _RunBudget:
+    """One experiment's per-process root-operation allowance.
+
+    Per run rather than per process. A renewed authorization for the same run
+    must not hand back slots that experiment already spent -- otherwise "renew"
+    would be a way to collect without limit -- while an administrator's *next*
+    experiment must start from a full allowance rather than inheriting the
+    previous one's exhaustion.
+    """
+
+    max_operations: int
+    used: int = 0
+
+
+#: Keyed by run id and pruned when a run is dropped, so the table is bounded by
+#: the experiments a process actually selected rather than by its uptime.
+_BUDGETS: dict[str, _RunBudget] = {}
 
 
 def _truthy(raw: str | None) -> bool:
@@ -611,28 +1113,110 @@ def manifest_for_run(run: ProfilingRun | None) -> dict[str, Any] | None:
 
 
 def manifest_for_measurement(measurement: Measurement | None) -> dict[str, Any] | None:
-    """Return the run manifest with the instance that admitted this root."""
+    """Return the run manifest this measurement was selected under.
+
+    Built from the measurement's *own* copy of the experiment rather than from
+    whatever run is configured now. That is what stops a delivery that happens
+    after a new experiment started from describing the old record as a sample
+    of the new one -- a mix-up the writer would reject as ``run_conflict`` and
+    an operator would have to debug from two disagreeing manifests.
+    """
     if measurement is None:
         return None
-    manifest = manifest_for_run(_load().run)
-    if manifest is None or manifest["run_id"] != measurement.run_id:
+    if not measurement.run_id:
         return None
-    if measurement.run_admission_instances:
-        manifest["admission_instances"] = [
-            dict(item) for item in measurement.run_admission_instances
-        ]
+    manifest: dict[str, Any] = {
+        "run_id": measurement.run_id,
+        "operations": sorted(measurement.run_operations),
+        "target": dict(measurement.run_target),
+        "config_version": measurement.run_config_version,
+        "max_operations": measurement.run_max_operations,
+        "admission_instances": [dict(item) for item in measurement.run_admission_instances],
+    }
+    # The configured expiry travels with the record, so a measurement that was
+    # handed over rather than selected here still states the experiment's
+    # identity instead of deriving a different instant from its own clock.
+    expired = measurement.run_expires_at
+    if expired is None:
+        authorization = measurement.authorization
+        expired = authorization.expires_at_utc if authorization is not None else None
+    if expired is None:
+        return None
+    manifest["expires_at"] = expired.isoformat()
     return manifest
 
 
-def _load() -> _Loaded:
-    """Return the cached switch state, reading the environment at most once."""
-    global _CACHE
-    with _CACHE_LOCK:
-        if _CACHE is not None:
-            return _CACHE
-        if not _truthy(os.environ.get(ENV_PROFILING_ENABLED)):
-            _CACHE = _Loaded(None, "not_enabled")
-            return _CACHE
+def profile_mode() -> str:
+    """Return which control source this deployment allows.
+
+    Read once per process. The value is deployment configuration: changing it is
+    a redeploy by definition, and the whole point of the feature is that
+    changing it is *not* how an experiment is started or stopped.
+
+    An unrecognized value is reported as ``disabled`` with a warning rather
+    than guessed at. "Refuse to collect until somebody fixes the spelling" is
+    the safe reading of a typo; treating it as ``environment`` could silently
+    enable collection from a stale descriptor.
+    """
+    global _MODE
+    with _MODE_LOCK:
+        if _MODE is None:
+            _MODE = _read_mode()
+        mode = _MODE
+        invalid = _INVALID_MODE
+    if invalid:
+        # Reported outside the lock: a log handler that itself asked about
+        # profiling would deadlock the process it is reporting on.
+        logger.warning(
+            "%s=%r is not a profiling mode (%s); profiling stays off",
+            ENV_PROFILING_MODE,
+            invalid,
+            ", ".join(PROFILING_MODES),
+        )
+    return mode
+
+
+def _read_mode() -> str:
+    """Parse the mode out of the environment exactly once.
+
+    Called with :data:`_MODE_LOCK` held, so it must not log: a logging handler
+    that asked about profiling would otherwise deadlock. The refusal is
+    therefore returned and reported by the caller.
+    """
+    raw = (os.environ.get(ENV_PROFILING_MODE) or "").strip().lower()
+    if not raw:
+        # Absent means the old semantics, unchanged: enabled + run descriptor,
+        # which is what a deployment that never sets the new variable expects.
+        return MODE_ENVIRONMENT if _truthy(os.environ.get(ENV_PROFILING_ENABLED)) else MODE_DISABLED
+    global _INVALID_MODE
+    if raw not in PROFILING_MODES:
+        # Remembered rather than logged here: the caller reports it outside the
+        # lock, because a log handler that itself asked about profiling would
+        # deadlock the process it is reporting on.
+        _INVALID_MODE = raw
+        return MODE_DISABLED
+    return raw
+
+
+def _environment_run() -> ProfilingRun | None:
+    """Return the run the static deployment descriptor names, if any.
+
+    Parsed once per process, exactly as before this module grew a control
+    source: the environment is deployment configuration and cannot change
+    without a restart, so re-reading it would only add a JSON parse to every
+    request that asks whether profiling is on.
+
+    The descriptor is parsed *outside* the cache lock. Parsing reads the
+    environment and logs, and holding a lock that the collector's read path also
+    takes while doing either is how a warning handler that itself asks about
+    profiling deadlocks the process it is reporting on.
+    """
+    global _ENV_RUN, _ENV_RUN_READ
+    with _MODE_LOCK:
+        if _ENV_RUN_READ:
+            return _ENV_RUN
+    run: ProfilingRun | None = None
+    if _truthy(os.environ.get(ENV_PROFILING_ENABLED)):
         raw = os.environ.get(ENV_PROFILING_RUN) or ""
         try:
             run = parse_run(raw)
@@ -644,15 +1228,120 @@ def _load() -> _Loaded:
                 "(%s); continuing without profiling",
                 exc,
             )
-            _CACHE = _Loaded(None, "not_enabled")
+            run = None
+    with _MODE_LOCK:
+        _ENV_RUN = run
+        _ENV_RUN_READ = True
+    return run
+
+
+def _load() -> _Loaded:
+    """Return the current control answer, re-deriving it when policy changed.
+
+    Cached per *publication* rather than once per process. A process whose
+    policy cannot change -- every static deployment, and every environment-mode
+    process -- therefore parses its descriptor exactly once, while a process
+    under Admin control answers from the snapshot the database just delivered.
+    The generation is a single integer read, which is what keeps the off path
+    as cheap as it was.
+    """
+    global _CACHE
+    mode = profile_mode()
+    if mode != MODE_ADMIN:
+        with _CACHE_LOCK:
+            if _CACHE is not None:
+                return _CACHE
+            run = _environment_run() if mode == MODE_ENVIRONMENT else None
+            _CACHE = _Loaded(
+                run,
+                "active" if run is not None else "not_enabled",
+                mode=mode,
+            )
             return _CACHE
-        _CACHE = _Loaded(run, "active")
+
+    published = _STORE.published()
+    if published is None and policy_provider() is not None:
+        # Nobody has read the control source in this process yet -- a route
+        # answering before the background loop's first pass. Read it once, now,
+        # rather than reporting "no control row" for a deployment that has one.
+        with _STORE_LOCK:
+            refreshed = _REFRESHED
+        if refreshed == 0:
+            refresh_policy()
+            published = _STORE.published()
+    generation = published.generation if published is not None else 0
+    with _CACHE_LOCK:
+        if _CACHE is not None and _CACHE.generation == generation:
+            return _CACHE
+    state = published.policy if published is not None else ControlState(mode=MODE_ADMIN)
+    run = published.run if published is not None else None
+    loaded = _Loaded(
+        run,
+        "active" if run is not None else "not_enabled",
+        mode=MODE_ADMIN,
+        control=state,
+    )
+    with _CACHE_LOCK:
+        _CACHE = replace(loaded, generation=generation)
         return _CACHE
 
 
 def active_run() -> ProfilingRun | None:
-    """Return the live run descriptor, or ``None`` when profiling is off."""
+    """Return the live run descriptor, or ``None`` when profiling is off.
+
+    This answers "is an experiment in force", which is a *filter*: it is what a
+    producer checks before deciding to look more closely. It is deliberately not
+    the authorization a measurement collects under -- see
+    :func:`authorization_for`, which is what makes a Stop reach a measurement
+    that is already open.
+    """
     return _load().run
+
+
+def control_state() -> ControlState:
+    """Return the control state this process is acting on.
+
+    Bounded and non-secret: mode, control revision, run id and the authority
+    instant. It is what a host reports back as its applied policy and what the
+    Admin surface reads to tell "starting" from "collecting".
+    """
+    return _load().control
+
+
+def authorization_for(run: ProfilingRun) -> RunAuthorization | None:
+    """Mint the authorization a new measurement collects under.
+
+    Returns ``None`` when the run that was just read is no longer the run this
+    process may collect for -- a Stop that landed between the two is a
+    revocation, not a race to be resolved in the collector's favour.
+
+    A static deployment descriptor has no control source and therefore nothing
+    that could revoke it, so its authorization is the run's own end. That is a
+    *different* object from an admin lease and is labelled as such: the offline
+    grace period the design grants a node that loses contact with the control
+    plane exists precisely so that a runtime-controlled experiment can stop
+    without one, and a descriptor that never had contact must not borrow it.
+    """
+    if profile_mode() != MODE_ADMIN:
+        return RunAuthorization(
+            run_id=run.run_id,
+            control_revision=0,
+            renewal_seq=0,
+            deadline_mono=run.deadline_mono,
+            expires_at_utc=run.expires_at_utc,
+            operations=run.operations,
+            target=dict(run.target),
+            config_version=run.config_version,
+            max_operations=run.max_operations,
+            admission_instances=run.admission_instances,
+            source=run.source,
+        )
+    authorization = _STORE.authorization()
+    if authorization is None or authorization.run_id != run.run_id:
+        return None
+    if _STORE.revoked(authorization):
+        return None
+    return authorization
 
 
 def reason() -> str:
@@ -661,21 +1350,52 @@ def reason() -> str:
 
 
 def _claim_budget(run: ProfilingRun) -> bool:
-    """Reserve one root-operation slot, or return ``False`` when used up."""
-    global _USED_OPERATIONS
+    """Reserve one root-operation slot for this run, or refuse when used up."""
     with _BUDGET_LOCK:
-        if run.max_operations <= _USED_OPERATIONS:
+        budget = _BUDGETS.get(run.run_id)
+        if budget is None:
+            budget = _RunBudget(max_operations=run.max_operations)
+            _BUDGETS[run.run_id] = budget
+        if budget.max_operations <= budget.used:
             return False
-        _USED_OPERATIONS += 1
+        budget.used += 1
         return True
 
 
-def _release_budget() -> None:
+def _release_budget(run_id: str) -> None:
     """Return a reserved slot for a measurement that produced no record."""
-    global _USED_OPERATIONS
     with _BUDGET_LOCK:
-        if _USED_OPERATIONS > 0:
-            _USED_OPERATIONS -= 1
+        budget = _BUDGETS.get(run_id)
+        if budget is not None and budget.used > 0:
+            budget.used -= 1
+
+
+def budget_state(run_id: str) -> dict[str, Any]:
+    """Return this process's allowance and usage for one run.
+
+    Reported to the Admin surface so "the experiment collected nothing" can be
+    told apart from "this instance spent its share", which the design requires
+    to be distinguishable. The scope is stated in the answer because the number
+    is a per-producer-instance count and a page that presented it as a
+    deployment-wide cap would be describing a quota nobody enforces.
+    """
+    with _BUDGET_LOCK:
+        budget = _BUDGETS.get(run_id)
+        if budget is None:
+            return {
+                "scope": "producer_instance",
+                "instance": PRODUCER_INSTANCE_ID,
+                "max_operations": None,
+                "used": 0,
+                "exhausted": False,
+            }
+        return {
+            "scope": "producer_instance",
+            "instance": PRODUCER_INSTANCE_ID,
+            "max_operations": budget.max_operations,
+            "used": budget.used,
+            "exhausted": budget.used >= budget.max_operations,
+        }
 
 
 def _recording(measurement: Measurement) -> bool:
@@ -719,6 +1439,12 @@ def start_operation(
     target_host = run.target.get("host")
     if target_host is not None and target_host != host:
         return None
+    # Minted before the budget is claimed, and refused if the run lapsed in
+    # between: a selection made on a run that has just been stopped must not
+    # spend the stopped experiment's remaining allowance.
+    authorization = authorization_for(run)
+    if authorization is None:
+        return None
     if not _claim_budget(run):
         return None
 
@@ -728,6 +1454,12 @@ def start_operation(
         measurement_id=f"msm_{uuid.uuid4().hex[:16]}",
         started_mono_ns=time.monotonic_ns(),
         deadline_mono=run.deadline_mono,
+        authorization=authorization,
+        run_operations=run.operations,
+        run_target=dict(run.target),
+        run_max_operations=run.max_operations,
+        run_config_version=run.config_version,
+        run_source=run.source,
         producer=producer,
         coverage_scope=coverage_scope or COVERAGE_BY_OPERATION.get(operation, ""),
         run_expires_at=run.expires_at_utc,
@@ -760,16 +1492,17 @@ def bind(measurement: Measurement | None, **facts: Any) -> bool:
         # attribution so it can close as a partial sample at the deadline;
         # merely noticing expiry after the claim is not grounds to erase it.
         measurement.expired = True
-    run = _load().run
     for key, value in facts.items():
         measurement.facts[key] = _bounded(value)
     measurement.bound = True
-    if run is not None:
-        for key, wanted in run.target.items():
-            observed = measurement.facts.get(key)
-            if observed is None or str(observed) != wanted:
-                measurement.selected = False
-                return False
+    # The measurement's own scope, not the deployment's current one: a record
+    # handed over from a parent must be judged by the experiment that selected
+    # it, and re-reading here would let a later experiment widen the filter.
+    for key, wanted in measurement.run_target.items():
+        observed = measurement.facts.get(key)
+        if observed is None or str(observed) != wanted:
+            measurement.selected = False
+            return False
     return measurement.selected
 
 
@@ -1057,10 +1790,23 @@ def measurement_context(
     know which attempt it belongs to. So the selected measurement travels with
     the request: run id, operation, and an absolute wall-clock expiry, since
     two processes share no monotonic clock.
+
+    The expiry is the *authorization's*, not the experiment's configured end.
+    A downstream producer is being told how long it may collect, and under a
+    runtime-controlled experiment that is the shorter of the two -- a lease
+    that lapses if the control source goes silent. Handing over the configured
+    end instead would turn a lost control plane into an experiment that keeps
+    running until its original deadline, which is precisely the failure mode
+    the bounded authorization exists to prevent.
+
+    The immutable manifest travels too, so the inheriting process binds to the
+    experiment that selected this measurement rather than to whatever is
+    configured where it happens to be running.
     """
     if measurement is None or measurement.finished or measurement.past_deadline():
         return None
-    return {
+    deadline = measurement.effective_deadline_mono()
+    context: dict[str, Any] = {
         "run_id": measurement.run_id,
         "measurement_id": measurement.measurement_id,
         "operation": measurement.operation,
@@ -1079,13 +1825,26 @@ def measurement_context(
         # be stating attribution it never authenticated.
         "facts": dict(measurement.facts),
         "call_id": call_id or "",
-        "expires_at": time.time() + max(0.0, measurement.deadline_mono - time.monotonic()),
+        "expires_at": time.time() + max(0.0, deadline - time.monotonic()),
         # The parent's own start, in nanoseconds. A child on the same host
         # shares this monotonic clock, so a turn it runs can be timed from the
         # claim rather than from whenever the child happened to start --
         # otherwise every sample silently loses the queueing it exists to show.
         "started_mono_ns": measurement.started_mono_ns,
+        # The immutable experiment, so the inheriting process validates against
+        # the selection instead of against its own current configuration.
+        "operations": sorted(measurement.run_operations),
+        "target": dict(measurement.run_target),
+        "config_version": measurement.run_config_version,
+        "max_operations": measurement.run_max_operations,
     }
+    authorization = measurement.authorization
+    if authorization is not None:
+        context["control_revision"] = authorization.control_revision
+        context["renewal_seq"] = authorization.renewal_seq
+    if measurement.run_expires_at is not None:
+        context["run_expires_at"] = measurement.run_expires_at.isoformat()
+    return context
 
 
 def handoff_context(measurement: Measurement | None) -> dict[str, Any] | None:
@@ -1155,6 +1914,104 @@ def _restore_handoff_marks(value: Any) -> list[tuple[str, int]] | None:
     return restored
 
 
+def _inherited_manifest(context: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return the immutable experiment an inherited selection states, if any.
+
+    Bounded and validated like every other value that crosses a process
+    boundary: a context that names an operation set this build cannot parse is
+    treated as "no manifest stated" only when the field is absent. A present but
+    malformed one refuses the selection outright -- half-reading a manifest is
+    how an attempt gets filed under an experiment it does not belong to.
+    """
+    raw_operations = context.get("operations")
+    if raw_operations is None:
+        return None
+    if not isinstance(raw_operations, (list, tuple, set, frozenset)):
+        return None
+    operations = frozenset(str(item).strip() for item in raw_operations if str(item).strip())
+    if not operations:
+        return None
+    raw_target = context.get("target")
+    target: dict[str, str] = {}
+    if isinstance(raw_target, Mapping):
+        for key, value in raw_target.items():
+            if str(key) not in TARGET_KEYS:
+                return None
+            target[str(key)] = str(value)
+    try:
+        config_version = int(context.get("config_version") or 1)
+        max_operations = int(context.get("max_operations") or 0)
+    except (TypeError, ValueError):
+        return None
+    if config_version <= 0 or max_operations < 0:
+        return None
+    return {
+        "operations": operations,
+        "target": target,
+        "config_version": config_version,
+        "max_operations": max_operations,
+    }
+
+
+def _inherited_authorization(
+    context: Mapping[str, Any], *, expires_at_utc: datetime | None
+) -> RunAuthorization | None:
+    """Rebuild the bounded authorization an inherited selection carries.
+
+    ``None`` means the context stated no control revision -- a selection made
+    under a static deployment descriptor, where the experiment's own end is the
+    only deadline and there is nothing that could revoke it. Otherwise the
+    authorization is reconstructed so the child's own deadline checks and its
+    record both report the same thing the parent did.
+    """
+    raw_revision = context.get("control_revision")
+    if raw_revision is None:
+        return None
+    try:
+        control_revision = int(raw_revision)
+        renewal_seq = int(context.get("renewal_seq") or 0)
+    except (TypeError, ValueError):
+        return None
+    if control_revision <= 0 or renewal_seq < 0:
+        return None
+    manifest = _inherited_manifest(context)
+    return RunAuthorization(
+        run_id=str(context.get("run_id") or ""),
+        control_revision=control_revision,
+        renewal_seq=renewal_seq,
+        # Filled by the caller once the local deadline is known: the lease is
+        # re-derived from the context's wall clock there, and this function
+        # deliberately does not read the clock twice.
+        deadline_mono=float("inf"),
+        expires_at_utc=expires_at_utc,
+        operations=manifest["operations"] if manifest is not None else None,
+        target=manifest["target"] if manifest is not None else None,
+        config_version=manifest["config_version"] if manifest is not None else None,
+        max_operations=manifest["max_operations"] if manifest is not None else None,
+    )
+
+
+def _context_expiry(context: Mapping[str, Any]) -> datetime | None:
+    """Return the configured expiry an inherited context states, if it parses.
+
+    Distinct from the context's own ``expires_at``, which is the *lease* the
+    inherited process may collect until. This is the experiment's identity --
+    the instant the administrator asked for -- and a record that stated the
+    lease instead would describe a different experiment on every renewal.
+    """
+    raw = str(context.get("run_expires_at") or "").strip()
+    if not raw:
+        return None
+    normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        moment = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
+
+
 def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measurement | None:
     """Continue measuring a selection another process already made.
 
@@ -1173,6 +2030,14 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
 
     The inherited deadline can only shorten the local one, exactly as it does
     for a downstream producer.
+
+    The inherited manifest is preferred over this process's own configuration
+    when the context carries one. Under a runtime-controlled deployment that is
+    not a convenience but the point: the parent selected this attempt from a
+    run id, an operation list and a target that its own snapshot had already
+    proved, and a child that re-read its own snapshot could bind the attempt to
+    a *different* experiment that started in between -- reporting a sample
+    under a run that never selected it.
     """
     run = _load().run
     if run is None or not isinstance(context, Mapping):
@@ -1180,7 +2045,11 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
     if str(context.get("run_id") or "") != run.run_id:
         return None
     operation = str(context.get("operation") or "").strip()
-    if not operation or operation not in run.operations:
+    inherited_manifest = _inherited_manifest(context)
+    allowed_operations = (
+        inherited_manifest["operations"] if inherited_manifest is not None else run.operations
+    )
+    if not operation or operation not in allowed_operations:
         return None
     inherited = _context_deadline(context)
     if inherited is None:
@@ -1217,6 +2086,17 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
     marks = _restore_handoff_marks(context.get("inherited_marks", []))
     if spans is None or marks is None:
         return None
+    # The configured expiry travels with the record, so a manifest rebuilt in
+    # this process states the experiment's identity rather than an instant
+    # re-derived from this process's own clock.
+    run_expires_at = _context_expiry(context) or run.expires_at_utc
+    authorization = _inherited_authorization(context, expires_at_utc=run_expires_at)
+    if authorization is not None:
+        # The lease can only shorten: a context that claimed more time than
+        # this process was willing to grant keeps the shorter one.
+        authorization = replace(
+            authorization, deadline_mono=min(authorization.deadline_mono, deadline)
+        )
     measurement = Measurement(
         operation=operation,
         run_id=run.run_id,
@@ -1227,13 +2107,29 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
         # paid for is part of the startup a user waits through.
         started_mono_ns=started_mono_ns,
         deadline_mono=deadline,
+        authorization=authorization,
+        run_operations=allowed_operations,
+        run_target=dict(
+            inherited_manifest["target"] if inherited_manifest is not None else run.target
+        ),
+        run_max_operations=(
+            inherited_manifest["max_operations"]
+            if inherited_manifest is not None
+            else run.max_operations
+        ),
+        run_config_version=(
+            inherited_manifest["config_version"]
+            if inherited_manifest is not None
+            else run.config_version
+        ),
+        run_source=run.source,
         producer=str(context.get("producer") or producer),
         producer_instance_id=str(context.get("producer_instance_id") or PRODUCER_INSTANCE_ID),
         clock_domain_id=str(context.get("clock_domain_id") or CLOCK_DOMAIN_ID),
         coverage_scope=str(
             context.get("coverage_scope") or COVERAGE_BY_OPERATION.get(operation, "")
         ),
-        run_expires_at=run.expires_at_utc,
+        run_expires_at=run_expires_at,
         run_admission_instances=inherited_admissions or run.admission_instances,
         facts={"operation": operation, "request_kind": operation},
         spans=spans,
@@ -1303,7 +2199,13 @@ def start_stage_recording(
     inherited = _context_deadline(context)
     if inherited is None:
         return None
+    # The inherited lease and this process's own policy deadline both apply, and
+    # the earlier one wins: a Stop that reached this process must cut collection
+    # even while the caller's authorization still has time left on it.
     deadline = min(run.deadline_mono, inherited)
+    authorization = _STORE.authorization()
+    if authorization is not None and authorization.run_id == run.run_id:
+        deadline = min(deadline, authorization.deadline_mono)
     if time.monotonic() > deadline:
         return None
     # One candidate is already decided; several are narrowed after the call.
@@ -1678,8 +2580,7 @@ def frozen_record(
     frozen_outcome = measurement.frozen_outcome
     if frozen_outcome not in _OUTCOMES:  # pragma: no cover - guarded by callers
         frozen_outcome = "incomplete"
-    run = _load().run
-    if run is not None and run.target and not measurement.bound:
+    if measurement.run_target and not measurement.bound:
         return None
     if measurement.frozen_payload is None:
         measurement.frozen_failure_stage = failure_stage
@@ -1687,7 +2588,10 @@ def frozen_record(
         if failure_stage:
             measurement.facts["failure_stage"] = failure_stage
         if measurement.expired:
-            measurement.facts["profiling_stopped"] = "expired"
+            # Why collection ended, not merely that it did: "the experiment
+            # expired" and "an administrator stopped it" are different findings
+            # and a truncated sample has to say which one closed it.
+            measurement.facts["profiling_stopped"] = measurement.stop_reason()
         measurement.frozen_payload = to_record(
             measurement,
             outcome=frozen_outcome,
@@ -1880,6 +2784,13 @@ def to_record(
         # name is true -- for the runner's own startup operation -- so a file
         # or terminal record cannot be mistaken for a startup by that reader.
         record[STARTUP_OUTCOME_ALIAS] = outcome
+    # Which control source rooted this measurement, and -- for a run an
+    # administrator started -- the deployment revision that authorized it. A
+    # reader that has the revision can tell two experiments that reused a run
+    # id apart, and can tell an old sample from one taken after a Stop.
+    record["run_source"] = measurement.run_source
+    if measurement.authorization is not None:
+        record["control_revision"] = measurement.authorization.control_revision
     if measurement.truncated:
         record["truncated"] = True
     if measurement.truncated_fragments:
@@ -2099,13 +3010,12 @@ def finish(
     measurement.reserved = False
     if not measurement.selected:
         return
-    run = _load().run
-    if run is not None and run.target and not measurement.bound:
+    if measurement.run_target and not measurement.bound:
         # A scoped run reports only attempts whose scope was proved; emitting
         # an unbound measurement would claim a sample the run never selected.
         logger.warning(
             "operation profiling dropped an unbound measurement (run %s, operation %s)",
-            run.run_id,
+            measurement.run_id,
             measurement.operation,
         )
         return
@@ -2122,16 +3032,23 @@ def discard(measurement: Measurement | None) -> None:
     measurement.selected = False
     if measurement.reserved:
         measurement.reserved = False
-        _release_budget()
+        _release_budget(measurement.run_id)
 
 
 def reset_cache() -> None:
-    """Drop the cached switch state and stop the sink. Tests call this."""
-    global _CACHE, _USED_OPERATIONS
+    """Drop every cached policy answer and stop the sink. Tests call this."""
+    global _CACHE, _MODE, _ENV_RUN, _ENV_RUN_READ, _INVALID_MODE, _REFRESHED
     with _CACHE_LOCK:
         _CACHE = None
+    with _MODE_LOCK:
+        _MODE = None
+        _ENV_RUN = None
+        _ENV_RUN_READ = False
+        _INVALID_MODE = ""
+    with _STORE_LOCK:
+        _REFRESHED = 0
     with _BUDGET_LOCK:
-        _USED_OPERATIONS = 0
+        _BUDGETS.clear()
     close_sink()
 
 
@@ -2146,6 +3063,7 @@ __all__ = [
     "DEFAULT_PRODUCER",
     "DEFAULT_ROOT_STAGE",
     "ENV_PROFILING_ENABLED",
+    "ENV_PROFILING_MODE",
     "ENV_PROFILING_RUN",
     "ENV_PROFILING_SINK",
     "MAX_CONTEXT_CHARS",
@@ -2153,6 +3071,9 @@ __all__ = [
     "MAX_RUN_ID_CHARS",
     "MAX_SELECTIONS",
     "MAX_SPANS",
+    "MODE_ADMIN",
+    "MODE_DISABLED",
+    "MODE_ENVIRONMENT",
     "OUTCOMES",
     "PRODUCER_INSTANCE_ID",
     "PROFILING_ANSWER_CALL_ID_HEADER",
@@ -2161,15 +3082,26 @@ __all__ = [
     "PROFILING_ANSWER_STAGES_HEADER",
     "PROFILING_ANSWER_TRUNCATED_HEADER",
     "PROFILING_CONTEXT_HEADER",
+    "PROFILING_MODES",
     "RUN_ID_PATTERN",
     "SCHEMA_VERSION",
     "SELECTION_TTL_S",
     "SINK_QUEUE_MAX",
+    "SOURCE_ADMIN",
+    "SOURCE_ENVIRONMENT",
     "STARTUP_OPERATION",
     "STARTUP_OUTCOME_ALIAS",
+    "STOP_REASON_EXPIRED",
+    "STOP_REASON_REVOKED",
+    "STOP_REASON_STOPPED",
+    "STOP_REASON_SUPERSEDED",
     "TARGET_KEYS",
+    "ControlState",
     "Measurement",
+    "PolicyProvider",
     "ProfilingRun",
+    "RunAuthorization",
+    "RuntimePolicyStore",
     "StageObserver",
     "StageRecorder",
     "active_run",
@@ -2177,10 +3109,13 @@ __all__ = [
     "attach_remote_stages",
     "attach_selection",
     "attributed_stage",
+    "authorization_for",
     "bind",
+    "budget_state",
     "close_sink",
     "collection_complete",
     "context_call_id",
+    "control_state",
     "discard",
     "expect_fragment",
     "finalize",
@@ -2189,15 +3124,21 @@ __all__ = [
     "fragment_truncated",
     "frozen_record",
     "handoff_context",
+    "install_policy_provider",
     "manifest_for_measurement",
     "manifest_for_run",
     "mark",
     "measurement_context",
     "parse_context",
     "parse_run",
+    "policy_provider",
+    "policy_store",
+    "profile_mode",
     "reason",
     "record_fragment",
+    "refresh_policy",
     "reset_cache",
+    "reset_policy",
     "set_attributes",
     "settle",
     "span",
