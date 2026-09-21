@@ -1764,6 +1764,51 @@ def _inherited_manifest(context: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _manifest_for_continuation(context: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return the manifest that lets this process continue a selection.
+
+    The continuation arm exists because a selection may outlive the
+    configuration that made it -- a child starting after a Sync, a broker
+    answering a stage of an attempt that was chosen before a Disable. It is
+    available **only under Admin control**, which is where "the configuration
+    may change while work is in flight" is the whole point.
+
+    ``disabled`` is a different statement. It means this deployment forbids
+    collection outright, so a process configured that way must not be talked
+    into collecting by an upstream context, however well formed -- otherwise a
+    staged rollout or a deliberately silenced producer could be made to allocate
+    recorders and measurements by whoever holds the broker token. The default
+    for a deployment that configures nothing is ``disabled``, so this is also
+    what keeps default-off meaning off.
+
+    ``environment`` follows its own static descriptor, and it is the same
+    descriptor in parent and child (the environment is inherited), so the
+    ordinary ``_load()`` path already covers it and the manifest arm is not
+    needed.
+    """
+    if profile_mode() != MODE_ADMIN:
+        return None
+    return _inherited_manifest(context)
+
+
+def _manifest_deadline(manifest: Mapping[str, Any]) -> float | None:
+    """Return an inherited experiment's own end as a local monotonic deadline.
+
+    ``None`` means the experiment is already over. The manifest states an
+    absolute instant, so it is converted here -- once, against this process's
+    monotonic clock -- exactly as a locally read descriptor is. A context can
+    outlive the experiment it names, and the earlier of the two always wins: a
+    selection never buys time by travelling.
+    """
+    expires_at = manifest.get("expires_at")
+    if not isinstance(expires_at, datetime):
+        return None
+    remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+    if remaining <= 0:
+        return None
+    return time.monotonic() + remaining
+
+
 def _parse_context_instant(value: Any) -> datetime | None:
     """Parse an ISO-8601 instant from an untrusted context, if it is one."""
     raw = str(value or "").strip()
@@ -1852,21 +1897,21 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
     """
     if not isinstance(context, Mapping):
         return None
-    inherited_manifest = _inherited_manifest(context)
+    manifest = _manifest_for_continuation(context)
     local = _load().run
-    if inherited_manifest is not None:
+    if manifest is not None:
         # A child of a selection that states its experiment. The manifest is
         # that experiment's identity, so it is what this process reports --
         # there is no local configuration to consult, because a new process
         # under Admin control has none until its own sync loop runs.
-        run_id = inherited_manifest["run_id"]
-        allowed_operations = inherited_manifest["operations"]
-        source = inherited_manifest["source"]
-        run_config_version = inherited_manifest["config_version"]
-        run_target = dict(inherited_manifest["target"])
-        run_max_operations = inherited_manifest["max_operations"]
+        run_id = manifest["run_id"]
+        allowed_operations = manifest["operations"]
+        source = manifest["source"]
+        run_config_version = manifest["config_version"]
+        run_target = dict(manifest["target"])
+        run_max_operations = manifest["max_operations"]
         run_admission_instances: tuple[Mapping[str, Any], ...] = ()
-        run_expires_at: datetime | None = inherited_manifest["expires_at"]
+        run_expires_at: datetime | None = manifest["expires_at"]
     elif local is not None:
         # A caller written before the manifest travelled -- and the environment
         # path, where the descriptor really is this process's own
@@ -1889,10 +1934,18 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
     inherited = _context_deadline(context)
     if inherited is None:
         return None
-    # Either ceiling can only shorten, and the earlier one wins: the experiment
-    # may not outlive its own configured end just because a parent stated a
-    # later one.
+    # Every ceiling applies and the earliest wins. The transport's own bound,
+    # the experiment's *configured* end from the manifest, and -- when this
+    # process happens to hold the same experiment -- its local deadline. A
+    # context whose stated bound is later than the experiment it names cannot
+    # extend that experiment, and one that names an experiment already over is
+    # refused outright rather than given the transport's remaining time.
     deadline = inherited
+    if manifest is not None:
+        manifest_deadline = _manifest_deadline(manifest)
+        if manifest_deadline is None:
+            return None
+        deadline = min(deadline, manifest_deadline)
     if local is not None and local.run_id == run_id:
         deadline = min(deadline, local.deadline_mono)
     if time.monotonic() > deadline:
@@ -1944,8 +1997,8 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
         started_mono_ns=started_mono_ns,
         deadline_mono=deadline,
         control_revision=(
-            inherited_manifest["control_revision"]
-            if inherited_manifest is not None
+            manifest["control_revision"]
+            if manifest is not None
             else _context_control_revision(context)
         ),
         run_operations=allowed_operations,
@@ -2042,7 +2095,7 @@ def start_stage_recording(
         return None
     local = _load().run
     run_id = str(context.get("run_id") or "")
-    manifest = _inherited_manifest(context)
+    manifest = _manifest_for_continuation(context)
     if manifest is not None:
         run_id = manifest["run_id"]
         candidates = _candidate_operations(context)
@@ -2051,7 +2104,13 @@ def start_stage_recording(
             if candidates
             else manifest["operations"]
         )
-        deadline = inherited
+        # The experiment's configured end is a ceiling of its own: a context
+        # that states a later bound cannot extend it, and one that names an
+        # experiment already over is refused.
+        manifest_deadline = _manifest_deadline(manifest)
+        if manifest_deadline is None:
+            return None
+        deadline = min(inherited, manifest_deadline)
         if local is not None and local.run_id == run_id:
             # Still the experiment in force: its own end applies too.
             deadline = min(deadline, local.deadline_mono)
