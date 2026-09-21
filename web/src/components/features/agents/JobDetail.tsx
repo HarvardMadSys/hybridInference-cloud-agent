@@ -18,6 +18,7 @@ import { basePath } from '@/config/env';
 import { useT } from '@/components/providers';
 import {
   cancelAgentJob,
+  clearAgentGoal,
   followUpAgentJob,
   forkAgentJob,
   getAgentConfig,
@@ -43,9 +44,14 @@ import { LedgerUsage, useLedgerUsage } from './LedgerUsage';
 import { PaneResizer } from './PaneResizer';
 import { Picker } from './Picker';
 import { ComposerPlusMenu, GoalIcon } from './ComposerPlusMenu';
+import { ComposerCommandMenu } from './ComposerCommandMenu';
 import { GoalBar } from './goal/GoalBar';
 import { GoalDialog, type GoalDraft } from './goal/GoalDialog';
+import { isGoalRevisionConflict, writeGoal } from './goal/goalApi';
+import { useGoalCommand } from './goal/useGoalCommand';
+import { useGoalWrite } from './goal/useGoalWrite';
 import { hasLiveWork } from './goal/liveWork';
+import { DEFAULT_GOAL_LIMITS } from '@/lib/goalLimits';
 import { SkillSelectionDialog } from './skills/SkillPicker';
 import type { SelectedSkillApi } from '@/lib/api/skills';
 import { BackToBottom, TurnRail } from './TurnNavigator';
@@ -562,6 +568,10 @@ export function JobDetail({
   // conversation already has; the two are never on screen together.
   const [goalOpen, setGoalOpen] = useState(false);
   const [goalDraft, setGoalDraft] = useState<GoalDraft | null>(null);
+  // The command's dialog. It writes the conversation's goal itself rather than
+  // drafting one to ride a message: `/goal` is a request to set the goal now,
+  // and the platform schedules the first round from that write.
+  const [goalManageOpen, setGoalManageOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   // Follow-ups append to the thread's latest turn, even from an older URL.
   const inheritedSkills = threadJobs.reduce(
@@ -585,6 +595,22 @@ export function JobDetail({
   const [forking, setForking] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // The bounds the server advertises. A command that names no round count asks
+  // for the same default the dialog would have offered.
+  const goalLimits = config?.goal_limits ?? DEFAULT_GOAL_LIMITS;
+  // The goal this conversation already has, as the page last read it. Every
+  // goal write travels with this revision, so an edit made in another tab is
+  // refused rather than silently overwritten.
+  const currentGoal = job.goal ?? null;
+  const threadId = job.threadId ?? job.id;
+  const goalWrite = useGoalWrite(() => onReload?.());
+  const goalCommand = useGoalCommand({
+    value: followUp,
+    setValue: setFollowUp,
+    onOpenDialog: () => setGoalManageOpen(true),
+    onApply: applyGoalObjective,
+    onError: setActionError,
+  });
   const stopRequestedRef = useRef(false);
   const forkRequestedRef = useRef(false);
   const workspacePane = useResizablePane({
@@ -879,10 +905,62 @@ export function JobDetail({
     setGoalOpen(false);
   }
 
+  /**
+   * `/goal <objective>` on a conversation that already exists.
+   *
+   * The thread's own endpoint, not a message: the owner's set *is* the
+   * authorization, and the platform schedules the first round from it, so
+   * nothing has to be sent that says "begin". A refusal is thrown rather than
+   * drawn here — the command reports it and keeps the text, because the retry
+   * is the same command.
+   */
+  async function applyGoalObjective(objective: string): Promise<void> {
+    try {
+      await writeGoal(
+        threadId,
+        {
+          objective,
+          // The cap the conversation already carries is a choice this page is
+          // holding; the command replaces the words, not the budget.
+          maxRounds: currentGoal?.maxRounds ?? goalLimits.default_rounds,
+        },
+        currentGoal?.revision,
+      );
+    } catch (cause) {
+      // The revision this page held is the stale thing the server just
+      // refused, so the conversation has to be read back before the owner
+      // tries again. The refusal itself still travels: the command keeps the
+      // text, and the retry is the same command.
+      if (isGoalRevisionConflict(cause)) onReload?.();
+      throw cause;
+    }
+    // The draft was for a message that has not been sent. The goal is set now,
+    // and letting a stale draft ride the next message would replace it.
+    setGoalDraft(null);
+    setActionError(null);
+    onReload?.();
+  }
+
+  /** Edit or clear from the command's dialog, which writes straight through. */
+  async function writeManagedGoal(draft: GoalDraft): Promise<void> {
+    setGoalManageOpen(false);
+    setGoalDraft(null);
+    await goalWrite.run(() => writeGoal(threadId, draft, currentGoal?.revision));
+  }
+
+  async function clearManagedGoal(): Promise<void> {
+    setGoalManageOpen(false);
+    await goalWrite.run(() => clearAgentGoal(threadId));
+  }
+
   async function submitFollowUp(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (submitting || contextLost || isArchived) return;
+    // A command is not a message. It runs the thing it names and leaves
+    // nothing behind for the model to read as a prompt.
+    if (await goalCommand.submit()) return;
     const prompt = followUp.trim();
-    if (!prompt || submitting || contextLost || isArchived) return;
+    if (!prompt) return;
     setSubmitting(true);
     setActionError(null);
     try {
@@ -1477,7 +1555,7 @@ export function JobDetail({
                 ) : null}
                 {job.goal ? (
                   <GoalBar
-                    threadId={job.threadId ?? job.id}
+                    threadId={threadId}
                     goal={job.goal}
                     limits={config?.goal_limits}
                     state={{
@@ -1493,6 +1571,22 @@ export function JobDetail({
                     }}
                   />
                 ) : null}
+                {/* What `/goal` opens: the conversation's own goal, set or
+                    changed here and now. The draft dialog below is the other
+                    half of the feature — a condition carried by the next
+                    message — and the two are never open together. */}
+                <GoalDialog
+                  open={goalManageOpen}
+                  initial={
+                    currentGoal
+                      ? { objective: currentGoal.objective, maxRounds: currentGoal.maxRounds }
+                      : null
+                  }
+                  limits={config?.goal_limits}
+                  onClose={() => setGoalManageOpen(false)}
+                  onApply={(draft) => void writeManagedGoal(draft)}
+                  onClear={currentGoal ? () => void clearManagedGoal() : undefined}
+                />
                 <GoalDialog
                   open={goalOpen}
                   initial={goalDraft}
@@ -1544,15 +1638,39 @@ export function JobDetail({
                 ) : (
                   <form
                     onSubmit={(event) => void submitFollowUp(event)}
-                    className="rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 shadow-[0_16px_40px_-28px_rgba(17,24,39,0.55)] transition focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05]"
+                    className="relative rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 shadow-[0_16px_40px_-28px_rgba(17,24,39,0.55)] transition focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05]"
                   >
+                    <ComposerCommandMenu
+                      id={goalCommand.menuId}
+                      entries={goalCommand.entries}
+                      activeIndex={goalCommand.activeIndex}
+                      onHighlight={goalCommand.onHighlight}
+                      onChoose={goalCommand.onChoose}
+                    />
                     <ComposerTextarea
                       rows={2}
                       value={followUp}
                       onChange={(event) => setFollowUp(event.target.value)}
+                      // The menu owns the keys while it is showing: Enter
+                      // confirms the highlighted command rather than sending
+                      // half of one to the model.
+                      onKeyDown={(event) => {
+                        goalCommand.onKeyDown(event);
+                      }}
+                      // The list is this box's own popup, and the highlighted
+                      // row is named to it — the caret never leaves here.
+                      // `aria-expanded` is deliberately not used: the textbox
+                      // role does not support it, and `aria-controls` pointing
+                      // at a list that is only in the DOM while it is open says
+                      // the same thing without lying.
+                      aria-autocomplete="list"
+                      aria-controls={goalCommand.open ? goalCommand.menuId : undefined}
+                      aria-activedescendant={goalCommand.activeId}
                       disabled={contextLost}
                       placeholder={
-                        contextLost ? 'Unable to reconnect this chat' : 'Add a follow-up'
+                        contextLost
+                          ? 'Unable to reconnect this chat'
+                          : 'Message or run a task, / commands, @ files or sessions'
                       }
                       aria-label="Add a follow-up"
                       className="w-full resize-none rounded-t-xl border-0 bg-transparent px-4 pt-3 text-sm leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
@@ -1628,19 +1746,19 @@ export function JobDetail({
                       <ComposerSendButton
                         label="Send follow-up"
                         title="Send follow-up — ⏎ to send, ⇧⏎ for a new line"
-                        disabled={contextLost || !followUp.trim() || submitting}
-                        busy={submitting}
+                        disabled={contextLost || !followUp.trim() || submitting || goalCommand.busy}
+                        busy={submitting || goalCommand.busy}
                       />
                     </div>
                   </form>
                 )}
                 <ThreadStatsBar job={job} />
-                {actionError ? (
+                {actionError || goalWrite.error ? (
                   <p
                     className="mt-2 text-center text-xs text-red-600 dark:text-red-400"
                     role="alert"
                   >
-                    {ownerFailureMessage(actionError)}
+                    {ownerFailureMessage(actionError ?? goalWrite.error ?? '')}
                   </p>
                 ) : null}
               </div>

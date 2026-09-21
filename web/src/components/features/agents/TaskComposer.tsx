@@ -3,21 +3,24 @@
 import { useRouter } from 'next/navigation';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createAgentJob, getAgentConfig, listRepoBranches } from '@/lib/api/agents';
-import type { AgentConfigApi } from '@/lib/api/agents';
+import type { AgentConfigApi, CreateAgentJobRequest, GoalInputApi } from '@/lib/api/agents';
 import { isComposerSubmit } from './composerKeys';
 import { ConnectSourceControl } from './ConnectSourceControl';
 import { highestEffort, offeredEfforts } from './effort';
 import { useT } from '@/components/providers';
 import { Picker } from './Picker';
 import { ComposerPlusMenu } from './ComposerPlusMenu';
+import { ComposerCommandMenu } from './ComposerCommandMenu';
 import { AttachmentStrip } from './attachments/AttachmentStrip';
 import { useAttachments } from './attachments/useAttachments';
 import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
 import { GoalDialog, type GoalDraft } from './goal/GoalDialog';
+import { useGoalCommand } from './goal/useGoalCommand';
 import { useComposerMcp } from './mcp/useComposerMcp';
 import { SkillSelectionDialog } from './skills/SkillPicker';
 import { useSkillLibrary } from './skills/useSkillLibrary';
 import type { SelectedSkillApi } from '@/lib/api/skills';
+import { DEFAULT_GOAL_LIMITS } from '@/lib/goalLimits';
 
 // New-task composer (the /agents index state). Runtime × model are first-class
 // controls — BYOA × BYOM is the product, not an advanced option.
@@ -67,6 +70,16 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   const [error, setError] = useState<string | null>(null);
   const attachments = useAttachments(t, config?.attachment_limits);
   const mcp = useComposerMcp(t);
+  // The bounds the server advertises, so a command that names no round count
+  // asks for the same default the dialog would have offered.
+  const goalLimits = config?.goal_limits ?? DEFAULT_GOAL_LIMITS;
+  const goalCommand = useGoalCommand({
+    value: task,
+    setValue: setTask,
+    onOpenDialog: () => setGoalOpen(true),
+    onApply: applyGoalObjective,
+    onError: setError,
+  });
 
   // The config fetch runs once on mount, but its fallback message has to be
   // translated. Depending on `t` would refetch the config every time the
@@ -152,10 +165,11 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
       : undefined;
 
   const disconnected = config?.github_connected === false;
+  const busy = submitting || goalCommand.busy;
   const canRun =
     config?.github_connected === true &&
     task.trim().length > 0 &&
-    !submitting &&
+    !busy &&
     // A file still in flight has no id yet. Running now would queue a job
     // without the attachment the user can see on screen.
     !attachments.uploading &&
@@ -167,39 +181,74 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     setGoalOpen(false);
   }
 
+  /**
+   * Exactly what the controls show. That this needs saying is the bug it
+   * replaced: the old composer displayed one thing and queued another.
+   *
+   * The prompt and the goal are the only things a command changes; everything
+   * else — the repository, the branch, the harness, the model, the skills, the
+   * uploads — is what the owner chose on this screen, and rides both paths.
+   */
+  function requestBody(prompt: string, goal?: GoalInputApi): CreateAgentJobRequest {
+    return {
+      repo,
+      task_prompt: prompt,
+      // Defaults are resolved by the server. Only an explicit picker change
+      // belongs in the request, so retries are independent of library edits.
+      ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
+      // Staged uploads, named by id. Omitted when nothing is attached so the
+      // request keeps the shape it had before this feature existed.
+      ...(attachments.ids.length ? { attachment_ids: attachments.ids } : {}),
+      // Omitted gives the task no servers at all, which is the right default:
+      // connecting a server and letting a task call it are separate choices.
+      ...(mcp.bindings.length ? { mcp_bindings: mcp.bindings } : {}),
+      // The completion condition rides the first message, so the first turn
+      // is already working toward it rather than learning about it later.
+      ...(goal ? { goal } : {}),
+      runtime,
+      model,
+      // Sent as a ref; the platform pins it to a commit at creation, because
+      // a branch moves and the publisher applies onto a fixed one.
+      ...(branch ? { base_ref: branch } : {}),
+      // Whatever the control shows is what is sent. Empty only when the
+      // pair offers no control at all, and then there is nothing to say.
+      ...(effort ? { reasoning_effort: effort } : {}),
+    };
+  }
+
+  /**
+   * `/goal <objective>` on a task that does not exist yet.
+   *
+   * One request, because there is one task to create: the objective is the
+   * first turn's content *and* the condition that continues it, so the run
+   * starts working instead of waiting for a second message saying "begin". A
+   * refused creation is thrown rather than drawn here — the command reports it
+   * and keeps the text, because the retry is the same command.
+   */
+  async function applyGoalObjective(objective: string): Promise<void> {
+    const job = await createAgentJob(
+      requestBody(objective, {
+        objective,
+        // A round count already chosen in the dialog is a choice this screen
+        // is holding; the command replaces the words, not the budget.
+        max_rounds: goalDraft?.maxRounds ?? goalLimits.default_rounds,
+      }),
+    );
+    router.push(`/${job.id}`);
+  }
+
   async function run() {
     if (!canRun) return;
+    // A command is not a message. It runs the thing it names and, when that
+    // succeeds, leaves nothing in the box to send to the model.
+    if (await goalCommand.submit()) return;
     setSubmitting(true);
     setError(null);
     try {
-      // Exactly what the controls show. That this needs saying is the bug it
-      // replaced: the old composer displayed one thing and queued another.
-      const job = await createAgentJob({
-        repo,
-        task_prompt: task.trim(),
-        // Defaults are resolved by the server. Only an explicit picker change
-        // belongs in the request, so retries are independent of library edits.
-        ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
-        // Staged uploads, named by id. Omitted when nothing is attached so the
-        // request keeps the shape it had before this feature existed.
-        ...(attachments.ids.length ? { attachment_ids: attachments.ids } : {}),
-        // Omitted gives the task no servers at all, which is the right default:
-        // connecting a server and letting a task call it are separate choices.
-        ...(mcp.bindings.length ? { mcp_bindings: mcp.bindings } : {}),
-        // The completion condition rides the first message, so the first turn
-        // is already working toward it rather than learning about it later.
-        ...(goalDraft
-          ? { goal: { objective: goalDraft.objective, max_rounds: goalDraft.maxRounds } }
-          : {}),
-        runtime,
-        model,
-        // Sent as a ref; the platform pins it to a commit at creation, because
-        // a branch moves and the publisher applies onto a fixed one.
-        ...(branch ? { base_ref: branch } : {}),
-        // Whatever the control shows is what is sent. Empty only when the
-        // pair offers no control at all, and then there is nothing to say.
-        ...(effort ? { reasoning_effort: effort } : {}),
-      });
+      const goal = goalDraft
+        ? { objective: goalDraft.objective, max_rounds: goalDraft.maxRounds }
+        : undefined;
+      const job = await createAgentJob(requestBody(task.trim(), goal));
       router.push(`/${job.id}`);
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : t('composer.startFailed'));
@@ -254,7 +303,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
             if (files.length) attachments.add(files);
           });
         }}
-        className={`rounded-xl border shadow-[0_14px_40px_-28px_rgba(17,24,39,0.5)] transition ${
+        className={`relative rounded-xl border shadow-[0_14px_40px_-28px_rgba(17,24,39,0.5)] transition ${
           dropping
             ? 'border-crimson/40 ring-4 ring-crimson/[0.08]'
             : 'border-gray-200/90 dark:border-white/10'
@@ -264,15 +313,33 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
             : 'mt-8 bg-white dark:bg-gray-900 focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05]'
         }`}
       >
+        <ComposerCommandMenu
+          id={goalCommand.menuId}
+          entries={goalCommand.entries}
+          activeIndex={goalCommand.activeIndex}
+          onHighlight={goalCommand.onHighlight}
+          onChoose={goalCommand.onChoose}
+        />
         <textarea
           rows={4}
           value={task}
           onChange={(event) => setTask(event.target.value)}
           onKeyDown={(event) => {
+            // The menu owns the keys while it is showing: Enter confirms the
+            // highlighted command instead of sending half of one to the model.
+            if (goalCommand.onKeyDown(event)) return;
             if (!isComposerSubmit(event)) return;
             event.preventDefault();
             void run();
           }}
+          // A command is being chosen, so the list is the box's own popup and
+          // the highlighted row is named to it — the caret never leaves here.
+          // `aria-expanded` is deliberately not used: the textbox role does not
+          // support it, and `aria-controls` pointing at a list that is only in
+          // the DOM while it is open says the same thing without lying.
+          aria-autocomplete="list"
+          aria-controls={goalCommand.open ? goalCommand.menuId : undefined}
+          aria-activedescendant={goalCommand.activeId}
           disabled={disconnected}
           placeholder={
             disconnected ? t('composer.placeholderDisconnected') : t('composer.placeholder')
@@ -310,7 +377,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           ) : (
             <>
               <ComposerPlusMenu
-                disabled={submitting}
+                disabled={busy}
                 onFiles={attachments.add}
                 onOpenSkills={() => setSkillsOpen(true)}
                 skillSummary={
@@ -365,7 +432,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
               canRun ? 'hover:bg-crimson-dark' : 'cursor-not-allowed opacity-60'
             }`}
           >
-            {submitting ? t('composer.starting') : t('composer.run')}
+            {busy ? t('composer.starting') : t('composer.run')}
             <svg
               className="h-3.5 w-3.5"
               fill="none"

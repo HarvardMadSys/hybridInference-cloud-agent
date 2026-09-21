@@ -12,11 +12,19 @@ export function composerOverrides(job: AgentJob, model: string, effort: string) 
     ...(effort && effort !== job.reasoningEffort ? { reasoning_effort: effort } : {}),
   };
 }
-export function ComposerTextarea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+export function ComposerTextarea({
+  onKeyDown,
+  ...props
+}: TextareaHTMLAttributes<HTMLTextAreaElement>) {
   return (
     <textarea
       {...props}
       onKeyDown={(event) => {
+        // A caller's handler runs first and has the last word: the command menu
+        // consumes the keys it owns — including the Enter that would otherwise
+        // submit the form — and says so by preventing the default.
+        onKeyDown?.(event);
+        if (event.defaultPrevented) return;
         if (!isComposerSubmit(event)) return;
         event.preventDefault();
         event.currentTarget.form?.requestSubmit();

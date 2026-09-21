@@ -167,11 +167,40 @@ no uploads and no MCP submenu, and it shows the groups it has rather than
 growing a second, differently-shaped menu beside the one the product already
 has.
 
+A `/goal` typed at the start of a message is the same feature without the
+menu. The box offers the command as soon as a slash is typed, filters it as
+the name is typed, and takes Enter, Escape and the arrow keys; an IME's Enter
+commits its candidate and is never a submit. Only a leading `/goal` is a
+command — `/goals`, a mention inside a sentence, and a line inside a code
+block are all ordinary text. `/goal` alone opens the dialog, seeded with the
+goal the conversation already has; `/goal <objective>` acts on submit instead
+of sending the command to the model. On a conversation that exists, that is
+the thread's own `PUT`, and the platform's next round is what starts the work
+— nothing has to be sent saying "begin". On a task that does not exist yet,
+the objective is the first turn's content *and* the goal, in the one create
+request, so a command can never queue two tasks.
+
 A conversation that already has one gets a status band above its message box,
-in one of five shapes — in progress (including "verifying"), waiting between
-rounds, paused with the reason it stopped, blocked with which kind of block, or
-complete. Each offers exactly the actions that state admits. A paused goal
-left behind by a fork says so in those words: a fork never continues itself.
+in one of three shapes — in progress (including the round in flight and the
+repair round that restates a report), paused with the reason it stopped, or
+complete with the basis it completed on. The band is absent, not empty, when
+there is no goal. Each shape offers exactly the actions that state admits, as
+icon controls with both an accessible name and a tooltip carrying the
+operation's own semantics: Pause stops what comes next and leaves the round
+already running alone (interrupting that round is the existing Stop button),
+Edit changes the objective or the cap without interrupting the round in
+flight, Clear removes the goal and its queued rounds and never the chat, and
+Resume is the owner starting it again. A paused goal that has spent its cap
+says so and points at the cap rather than offering a resume the server will
+refuse. The objective ellipsises to keep the band compact and opens, whole, on
+request.
+
+The band reads the goal from the thread on every reload, and every write
+re-reads it afterwards. A write carries the revision the client read, so a
+second tab's edit is refused with a 409 rather than silently overwritten, and
+the refusal is what triggers the re-read. A goal that is still `active` keeps
+the page observing after the turn on screen has settled: the next round is
+usually queued a moment later, and the owner is watching for exactly that.
 
 An automatic round is not drawn as a user bubble. Nobody wrote it, so it
 renders as a system marker — `Round 3 · automatic` or `Verification round` —
@@ -182,10 +211,11 @@ reported.
 
 | Route | Action |
 | --- | --- |
-| `PUT /v1/agent/jobs/{job_id}/goal` | Set, replace or edit; optional `revision` for compare-and-set (409 on mismatch) |
-| `POST /v1/agent/jobs/{job_id}/goal/pause` | `active → paused(user)`, cancelling the queued automatic round |
-| `POST /v1/agent/jobs/{job_id}/goal/resume` | `paused → active`, and queue a work round when nothing is pending |
-| `DELETE /v1/agent/jobs/{job_id}/goal` | Remove the goal and its queued round |
+| `GET /v1/agent/threads/{thread_id}/goal` | The goal, and the control revision even when there is none |
+| `PUT /v1/agent/threads/{thread_id}/goal` | Set, replace or edit; optional `revision` for compare-and-set (409 on mismatch) |
+| `POST /v1/agent/threads/{thread_id}/goal/pause` | `active → paused(user)`, cancelling the queued automatic rounds |
+| `POST /v1/agent/threads/{thread_id}/goal/resume` | `paused → active`, recording the obligation to schedule |
+| `DELETE /v1/agent/threads/{thread_id}/goal` | Remove the goal and its queued rounds |
 
 `POST /v1/agent/jobs` and `POST /v1/agent/jobs/{job_id}/follow-ups` accept a
 `goal` alongside the message, and `/config` advertises `goal_limits`. The
@@ -223,8 +253,17 @@ the attempt fence), goal storage under real Postgres (revisions,
 compare-and-set, claim-time accounting, tool-versus-text precedence, forks,
 archives, idempotent round creation), the route loop end to end (continue,
 verify, complete, blocked, round limit, pause/resume/clear, replay), and the
-browser pieces (the band's five shapes, the menu's keyboard behaviour, the goal
-mapping, dictionary alignment).
+browser pieces (the band's shapes and controls, the command's recognition rule
+and its keyboard behaviour, the two composers' submit paths, the goal mapping,
+dictionary alignment).
+
+The browser pieces were also looked at in a real Chrome against the real
+Next.js app, with a stub control plane standing in for the one this environment
+cannot run: the command menu in both composers, the dialog `/goal` opens, a
+new task created once from `/goal <objective>`, an existing conversation's
+goal set through the thread's own route, and the band in light, dark and a
+phone width with a long, a paused, an exhausted and a completed objective. The
+end-to-end run below is the part that still needs a real deployment.
 
 The one acceptance check that needs a real deployment is the end-to-end run:
 a goal whose objective is "until `pytest` is green" reaching green on a

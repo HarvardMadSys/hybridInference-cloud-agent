@@ -1,12 +1,23 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { clearAgentGoal, pauseAgentGoal, resumeAgentGoal, setAgentGoal } from '@/lib/api/agents';
+import { APIError } from '@/lib/utils/errors';
 
 import { GoalBar } from './GoalBar';
 import { hasActiveGoal, hasLiveWork } from './liveWork';
 import type { AgentGoal } from '../types';
+
+vi.mock('@/lib/api/agents', () => ({
+  getAgentGoal: vi.fn(),
+  setAgentGoal: vi.fn(),
+  pauseAgentGoal: vi.fn(),
+  resumeAgentGoal: vi.fn(),
+  clearAgentGoal: vi.fn(),
+}));
 
 // The band and the menu are rendered directly rather than through JobDetail:
 // what they say is the whole subject here, and mounting the page would bury
@@ -25,9 +36,29 @@ function goal(overrides: Partial<AgentGoal> = {}): AgentGoal {
 
 const idle = { live: false, repairing: false };
 
+beforeEach(() => {
+  vi.mocked(pauseAgentGoal).mockReset();
+  vi.mocked(resumeAgentGoal).mockReset();
+  vi.mocked(clearAgentGoal).mockReset();
+  vi.mocked(setAgentGoal).mockReset();
+  vi.mocked(pauseAgentGoal).mockResolvedValue({ thread_id: 'thread_1', goal: null, revision: 4 });
+  vi.mocked(resumeAgentGoal).mockResolvedValue({ thread_id: 'thread_1', goal: null, revision: 4 });
+  vi.mocked(clearAgentGoal).mockResolvedValue({
+    thread_id: 'thread_1',
+    cleared: true,
+    revision: 5,
+  });
+  vi.mocked(setAgentGoal).mockResolvedValue({ thread_id: 'thread_1', goal: null, revision: 4 });
+});
+
 afterEach(cleanup);
 
 describe('GoalBar', () => {
+  it('names the band, so it is not one of two anonymous status regions', () => {
+    render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
+    expect(screen.getByRole('status', { name: 'Completion condition' })).toBeInTheDocument();
+  });
+
   it('shows progress while the goal is running itself', () => {
     render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
     expect(screen.getByRole('status')).toHaveTextContent(
@@ -207,6 +238,158 @@ describe('GoalBar', () => {
     );
     expect(screen.getByRole('status')).toHaveTextContent('Goal complete · 2/10 rounds');
     expect(screen.getByRole('status')).not.toHaveTextContent('reported by the agent');
+  });
+});
+
+// The band's controls are the whole of the goal's management surface, so what
+// each one does — and, more importantly, what it does not do — is behaviour
+// worth pinning down.
+describe('GoalBar controls', () => {
+  it('names every control and says what it does', () => {
+    render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
+    const hints: [string, RegExp][] = [
+      ['Pause', /round in flight/],
+      ['Edit', /round in flight is left alone/],
+      ['Clear', /chat and its history stay/],
+    ];
+    for (const [name, hint] of hints) {
+      const control = screen.getByRole('button', { name });
+      expect(control.getAttribute('title')).toMatch(hint);
+    }
+  });
+
+  it('pauses the goal without stopping the round already running', async () => {
+    const onChanged = vi.fn();
+    render(
+      <GoalBar
+        threadId="thread_1"
+        goal={goal()}
+        state={{ live: true, repairing: false }}
+        onChanged={onChanged}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
+    await waitFor(() => expect(pauseAgentGoal).toHaveBeenCalledWith('thread_1'));
+    expect(onChanged).toHaveBeenCalled();
+  });
+
+  it('edits a running goal in place, without pausing or interrupting it', async () => {
+    render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('Objective'), {
+      target: { value: 'ship the release notes' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Set condition' }));
+    // The revision the band was drawn from travels with the write.
+    await waitFor(() =>
+      expect(setAgentGoal).toHaveBeenCalledWith('thread_1', {
+        goal: { objective: 'ship the release notes', max_rounds: 10 },
+        revision: 3,
+      }),
+    );
+    expect(pauseAgentGoal).not.toHaveBeenCalled();
+  });
+
+  it('leaves a paused goal paused when its objective is edited', async () => {
+    // Changing the words is not resuming it: the owner stopped this goal, and
+    // only the owner starts it again.
+    render(
+      <GoalBar
+        threadId="thread_1"
+        goal={goal({ state: 'paused', pauseReason: 'user', pauseDetail: 'paused by the user' })}
+        state={idle}
+        onChanged={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('Objective'), {
+      target: { value: 'ship the release notes' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Set condition' }));
+    await waitFor(() => expect(setAgentGoal).toHaveBeenCalledTimes(1));
+    expect(resumeAgentGoal).not.toHaveBeenCalled();
+  });
+
+  it('clears a goal that is still running, and nothing else', async () => {
+    render(
+      <GoalBar
+        threadId="thread_1"
+        goal={goal()}
+        state={{ live: true, repairing: false }}
+        onChanged={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    await waitFor(() => expect(clearAgentGoal).toHaveBeenCalledWith('thread_1'));
+    expect(pauseAgentGoal).not.toHaveBeenCalled();
+  });
+
+  it('refuses to resume a goal that has spent its budget, and says what to do', () => {
+    render(
+      <GoalBar
+        threadId="thread_1"
+        goal={goal({
+          state: 'paused',
+          pauseReason: 'round_limit',
+          pauseDetail: 'the goal used its whole automatic round budget',
+          roundsUsed: 10,
+          maxRounds: 10,
+        })}
+        state={idle}
+        onChanged={() => {}}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Resume' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'All 10 automatic rounds are used. Raise the limit to continue.',
+    );
+    // The way out is the control beside it, which keeps the goal paused and
+    // leaves the rounds already spent alone.
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
+    expect(resumeAgentGoal).not.toHaveBeenCalled();
+  });
+
+  it('keeps a refused write on screen and does not pretend it landed', async () => {
+    const onChanged = vi.fn();
+    vi.mocked(pauseAgentGoal).mockRejectedValue(new Error('goal service unavailable'));
+    render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={onChanged} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('goal service unavailable');
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it('reads the goal back after a version conflict instead of overwriting', async () => {
+    const onChanged = vi.fn();
+    vi.mocked(setAgentGoal).mockRejectedValue(
+      new APIError('goal_revision_conflict', 'This goal changed while you were editing it.'),
+    );
+    render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={onChanged} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('Objective'), {
+      target: { value: 'ship the release notes' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Set condition' }));
+    // The revision this band holds is exactly what the server refused, so the
+    // goal has to be re-read before the owner can try again.
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'This goal changed while you were editing it.',
+    );
+  });
+
+  it('shows the whole objective on demand, however long it is', () => {
+    const objective =
+      'make every unit test pass, then update the changelog, then open a draft pull request against dev and leave the tree clean';
+    render(
+      <GoalBar threadId="thread_1" goal={goal({ objective })} state={idle} onChanged={() => {}} />,
+    );
+    const shown = screen.getByRole('button', { name: objective });
+    // Truncated on the band, whole in the tooltip and one click away.
+    expect(shown.getAttribute('title')).toBe(objective);
+    expect(shown).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(shown);
+    expect(shown).toHaveAttribute('aria-expanded', 'true');
   });
 });
 

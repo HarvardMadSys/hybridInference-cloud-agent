@@ -282,6 +282,11 @@ export const zhCN: Record<TranslationKey, string> = {
   'composer.loadConfigFailed': '无法加载配置',
   'composer.startFailed': '无法启动任务',
 
+  // ── 输入框命令 ──────────────────────────────────────────────────────────
+  'commands.title': '命令',
+  'commands.goal': '目标',
+  'commands.goalHint': '为长时间运行的任务设置或查看目标',
+
   // ── 输入框附件 ──────────────────────────────────────────────────────────
   'attach.goal': '完成条件',
   'attach.goalNone': '一直做到……',
@@ -358,6 +363,13 @@ export const zhCN: Record<TranslationKey, string> = {
   'goal.edit': '编辑',
   'goal.clear': '清除',
   'goal.actionFailed': '无法更新目标',
+  'goal.commandFailed': '无法设置目标',
+  // 按钮名是动作,提示是后果:提示要说清楚每个操作影响到哪一步。
+  'goal.resumeHint': '继续这个目标,并安排下一轮',
+  'goal.editHint': '修改目标或轮次上限;正在跑的这一轮不受影响',
+  'goal.clearHint': '移除目标并停止后续自动续跑;对话和执行历史都会保留',
+  'goal.limitReached': '{max} 轮自动轮次已用完,先提高上限才能继续。',
+  'goal.limitReachedHint': '轮次已用完,请先提高上限',
   // 目标停下来的原因,每个 pause_reason 一条。
   'goal.pauseUser': '你暂停了它',
   'goal.pauseFork': '这个对话是分叉出来的',

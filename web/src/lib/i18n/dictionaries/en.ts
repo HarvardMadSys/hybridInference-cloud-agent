@@ -292,6 +292,11 @@ export const en = {
   'composer.loadConfigFailed': 'could not load config',
   'composer.startFailed': 'could not start the job',
 
+  // ── Composer commands ───────────────────────────────────────────────────
+  'commands.title': 'Commands',
+  'commands.goal': 'Goal',
+  'commands.goalHint': 'Set or view the goal for a long-running task',
+
   // ── Composer attachments ────────────────────────────────────────────────
   'attach.goal': 'Completion condition',
   'attach.goalNone': 'Keep going until…',
@@ -371,6 +376,14 @@ export const en = {
   'goal.edit': 'Edit',
   'goal.clear': 'Clear',
   'goal.actionFailed': 'Could not update the goal',
+  'goal.commandFailed': 'Could not set the goal',
+  // What each control does, said for a pointer rather than for a screen
+  // reader: the name is the verb, the tooltip is the consequence.
+  'goal.resumeHint': 'Continue the goal and queue its next round',
+  'goal.editHint': 'Change the objective or the round limit; the round in flight is left alone',
+  'goal.clearHint': 'Remove the goal and stop future rounds; the chat and its history stay',
+  'goal.limitReached': 'All {max} automatic rounds are used. Raise the limit to continue.',
+  'goal.limitReachedHint': 'All rounds are used — raise the limit first',
   // Why a goal stopped, one phrase per reason the platform records.
   'goal.pauseUser': 'you paused it',
   'goal.pauseFork': 'this conversation was forked',

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createAgentJob, getAgentConfig, listRepoBranches } from '@/lib/api/agents';
@@ -826,5 +826,164 @@ describe('TaskComposer reasoning effort', () => {
 
     await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
     expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('reasoning_effort');
+  });
+});
+
+// `/goal` is the one thing this composer can be told that is not a message. The
+// rule that separates the two is the feature; the request it produces is the
+// contract with the control plane.
+describe('TaskComposer goal command', () => {
+  beforeEach(() => {
+    vi.mocked(listSkills).mockResolvedValue([]);
+    vi.mocked(listMcpConnections).mockResolvedValue({ connections: [], templates: [] });
+    vi.mocked(getMcpConnectionCapabilities).mockResolvedValue([]);
+    vi.mocked(uploadAttachment).mockReset();
+    vi.mocked(deleteAttachment).mockReset();
+    navigation.push.mockReset();
+    vi.mocked(createAgentJob).mockReset();
+    vi.mocked(getAgentConfig).mockReset();
+    vi.mocked(listRepoBranches).mockReset();
+    vi.mocked(listRepoBranches).mockResolvedValue({ default: 'dev', branches: ['dev', 'main'] });
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+  });
+
+  afterEach(() => cleanup());
+
+  async function composer() {
+    render(<TaskComposer />);
+    const box = await screen.findByRole('textbox');
+    await screen.findByLabelText('Branch');
+    box.focus();
+    return box;
+  }
+
+  function menu() {
+    return screen.queryByRole('listbox', { name: 'Commands' });
+  }
+
+  it('offers the goal command from the first slash', async () => {
+    const box = await composer();
+    fireEvent.change(box, { target: { value: '/' } });
+    expect(menu()).toBeInTheDocument();
+    expect(within(menu()!).getByRole('option', { name: /Goal/ })).toBeInTheDocument();
+    expect(
+      within(menu()!).getByText('Set or view the goal for a long-running task'),
+    ).toBeInTheDocument();
+    // The box keeps the caret: the menu is completing a sentence, not taking
+    // the owner away from it.
+    expect(box).toHaveFocus();
+
+    fireEvent.change(box, { target: { value: '/go' } });
+    expect(menu()).toBeInTheDocument();
+  });
+
+  it('stands the menu down for text that is not a command', async () => {
+    const box = await composer();
+    for (const typed of ['/goals', '/goal now', 'run /', 'src/lib/api/']) {
+      fireEvent.change(box, { target: { value: typed } });
+      expect(menu(), typed).not.toBeInTheDocument();
+    }
+  });
+
+  it('confirms the highlighted command with Enter, and closes on Escape', async () => {
+    const box = await composer();
+    fireEvent.change(box, { target: { value: '/go' } });
+    fireEvent.keyDown(box, { key: 'ArrowDown' });
+    fireEvent.keyDown(box, { key: 'ArrowUp' });
+    fireEvent.keyDown(box, { key: 'Enter' });
+
+    // Enter confirmed the command rather than sending half of one as a prompt.
+    expect(
+      await screen.findByRole('heading', { name: 'Completion condition' }),
+    ).toBeInTheDocument();
+    expect(createAgentJob).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.change(box, { target: { value: '/go' } });
+    fireEvent.keyDown(box, { key: 'Escape' });
+    expect(menu()).not.toBeInTheDocument();
+    // Dismissing the menu is not clearing the box.
+    expect(box).toHaveValue('/go');
+  });
+
+  it('opens the dialog for a bare /goal instead of creating a task', async () => {
+    const box = await composer();
+    fireEvent.change(box, { target: { value: '/goal' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+
+    expect(
+      await screen.findByRole('heading', { name: 'Completion condition' }),
+    ).toBeInTheDocument();
+    expect(createAgentJob).not.toHaveBeenCalled();
+    expect(navigation.push).not.toHaveBeenCalled();
+    // The command was consumed, so the dialog's answer is the only thing left
+    // to send.
+    expect(box).toHaveValue('');
+  });
+
+  it('creates exactly one task for /goal <objective>, with the objective as its first turn', async () => {
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
+    const box = await composer();
+    fireEvent.change(box, { target: { value: '/goal make the suite pass' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).toMatchObject({
+      repo: 'owner/repository',
+      task_prompt: 'make the suite pass',
+      goal: { objective: 'make the suite pass', max_rounds: 10 },
+      runtime: 'claude-code',
+      model: 'model-a',
+      base_ref: 'dev',
+    });
+    expect(navigation.push).toHaveBeenCalledWith('/ajob_1');
+  });
+
+  it('runs the command from the send button too, not only from Enter', async () => {
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
+    const box = await composer();
+    fireEvent.change(box, { target: { value: '/goal make the suite pass' } });
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).toHaveProperty(
+      'task_prompt',
+      'make the suite pass',
+    );
+  });
+
+  it('sends a message that merely mentions the command', async () => {
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
+    const box = await composer();
+    fireEvent.change(box, {
+      target: { value: 'please read `/goal` and tell me what it does' },
+    });
+    fireEvent.keyDown(box, { key: 'Enter' });
+
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
+    const sent = vi.mocked(createAgentJob).mock.calls[0][0];
+    expect(sent.task_prompt).toBe('please read `/goal` and tell me what it does');
+    expect(sent).not.toHaveProperty('goal');
+  });
+
+  it('keeps the command in the box when the task could not be created', async () => {
+    vi.mocked(createAgentJob).mockRejectedValue(new Error('repository is not accessible'));
+    const box = await composer();
+    fireEvent.change(box, { target: { value: '/goal make the suite pass' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+
+    // The retry is the same command, so nothing may be thrown away.
+    expect(await screen.findByRole('alert')).toHaveTextContent('repository is not accessible');
+    expect(box).toHaveValue('/goal make the suite pass');
+    expect(navigation.push).not.toHaveBeenCalled();
+  });
+
+  it('leaves Enter to the IME while a candidate is being composed', async () => {
+    const box = await composer();
+    fireEvent.change(box, { target: { value: '/goal 修复这个测试' } });
+    fireEvent.keyDown(box, { key: 'Enter', isComposing: true });
+    fireEvent.keyDown(box, { key: 'Enter', keyCode: 229 });
+
+    expect(createAgentJob).not.toHaveBeenCalled();
   });
 });
