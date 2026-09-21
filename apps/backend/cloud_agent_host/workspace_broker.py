@@ -33,6 +33,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from cloud_agent_host import broker_profiling_policy
 from cloud_agent_host.chat_sandbox import (
     CHAT_WORKDIR,
     ChatSandboxManager,
@@ -1301,6 +1302,11 @@ def create_app(
     app.state.terminal_manager = terminals
     app.state.shared_session_supervisor = shared_supervisor
 
+    # Until a policy arrives, this broker holds none, which reads as "not
+    # collecting". That is what stops a broker that started before its runner
+    # from briefly measuring for an experiment nobody told it about.
+    broker_profiling_policy.install_policy_provider()
+
     def authenticate(x_agent_workspace_token: str | None = Header(None)) -> None:
         if (
             not expected_token
@@ -1308,6 +1314,23 @@ def create_app(
             or not secrets.compare_digest(expected_token, x_agent_workspace_token)
         ):
             raise HTTPException(status_code=401, detail="invalid workspace broker credential")
+
+    @app.post("/profiling-policy")
+    def profiling_policy(
+        body: dict[str, Any],
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        """Accept the profiling policy this host's runner pushes.
+
+        Reached over the broker's own shared-token channel and nowhere else.
+        The broker holds no host credential and must not be given one -- the
+        design keeps that out of the sandbox side entirely -- so the runner,
+        which does hold one, is what tells it what the deployment is collecting
+        for. Applying the policy through the same store the collector reads is
+        what makes a fragment possible at all: a broker with no policy refuses
+        every selection, however well-formed the header that carried it.
+        """
+        return broker_profiling_policy.apply_received_policy(body)
 
     @app.get("/health")
     def health(_: None = Depends(authenticate)) -> dict[str, Any]:

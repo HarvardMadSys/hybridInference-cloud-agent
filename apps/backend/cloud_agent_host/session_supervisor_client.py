@@ -99,6 +99,37 @@ class SessionSupervisorClient:
             raise SessionSupervisorError(502, "shared Session Supervisor returned invalid data")
         return body
 
+    def apply_profiling_policy(self, policy: dict[str, Any]) -> dict[str, Any]:
+        """Hand the broker one profiling policy and read back its confirmation.
+
+        The broker is a separate container, so it cannot inherit the runner's
+        policy the way a child process inherits one. It is told instead, over
+        the same authenticated channel every other lifecycle message uses --
+        the broker holds no host credential and never will, and the design
+        forbids widening that.
+
+        Returns what the broker says it applied, which is *not* the same as what
+        was sent: the control plane records the confirmation, so a broker that
+        rejected a newer revision must be visible rather than assumed.
+        """
+        try:
+            response = self._client.post(f"{self._base_url}/profiling-policy", json=policy)
+        except httpx.HTTPError as exc:
+            raise SessionSupervisorError(503, "workspace broker is unavailable") from exc
+        if response.is_error:
+            detail = "workspace broker rejected the profiling policy"
+            try:
+                body = response.json()
+                if isinstance(body, dict) and isinstance(body.get("detail"), str):
+                    detail = body["detail"]
+            except ValueError:
+                pass
+            raise SessionSupervisorError(response.status_code, detail)
+        body = response.json()
+        if not isinstance(body, dict):
+            raise SessionSupervisorError(502, "workspace broker returned invalid data")
+        return body
+
     def list(self) -> builtins.list[dict[str, Any]]:
         """Observe every retained container owned by this host's broker."""
         try:

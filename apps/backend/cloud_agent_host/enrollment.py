@@ -125,6 +125,10 @@ class HostIdentity:
     #: heartbeat: a cleared request must not linger as the old number.
     slots_desired: int | None = None
     capabilities: list[str] = field(default_factory=list)
+    #: The operation-profiling policy the control plane returned with the last
+    #: heartbeat, or ``None`` when it returned none. Read by the runner's own
+    #: policy sync, which is the only thing that writes the collector's store.
+    profiling_policy: dict[str, Any] | None = None
 
 
 def credential_path() -> Path:
@@ -304,6 +308,7 @@ def heartbeat(
     residencies: list[dict[str, Any]] | None = None,
     retained_sandboxes: list[dict[str, Any]] | None = None,
     capacity: dict[str, Any] | None = None,
+    profiling: dict[str, Any] | None = None,
     on_residencies_lost: Callable[[list[dict[str, Any]]], None] | None = None,
     on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> HostIdentity:
@@ -344,6 +349,7 @@ def heartbeat(
             "residencies": residencies,
             "retained_sandboxes": retained_sandboxes,
             "capacity": capacity,
+            "profiling": profiling,
             "physical_host": os.environ.get("AGENT_PHYSICAL_HOST", "").strip() or None,
         },
         bearer=identity.credential,
@@ -369,6 +375,12 @@ def heartbeat(
     identity.slots_desired = (
         int(desired) if isinstance(desired, int) and not isinstance(desired, bool) else None
     )
+    # The profiling policy rides this same answer, and the caller applies it to
+    # its own process's policy store. Returning it rather than applying it here
+    # keeps this module about talking to the control plane: the store belongs to
+    # the collector, and the runner is the only thing that should write it.
+    policy = answer.get("profiling")
+    identity.profiling_policy = policy if isinstance(policy, dict) else None
     return identity
 
 
@@ -491,6 +503,7 @@ class HostHeartbeat:
         residency_beats: Callable[[], list[dict[str, Any]]] | None = None,
         retained_sandbox_beats: Callable[[], list[dict[str, Any]] | None] | None = None,
         capacity_beats: Callable[[], dict[str, Any] | None] | None = None,
+        profiling: Callable[[], dict[str, Any] | None] | None = None,
         on_residencies_lost: Callable[[list[dict[str, Any]]], None] | None = None,
         on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> None:
@@ -534,6 +547,11 @@ class HostHeartbeat:
         # sample, or once the newest one is too old to be worth sending —
         # simply omits the field.
         self._capacity_beats = capacity_beats
+        # Asked freshly on every beat. It reports the revision this process has
+        # *applied*, which is what lets the Admin page tell "this host has not
+        # heard about the Stop" from "this host is not there" -- two different
+        # problems with two different fixes.
+        self._profiling = profiling
         self._on_residencies_lost = on_residencies_lost
         self._on_retained_sandboxes_stop = on_retained_sandboxes_stop
         self._stop = threading.Event()
@@ -623,6 +641,7 @@ class HostHeartbeat:
                         else None
                     ),
                     capacity=(self._capacity_beats() if self._capacity_beats is not None else None),
+                    profiling=(self._profiling() if self._profiling is not None else None),
                     on_residencies_lost=self._on_residencies_lost,
                     on_retained_sandboxes_stop=self._on_retained_sandboxes_stop,
                 )

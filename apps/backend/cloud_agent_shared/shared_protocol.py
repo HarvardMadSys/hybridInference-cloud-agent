@@ -16,6 +16,18 @@ NATIVE_FORK_AT_ANCHOR_CAPABILITY = "native-fork-at-anchor-v1"
 #: The admin page reads it to tell "this host will apply your number" from
 #: "this host needs a redeploy to change".
 HOST_CONCURRENCY_CAPABILITY = "host-concurrency-v1"
+#: Advertised by a host agent that can take its operation-profiling policy from
+#: the control plane at runtime and apply it without a restart. A host without
+#: it is reported by the Admin page as *unsupported* rather than as one that has
+#: not answered yet, because the two need different fixes: a redeploy and a
+#: network, respectively.
+PROFILING_CONTROL_CAPABILITY = "operation-profiling-control-v1"
+#: Header the runner uses when it hands its workspace broker the profiling policy
+#: a control plane sent it. The broker has no host credential and never will --
+#: the design forbids widening that -- so the policy travels over the existing
+#: broker-authenticated channel and is carried in a header whose value is an
+#: opaque, bounded, revision-stamped message rather than a bearer token.
+PROFILING_POLICY_HEADER = "X-Agent-Profiling-Policy"
 #: How many turns at once an operator may ask a host for. Two is the
 #: shared-live floor — a fork's sibling runs beside its parent, not behind it —
 #: and 128 is a typo guard, checked again by the host that would act on it.
