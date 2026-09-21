@@ -250,6 +250,16 @@ def test_the_local_stack_can_switch_profiling_on_for_every_producer(local_compos
         assert environment["AGENT_OPERATION_PROFILING_SINK"] == (
             "${AGENT_OPERATION_PROFILING_SINK:-}"
         )
+        # The control mode and the deployment namespace travel the same way.
+        # Both are empty/default by default, which is what keeps a local stack
+        # that sets neither behaving exactly as it did before runtime control
+        # existed.
+        assert environment["AGENT_OPERATION_PROFILING_MODE"] == (
+            "${AGENT_OPERATION_PROFILING_MODE:-}"
+        )
+        assert environment["AGENT_OPERATION_PROFILING_DEPLOYMENT"] == (
+            "${AGENT_OPERATION_PROFILING_DEPLOYMENT:-default}"
+        )
 
 
 def test_complete_local_sandbox_network_has_only_narrow_relays(local_compose: dict):
