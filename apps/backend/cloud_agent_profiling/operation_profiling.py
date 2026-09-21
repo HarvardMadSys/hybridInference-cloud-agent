@@ -1607,17 +1607,37 @@ def measurement_context(
         # claim rather than from whenever the child happened to start --
         # otherwise every sample silently loses the queueing it exists to show.
         "started_mono_ns": measurement.started_mono_ns,
-        # The immutable experiment, so the inheriting process validates against
-        # the selection instead of against its own current configuration.
+        # The candidate operations this caller says are in play. Deliberately
+        # *not* the experiment's manifest: a caller may narrow the candidates it
+        # offers, and a broker must never let that claim override what its own
+        # configuration selects. The manifest is the nested object below.
+        "operations": sorted(measurement.run_operations),
+        # The immutable experiment, as one object. Its presence is what tells a
+        # downstream process that this selection was already proved by a
+        # producer that held the configuration, which is the only thing that
+        # lets a continuation outlive a Disable.
+        "run": _context_run(measurement),
+    }
+    return context
+
+
+def _context_run(measurement: Measurement) -> dict[str, Any]:
+    """Return the immutable experiment a selection was made under."""
+    run: dict[str, Any] = {
+        "run_id": measurement.run_id,
         "operations": sorted(measurement.run_operations),
         "target": dict(measurement.run_target),
         "config_version": measurement.run_config_version,
         "max_operations": measurement.run_max_operations,
         "control_revision": measurement.control_revision,
+        # Which control source rooted the experiment. It travels so a process
+        # that only continues the selection -- a child, a broker -- reports the
+        # same provenance its parent proved instead of inferring one.
+        "source": measurement.run_source,
     }
     if measurement.run_expires_at is not None:
-        context["run_expires_at"] = measurement.run_expires_at.isoformat()
-    return context
+        run["expires_at"] = measurement.run_expires_at.isoformat()
+    return run
 
 
 def handoff_context(measurement: Measurement | None) -> dict[str, Any] | None:
@@ -1688,23 +1708,30 @@ def _restore_handoff_marks(value: Any) -> list[tuple[str, int]] | None:
 
 
 def _inherited_manifest(context: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return the immutable experiment an inherited selection states, if any.
+    """Return the immutable experiment a context states, if it states one.
 
     Bounded and validated like every other value that crosses a process
-    boundary: a context that names an operation set this build cannot parse is
-    treated as "no manifest stated" only when the field is absent. A present but
-    malformed one refuses the selection outright -- half-reading a manifest is
-    how an attempt gets filed under an experiment it does not belong to.
+    boundary. ``None`` means the context did not state one, which is the case
+    for a caller written before this field existed -- and for a caller that
+    offers candidates without holding the experiment.
+
+    A context that states a *malformed* manifest is refused outright rather than
+    read leniently: half a manifest is how an attempt gets filed under an
+    experiment it does not belong to.
     """
-    raw_operations = context.get("operations")
-    if raw_operations is None:
+    raw = context.get("run")
+    if not isinstance(raw, Mapping):
         return None
+    run_id = str(raw.get("run_id") or "").strip()
+    if not run_id or len(run_id) > MAX_RUN_ID_CHARS or RUN_ID_PATTERN.fullmatch(run_id) is None:
+        return None
+    raw_operations = raw.get("operations")
     if not isinstance(raw_operations, (list, tuple, set, frozenset)):
         return None
     operations = frozenset(str(item).strip() for item in raw_operations if str(item).strip())
     if not operations:
         return None
-    raw_target = context.get("target")
+    raw_target = raw.get("target")
     target: dict[str, str] = {}
     if isinstance(raw_target, Mapping):
         for key, value in raw_target.items():
@@ -1712,18 +1739,44 @@ def _inherited_manifest(context: Mapping[str, Any]) -> dict[str, Any] | None:
                 return None
             target[str(key)] = str(value)
     try:
-        config_version = int(context.get("config_version") or 1)
-        max_operations = int(context.get("max_operations") or 0)
+        config_version = int(raw.get("config_version") or 1)
+        max_operations = int(raw.get("max_operations") or 0)
     except (TypeError, ValueError):
         return None
     if config_version <= 0 or max_operations < 0:
         return None
+    expires_at = _parse_context_instant(raw.get("expires_at"))
+    if expires_at is None:
+        return None
+    try:
+        control_revision = max(0, int(raw.get("control_revision") or 0))
+    except (TypeError, ValueError):
+        control_revision = 0
     return {
+        "run_id": run_id,
         "operations": operations,
         "target": target,
         "config_version": config_version,
         "max_operations": max_operations,
+        "expires_at": expires_at,
+        "control_revision": control_revision,
+        "source": str(raw.get("source") or SOURCE_ADMIN),
     }
+
+
+def _parse_context_instant(value: Any) -> datetime | None:
+    """Parse an ISO-8601 instant from an untrusted context, if it is one."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        moment = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
 
 
 def _context_control_revision(context: Mapping[str, Any]) -> int:
@@ -1781,30 +1834,67 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
     The inherited deadline can only shorten the local one, exactly as it does
     for a downstream producer.
 
-    The inherited manifest is preferred over this process's own configuration
-    when the context carries one. Under a runtime-controlled deployment that is
-    not a convenience but the point: the parent selected this attempt from a
-    run id, an operation list and a target that its own snapshot had already
-    proved, and a child that re-read its own snapshot could bind the attempt to
-    a *different* experiment that started in between -- reporting a sample
-    under a run that never selected it.
+    **The context's own manifest is what this process binds to**, and it does
+    not require the child to have selected the experiment for itself. That is
+    not a relaxation: the deployment path runs the child in a *new Python
+    process*, which under Admin control has no experiment of its own -- its
+    policy store is empty until the sync loop fills it, and it never reads a
+    static descriptor. Requiring it to agree with a local run made the handoff
+    work only in the process that made it, so a real turn child silently
+    collected nothing.
+
+    What makes this safe is not a local re-check but the channel: the context
+    arrives over the parent's own pipe, produced by a process that had already
+    proved the selection against its own configuration. The child restates that
+    proof rather than repeating it, and three things are still enforced here --
+    the experiment has not expired, its operation list is well formed, and the
+    child is not given a budget slot (the parent holds it).
     """
-    run = _load().run
-    if run is None or not isinstance(context, Mapping):
+    if not isinstance(context, Mapping):
         return None
-    if str(context.get("run_id") or "") != run.run_id:
+    inherited_manifest = _inherited_manifest(context)
+    local = _load().run
+    if inherited_manifest is not None:
+        # A child of a selection that states its experiment. The manifest is
+        # that experiment's identity, so it is what this process reports --
+        # there is no local configuration to consult, because a new process
+        # under Admin control has none until its own sync loop runs.
+        run_id = inherited_manifest["run_id"]
+        allowed_operations = inherited_manifest["operations"]
+        source = inherited_manifest["source"]
+        run_config_version = inherited_manifest["config_version"]
+        run_target = dict(inherited_manifest["target"])
+        run_max_operations = inherited_manifest["max_operations"]
+        run_admission_instances: tuple[Mapping[str, Any], ...] = ()
+        run_expires_at: datetime | None = inherited_manifest["expires_at"]
+    elif local is not None:
+        # A caller written before the manifest travelled -- and the environment
+        # path, where the descriptor really is this process's own
+        # configuration. Nothing has been handed over, so the local run decides.
+        run_id = str(context.get("run_id") or "")
+        if run_id != local.run_id:
+            return None
+        allowed_operations = local.operations
+        source = local.source
+        run_config_version = local.config_version
+        run_target = dict(local.target)
+        run_max_operations = local.max_operations
+        run_admission_instances = local.admission_instances
+        run_expires_at = _context_expiry(context) or local.expires_at_utc
+    else:
         return None
     operation = str(context.get("operation") or "").strip()
-    inherited_manifest = _inherited_manifest(context)
-    allowed_operations = (
-        inherited_manifest["operations"] if inherited_manifest is not None else run.operations
-    )
     if not operation or operation not in allowed_operations:
         return None
     inherited = _context_deadline(context)
     if inherited is None:
         return None
-    deadline = min(run.deadline_mono, inherited)
+    # Either ceiling can only shorten, and the earlier one wins: the experiment
+    # may not outlive its own configured end just because a parent stated a
+    # later one.
+    deadline = inherited
+    if local is not None and local.run_id == run_id:
+        deadline = min(deadline, local.deadline_mono)
     if time.monotonic() > deadline:
         return None
     started = context.get("started_mono_ns")
@@ -1838,11 +1928,14 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
         return None
     # The configured expiry travels with the record, so a manifest rebuilt in
     # this process states the experiment's identity rather than an instant
-    # re-derived from this process's own clock.
-    run_expires_at = _context_expiry(context) or run.expires_at_utc
+    # re-derived from this process's own clock. A context from an Admin
+    # experiment that omits it cannot be filed under a run, so it is refused
+    # rather than given a deadline this process invented.
+    if run_expires_at is None:
+        return None
     measurement = Measurement(
         operation=operation,
-        run_id=run.run_id,
+        run_id=run_id,
         # The same id the parent minted, so the child's record and the parent's
         # selection are one measurement rather than two that look related.
         measurement_id=str(context.get("measurement_id") or f"msm_{uuid.uuid4().hex[:16]}"),
@@ -1850,22 +1943,16 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
         # paid for is part of the startup a user waits through.
         started_mono_ns=started_mono_ns,
         deadline_mono=deadline,
-        control_revision=_context_control_revision(context),
+        control_revision=(
+            inherited_manifest["control_revision"]
+            if inherited_manifest is not None
+            else _context_control_revision(context)
+        ),
         run_operations=allowed_operations,
-        run_target=dict(
-            inherited_manifest["target"] if inherited_manifest is not None else run.target
-        ),
-        run_max_operations=(
-            inherited_manifest["max_operations"]
-            if inherited_manifest is not None
-            else run.max_operations
-        ),
-        run_config_version=(
-            inherited_manifest["config_version"]
-            if inherited_manifest is not None
-            else run.config_version
-        ),
-        run_source=run.source,
+        run_target=run_target,
+        run_max_operations=run_max_operations,
+        run_config_version=run_config_version,
+        run_source=source,
         producer=str(context.get("producer") or producer),
         producer_instance_id=str(context.get("producer_instance_id") or PRODUCER_INSTANCE_ID),
         clock_domain_id=str(context.get("clock_domain_id") or CLOCK_DOMAIN_ID),
@@ -1873,7 +1960,7 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
             context.get("coverage_scope") or COVERAGE_BY_OPERATION.get(operation, "")
         ),
         run_expires_at=run_expires_at,
-        run_admission_instances=inherited_admissions or run.admission_instances,
+        run_admission_instances=inherited_admissions or run_admission_instances,
         facts={"operation": operation, "request_kind": operation},
         spans=spans,
         marks=marks,
@@ -1919,32 +2006,66 @@ def start_stage_recording(
     Recording requires an inherited selection, never just a local switch. A
     broker sees one call at a time and cannot tell which attempt it belongs to,
     so on its own it cannot know whether the operation was selected -- and a
-    broker that kept measuring after the runner stopped would report time the
-    experiment was not collecting for. ``None`` therefore means "not selected"
-    and records nothing.
+    broker that kept measuring after the configuration moved on would report
+    time the experiment was not collecting for. ``None`` therefore means "not
+    selected" and records nothing.
 
-    Beyond the local switch, the inherited selection must agree with this
-    process on the run id and on the operation being one this run selects, and
-    its deadline must not already have passed.
+    **Two things can make a selection valid, and they are not the same thing.**
+
+    * A context that names an operation and no manifest is a *new* selection, and
+      the only way to honour it is for this process's configuration to name that
+      run and select that operation. This is the path a producer that read the
+      configuration for itself takes.
+    * A context that carries the immutable manifest of an experiment is a
+      *continuation*: the operation was chosen before an administrator switched
+      collection off (or moved to another experiment), and its later stages
+      still belong to it. Refusing those is what made a root operation that was
+      allowed to run to completion deliver an incomplete record -- the record
+      was kept, but the broker's stages went missing, which is worse than
+      either.
+
+    The continuation arm is safe because of the channel rather than a local
+    re-check: a manifest-bearing context is produced by a control-plane or
+    runner process that had already proved the selection, it reaches the broker
+    over the broker's own shared-token channel, and the experiment it names must
+    still be unexpired. A caller that cannot reach that channel cannot assert
+    one.
 
     The inherited deadline can only ever shorten the local one -- the recorder
-    takes the earlier of the two -- so a caller cannot extend an experiment
-    past what this process was configured to run.
+    takes the earlier of the two -- so a caller cannot extend an experiment past
+    what this process was configured to run.
     """
-    run = _load().run
-    if run is None or not isinstance(context, Mapping):
-        return None
-    if str(context.get("run_id") or "") != run.run_id:
-        return None
-    allowed = _resolved_operations(run, context)
-    if not allowed:
+    if not isinstance(context, Mapping):
         return None
     inherited = _context_deadline(context)
     if inherited is None:
         return None
-    # Both the experiment's own end and the one the caller stated apply, and the
-    # earlier wins: a fragment may never outlive the run that asked for it.
-    deadline = min(run.deadline_mono, inherited)
+    local = _load().run
+    run_id = str(context.get("run_id") or "")
+    manifest = _inherited_manifest(context)
+    if manifest is not None:
+        run_id = manifest["run_id"]
+        candidates = _candidate_operations(context)
+        allowed = (
+            frozenset(name for name in candidates if name in manifest["operations"])
+            if candidates
+            else manifest["operations"]
+        )
+        deadline = inherited
+        if local is not None and local.run_id == run_id:
+            # Still the experiment in force: its own end applies too.
+            deadline = min(deadline, local.deadline_mono)
+        elif local is not None:
+            # The deployment moved on. The continuation is honoured anyway --
+            # that is the point -- bounded by its own stated end.
+            logger.debug("operation profiling continues a selection from a previous configuration")
+    elif local is not None and run_id == local.run_id:
+        allowed = _resolved_operations(local, context)
+        deadline = min(local.deadline_mono, inherited)
+    else:
+        return None
+    if not allowed:
+        return None
     if time.monotonic() > deadline:
         return None
     # One candidate is already decided; several are narrowed after the call.
@@ -2051,7 +2172,44 @@ def parse_context(raw: Any) -> dict[str, Any] | None:
         parsed["operations"] = [
             _bounded_context_str(item) for item in operations[:8] if _bounded_context_str(item)
         ]
+    # The immutable experiment travels as one nested object, and it is carried
+    # through the header boundary intact: a broker that received a selection it
+    # cannot identify could only refuse it. ``_inherited_manifest`` is what
+    # decides whether the object is usable, so this only bounds its size.
+    run = body.get("run")
+    if isinstance(run, Mapping):
+        parsed["run"] = _bounded_context_run(run)
     return parsed
+
+
+def _bounded_context_run(run: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the bounded, deliberately unvalidated form of an inherited run.
+
+    Unvalidated here on purpose: two different readers want different things
+    from it -- a broker needs the operation list and the deadline, a child needs
+    the whole identity -- and each validates what it uses. This bounds the
+    values so a hostile or truncated value cannot become an unbounded record.
+    """
+    bounded: dict[str, Any] = {
+        "run_id": _bounded_context_str(run.get("run_id"), MAX_RUN_ID_CHARS),
+        "config_version": run.get("config_version"),
+        "max_operations": run.get("max_operations"),
+        "control_revision": run.get("control_revision"),
+        "source": _bounded_context_str(run.get("source")),
+        "expires_at": _bounded_context_str(run.get("expires_at")),
+    }
+    operations = run.get("operations")
+    if isinstance(operations, list):
+        bounded["operations"] = [
+            _bounded_context_str(item) for item in operations[:MAX_REMOTE_STAGES]
+        ]
+    target = run.get("target")
+    if isinstance(target, Mapping):
+        bounded["target"] = {
+            _bounded_context_str(key): _bounded_context_str(value)
+            for key, value in list(target.items())[:8]
+        }
+    return bounded
 
 
 def context_call_id(context: Any) -> str | None:

@@ -19,10 +19,13 @@ configuration version, and an answer older than the one already applied is
 ignored by the store. That is the whole anti-rollback protocol: a delayed or
 reordered reply cannot put a stopped experiment back into force.
 
-**The broker is told, and its answer is not assumed.** The runner pushes the
-configuration over the broker's existing authenticated channel and records only
-whether the push was accepted. It does not wait for, invent or report a
-confirmation the broker did not give.
+**The broker is told on every pass, and its answer is not assumed.** The runner
+pushes the configuration over the broker's existing authenticated channel and
+records only whether the push was accepted. It does not wait for, invent or
+report a confirmation the broker did not give. It re-sends even when the
+configuration has not changed, because the two ways a broker can be missing one
+-- a failed first push, and the broker's own restart -- are both invisible from
+here, and the receiver is idempotent by revision.
 
 **Failure is neither fatal nor silent.** A control plane that cannot be reached
 leaves the last configuration in place, which then ends at the experiment's own
@@ -251,13 +254,23 @@ class ProfilingPolicySync:
         except Exception:
             logger.debug("agent_profiling_policy_unreachable", exc_info=True)
             return ERROR_INTERVAL_S
-        if answer["changed"]:
-            # The broker hears every *change*, including the one that says "no
-            # run": a broker that kept its own copy would keep contributing
-            # fragments for an experiment the runner has already left. Repeating
-            # the same configuration is not re-pushed -- the broker refuses older
-            # versions anyway, and a push per sync would be traffic for nothing.
-            self._push_to_broker(answer)
+        # The broker hears every pass, not only every *change*.
+        #
+        # A change-only push looks cheaper and is wrong twice over. The first
+        # push of a configuration can fail -- the broker is still starting, the
+        # connection was reset -- and if the runner then records the revision as
+        # applied, no later pass ever tries again: the experiment runs with the
+        # broker contributing nothing, which shows up as a root record whose
+        # container stages are simply missing. And the broker holds its
+        # configuration in memory, so its own restart silently empties it; the
+        # runner has no way to learn that except by offering it again.
+        #
+        # Re-sending is safe because the broker's route is idempotent by
+        # revision: an equal revision answers with what it already holds and
+        # writes nothing. This is not an acknowledgement protocol -- the runner
+        # does not wait for one, and nothing upstream depends on it -- it is a
+        # periodic re-offer of a value the receiver already knows how to ignore.
+        self._push_to_broker(answer)
         return ACTIVE_INTERVAL_S if answer["run_id"] else IDLE_INTERVAL_S
 
     def _fetch(self) -> dict[str, Any]:

@@ -418,9 +418,9 @@ class ProfilingControlService:
             # version of a background switch is "this takes a few seconds", and
             # a page that did not say so would be implying instant agreement.
             "sync_note": (
-                "the configuration reaches the control plane, runners and brokers "
-                "through a background sync; allow up to 30 seconds for a change to "
-                "take effect everywhere"
+                "this switch reaches the control plane, runners and brokers through a "
+                "background sync, which normally takes about 30 seconds; a measurement "
+                "that already started is not affected"
             ),
             "operations": {
                 "selectable": {
