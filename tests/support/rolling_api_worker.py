@@ -5,11 +5,28 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 import asyncpg
 
 # The controller explicitly supplies the old checkout, never this repository.
-sys.path.insert(0, sys.argv[1])
+#
+# Where that checkout keeps its packages depends on when the release was cut.
+# A tree from before the layout move has `cloud_agent/` at its top level; one
+# from after it has the same package under `apps/backend/`. Both are handed to
+# this worker, and putting the wrong root first is not a harmless miss: the
+# import then falls through to the *candidate* the venv has installed, and the
+# gate silently stops testing a previous release at all — which is how a
+# candidate that writes a column the old schema does not have first shows up
+# as "previous release failed before upgrade".
+_old_tree = Path(sys.argv[1]).resolve()
+for _package_root in (_old_tree, _old_tree / "apps" / "backend"):
+    if (_package_root / "cloud_agent").is_dir():
+        sys.path.insert(0, str(_package_root))
+        break
+else:  # pragma: no cover - a checkout with no control plane is not a release
+    raise SystemExit(f"no cloud_agent package under {_old_tree}")
+
 from cloud_agent.storage.assembly import Storage
 
 
