@@ -126,6 +126,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     import httpx
 
     from cloud_agent.api.mcp_relay import close_host, maintain_host_sessions
+    from cloud_agent.application.profiling_control import ProfilingControlService
     from cloud_agent.broker_routing import close_broker_clients
     from cloud_agent.capacity_history import prune_host_capacity_history
     from cloud_agent.gateway import GatewayClient
@@ -133,7 +134,9 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     from cloud_agent.ledger import collect_usage_snapshots
     from cloud_agent.mcp.catalog import McpCatalog
     from cloud_agent.operational_health import monitor_queue
+    from cloud_agent.profiling_control_config import profiling_control_deployment
     from cloud_agent.storage.assembly import Storage
+    from cloud_agent.workers.profiling_control import ProfilingPolicyWorker
 
     dsn = os.environ.get(ENV_DATABASE_URL, "")
     if not dsn:
@@ -210,12 +213,35 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         app.state.snapshot_task = snapshot_coordinator
         app.state.ledger_task = ledger_collector
         app.state.capacity_task = capacity_history
+        # The profiling policy loop runs in every control-plane process, not
+        # only the one that owns the reaper: each process roots its own file and
+        # terminal requests, so each one has to know what it is allowed to
+        # collect. It polls the control row, which is why an idle deployment now
+        # has a small, stated background cost instead of claiming zero I/O.
+        profiling_service = ProfilingControlService(
+            control=storage.profiling_control,
+            deployment=profiling_control_deployment(),
+            host_pool=storage.host_pool,
+        )
+        profiling_worker = ProfilingPolicyWorker(service=profiling_service)
+        app.state.profiling_control_service = profiling_service
+        app.state.profiling_policy_worker = profiling_worker
+        app.state.profiling_policy_task = asyncio.create_task(profiling_worker.run())
+        _BACKGROUND_TASKS.add(app.state.profiling_policy_task)
+        app.state.profiling_policy_task.add_done_callback(_BACKGROUND_TASKS.discard)
         app.state.queue_monitor_task = asyncio.create_task(monitor_queue(storage.host_pool))
         _BACKGROUND_TASKS.add(app.state.queue_monitor_task)
         app.state.queue_monitor_task.add_done_callback(_BACKGROUND_TASKS.discard)
         _start_publisher(app, storage)
         logger.info("cloud agent control plane started")
     else:
+        # The relay listener roots no file or terminal request, so it has no
+        # policy to apply. Publishing one there would be a second process
+        # collecting under the same revision, which is what the participant
+        # table exists to make visible rather than to hide.
+        app.state.profiling_control_service = None
+        app.state.profiling_policy_worker = None
+        app.state.profiling_policy_task = None
         app.state.reaper_task = None
         app.state.snapshot_task = None
         app.state.ledger_task = None
@@ -256,6 +282,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.capacity_task,
             app.state.queue_monitor_task,
             app.state.publish_task,
+            app.state.profiling_policy_task,
         ):
             if task is None:
                 continue

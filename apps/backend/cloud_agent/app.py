@@ -105,8 +105,10 @@ def create_app() -> FastAPI:
         admin_hosts,
         admin_llm_requests,
         admin_measurements,
+        admin_profiling_control,
         admin_runs,
         admin_usage,
+        host_profiling,
         hosts,
         mcp_connections,
         mcp_relay,
@@ -136,11 +138,19 @@ def create_app() -> FastAPI:
     app.include_router(mcp_connections.router)
     app.include_router(mcp_relay.router)
     app.include_router(hosts.router)
+    # Host policy exchange. A sibling of the host routes rather than part of
+    # them: it is the profiling feature's own channel, it shares the same
+    # credential, and it should be removable without editing the host API.
+    app.include_router(host_profiling.router)
     app.include_router(admin_hosts.router)
     app.include_router(admin_conversations.router)
     app.include_router(admin_runs.router)
     app.include_router(admin_usage.router)
     app.include_router(admin_measurements.router)
+    # Start/Stop for the same feature, in its own module so the write path's
+    # transaction and audit imports do not load on the read-only page's route
+    # table. Same guard, same prefix, same no-store: it is one surface.
+    app.include_router(admin_profiling_control.router)
     # Per-request LLM detail reads a second service and stays in its own module
     # for the same reason it is a separate page load: the default run detail
     # must not acquire a gateway I/O path.

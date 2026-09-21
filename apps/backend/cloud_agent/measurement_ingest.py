@@ -165,6 +165,13 @@ KNOWN_RECORD_KEYS: Final = frozenset(
         "clock_domain_id",
         "boundary_frozen",
         "run_expires_at",
+        # Which control source rooted this measurement, and -- for a run an
+        # administrator started -- the deployment revision that authorized it.
+        # Both are identity rather than observation: a reader uses them to tell
+        # a static-descriptor experiment from a commanded one, and two
+        # experiments that happen to reuse a run id apart.
+        "run_source",
+        "control_revision",
         "container_action",
         "resident_action",
         "context_status",

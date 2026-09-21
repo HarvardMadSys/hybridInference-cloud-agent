@@ -2408,6 +2408,49 @@ class RetainedSandboxStop(BaseModel):
     shared_live: Literal[True] = True
 
 
+class ProfilingHostReport(BaseModel):
+    """What a host agent reports about its own profiling policy state.
+
+    Read as evidence rather than as a claim: the control plane records these
+    values to decide whether an experiment is fully active, so every field says
+    what the host *observed*, not what it was configured with. ``applied_revision``
+    is the revision in force locally, which is the only number that can answer
+    "has this host heard about the Stop".
+    """
+
+    participant_id: str | None = Field(
+        None,
+        max_length=128,
+        description="Stable per-process identity, so a restart is not a second participant.",
+    )
+    applied_revision: int | None = Field(
+        None, ge=0, description="Control revision this host has applied."
+    )
+    run_id: str | None = Field(None, max_length=128)
+    capability: str | None = Field(
+        None,
+        max_length=128,
+        description=(
+            "The runtime-control capability this host advertises. A host "
+            "without it is reported as unsupported rather than as one that has "
+            "not answered."
+        ),
+    )
+    detail: str | None = Field(None, max_length=500)
+    budget: dict[str, Any] = Field(default_factory=dict)
+    broker_revision: int | None = Field(
+        None,
+        ge=0,
+        description=(
+            "The revision this host's workspace broker has confirmed, when it "
+            "has one. Null means the host could not confirm its broker, which "
+            "the Admin page reports as a gap rather than rounding up."
+        ),
+    )
+    broker_capability: str | None = Field(None, max_length=128)
+    broker_detail: str | None = Field(None, max_length=500)
+
+
 class HostHeartbeatRequest(BaseModel):
     """A host reporting that it is still there, and what it now looks like.
 
@@ -2415,6 +2458,17 @@ class HostHeartbeatRequest(BaseModel):
     that carries nothing but liveness does not blank out what enrollment
     declared.
     """
+
+    profiling: ProfilingHostReport | None = Field(
+        None,
+        description=(
+            "What this host has applied of the operation-profiling policy, and "
+            "what its workspace broker confirmed. Present so the answer can "
+            "carry the current policy back on the same authenticated channel "
+            "the host already uses, and so the Admin page can tell 'applied' "
+            "from 'never heard about it'."
+        ),
+    )
 
     physical_host: str | None = Field(
         None,
@@ -2586,6 +2640,89 @@ class HostHeartbeatResponse(BaseModel):
             "what moves a host to offline."
         ),
     )
+    profiling: ProfilingPolicy | None = Field(
+        None,
+        description=(
+            "The operation-profiling policy this host must apply, or null when "
+            "this deployment is not under Admin control. Carried on the beat so "
+            "a Stop reaches a runner without a second channel and without a "
+            "second credential: the host already holds this one, and the "
+            "sandbox never sees it."
+        ),
+    )
+
+
+class ProfilingPolicyLease(BaseModel):
+    """How long the policy may be acted on without hearing from the control plane."""
+
+    seconds: float = Field(
+        ...,
+        description=(
+            "Remaining lifetime of this authorization, already reduced by the "
+            "request's round trip. A host that applies the policy past this "
+            "instant is collecting on a lease the control plane no longer "
+            "stands behind, which is how an isolated node stops by itself."
+        ),
+    )
+    issued_at: datetime = Field(
+        ...,
+        description=(
+            "The control plane's own instant when this lease was minted. The "
+            "host uses it as a wall-clock anchor so it never has to compare two "
+            "machines' monotonic clocks."
+        ),
+    )
+
+
+class ProfilingPolicyRun(BaseModel):
+    """The immutable experiment a policy names, as a host receives it."""
+
+    run_id: str
+    operations: list[str]
+    target: dict[str, str] = Field(default_factory=dict)
+    expires_at: datetime
+    config_version: int = 1
+    max_operations: int
+    admission_instances: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ProfilingPolicy(BaseModel):
+    """What a host agent must collect for, and until when.
+
+    Read the three orders as three different fields, because they are three
+    different questions and collapsing any two of them is how an experiment
+    gets extended or a Stop ignored:
+
+    * ``revision`` -- which control command was applied last. A host that sees
+      a revision it has not applied must adopt the whole policy, including the
+      case where the answer is "nothing".
+    * ``run.config_version`` -- which immutable experiment this is. It never
+      changes for a given run.
+    * ``lease`` -- how long this answer may be acted on. The host's own
+      renewal sequence is local and never crosses this boundary: a renewal is
+      not a command and must not look like one.
+    """
+
+    mode: str = Field(
+        ...,
+        description=(
+            "``admin`` means the persisted control state decides, so this "
+            "policy is authoritative. ``environment`` and ``disabled`` mean the "
+            "host keeps its own deployment configuration and must ignore the "
+            "run below, which is empty in both cases."
+        ),
+    )
+    revision: int = Field(..., description="Control revision this policy states.")
+    run: ProfilingPolicyRun | None = Field(
+        None,
+        description=(
+            "The experiment in force, or null when the deployment is not "
+            "collecting. Null is a command, not an absence: a host that applied "
+            "a previous revision must stop."
+        ),
+    )
+    lease: ProfilingPolicyLease
+    server_time: datetime = Field(..., description="The control plane's instant for this answer.")
 
 
 # ── Session ────────────────────────────────────────────────────────────
