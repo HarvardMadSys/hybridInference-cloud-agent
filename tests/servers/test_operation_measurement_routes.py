@@ -165,6 +165,32 @@ def _enable(monkeypatch, **overrides: Any) -> dict[str, Any]:
     return run
 
 
+def _enable_admin(monkeypatch, **overrides: Any) -> tuple[dict[str, Any], Any]:
+    """Put this process under Admin control with one experiment in force.
+
+    Returns the descriptor and the published snapshot, so a test can publish a
+    Stop the way the control plane's sync loop does.
+    """
+    run: dict[str, Any] = {
+        "run_id": "cp-run-1",
+        "operations": ["files.list", "files.open", "terminal.open"],
+        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+        "max_operations": 10,
+    }
+    run.update(overrides)
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_MODE, operation_profiling.MODE_ADMIN)
+    operation_profiling.reset_cache()
+    reset_selections()
+    published = operation_profiling.policy_store().publish(
+        operation_profiling.ControlState(
+            mode=operation_profiling.MODE_ADMIN,
+            config_version=1,
+            run=operation_profiling.parse_run(json.dumps(run)),
+        )
+    )
+    return run, published
+
+
 def _answer(headers: Any) -> dict[str, Any] | None:
     """Decode the fragment a broker stand-in echoed, as the real client does."""
     return operation_profiling.answer_from_headers(headers)
@@ -1324,18 +1350,19 @@ async def test_a_request_that_outlived_its_run_reports_incomplete(
     assert emitted[0]["collection_complete"] is False
 
 
-async def test_a_configuration_change_does_not_truncate_an_in_flight_request(
+async def test_a_disable_does_not_truncate_an_in_flight_request(
     client: AsyncClient, store: FakeStorage, monkeypatch, records
 ):
     """Disabling collection stops selecting; it does not cut a request short.
 
-    The deployment's configuration is replaced mid-request, which is what a
-    Disable looks like from here. The request keeps its own experiment, keeps
-    its own deadline, and finishes complete -- and the broker, which is told to
-    stop selecting at the same moment, still answers the fragment this request
-    had already started.
+    Only Admin control changes configuration at runtime, so that is the mode
+    this happens in: the broker's own copy of the configuration is replaced
+    mid-request, which is exactly what a Disable does. The request keeps its own
+    experiment and its own deadline and finishes complete -- and the broker,
+    which has just been told to stop selecting, still answers the fragment this
+    request had already started.
     """
-    run = _enable(monkeypatch)
+    _enable_admin(monkeypatch)
     broker = _RecordingClient()
     _use_broker(monkeypatch, broker)
     job_id = await _ready_job(client, store)
@@ -1344,10 +1371,14 @@ async def test_a_configuration_change_does_not_truncate_an_in_flight_request(
 
     async def _disable_then_read(*args: Any, **kwargs: Any) -> dict[str, Any]:
         # The whole deployment stops selecting, including the broker's copy.
-        run["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
-        monkeypatch.setenv(operation_profiling.ENV_PROFILING_RUN, json.dumps(run))
-        operation_profiling.reset_cache()
-        operation_profiling.reset_policy()
+        operation_profiling.policy_store().publish(
+            operation_profiling.ControlState(
+                mode=operation_profiling.MODE_ADMIN,
+                config_version=2,
+                run=None,
+                stop_reason="stopped",
+            )
+        )
         return await original(*args, **kwargs)
 
     monkeypatch.setattr(broker, "files", _disable_then_read)
@@ -1360,6 +1391,11 @@ async def test_a_configuration_change_does_not_truncate_an_in_flight_request(
     assert block["fragment_recorded"] is True, "the fragment still belonged to it"
     assert block["collection_complete"] is True
     assert records()[0]["collection_complete"] is True
+    # And a request arriving after the Disable is not selected at all.
+    operation_profiling.reset_cache()
+    broker.files = original
+    after = await client.get(f"/v1/agent/jobs/{job_id}/files")
+    assert "profiling" not in after.json()
 
 
 # ---------------------------------------------------------------------------

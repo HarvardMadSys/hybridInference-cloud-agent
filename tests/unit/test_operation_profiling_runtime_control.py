@@ -650,6 +650,139 @@ def test_a_continuation_cannot_widen_the_operations_it_was_given(monkeypatch):
     assert profiling.start_stage_recording(context, producer="broker") is not None
 
 
+def _admin_context(monkeypatch) -> tuple[Any, dict[str, Any]]:
+    """One real Admin selection and the context a child would be handed."""
+    run = _run(run_id=RUN_A, operations=("attempt.startup",), target={"host": "host-a"})
+    _admin(monkeypatch, _state(run=run, revision=1))
+    measurement = profiling.start_operation(
+        operation="attempt.startup", host="host-a", producer="runner"
+    )
+    assert measurement is not None
+    assert profiling.bind(measurement, host="host-a") is True
+    context = profiling.handoff_context(measurement)
+    assert context is not None
+    return measurement, context
+
+
+def _retime(context: dict[str, Any], *, run_expires_in: float, transport_expires_in: float):
+    """Return the same context with the two deadlines stated separately.
+
+    A real context derives both from one measurement, so a test that wants to
+    prove which one wins has to state them apart -- which is also what a
+    delayed, replayed or hostile context looks like from the receiver's side.
+    """
+    retimed = json.loads(json.dumps(context))
+    retimed["run"]["expires_at"] = (
+        datetime.now(timezone.utc) + timedelta(seconds=run_expires_in)
+    ).isoformat()
+    retimed["expires_at"] = time.time() + transport_expires_in
+    return retimed
+
+
+def test_a_disabled_deployment_refuses_a_continuation(monkeypatch):
+    """``disabled`` is not the Admin switch. It forbids collection outright.
+
+    A continuation is honoured because a *configuration* may change while work
+    is in flight -- which is an Admin-mode statement. A process told the
+    deployment does not collect at all must not be talked into allocating a
+    measurement or a recorder by an upstream context, however well formed, or
+    a staged rollout could not silence a producer.
+    """
+    _measurement, context = _admin_context(monkeypatch)
+    assert profiling.attach_selection(context) is not None
+
+    monkeypatch.setenv(profiling.ENV_PROFILING_MODE, profiling.MODE_DISABLED)
+    profiling.reset_cache()
+
+    assert profiling.profile_mode() == profiling.MODE_DISABLED
+    assert profiling.attach_selection(context) is None
+    assert profiling.start_stage_recording(context, producer="broker") is None
+    # And through the real parser a broker route uses, not just the helpers.
+    from cloud_agent_profiling.operation_call import open_call
+
+    assert open_call(json.dumps(context), operations=("attempt.startup",)).recording is False
+
+
+def test_a_default_off_deployment_refuses_a_continuation(monkeypatch):
+    """A deployment that configures nothing collects nothing, however it is asked."""
+    _measurement, context = _admin_context(monkeypatch)
+
+    monkeypatch.delenv(profiling.ENV_PROFILING_MODE, raising=False)
+    monkeypatch.delenv(profiling.ENV_PROFILING_ENABLED, raising=False)
+    monkeypatch.delenv(profiling.ENV_PROFILING_RUN, raising=False)
+    profiling.reset_cache()
+
+    assert profiling.profile_mode() == profiling.MODE_DISABLED
+    assert profiling.attach_selection(context) is None
+    assert profiling.start_stage_recording(context, producer="broker") is None
+
+
+def test_environment_mode_still_follows_its_own_descriptor(monkeypatch):
+    """The static descriptor decides, and it is the same one in parent and child."""
+    _measurement, context = _admin_context(monkeypatch)
+
+    # No static experiment configured: the deployment collects nothing.
+    monkeypatch.setenv(profiling.ENV_PROFILING_MODE, profiling.MODE_ENVIRONMENT)
+    monkeypatch.delenv(profiling.ENV_PROFILING_ENABLED, raising=False)
+    profiling.reset_cache()
+    assert profiling.attach_selection(context) is None
+    assert profiling.start_stage_recording(context, producer="broker") is None
+
+    # A matching static descriptor: the ordinary inherited-environment path,
+    # where the local run is the authority rather than the carried manifest.
+    _enable_environment(monkeypatch, run_id=RUN_A, operations=["attempt.startup"])
+    attached = profiling.attach_selection(context)
+    assert attached is not None
+    assert attached.run_id == RUN_A
+    assert attached.run_source == profiling.SOURCE_ENVIRONMENT
+
+
+def test_an_inherited_manifest_that_has_expired_is_refused(monkeypatch):
+    """The experiment's own end is a ceiling, not decoration.
+
+    A context can outlive the experiment it names -- delayed in a queue, replayed
+    after a sync -- and the transport's own expiry says nothing about that. A
+    selection may not buy time by travelling.
+    """
+    _measurement, context = _admin_context(monkeypatch)
+    stale = _retime(context, run_expires_in=-60, transport_expires_in=300)
+
+    assert profiling.attach_selection(stale) is None
+    assert profiling.start_stage_recording(stale, producer="broker") is None
+    from cloud_agent_profiling.operation_call import open_call
+
+    assert open_call(json.dumps(stale), operations=("attempt.startup",)).recording is False
+
+
+def test_the_earlier_of_the_two_deadlines_wins(monkeypatch):
+    """A context with 300 s left on an experiment with 2 s left gets 2 s.
+
+    Both are ceilings and the earlier one applies, which is the same rule the
+    environment path already applied to a locally read descriptor.
+    """
+    _measurement, context = _admin_context(monkeypatch)
+    soon = _retime(context, run_expires_in=2, transport_expires_in=300)
+
+    child = profiling.attach_selection(soon)
+    assert child is not None
+    recorder = profiling.start_stage_recording(soon, producer="broker")
+    assert recorder is not None
+    for deadline in (child.deadline_mono, recorder.deadline_mono):
+        remaining = deadline - time.monotonic()
+        assert 0 < remaining <= 3, f"got {remaining} s, not the manifest's 2"
+
+
+def test_a_context_cannot_outlive_the_experiment_it_names(monkeypatch):
+    """The transport's bound is a ceiling too, even when the manifest is later."""
+    _measurement, context = _admin_context(monkeypatch)
+    short_leash = _retime(context, run_expires_in=300, transport_expires_in=2)
+
+    child = profiling.attach_selection(short_leash)
+    assert child is not None
+    remaining = child.deadline_mono - time.monotonic()
+    assert 0 < remaining <= 3, f"got {remaining} s, not the transport's 2"
+
+
 def test_a_context_without_a_manifest_still_needs_the_local_configuration(monkeypatch):
     """A caller that only names operations cannot enable collection by claiming."""
     _admin(monkeypatch, _state(run=_run(run_id=RUN_A, operations=("attempt.startup",)), revision=1))
@@ -959,6 +1092,25 @@ def test_a_real_child_process_continues_an_admin_selection(monkeypatch, tmp_path
     assert written["profiling_run_id"] == RUN_A
     assert written["measurement_id"] == measurement.measurement_id
     assert written["control_revision"] == 5
+
+    # The same child process, told the deployment does not collect at all,
+    # refuses the very same handoff.
+    disabled_env = dict(env)
+    disabled_env[profiling.ENV_PROFILING_MODE] = profiling.MODE_DISABLED
+    refused = subprocess.run(
+        [sys.executable, "-c", _CHILD_SCRIPT],
+        input=json.dumps({"_profiling": context}),
+        capture_output=True,
+        text=True,
+        env=disabled_env,
+        timeout=60,
+        check=False,
+    )
+    assert refused.returncode == 0, refused.stderr
+    answer = json.loads(refused.stdout.strip().splitlines()[-1])
+    assert answer == {"attached": False, "mode": profiling.MODE_DISABLED}
+    # Nothing was written for it: a disabled deployment collects nothing.
+    assert len(sink.read_text().strip().splitlines()) == 1
 
 
 def test_an_expired_selection_is_refused_however_it_arrives(monkeypatch):
