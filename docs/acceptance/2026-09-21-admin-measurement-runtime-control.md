@@ -296,3 +296,19 @@ $ npm run test          # Test Files 103 passed (103) / Tests 1673 passed (1673)
 
 未跑：`scripts/bench_startup_profiling_overhead.py`、`scripts/bench_operation_overhead.py`
 （本轮未做性能基准，见 §6.7）；`pytest -m external`（需要外部服务）。
+
+### CI
+
+PR #318 的 CI 全绿（`9c88596` + 本 PR 的 10 个提交）：
+
+```
+CI Gate pass · Classify Changes pass · Gitleaks pass · Compose resolves pass
+Lint pass (15s) · Tests pass (2m42s) · Tests (Postgres) pass (52s) · Web pass (1m44s)
+control (arm64) pass · runner (amd64) pass · sandbox (amd64) pass · egress (amd64) pass
+tunnel (amd64) pass · web-agents (arm64) pass · web-root (arm64) pass
+Candidate on real Kata: skipping（未触发）
+```
+
+`Tests (Postgres)` 在 CI 上是绿的，这与本机 `dbtest` 的 5 个到期边界失败形成对照：
+它们是本机时序相关，不是分支问题（§6.8 的干净 worktree 复核也支持这一点）。
+`Tests` 绿同时说明 §6.1 的 `os.openpty` 失败只发生在本机沙箱。
