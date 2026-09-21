@@ -221,19 +221,20 @@ function controlRun(overrides: Partial<ProfilingControlRun> = {}): ProfilingCont
 function control(overrides: Partial<ProfilingControlSnapshot> = {}): ProfilingControlSnapshot {
   return {
     deployment: 'test',
+    mode: 'admin',
     revision: 3,
     configured: true,
     server_time: '2026-09-21T10:00:00Z',
     status: 'off',
-    gaps: [],
     run: null,
     run_active: false,
     last_stopped_run: null,
     stored_samples: 0,
     budget_scope: 'producer_instance',
     budget_note: 'Each producer enforces its own operation budget.',
-    participants: [],
-    participant_ttl_seconds: 30,
+    sync_note:
+      'the configuration reaches the control plane, runners and brokers through a background ' +
+      'sync; allow up to 30 seconds for a change to take effect everywhere',
     operations: {
       selectable: {
         sandbox_startup: ['attempt.startup'],
@@ -797,42 +798,88 @@ describe('measurement collection control', () => {
 
   /** Open the inline form and wait until the host menu it reads has arrived. */
   async function openForm(): Promise<void> {
-    fireEvent.click(await screen.findByRole('button', { name: 'Start measurement' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Enable measurement' }));
     await screen.findByRole('option', { name: 'host-a' });
   }
 
+  /** The form's own primary button; the toggle is gone while the form is open. */
   function submit(): void {
-    fireEvent.click(screen.getByRole('button', { name: 'Start measurement' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Enable measurement' }));
   }
 
-  it('says Off and offers Start, never Stop, while nothing is being collected', async () => {
+  it('says Off and offers exactly one button, labelled Enable measurement', async () => {
     render(<AdminMeasurementsPage />);
-    await screen.findByRole('button', { name: 'Start measurement' });
+    await screen.findByRole('button', { name: 'Enable measurement' });
 
     expect(within(card()).getByText('Off')).toBeInTheDocument();
-    expect(
-      within(card()).getByText(/Collect timings while you use sandboxes, terminals and files/),
-    ).toBeInTheDocument();
-    expect(within(card()).getByText(/Server-side timings only/)).toBeInTheDocument();
-    expect(
-      within(card()).queryByRole('button', { name: 'Stop measurement' }),
-    ).not.toBeInTheDocument();
+    // One button, never two: nothing here offers to stop what is not running.
+    expect(within(card()).getAllByRole('button')).toHaveLength(1);
+    expect(within(card()).queryByRole('button', { name: /disable/i })).not.toBeInTheDocument();
   });
 
-  it('starts the chosen groups, host and duration, and renders the returned snapshot', async () => {
+  it.each<[ProfilingControlStatus, string, RegExp]>([
+    ['unavailable', 'Unavailable', /This deployment is not configured for Admin control/],
+    [
+      'unmanaged',
+      'Managed by deployment configuration',
+      /set by this deployment's own configuration/,
+    ],
+  ])('renders %s without a button at all, and explains why', async (status, line, explanation) => {
+    // What the control plane answers for a deployment it cannot command: no
+    // selectable groups and no bounds, because there is no command to build.
+    // The card must say why rather than crash on the shape or offer a switch.
+    live = control({
+      mode: status === 'unmanaged' ? 'environment' : 'disabled',
+      configured: false,
+      status,
+      operations: { selectable: {}, all: [] } as unknown as ProfilingControlSnapshot['operations'],
+      bounds: {} as unknown as ProfilingControlSnapshot['bounds'],
+    });
+    render(<AdminMeasurementsPage />);
+    await within(card()).findByText(explanation);
+
+    // The one-line status is configuration, and it is not "Off".
+    const header = within(card()).getByRole('heading', {
+      name: 'Measurement collection',
+    }).parentElement!;
+    expect(within(header).getByText(line)).toBeInTheDocument();
+    expect(within(card()).queryByText('Off')).not.toBeInTheDocument();
+    // Not one button: not "Enable measurement", and not a disabled one either.
+    expect(within(card()).queryAllByRole('button')).toHaveLength(0);
+  });
+
+  it('opens the inline form on Enable measurement, with every group on and no host chosen', async () => {
+    render(<AdminMeasurementsPage />);
+    await openForm();
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Sandbox startup' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Terminal opening' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'File access' })).toBeChecked();
+    // Nothing is preselected: the admin chooses, and there is no host default.
+    expect(screen.getByLabelText('Host')).toHaveValue('');
+    expect(screen.getByLabelText('Duration')).toHaveValue('10');
+    expect(screen.getByRole('option', { name: 'Choose a host…' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'All hosts' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'host-a' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'host-b' })).toBeInTheDocument();
+    expect(within(card()).queryByRole('button', { name: /disable/i })).not.toBeInTheDocument();
+  });
+
+  it('sends the chosen groups, host and duration with the revision it read, and draws the answer', async () => {
     vi.mocked(startProfilingRun).mockImplementation(async () => {
       live = control({
         revision: 4,
-        status: 'collecting',
+        status: 'on',
+        run_active: true,
         run: controlRun({ operations: ['attempt.startup', 'files.list', 'files.open'] }),
+        stored_samples: 0,
       });
       return { control: live, run_id: 'prun-1', revision: 4 };
     });
     render(<AdminMeasurementsPage />);
     await openForm();
 
-    // Nothing is preselected: the admin chooses, and there is no host default.
-    expect(screen.getByLabelText('Host')).toHaveValue('');
     fireEvent.change(screen.getByLabelText('Host'), { target: { value: 'host-a' } });
     fireEvent.click(screen.getByRole('checkbox', { name: 'Terminal opening' }));
     submit();
@@ -847,23 +894,34 @@ describe('measurement collection control', () => {
     expect(body.request_id.length).toBeGreaterThan(0);
 
     // What is drawn is the snapshot the server returned, not a local guess.
-    expect(await screen.findByText('Collecting')).toBeInTheDocument();
+    expect(await screen.findByText('Measuring')).toBeInTheDocument();
     expect(screen.getByText('Operations: Sandbox startup, File access')).toBeInTheDocument();
     expect(screen.getByText('Host: host-a')).toBeInTheDocument();
+    expect(screen.getByText(/^Expires at: /)).toBeInTheDocument();
     expect(screen.getByText('Time left: 10:00')).toBeInTheDocument();
     expect(screen.getByText('Stored samples: 0')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Disable measurement' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Enable measurement' })).not.toBeInTheDocument();
+  });
+
+  it('flips the single button to Disable measurement once the run is in force', async () => {
+    live = control({ status: 'on', run_active: true, run: controlRun() });
+    render(<AdminMeasurementsPage />);
+    await screen.findByRole('button', { name: 'Disable measurement' });
+
+    expect(within(card()).getByText('Measuring')).toBeInTheDocument();
+    expect(within(card()).getAllByRole('button')).toHaveLength(1);
     expect(
-      screen.getByText(/A stored sample is one server-side record, and one terminal interaction/),
-    ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Stop measurement' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Start measurement' })).not.toBeInTheDocument();
+      within(card()).queryByRole('button', { name: 'Enable measurement' }),
+    ).not.toBeInTheDocument();
   });
 
   it('sends an all-hosts target as null when All hosts is the choice', async () => {
     vi.mocked(startProfilingRun).mockImplementation(async () => {
       live = control({
         revision: 4,
-        status: 'starting',
+        status: 'on',
+        run_active: true,
         run: controlRun({ target: {}, operations: ['attempt.startup'] }),
       });
       return { control: live, run_id: 'prun-1', revision: 4 };
@@ -877,6 +935,7 @@ describe('measurement collection control', () => {
 
     await waitFor(() => expect(startProfilingRun).toHaveBeenCalledTimes(1));
     expect(vi.mocked(startProfilingRun).mock.calls[0][0].target).toEqual({ host: null });
+    expect(await screen.findByText('Host: All hosts')).toBeInTheDocument();
   });
 
   it('refuses a submission with no host or no group instead of guessing one', async () => {
@@ -895,7 +954,7 @@ describe('measurement collection control', () => {
     expect(startProfilingRun).not.toHaveBeenCalled();
   });
 
-  it('keeps the form and its values when a start fails, and says why', async () => {
+  it('keeps the form and its values when an enable fails, and says why', async () => {
     vi.mocked(startProfilingRun).mockRejectedValue(
       new APIError('storage_unavailable', 'measurement storage is unavailable', 503),
     );
@@ -912,18 +971,17 @@ describe('measurement collection control', () => {
     expect(screen.getByRole('checkbox', { name: 'File access' })).not.toBeChecked();
     expect(screen.getByLabelText('Host')).toHaveValue('host-b');
     expect(screen.getByLabelText('Duration')).toHaveValue('30');
+    expect(screen.getByRole('button', { name: 'Enable measurement' })).toBeInTheDocument();
     // And nothing was drawn as though a run had begun.
     expect(within(card()).getByText('Off')).toBeInTheDocument();
-    expect(
-      within(card()).queryByRole('button', { name: 'Stop measurement' }),
-    ).not.toBeInTheDocument();
+    expect(within(card()).queryByRole('button', { name: /disable/i })).not.toBeInTheDocument();
   });
 
-  it('retries an identical start with the same request id instead of a second run', async () => {
+  it('retries an identical enable with the same request id instead of a second run', async () => {
     vi.mocked(startProfilingRun)
       .mockRejectedValueOnce(new APIError('NETWORK_ERROR', 'offline'))
       .mockImplementationOnce(async () => {
-        live = control({ revision: 4, status: 'collecting', run: controlRun() });
+        live = control({ revision: 4, status: 'on', run_active: true, run: controlRun() });
         return { control: live, run_id: 'prun-1', revision: 4 };
       });
     render(<AdminMeasurementsPage />);
@@ -941,31 +999,15 @@ describe('measurement collection control', () => {
     expect(second[0].request_id).toBe(first[0].request_id);
   });
 
-  it('renders the gaps of a partly active run and still offers Stop', async () => {
-    live = control({
-      status: 'partially_active',
-      run: controlRun(),
-      gaps: [
-        { kind: 'host_not_confirmed', detail: 'host-b has not confirmed revision 4 yet' },
-        { kind: 'broker_missing', detail: 'no broker on host-b has applied revision 4' },
-      ],
-    });
-    render(<AdminMeasurementsPage />);
-    await screen.findByText(/host-b has not confirmed revision 4 yet/);
-
-    expect(screen.getByText('Partly active')).toBeInTheDocument();
-    expect(screen.getByText('host_not_confirmed')).toBeInTheDocument();
-    expect(screen.getByText(/no broker on host-b has applied revision 4/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Stop measurement' })).toBeEnabled();
-  });
-
   it('stops the named run without a confirmation dialog, and draws the answer', async () => {
-    live = control({ status: 'collecting', run: controlRun() });
+    live = control({ status: 'on', run_active: true, run: controlRun() });
     vi.mocked(stopProfilingRun).mockImplementation(async () => {
       live = control({
         revision: 6,
-        status: 'stopped',
-        run: controlRun({
+        status: 'off',
+        run: null,
+        run_active: false,
+        last_stopped_run: controlRun({
           stop_reason: 'stopped_by_admin',
           stopped_at: '2026-09-21T10:03:00Z',
         }),
@@ -975,7 +1017,7 @@ describe('measurement collection control', () => {
     const confirm = vi.spyOn(window, 'confirm');
     try {
       render(<AdminMeasurementsPage />);
-      fireEvent.click(await screen.findByRole('button', { name: 'Stop measurement' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Disable measurement' }));
 
       await waitFor(() => expect(stopProfilingRun).toHaveBeenCalledTimes(1));
       expect(vi.mocked(stopProfilingRun).mock.calls[0][0]).toBe('prun-1');
@@ -986,25 +1028,67 @@ describe('measurement collection control', () => {
       expect(confirm).not.toHaveBeenCalled();
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
-      expect(await screen.findByText('Stopped')).toBeInTheDocument();
-      expect(screen.getByText('Stop reason: stopped_by_admin')).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Start measurement' })).toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: 'Stop measurement' })).not.toBeInTheDocument();
+      expect(await screen.findByText('Off')).toBeInTheDocument();
+      expect(screen.getByText(/Last experiment: prun-1/)).toBeInTheDocument();
+      expect(screen.getByText(/Stop reason: stopped_by_admin/)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Enable measurement' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Disable measurement' })).not.toBeInTheDocument();
     } finally {
       confirm.mockRestore();
     }
   });
 
-  it('shows a stopped run’s reason and offers Start again', async () => {
-    live = control({
-      status: 'expired',
-      run: controlRun({ stop_reason: 'deadline_reached', stopped_at: '2026-09-21T10:10:00Z' }),
+  it('shows the pending verb and disables the button while a write is in flight', async () => {
+    live = control({ status: 'on', run_active: true, run: controlRun() });
+    let release: () => void = () => {};
+    vi.mocked(stopProfilingRun).mockImplementation(async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      live = control({ revision: 6, status: 'off', run: null, run_active: false });
+      return { control: live, run_id: 'prun-1', revision: 6 };
     });
     render(<AdminMeasurementsPage />);
-    await screen.findByText('Expired');
-    expect(screen.getByText('Stop reason: deadline_reached')).toBeInTheDocument();
-    expect(screen.getByText(/Stopped at:/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Start measurement' })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Disable measurement' }));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Disabling…' })).toBeDisabled());
+    await act(async () => {
+      release();
+    });
+    await screen.findByRole('button', { name: 'Enable measurement' });
+  });
+
+  it('hints that nothing has been stored yet while a live run has no samples', async () => {
+    live = control({ status: 'on', run_active: true, run: controlRun(), stored_samples: 0 });
+    render(<AdminMeasurementsPage />);
+    await screen.findByText('Stored samples: 0');
+
+    expect(screen.getByText(/No matching operation has happened yet/)).toBeInTheDocument();
+    expect(screen.getByText(/use a sandbox, open a terminal or browse files/)).toBeInTheDocument();
+    expect(screen.getByText(/A stored sample is one server-side record/)).toBeInTheDocument();
+
+    live = control({ status: 'on', run_active: true, run: controlRun(), stored_samples: 7 });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await screen.findByText('Stored samples: 7');
+    expect(screen.queryByText(/No matching operation has happened yet/)).not.toBeInTheDocument();
+  });
+
+  it('repeats the server’s sync note and folds the diagnostics away behind Details', async () => {
+    render(<AdminMeasurementsPage />);
+    await screen.findByRole('button', { name: 'Enable measurement' });
+
+    // A change takes a few seconds to reach every process, and the card says
+    // so in the server's own words instead of implying instant agreement.
+    expect(within(card()).getByText(/allow up to 30 seconds/)).toBeInTheDocument();
+
+    const details = card().querySelector('details')!;
+    expect(details).not.toHaveAttribute('open');
+    expect(within(details).getByText('Details')).toBeInTheDocument();
+    expect(within(details).getByText('Mode')).toBeInTheDocument();
+    expect(within(details).getByText('admin')).toBeInTheDocument();
+    expect(within(details).getByText('Revision')).toBeInTheDocument();
+    expect(within(details).getByText('test')).toBeInTheDocument();
+    expect(within(details).getByText('producer_instance')).toBeInTheDocument();
   });
 
   it('clears the page for a revoked control read rather than showing a state', async () => {
@@ -1015,48 +1099,6 @@ describe('measurement collection control', () => {
     expect(screen.queryByText('Off')).not.toBeInTheDocument();
   });
 
-  it.each<[ProfilingControlStatus, RegExp]>([
-    ['unavailable', /not configured for Admin control/],
-    ['unknown', /cannot say what state measurement collection is in/],
-    ['unmanaged', /set by this deployment/],
-  ])('never renders %s as Off, and offers no Start', async (status, expected) => {
-    live = control({ status });
-
-    render(<AdminMeasurementsPage />);
-    await within(card()).findByText(expected);
-
-    expect(within(card()).queryByText('Off')).not.toBeInTheDocument();
-    expect(
-      within(card()).queryByRole('button', { name: 'Start measurement' }),
-    ).not.toBeInTheDocument();
-    expect(within(card()).getByText(/not the same as off/)).toBeInTheDocument();
-  });
-
-  it('renders a deployment-mode answer that carries no operations at all', async () => {
-    // What the control plane answers for a deployment it cannot command: no
-    // selectable groups and no bounds, because there is no command to build.
-    // The card must say why rather than crash on the shape or offer a Start.
-    live = control({
-      configured: false,
-      status: 'unmanaged',
-      gaps: [
-        { kind: 'mode_not_admin', detail: 'this deployment is configured by its environment' },
-      ],
-      operations: { selectable: {}, all: [] } as unknown as ProfilingControlSnapshot['operations'],
-      bounds: {} as unknown as ProfilingControlSnapshot['bounds'],
-    });
-    render(<AdminMeasurementsPage />);
-    await screen.findByText(/this deployment is configured by its environment/);
-
-    expect(within(card()).getByText('mode_not_admin')).toBeInTheDocument();
-    expect(
-      within(card()).queryByRole('button', { name: 'Start measurement' }),
-    ).not.toBeInTheDocument();
-    expect(
-      within(card()).queryByRole('button', { name: 'Stop measurement' }),
-    ).not.toBeInTheDocument();
-  });
-
   it('keeps the last successful read when a background poll fails, flagged as stale', async () => {
     vi.mocked(getProfilingControl).mockRejectedValueOnce(new APIError('SERVER_ERROR', 'boom', 500));
     render(<AdminMeasurementsPage />);
@@ -1064,7 +1106,7 @@ describe('measurement collection control', () => {
     // so instead of inventing an Off state.
     await screen.findByRole('alert');
     expect(
-      within(card()).queryByRole('button', { name: 'Start measurement' }),
+      within(card()).queryByRole('button', { name: 'Enable measurement' }),
     ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
@@ -1075,13 +1117,13 @@ describe('measurement collection control', () => {
     await screen.findByText(/showing the last successful read/);
     // The last good state is still on screen, and still says Off.
     expect(within(card()).getByText('Off')).toBeInTheDocument();
-    expect(within(card()).getByRole('button', { name: 'Start measurement' })).toBeEnabled();
+    expect(within(card()).getByRole('button', { name: 'Enable measurement' })).toBeEnabled();
   });
 
-  it('re-reads a live run within five seconds and an idle one not at all', async () => {
+  it('re-reads a live run within five seconds and an idle one only at thirty', async () => {
     vi.useFakeTimers();
     try {
-      live = control({ status: 'collecting', run: controlRun() });
+      live = control({ status: 'on', run_active: true, run: controlRun() });
       render(<AdminMeasurementsPage />);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(50);
@@ -1096,7 +1138,7 @@ describe('measurement collection control', () => {
     }
   });
 
-  it('leaves an idle deployment alone for longer than a live poll interval', async () => {
+  it('leaves an idle deployment alone until the thirty-second poll', async () => {
     vi.useFakeTimers();
     try {
       render(<AdminMeasurementsPage />);
@@ -1109,14 +1151,19 @@ describe('measurement collection control', () => {
       });
       // Off is read every thirty seconds: a five-second poll would have fired.
       expect(vi.mocked(getProfilingControl).mock.calls.length).toBe(idleReads);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(25000);
+      });
+      expect(vi.mocked(getProfilingControl).mock.calls.length).toBeGreaterThan(idleReads);
     } finally {
       vi.useRealTimers();
     }
   });
 
   it('reads nothing while the tab is hidden, and reads at once when it returns', async () => {
+    live = control({ status: 'on', run_active: true, run: controlRun() });
     render(<AdminMeasurementsPage />);
-    await screen.findByRole('button', { name: 'Start measurement' });
+    await screen.findByRole('button', { name: 'Disable measurement' });
     const before = vi.mocked(getProfilingControl).mock.calls.length;
 
     Object.defineProperty(document, 'hidden', { configurable: true, value: true });

@@ -394,17 +394,18 @@ export async function getMeasurementWriterStatus(
 // command instead of a second run. Both travel in the body; neither is
 // recoverable from the response of the request that failed.
 
-export type ProfilingControlStatus =
-  | 'off'
-  | 'starting'
-  | 'collecting'
-  | 'partially_active'
-  | 'stopping'
-  | 'stopped'
-  | 'expired'
-  | 'unavailable'
-  | 'unknown'
-  | 'unmanaged';
+/**
+ * What the deployment's *configuration* says it is doing.
+ *
+ * Four values, and they are not the same fact: `off` is a state somebody chose,
+ * `on` is an experiment in force, and the other two are statements about
+ * whether this deployment can be commanded from the Admin API at all.
+ * `unavailable` covers both "profiling is disabled" and "there is no control
+ * row", and `unmanaged` means the deployment's own configuration decides.
+ * Neither of those is off, and a page that rendered one as off would offer a
+ * switch that does nothing.
+ */
+export type ProfilingControlStatus = 'off' | 'on' | 'unavailable' | 'unmanaged';
 
 /**
  * Which of the three questions an operator is asking.
@@ -416,12 +417,6 @@ export type ProfilingControlStatus =
  * for.
  */
 export type MeasurementOperationGroup = 'sandbox_startup' | 'terminal_open' | 'file_access';
-
-/** Why collection is not fully `collecting`, in the server's own words. */
-export interface ProfilingGap {
-  kind: string;
-  detail: string;
-}
 
 export interface ProfilingControlRun {
   run_id: string;
@@ -444,27 +439,26 @@ export interface ProfilingControlRun {
   seconds_remaining: number;
 }
 
-/** One enrolled instance that has to confirm the current control revision. */
-export interface ProfilingParticipant {
-  participant_id: string;
-  kind: 'control_plane' | 'runner' | 'broker';
-  host: string | null;
-  run_id: string | null;
-  applied_revision: number;
-  capability: string | null;
-  supported: boolean;
-  state: string;
-  detail: string;
-  budget: Record<string, unknown>;
-  confirmed_at: string | null;
-  expires_at: string | null;
-  expected: boolean;
-  missing: boolean;
-}
-
+/**
+ * One deployment's control state, as the server reads it at one instant.
+ *
+ * Everything here describes the configuration: what the deployment is
+ * currently set to collect, until when, and what that configuration has stored.
+ * It says nothing about which processes have applied it -- sync lags by design,
+ * and `sync_note` states the lag instead of pretending to have measured it.
+ */
 export interface ProfilingControlSnapshot {
   /** Which deployment this control row belongs to; never chosen by a client. */
   deployment: string;
+  /**
+   * Who may control this deployment.
+   *
+   * `admin` is the only mode in which a command from this page means anything:
+   * a deployment configured by its environment answers `unmanaged`, and one
+   * with profiling disabled answers `unavailable`. Both still answer, rather
+   * than 404, so the card can say why it offers no switch.
+   */
+  mode: 'disabled' | 'environment' | 'admin';
   /** The control revision a write must echo back as `expected_revision`. */
   revision: number;
   /** False when this deployment has no Admin control state to command. */
@@ -472,8 +466,6 @@ export interface ProfilingControlSnapshot {
   /** ISO-8601 UTC, by the server's clock. */
   server_time: string;
   status: ProfilingControlStatus;
-  /** Why the status is not fully `collecting`; empty when it is. */
-  gaps: ProfilingGap[];
   /**
    * The experiment **in force**, or null when the deployment is not collecting.
    *
@@ -500,8 +492,13 @@ export interface ProfilingControlSnapshot {
   budget_scope: 'producer_instance';
   /** The server's own statement of what the bound does and does not cover. */
   budget_note: string;
-  participants: ProfilingParticipant[];
-  participant_ttl_seconds: number;
+  /**
+   * How long a change takes to reach every process, in the server's words.
+   *
+   * Rendered as written: a card that implied instant agreement would be
+   * describing a consensus it never measured.
+   */
+  sync_note: string;
   operations: {
     /** The root operation names each group selects, as this deployment offers them. */
     selectable: {

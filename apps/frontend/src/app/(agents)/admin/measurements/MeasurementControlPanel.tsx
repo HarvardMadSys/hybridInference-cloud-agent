@@ -4,12 +4,24 @@
 //
 // The rest of this page reads what was collected. This card is the only place
 // an admin can make the platform collect at all, so it is written to be slow to
-// claim anything: a command is stored here, applied by a deployment elsewhere,
-// and confirmed back by each participant. Every fact shown below is the
-// server's, including the status after a successful write -- the response
-// carries the control snapshot the command produced, and showing "Collecting"
-// before that snapshot arrives would be this page's guess about a machine it
-// cannot see.
+// claim anything. What it shows is the deployment's *configuration*: the
+// experiment currently in force, until when, and what that configuration has
+// stored. It deliberately says nothing about which processes have applied it --
+// the configuration reaches them through a background sync, and the server's
+// own `sync_note` is what the card repeats instead of pretending to have
+// measured the lag.
+//
+// One button, whose label follows the state, is the whole surface:
+//
+//   * off  -- "Enable measurement" opens the inline form;
+//   * on   -- "Disable measurement" stops the run immediately, with no
+//             confirmation, because the command is reversible in one click;
+//   * a state this deployment cannot be commanded in (unavailable, unmanaged)
+//             offers no button at all and explains why instead.
+//
+// Every fact shown after a write is the server's: the response carries the
+// control snapshot the command produced, and showing "Measuring" before that
+// snapshot arrives would be this page's guess about a machine it cannot see.
 //
 // It also reads itself: a live run is re-read every five seconds, an idle
 // deployment every thirty, and never while the tab is hidden. A failed
@@ -17,7 +29,7 @@
 // stale, because a card that empties itself on a network blip is a card that
 // reports an outage nobody had.
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 import { getAgentRunnerHosts, type AgentRunnerHost } from '@/lib/api/admin';
 import {
@@ -28,13 +40,12 @@ import {
   type MeasurementOperationGroup,
   type ProfilingControlRun,
   type ProfilingControlSnapshot,
-  type ProfilingControlStatus,
 } from '@/lib/api/adminMeasurements';
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { accessDenied, BUTTON, CARD, dateTime, ErrorNotice, INPUT, number } from '../runs/shared';
 
-/** A live run changes within seconds; an idle deployment does not. */
+/** A live experiment changes within seconds; an idle deployment does not. */
 const LIVE_POLL_MS = 5000;
 const IDLE_POLL_MS = 30000;
 /** The countdown is local between polls, so it has to tick on its own. */
@@ -66,77 +77,46 @@ const OPERATION_WORDS: Record<string, string> = {
   'files.open': 'File access',
 };
 
-const LIVE_STATUSES = new Set<ProfilingControlStatus>([
-  'starting',
-  'collecting',
-  'partially_active',
-  'stopping',
-]);
-/** A run exists and can still be stopped from here. */
-const STOPPABLE_STATUSES = new Set<ProfilingControlStatus>([
-  'starting',
-  'collecting',
-  'partially_active',
-]);
-const STARTABLE_STATUSES = new Set<ProfilingControlStatus>(['off', 'stopped', 'expired']);
+/** What one stored sample is, said once, beside the count it is a count of. */
+const SAMPLE_NOTE =
+  'A stored sample is one server-side record, and one terminal interaction can produce several.';
+
 /**
- * States in which no command may be sent at all, whatever the run says. They
- * are not "off": off is a statement about collection, and these are statements
- * about whether this deployment can be commanded from here.
+ * The one-line status, which is a statement about configuration.
+ *
+ * It is not a consensus and must not be read as one: an experiment is
+ * "Measuring" the moment the deployment is configured to collect, whether or
+ * not every process has caught up.
  */
-const UNADMINISTRABLE_STATUSES = new Set<ProfilingControlStatus>([
-  'unavailable',
-  'unknown',
-  'unmanaged',
-]);
-
-const STATUS_LABELS: Record<ProfilingControlStatus, string> = {
-  off: 'Off',
-  starting: 'Starting',
-  collecting: 'Collecting',
-  partially_active: 'Partly active',
-  stopping: 'Stopping',
-  stopped: 'Stopped',
-  expired: 'Expired',
-  unavailable: 'Unavailable',
-  unknown: 'Unknown',
-  unmanaged: 'Managed by deployment configuration',
-};
-
-const STATUS_DETAILS: Record<ProfilingControlStatus, string> = {
-  off: 'Collect timings while you use sandboxes, terminals and files. Server-side timings only.',
-  starting: 'The command is stored; the deployment has not confirmed it everywhere yet.',
-  collecting: 'Server-side timings are being collected for the operations below.',
-  partially_active: 'Collection is running, but not every participant has confirmed it yet.',
-  stopping: 'The command is stored; participants are retiring the grants they were issued.',
-  stopped: 'Collection stopped before its deadline. The stop reason is below.',
-  expired: 'The experiment reached its deadline and closed itself. The reason is below.',
-  unavailable:
-    'This deployment is not configured for Admin control: it is not running in Admin ' +
-    'measurement mode. That is not the same as off, and no Start is offered here.',
-  unknown:
-    'The control plane cannot say what state measurement collection is in. That is not the ' +
-    'same as off, and nothing is started or stopped from here.',
-  unmanaged:
-    "Measurement collection is set by this deployment's own configuration, not by Admin " +
-    'commands. That is not the same as off, and no Start is offered here.',
-};
-
-function statusLabel(status: ProfilingControlStatus): string {
-  return STATUS_LABELS[status] ?? status;
+function statusLine(status: string): string {
+  if (status === 'off') return 'Off';
+  if (status === 'on') return 'Measuring';
+  if (status === 'unmanaged') return 'Managed by deployment configuration';
+  return 'Unavailable';
 }
 
-function unadministrableDetail(control: ProfilingControlSnapshot): string {
-  if (control.status === 'unknown' || control.status === 'unmanaged') {
-    return STATUS_DETAILS[control.status];
+/** Why the deployment is in that state, in words that do not overclaim. */
+function statusDetail(control: ProfilingControlSnapshot): string {
+  if (control.status === 'on') {
+    return 'Server-side timings are being collected for the selected operations.';
   }
-  if (!control.configured) {
+  if (control.status === 'off') {
     return (
-      'This deployment is not configured for Admin control: it has never been commanded, so ' +
-      'there is no control state to start or stop from here. That is not the same as off.'
+      'Nothing is being collected. Measurement records server-side timings only, while ' +
+      'sandboxes, terminals and files are used.'
     );
   }
-  return STATUS_DETAILS.unavailable;
+  if (control.status === 'unmanaged') {
+    return (
+      "Measurement collection is set by this deployment's own configuration, not by Admin " +
+      'commands, so there is no switch here. That is not the same as off: the deployment may ' +
+      'be collecting under its own configuration.'
+    );
+  }
+  return (
+    'This deployment is not configured for Admin control: there is no control state here to ' +
+    'start or stop. That is not the same as off.'
+  );
 }
 
 function durationLabel(minutes: number): string {
@@ -150,6 +130,10 @@ function operationWords(operations: string[]): string {
     if (!words.includes(word)) words.push(word);
   }
   return words.length > 0 ? words.join(', ') : 'None selected';
+}
+
+function hostWords(run: ProfilingControlRun): string {
+  return run.target?.host ? run.target.host : 'All hosts';
 }
 
 /**
@@ -202,7 +186,8 @@ export function MeasurementControlPanel({
   const [readError, setReadError] = useState<string | null>(null);
   /** A failed background poll: the last good snapshot stays, flagged. */
   const [refreshFailed, setRefreshFailed] = useState(false);
-  const [write, setWrite] = useState<'start' | 'stop' | null>(null);
+  /** Which write is in flight, so the button can show its pending verb. */
+  const [write, setWrite] = useState<'enable' | 'disable' | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const [formOpen, setFormOpen] = useState(false);
@@ -223,10 +208,10 @@ export function MeasurementControlPanel({
   /** Bumped whenever a snapshot is applied, so a write beats an earlier poll. */
   const appliedSeq = useRef(0);
   const hasData = useRef(false);
-  /** The start command a retry would repeat, and the id that makes it one command. */
-  const startAttempt = useRef<{ fingerprint: string; id: string } | null>(null);
-  /** The stop command a retry would repeat. */
-  const stopAttempt = useRef<{ runId: string; id: string } | null>(null);
+  /** The enable command a retry would repeat, and the id that makes it one command. */
+  const enableAttempt = useRef<{ fingerprint: string; id: string } | null>(null);
+  /** The disable command a retry would repeat. */
+  const disableAttempt = useRef<{ runId: string; id: string } | null>(null);
 
   useEffect(() => {
     mounted.current = true;
@@ -309,7 +294,8 @@ export function MeasurementControlPanel({
     [applyControl, clearAll],
   );
 
-  const live = snapshot !== null && LIVE_STATUSES.has(snapshot.control.status);
+  /** Collecting means the configuration says so *and* the run is in force. */
+  const live = snapshot !== null && snapshot.control.status === 'on';
 
   useEffect(() => {
     void load(hasData.current);
@@ -358,35 +344,30 @@ export function MeasurementControlPanel({
   }, [formOpen, clearAll]);
 
   const control = snapshot?.control ?? null;
-  const status = control?.status ?? null;
-  const administrable =
-    control !== null && control.configured && !UNADMINISTRABLE_STATUSES.has(control.status);
-  const detail =
-    control === null
-      ? null
-      : administrable
-        ? STATUS_DETAILS[control.status]
-        : unadministrableDetail(control);
-  const canStart = administrable && status !== null && STARTABLE_STATUSES.has(status);
-  const canStop =
-    administrable &&
+  const busy = write !== null;
+  /**
+   * Whether this deployment can be commanded from here at all.
+   *
+   * `unavailable` and `unmanaged` are not "off": off is a statement about
+   * collection, and these are statements about whether this page may command
+   * the deployment. A deployment with no control row is neither.
+   */
+  const commandable =
     control !== null &&
-    control.run !== null &&
-    status !== null &&
-    STOPPABLE_STATUSES.has(status);
-  const activeRun =
-    administrable && control !== null && status !== null && LIVE_STATUSES.has(status)
-      ? control.run
-      : null;
-  const stoppedRun =
-    administrable && control !== null && (status === 'stopped' || status === 'expired')
-      ? control.run
-      : null;
+    control.configured === true &&
+    (control.status === 'off' || control.status === 'on');
+  const collecting =
+    control !== null &&
+    control.configured === true &&
+    control.status === 'on' &&
+    control.run_active === true &&
+    control.run !== null;
+  const activeRun = collecting ? (control?.run ?? null) : null;
+  const stoppedRun = control !== null && control.status === 'off' ? control.last_stopped_run : null;
   const secondsLeft =
     snapshot?.expiresAtMs == null
       ? null
       : Math.max(0, Math.ceil((snapshot.expiresAtMs - nowMs) / 1000));
-  const busy = write !== null;
 
   const toggleGroup = (group: MeasurementOperationGroup) => {
     setGroups((current) =>
@@ -407,7 +388,7 @@ export function MeasurementControlPanel({
     setFormOpen(false);
   };
 
-  const submitStart = async (event: FormEvent) => {
+  const submitEnable = async (event: FormEvent) => {
     event.preventDefault();
     if (control === null || busy) return;
     if (groups.length === 0) {
@@ -422,6 +403,8 @@ export function MeasurementControlPanel({
       );
       return;
     }
+    // Nothing is preselected, so an empty value is a decision the admin has not
+    // made yet -- not an implicit "All hosts".
     if (host === '') {
       setActionError('Choose a host, or All hosts. Nothing is aimed at a host you did not pick.');
       return;
@@ -436,12 +419,14 @@ export function MeasurementControlPanel({
       duration: minutes,
     });
     const requestId =
-      startAttempt.current?.fingerprint === fingerprint ? startAttempt.current.id : newRequestId();
-    startAttempt.current = { fingerprint, id: requestId };
+      enableAttempt.current?.fingerprint === fingerprint
+        ? enableAttempt.current.id
+        : newRequestId();
+    enableAttempt.current = { fingerprint, id: requestId };
 
     const controller = new AbortController();
     writeRequest.current = controller;
-    setWrite('start');
+    setWrite('enable');
     setActionError(null);
     try {
       const response = await startProfilingRun(
@@ -459,7 +444,7 @@ export function MeasurementControlPanel({
       readSeq.current += 1;
       appliedSeq.current += 1;
       applyControl(response.control);
-      startAttempt.current = null;
+      enableAttempt.current = null;
       setFormOpen(false);
       setHostsError(null);
     } catch (e) {
@@ -476,16 +461,17 @@ export function MeasurementControlPanel({
     }
   };
 
-  const submitStop = async () => {
-    if (control === null || control.run === null || busy) return;
-    const runId = control.run.run_id;
+  const submitDisable = async () => {
+    const run = collecting ? (control?.run ?? null) : null;
+    if (run === null || busy) return;
+    const runId = run.run_id;
     const requestId =
-      stopAttempt.current?.runId === runId ? stopAttempt.current.id : newRequestId();
-    stopAttempt.current = { runId, id: requestId };
+      disableAttempt.current?.runId === runId ? disableAttempt.current.id : newRequestId();
+    disableAttempt.current = { runId, id: requestId };
 
     const controller = new AbortController();
     writeRequest.current = controller;
-    setWrite('stop');
+    setWrite('disable');
     setActionError(null);
     try {
       const response = await stopProfilingRun(runId, { request_id: requestId }, controller.signal);
@@ -493,7 +479,7 @@ export function MeasurementControlPanel({
       readSeq.current += 1;
       appliedSeq.current += 1;
       applyControl(response.control);
-      stopAttempt.current = null;
+      disableAttempt.current = null;
     } catch (e) {
       if (!mounted.current || controller.signal.aborted) return;
       if (accessDenied(e)) {
@@ -506,6 +492,14 @@ export function MeasurementControlPanel({
     }
   };
 
+  const buttonLabel = busy
+    ? write === 'disable'
+      ? 'Disabling…'
+      : 'Enabling…'
+    : collecting
+      ? 'Disable measurement'
+      : 'Enable measurement';
+
   return (
     <section className={`${CARD} mt-6 p-5`} aria-labelledby="measurement-control-heading">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -516,31 +510,33 @@ export function MeasurementControlPanel({
           >
             Measurement collection
           </h3>
-          {status === null ? (
+          {control === null ? (
             <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
               {loading ? 'Reading the control state…' : 'No control state has been read.'}
             </p>
           ) : (
             <>
               <p className="mt-1 text-base font-medium text-gray-900 dark:text-gray-50">
-                {statusLabel(status)}
+                {statusLine(control.status)}
               </p>
-              <p className="mt-1 max-w-3xl text-sm text-gray-500 dark:text-gray-400">{detail}</p>
+              <p className="mt-1 max-w-3xl text-sm text-gray-500 dark:text-gray-400">
+                {statusDetail(control)}
+              </p>
             </>
           )}
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {canStart && !formOpen && (
-            <button className={BUTTON} type="button" disabled={busy} onClick={openForm}>
-              Start measurement
+        {control !== null && commandable && !formOpen && (
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              className={BUTTON}
+              type="button"
+              disabled={busy}
+              onClick={collecting ? submitDisable : openForm}
+            >
+              {buttonLabel}
             </button>
-          )}
-          {canStop && (
-            <button className={BUTTON} type="button" disabled={busy} onClick={submitStop}>
-              Stop measurement
-            </button>
-          )}
-        </div>
+          </div>
+        )}
       </div>
 
       {readError !== null && <ErrorNotice>{readError}</ErrorNotice>}
@@ -551,32 +547,21 @@ export function MeasurementControlPanel({
         </p>
       )}
 
-      {control !== null && control.gaps.length > 0 && (
-        <ul className="mt-3 list-disc space-y-1 pl-5 text-xs text-amber-800 dark:text-amber-300">
-          {control.gaps.map((gap) => (
-            <li key={`${gap.kind}\u0000${gap.detail}`}>
-              <span className="font-medium">{gap.kind}</span>
-              <span className="block">{gap.detail}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-
       {control !== null && activeRun !== null && (
         <RunFacts control={control} run={activeRun} secondsLeft={secondsLeft} />
       )}
 
       {control !== null && stoppedRun !== null && (
-        <div className="mt-3 space-y-1 text-sm text-gray-700 dark:text-gray-300">
-          <p>
-            {stoppedRun.stop_reason
-              ? `Stop reason: ${stoppedRun.stop_reason}`
-              : 'The control plane recorded no stop reason for this run.'}
-          </p>
-          {stoppedRun.stopped_at !== null && (
-            <p>{`Stopped at: ${dateTime(stoppedRun.stopped_at)}`}</p>
-          )}
-        </div>
+        <p className="mt-3 text-sm text-gray-700 dark:text-gray-300">
+          {`Last experiment: ${stoppedRun.run_id}`}
+          {stoppedRun.stop_reason
+            ? ` · Stop reason: ${stoppedRun.stop_reason}`
+            : ' · The control plane recorded no stop reason for it.'}
+        </p>
+      )}
+
+      {control !== null && control.sync_note !== '' && (
+        <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">{control.sync_note}</p>
       )}
 
       {actionError !== null && <ErrorNotice>{actionError}</ErrorNotice>}
@@ -584,7 +569,7 @@ export function MeasurementControlPanel({
       {formOpen && control !== null && (
         <form
           className="mt-4 border-t border-gray-100 pt-4 dark:border-white/5"
-          onSubmit={submitStart}
+          onSubmit={submitEnable}
         >
           <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
             What to measure
@@ -667,7 +652,7 @@ export function MeasurementControlPanel({
 
           <div className="mt-4 flex flex-wrap items-center gap-2">
             <button className={BUTTON} type="submit" disabled={busy}>
-              Start measurement
+              {busy ? 'Enabling…' : 'Enable measurement'}
             </button>
             <button className={BUTTON} type="button" disabled={busy} onClick={closeForm}>
               Cancel
@@ -675,11 +660,13 @@ export function MeasurementControlPanel({
           </div>
         </form>
       )}
+
+      {control !== null && <ControlDetails control={control} />}
     </section>
   );
 }
 
-/** The facts of a run that is still open, and what a stored sample is. */
+/** The facts of a run that is in force, and what a stored sample is. */
 function RunFacts({
   control,
   run,
@@ -693,16 +680,96 @@ function RunFacts({
     <>
       <ul className="mt-3 space-y-1 text-sm text-gray-700 dark:text-gray-300">
         <li>{`Operations: ${operationWords(run.operations)}`}</li>
-        <li>{`Host: ${run.target?.host ? run.target.host : 'All hosts'}`}</li>
+        <li>{`Host: ${hostWords(run)}`}</li>
+        <li>{`Expires at: ${dateTime(run.expires_at)}`}</li>
         <li>{`Time left: ${secondsLeft === null ? 'Unavailable' : mmss(secondsLeft)}`}</li>
         <li>{`Stored samples: ${number(control.stored_samples)}`}</li>
       </ul>
-      <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-        A stored sample is one server-side record, and one terminal interaction can produce several.
-      </p>
-      {control.budget_note !== '' && (
-        <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{control.budget_note}</p>
+      {control.stored_samples === 0 && (
+        <p className="mt-2 text-sm text-gray-700 dark:text-gray-300">
+          No matching operation has happened yet, so nothing has been stored. That is not a failure:
+          use a sandbox, open a terminal or browse files, and the first sample should follow.
+        </p>
       )}
+      <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">{SAMPLE_NOTE}</p>
     </>
+  );
+}
+
+/**
+ * The diagnostic material, folded away.
+ *
+ * Everything here is either an internal identifier, a server clock, or the
+ * bound the server applies to one producer. It is useful when a run is not
+ * behaving and noise when it is, so the card keeps it behind one click rather
+ * than in the reading path.
+ */
+function ControlDetails({ control }: { control: ProfilingControlSnapshot }) {
+  const selectable = Object.entries(control.operations?.selectable ?? {});
+  return (
+    <details className="mt-4 border-t border-gray-100 pt-3 dark:border-white/5">
+      <summary className="cursor-pointer text-xs font-medium text-gray-500 dark:text-gray-400">
+        Details
+      </summary>
+      <dl className="mt-3 grid gap-x-8 gap-y-2 text-xs sm:grid-cols-2 lg:grid-cols-3">
+        <DetailItem label="Mode">{control.mode}</DetailItem>
+        <DetailItem label="Revision">{number(control.revision)}</DetailItem>
+        <DetailItem label="Deployment">{control.deployment}</DetailItem>
+        <DetailItem label="Server time">{dateTime(control.server_time)}</DetailItem>
+        <DetailItem label="Configured">{control.configured ? 'Yes' : 'No'}</DetailItem>
+        <DetailItem label="Run active">{control.run_active ? 'Yes' : 'No'}</DetailItem>
+        <DetailItem label="Run ID">
+          {control.run?.run_id ?? control.last_stopped_run?.run_id ?? 'No run recorded'}
+        </DetailItem>
+        <DetailItem label="Experiment started">
+          {dateTime(control.run?.started_at ?? control.last_stopped_run?.started_at)}
+        </DetailItem>
+        <DetailItem label="Experiment stopped">
+          {dateTime(control.run?.stopped_at ?? control.last_stopped_run?.stopped_at)}
+        </DetailItem>
+        <DetailItem label="Lifecycle">
+          {control.run?.lifecycle ?? control.last_stopped_run?.lifecycle ?? 'Not reported'}
+        </DetailItem>
+        <DetailItem label="Source">
+          {control.run?.source ?? control.last_stopped_run?.source ?? 'Not reported'}
+        </DetailItem>
+        <DetailItem label="Created by">
+          {control.run?.created_by ?? control.last_stopped_run?.created_by ?? 'Not reported'}
+        </DetailItem>
+        <DetailItem label="Control revision">
+          {number(control.run?.control_revision ?? control.last_stopped_run?.control_revision)}
+        </DetailItem>
+        <DetailItem label="Stored samples">{number(control.stored_samples)}</DetailItem>
+        <DetailItem label="Budget scope">{control.budget_scope}</DetailItem>
+        <DetailItem label="Budget note">{control.budget_note || 'Not stated'}</DetailItem>
+        <DetailItem label="Selectable operations">
+          {selectable.length > 0
+            ? selectable.map(([group, names]) => `${group}: ${names.join(', ')}`).join(' · ')
+            : 'None offered by this deployment'}
+        </DetailItem>
+        <DetailItem label="Known operations">
+          {control.operations?.all?.length ? control.operations.all.join(', ') : 'None reported'}
+        </DetailItem>
+        <DetailItem label="Duration bounds">
+          {Number.isFinite(control.bounds?.min_duration_seconds)
+            ? `${control.bounds.min_duration_seconds}–${control.bounds.max_duration_seconds} seconds`
+            : 'Not reported'}
+        </DetailItem>
+        <DetailItem label="Operation bounds">
+          {Number.isFinite(control.bounds?.default_max_operations)
+            ? `${number(control.bounds.default_max_operations)} by default, ${number(control.bounds.hard_max_operations)} at most`
+            : 'Not reported'}
+        </DetailItem>
+      </dl>
+    </details>
+  );
+}
+
+function DetailItem({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <dt className="font-medium text-gray-500 dark:text-gray-400">{label}</dt>
+      <dd className="mt-0.5 break-words text-gray-700 dark:text-gray-300">{children}</dd>
+    </div>
   );
 }

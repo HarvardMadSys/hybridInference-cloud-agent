@@ -31,19 +31,18 @@ function urlOf(fetch: { mock: { calls: unknown[][] } }, call = 0): URL {
 function control(overrides: Partial<ProfilingControlSnapshot> = {}): ProfilingControlSnapshot {
   return {
     deployment: 'test',
+    mode: 'admin',
     revision: 12,
     configured: true,
     server_time: '2026-09-21T10:00:00Z',
     status: 'off',
-    gaps: [],
     run: null,
     run_active: false,
     last_stopped_run: null,
     stored_samples: 0,
     budget_scope: 'producer_instance',
     budget_note: 'Each producer enforces its own budget.',
-    participants: [],
-    participant_ttl_seconds: 30,
+    sync_note: 'the configuration reaches every process through a background sync',
     operations: {
       selectable: {
         sandbox_startup: ['attempt.startup'],
