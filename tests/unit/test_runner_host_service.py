@@ -11,6 +11,7 @@ a number, changing their mind, and typing another.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -687,3 +688,1050 @@ def test_turn_mode_without_a_handover_descriptor_is_refused(monkeypatch):
 
     with pytest.raises(SystemExit):
         runner_mod.main(["--turn", "--host", "host-a"])
+
+
+# ── The selection crossing the process boundary ────────────────────────
+
+
+def _descriptor(run_id: str = "run-1") -> dict[str, Any]:
+    """One experiment descriptor, as the deployment would set it."""
+    from datetime import UTC, datetime, timedelta
+
+    return {
+        "run_id": run_id,
+        "operations": ["attempt.startup"],
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=30)).isoformat(),
+        "max_operations": 10,
+    }
+
+
+def _run_descriptor(monkeypatch, **overrides: Any) -> dict[str, Any]:
+    """Turn profiling on in this process with one usable run."""
+    import json
+
+    from cloud_agent_profiling import operation_profiling
+
+    descriptor = {**_descriptor(), **overrides}
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_RUN, json.dumps(descriptor))
+    operation_profiling.reset_cache()
+    return descriptor
+
+
+def test_the_host_hands_its_selection_to_the_child(monkeypatch):
+    """The deployed path measures startups, not only the single-process one.
+
+    The host claims, then starts a child to run the turn -- so a selection made
+    in the parent is worthless unless it crosses that boundary. Without this
+    the whole feature is silent on the path production actually uses.
+    """
+    from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult
+    from cloud_agent_profiling import operation_profiling
+
+    _run_descriptor(monkeypatch)
+    payload = {
+        "job_id": "ajob_1",
+        "thread_id": "athr_1",
+        "attempt_id": 7,
+        "attempt_no": 1,
+        "repo": "o/n",
+        "base_sha": None,
+        "task_prompt": "do it",
+        "runtime": "claude-code",
+        "model": "m",
+        "worker_token": "ajt.a.b",
+        "sandbox_token": "grant",
+        "execution_profile": "default",
+    }
+    measurement = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+    assert measurement is not None
+    bound = runner_mod._bound_measurement(measurement, payload)
+    assert bound is not None
+    with operation_profiling.span(bound, "claim"):
+        pass
+
+    seen: list[dict[str, Any]] = []
+
+    class _Turns:
+        def launch(self, handed: dict[str, Any]) -> Any:
+            seen.append(handed)
+            return LaunchResult(LAUNCH_STARTED, None)
+
+    runner_mod._hand_over_turn(
+        payload,
+        turns=_Turns(),
+        base_url="http://control",
+        worker_id="runner-a-1",
+        measurement=bound,
+    )
+
+    assert seen, "the turn must be handed to a child"
+    context = seen[0].get("_profiling")
+    assert context is not None, "the child cannot measure what it was never told"
+    assert context["run_id"] == "run-1"
+    assert context["measurement_id"] == bound.measurement_id
+    assert context["facts"]["job_id"] == "ajob_1"
+    assert context["expires_at"] > 0
+    assert context["inherited_spans"][0]["name"] == "claim"
+    assert context["admission_instances"][0]["instance"] == operation_profiling.PRODUCER_INSTANCE_ID
+    operation_profiling.reset_cache()
+
+
+def test_the_spawn_payload_keeps_only_the_profiling_handoff():
+    """The deployed child must receive the selection the parent paid for."""
+    handed = runner_mod._child_turn_payload(
+        {
+            "job_id": "ajob_1",
+            "_worker_id": "parent-only",
+            "_profiling": {"run_id": "run-1", "measurement_id": "msm_1"},
+        }
+    )
+
+    assert handed == {
+        "job_id": "ajob_1",
+        "_profiling": {"run_id": "run-1", "measurement_id": "msm_1"},
+    }
+
+
+@pytest.mark.parametrize("outcome", [LAUNCH_NOT_STARTED, LAUNCH_UNCERTAIN])
+def test_a_parent_side_handover_failure_delivers_its_measurement(monkeypatch, outcome):
+    """Failures before a child owns the sample still reach persistence."""
+    from cloud_agent_profiling import operation_profiling
+
+    _run_descriptor(monkeypatch)
+    payload = {
+        "job_id": "ajob_1",
+        "thread_id": "athr_1",
+        "attempt_id": 7,
+        "attempt_no": 1,
+        "repo": "o/n",
+        "task_prompt": "do it",
+        "runtime": "claude-code",
+        "model": "m",
+        "worker_token": "ajt.a.b",
+        "sandbox_token": "grant",
+    }
+    measurement = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+    assert measurement is not None
+    assert runner_mod._bound_measurement(measurement, payload) is measurement
+    queued: list[Any] = []
+    monkeypatch.setattr(
+        runner_mod,
+        "_enqueue_delivery",
+        lambda selected, **_kwargs: queued.append(selected),
+    )
+
+    class _Turns:
+        def launch(self, _payload: dict[str, Any]) -> Any:
+            return LaunchResult(outcome, None, "review failure")
+
+    monkeypatch.setattr(runner_mod, "release_turn", lambda **_kwargs: True)
+    runner_mod._hand_over_turn(
+        payload,
+        turns=_Turns(),
+        base_url="http://control",
+        worker_id="runner-a",
+        measurement=measurement,
+    )
+
+    assert queued == [measurement]
+    assert measurement.frozen_outcome == "incomplete"
+    operation_profiling.reset_cache()
+
+
+def test_an_expired_selection_is_delivered_by_the_parent_before_handoff(monkeypatch):
+    """The child runs unmeasured, while the partial claim sample is retained."""
+    import time
+
+    from cloud_agent_profiling import operation_profiling
+
+    _run_descriptor(monkeypatch)
+    payload = {
+        "job_id": "ajob_1",
+        "thread_id": "athr_1",
+        "attempt_id": 7,
+        "attempt_no": 1,
+        "repo": "o/n",
+        "task_prompt": "do it",
+        "runtime": "claude-code",
+        "model": "m",
+        "worker_token": "ajt.a.b",
+        "sandbox_token": "grant",
+    }
+    measurement = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION
+    )
+    assert measurement is not None
+    assert runner_mod._bound_measurement(measurement, payload) is measurement
+    measurement.deadline_mono = time.monotonic() - 1
+    queued: list[Any] = []
+    handed: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        runner_mod,
+        "_enqueue_delivery",
+        lambda selected, **_kwargs: queued.append(selected),
+    )
+
+    class _Turns:
+        def launch(self, child_payload: dict[str, Any]) -> Any:
+            handed.append(child_payload)
+            return LaunchResult(LAUNCH_STARTED, None)
+
+    runner_mod._hand_over_turn(
+        payload,
+        turns=_Turns(),
+        base_url="http://control",
+        worker_id="runner-a",
+        measurement=measurement,
+    )
+
+    assert "_profiling" not in handed[0]
+    assert queued == [measurement]
+    assert measurement.frozen_outcome == "incomplete"
+    assert measurement.frozen_failure_stage == "expired_before_handoff"
+    operation_profiling.reset_cache()
+
+
+def test_a_turn_process_reattaches_the_selection_it_was_handed(monkeypatch):
+    """The child times the turn; it does not select one or spend a slot."""
+    import io
+    import os
+
+    from cloud_agent_host.host_runtime import encode_turn
+    from cloud_agent_profiling import operation_profiling
+
+    _run_descriptor(monkeypatch)
+    read_fd, write_fd = os.pipe()
+    payload = {
+        "job_id": "ajob_1",
+        "thread_id": "athr_1",
+        "attempt_id": 7,
+        "attempt_no": 1,
+        "repo": "o/n",
+        "task_prompt": "do it",
+        "runtime": "claude-code",
+        "model": "m",
+        "worker_token": "ajt.a.b",
+        "sandbox_token": "grant",
+        "_profiling": {
+            "run_id": "run-1",
+            "measurement_id": "msm_handed",
+            "operation": "attempt.startup",
+            "producer": "runner",
+            "coverage_scope": "host_startup",
+            "facts": {"operation": "attempt.startup", "job_id": "ajob_1"},
+            "call_id": "",
+            "expires_at": __import__("time").time() + 600,
+        },
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(encode_turn(payload).decode()))
+    backend = ProcessBackend(acknowledged_unsafe=True)
+    monkeypatch.setattr(runner_mod, "build_backend_from_env", lambda: backend)
+
+    handed: list[Any] = []
+
+    def _capture(*_args: Any, **kwargs: Any) -> int:
+        handed.append(kwargs.get("measurement"))
+        return 0
+
+    monkeypatch.setattr(runner_mod, "run_turn", _capture)
+
+    code = runner_mod._serve_turn(
+        handover_fd=write_fd,
+        base_url="http://control",
+        gateway_url="http://gateway",
+        worker_id="runner-a",
+        lease_ttl=120.0,
+        agent_timeout_s=3600.0,
+        host="host-a",
+    )
+
+    assert code == 0
+    assert len(handed) == 1
+    measurement = handed[0]
+    assert measurement is not None, "the child must measure the turn it was given"
+    # The parent's identity and slot, not a second one of either.
+    assert measurement.measurement_id == "msm_handed"
+    assert measurement.run_id == "run-1"
+    assert measurement.reserved is False, "the slot belongs to the host that claimed it"
+    assert measurement.facts["job_id"] == "ajob_1"
+    assert measurement.coverage_scope == "host_startup"
+    os.close(read_fd)
+    operation_profiling.reset_cache()
+
+
+def test_a_child_never_refuses_a_turn_over_an_unusable_selection(monkeypatch):
+    """A measurement setting is not a reason to drop a user's turn."""
+    import io
+    import os
+
+    from cloud_agent_host.host_runtime import encode_turn
+
+    read_fd, write_fd = os.pipe()
+    payload = {
+        "job_id": "ajob_1",
+        "thread_id": "athr_1",
+        "attempt_id": 7,
+        "attempt_no": 1,
+        "repo": "o/n",
+        "task_prompt": "do it",
+        "runtime": "claude-code",
+        "model": "m",
+        "worker_token": "ajt.a.b",
+        "sandbox_token": "grant",
+        # A run this process is not configured for: nothing may be measured,
+        # and the turn still runs.
+        "_profiling": {"run_id": "another-run", "expires_at": 2**31},
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(encode_turn(payload).decode()))
+    backend = ProcessBackend(acknowledged_unsafe=True)
+    monkeypatch.setattr(runner_mod, "build_backend_from_env", lambda: backend)
+    handed: list[Any] = []
+    monkeypatch.setattr(
+        runner_mod, "run_turn", lambda *a, **k: handed.append(k.get("measurement")) or 0
+    )
+
+    code = runner_mod._serve_turn(
+        handover_fd=write_fd,
+        base_url="http://control",
+        gateway_url="http://gateway",
+        worker_id="runner-a",
+        lease_ttl=120.0,
+        agent_timeout_s=3600.0,
+        host="host-a",
+    )
+
+    assert code == 0
+    assert handed == [None], "the turn runs, unmeasured"
+    os.close(read_fd)
+
+
+def test_a_poll_that_claimed_nothing_spends_no_slot(monkeypatch):
+    """An idle poll is not a startup, so it must not consume the experiment."""
+    from cloud_agent_profiling import operation_profiling
+
+    _run_descriptor(monkeypatch, max_operations=1)
+
+    # The first selection is the experiment's only slot.
+    first = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+    assert first is not None
+    operation_profiling.discard(first)
+
+    # Discarded, so the slot came back and an idle poll can still be measured.
+    second = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+    assert second is not None
+    operation_profiling.discard(second)
+    operation_profiling.reset_cache()
+
+
+# ── The exporter runtime ───────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _clean_delivery_state():
+    """Every test starts having delivered nothing."""
+    runner_mod.reset_delivery_state()
+    yield
+    runner_mod.reset_delivery_state()
+
+
+def _sink_with(monkeypatch: Any, tmp_path: Any, records: list[dict[str, Any]]) -> str:
+    """Point profiling at a sink holding these frozen records."""
+    import json
+
+    from cloud_agent_profiling import operation_profiling
+
+    sink = tmp_path / "records.jsonl"
+    sink.write_text("".join(json.dumps(record) + "\n" for record in records))
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    monkeypatch.setenv(
+        operation_profiling.ENV_PROFILING_RUN,
+        json.dumps(_descriptor()),
+    )
+    operation_profiling.reset_cache()
+    return str(sink)
+
+
+def _frozen(measurement_id: str = "msm_1", **overrides: Any) -> dict[str, Any]:
+    """One record as the collector freezes it."""
+    from datetime import UTC, datetime
+
+    record = {
+        "schema_version": 3,
+        "measurement_id": measurement_id,
+        "interaction_id": measurement_id,
+        "profiling_run_id": "run-1",
+        "operation": "attempt.startup",
+        "request_kind": "attempt.startup",
+        "boundary_version": 1,
+        "coverage_scope": "host_startup",
+        "producer": "runner",
+        "producer_instance_id": "p-1",
+        "duration_us": 10,
+        "outcome": "dispatched",
+        "collection_complete": True,
+        "end_to_end_complete": False,
+        "startup_path": "new_group",
+        "observed_at": datetime.now(UTC).isoformat(),
+        "facts": {"operation": "attempt.startup"},
+    }
+    record.update(overrides)
+    return record
+
+
+class _StubControl:
+    """A control plane that answers measurements with a scripted verdict."""
+
+    def __init__(self, answers: list[Any]) -> None:
+        self.answers = answers
+        self.sent: list[tuple[str, dict[str, Any]]] = []
+        self.closed = False
+
+    def record_measurement(self, job_id: str, body: dict[str, Any]) -> Any:
+        """Record the body and return the next scripted answer."""
+        self.sent.append((job_id, body))
+        answer = self.answers.pop(0) if self.answers else (200, {"result": "stored"})
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    def close(self) -> None:
+        """Mark the client closed."""
+        self.closed = True
+
+
+def test_a_frozen_measurement_is_delivered_after_the_turn(monkeypatch, tmp_path):
+    """The record the exporter wrote reaches the control plane."""
+
+    sink = _sink_with(monkeypatch, tmp_path, [_frozen()])
+    control = _StubControl([(200, {"result": "stored"})])
+
+    counts = runner_mod.deliver_measurements(control=control, job_id="ajob_1")
+
+    assert counts == {"delivered": 1, "duplicate": 0, "dropped": 0, "retried": 0}
+    assert len(control.sent) == 1
+    job_id, body = control.sent[0]
+    assert job_id == "ajob_1"
+    assert body["record"]["measurement_id"] == "msm_1"
+    # The manifest travels with the record, derived from the same descriptor.
+    assert body["run"]["run_id"] == "run-1"
+    assert body["run"]["operations"] == ["attempt.startup"]
+    # The sink is append-only and may be shared, so the record stays in it
+    # and this process remembers it was delivered. Rewriting the file to
+    # remove it would race another process appending to the same path.
+    with open(sink) as handle:
+        assert len([line for line in handle if line.strip()]) == 1
+    assert {"msm_1"} == runner_mod._DELIVERED_MEASUREMENT_IDS
+
+
+def test_a_duplicate_is_counted_as_such(monkeypatch, tmp_path):
+    """The control plane already having it is a success, said differently."""
+    _sink_with(monkeypatch, tmp_path, [_frozen()])
+    control = _StubControl([(200, {"result": "duplicate"})])
+
+    counts = runner_mod.deliver_measurements(control=control, job_id="ajob_1")
+
+    assert counts["duplicate"] == 1
+    assert counts["delivered"] == 0
+
+
+def test_a_refusal_is_not_retried(monkeypatch, tmp_path):
+    """A conflict is terminal: the same bytes get the same answer."""
+    _sink_with(monkeypatch, tmp_path, [_frozen()])
+    control = _StubControl([(200, {"result": "run_conflict"})])
+
+    counts = runner_mod.deliver_measurements(control=control, job_id="ajob_1")
+
+    assert counts["dropped"] == 1
+    assert counts["retried"] == 0
+    assert len(control.sent) == 1, "a refusal must not be sent again"
+
+
+def test_a_transport_failure_is_retried_then_given_up_on(monkeypatch, tmp_path):
+    """A destination that never answers costs bounded attempts, not a hang."""
+    import httpx
+
+    _sink_with(monkeypatch, tmp_path, [_frozen()])
+    failure = httpx.ConnectError("refused")
+    control = _StubControl([failure, failure, failure])
+
+    counts = runner_mod.deliver_measurements(control=control, job_id="ajob_1")
+
+    assert counts["dropped"] == 1
+    assert len(control.sent) == 3, "the stated attempt ceiling, no more"
+
+
+def test_a_turn_with_no_measurement_delivers_nothing(monkeypatch, tmp_path):
+    """Profiling off means no sink, no request and no cost."""
+    import os
+
+    from cloud_agent_profiling import operation_profiling
+
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_SINK, raising=False)
+    control = _StubControl([])
+
+    counts = runner_mod.deliver_measurements(control=control, job_id="ajob_1")
+
+    assert counts == {"delivered": 0, "duplicate": 0, "dropped": 0, "retried": 0}
+    assert control.sent == []
+    assert not os.path.exists(str(tmp_path / "records.jsonl"))
+
+
+def test_runtime_delivery_does_not_require_the_optional_jsonl_sink(monkeypatch):
+    """Admin persistence is independent of the operator's baseline file."""
+    from cloud_agent_profiling import operation_profiling
+
+    _run_descriptor(monkeypatch)
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_SINK, raising=False)
+    measurement = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+    assert measurement is not None
+    operation_profiling.finish(measurement, outcome="dispatched")
+    control = _StubControl([(200, {"result": "stored"})])
+    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_args, **_kwargs: control)
+
+    runner_mod._enqueue_delivery(
+        measurement,
+        job=_claimed(),
+        base_url="http://control",
+        drain_s=1.0,
+    )
+
+    assert [body["record"]["measurement_id"] for _job, body in control.sent] == [
+        measurement.measurement_id
+    ]
+    assert control.sent[0][1]["run"]["admission_instances"]
+
+
+def test_only_this_turns_record_is_delivered(monkeypatch, tmp_path):
+    """A sink shared with an earlier turn does not re-send its samples."""
+    _sink_with(monkeypatch, tmp_path, [_frozen("msm_old"), _frozen("msm_this")])
+    control = _StubControl([(200, {"result": "stored"})])
+
+    counts = runner_mod.deliver_measurements(
+        control=control, job_id="ajob_1", measurement_ids=["msm_this"]
+    )
+
+    assert counts["delivered"] == 1
+    assert [body["record"]["measurement_id"] for _job, body in control.sent] == ["msm_this"]
+
+
+# ── When the startup sample is queued, and who waits for it ────────────
+
+
+def _claimed(job_id: str = "ajob_1") -> Any:
+    """A claimed turn, with only the fields the delivery path reads."""
+    from cloud_agent_host.runner import ClaimedJob
+
+    return ClaimedJob(
+        job_id=job_id,
+        thread_id="athr_1",
+        attempt_id=7,
+        attempt_no=1,
+        repo="o/n",
+        base_sha=None,
+        task_prompt="do it",
+        runtime="claude-code",
+        model="m",
+        worker_token="ajt.a.b",
+        sandbox_token="grant",
+    )
+
+
+@pytest.fixture
+def startup_measurement(monkeypatch) -> Any:
+    """A selected, frozen startup measurement, under a live experiment."""
+    from cloud_agent_profiling import operation_profiling
+
+    _run_descriptor(monkeypatch)
+    measurement = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+    assert measurement is not None, "the experiment must select this operation"
+    operation_profiling.finish(measurement, outcome="dispatched")
+    yield measurement
+    operation_profiling.reset_cache()
+
+
+class _IdleSupervisor:
+    """A supervisor whose turn produces no frames and ends at once."""
+
+    def start_shared_turn(self, *_args: Any, **_kwargs: Any) -> Any:
+        """Return a stream that immediately ends."""
+        return _EmptyStream()
+
+
+class _IdleHeart:
+    """A lease that is alive and never asks to cancel."""
+
+    lease_lost = False
+    cancel_requested = False
+
+
+class _EmptyStream:
+    """A broker stream that ends as soon as it is read."""
+
+    def frames(self) -> Any:
+        """Yield the one frame that ends the turn."""
+        return iter(({"kind": "result", "exit_code": 0},))
+
+    def close(self) -> None:
+        """Release nothing."""
+
+
+def test_the_streaming_helper_invokes_the_freeze_callback(startup_measurement):
+    """The prompt handoff is where the startup ends, so it is where it is sent.
+
+    Left to the turn's exit, a long turn would report its startup an hour late
+    -- and past the experiment's grace period the endpoint would refuse a
+    perfectly good sample.
+    """
+    measurement = startup_measurement
+    frozen: list[Any] = []
+    runner_mod._stream_shared_agent_turn(
+        supervisor=_IdleSupervisor(),
+        job=_claimed(job_id="ajob_1"),
+        control=_StubControl([]),
+        heart=_IdleHeart(),
+        lease_token="lease",
+        timeout_s=1.0,
+        measurement=measurement,
+        on_frozen=frozen.append,
+    )
+
+    assert frozen == [measurement], "the record must leave the host at the handoff"
+
+
+def test_the_call_path_actually_passes_the_freeze_callback():
+    """The callback has to be threaded to where the freeze happens.
+
+    ``_frozen_measurement`` was defined at the call site and never passed, so
+    the handoff queued nothing and the startup still waited for the model. A
+    behaviour test cannot see that: the helper is correct and the *wiring* is
+    missing, which only the call site can show.
+    """
+    import ast
+    import inspect
+
+    source = ast.parse(inspect.getsource(runner_mod._run_shared_live_attempt))
+    calls = [
+        node
+        for node in ast.walk(source)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_stream_shared_agent_turn"
+    ]
+
+    assert calls, "the streaming helper must be called from the attempt"
+    passed = {keyword.arg for keyword in calls[0].keywords}
+    assert "on_frozen" in passed, (
+        "the streaming helper receives no on_frozen, so a startup record waits "
+        "for the model to finish"
+    )
+
+
+def test_a_later_caller_waits_for_the_send_already_running(
+    startup_measurement, monkeypatch, tmp_path
+):
+    """Dedup must not turn two bounded attempts into none.
+
+    The handoff can only afford a short wait because the turn goes on working;
+    the turn's exit is the one that can afford a long one. An exit that
+    returned immediately on "already queued" would make that sweep a no-op for
+    exactly the case it exists for.
+    """
+    import threading
+
+    _sink_with(monkeypatch, tmp_path, [_frozen()])
+    release = threading.Event()
+    started = threading.Event()
+    finished = threading.Event()
+
+    def _slow_send(**_kwargs: Any) -> Any:
+        def _run() -> None:
+            started.set()
+            # Held until the test lets go: the slow destination the second
+            # caller is supposed to wait for.
+            release.wait(timeout=10)
+            finished.set()
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        return thread
+
+    monkeypatch.setattr(runner_mod, "_deliver_in_background", _slow_send)
+    measurement = startup_measurement
+    job = _claimed()
+    try:
+        runner_mod._enqueue_delivery(measurement, job=job, base_url="http://control", drain_s=0.05)
+        assert started.wait(timeout=5), "the first enqueue must start a send"
+        assert not finished.is_set()
+
+        # The handoff's short bound returns while the send is still in flight.
+        runner_mod._enqueue_delivery(measurement, job=job, base_url="http://control", drain_s=0.05)
+        assert not finished.is_set(), "the handoff's short bound must not wait it out"
+
+        # The exit's longer bound waits for the same in-flight send rather than
+        # declining to try, which is the whole point of leaving it running.
+        release.set()
+        runner_mod._enqueue_delivery(measurement, job=job, base_url="http://control", drain_s=5.0)
+        assert finished.is_set(), "the exit sweep waited for the send already running"
+    finally:
+        release.set()
+
+
+def test_prompt_handoff_starts_delivery_without_waiting(startup_measurement, monkeypatch, tmp_path):
+    """A diagnostic send must not sit between prompt dispatch and stream reads."""
+    import threading
+    import time
+
+    _sink_with(monkeypatch, tmp_path, [_frozen()])
+    release = threading.Event()
+
+    def _slow_send(**_kwargs: Any) -> Any:
+        thread = threading.Thread(target=lambda: release.wait(timeout=10), daemon=True)
+        thread.start()
+        return thread
+
+    monkeypatch.setattr(runner_mod, "_deliver_in_background", _slow_send)
+    try:
+        started = time.perf_counter()
+        runner_mod._enqueue_delivery(
+            startup_measurement,
+            job=_claimed(),
+            base_url="http://control",
+            drain_s=runner_mod.DELIVERY_HANDOFF_DRAIN_S,
+        )
+        elapsed = time.perf_counter() - started
+        assert elapsed < 0.05
+    finally:
+        release.set()
+
+
+def test_concurrent_enqueues_start_only_one_delivery(startup_measurement, monkeypatch):
+    """The measurement id is reserved atomically before a thread is started."""
+    import threading
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    def _slow_start(**_kwargs: Any) -> Any:
+        calls.append("start")
+        entered.set()
+        release.wait(timeout=5)
+        thread = threading.Thread(target=lambda: None)
+        thread.start()
+        return thread
+
+    monkeypatch.setattr(runner_mod, "_deliver_in_background", _slow_start)
+    first = threading.Thread(
+        target=lambda: runner_mod._enqueue_delivery(
+            startup_measurement,
+            job=_claimed(),
+            base_url="http://control",
+            drain_s=0,
+        )
+    )
+    first.start()
+    assert entered.wait(timeout=1)
+    runner_mod._enqueue_delivery(
+        startup_measurement,
+        job=_claimed(),
+        base_url="http://control",
+        drain_s=0,
+    )
+    release.set()
+    first.join(timeout=1)
+
+    assert calls == ["start"]
+
+
+def test_delivery_byte_budget_drops_before_starting_a_thread(startup_measurement, monkeypatch):
+    """The count bound cannot hide an oversized in-memory delivery set."""
+    starts: list[str] = []
+    monkeypatch.setattr(runner_mod, "DELIVERY_BYTES_MAX", 1)
+    monkeypatch.setattr(
+        runner_mod,
+        "_deliver_in_background",
+        lambda **_kwargs: starts.append("started"),
+    )
+
+    runner_mod._enqueue_delivery(
+        startup_measurement,
+        job=_claimed(),
+        base_url="http://control",
+        drain_s=0,
+    )
+
+    assert starts == []
+    assert runner_mod._DELIVERY_DROPPED_COUNT == 1
+    assert runner_mod._DELIVERY_PENDING_BYTES == 0
+
+
+def test_delivery_client_startup_failure_releases_its_queue_bytes(startup_measurement, monkeypatch):
+    """A client constructor failure cannot permanently consume the byte bound."""
+
+    def _fail(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("client unavailable")
+
+    monkeypatch.setattr(runner_mod, "ControlPlane", _fail)
+    runner_mod._enqueue_delivery(
+        startup_measurement,
+        job=_claimed(),
+        base_url="http://control",
+        drain_s=1,
+    )
+
+    assert runner_mod._DELIVERY_PENDING_BYTES == 0
+    assert runner_mod._IN_FLIGHT_DELIVERIES == {}
+
+
+def test_a_send_that_never_started_is_retried_by_the_next_caller(
+    startup_measurement, monkeypatch, tmp_path
+):
+    """A thread that could not start leaves nothing to dedup against."""
+    _sink_with(monkeypatch, tmp_path, [_frozen()])
+    measurement = startup_measurement
+    attempts: list[str] = []
+
+    def _refuse(**kwargs: Any) -> Any:
+        attempts.append("tried")
+        return None  # as a failed thread start reports itself
+
+    monkeypatch.setattr(runner_mod, "_deliver_in_background", _refuse)
+
+    for _ in range(2):
+        runner_mod._enqueue_delivery(
+            measurement, job=_claimed(), base_url="http://control", drain_s=0.05
+        )
+
+    assert len(attempts) == 2, "a send that never began must not be remembered as queued"
+
+
+def test_the_first_enqueue_also_waits_its_bound(startup_measurement, monkeypatch, tmp_path):
+    """The exit sweep is often the *first* caller, and it must still wait.
+
+    A turn that fails before dispatch never reaches the handoff, so the exit's
+    sweep starts the send. Returning as soon as the thread was running meant
+    that path got no bounded wait at all, and the process could exit with the
+    send in flight.
+    """
+    import threading
+
+    _sink_with(monkeypatch, tmp_path, [_frozen()])
+    release = threading.Event()
+    finished = threading.Event()
+
+    def _slow_send(**_kwargs: Any) -> Any:
+        def _run() -> None:
+            release.wait(timeout=10)
+            finished.set()
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        return thread
+
+    monkeypatch.setattr(runner_mod, "_deliver_in_background", _slow_send)
+    try:
+        # Released only from another thread, so the waiting call is the one
+        # being measured: with no wait it returns while `_run` is still going.
+        threading.Timer(0.2, release.set).start()
+        runner_mod._enqueue_delivery(
+            startup_measurement,
+            job=_claimed(),
+            base_url="http://control",
+            drain_s=5.0,
+        )
+        assert finished.is_set(), "the first enqueue must wait out its own bound"
+    finally:
+        release.set()
+
+
+def test_a_sink_that_does_not_exist_yet_is_not_a_completed_send(
+    startup_measurement, monkeypatch, tmp_path
+):
+    """A record queued in the exporter is not yet a file on disk.
+
+    The existence check ran before the drain, so a frozen record whose JSONL
+    had not been created yet was read as "nothing to send" -- and the turn's
+    exit only joins a send that already finished, so it was lost for good.
+    """
+    import json as _json
+
+    from cloud_agent_profiling import operation_profiling
+
+    class _Recorder:
+        """Records what a delivery would have sent, without a network."""
+
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+
+        def record_measurement(self, job_id: str, body: dict[str, Any]) -> Any:
+            """Keep the body and report it stored."""
+            self.sent.append(body)
+            return (200, {"result": "stored"})
+
+        def close(self) -> None:
+            """Release nothing."""
+
+    sink = tmp_path / "late" / "records.jsonl"
+    sink.parent.mkdir()
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_RUN, _json.dumps(_descriptor()))
+    operation_profiling.reset_cache()
+
+    # The record is frozen into the exporter while the file does not exist.
+    frozen = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+    assert frozen is not None
+    operation_profiling.finish(frozen, outcome="dispatched")
+    assert not sink.exists(), "the exporter has not written it yet"
+
+    control = _Recorder()
+    counts = runner_mod.deliver_measurements(
+        control=control, job_id="ajob_1", measurement_ids=[frozen.measurement_id]
+    )
+
+    assert counts["delivered"] == 1, "the queued record must still be delivered"
+    assert [body["record"]["measurement_id"] for body in control.sent] == [frozen.measurement_id]
+    operation_profiling.reset_cache()
+
+
+def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeypatch, tmp_path):
+    """A long turn must not delay its own startup sample.
+
+    The prompt handoff is where the startup ends, so the record must leave the
+    host there -- while the model may run for another hour. Delivering it at
+    the turn's exit would delay an operator's view of it and, past the
+    experiment's grace period, deliver it after the endpoint has begun refusing
+    that run's records.
+    """
+    import threading
+
+    from cloud_agent_profiling import operation_profiling
+
+    _run_descriptor(monkeypatch)
+    sink = tmp_path / "records.jsonl"
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    operation_profiling.reset_cache()
+
+    sent: list[str] = []
+    turn_is_running = threading.Event()
+    #: Set by the recorder the instant the record arrives, so the test thread
+    #: waits on the send itself instead of polling a list for it.
+    delivered = threading.Event()
+    release_delivery = threading.Event()
+    release_turn = threading.Event()
+
+    class _Recorder:
+        def record_measurement(self, job_id: str, body: dict[str, Any]) -> Any:
+            """Keep the measurement id, then hold the delivery open.
+
+            Held so the assertion can prove the sample left the host *while the
+            turn was still running*: without this the turn could have ended
+            first and the ordering being tested would go unobserved.
+            """
+            sent.append(str(body["record"]["measurement_id"]))
+            delivered.set()
+            release_delivery.wait(timeout=10)
+            return (200, {"result": "stored"})
+
+        def close(self) -> None:
+            """Release nothing."""
+
+    class _HangingSupervisor:
+        """A model that has not finished: the turn is still in flight."""
+
+        def start_shared_turn(self, *_args: Any, **_kwargs: Any) -> Any:
+            """Hand back a stream that never produces a frame."""
+            turn_is_running.set()
+            return _HangingStream()
+
+    class _HangingStream:
+        def frames(self) -> Any:
+            """Block until the test is done with the assertion."""
+            release_turn.wait(timeout=10)
+            return iter(({"kind": "result", "exit_code": 0},))
+
+        def close(self) -> None:
+            """Release nothing."""
+
+    measurement = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+    assert measurement is not None
+    real_control = runner_mod.ControlPlane
+    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_a, **_k: _Recorder())
+    try:
+        turn = threading.Thread(
+            target=lambda: runner_mod._stream_shared_agent_turn(
+                supervisor=_HangingSupervisor(),
+                job=_claimed(),
+                control=real_control("http://control", "t"),
+                heart=_IdleHeart(),
+                lease_token="lease",
+                timeout_s=10.0,
+                measurement=measurement,
+                on_frozen=lambda frozen: runner_mod._enqueue_delivery(
+                    frozen,
+                    job=_claimed(),
+                    base_url="http://control",
+                    drain_s=runner_mod.DELIVERY_HANDOFF_DRAIN_S,
+                ),
+            ),
+            daemon=True,
+        )
+        turn.start()
+        assert turn_is_running.wait(timeout=5), "the turn must have started"
+        assert delivered.wait(timeout=5), "the startup sample must reach the destination"
+
+        # The record is out while the model is still working. The delivery is
+        # held open, so the turn cannot have finished before this was sent.
+        assert sent == [measurement.measurement_id], (
+            "the startup sample must be delivered at the handoff, not at the turn's exit"
+        )
+        assert not release_delivery.is_set()
+        assert turn.is_alive(), "the turn was still running when the sample was sent"
+        # And the frozen record really is the startup's, not a placeholder. The
+        # sink is written by the exporter thread, so drain it first rather than
+        # reading a file the record has been queued for but not yet reached --
+        # which is a race, not the ordering under test.
+        operation_profiling.flush_sink()
+        written = [json.loads(line) for line in sink.read_text().splitlines() if line.strip()]
+        assert written and written[0]["operation"] == "attempt.startup"
+    finally:
+        release_delivery.set()
+        release_turn.set()
+        turn.join(timeout=2)
+        operation_profiling.reset_cache()
+
+
+def test_profiling_off_sends_nothing_at_all(monkeypatch, tmp_path):
+    """The switch is the promise: off means no request, no sink, no record."""
+    from cloud_agent_profiling import operation_profiling
+
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_ENABLED, raising=False)
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_RUN, raising=False)
+    sink = tmp_path / "records.jsonl"
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    operation_profiling.reset_cache()
+
+    measurement = operation_profiling.start_operation(
+        operation=operation_profiling.STARTUP_OPERATION, host="host-a"
+    )
+
+    assert measurement is None, "off must not select an operation"
+    assert not sink.exists(), "off must not write a sink"
+    operation_profiling.reset_cache()

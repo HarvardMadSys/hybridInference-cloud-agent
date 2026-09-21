@@ -37,12 +37,12 @@ from typing import Any
 import asyncpg
 import pytest
 import pytest_asyncio
+from tests.support.db import reset_agent_tables
+from tests.support.migrations import apply_migrations, downgrade_to
 
 from cloud_agent.mcp import refresh
 from cloud_agent.mcp.registry import mcp_cipher, oauth_cipher
 from cloud_agent.storage.assembly import Storage
-from tests.support.db import reset_agent_tables
-from tests.support.migrations import apply_migrations, downgrade_to
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

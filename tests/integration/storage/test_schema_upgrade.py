@@ -16,11 +16,11 @@ import os
 import asyncpg
 import pytest
 import pytest_asyncio
-
-from cloud_agent.storage.assembly import Storage
 from tests.integration.storage.test_agent_job_store import _reserve_shared_chat
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations, downgrade_to
+
+from cloud_agent.storage.assembly import Storage
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

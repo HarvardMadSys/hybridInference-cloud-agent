@@ -169,7 +169,7 @@ def source_free(directory: str | Any) -> None:
     from pathlib import Path
 
     root = Path(directory)
-    for name in (".git", "cloud_agent", "cloud_agent_host", "web", "deploy/local"):
+    for name in (".git", "apps", "deploy/local"):
         if (root / name).exists():
             raise AcceptanceError(
                 f"{root} contains {name}, so a deployment that works there says nothing about "

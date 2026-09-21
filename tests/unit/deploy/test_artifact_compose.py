@@ -18,7 +18,6 @@ from typing import Any
 
 import pytest
 import yaml
-
 from deploy.release import artifact_compose as ac
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -130,6 +129,30 @@ def test_third_party_services_keep_their_own_images() -> None:
     document = rendered("control-plane", "agents")
     assert document["services"]["postgres"]["image"] == "postgres:16-alpine"
     assert document["services"]["edge"]["image"] == "nginx:1.27.5-alpine"
+
+
+def test_supported_services_receive_the_opt_in_profiling_descriptor() -> None:
+    """Values in a Compose .env are inert unless each producer passes them.
+
+    The mode is part of the same set and for the same reason: it decides whether
+    an administrator's Start and Stop can reach a producer at all, so a producer
+    that never receives it stays on the legacy environment switch no matter what
+    the operator sets. The broker needs it as much as the runner does -- it is a
+    different container, and a selection it is handed is only honoured while its
+    own mode says a control plane may decide.
+    """
+    names = {
+        "AGENT_OPERATION_PROFILING_ENABLED",
+        "AGENT_OPERATION_PROFILING_RUN",
+        "AGENT_OPERATION_PROFILING_SINK",
+        "AGENT_OPERATION_PROFILING_MODE",
+    }
+    control = source("control-plane")["services"]["control-plane"]["environment"]
+    host = source("host")["services"]
+
+    assert names <= set(control)
+    assert names <= set(host["runner"]["environment"])
+    assert names <= set(host["workspace-broker"]["environment"])
 
 
 @pytest.mark.parametrize(

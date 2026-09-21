@@ -19,9 +19,9 @@ from cloud_agent.attachments.selection import (
     prompt_with_attachments,
     resolve_attachments,
 )
-from cloud_agent_contracts.errors import SandboxError
-from cloud_agent_git.source_archive import build_upload_archive
 from cloud_agent_host.chat_sandbox import CHAT_UPLOADS_DIR, CHAT_WORKDIR
+from cloud_agent_shared.errors import SandboxError
+from cloud_agent_shared.git.source_archive import build_upload_archive
 
 
 class _Store:

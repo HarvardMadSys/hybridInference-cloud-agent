@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import Mock
 
 import pytest
+from tests.unit.test_retained_deploy import _add_required_host_paths, _host, _run
 
 from cloud_agent_host.candidate_check import check_candidate
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
@@ -13,7 +14,6 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_PROTOCOL,
     SHARED_SANDBOX_RUNTIME_PINS,
 )
-from tests.unit.test_retained_deploy import _add_required_host_paths, _host, _run
 
 
 def test_candidate_probe_failure_preserves_the_live_marker(tmp_path):

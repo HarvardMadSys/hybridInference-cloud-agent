@@ -1,4 +1,4 @@
-"""The claim asks the gateway for the sandbox's credential (task E9).
+"""The claim asks the gateway for the sandbox's credential.
 
 Before this the claim minted a ``model``-scoped worker token signed with
 ``AGENT_CONTROL_TOKEN_SECRET`` — a root the gateway does not know. It parsed,
@@ -35,6 +35,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.storage import AllCapabilities, EmptyAttachments
 
 from cloud_agent.api import routes as agent_jobs_router, worker as agent_worker
 from cloud_agent.api.deps import (
@@ -43,7 +44,6 @@ from cloud_agent.api.deps import (
     get_storage,
 )
 from cloud_agent.gateway import GatewayError
-from tests.support.storage import AllCapabilities, EmptyAttachments
 
 pytestmark = pytest.mark.asyncio
 
@@ -164,7 +164,7 @@ def _app(store: _ClaimStore, grants: _Grants) -> FastAPI:
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     app.dependency_overrides[get_grant_client] = lambda: grants
-    app.dependency_overrides[agent_jobs_router.verify_claiming_host] = lambda: {
+    app.dependency_overrides[agent_worker.verify_claiming_host] = lambda: {
         "host": "runner-test",
         "credential_hash": "test-credential-hash",
     }
@@ -356,7 +356,7 @@ async def test_title_generation_is_scheduled_after_successful_claim(monkeypatch,
     generate = AsyncMock()
     monkeypatch.setattr(agent_worker, "generate_thread_title", generate)
     background = BackgroundTasks()
-    response = await agent_jobs_router.worker_claim(
+    response = await agent_worker.worker_claim(
         WorkerClaimRequest(worker_id="w1"),
         background,
         claiming_host={"host": "runner-test", "credential_hash": "test-credential-hash"},
@@ -374,7 +374,6 @@ async def test_title_generation_is_scheduled_after_successful_claim(monkeypatch,
             job_id=_JOB,
             attempt_id=_ATTEMPT,
             lease_generation=_GENERATION,
-            prompt="fix it",
             model="glm-5.1",
             sandbox_token="agr.header.signature",
         )

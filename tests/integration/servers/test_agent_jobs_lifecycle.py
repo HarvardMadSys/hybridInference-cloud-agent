@@ -21,8 +21,11 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.db import reset_agent_tables
+from tests.support.migrations import apply_migrations
 
 from cloud_agent.api import routes as agent_jobs_router
+from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
@@ -30,6 +33,7 @@ from cloud_agent.api.deps import (
     get_log_store,
     get_storage,
 )
+from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.storage.assembly import Storage
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
@@ -39,8 +43,6 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
-from tests.support.db import reset_agent_tables
-from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -86,7 +88,7 @@ class _FakeGateway:
 
 
 class _FakeGrants:
-    """The gateway's grant contract. The claim asks for one now (E9)."""
+    """The gateway's grant contract. The claim asks the gateway for one."""
 
     async def mint(self, **kwargs: Any) -> dict[str, Any]:
         return {
@@ -169,13 +171,13 @@ async def api(monkeypatch):
     # (``verify_api_key`` no longer exists here — the API-key branch was deleted
     # on 2026-08-04 — so this paragraph is about the source, not about a
     # dependency a reader will find.)
-    app.dependency_overrides[agent_jobs_router.authenticate_agent_owner] = lambda: {
+    app.dependency_overrides[authenticate_agent_owner] = lambda: {
         "user_id": _OWNER,
         "role": "free",
         "authenticated": True,
     }
     # /worker/claim is machine-to-machine; stand in for an enrolled host credential.
-    app.dependency_overrides[agent_jobs_router.verify_claiming_host] = lambda: {
+    app.dependency_overrides[verify_claiming_host] = lambda: {
         "host": "runner-test",
         "credential_hash": "test-credential-hash",
     }

@@ -295,7 +295,7 @@ directly, with stub stores, and fed what came back to this service's readers.
 | unknown user — the response omits `status`, `role` and `email` | refused, and the later `.get()` reads return the defaults rather than raising |
 | catalog `models` / `aliases` | parsed as expected |
 
-**Two drifts found in `contracts/internal-lookups.openapi.yaml`**, both fixed:
+**Two drifts found in `gateway_contracts/internal-lookups.openapi.yaml`**, both fixed:
 
 - `/internal/mcp-registry` was still a documented path. The gateway stopped
   serving it at the ownership amendment.

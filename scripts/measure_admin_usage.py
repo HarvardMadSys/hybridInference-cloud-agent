@@ -18,6 +18,8 @@ from datetime import UTC, datetime, timedelta
 
 import asyncpg
 from cloud_agent.storage.store import TERMINAL_STATES
+from tests.support.db import reset_agent_tables
+from tests.support.migrations import apply_migrations
 
 from cloud_agent.admin_usage import (
     MAX_USAGE_LEDGER_ROWS,
@@ -38,8 +40,6 @@ from cloud_agent.storage.admin_usage_queries import (
     _PROJECTION_SQL,
     AdminUsageQueries,
 )
-from tests.support.db import reset_agent_tables
-from tests.support.migrations import apply_migrations
 
 OWNERS = [f"owner-{index:02d}" for index in range(5)]
 MODELS = ["model-a", "model-b", "model-c", ""]

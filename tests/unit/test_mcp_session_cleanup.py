@@ -9,13 +9,13 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
+from tests.unit.test_mcp_host_sessions_and_results import Transport, session
+from tests.unit.test_mcp_protocol_and_authorization import _connection
+from tests.unit.test_mcp_transports import _client, _config
 
 from cloud_agent.api import mcp_relay
 from cloud_agent.app import lifespan
 from cloud_agent.mcp import host, protocol, transports
-from tests.unit.test_mcp_host_sessions_and_results import Transport, session
-from tests.unit.test_mcp_protocol_and_authorization import _connection
-from tests.unit.test_mcp_transports import _client, _config
 
 pytestmark = pytest.mark.asyncio
 

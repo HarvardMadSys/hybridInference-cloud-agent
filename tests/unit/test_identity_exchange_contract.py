@@ -31,7 +31,7 @@ from cloud_agent.gateway import GatewayClient
 
 pytestmark = pytest.mark.asyncio
 
-CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "identity.openapi.yaml"
+CONTRACT = Path(__file__).resolve().parents[2] / "gateway_contracts" / "identity.openapi.yaml"
 
 
 def _schema(path: str, method: str) -> dict[str, Any]:

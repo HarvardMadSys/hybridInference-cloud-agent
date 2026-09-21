@@ -23,6 +23,8 @@ from datetime import UTC, datetime, timedelta
 import asyncpg
 import pytest
 import pytest_asyncio
+from tests.support.db import reset_agent_tables
+from tests.support.migrations import apply_migrations, downgrade_to
 
 from cloud_agent.capacity_protocol import (
     CapacityHistoryPointWrite,
@@ -36,8 +38,6 @@ from cloud_agent.storage.repositories.host_capacity import (
     PostgresHostCapacityRepository,
     insert_capacity_history_point,
 )
-from tests.support.db import reset_agent_tables
-from tests.support.migrations import apply_migrations, downgrade_to
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
 from deploy.release import publish_inputs as pi, release_manifest as rm
 
 REPO_ROOT = Path(__file__).resolve().parents[3]

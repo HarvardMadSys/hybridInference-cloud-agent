@@ -1,10 +1,10 @@
-"""The auth dependencies E7 replaced (``cloud_agent.api.deps``).
+"""The auth dependencies (``cloud_agent.api.deps``).
 
-Until E7 these eight raised ``NotImplementedError`` and the ported API tests
-supplied stand-ins. They are real now, and this file is what stops them
-regressing into something permissive: nearly every case here asserts a
-*refusal*, because the failure mode that matters is a dependency that says yes
-when it cannot know.
+These eight raised ``NotImplementedError`` until they were implemented, with
+the ported API tests supplying stand-ins for them. They are real now, and this
+file is what stops them regressing into something permissive: nearly every
+case here asserts a *refusal*, because the failure mode that matters is a
+dependency that says yes when it cannot know.
 
 The credential boundaries that would be quietest if they broke:
 
@@ -325,7 +325,9 @@ async def test_a_trusted_deployment_falls_back_to_the_socket(
 # ── log_admin_action ───────────────────────────────────────────────────
 
 
-class _RecordingStore:
+class _RecordingAudit:
+    """The audit port, as ``Storage`` exposes it under ``.audit``."""
+
     def __init__(self, explode: bool = False) -> None:
         self.rows: list[dict[str, Any]] = []
         self.explode = explode
@@ -335,6 +337,18 @@ class _RecordingStore:
             raise RuntimeError("database went away")
         self.rows.append(kwargs)
         return len(self.rows)
+
+
+class _RecordingStore:
+    """An assembly: it holds the capability, and has no top-level method.
+
+    That is the shape that made the bug invisible — `Storage` after #210
+    exposes `audit`, and asking it for `record_admin_action` by name answered
+    "no such method" for a store that had one.
+    """
+
+    def __init__(self, explode: bool = False) -> None:
+        self.audit = _RecordingAudit(explode=explode)
 
 
 async def test_an_admin_action_reaches_the_trail() -> None:
@@ -349,7 +363,7 @@ async def test_an_admin_action_reaches_the_trail() -> None:
         actor_id="admin-1",
     )
 
-    assert store.rows == [
+    assert store.audit.rows == [
         {
             "action": "agent.runner_host.drain",
             "actor_id": "admin-1",
@@ -366,8 +380,12 @@ async def test_no_store_is_a_silent_no_op() -> None:
     await log_admin_action(None, "203.0.113.9", "agent.runner_host.drain", actor_id="admin-1")
 
 
-async def test_a_store_without_the_method_is_a_no_op() -> None:
-    """The fakes in the ported host tests are exactly this shape."""
+async def test_a_store_without_the_capability_never_raises() -> None:
+    """Never raises, whatever the store turns out to be.
+
+    The drain has already happened by the time this is called; turning a store
+    that cannot record into a 500 would report the action as failed.
+    """
 
     class _Old:
         pass

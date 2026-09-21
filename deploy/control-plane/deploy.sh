@@ -105,7 +105,7 @@ else
   # against a non-checkout silently does nothing useful. Fail rather than deploy
   # something that is not what the caller asked for.
   git rev-parse --git-dir >/dev/null 2>&1 \
-    || die "${DEPLOY_ROOT} is not a git checkout — convert it once before enabling CD (see deploy/control-plane/README-cd.md)"
+    || die "${DEPLOY_ROOT} is not the git checkout required by AGENT_DEPLOY_MODE=source"
 
   # The reason this check exists is #29: four files that only ever existed on this
   # host were found by diffing it against dev, and a rebuild would have reverted

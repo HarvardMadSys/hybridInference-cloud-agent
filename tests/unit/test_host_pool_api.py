@@ -23,9 +23,11 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.storage import AllCapabilities
 
 from cloud_agent.api import admin_hosts, hosts
 from cloud_agent.api.deps import get_grant_client, get_storage, verify_admin_access
+from cloud_agent.application import residency
 from cloud_agent.broker_routing import (
     ENV_BROKER_HOSTS,
     BrokerUrlRefused,
@@ -41,7 +43,6 @@ from cloud_agent.host_pool import (
     normalize_capabilities,
     transition_allowed,
 )
-from tests.support.storage import AllCapabilities
 
 ADMIN = {"Authorization": "Bearer test-admin"}
 
@@ -442,7 +443,7 @@ async def _enroll(client, store, name="runner-a", **body) -> str:
     return response.json()["credential"]
 
 
-# ── G2: enrollment ─────────────────────────────────────────────────────
+# ── Enrollment ─────────────────────────────────────────────────────────
 
 
 async def test_enrollment_returns_a_credential_and_starts_the_host_enrolling(client):
@@ -664,10 +665,10 @@ async def test_the_enrollment_token_is_never_shown_twice(client):
     ],
 )
 def test_every_pool_admin_route_declares_the_admin_gate(path):
-    """Asserted structurally, because the gate itself is still E7's placeholder.
+    """Asserted structurally, because a live 401 would prove only one route.
 
-    Sending an unauthenticated request would only prove that a
-    ``NotImplementedError`` propagates. What is checkable now — and what would
+    Sending an unauthenticated request would answer for the route it names and
+    nothing about the next one. What is checkable now — and what would
     actually go wrong if a new route were added without thinking — is whether
     ``verify_admin_access`` is in the route's dependency tree at all. Minting
     enrollment tokens or revoking a host from an unauthenticated call is the
@@ -682,7 +683,7 @@ def test_every_pool_admin_route_declares_the_admin_gate(path):
     ), path
 
 
-# ── G3: heartbeat ──────────────────────────────────────────────────────
+# ── Heartbeat ──────────────────────────────────────────────────────────
 
 
 async def test_the_first_heartbeat_puts_an_enrolling_host_online(client):
@@ -916,7 +917,7 @@ async def test_another_hosts_credential_does_not_authenticate_this_one(client):
     assert response.json()["host"] == "runner-b"
 
 
-# ── G4: the claim takes its host from the credential ───────────────────
+# ── The claim takes its host from the credential ───────────────────────
 
 
 class ClaimRecorder(FakeHostPoolStore):
@@ -1092,7 +1093,7 @@ async def test_a_host_credential_for_an_unknown_host_cannot_claim(claim_client):
     assert store.claims == []
 
 
-# ── G6: drain, undrain, remove ─────────────────────────────────────────
+# ── Drain, undrain, remove ─────────────────────────────────────────────
 
 
 async def test_draining_stops_new_claims_without_touching_the_running_ones(client):
@@ -1530,7 +1531,7 @@ async def test_a_grant_with_no_token_is_revoked_rather_than_abandoned() -> None:
     grants = RecordingGrants()
     grants.mint = AsyncMock(return_value={"grant_id": "agr-orphan", "token": ""})
 
-    credential = await hosts._mint_residency_grant(store, grants, row=_residency_row())
+    credential = await residency._mint_residency_grant(store, grants, row=_residency_row())
 
     assert credential is None
     assert grants.revoked == ["agr-orphan"]
@@ -1549,7 +1550,7 @@ async def test_a_refused_revoke_still_reports_no_credential() -> None:
     grants.mint = AsyncMock(return_value={"grant_id": "agr-orphan", "token": ""})
     grants.revoke = AsyncMock(side_effect=RuntimeError("gateway is down"))
 
-    credential = await hosts._mint_residency_grant(store, grants, row=_residency_row())
+    credential = await residency._mint_residency_grant(store, grants, row=_residency_row())
 
     assert credential is None
 
@@ -1560,7 +1561,7 @@ async def test_an_answer_without_a_grant_id_has_nothing_to_revoke() -> None:
     grants = RecordingGrants()
     grants.mint = AsyncMock(return_value={"grant_id": "", "token": "tok-1"})
 
-    credential = await hosts._mint_residency_grant(store, grants, row=_residency_row())
+    credential = await residency._mint_residency_grant(store, grants, row=_residency_row())
 
     assert credential is None
     assert grants.revoked == []

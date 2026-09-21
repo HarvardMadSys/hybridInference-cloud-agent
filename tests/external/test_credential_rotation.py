@@ -23,7 +23,6 @@ import re
 import shutil
 
 import pytest
-
 from tests.support.claude_cli import ClaudeCli, FakeAnthropicGateway
 
 pytestmark = pytest.mark.external

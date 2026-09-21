@@ -1,9 +1,9 @@
 """The gateway client — every question this service used to answer by import.
 
 Tested at this level because three consumers depend on the same failure
-behaviour: E4's catalog, E7/E8's user status, E6's MCP registry. If the client
-ever failed *open* — treating an unreachable gateway as permission — each of
-them would inherit that quietly.
+behaviour: the visible-model catalog, the session's user status, and the MCP
+registry. If the client ever failed *open* — treating an unreachable gateway as
+permission — each of them would inherit that quietly.
 """
 
 from __future__ import annotations

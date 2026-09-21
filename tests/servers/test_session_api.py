@@ -1,4 +1,4 @@
-"""The session endpoints (task E8) — this service's own half of sign-in.
+"""The session endpoints — this service's own half of sign-in.
 
 The identity token is verified for real here: a generated RSA key stands in for
 the gateway's JWKS, so the callback is exercised against a genuine RS256 token

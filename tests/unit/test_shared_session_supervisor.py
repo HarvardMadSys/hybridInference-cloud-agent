@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
+import time
 from dataclasses import asdict, replace
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -32,6 +36,7 @@ from cloud_agent_host.shared_session_supervisor import (
     SharedMemberManifest,
 )
 from cloud_agent_host.workspace_broker import SharedSandboxIdentityRequest, create_app
+from cloud_agent_profiling import operation_profiling
 
 
 class _Manager:
@@ -62,8 +67,23 @@ class _Manager:
             networks=("agent-net",),
         )
 
-    def create(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
-        return self.items.setdefault(spec.container_name, self._inspection(spec))
+    def create(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        facts: Any = None,
+        observer: Any = None,
+    ) -> ChatSandboxInspection:
+        created = spec.container_name not in self.items
+        # Instrumented like the real manager, so a test can exercise the stage
+        # path rather than only the action path.
+        with operation_profiling.substage(observer, "container_create"):
+            inspection = self.items.setdefault(spec.container_name, self._inspection(spec))
+        if created and facts is not None:
+            # Mirrors the real manager: only a container this call actually
+            # made is reported as created.
+            facts.note("create")
+        return inspection
 
     def require_existing(
         self, spec: ChatSandboxSpec, *, container_id: str
@@ -83,16 +103,24 @@ class _Manager:
         spec: ChatSandboxSpec,
         *,
         network_phase: str | None = None,
+        facts: Any = None,
+        observer: Any = None,
     ) -> ChatSandboxInspection:
         self.start_phases.append(network_phase)
         current = self.items[spec.container_name]
         if not current.running:
-            current = replace(
-                current,
-                running=True,
-                status=ChatSandboxStatus.RUNNING,
-            )
-            self.items[spec.container_name] = current
+            with operation_profiling.substage(observer, "container_start"):
+                current = replace(
+                    current,
+                    running=True,
+                    status=ChatSandboxStatus.RUNNING,
+                )
+                self.items[spec.container_name] = current
+            if facts is not None:
+                facts.note("start")
+        elif facts is not None:
+            with operation_profiling.substage(observer, "service_hosts_sync"):
+                facts.note("reuse")
         return current
 
     def stop(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
@@ -2066,3 +2094,429 @@ def test_the_final_report_sequence_stays_above_every_checkpoint():
     assert sequences, "checkpoints should have been produced"
     assert telemetry.turn_resources is not None
     assert telemetry.turn_resources["report_seq"] > max(sequences)
+
+
+@pytest.mark.parametrize(
+    ("pre_existing", "running", "expected"),
+    [
+        # No container yet: this activation pays for creating it.
+        (False, None, "create"),
+        # It exists and is stopped: this activation starts it.
+        (True, False, "start"),
+        # It exists and is running: this activation only attaches to it.
+        (True, True, "reuse"),
+    ],
+)
+def test_acquire_reports_what_it_did_to_the_container(pre_existing, running, expected):
+    """The four startup paths differ by the action, and only the call knows it.
+
+    A group can outlive the broker that made it, and a container that was
+    stopped and restarted looks exactly like one that never stopped once it is
+    running again. So the action is reported by the code that performed it
+    rather than inferred later from the container's state.
+    """
+    manager = _Manager()
+    spec = _spec()
+    if pre_existing:
+        manager.items[spec.container_name] = manager._inspection(spec, running=running)
+    supervisor = SharedChatSessionSupervisor(manager)
+
+    lease = supervisor.acquire(
+        spec,
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+
+    assert lease.container_action == expected
+
+
+def test_a_container_created_then_started_is_still_reported_as_created():
+    """Creating a group also starts it; the stronger fact must survive."""
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+
+    # The fake manager, like the real one, starts what it just created.
+    assert manager.start_phases == ["agent"]
+    assert lease.container_action == "create"
+
+
+def test_container_action_is_reported_even_when_this_process_is_not_profiling():
+    """The action is a fact, not a measurement: it never depends on a switch."""
+    assert operation_profiling.active_run() is None
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+
+    assert lease.container_action == "create"
+    assert lease.stages == []
+
+
+def test_ensure_resident_reports_a_reopened_native_session():
+    """Reopening a retained native session is a resume, not a fresh CLI."""
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+
+    descriptor = supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id=None, slot=0),
+    )
+
+    # The retained member owns the locator, so an omitted field still resumes
+    # the exact session rather than starting a fresh chat.
+    assert descriptor.resident_action == "resume"
+
+
+def test_ensure_resident_reports_a_first_process_as_new():
+    """A member with no session to resume starts a new CLI."""
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    fresh = [
+        SharedMemberManifest(
+            thread_id="athr_source",
+            native_session_id=None,
+            context_status="new",
+            resident_slot_id=0,
+            last_settled_job_id=None,
+        )
+    ]
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=False,
+        manifest=fresh,
+    )
+
+    descriptor = supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id=None, slot=0),
+    )
+
+    assert descriptor.resident_action == "new"
+
+
+def test_ensure_resident_reports_reuse_for_a_hot_process():
+    """The same live process accepting another turn is a reuse, not a start."""
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    launch = _launch("athr_source", native_session_id="native-source", slot=0)
+    first = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    assert (
+        supervisor.ensure_resident("athr_source", first.token, launch).resident_action == "resume"
+    )
+    supervisor.settle("athr_source", first.token, job_id="ajob_source", context_status="restored")
+
+    second = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    descriptor = supervisor.ensure_resident("athr_source", second.token, launch)
+
+    assert descriptor.resident_action == "reuse"
+    assert len(factory.opened) == 1
+
+
+def test_broker_sub_stages_are_reported_when_this_process_is_profiling(monkeypatch, tmp_path):
+    """With the broker's switch on, the container work comes back as durations."""
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
+    monkeypatch.setenv(
+        operation_profiling.ENV_PROFILING_RUN,
+        json.dumps(
+            {
+                "run_id": "broker-stages-1",
+                "operations": ["attempt.startup"],
+                "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(),
+                "max_operations": 10,
+            }
+        ),
+    )
+    operation_profiling.reset_cache()
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        profiling={
+            "run_id": "broker-stages-1",
+            "measurement_id": "msm_x",
+            "operation": "attempt.startup",
+            "call_id": "c7",
+            "expires_at": time.time() + 60,
+        },
+    )
+
+    # The answer says which call it belongs to and that this process collected.
+    assert lease.profiling_call_id == "c7"
+    assert lease.profiling_recorded is True
+    # The fake manager is instrumented like the real one: the container was
+    # created here and then found already running.
+    names = [item["name"] for item in lease.stages]
+    assert names == ["container_create", "service_hosts_sync"]
+    assert all(item["duration_us"] >= 0 for item in lease.stages)
+    # Only durations travel: the caller's timeline cannot place them.
+    assert all("start_offset_us" not in item for item in lease.stages)
+    assert lease.container_action == "create"
+
+
+def _enable_broker_profiling(monkeypatch) -> None:
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
+    monkeypatch.setenv(
+        operation_profiling.ENV_PROFILING_RUN,
+        json.dumps(
+            {
+                "run_id": "broker-context-1",
+                "operations": ["attempt.startup"],
+                "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(),
+                "max_operations": 10,
+            }
+        ),
+    )
+    operation_profiling.reset_cache()
+
+
+def test_a_lapsed_selection_stops_the_broker_recording(monkeypatch):
+    """A run that already expired must not collect container sub-stages.
+
+    Regression: the broker checked only that its cached run existed, so it
+    kept measuring after the runner had stopped.
+    """
+    _enable_broker_profiling(monkeypatch)
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        profiling={
+            "run_id": "broker-context-1",
+            "measurement_id": "msm_gone",
+            "operation": "attempt.startup",
+            "expires_at": time.time() - 1,
+        },
+    )
+
+    assert lease.stages == []
+    # A refusal is still an answer about collection: it says this process did
+    # not record, which is what makes the caller's fragment missing.
+    assert lease.profiling_recorded is False
+    # The action is a fact, so it survives the lapsed measurement.
+    assert lease.container_action == "create"
+
+
+def test_a_selection_for_another_run_is_refused(monkeypatch):
+    """The broker honours only the run configured here."""
+    _enable_broker_profiling(monkeypatch)
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        profiling={
+            "run_id": "some-other-run",
+            "measurement_id": "msm_x",
+            "operation": "attempt.startup",
+            "expires_at": time.time() + 60,
+        },
+    )
+
+    assert lease.stages == []
+
+
+def test_a_live_selection_records_container_sub_stages(monkeypatch):
+    """With a matching, unexpired selection the broker reports its work."""
+    _enable_broker_profiling(monkeypatch)
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        profiling={
+            "run_id": "broker-context-1",
+            "measurement_id": "msm_x",
+            "operation": "attempt.startup",
+            "call_id": "c9",
+            "expires_at": time.time() + 60,
+        },
+    )
+
+    assert [item["name"] for item in lease.stages] == [
+        "container_create",
+        "service_hosts_sync",
+    ]
+    assert all(item["duration_us"] >= 0 for item in lease.stages)
+    assert lease.profiling_call_id == "c9"
+    assert lease.profiling_recorded is True
+    assert lease.profiling_truncated is False
+
+
+def test_a_reuse_with_no_stages_still_reports_that_it_collected(monkeypatch):
+    """An empty stage list is a completed collection, not a missing one.
+
+    Regression: the reuse path runs no `cli_spawn`, so it answers with no
+    stages, and the caller read that as never having heard from the broker.
+    """
+    _enable_broker_profiling(monkeypatch)
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    live = {
+        "run_id": "broker-context-1",
+        "measurement_id": "msm_x",
+        "operation": "attempt.startup",
+        "call_id": "c1",
+        "expires_at": time.time() + 60,
+    }
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        profiling=live,
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+        profiling=live,
+    )
+    supervisor.settle("athr_source", lease.token, job_id="ajob_source", context_status="live")
+
+    second = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=True,
+        manifest=_members(),
+        profiling={**live, "call_id": "c2"},
+    )
+    descriptor = supervisor.ensure_resident(
+        "athr_source",
+        second.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+        profiling={**live, "call_id": "c2"},
+    )
+
+    assert descriptor.resident_action == "reuse"
+    assert descriptor.stages == []
+    assert descriptor.profiling_call_id == "c2"
+    # The member's work was skipped on purpose and that is a complete answer.
+    assert descriptor.profiling_recorded is True
+
+
+def test_a_collection_cut_short_by_the_deadline_says_so(monkeypatch):
+    """An empty answer is only "nothing to time" when collection finished.
+
+    Regression, at the response the runner actually reads: the broker's local
+    deadline lapsed while it waited for the member lock, the CLI start was
+    never timed, and the lease still reported a completed collection.
+    """
+    _enable_broker_profiling(monkeypatch)
+    live = {
+        "run_id": "broker-context-1",
+        "measurement_id": "msm_x",
+        "operation": "attempt.startup",
+        "call_id": "c1",
+        "expires_at": time.time() + 600,
+    }
+    real_recorder = operation_profiling.start_stage_recording
+
+    def lapsed(context):
+        """A recorder that already missed its own (shorter) deadline."""
+        recorder = real_recorder(context)
+        if recorder is not None:
+            recorder.deadline_mono = time.monotonic() - 1
+        return recorder
+
+    monkeypatch.setattr("cloud_agent_host.shared_session_supervisor.start_stage_recording", lapsed)
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=_TransportFactory())
+
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        profiling=live,
+    )
+    descriptor = supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+        profiling={**live, "call_id": "c2"},
+    )
+
+    for answer in (lease, descriptor):
+        # The recorder existed and the call answered...
+        assert answer.profiling_recorded is True
+        # ...but every stage was skipped, so nothing was measured at all.
+        assert answer.stages == []
+        assert answer.profiling_truncated is True

@@ -28,7 +28,7 @@ from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent import identity
-from cloud_agent.api.routes import authenticate_agent_owner
+from cloud_agent.api._owner_auth import authenticate_agent_owner
 
 pytestmark = pytest.mark.asyncio
 

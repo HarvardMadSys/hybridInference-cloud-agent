@@ -20,9 +20,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import pytest
+from tests.support.claude_cli import ClaudeCli, sse
 
 from cloud_agent_host.runtimes import ClaudeCodeRuntime
-from tests.support.claude_cli import ClaudeCli, sse
 
 pytestmark = pytest.mark.external
 

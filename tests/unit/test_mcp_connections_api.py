@@ -26,12 +26,13 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
+from tests.support.storage import AllCapabilities, OneFake
 
-from cloud_agent.api import mcp_connections, routes
+from cloud_agent.api import mcp_connections
+from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp.models import CapabilityKind, ToolPolicy
 from cloud_agent.mcp.registry import mcp_cipher
-from tests.support.storage import AllCapabilities, OneFake
 
 _OWNER = "user-owner"
 _OTHER = "user-other"
@@ -434,7 +435,7 @@ def _client(store: FakeStore, *, user_id: str = _OWNER) -> TestClient:
 
     app.include_router(mcp_relay.router)
     app.dependency_overrides[get_storage] = lambda: OneFake(store)
-    app.dependency_overrides[routes.require_agent_owner] = lambda: {"user_id": user_id}
+    app.dependency_overrides[require_agent_owner] = lambda: {"user_id": user_id}
     return TestClient(app)
 
 

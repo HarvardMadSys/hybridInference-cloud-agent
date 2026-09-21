@@ -1,4 +1,4 @@
-"""The grant link's SQL predicates, against a real database (task E9).
+"""The grant link's SQL predicates, against a real database.
 
 ``tests/unit/test_grant_lifecycle.py`` pins the *loops* — that they re-read the
 store every pass and act only on what it returns. What it cannot pin is the
@@ -25,6 +25,8 @@ import os
 
 import pytest
 import pytest_asyncio
+from tests.support.db import reset_agent_tables
+from tests.support.migrations import apply_migrations
 
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.grants import PostgresGrantRepository
@@ -36,8 +38,6 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
-from tests.support.db import reset_agent_tables
-from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

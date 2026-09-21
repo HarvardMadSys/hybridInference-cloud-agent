@@ -14,7 +14,6 @@ import uuid
 import asyncpg
 import pytest
 import pytest_asyncio
-
 from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_schema_upgrade import _db_config, store as store
 from tests.support.migrations import apply_migrations, downgrade_to
@@ -39,7 +38,7 @@ async def _rebuild_at_0017(config) -> None:
         await conn.execute("CREATE SCHEMA public")
     finally:
         await conn.close()
-    apply_migrations(config, "0017_conversation_goal")
+    apply_migrations(config, "0019_conversation_goal")
 
 
 async def _reset_to_head(config) -> None:

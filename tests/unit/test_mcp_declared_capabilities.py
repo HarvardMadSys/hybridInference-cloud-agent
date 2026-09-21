@@ -4,10 +4,10 @@ import json
 from unittest.mock import AsyncMock
 
 import pytest
+from tests.unit.test_mcp_transports import _client, _config
 
 from cloud_agent.mcp import protocol, transports
 from cloud_agent.mcp.jsonrpc import decode
-from tests.unit.test_mcp_transports import _client, _config
 
 
 @pytest.mark.asyncio

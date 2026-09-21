@@ -15,7 +15,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
-
 from tests.servers.test_agent_jobs_api import (  # noqa: F401 - pytest fixtures
     _MCP_ENCRYPTION_KEY,
     _OWNER,

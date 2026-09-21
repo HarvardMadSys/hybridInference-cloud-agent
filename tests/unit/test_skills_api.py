@@ -11,8 +11,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from cloud_agent.api import skills
+from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_agent_app_credentials, get_storage
-from cloud_agent.api.routes import require_agent_owner
 from cloud_agent.app import create_app, create_mcp_app
 from cloud_agent.skills.imports import SkillImportNotFound
 from cloud_agent.skills.models import SkillConflict

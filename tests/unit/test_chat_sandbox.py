@@ -30,6 +30,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     ChatSandboxStatus,
     RetainedChatBackend,
+    SandboxActionFacts,
     _RetainedTerminalProcess,
 )
 from cloud_agent_host.egress import EgressPolicy, EgressTier
@@ -2674,3 +2675,84 @@ def test_a_live_network_this_chat_does_not_own_is_still_an_ownership_violation()
 
     with pytest.raises(SandboxError, match="unknown egress network"):
         manager._release_sandbox_networks(spec, inspection)
+
+
+class TestSandboxActionFacts:
+    """The container action is what classifies the startup path."""
+
+    def test_create_outranks_the_start_that_follows_it(self):
+        facts = SandboxActionFacts()
+
+        facts.note("create")
+        facts.note("reuse")
+
+        assert facts.container_action == "create"
+
+    def test_a_later_action_overwrites_an_earlier_weaker_one(self):
+        facts = SandboxActionFacts()
+
+        facts.note("reuse")
+        facts.note("start")
+
+        assert facts.container_action == "start"
+
+    def test_an_untouched_activation_reports_unknown(self):
+        assert SandboxActionFacts().container_action == "unknown"
+
+    def test_a_real_creation_reports_the_action_the_classifier_reads(self, monkeypatch):
+        """The manager's own literal and the runner's classifier must agree.
+
+        These two halves were individually correct and jointly broken: the
+        manager noted ``"created"`` while the classifier and the strongest-fact
+        guard both tested ``"create"``. So the guard never fired, the ``start``
+        that always follows a create overwrote the fact, and every brand-new
+        retained group was measured as ``resume_stopped`` -- two of the four
+        declared paths collapsed into one. A unit test of the guard cannot see
+        that, because it supplies the spelling the classifier wants, so this one
+        drives the real ``create`` and hands the result to the real classifier.
+        """
+        from cloud_agent_host.runner import _classify_startup_path
+
+        spec = _spec()
+        manager = ChatSandboxManager(
+            ContainerBackend(image="img", network="unused", egress=_isolated_policy())
+        )
+        created = ChatSandboxInspection(
+            container_id="container-new",
+            name=spec.container_name,
+            status=ChatSandboxStatus.RUNNING,
+            running=True,
+            image=spec.sandbox_image_digest or "sha256:image",
+            labels=spec.docker_labels(),
+            mounts=(),
+            networks=("agent-net",),
+        )
+        # Everything except the container creation itself: the network, the
+        # inspect that follows it (absent before the create, present after),
+        # and the ownership checks that run on both.
+        made = False
+
+        def _inspect(_name):
+            return created if made else None
+
+        def _run(*_args, **_kwargs):
+            nonlocal made
+            made = True
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(manager, "_ensure_phase_network", lambda *_args: None)
+        monkeypatch.setattr(manager, "inspect", _inspect)
+        monkeypatch.setattr(manager, "_require_phase_network", lambda *_args: created)
+        monkeypatch.setattr(manager, "_verify_identity", lambda *_args: None)
+        monkeypatch.setattr(manager, "_run", _run)
+
+        facts = SandboxActionFacts()
+        manager.create(spec, facts=facts)
+        # The start that follows a creation, which used to overwrite the fact.
+        facts.note("start")
+
+        assert facts.container_action == "create", (
+            "a container this attempt created must say so in the word the "
+            "classifier recognises, not a near-miss spelling"
+        )
+        assert _classify_startup_path(facts.container_action, "unknown") == "new_group"

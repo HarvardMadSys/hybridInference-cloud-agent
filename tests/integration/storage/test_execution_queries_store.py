@@ -27,12 +27,12 @@ import os
 
 import pytest
 import pytest_asyncio
-
-from cloud_agent.storage.assembly import Storage
-from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
 from tests.integration.storage.test_agent_job_store import _claim, _create_job
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
+
+from cloud_agent.storage.assembly import Storage
+from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

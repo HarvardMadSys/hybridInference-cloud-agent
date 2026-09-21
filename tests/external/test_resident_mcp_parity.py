@@ -24,17 +24,6 @@ import asyncpg
 import httpx
 import pytest
 import uvicorn
-
-from cloud_agent.mcp.protocol import presented_name
-from cloud_agent.storage.assembly import Storage
-from cloud_agent.tokens import SCOPE_MCP, mint_worker_token, parse_worker_token
-from cloud_agent_host.chat_sandbox import ChatSandboxManager
-from cloud_agent_host.codex_mcp import INSTALL_POLICY
-from cloud_agent_host.drivers import LaunchContext, TurnInput, get_driver
-from cloud_agent_host.kilo_mcp import ensure_kilo_runtime
-from cloud_agent_host.mcp_helpers import install_mcp_helpers
-from cloud_agent_host.runtimes import RuntimeMCPConfig, get_runtime
-from cloud_agent_host.sandbox import _PopenProcess
 from tests.external.test_agent_mcp_end_to_end import (
     _ENCRYPTION_KEY,
     _MCP_TOKEN_SECRET,
@@ -49,6 +38,17 @@ from tests.external.test_agent_mcp_end_to_end import (
 )
 from tests.support.claude_cli import sse
 from tests.support.migrations import apply_migrations
+
+from cloud_agent.mcp.protocol import presented_name
+from cloud_agent.storage.assembly import Storage
+from cloud_agent.tokens import SCOPE_MCP, mint_worker_token, parse_worker_token
+from cloud_agent_host.chat_sandbox import ChatSandboxManager
+from cloud_agent_host.codex_mcp import INSTALL_POLICY
+from cloud_agent_host.drivers import LaunchContext, TurnInput, get_driver
+from cloud_agent_host.kilo_mcp import ensure_kilo_runtime
+from cloud_agent_host.mcp_helpers import install_mcp_helpers
+from cloud_agent_host.runtimes import RuntimeMCPConfig, get_runtime
+from cloud_agent_host.sandbox import _PopenProcess
 
 pytestmark = [pytest.mark.external, pytest.mark.asyncio]
 _ROOT = pathlib.Path(__file__).resolve().parents[2]

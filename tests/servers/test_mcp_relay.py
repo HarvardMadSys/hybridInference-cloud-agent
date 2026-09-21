@@ -26,12 +26,12 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.storage import OneFake
 
 from cloud_agent.api import mcp_relay as agent_mcp_router
 from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.tokens import SCOPE_FULL, SCOPE_MCP, SCOPE_MODEL, mint_worker_token
-from tests.support.storage import OneFake
 
 pytestmark = pytest.mark.asyncio
 

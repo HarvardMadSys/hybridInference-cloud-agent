@@ -20,16 +20,19 @@ work tracks in this repository's issues and pull requests.
 ## 2. Repo map
 
 ```text
-cloud_agent/            control plane (FastAPI): API, auth adapter, scheduler,
-                        source-control integrations, publishing, storage
-cloud_agent_host/       host agent: runner, sandbox, runtimes, workspace broker
-cloud_agent_contracts/  shared vocabulary both images ship: capability strings,
-                        protocol versions, pins, egress policy, shared errors
-cloud_agent_git/        shared Git algorithms both images ship: the patch gate
-                        and the source-archive builders
-web/                    Next.js user UI + admin dashboard
-contracts/              OpenAPI mirrors of the gateway contracts we consume
-migrations/             Alembic migrations (agent-owned database only)
+apps/
+├── backend/
+│   ├── cloud_agent/           control plane (FastAPI): API, auth adapter,
+│   │                          scheduler, publishing, storage
+│   ├── cloud_agent_host/      host agent: runner, sandbox, runtimes, workspace broker
+│   ├── cloud_agent_profiling/ neutral opt-in measurement vocabulary the control
+│   │                          plane and host both import without either owning it
+│   └── cloud_agent_shared/    vocabulary both images ship: capability strings,
+│       │                      protocol versions, pins, egress policy, shared errors
+│       └── git/               the patch gate and the source-archive builders
+└── frontend/                  Next.js user UI + admin dashboard
+gateway_contracts/             OpenAPI mirrors of the gateway contracts we consume
+migrations/                    Alembic migrations (agent-owned database only)
 deploy/{control-plane,host,sandbox}/
 tests/{unit,servers,integration,external}/  # plus fixtures/ and support/
 docs/
@@ -44,20 +47,23 @@ database stamped with the chain that predates it.
 
 | Module | What it owns |
 |---|---|
-| `cloud_agent/app.py` | The two listeners: the main API and the MCP-only one |
-| `cloud_agent/api/` | One router module per surface — jobs, hosts, admin, session, MCP relay |
-| `cloud_agent/ports/`, `cloud_agent/storage/` | Narrow capability contracts and Postgres repositories: claims, fences, residency, publication |
-| `cloud_agent/grants.py`, `ledger.py`, `grant_usage.py` | Gateway inference grants, and the usage snapshots read back from them |
-| `cloud_agent/gateway.py`, `agent_access.py`, `identity.py` | The three gateway contracts: lookups, admission, identity |
-| `cloud_agent/identity_namespace.py` | Which Gateway minted the `user_id`s this database is keyed by |
-| `cloud_agent/mcp/`, `api/mcp_connections.py`, `api/mcp_relay.py` | Per-user connections, protocol hosting, authorization and the MCP relay |
-| `cloud_agent/publisher.py`, `publish_worker.py`, `source_control.py` | Branch and draft-PR publication, and the GitHub/GitLab credentials behind it |
-| `cloud_agent/admin_observability.py` | The cross-user admin reading surface and its audit |
-| `cloud_agent_host/enrollment.py` | Host registration and the persisted host credential |
-| `cloud_agent_host/runner.py` | Claims, executes one turn, heartbeats, drains on SIGTERM |
-| `cloud_agent_host/chat_sandbox.py`, `sandbox.py` | Retained group lifecycle and the Docker/Kata boundary |
-| `cloud_agent_contracts/egress.py`, `cloud_agent_host/egress_proxy.py` | The two egress phases and the setup allowlist proxy |
-| `cloud_agent_host/runtimes.py`, `shared_protocol.py` | The five Agent CLI adapters and the version pins they attest |
+| `apps/backend/cloud_agent/app.py` | The two listeners: the main API and the MCP-only one |
+| `apps/backend/cloud_agent/api/` | One router module per surface — jobs, hosts, admin, session, MCP relay |
+| `apps/backend/cloud_agent/application/` | Flows that run without a request: job admission and creation, native Fork materialization, residency credentials |
+| `apps/backend/cloud_agent/bootstrap/` | Internal assembly: the resources the listeners are built from, and the lifespan that starts and stops them |
+| `apps/backend/cloud_agent/workers/` | The background loops — attempt reaping, grant renewal, shared-workspace snapshot capture |
+| `apps/backend/cloud_agent/ports/`, `apps/backend/cloud_agent/storage/` | Narrow capability contracts and Postgres repositories: claims, fences, residency, publication |
+| `apps/backend/cloud_agent/grants.py`, `ledger.py`, `grant_usage.py` | Gateway inference grants, and the usage snapshots read back from them |
+| `apps/backend/cloud_agent/gateway.py`, `agent_access.py`, `identity.py` | The three gateway contracts: lookups, admission, identity |
+| `apps/backend/cloud_agent/identity_namespace.py` | Which Gateway minted the `user_id`s this database is keyed by |
+| `apps/backend/cloud_agent/mcp/`, `api/mcp_connections.py`, `api/mcp_relay.py` | Per-user connections, protocol hosting, authorization and the MCP relay |
+| `apps/backend/cloud_agent/publisher.py`, `publish_worker.py`, `source_control.py` | Branch and draft-PR publication, and the GitHub/GitLab credentials behind it |
+| `apps/backend/cloud_agent/admin_observability.py` | The cross-user admin reading surface and its audit |
+| `apps/backend/cloud_agent_host/enrollment.py` | Host registration and the persisted host credential |
+| `apps/backend/cloud_agent_host/runner.py` | Claims, executes one turn, heartbeats, drains on SIGTERM |
+| `apps/backend/cloud_agent_host/chat_sandbox.py`, `sandbox.py` | Retained group lifecycle and the Docker/Kata boundary |
+| `apps/backend/cloud_agent_shared/egress.py`, `apps/backend/cloud_agent_host/egress_proxy.py` | The two egress phases and the setup allowlist proxy |
+| `apps/backend/cloud_agent_host/runtimes.py`, `shared_protocol.py` | The five Agent CLI adapters and the version pins they attest |
 
 ## 3. Quality gates
 
@@ -100,7 +106,7 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
    (`AGENT_CONTROL_TOKEN_SECRET`, `AGENT_SESSION_SECRET`).
 5. **The gateway is reached over HTTP only.** No Python import of `serving.*`,
    ever. If you need something the gateway knows, it needs a contract in
-   `contracts/`.
+   `gateway_contracts/`.
 
 ## 6. Key concepts
 
@@ -128,7 +134,7 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   transcript-replay or platform-checkpoint recovery path. See the implemented
   [session design](docs/specs/2026-08-31-native-session-fork-shared-workspace-design.md).
   The group has **two egress phases**, enforced by the
-  code in `cloud_agent_contracts/egress.py` and
+  code in `cloud_agent_shared/egress.py` and
   `cloud_agent_host/egress_proxy.py`:
   - *Setup phase* — dependency installation may reach package registries, but
     only through the Squid allowlist proxy, which permits CONNECT to an

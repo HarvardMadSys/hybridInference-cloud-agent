@@ -12,11 +12,11 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from tests.support.storage import AllCapabilities
 
 from cloud_agent import broker_routing
 from cloud_agent.broker_routing import broker_for_attempt, broker_for_job, hydrate_shared_broker
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
-from tests.support.storage import AllCapabilities
 
 BROKER_TOKEN_ENV = "AGENT_WORKSPACE_BROKER_TOKEN"
 

@@ -44,16 +44,16 @@ dependencies = [
 include-package-data = true
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["apps/backend"]
 include = [
   "cloud_agent",
   "cloud_agent.*",
-  "cloud_agent_contracts",
-  "cloud_agent_contracts.*",
-  "cloud_agent_git",
-  "cloud_agent_git.*",
   "cloud_agent_host",
   "cloud_agent_host.*",
+  "cloud_agent_profiling",
+  "cloud_agent_profiling.*",
+  "cloud_agent_shared",
+  "cloud_agent_shared.*",
 ]
 
 [tool.pytest.ini_options]
@@ -83,10 +83,13 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-src = ["."]
+# Where the first-party packages live, for import classification: the three
+# of them moved under apps/backend, and `src = ["."]` no longer finds them, so
+# every `cloud_agent*` import would be sorted as if it came from a dependency.
+src = ["apps/backend"]
 exclude = [
   ".venv",
-  "web",
+  "apps/frontend",
   "migrations/versions",
 ]
 
@@ -133,7 +136,7 @@ add-ignore = [
   "D107",  # __init__ docstring not required
 ]
 match = ".+\\.py"
-match-dir = "(?!tests|\\.venv|node_modules|web|migrations|docs).*"
+match-dir = "(?!tests|\\.venv|node_modules|frontend|migrations|docs).*"
 
 # Type checking the control plane, and blocking. `store.py` is included on
 # purpose: a checker that cannot see the class it is validating callers against
@@ -144,7 +147,18 @@ match-dir = "(?!tests|\\.venv|node_modules|web|migrations|docs).*"
 # imports` covers asyncpg, which ships no stubs.
 [tool.mypy]
 python_version = "3.12"
-files = ["cloud_agent", "cloud_agent_contracts", "cloud_agent_git", "cloud_agent_host"]
+files = [
+  "apps/backend/cloud_agent",
+  "apps/backend/cloud_agent_host",
+  "apps/backend/cloud_agent_shared",
+  "apps/backend/cloud_agent_profiling",
+]
+# Where the three packages live. Without this, a file checked from outside that
+# tree -- `tests/fixtures/ports_negative/miswired_port.py`, which exists to be
+# rejected -- cannot resolve `cloud_agent`, and `ignore_missing_imports` below
+# turns every annotation it carries into `Any`, so the negative control passes
+# by finding nothing to complain about.
+mypy_path = "apps/backend"
 follow_imports = "silent"
 ignore_missing_imports = true
 check_untyped_defs = true
@@ -170,7 +184,7 @@ dev = [
   "pytest-asyncio>=0.23.0",
   "pytest-cov>=5.0.0",
   "pytest-mock>=3.14.0",
-  # Validates contracts/*.yaml. A dev dependency and not a runtime one: nothing
+  # Validates gateway_contracts/*.yaml. A dev dependency and not a runtime one: nothing
   # in this service loads those documents — they record what the gateway agreed
   # to, and a wire-level validator would fail closed on a compatible change.
   "openapi-spec-validator>=0.7.1",

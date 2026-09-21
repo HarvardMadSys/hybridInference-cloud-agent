@@ -10,12 +10,12 @@ longer holds are supplied by the test app instead of by an import:
 
 - **The model catalog and the MCP registry** arrive over HTTP now, so the
   route registry the source stubbed is a fake ``GatewayClient`` here.
-- **The auth dependencies** are real as of E7, so nothing stands in for them
+- **The auth dependencies** are real now, so nothing stands in for them
   any more: ``get_current_user`` verifies this service's own session token and
   ``verify_admin_access`` compares ``ADMIN_TOKEN``. There is no API-key branch
   to stand in for since 2026-08-04 — it was deleted, along with the operational
   store it read; the session is the only owner credential here.
-- **The sandbox's credential** is a gateway grant since E9, not something the
+- **The sandbox's credential** is a gateway grant now, not something the
   claim mints, so the fake gateway client has a grant-minting sibling.
 
 Workspace operations always route through the attempt's enrolled host. The
@@ -36,15 +36,16 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.storage import AllCapabilities, EmptyAttachments, EmptySkillLibrary
 
 from cloud_agent import broker_routing
-from cloud_agent.api import routes as agent_jobs_router, workspace as agent_workspace
+from cloud_agent.api import routes as agent_jobs_router, worker, workspace as agent_workspace
+from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_storage
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.storage.repositories.goals import _pause_detail
 from cloud_agent.tokens import mint_worker_token
-from tests.support.storage import AllCapabilities, EmptyAttachments, EmptySkillLibrary
 
 pytestmark = pytest.mark.asyncio
 
@@ -1753,7 +1754,7 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
     # The create endpoints fail fast on models the deployment cannot serve, so
     # the gateway the test answers with must contain what the tests submit.
     app.dependency_overrides[get_gateway_client] = _FakeGateway
-    # The sandbox credential comes from the gateway (E9); without this the
+    # The sandbox credential comes from the gateway; without this the
     # claim would correctly refuse, having no configured grant client.
     app.dependency_overrides[get_grant_client] = _FakeGrants
     # No GitHub App by default — the configuration most deployments start in,
@@ -1764,9 +1765,9 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
     app.dependency_overrides[get_log_store] = lambda: None
     identity = {"user_id": _OWNER, "role": role, "authenticated": True}
     # Override identity only; every request still exercises Gateway admission.
-    app.dependency_overrides[agent_jobs_router.authenticate_agent_owner] = lambda: identity
+    app.dependency_overrides[authenticate_agent_owner] = lambda: identity
     if claim_auth:
-        app.dependency_overrides[agent_jobs_router.verify_claiming_host] = lambda: {
+        app.dependency_overrides[worker.verify_claiming_host] = lambda: {
             "host": "runner-test",
             "credential_hash": "test-credential-hash",
         }
@@ -2012,7 +2013,7 @@ async def test_conversation_search_requires_owner_and_accepts_browser_session(
     search = AsyncMock(return_value={"conversations": [], "next_cursor": None})
     monkeypatch.setattr(store, "list_conversations", search, raising=False)
     app = _build_app(store)
-    app.dependency_overrides.pop(agent_jobs_router.authenticate_agent_owner)
+    app.dependency_overrides.pop(authenticate_agent_owner)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         anonymous = await client.get("/v1/agent/conversations")
         assert anonymous.status_code == 401
@@ -2466,7 +2467,7 @@ async def test_an_unregistered_runtime_is_refused_at_create(client: AsyncClient)
 
 
 async def test_a_follow_up_cannot_switch_the_threads_harness(client: AsyncClient):
-    """The harness is fixed per thread (design D2); its session is the memory.
+    """The harness is fixed per thread; its session is the memory.
 
     Echoing the thread's own runtime stays a 201 — existing callers do that —
     and a *different* registered runtime is refused. Native fork preserves the
@@ -2984,7 +2985,7 @@ async def test_fork_is_owner_scoped(client: AsyncClient, store: FakeStorage):
 async def test_browser_jwt_can_list_agent_jobs(store: FakeStorage):
     """Regression: the web login JWT was interpreted as an invalid API key."""
     app = _build_app(store)
-    app.dependency_overrides.pop(agent_jobs_router.authenticate_agent_owner)
+    app.dependency_overrides.pop(authenticate_agent_owner)
     token = _browser_session()
 
     transport = ASGITransport(app=app)
@@ -3003,7 +3004,7 @@ async def test_expired_browser_jwt_is_not_reinterpreted_as_api_key(store: FakeSt
     from datetime import timedelta
 
     app = _build_app(store)
-    app.dependency_overrides.pop(agent_jobs_router.authenticate_agent_owner)
+    app.dependency_overrides.pop(authenticate_agent_owner)
     token = _browser_session(expires_delta=timedelta(seconds=-1))
 
     transport = ASGITransport(app=app)
@@ -3032,7 +3033,7 @@ async def test_sandbox_token_stays_out_of_owner_routes(store: FakeStorage):
     from cloud_agent.tokens import SCOPE_MODEL
 
     app = _build_app(store)
-    app.dependency_overrides.pop(agent_jobs_router.authenticate_agent_owner)
+    app.dependency_overrides.pop(authenticate_agent_owner)
     token = mint_worker_token(
         job_id="ajob_0001",
         attempt_id=1,
@@ -3131,7 +3132,7 @@ async def test_live_workspace_routes_use_the_job_broker(store: FakeStorage, monk
         async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
             return None
 
-        async def files(self, workspace_id: str, path: str):
+        async def files(self, workspace_id: str, path: str, *, profiling=None):
             self.calls.append(("files", workspace_id, path))
             return {
                 "path": path,
@@ -3209,7 +3210,7 @@ async def test_missing_shared_workspace_is_a_conflict_not_a_missing_file(
         async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
             return None
 
-        async def files(self, _workspace_id: str, _path: str):
+        async def files(self, _workspace_id: str, _path: str, *, profiling=None):
             raise WorkspaceBrokerError(404, "shared chat workspace is not materialized")
 
     monkeypatch.setattr(broker_routing, "_client_for", lambda _host: Broker())
@@ -3332,11 +3333,11 @@ class _TerminalSessionBroker:
     async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
         return None
 
-    async def create_terminal(self, workspace_id: str, *, rows: int, cols: int):
+    async def create_terminal(self, workspace_id: str, *, rows: int, cols: int, profiling=None):
         self.calls.append(("create", workspace_id, rows, cols))
         return _terminal_session_descriptor()
 
-    async def list_terminals(self, workspace_id: str):
+    async def list_terminals(self, workspace_id: str, *, profiling=None):
         self.calls.append(("list", workspace_id))
         return {"terminals": [_terminal_session_descriptor()]}
 
@@ -3372,7 +3373,9 @@ class _TerminalSessionBroker:
         self.suspended.discard(workspace_id)
         return {"ok": True}
 
-    async def stream_terminal(self, workspace_id: str, terminal_id: str, *, after: int):
+    async def stream_terminal(
+        self, workspace_id: str, terminal_id: str, *, after: int, profiling=None
+    ):
         self.calls.append(("stream", workspace_id, terminal_id, after))
         return self.stream
 
@@ -3893,7 +3896,9 @@ async def test_terminal_routes_report_missing_broker_and_workspace_as_conflicts(
         )
 
         class MissingWorkspaceBroker(_TerminalSessionBroker):
-            async def create_terminal(self, workspace_id: str, *, rows: int, cols: int):
+            async def create_terminal(
+                self, workspace_id: str, *, rows: int, cols: int, profiling=None
+            ):
                 raise WorkspaceBrokerError(404, "shared chat workspace is not materialized")
 
         monkeypatch.setattr(
@@ -4488,8 +4493,8 @@ async def test_terminal_stream_drains_beyond_one_page(client: AsyncClient, store
 
 # ``test_claim_returns_a_separate_model_scoped_token`` was here. It asserted
 # that the sandbox credential parsed as a ``SCOPE_MODEL`` worker token — which
-# is precisely the credential E9 removed, because it was signed with a root the
-# gateway does not know and therefore bought nothing. The property it protected
+# is precisely the credential the claim stopped minting, because it was signed
+# with a root the gateway does not know and therefore bought nothing. The
 # (the sandbox gets a *different*, weaker credential than the runner) is pinned
 # below against the credential that replaced it.
 #
@@ -4505,7 +4510,7 @@ async def test_the_claim_hands_over_a_gateway_grant_not_a_minted_token(
 ):
     """The sandbox credential is distinct from the runner's — and is not ours.
 
-    Two separate claims, and the second is the point of E9: this service can
+    Two separate claims, and the second is the point: this service can
     mint the runner's control token because it verifies it, and it must *not*
     be able to mint the sandbox's, because the thing that credential buys is
     inference the gateway meters. So the sandbox token deliberately does not
@@ -4578,7 +4583,7 @@ async def test_the_sandbox_grant_cannot_write_job_state(client: AsyncClient):
 # code inside a migration. The wire-level half of the same guarantee is
 # ``test_sandbox_token_stays_out_of_owner_routes`` (ported; 403
 # ``insufficient_scope`` on ``/v1/agent/jobs``) and, for the worker surface,
-# ``test_the_sandbox_grant_cannot_write_job_state`` (E9's in-place replacement
+# ``test_the_sandbox_grant_cannot_write_job_state`` (the in-place replacement
 # for ``test_sandbox_token_cannot_write_job_state``; 401 against the gateway
 # grant the sandbox now carries). Recorded in MIGRATION.md's discarded-test
 # register.
@@ -4586,7 +4591,7 @@ async def test_the_sandbox_grant_cannot_write_job_state(client: AsyncClient):
 
 async def test_event_type_guard_rejects_a_trailing_newline(client: AsyncClient):
     """`match()` with `$` accepted "message\\n"; the guard must use fullmatch."""
-    from cloud_agent.api.routes import _SAFE_EVENT_TYPE
+    from cloud_agent.api._job_views import _SAFE_EVENT_TYPE
 
     assert _SAFE_EVENT_TYPE.fullmatch("message") is not None
     assert _SAFE_EVENT_TYPE.fullmatch("message\n") is None

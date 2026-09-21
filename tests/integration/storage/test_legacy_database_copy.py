@@ -9,7 +9,6 @@ from pathlib import Path
 import psycopg
 import pytest
 from psycopg import sql
-
 from scripts import convert_legacy_database_copy as migration
 
 pytestmark = pytest.mark.dbtest

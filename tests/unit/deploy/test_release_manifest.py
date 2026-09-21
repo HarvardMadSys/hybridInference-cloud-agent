@@ -26,9 +26,9 @@ from typing import Any
 
 import jsonschema
 import pytest
+from deploy.release import release_manifest as rm
 
 from cloud_agent_host import sandbox as host_sandbox
-from deploy.release import release_manifest as rm
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCHEMA = json.loads((REPO_ROOT / "deploy/release/manifest.schema.json").read_text())

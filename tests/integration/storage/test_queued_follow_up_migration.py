@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncpg
 import pytest
-
 from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_schema_upgrade import _db_config, store as store
 from tests.support.migrations import apply_migrations, downgrade_to

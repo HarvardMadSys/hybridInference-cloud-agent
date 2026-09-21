@@ -23,9 +23,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import pytest
+from tests.support.claude_cli import ClaudeCli, sse
 
 from cloud_agent_host.tool_windows import TOOL_MARK_SANDBOX_PATH, hook_settings
-from tests.support.claude_cli import ClaudeCli, sse
 
 pytestmark = pytest.mark.external
 

@@ -13,9 +13,9 @@ coverage.xml
 htmlcov
 
 node_modules
-web/node_modules
+apps/frontend/node_modules
 .next
-web/.next
+apps/frontend/.next
 out
 *.tsbuildinfo
 

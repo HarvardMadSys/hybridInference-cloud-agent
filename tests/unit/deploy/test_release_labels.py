@@ -19,7 +19,6 @@ import re
 from pathlib import Path
 
 import pytest
-
 from deploy.release import release_manifest as rm
 
 REPO_ROOT = Path(__file__).resolve().parents[3]

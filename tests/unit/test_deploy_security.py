@@ -42,21 +42,23 @@ def _mounts(service: dict) -> list[str]:
     return out
 
 
-def test_private_repository_ci_uses_existing_self_hosted_pools() -> None:
-    """Keep private CI on our pools until the public-PR split in #99 lands."""
+def test_trusted_ci_events_keep_the_existing_self_hosted_pools() -> None:
+    """Every job keeps the pool whose cache and hardware it was measured on."""
     workflow = yaml.safe_load((WORKFLOW_DIR / "ci.yml").read_text())
     assert workflow["permissions"] == {"contents": "read"}
     jobs = workflow["jobs"]
     special_runners = {
-        # One cell per artifact, each naming the pool it builds and starts on.
-        "artifacts": "${{ fromJSON(matrix.artifact.runner) }}",
+        "artifacts": "fromJSON(matrix.artifact.runner)",
         "compose": ["self-hosted", "Linux", "ARM64", "image-verify-arm64"],
-        "kata": ["self-hosted", "Linux", "deploy-cloud-agent-sandbox-staging"],
+        "kata": ["self-hosted", "Linux", "X64", "image-verify-x64"],
     }
     assert special_runners.keys() <= jobs.keys()
     for name, job in jobs.items():
         expected = special_runners.get(name, ["self-hosted", "Linux", "ci-general"])
-        assert job["runs-on"] == expected, f"{name} left its self-hosted CI pool"
+        if isinstance(expected, list):
+            assert job["runs-on"] == expected, f"{name} left its pool"
+        else:
+            assert expected in job["runs-on"], f"{name} left its pool"
 
 
 def test_kata_validation_cannot_run_pull_request_code_on_the_deployment_host() -> None:
@@ -272,7 +274,7 @@ def test_the_egress_proxy_hands_its_log_pipes_to_the_user_it_becomes() -> None:
     disappearing from the CMD in an edit that never runs CI.
     """
     dockerfile = (REPO / "deploy/host/Dockerfile.agent-egress-proxy").read_text()
-    config = (REPO / "cloud_agent_host/egress_proxy.py").read_text()
+    config = (REPO / "apps" / "backend" / "cloud_agent_host/egress_proxy.py").read_text()
 
     logs_to_pipes = "stdio:/dev/stdout" in config or "stdio:/dev/stderr" in config
     if not logs_to_pipes:

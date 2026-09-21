@@ -17,6 +17,15 @@ import asyncpg
 # Imported pytest fixtures are intentionally named by test parameters.
 # ruff: noqa: F811
 import pytest
+from tests.integration.storage.test_agent_job_store import (  # noqa: F401
+    _SHARED_HOST_CAPABILITIES,
+    _claim,
+    _create_job,
+    _expire_attempt,
+    _shared_claim_attestation,
+    pool,
+    store,
+)
 
 from cloud_agent.goals.decision import GoalAction
 from cloud_agent.goals.models import (
@@ -29,15 +38,6 @@ from cloud_agent.goals.models import (
 )
 from cloud_agent.goals.report import GoalReportEnvelope
 from cloud_agent.storage.repositories.goal_wakeups import is_exhausted, wakeup_backoff
-from tests.integration.storage.test_agent_job_store import (  # noqa: F401
-    _SHARED_HOST_CAPABILITIES,
-    _claim,
-    _create_job,
-    _expire_attempt,
-    _shared_claim_attestation,
-    pool,
-    store,
-)
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

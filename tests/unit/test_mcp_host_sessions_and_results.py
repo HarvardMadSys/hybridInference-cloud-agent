@@ -6,10 +6,10 @@ import asyncio
 import json
 
 import pytest
+from tests.unit.test_mcp_protocol_and_authorization import _connection
 
 from cloud_agent.mcp import host, protocol
 from cloud_agent.mcp.transports import TransportError
-from tests.unit.test_mcp_protocol_and_authorization import _connection
 
 
 class Transport:

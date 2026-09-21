@@ -3,9 +3,9 @@
 Every variable the cloud agent stack reads, which deployment unit reads it, and
 who provisions it.
 
-Names carried over from HybridInference are kept **unchanged** so that moved
-files work without edits (see the move-as-is rule in [AGENTS.md](AGENTS.md)).
-Rows marked **NEW** are introduced by the split.
+Names carried over from HybridInference were preserved during the extraction.
+Rows marked **NEW** were introduced by that split; the label is historical.
+For local setup and validation commands, see the [developer guide](docs/development.md).
 
 > **This file is public. It names variables, never values.**
 >
@@ -37,12 +37,11 @@ need a gateway secret here, the design is wrong — stop and escalate.
 | Production values provisioned | ✅ 2026-08-07 (`docs/cutover.md`, H3) |
 | Secret storage | deploy host environment / unit env files, and read-only file mounts for keys. **Never** in git. |
 
-Both environments have been serving traffic since those dates: `README.md`,
-`docs/cutover.md` and `deploy/control-plane/README-cd.md` are the deployment
-record. This table is about the *values* being in place, not about a particular
-release being deployed — a pending rollout belongs in that record, not here.
-What is still missing on the production side is spelled out in
-`deploy/control-plane/README-cd.md` § *Production — what is still missing*.
+Those dates record the original extraction cutover. This repository now
+publishes neutral releases and does not own any named environment's deployment
+configuration or record. Concrete values, rollout status and recovery evidence
+belong to each downstream operator; the generic artifact contract is documented
+in `deploy/release/README.md`.
 
 ## Control plane (`cloud_agent`)
 
@@ -88,7 +87,7 @@ it before deployment; it needs no model API key or deployed-service setting.
 | `AGENT_DEFAULT_EXECUTION_PROFILE` | **NEW** | Server-owned policy for new root threads. `untrusted-kata-v1` requires an enrolled Host whose current credential still matches and whose exact claiming replica attests `io.containerd.kata.v2` with a guest kernel different from the Host. `trusted-v1` permits the retained container to use runc for trusted internal/dev repositories. Follow-ups and forks inherit the stored profile; callers cannot select it. |
 | `AGENT_ONCALL_DISPATCH_TOKEN` | **NEW** | Authenticates the gateway alert relay on `/v1/agent/service/oncall/*` — one credential, one door. Random 32 bytes, same value in the relay's `.env.oncall`, distinct per environment. Unset opens nothing (the door then answers only to `ADMIN_TOKEN`). |
 | `AGENT_ONCALL_USER_ID` | **NEW** | Gateway user id every on-call job runs as. Its role decides which models the job's grant may carry (`glm-5.2` needs `internal`+), and its quota is what the analysis spends. Unset: the on-call door answers 503, the rest of the service is unaffected. |
-| `AGENT_ALERT_WEBHOOK_URL` | **NEW** | Operator-owned JSON webhook for queue incidents and recovery. The control-plane process checks every minute; a runnable queue head older than ten minutes with no serving host, or no running work, is reported after two observations. Delivery has a five-second timeout, retries on the next pass, and reminders are at most every 30 minutes. Payload contains only event, deployment SHA and counts. Unset still emits structured log events. Configure `STAGING_ALERT_WEBHOOK_URL` as an Actions secret for deployment failures to the same receiver. Neither URL enters runners or sandboxes. |
+| `AGENT_ALERT_WEBHOOK_URL` | **NEW** | Operator-owned JSON webhook for queue incidents and recovery. The control-plane process checks every minute; a runnable queue head older than ten minutes with no serving host, or no running work, is reported after two observations. Delivery has a five-second timeout, retries on the next pass, and reminders are at most every 30 minutes. Payload contains only event, deployment SHA and counts. Unset still emits structured log events. Deployment-workflow alerting belongs to the downstream distribution. This URL never enters runners or sandboxes. |
 | `AGENT_RESIDENCY_TTL_S` | **NEW** | How long a member's independently fenced live-process residency and short-lived inference grant survive between host heartbeats. Default 1800. Shared-live uses one residency per chat membership. This is credential/process ownership, not a second chat lifecycle clock: `AGENT_CHAT_IDLE_TIMEOUT_S` alone decides when a settled retained sandbox group is stopped. |
 | `ADMIN_TOKEN` | existing | The machine-to-machine admin credential (task E7). **Unset opens nothing** — `verify_admin_access` refuses an empty configured value rather than matching an empty presented one — so a deployment that skips it has no token door, only the admin-session one. |
 
@@ -131,7 +130,7 @@ gateway serves models and answers nothing about MCP.
 adds a standard MCP server — a remote URL, an imported `mcpServers` snippet, or
 a stdio launch spec — and the platform discovers what it offers. There is no
 variable that adds a server and no variable that grants one to somebody.
-Catalogued templates (`cloud_agent/api/mcp_connections.py`) only prefill a form;
+Catalogued templates (`apps/backend/cloud_agent/api/mcp_connections.py`) only prefill a form;
 a server with no template is added the same way. Credentials live per user in
 `agent_mcp_connections`, wrapped with
 [`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`](#own-secrets). The variables below
@@ -200,6 +199,51 @@ compose, because they name the stack rather than configure it.
 | `AGENT_HOST_STORAGE_PROBE` | **NEW** | Which probe measures the filesystem holding the sandbox writable layers, shown as the Servers page's Storage column. `overlay_root` (the default, and what the host Compose stack interpolates) reads the runner's own root filesystem: the runner is an ordinary container under the same daemon and storage driver, so OverlayFS's `statfs` makes `os.statvfs("/")` describe the upper layer's filesystem — the disk the sandboxes write to. `off` stops measuring storage on that host and is the rollback; it needs an `up` to reach replicas that are already running, since a container's environment is fixed when it is created, and the `check` before it clears the verdict so those replicas stop publishing a figure in the meantime. No other spelling is accepted: the host script refuses anything but these two at configuration time, because its vocabulary and the runner's used to differ and a value only one side recognised produced a rollout log reading "storage verified" beside a page reading "switched off". A reading is published only when the deployment has attested the topology in `.storage-probe/verdict.json`: `sandbox_host.sh` compares the container's own numbers against `df` of the **mount root** of the filesystem containing the upper directory, because `df <upperdir>` returns a project quota when `overlay2.size` is configured and would agree with a container reading that quota. Verification failures never block a deployment — the runner reports `unverified` and every other metric keeps working. |
 | `AGENT_LOG_LEVEL` | **NEW** | Host process log level (default INFO). Read by `configure_process_logging()` at the runner entrypoint; replaces the source repo's import-side-effect logging setup (task D6). |
 | `AGENT_LOG_FORMAT` | **NEW** | `json` makes a process emit one JSON object per record, with the `extra={"event": …, "job_id": …, "duration_ms": …}` fields that call sites in both packages already pass rendered at the top level. Any other value keeps the text format, which is the default and which renders the message alone — discarding those fields before they reach a log. Read by `configure_process_logging()` in both shims — the control plane's two listeners, the runner, and the workspace broker. Under `json` those processes also hand uvicorn's own loggers to that same handler: uvicorn otherwise keeps them on its text format with propagation off and no `root` entry, which would leave the stream half JSON and fail `jq` on the first line uvicorn wrote. A deployment with no log pipeline then reads it with `docker logs … | jq`. An unrecognised value serves text and warns rather than refusing to start. |
+| `AGENT_OPERATION_PROFILING_ENABLED` | **NEW** | Deployment-level switch for the opt-in platform operation profiler ([design](docs/specs/2026-09-14-sandbox-startup-measurement-design.zh-CN.md)). Unset or `false` is both the default and the intended steady state: the runner then creates no measurement, reads no clock, allocates no span and writes no record, so the startup path is the delivery it was before. `true` on its own profiles nothing — it also needs a usable run descriptor below. Read once per process, so changing it requires the experiment's restart, not a live toggle. **The runner, the control plane and the broker are separate processes and each reads this**: with only the runner enabled a record still lands, but the container and CLI sub-stages the broker measured are missing and the record's `producers` says so, and a file or terminal request is not measured at all because the control plane is what selects those. The container/CLI *actions* that classify the startup path need neither switch — they are facts, not measurements. Measured cost: enabled adds about 25 µs per attempt on the attempt thread, disabled about 0.36 µs ([benchmark](scripts/bench_startup_profiling_overhead.py)). |
+| `AGENT_OPERATION_PROFILING_RUN` | **NEW** | JSON descriptor for the current profiling run: `run_id`, a non-empty `operations` list (this slice implements `attempt.startup`), an absolute UTC `expires_at`, a positive `max_operations`, and an optional `target` naming `host`, `job_id`, `thread_id` or `sandbox_id` — any other target field rejects the whole descriptor, because a filter that can never match would silently measure nothing. A descriptor missing any other required part leaves profiling off and logs one warning instead of refusing to start. `expires_at` becomes a monotonic deadline when first read, so a service restart or a wall-clock jump cannot extend a run, and it is enforced while collecting: past it nothing more is recorded, the record ends at the deadline rather than when someone noticed, and it is emitted as partial (`measurement_complete: false`, `profiling_stopped: "expired"`). `max_operations` is a per-process budget in this slice, not a fleet-wide admission: two replicas can each spend it. A slot is only spent on an operation that was actually selected — targets are matched with every configured field present and equal, so an unknown value is a mismatch, and a rejected candidate returns its slot. `operations` may also name `files.list`, `files.open` and `terminal.open`, which the **control plane** roots; a control plane that is not enabled neither selects nor reports them. |
+| `AGENT_OPERATION_PROFILING_SINK` | **NEW** | Optional JSONL path for the finished measurements, which are logged as well. An external benchmark reads this file to aggregate a baseline. It is **not** an outbox and is not required for Postgres/Admin delivery: root producers send the same cached frozen record directly through their bounded delivery path. Log and JSONL publication still use one bounded background exporter, so a slow file or log handler never runs on the measured thread. The runner sends selected context to the broker in `X-Agent-Operation-Profiling`; file/terminal response metadata returns in JSON or `x-agent-profiling-*` headers. Browser continuation uses `X-Agent-Interaction-Id` (the older measurement header is compatibility-only). |
+
+| `AGENT_OPERATION_PROFILING_MODE` | **NEW** | Which control source a deployment allows: `disabled`, `environment` or `admin`. **Unset keeps the old `ENABLED` + `RUN` semantics exactly**, so a deployment that never sets it behaves as it did before runtime control existed. `disabled` forbids collection deployment-wide and makes Admin report the control as unavailable rather than offering a Start that would do nothing. `environment` reads only the static descriptor and makes Admin say the deployment is configuration-managed, with no fake Stop. `admin` uses the persisted control state **only**: a leftover `ENABLED=false` no longer vetoes an administrator's Start, and a leftover `RUN` may not be used as a fallback after an Admin Stop — an off that can be undone by stale configuration is not off. Read once per process, because the mode is *how* a deployment may be controlled and never the per-experiment switch; changing it is a redeploy, and the whole point of the feature is that changing it is not how an experiment starts or stops. An unrecognised value disables collection and warns. **The runner, the control plane, the workspace broker and the turn child all need it.** The runner and the broker are separate containers; the turn child inherits the runner's process environment, and its selection also travels in the handoff JSON, so a child binds to the experiment its parent selected rather than to whatever its own snapshot happens to say. Under `admin` an idle control plane polls the control row every 30 s and an active one every 5 s, and a host syncs its policy on the same cadence over the authenticated heartbeat and `POST /v1/agent/hosts/profiling-policy`; each authorization is valid for at most 15 s, so a node that loses contact stops collecting on its own. That is a real, stated background cost — a deployment under `admin` can no longer claim zero I/O while switched off. |
+| `AGENT_OPERATION_PROFILING_DEPLOYMENT` | **NEW** | Which deployment's control row this control-plane process commands; defaults to `default`. The singleton control row is keyed by this name, and the name comes from trusted configuration and never from a request: a browser that could name its namespace could see — and stop — another deployment's experiment, because a Stop only has to name a run id. Set it when two deployments share one database (staging and production, or two preview stacks). Read by the control-plane process only; the host agent and the broker never read it, because they cannot act on a name they do not hold. A missing or malformed value falls back to `default` rather than refusing to boot. |
+
+The supported control-plane and host Compose files explicitly pass all of these
+profiling variables to the control plane, runner, and workspace broker, and so
+does the local development stack (`deploy/local/docker-compose.yml`): without
+them a local experiment silently collects only the control plane's own file and
+terminal requests and no startup record at all. `AGENT_OPERATION_PROFILING_MODE`
+is part of that set for the same reason — a producer that never receives it
+stays on the legacy environment switch no matter what the operator sets — and
+the deployment namespace is passed to the control plane so two stacks on one
+database cannot reach each other's control row.
+Profiling remains inert by default, and unset `MODE` means the paragraphs above
+describe it completely: nothing polls, nothing syncs, and the collector reads a
+process-cached environment value. Under `MODE=admin` the same collector is
+driven by the persisted control row instead, and an administrator starts and
+stops an experiment from **Admin → Measurements** without editing this file or
+restarting a service. `config_version` (which immutable experiment this is),
+`revision` (which start/stop command was applied last) and the in-memory renewal
+sequence (which authorization refresh a process has seen) are three different
+orders and are kept as three different things; the run's configured `expires_at`
+is never rewritten on a Stop, because the delivery path validates an arriving
+manifest against it and a rewritten expiry would refuse every in-flight upload.
+`max_operations` stays a per-producer-instance allowance — the Admin API reports
+`budget_scope=producer_instance` and does not present it as a deployment-wide
+cap. Different runtimes and execution profiles remain separate in Admin
+distributions. A 2026-09-18 local rerun measured roughly 30 microseconds
+of collector work per synthetic startup; this does not include a real
+container, broker, network, or database.
+
+Two benchmarks answer two different questions, and neither substitutes for the
+other. `scripts/bench_startup_profiling_overhead.py` measures the collector's
+own cost on a synthetic attempt sequence — no claim, container, supervisor,
+agent CLI or network — and its own output says so.
+`scripts/bench_operation_overhead.py` drives the real control-plane routes over
+a real socket against a real database and, with a container runtime available,
+the real supervisor activation that produces each of the four startup paths. It
+reports per-operation p50/p95, the delta against the uninstrumented cohort,
+queue drop counts, the background cost, and the agreed
+`max(10 ms, baseline p95 × 1%)` budget verdict. Read each script's
+`what`/`not_what` block before quoting either.
 
 ## Sandbox isolation (host agent reads, sandbox inherits)
 
@@ -252,7 +296,7 @@ volume or resets its password automatically.
 
 The five default versions live in both
 `deploy/sandbox/Dockerfile.agent-sandbox` and
-`cloud_agent_contracts/shared_protocol.py`. They are one reviewed protocol unit:
+`apps/backend/cloud_agent_shared/shared_protocol.py`. They are one reviewed protocol unit:
 the image installs and labels them, while every runner and the control plane
 use the matching constants to decide whether `shared-sandbox-v1` may be
 advertised or claimed. They are therefore source pins, not per-host `.env`
@@ -316,7 +360,7 @@ dies at its first turn.
 | `OPENCODE_EXTRA_VERSIONS` | **NEW** | Extra `opencode-ai` versions. |
 | `KILO_EXTRA_VERSIONS` | **NEW** | Extra `@kilocode/cli` versions. |
 
-## Web (`web/`)
+## Web (`apps/frontend/`)
 
 Two classes of configuration, and the difference is what changing one costs.
 Both are **public** — one is compiled into a bundle a browser downloads, the
@@ -339,7 +383,7 @@ rather than shipping an image whose every request misses the reverse proxy —
 a 404 on a page that looks correct. An absolute value is the cross-origin shape
 (a deployment's own CORS decision) and is left alone, as is an empty one, which
 is the same-origin shape for a deployment that owns its hostname; compose is
-what requires the value under a mount prefix. `web/src/config/variantPairing.test.ts`
+what requires the value under a mount prefix. `apps/frontend/src/config/variantPairing.test.ts`
 runs the real config file, so the rule is pinned where it is written.
 
 | Variable | New? | Compose build argument | Notes |
@@ -351,7 +395,7 @@ runs the real config file, so the rule is pinned where it is written.
 
 ### Runtime: the deployment's identity
 
-Read by the web server on every request (`web/src/config/site.server.ts`), so
+Read by the web server on every request (`apps/frontend/src/config/site.server.ts`), so
 the same built image serves any deployment and changing one is a restart, not a
 rebuild. Each must be a key under the `web` service's `environment:`;
 `test_web_runtime_variables_are_wired` fails on one that is not.

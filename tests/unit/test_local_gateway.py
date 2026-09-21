@@ -10,9 +10,8 @@ from urllib.parse import parse_qs, urlparse
 
 import jwt
 import pytest
-from httpx import ASGITransport, AsyncClient
-
 from deploy.local import gateway
+from httpx import ASGITransport, AsyncClient
 
 
 @pytest.fixture(autouse=True)

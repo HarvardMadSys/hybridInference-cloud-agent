@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import pytest
+from tests.unit.test_thread_stats import _attempt, _event
 
 from cloud_agent.session_statistics import summarize_session_statistics
-from tests.unit.test_thread_stats import _attempt, _event
 
 
 def _stats(events, attempts=()):

@@ -2,8 +2,8 @@
 
 Ported from the gateway with assertions untouched. One piece of wiring changed
 and could not not change: the gateway's ``AppServices`` container became
-``app.state.storage``. ``verify_admin_access`` is this repository's own since E7
-and is left real — the ``ADMIN_TOKEN`` these tests knock with is the door it
+``app.state.storage``. ``verify_admin_access`` is this repository's own and is
+left real — the ``ADMIN_TOKEN`` these tests knock with is the door it
 actually opens.
 """
 
@@ -15,12 +15,35 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.storage import AllCapabilities
 
 from cloud_agent.api import admin_hosts as admin_router
 from cloud_agent.api.deps import get_storage
-from tests.support.storage import AllCapabilities
 
 ADMIN = {"Authorization": "Bearer test-admin"}
+
+
+class _AuditTrail:
+    """The audit capability, in the shape ``Storage`` really exposes it.
+
+    The handler records through ``store.audit.record_admin_action``. This fake
+    used to carry that method flat on the store *and* an ``audit`` list beside
+    it — the shape #210 left behind — which is why these tests stayed green
+    while the deployed service wrote no audit rows at all.
+    """
+
+    def __init__(self) -> None:
+        self.rows: list[dict[str, Any]] = []
+
+    async def record_admin_action(self, **kwargs: Any) -> int:
+        self.rows.append(kwargs)
+        return len(self.rows)
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        return self.rows[index]
 
 
 class FakeHostStore(AllCapabilities):
@@ -31,7 +54,7 @@ class FakeHostStore(AllCapabilities):
         # The singleton policy row: two facts, in one place, as in the store.
         self.active_host: str | None = None
         self.runtime_versions: dict[str, str] = {}
-        self.audit: list[dict[str, Any]] = []
+        self.audit = _AuditTrail()
 
     def seed(self, host: str, *, active: bool = False, seen_minutes_ago: float = 0.0) -> None:
         seen = datetime.now(timezone.utc) - timedelta(minutes=seen_minutes_ago)
@@ -80,10 +103,6 @@ class FakeHostStore(AllCapabilities):
         self.active_host = host
         return True
 
-    async def record_admin_action(self, **kwargs: Any) -> int:
-        self.audit.append(kwargs)
-        return len(self.audit)
-
     async def forget_runner_host(self, *, host: str) -> str:
         # The active-host refusal is the store's, not the caller's.
         if host == self.active_host:
@@ -105,7 +124,7 @@ class FakeHostStore(AllCapabilities):
 
 
 def _admin_app(store: FakeHostStore | None) -> FastAPI:
-    """Mount the admin router over one store, with E7's gate stood in for."""
+    """Mount the admin router over one store."""
     app = FastAPI()
     app.state.storage = store
     app.include_router(admin_router.router)

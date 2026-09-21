@@ -13,7 +13,7 @@ found, what we changed, and when it shipped.
 
 - The control plane, the web app, the runner host and the sandbox image in
   this repository.
-- The HTTP contracts under `contracts/` as this service consumes them.
+- The HTTP contracts under `gateway_contracts/` as this service consumes them.
 
 The gateway this service authenticates against is a separate project
 (HybridInference); report gateway issues there.

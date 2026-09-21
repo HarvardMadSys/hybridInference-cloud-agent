@@ -9,6 +9,8 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.integration.storage.test_agent_job_store import _create_job
+from tests.integration.storage.test_attempt_ledger import _seed_attempt, db as db
 
 from cloud_agent.admin_observability import (
     ActivityCursor,
@@ -18,14 +20,12 @@ from cloud_agent.admin_observability import (
     decode_cursor,
 )
 from cloud_agent.api import admin_runs
+from cloud_agent.api._job_views import _attempt_resources
 from cloud_agent.api.deps import get_storage
-from cloud_agent.api.routes import _attempt_resources
 from cloud_agent.ledger import summarize_job_usage
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage.assembly import Storage
 from cloud_agent_host.event_payloads import MAX_EVENT_PAYLOAD_BYTES
-from tests.integration.storage.test_agent_job_store import _create_job
-from tests.integration.storage.test_attempt_ledger import _seed_attempt, db as db
 
 
 @pytest_asyncio.fixture

@@ -1,7 +1,6 @@
 """Keep request-level history regressions sensitive to false passes."""
 
 import pytest
-
 from tests.external.test_claude_driver_context import MODEL, _assert_history
 
 

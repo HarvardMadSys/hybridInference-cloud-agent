@@ -16,7 +16,10 @@ import cloud_agent
 import cloud_agent_host
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_PACKAGE_ROOTS = (_REPO_ROOT / "cloud_agent", _REPO_ROOT / "cloud_agent_host")
+_PACKAGE_ROOTS = (
+    _REPO_ROOT / "apps" / "backend" / "cloud_agent",
+    _REPO_ROOT / "apps" / "backend" / "cloud_agent_host",
+)
 
 # Matches `import serving...` and `from serving... import ...`, which would mean
 # a moved file still reaches into the HybridInference gateway package.
@@ -45,7 +48,7 @@ def test_no_gateway_imports() -> None:
 
 
 # The gateway's signing roots, by name. This service must never hold either:
-# control tokens re-keyed to AGENT_CONTROL_TOKEN_SECRET in E3, and inference is
+# control tokens are signed with AGENT_CONTROL_TOKEN_SECRET, and inference is
 # authorized by grants the gateway mints and verifies.
 _GATEWAY_SECRETS = ("API_KEY_SECRET", "JWT_SECRET_KEY")
 

@@ -7,7 +7,7 @@ tested its own half of a two-sided agreement, and a rename on either would pass
 both suites and fail at the first sign-in.
 
 `contracts/identity.openapi.yaml` is the closest thing here to the other side:
-hand-transcribed from the gateway's routers in C8, and independent of
+hand-transcribed from the gateway's routers, and independent of
 `identity.py` in the sense that matters — nobody editing the verifier is
 editing it too.
 
@@ -26,7 +26,7 @@ from pathlib import Path
 
 from cloud_agent.identity import AUDIENCE
 
-CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "identity.openapi.yaml"
+CONTRACT = Path(__file__).resolve().parents[2] / "gateway_contracts" / "identity.openapi.yaml"
 
 
 def test_the_audience_matches_the_transcribed_gateway_contract() -> None:

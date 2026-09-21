@@ -315,7 +315,8 @@ heartbeat, and only a running API can accept one.
 The manifest supplies the commit and all owned image references. Any conflicting
 effective Compose configuration is refused before pulling or replacing services.
 Remove old image/commit overrides when switching to artifact mode. The default
-`source` mode continues to support the existing checkout-based workflows.
+`source` mode remains available to operators managing their own checkout-based
+deployment.
 
 Image pulls and the host's Kata probe precede runner drain. Migrations, the
 identity namespace check, exact-commit readiness, reverse broker probes, and
@@ -328,11 +329,14 @@ available. These tests do not establish that a particular Linux host, registry
 release, or live Kata runtime is ready; that remains the environment cutover
 acceptance.
 
-## What is still owed
+## What a downstream deployment still owns
 
-* **The execution host's half of the acceptance**: the control-plane stack is
-  installed and checked on every release, above. The host stack is not, because
-  it needs Kata and a machine that can run it, so it belongs to the staging
-  handoff along with the failure and rollback drills.
-* **P4**: the resolver — the registry-side half of these checks, and
-  `agent.lock` pinning this document's hash.
+This repository publishes releases and deliberately contains no workflow that
+deploys a named environment. A distribution consuming a release must:
+
+* verify the manifest, registry digests, image labels and platforms before
+  replacing either role;
+* run the execution-host preparation and Kata checks on its actual host;
+* pin the manifest bytes in its own reviewed lock and keep environment
+  configuration, deployment records and recovery material outside this
+  upstream repository.

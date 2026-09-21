@@ -12,6 +12,10 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent import identity
 from cloud_agent.api import admin_hosts as admin_hosts_router, routes as agent_jobs_router
+from cloud_agent.api._owner_auth import (
+    authenticate_agent_owner,
+    require_agent_owner,
+)
 from cloud_agent.api.deps import get_gateway_client, verify_admin_access
 from cloud_agent.gateway import GatewayError
 
@@ -47,7 +51,7 @@ def _app(gateway: _AccessGateway, role: str = "admin") -> FastAPI:
 
     @app.get("/probe")
     @app.post("/probe")
-    async def owner(user: dict[str, Any] = Depends(agent_jobs_router.require_agent_owner)):
+    async def owner(user: dict[str, Any] = Depends(require_agent_owner)):
         return user
 
     @app.get("/admin/probe")
@@ -55,7 +59,7 @@ def _app(gateway: _AccessGateway, role: str = "admin") -> FastAPI:
     async def admin(actor: str = Depends(verify_admin_access)):
         return {"actor": actor}
 
-    app.dependency_overrides[agent_jobs_router.authenticate_agent_owner] = lambda: {
+    app.dependency_overrides[authenticate_agent_owner] = lambda: {
         "user_id": _OWNER,
         "role": role,
         "authenticated": True,

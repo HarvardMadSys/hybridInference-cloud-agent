@@ -4,7 +4,7 @@ Driven with the real dialect adapter and authentic stream-json shapes, over a
 fake live process — what is under test is the session machinery: lazy spawn
 with the first turn's model, stdin-borne turns, result-bounded event slices,
 settling without waiting for the process to die, and the restart refusal for
-a mid-session model switch (D6).
+a mid-session model switch.
 """
 
 from __future__ import annotations

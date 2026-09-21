@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from deploy.release import build_recipe
 
 REPO = Path(__file__).resolve().parents[3]

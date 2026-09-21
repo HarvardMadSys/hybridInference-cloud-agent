@@ -23,8 +23,8 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PORTS_DIR = REPO_ROOT / "cloud_agent" / "ports"
-REPOSITORIES_DIR = REPO_ROOT / "cloud_agent" / "storage" / "repositories"
+PORTS_DIR = REPO_ROOT / "apps" / "backend" / "cloud_agent" / "ports"
+REPOSITORIES_DIR = REPO_ROOT / "apps" / "backend" / "cloud_agent" / "storage" / "repositories"
 
 #: Names whose *signature* a port cannot describe, though it does claim them.
 #: ``transaction`` is the one: it opens the transaction a decision is written
@@ -92,8 +92,14 @@ def _implementations() -> dict[str, tuple[str, str, str, str]]:
 
 
 def test_the_ports_directory_is_not_empty() -> None:
-    """A scan that silently matches nothing would pass every test below."""
-    assert len(_port_files()) == 21
+    """A scan that silently matches nothing would pass every test below.
+
+    The number is the inventory, not a limit: it moves when a capability is
+    added, and the point of asserting it is that a file which stopped being
+    discovered -- a rename, a stray suffix, a directory move -- makes this fail
+    instead of quietly shrinking what the tests below cover.
+    """
+    assert len(_port_files()) == 23
 
 
 @pytest.mark.parametrize("path", _port_files(), ids=lambda p: p.stem)
@@ -163,7 +169,7 @@ def test_the_ports_cover_every_capability_the_callers_reach_for() -> None:
     claimed = {name for path in _port_files() for name in _methods(path)}
 
     reached: dict[str, set[str]] = {}
-    for path in sorted((REPO_ROOT / "cloud_agent").rglob("*.py")):
+    for path in sorted((REPO_ROOT / "apps" / "backend" / "cloud_agent").rglob("*.py")):
         if path.parent == REPOSITORIES_DIR:
             continue
         for node in ast.walk(ast.parse(path.read_text())):

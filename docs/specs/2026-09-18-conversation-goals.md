@@ -119,7 +119,7 @@ stop polling — so the round the user is waiting to see would be the one round
 nobody fetched.
 
 The decision itself is a pure function over the turn's facts
-(`cloud_agent/goals/decision.py`), and every rule about automatic continuation
+(`apps/backend/cloud_agent/goals/decision.py`), and every rule about automatic continuation
 lives there. The orchestration around it repeats the follow-up route's own
 checks — archived conversation, lost sandbox context, repository entitlement —
 and *pauses* rather than retrying when one of them fails, so the owner is told
@@ -231,7 +231,7 @@ ran, not from the cancelled round that was waiting.
 
 ## Rollout
 
-1. Apply additive Alembic revision `0017_conversation_goal` before starting the
+1. Apply additive Alembic revision `0019_conversation_goal` before starting the
    new control plane. Every existing row has no goal, which is what the shape
    constraint asserts; nothing is backfilled.
 2. Upgrade the control plane. No host rebuild is needed: the goal reaches the

@@ -1,19 +1,19 @@
 name: CI
 
-# One workflow, because the deployment hangs off it.
+# One workflow, because release publication hangs off it.
 #
 # This was four — Backend CI, Web CI, Secret Scan, Docker Build — each with its
 # own `paths:` filter. That arrangement cannot produce a trustworthy "this
-# commit is good" signal, which is exactly what a deploy needs to gate on. A
+# commit is good" signal, which is exactly what publication needs to gate on. A
 # backend-only change does not run Web CI at all, and over the API a workflow
 # that was filtered out is indistinguishable from one that has not started yet:
-# both are simply absent. A deploy reading that has to treat "absent" as "fine",
-# and the first time it is wrong it ships unverified code to a live host.
+# both are simply absent. A publisher reading that has to treat "absent" as
+# "fine", and the first time it is wrong it releases unverified code.
 #
 # Inside one workflow the same condition is a *state*: a job whose paths did not
 # match is `skipped`, which is reported, not missing. `CI Gate` can then assert
-# that every job either succeeded or was skipped, and `deploy-staging.yml`
-# hangs off this workflow alone.
+# that every job either succeeded or was skipped, and `publish.yml` hangs off
+# this workflow alone.
 #
 # The path filters keep their meaning — they moved from four `on:` blocks into
 # the `changes` job below, which is also the only place they now have to agree
@@ -26,9 +26,15 @@ on:
   pull_request:
     branches: [main, dev]
 
-# While this repository is private, CI uses the existing self-hosted pools.
-# Before making it public, #99 must route pull requests to GitHub-hosted
-# runners; tests, package install hooks and Docker builds execute PR code.
+# While this repository is private, every event runs on the self-hosted pools.
+# GitHub-hosted minutes are billed to the organisation for a private repository,
+# and a pull request here can only come from somebody who already has push
+# access to this code, so routing pull requests away from our own machines
+# spends quota to remove a risk that does not exist yet. It exists the moment
+# this repository is public: a fork's pull request then executes unvetted code —
+# tests, package install hooks, Docker builds. That routing is prepared as its
+# own pull request and merges on the day this repository goes public.
+# `tests/unit/test_ci_workflow_policy.py` is what fails if it lands early.
 permissions:
   contents: read
 
@@ -110,7 +116,7 @@ jobs:
           # top-level directory runs the backend checks rather than skipping
           # them unnoticed.
           if printf '%s\n' "${files}" \
-             | grep -vE '^(docs/|web/)' \
+             | grep -vE '^(docs/|apps/frontend/)' \
              | grep -vE '(\.md|LICENSE|\.gitignore)$' \
              | grep . >/dev/null; then
             backend=true
@@ -119,15 +125,24 @@ jobs:
           fi
 
           # Web: the app itself.
-          if matches '^web/'; then web=true; else web=false; fi
+          if matches '^apps/frontend/'; then web=true; else web=false; fi
 
           # Docker: the deploy files and what they COPY. README.md is here
           # because Dockerfile.agent-runner COPYs it alongside pyproject/uv.lock,
           # so deleting or renaming it breaks the build and nothing else notices.
-          # web/ is here because the console image is built from web/ plus
+          # apps/frontend/ is here because the console image is built from it plus
           # deploy/control-plane/Dockerfile.web: a change to the app alone used
           # to skip every docker job, which is how that image went unverified.
-          if matches '^(deploy/|cloud_agent_host/|web/)' \
+          # apps/backend/cloud_agent_shared/ and
+          # apps/backend/cloud_agent_profiling/ are here because *both* images
+          # COPY and import them, and "it imports in this checkout and not in
+          # the image" is the failure these jobs exist to catch. The set is
+          # pinned by test_a_change_to_what_both_images_ship_runs_the_image_
+          # jobs, which derives it from the two Dockerfiles rather than listing
+          # it here a second time -- which is how cloud_agent_profiling was
+          # missed once: it reached both Dockerfiles and the Makefile and the
+          # classifier was left behind.
+          if matches '^(deploy/|apps/backend/cloud_agent_host/|apps/backend/cloud_agent_shared/|apps/backend/cloud_agent_profiling/|apps/frontend/)' \
              || matches '^(pyproject\.toml|uv\.lock|README\.md)$'; then
             docker=true
           else
@@ -218,7 +233,7 @@ jobs:
       - name: Pydocstyle
         id: pydocstyle
         continue-on-error: true
-        run: uv run pydocstyle cloud_agent cloud_agent_host
+        run: uv run pydocstyle apps/backend/cloud_agent apps/backend/cloud_agent_host apps/backend/cloud_agent_shared
 
       # Blocking, and the store is inside it on purpose: a checker that cannot
       # see the class it validates callers against proves nothing about the
@@ -557,17 +572,17 @@ jobs:
           # failing random checkouts on this pool.
           fetch-depth: 0
 
-      # web/ is an empty placeholder until task F1 lands the Next.js app. Until
+      # apps/frontend/ is an empty placeholder until task F1 lands the Next.js app. Until
       # then this workflow is a deliberate no-op rather than a red X: gating on
       # the manifest keeps the required-check list stable across that boundary.
       - name: Detect web app
         id: detect
         run: |
-          if [ -f web/package.json ]; then
+          if [ -f apps/frontend/package.json ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "web/package.json not present yet — skipping (task F1)"
+            echo "apps/frontend/package.json not present yet — skipping (task F1)"
           fi
 
       - name: Isolate the npm cache dir
@@ -589,11 +604,11 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: apps/frontend/package-lock.json
 
       - name: Install dependencies
         if: steps.detect.outputs.present == 'true'
-        working-directory: ./web
+        working-directory: ./apps/frontend
         run: npm ci
 
       # Ordered cheapest-first so a formatting slip is reported in seconds
@@ -603,28 +618,28 @@ jobs:
         id: eslint
         if: steps.detect.outputs.present == 'true'
         continue-on-error: true
-        working-directory: ./web
+        working-directory: ./apps/frontend
         run: npm run lint
 
       - name: Prettier
         id: prettier
         if: steps.detect.outputs.present == 'true'
         continue-on-error: true
-        working-directory: ./web
+        working-directory: ./apps/frontend
         run: npm run format:check
 
       - name: TypeScript
         id: typescript
         if: steps.detect.outputs.present == 'true'
         continue-on-error: true
-        working-directory: ./web
+        working-directory: ./apps/frontend
         run: npm run type-check
 
       - name: Tests
         id: tests
         if: steps.detect.outputs.present == 'true'
         continue-on-error: true
-        working-directory: ./web
+        working-directory: ./apps/frontend
         run: npm run test
 
       # A Client Component importing the server config reader must fail the
@@ -635,7 +650,7 @@ jobs:
         id: server-only
         if: steps.detect.outputs.present == 'true'
         continue-on-error: true
-        working-directory: ./web
+        working-directory: ./apps/frontend
         run: node scripts/check-server-only-guard.mjs
 
       # Builds both web variants — root and `/agents` — and boots each under
@@ -648,10 +663,10 @@ jobs:
         id: runtime-config
         if: steps.detect.outputs.present == 'true'
         continue-on-error: true
-        working-directory: ./web
+        working-directory: ./apps/frontend
         run: node scripts/check-runtime-site-config.mjs
 
-      # Skipped along with the checks when web/ is absent, so this stays the
+      # Skipped along with the checks when apps/frontend/ is absent, so this stays the
       # deliberate no-op the `Detect web app` step describes rather than
       # reading six empty outcomes as six failures.
       - name: Every check passed
@@ -971,7 +986,7 @@ jobs:
 
       - name: All five CLIs retain MCP through approval, resume and fork
         if: matrix.artifact.name == 'sandbox'
-        timeout-minutes: 10
+        timeout-minutes: 20
         env:
           MCP_TEST_SANDBOX_IMAGE: ${{ env.IMAGE_TAG }}
           MCP_TEST_RUN_LABEL: ${{ env.SUFFIX }}
@@ -988,11 +1003,20 @@ jobs:
             --label "io.hybridinference.smoke.run=${SUFFIX}" \
             -e POSTGRES_DB="${TEST_DB_NAME}" -e POSTGRES_PASSWORD="${TEST_DB_PASSWORD}" \
             -p 127.0.0.1::5432 postgres:16-alpine
+          # Probe TCP, not the socket. The image runs initdb against a
+          # temporary server started with `listen_addresses=''` — reachable on
+          # the unix socket and nowhere else — then stops it and starts the
+          # real one. A socket probe answers "accepting connections" for that
+          # temporary server, and the createdb below then lands in the shutdown
+          # between the two: `FATAL: the database system is shutting down`.
+          # TCP is also how the tests reach it, so it is the honest question.
           for attempt in $(seq 1 30); do
-            if docker exec "${database}" pg_isready -U postgres >/dev/null 2>&1; then break; fi
+            if docker exec "${database}" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then
+              break
+            fi
             sleep 1
           done
-          docker exec "${database}" pg_isready -U postgres
+          docker exec "${database}" pg_isready -h 127.0.0.1 -U postgres
           # The test config appends pytest-xdist's worker id to TEST_DB_NAME.
           # Give each worker its own database so migrations and state cannot race;
           # the Postgres container creates only the unsuffixed database.
@@ -1221,7 +1245,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' && github.ref == 'refs/heads/dev' &&
       (needs.changes.outputs.backend == 'true' || needs.changes.outputs.docker == 'true')
-    runs-on: [self-hosted, Linux, deploy-cloud-agent-sandbox-staging]
+    runs-on: [self-hosted, Linux, X64, image-verify-x64]
     timeout-minutes: 30
     concurrency:
       group: cloud-agent-kata-ci
@@ -1252,9 +1276,9 @@ jobs:
 
   ci-gate:
     name: CI Gate
-    # The single job that says whether this commit is good. `deploy-staging.yml`
-    # keys on this workflow's conclusion, so this is what stands between a merge
-    # to dev and a rebuild of the staging stack.
+    # The single job that says whether this commit is good. `publish.yml` keys
+    # on this workflow's conclusion, so this is what stands between a merge to
+    # dev and a consumable release.
     if: always()
     runs-on: [self-hosted, Linux, ci-general]
     needs:

@@ -20,7 +20,6 @@ import tarfile
 from pathlib import Path
 
 import pytest
-
 from deploy.release import acceptance as ac, release_manifest as rm
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -354,9 +353,12 @@ def write_archive(path: Path, entries: dict[str, bytes]) -> Path:
 def test_a_recipe_root_carrying_source_is_not_a_recipe(tmp_path: Path) -> None:
     source = write_archive(
         tmp_path / "r.tar.gz",
-        {"recipe/deploy/DEPLOY_PROTOCOL": b"v3\n", "recipe/cloud_agent/__init__.py": b""},
+        {
+            "recipe/deploy/DEPLOY_PROTOCOL": b"v3\n",
+            "recipe/apps/backend/cloud_agent/__init__.py": b"",
+        },
     )
-    with pytest.raises(Exception, match="cloud_agent"):
+    with pytest.raises(Exception, match="apps"):
         ac.extract_recipe(source, tmp_path / "out")
 
 
