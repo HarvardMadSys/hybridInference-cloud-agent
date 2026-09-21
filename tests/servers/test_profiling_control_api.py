@@ -1,14 +1,14 @@
-"""Real HTTP: the Admin control surface and the host policy exchange.
+"""Real HTTP: the Admin control surface and the host configuration exchange.
 
 Two surfaces, one file, because they are two ends of one decision: the Admin
-routes write the control row and the policy exchange hands it to a host. A test
-of either alone would pass while the pair disagreed.
+routes write the configuration and the exchange hands it to a host. A test of
+either alone would pass while the pair disagreed.
 
 What is real here: the FastAPI applications, their routers, their dependencies,
 the host credential check, the request and response models, and the transport.
 What is stated rather than performed: storage (an in-memory capability) and the
-host agent's own loop, which is driven one pass at a time so the test does not
-wait out an interval.
+broker's own container, which the policy-push test replaces with the real
+application served in-process.
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ from cloud_agent.domain.profiling_control import (
     CONTROL_REFUSED_ALREADY_ACTIVE,
     CONTROL_REFUSED_ALREADY_FINISHED,
     CONTROL_REFUSED_STALE_REVISION,
-    CONTROL_REFUSED_STOPPING,
     ControlCommandResult,
 )
 from cloud_agent.storage.repositories.profiling_control import (
@@ -37,7 +36,6 @@ from cloud_agent.storage.repositories.profiling_control import (
     LIFECYCLE_STOPPED,
 )
 from cloud_agent_profiling import operation_profiling
-from cloud_agent_shared.shared_protocol import PROFILING_CONTROL_CAPABILITY
 
 ADMIN = {"Authorization": "Bearer test-admin-token"}
 HOST = "gpu-1"
@@ -66,7 +64,6 @@ class _FakeControl:
         }
         self.runs: dict[str, dict[str, Any]] = {}
         self.commands: dict[tuple[str, str], dict[str, Any]] = {}
-        self.participants: list[dict[str, Any]] = []
         self.stored = 0
 
     async def get_control_state(self, *, deployment: str) -> dict[str, Any] | None:
@@ -107,14 +104,6 @@ class _FakeControl:
                 revision=int(self.control["revision"]),
                 reason=CONTROL_REFUSED_STALE_REVISION,
                 detail="expected revision differs",
-            )
-        if self._stopping(now):
-            return ControlCommandResult(
-                kind=CONTROL_OUTCOME_REFUSED,
-                revision=int(self.control["revision"]),
-                run_id=str(self.control.get("last_stopped_run_id") or ""),
-                reason=CONTROL_REFUSED_STOPPING,
-                detail="the previous experiment is still propagating its stop",
             )
         revision = int(self.control["revision"]) + 1
         self.runs[str(run["run_id"])] = {
@@ -217,50 +206,6 @@ class _FakeControl:
             kind=CONTROL_OUTCOME_APPLIED, revision=int(self.control["revision"]) + 1, run_id=run_id
         )
 
-    async def record_participant(self, **kwargs: Any) -> None:
-        """Upsert one participant by instance."""
-        existing = next(
-            (
-                item
-                for item in self.participants
-                if item["participant_id"] == kwargs["participant_id"]
-            ),
-            None,
-        )
-        record = {
-            "participant_id": kwargs["participant_id"],
-            "kind": kwargs["kind"],
-            "host": kwargs["host"],
-            "run_id": kwargs["run_id"],
-            "applied_revision": kwargs["applied_revision"],
-            "capability": kwargs["capability"],
-            "state": kwargs["state"],
-            "detail": kwargs["detail"],
-            "budget": dict(kwargs.get("budget") or {}),
-            "confirmed_at": kwargs["now"],
-            "expires_at": kwargs["now"] + timedelta(seconds=kwargs["ttl_seconds"]),
-        }
-        if existing is None:
-            self.participants.append(record)
-        else:
-            existing.update(record)
-
-    async def list_participants(
-        self, *, deployment: str, now: datetime, run_id: str | None = None
-    ) -> list[dict[str, Any]]:
-        """Return unexpired participants."""
-        return [
-            item
-            for item in self.participants
-            if item["expires_at"] > now and (run_id is None or item["run_id"] == run_id)
-        ]
-
-    async def prune_participants(self, *, deployment: str, now: datetime) -> int:
-        """Drop expired participants."""
-        before = len(self.participants)
-        self.participants = [item for item in self.participants if item["expires_at"] > now]
-        return before - len(self.participants)
-
     async def count_stored_measurements(self, *, run_id: str) -> int:
         """Return how many samples this experiment stored."""
         return self.stored
@@ -276,13 +221,6 @@ class _FakeControl:
     async def list_runs(self, *, deployment: str, limit: int = 20) -> list[dict[str, Any]]:
         """Return the deployment's runs."""
         return list(self.runs.values())[:limit]
-
-    def _stopping(self, now: datetime) -> bool:
-        """Whether a recent stop is still assumed to be propagating."""
-        stopped = self.control.get("last_stopped_at") if self.control else None
-        if stopped is None or not self.control or not self.control.get("last_stopped_run_id"):
-            return False
-        return (now - stopped).total_seconds() < 20
 
 
 class _FakeHostPool:
@@ -515,7 +453,7 @@ def test_stop_is_idempotent_and_states_what_it_stopped() -> None:
     assert first.json()["control"]["run"] is None
     assert first.json()["control"]["run_active"] is False
     assert first.json()["control"]["last_stopped_run"]["run_id"] == run_id
-    assert first.json()["control"]["status"] == "stopped"
+    assert first.json()["control"]["status"] == "off"
     # Nothing was active, so the second Stop changed nothing and did not move
     # the revision: a later Start must not be made to look stale by a double
     # click.
@@ -561,7 +499,8 @@ def test_a_deployment_without_admin_control_says_so() -> None:
     body = snapshot.json()
     assert body["status"] == "unavailable"
     assert body["configured"] is False
-    assert body["gaps"][0]["kind"] == "control_row_missing"
+    assert body["run"] is None
+    assert body["run_active"] is False
 
 
 def test_environment_mode_reports_itself_as_unmanaged(monkeypatch) -> None:
@@ -625,94 +564,71 @@ def _host_app(storage: _FakeStorage, monkeypatch) -> FastAPI:
     return app
 
 
-def test_a_host_is_told_the_policy_and_its_own_revision_is_recorded() -> None:
-    """The exchange both answers the host and reports it to the Admin page."""
+def test_a_host_is_told_the_configuration_in_force() -> None:
+    """The exchange answers with the experiment, its operations and its end."""
     storage = _FakeStorage()
     service = ProfilingControlService(
         control=storage.profiling_control, deployment="test", host_pool=storage.host_pool
     )
-    started = _run_sync(
-        service.start,
-        service,
-        now=datetime.now(UTC),
-    )
+    started = _run_sync(service.start, service, now=datetime.now(UTC))
     assert started is not None
 
-    app = _host_app(storage, None)
-    with TestClient(app) as client:
-        answer = client.post(
-            "/v1/agent/hosts/profiling-policy",
-            json={
-                "profiling": {
-                    "participant_id": "runner:gpu-1:1",
-                    "applied_revision": 1,
-                    "run_id": started.run_id,
-                    "capability": PROFILING_CONTROL_CAPABILITY,
-                    "detail": "",
-                    "budget": {"scope": "producer_instance", "used": 3},
-                    "broker_revision": 1,
-                    "broker_capability": PROFILING_CONTROL_CAPABILITY,
-                }
-            },
-        )
+    with TestClient(_host_app(storage, None)) as client:
+        answer = client.post("/v1/agent/hosts/profiling-policy", json={"host": HOST})
     assert answer.status_code == 200, answer.text
     policy = answer.json()
     assert policy["mode"] == "admin"
     assert policy["revision"] == 1
     assert policy["run"]["run_id"] == started.run_id
-    # The lease is bounded: the host stops on its own if it never hears again.
-    assert 0 < policy["lease"]["seconds"] <= 15
-    assert policy["broker_confirmed_revision"] == 1
-    # Both processes were recorded, so the page can tell a confirmed broker from
-    # one that never answered.
-    kinds = {item["kind"]: item for item in storage.profiling_control.participants}
-    assert kinds["runner"]["applied_revision"] == 1
-    assert kinds["broker"]["applied_revision"] == 1
-    assert kinds["broker"]["capability"] == PROFILING_CONTROL_CAPABILITY
+    assert policy["run"]["target"] == {}
+    assert policy["run"]["max_operations"] == 100
+    assert "server_time" in policy
+    # Nothing in the answer claims to know what this host has applied, and no
+    # lease is issued: the experiment's own deadline is the bound.
+    assert "lease" not in policy
+    assert "applied" not in answer.text
 
 
-def test_a_host_without_the_capability_is_not_counted_as_confirmed() -> None:
-    """Unsupported is a state, not a missing answer: the two need different fixes."""
+def test_the_configuration_exchange_records_nothing_about_the_host() -> None:
+    """Sync is allowed to lag, so there is no acknowledgement to record."""
     storage = _FakeStorage()
     service = ProfilingControlService(
         control=storage.profiling_control, deployment="test", host_pool=storage.host_pool
     )
     _run_sync(service.start, service, now=datetime.now(UTC))
+    before = dict(storage.profiling_control.control or {})
     with TestClient(_host_app(storage, None)) as client:
-        client.post(
-            "/v1/agent/hosts/profiling-policy",
-            json={"profiling": {"participant_id": "runner:old", "applied_revision": 0}},
-        )
-    recorded = storage.profiling_control.participants[0]
-    assert recorded["state"] == "unsupported"
+        client.post("/v1/agent/hosts/profiling-policy", json={"host": HOST})
+    assert storage.profiling_control.control == before
 
 
-def test_the_lease_shrinks_with_the_request_that_carried_it() -> None:
-    """A reply delayed in flight cannot buy time it never had.
-
-    The deadline is computed from the answer's own two instants, so a host whose
-    policy arrived two seconds late stops two seconds sooner -- without either
-    machine having to trust the other's wall clock.
-    """
+def test_a_host_cannot_ask_for_another_hosts_configuration() -> None:
+    """The answer is computed for whoever authenticated, not for whoever asked."""
     storage = _FakeStorage()
-    service = ProfilingControlService(
-        control=storage.profiling_control, deployment="test", host_pool=storage.host_pool
-    )
-    _run_sync(service.start, service, now=datetime.now(UTC))
-    with TestClient(_host_app(storage, None)) as client:
-        answer = client.post("/v1/agent/hosts/profiling-policy", json={}).json()
-    issued = datetime.fromisoformat(str(answer["lease"]["issued_at"]).replace("Z", "+00:00"))
-    delayed = {
-        **answer,
-        "server_time": (issued + timedelta(seconds=12)).isoformat(),
-    }
-    from cloud_agent_host.profiling_policy import lease_deadline_mono
+    seen: list[str] = []
 
-    from_scratch = lease_deadline_mono(answer)
-    from_delayed = lease_deadline_mono(delayed)
-    assert from_delayed < from_scratch
-    # Twelve of the fifteen seconds were already spent, so about three are left.
-    assert 2.0 < from_delayed - __import__("time").monotonic() < 4.0
+    app = FastAPI()
+    app.include_router(host_profiling.router)
+    app.state.storage = storage
+
+    async def _authenticate() -> dict[str, Any]:
+        return {"host": HOST, "status": "online"}
+
+    app.dependency_overrides[host_profiling.authenticate_host] = _authenticate
+    original = host_profiling.build_policy_for_host
+
+    async def _spy(*, host: Any, reported: Any, store: Any) -> dict[str, Any]:
+        seen.append(str(host.get("host")))
+        return await original(host=host, reported=reported, store=store)
+
+    host_profiling.read_host_profiling_policy.__globals__["build_policy_for_host"] = _spy
+    try:
+        with TestClient(app) as client:
+            client.post("/v1/agent/hosts/profiling-policy", json={"host": "some-other-machine"})
+    finally:
+        host_profiling.read_host_profiling_policy.__globals__["build_policy_for_host"] = original
+    # The body named another machine and the answer was built for this one.
+    assert seen == [HOST]
 
 
 def test_a_stopped_deployment_hands_the_host_no_run() -> None:

@@ -1,12 +1,21 @@
 """What a runtime control source changes about collection, and what it must not.
 
 The collector used to answer "is profiling on" from process configuration, read
-once, at startup. It now also answers from a snapshot another process publishes,
-and that is only safe if three properties hold: the snapshot is replaced whole,
-a Stop reaches work that is already open, and nothing about the previous
-experiment leaks into the next one. Each test here pins one of those through the
-same ``install_policy_provider`` / ``policy_store`` seam the control plane uses,
-so the rules are stated in one place instead of being inferred from a worker.
+once, at startup. It now also answers from a configuration another process
+publishes, and that is only safe if four properties hold:
+
+* the snapshot is replaced whole, and **a version never goes backwards**, so a
+  delayed answer cannot put a stopped experiment back into force;
+* a Stop stops *selecting new operations* -- and does **not** reach into work
+  that already started, which finishes and delivers under the configuration that
+  selected it;
+* the experiment's own absolute deadline is what ends collection, including on a
+  node that never hears anything again;
+* nothing about the previous experiment leaks into the next one.
+
+Each test here pins one of those through the same ``install_policy_provider`` /
+``policy_store`` seam the control plane uses, so the rules are stated in one
+place instead of being inferred from a worker.
 """
 
 from __future__ import annotations
@@ -54,41 +63,6 @@ class _BrokenProvider:
         raise RuntimeError("control source is unreachable")
 
 
-class _Clock:
-    """A clock whose wall and monotonic readings advance together.
-
-    A lease is minted from the authority's wall clock and enforced against this
-    process's monotonic one. A test that moved only one of them would be
-    measuring its own arithmetic rather than the collector's.
-    """
-
-    def __init__(self) -> None:
-        self.mono = 1_000.0
-        self.wall = time.time()
-
-    def advance(self, seconds: float) -> None:
-        """Move both readings forward by the same amount."""
-        self.mono += seconds
-        self.wall += seconds
-
-    def time(self) -> float:
-        """Return the fake wall clock."""
-        return self.wall
-
-    def monotonic(self) -> float:
-        """Return the fake monotonic clock."""
-        return self.mono
-
-    def monotonic_ns(self) -> int:
-        """Return the fake monotonic clock in nanoseconds."""
-        return int(self.mono * 1_000_000_000)
-
-    def sleep(self, seconds: float) -> None:
-        """Yield briefly, then move both readings like a real sleep."""
-        time.sleep(0.001)
-        self.advance(seconds)
-
-
 @pytest.fixture(autouse=True)
 def _clean_profiling_state(monkeypatch):
     """Every test starts from a process that never read a control source."""
@@ -103,14 +77,6 @@ def _clean_profiling_state(monkeypatch):
     # able to answer for the next test's process.
     profiling.install_policy_provider(None)
     profiling.reset_cache()
-
-
-@pytest.fixture
-def clock(monkeypatch):
-    """Replace the collector's clock so lease arithmetic is deterministic."""
-    fake = _Clock()
-    monkeypatch.setattr(profiling, "time", fake)
-    return fake
 
 
 def _expiry(minutes: int = 60) -> str:
@@ -149,28 +115,22 @@ def _state(
     *,
     run: profiling.ProfilingRun,
     revision: int = 1,
-    ttl: float = 0.0,
-    authority_epoch: float | None = None,
 ) -> profiling.ControlState:
-    """Return the snapshot a control source publishes for one live run."""
+    """Return the configuration a control source publishes for one live run."""
     return profiling.ControlState(
         mode=profiling.MODE_ADMIN,
-        control_revision=revision,
+        config_version=revision,
         run=run,
-        authority_epoch=time.time() if authority_epoch is None else authority_epoch,
-        authorization_ttl_s=ttl,
     )
 
 
 def _stopped(*, revision: int = 2, reason: str = profiling.STOP_REASON_STOPPED):
-    """Return the snapshot a Stop publishes: the tombstone, and no run."""
+    """Return the configuration a Stop publishes: the tombstone, and no run."""
     return profiling.ControlState(
         mode=profiling.MODE_ADMIN,
-        control_revision=revision,
+        config_version=revision,
         run=None,
         stop_reason=reason,
-        authority_epoch=time.time(),
-        authorization_ttl_s=0.0,
     )
 
 
@@ -233,10 +193,9 @@ def test_no_mode_still_honours_the_legacy_switch(monkeypatch):
     measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
     assert measurement is not None
     assert measurement.run_source == profiling.SOURCE_ENVIRONMENT
-    # A static descriptor has no control source, so nothing can revoke it: its
-    # authorization is the run's own end and carries no control revision.
-    assert measurement.authorization is not None
-    assert measurement.authorization.control_revision == 0
+    # A static descriptor has no control source, so it carries no configuration
+    # version: nothing published it and nothing can withdraw it.
+    assert measurement.control_revision == 0
 
 
 def test_mode_disabled_vetoes_a_valid_switch_and_run(monkeypatch):
@@ -261,7 +220,7 @@ def test_environment_mode_ignores_the_published_control_state(monkeypatch):
 
     live = profiling.active_run()
     assert live is not None and live.run_id == ENV_RUN_ID
-    assert profiling.control_state().control_revision == 0
+    assert profiling.control_state().config_version == 0
     assert profiling.start_operation(operation="terminal.open", host="host-a") is None
     assert profiling.start_operation(operation="attempt.startup", host="host-a") is not None
 
@@ -319,7 +278,7 @@ def test_an_admin_run_is_selected_through_the_published_snapshot(monkeypatch):
     assert provider.reads == 1
     assert profiling.policy_provider() is provider
     assert profiling.active_run() is run
-    assert profiling.control_state().control_revision == 3
+    assert profiling.control_state().config_version == 3
     assert profiling.control_state().mode == profiling.MODE_ADMIN
 
     measurement = profiling.start_operation(operation="terminal.open", host="host-a")
@@ -386,45 +345,73 @@ def test_the_store_refuses_a_run_that_does_not_describe_its_policy():
 
 
 # ---------------------------------------------------------------------------
-# A Stop reaches work that is already open
+# A Stop stops selecting; it does not reach into work already under way
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("replacement", ["stopped", "other_run"])
-def test_a_stop_reaches_a_measurement_that_is_already_open(monkeypatch, caplog, replacement):
-    """A Stop must not need the measurement's cooperation or its next request."""
+def test_a_stop_stops_selecting_new_operations(monkeypatch):
+    """The switch is about new work, and the deadline bounds the old."""
+    run = _run(run_id=RUN_A)
+    _admin(monkeypatch, _state(run=run, revision=1))
+    assert profiling.start_operation(operation="terminal.open", host="host-a") is not None
+
+    profiling.policy_store().publish(_stopped(revision=2))
+
+    assert profiling.active_run() is None
+    assert profiling.start_operation(operation="terminal.open", host="host-a") is None
+
+
+def test_a_stop_does_not_end_a_measurement_that_already_started(monkeypatch, caplog):
+    """Work in flight finishes under the configuration that selected it.
+
+    This is the whole simplified Stop contract: disabling collection must not
+    truncate a sample that a user's request is still producing, and must not
+    change what that sample says about itself.
+    """
     caplog.set_level(logging.INFO, logger=profiling.__name__)
     run = _run(run_id=RUN_A)
     _admin(monkeypatch, _state(run=run, revision=1))
     measurement = profiling.start_operation(operation="terminal.open", host="host-a")
     assert measurement is not None
-    assert measurement.past_deadline() is False
 
-    if replacement == "stopped":
-        published = _stopped(revision=2)
-    else:
-        published = _state(run=_run(run_id=RUN_B, operations=("files.list",)), revision=2)
-
-    # The stop lands while a span is open, which is the case the deadline
-    # arithmetic must clamp rather than the next selection.
     with profiling.span(measurement, "serving"):
-        profiling.policy_store().publish(published)
+        profiling.policy_store().publish(_stopped(revision=2))
 
-    assert measurement.past_deadline() is True
-    assert measurement.expired is True
-    assert measurement.stop_reason() == profiling.STOP_REASON_REVOKED
-    assert profiling.measurement_context(measurement) is None
+    # Still live: the deadline is the experiment's, not the switch's.
+    assert measurement.past_deadline() is False
+    assert profiling.measurement_context(measurement) is not None
     profiling.finish(measurement, outcome="completed")
 
     record = _records(caplog)[0]
-    assert record["facts"]["profiling_stopped"] == "stopped_locally"
-    assert record["truncated"] is True
-    assert record["collection_complete"] is False
-    # The record is the old experiment's, even though the deployment has moved on.
     assert record["profiling_run_id"] == RUN_A
-    assert record["run_source"] == profiling.SOURCE_ADMIN
+    assert record["collection_complete"] is True
+    assert "truncated" not in record
+    assert "profiling_stopped" not in record["facts"]
+    # The record still names the experiment that selected it.
     manifest = profiling.manifest_for_measurement(measurement)
     assert manifest is not None and manifest["run_id"] == RUN_A
+
+
+def test_the_experiment_deadline_is_what_ends_an_open_measurement(monkeypatch, caplog):
+    """A node that never hears the Stop stops at the experiment's own end."""
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    # The run is published live -- the parser refuses a past expiry -- and the
+    # measurement is then aged past its own deadline, which is exactly "the
+    # experiment ended while this was open".
+    _admin(monkeypatch, _state(run=_run(run_id=RUN_A), revision=1))
+    measurement = profiling.start_operation(operation="terminal.open", host="host-a")
+    assert measurement is not None
+    measurement.deadline_mono = time.monotonic() - 0.001
+
+    assert measurement.past_deadline() is True
+    assert measurement.expired is True
+    profiling.finish(measurement, outcome="completed")
+
+    record = _records(caplog)[0]
+    assert record["facts"]["profiling_stopped"] == profiling.STOP_REASON_EXPIRED
+    # A sample cut off by the deadline is a floor, not a duration, and it says so.
+    assert record["collection_complete"] is False
+    assert record["duration_us"] == 0
 
 
 def test_a_measurement_keeps_the_experiment_that_selected_it(monkeypatch, caplog):
@@ -463,48 +450,66 @@ def test_a_measurement_keeps_the_experiment_that_selected_it(monkeypatch, caplog
     assert profiling.start_operation(operation="terminal.open", host="host-b") is None
 
 
-# ---------------------------------------------------------------------------
-# The lease bounds collection, and renewal does not reset spending
-# ---------------------------------------------------------------------------
-
-
-def test_an_authorization_is_bounded_by_the_lease_not_the_run(monkeypatch, clock):
-    """A node that loses the control source must stop at the lease, not later."""
-    run = _run(run_id=RUN_A)
-    _admin(monkeypatch, _state(run=run, revision=1, ttl=0.5, authority_epoch=clock.time()))
-
+def test_a_record_states_the_configuration_version_that_selected_it(monkeypatch, caplog):
+    """A reader has to be able to tell two versions of the switch apart."""
+    caplog.set_level(logging.INFO, logger=profiling.__name__)
+    _admin(monkeypatch, _state(run=_run(run_id=RUN_A), revision=9))
     measurement = profiling.start_operation(operation="terminal.open", host="host-a")
     assert measurement is not None
-    assert measurement.effective_deadline_mono() <= clock.monotonic() + 0.5
-    assert measurement.effective_deadline_mono() < run.deadline_mono
-    assert measurement.past_deadline() is False
-
-    clock.advance(1.0)
-
-    assert profiling.policy_store().revoked(measurement.authorization) is True
-    assert measurement.past_deadline() is True
-    assert measurement.expired is True
+    assert measurement.control_revision == 9
+    profiling.finish(measurement, outcome="completed")
+    assert _records(caplog)[0]["control_revision"] == 9
 
 
-def test_a_renewal_does_not_hand_back_spent_budget(monkeypatch):
-    """Otherwise "renew" would be a way to collect without limit."""
+# ---------------------------------------------------------------------------
+# The version never goes backwards, and a re-publish hands nothing back
+# ---------------------------------------------------------------------------
+
+
+def test_an_older_configuration_cannot_replace_a_newer_one(monkeypatch):
+    """A delayed answer must not put a stopped experiment back into force."""
+    run = _run(run_id=RUN_A)
+    _admin(monkeypatch, _state(run=run, revision=5))
+    assert profiling.active_run() is not None
+
+    published = profiling.policy_store().publish(_stopped(revision=4))
+
+    assert published.state.config_version == 5
+    assert profiling.active_run() is not None
+    assert profiling.start_operation(operation="terminal.open", host="host-a") is not None
+
+
+def test_the_stopped_version_wins_over_the_one_it_replaced(monkeypatch):
+    """The other direction is the one that matters: a Stop must stick."""
+    run = _run(run_id=RUN_A)
+    _admin(monkeypatch, _state(run=run, revision=5))
+    profiling.policy_store().publish(_stopped(revision=6))
+
+    # The old configuration arrives again, as a retry or out of order.
+    profiling.policy_store().publish(_state(run=run, revision=5))
+
+    assert profiling.active_run() is None
+    assert profiling.start_operation(operation="terminal.open", host="host-a") is None
+
+
+def test_republishing_the_same_run_does_not_hand_back_spent_budget(monkeypatch):
+    """Otherwise re-syncing would be a way to collect without limit."""
     run = _run(run_id=RUN_A, max_operations=2)
-    _admin(monkeypatch, _state(run=run, revision=1, ttl=1.0, authority_epoch=time.time()))
+    _admin(monkeypatch, _state(run=run, revision=1))
 
     assert profiling.start_operation(operation="terminal.open", host="host-a") is not None
     assert profiling.start_operation(operation="terminal.open", host="host-a") is not None
     assert profiling.start_operation(operation="terminal.open", host="host-a") is None
 
-    # A fresh authorization for the same run, issued by the same authority.
-    later = time.time() + 60
-    profiling.policy_store().publish(_state(run=run, revision=1, ttl=1.0, authority_epoch=later))
+    # The same configuration, read again: same run, same allowance.
+    profiling.policy_store().publish(_state(run=run, revision=1))
 
     assert profiling.budget_state(RUN_A)["used"] == 2
     assert profiling.start_operation(operation="terminal.open", host="host-a") is None
 
     # A genuinely new experiment starts from a full allowance.
     fresh = _run(run_id=RUN_B, max_operations=2)
-    profiling.policy_store().publish(_state(run=fresh, revision=2, ttl=1.0, authority_epoch=later))
+    profiling.policy_store().publish(_state(run=fresh, revision=2))
 
     assert profiling.start_operation(operation="terminal.open", host="host-a") is not None
     assert profiling.budget_state(RUN_B)["used"] == 1
@@ -546,24 +551,18 @@ def test_budget_state_for_an_unselected_run_invents_no_allowance(monkeypatch):
     assert state["exhausted"] is False
 
 
-def test_redelivering_a_context_cannot_extend_a_lapsed_lease(monkeypatch, clock):
-    """The lease travels in the context; replaying the same bytes revives nothing."""
-    run = _run(run_id=RUN_A)
-    _admin(monkeypatch, _state(run=run, revision=1, ttl=0.05, authority_epoch=clock.time()))
-    measurement = profiling.start_operation(operation="terminal.open", host="host-a")
-    assert measurement is not None
-    context = profiling.measurement_context(measurement)
-    assert context is not None
-    assert profiling.start_stage_recording(context) is not None
-
-    clock.advance(1.0)
-
-    # The experiment itself is still in force: what refused is the lease.
-    live = profiling.active_run()
-    assert live is not None and live.run_id == RUN_A
-    assert measurement.past_deadline() is True
-    assert profiling.start_stage_recording(context) is None
-    assert profiling.measurement_context(measurement) is None
+def test_admits_answers_only_for_the_configuration_in_force(monkeypatch):
+    """A broker's inherited selection is checked against the current configuration."""
+    run = _run(run_id=RUN_A, operations=("terminal.open",))
+    _admin(monkeypatch, _state(run=run, revision=1))
+    store = profiling.policy_store()
+    assert store.admits(RUN_A, operations=frozenset({"terminal.open"})) is True
+    # An operation this run does not select is not collectable under it.
+    assert store.admits(RUN_A, operations=frozenset({"files.open"})) is False
+    # A selection from another experiment is refused rather than reported.
+    assert store.admits(RUN_B, operations=frozenset({"terminal.open"})) is False
+    profiling.policy_store().publish(_stopped(revision=2))
+    assert store.admits(RUN_A, operations=frozenset({"terminal.open"})) is False
 
 
 # ---------------------------------------------------------------------------

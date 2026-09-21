@@ -1,29 +1,35 @@
-"""Acceptance: an administrator's Start and Stop really control collection.
+"""Acceptance: an administrator's switch really controls collection.
 
 This walks the whole chain against a real PostgreSQL, a real schema applied by
 Alembic, and the real FastAPI applications served on real sockets:
 
 1. `POST /admin/agent/profiling-runs` creates the experiment and moves the
    control row.
-2. The control plane's own policy worker reads that row and publishes the
-   snapshot its routes then collect under -- without a restart and without an
-   environment variable changing.
-3. A real file read through the workspace route roots a measurement, hands the
+2. The control plane's own sync worker reads that row and publishes the
+   configuration its routes then collect under -- without a restart and without
+   an environment variable changing.
+3. A real runner policy sync, pointed at the real control-plane endpoint with a
+   real broker client, carries that configuration to a **separately served
+   broker application** over HTTP. This is the hop that used to be broken: a
+   sync with no broker client left every file and terminal sample missing its
+   container sub-stages.
+4. A real file read through the workspace route roots a measurement, hands the
    selection to the broker over the real fragment protocol, and stores what came
    back.
-4. `GET /admin/agent/profiling-control` reads the same state back, including the
-   real stored-sample count.
-5. A Stop stops it: the next read produces no sample at all, while everything
-   already stored stays readable.
+5. `GET /admin/agent/profiling-control` reads the same configuration back,
+   including the real stored-sample count.
+6. Disabling stops it: the next read produces no sample at all, and a
+   measurement that was already open when the switch flipped finishes and is
+   stored under the experiment that selected it.
 
 What is *simulated* here is stated rather than hidden. There is no container in
-this environment, so the broker is the in-process double the existing
-measurement acceptance test uses -- it validates selections through the real
-`operation_call` code but answers a workspace read from a fixture. The runner's
-parent/child handoff, the broker's own policy endpoint and the offline lease
-are covered in `tests/unit/test_profiling_control_application.py`,
-`tests/unit/test_operation_profiling_runtime_control.py` and
-`tests/servers/test_profiling_control_api.py`.
+this environment, so the broker's own workspace read is the in-process double
+the existing measurement acceptance test uses -- it validates selections through
+the real `operation_call` code but answers a file read from a fixture. The
+parent/child turn handoff on a real fork is covered in
+`tests/unit/test_runner_host_service.py`, and the offline bound -- an experiment
+ending on a node that never hears anything again -- in
+`tests/unit/test_operation_profiling_runtime_control.py`.
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -54,8 +61,10 @@ from tests.integration.servers.test_measurement_acceptance_db import (
 from cloud_agent.api.deps import get_agent_app_credentials, get_gateway_client
 from cloud_agent.app import create_app
 from cloud_agent.application.profiling_control import ProfilingControlService
+from cloud_agent.host_pool import hash_secret
 from cloud_agent.profiling_control_config import profiling_control_deployment
 from cloud_agent.storage.assembly import Storage
+from cloud_agent.tokens import mint_host_token
 from cloud_agent.workers.profiling_control import ProfilingPolicyWorker
 from cloud_agent_profiling import operation_profiling
 
@@ -75,6 +84,28 @@ STOP_REQUEST_ID = "acceptance-stop-1"
 DURATION_SECONDS = 600
 
 
+class _IdleSupervisor:
+    """The smallest supervisor the broker's lifespan will start.
+
+    The workspace read in this chain is answered by the double the measurement
+    acceptance test already uses, and the policy route touches no container at
+    all -- but the broker refuses to start beside a process backend without a
+    supervisor, which is a real product rule this test should not work around.
+    """
+
+    def start(self) -> None:
+        """Start nothing."""
+        return None
+
+    def close(self) -> None:
+        """Close nothing."""
+        return None
+
+    def owns(self, _workspace_id: str) -> bool:
+        """Own no workspace."""
+        return False
+
+
 @dataclass
 class _ControlChain:
     """Everything the assertions below reach for, assembled."""
@@ -88,6 +119,12 @@ class _ControlChain:
     service: ProfilingControlService
     worker: ProfilingPolicyWorker
     worker_task: asyncio.Task[None]
+    #: The broker's own application, served on its own socket so the runner's
+    #: configuration push crosses a real HTTP boundary into it.
+    broker_base_url: str
+    #: The real host credential this chain's host row was pointed at, so the
+    #: runner's own configuration exchange authenticates for real.
+    host_credential: str
     #: A real minted owner session, as the browser presents it. The file and
     #: terminal routes are owner routes: an administrator's infrastructure
     #: token authenticates the control surface, not a user's workspace.
@@ -149,6 +186,33 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
     server, task, base_url = await _serve(app)
     store = Storage(pool)
     job, _claim, sandbox = await _arrange_chain(store)
+    # The chain enrolls its host with a placeholder hash, which is enough for
+    # every test that never presents a credential. This one does present one --
+    # the runner's own configuration exchange -- so the row is pointed at the
+    # hash of a real minted token. Without this the exchange would answer 401
+    # and the test would be proving the stub rather than the route.
+    host_credential = mint_host_token(host=HOST)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_runner_hosts SET credential_hash = $1 WHERE host = $2",
+            hash_secret(host_credential),
+            HOST,
+        )
+
+    # The broker application, served on its own socket. It is built through its
+    # own factory with the same token the runner would present, so the push
+    # below is the real route with the real credential check in front of it.
+    from cloud_agent_host.broker_profiling_policy import reset_applied_state
+    from cloud_agent_host.sandbox import ProcessBackend
+    from cloud_agent_host.workspace_broker import create_app as create_broker_app
+
+    reset_applied_state()
+    broker_app = create_broker_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="acceptance-broker-token",
+        shared_session_supervisor=_IdleSupervisor(),  # type: ignore[arg-type]
+    )
+    broker_server, broker_task, broker_base_url = await _serve(broker_app)
     chain_job = job
 
     # The policy loop, driven exactly as the lifespan drives it -- but with the
@@ -179,6 +243,8 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
         worker=worker,
         worker_task=worker_task,
         owner_cookie={SESSION_COOKIE: mint_session(user_id=USER_ID)},
+        broker_base_url=broker_base_url,
+        host_credential=host_credential,
     )
     try:
         yield chain
@@ -188,6 +254,8 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
 
         with contextlib.suppress(asyncio.CancelledError):
             await worker_task
+        broker_server.should_exit = True
+        await asyncio.wait_for(broker_task, timeout=10)
         server.should_exit = True
         await asyncio.wait_for(task, timeout=10)
         from cloud_agent import measurement_writer
@@ -301,13 +369,43 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         assert published is not None and published.run is not None
         assert published.run.run_id == run_id
         assert published.run.source == operation_profiling.SOURCE_ADMIN
-        assert published.policy.control_revision == 1
-        # The runtime lease is bounded, so an offline node stops on its own.
-        assert published.authorization_ttl_s > 0
-        assert published.authorization_ttl_s <= 15.0
-        authorization = operation_profiling.policy_store().authorization()
-        assert authorization is not None
-        assert authorization.deadline_mono < published.run.deadline_mono
+        assert published.state.config_version == 1
+        # No lease: the experiment's own absolute deadline is what ends
+        # collection, including on a node that never hears anything again.
+        assert published.run.deadline_mono > time.monotonic()
+
+        # -- 3b. The runner's own sync carries it to the broker --------
+        # Real client, real endpoints, real credential: the control plane's
+        # exchange, then the broker's own policy route. This is the wiring that
+        # a sync built without a broker client silently skipped.
+        from cloud_agent_host.broker_profiling_policy import applied_state
+        from cloud_agent_host.profiling_policy import ProfilingPolicySync
+        from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
+
+        broker_client = SessionSupervisorClient(
+            chain.broker_base_url, "acceptance-broker-token", timeout=10
+        )
+        sync = ProfilingPolicySync(
+            base_url=chain.base_url,
+            credential=chain.host_credential,
+            host=HOST,
+            broker=broker_client,
+        )
+        try:
+            # Off the event loop: the sync is synchronous, and both servers are
+            # tasks on this loop. Calling it inline would block the loop that
+            # has to answer the request it is waiting for.
+            interval = await asyncio.to_thread(sync._sync_once)
+        finally:
+            sync.stop()
+        assert interval == 5.0, "an experiment in force is polled quickly"
+        state = sync.state()
+        assert state["run_id"] == run_id
+        assert state["applied_revision"] == 1
+        assert state["broker_ok"] is True, state["broker_detail"]
+        # The broker really received it: its own applied state names the run.
+        assert applied_state()["revision"] == 1
+        assert applied_state()["run_id"] == run_id
 
         # -- 4. A real file read roots a real measurement ---------------
         async with httpx.AsyncClient(base_url=chain.base_url, cookies=chain.owner_cookie) as owner:
@@ -338,7 +436,8 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         live = (await admin.get("/admin/agent/profiling-control")).json()
         assert live["run"]["run_id"] == run_id
         assert live["stored_samples"] == 1
-        assert live["status"] in {"collecting", "partially_active", "starting"}
+        assert live["status"] == "on"
+        assert live["run_active"] is True
         assert live["run"]["seconds_remaining"] > 0
         # The one sample is readable through the history API, which is what
         # "preserve history" means.
@@ -355,7 +454,7 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         )
         assert stopped.status_code == 200, stopped.text
         assert stopped.json()["revision"] == 2
-        assert stopped.json()["control"]["status"] == "stopped"
+        assert stopped.json()["control"]["status"] == "off"
         # Nothing is in force, and the stopped experiment is still named beside
         # it -- so the page can say *what* was stopped rather than showing the
         # same blank "Off" as a deployment that has never collected. The two
@@ -391,13 +490,97 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         # The already-stored sample is untouched: stopping is not deleting.
         assert await _measurement_count(chain, run_id) == 1
         final = (await admin.get("/admin/agent/profiling-control")).json()
-        assert final["status"] == "stopped"
+        assert final["status"] == "off"
         assert final["run"] is None
         assert final["last_stopped_run"]["run_id"] == run_id
         assert final["last_stopped_run"]["stop_reason"]
         # No *active* run means no live sample count: the number describes the
         # experiment in force, and there is none.
         assert final["stored_samples"] == 0
+
+
+async def test_a_measurement_open_when_the_switch_flips_still_lands(
+    control_chain: _ControlChain,
+) -> None:
+    """Disabling stops selecting; it does not cancel or truncate work in flight.
+
+    This is the simplified Stop contract, end to end: a request roots its
+    measurement while the experiment is on, the administrator switches it off
+    through the real route, and that request still finishes through the real
+    in-process persistence path -- stored, complete, and filed under the
+    experiment that selected it.
+    """
+    import httpx
+    from tests.integration.servers.test_measurement_acceptance_db import _await_row
+
+    from cloud_agent.api._operation_measurements import record_measurement
+    from cloud_agent.operation_measurement import operation as measured_operation, root_scope
+
+    chain = control_chain
+    job = await chain.store.conversation_queries.get_job(chain.job_id)
+    assert job is not None
+    async with httpx.AsyncClient(base_url=chain.base_url, headers=ADMIN) as admin:
+        started = await admin.post(
+            "/admin/agent/profiling-runs",
+            json={
+                "request_id": "acceptance-open-start",
+                "expected_revision": 0,
+                "operations": ["files.open"],
+                "target": {"host": HOST},
+                "duration_seconds": DURATION_SECONDS,
+            },
+        )
+        assert started.status_code == 201, started.text
+        run_id = started.json()["run_id"]
+        await _await_policy(run_id=run_id)
+
+        # A request enters while the experiment is on. Its selection is made
+        # here, inside the block, and the block stays open across the Stop.
+        selection = None
+        scope = root_scope("files.open", job)
+        with measured_operation("files.open", scope) as measure:
+            assert measure is not None, "the experiment must select this request"
+            selection = measure
+            measurement_id = measure.measurement_id
+            measure.mark("read")
+            # What the route does once its read reports the kind: a path starts
+            # as a candidate over listing and opening, and only the result can
+            # say which it was.
+            assert measure.confirm("files.open", request_kind="files.open") is True
+
+            stopped = await admin.post(
+                f"/admin/agent/profiling-runs/{run_id}/stop",
+                json={"request_id": "acceptance-open-stop"},
+            )
+            assert stopped.status_code == 200, stopped.text
+            await _await_policy(run_id=None)
+
+            # The switch is off: a request entering now is not selected.
+            assert (
+                operation_profiling.start_operation(
+                    operation="files.open",
+                    producer="control-plane",
+                    host=HOST,
+                )
+                is None
+            )
+            # The request's own work succeeded, which is what the route states
+            # before it builds its response.
+            measure.outcome = "completed"
+
+        assert selection is not None
+        # The request that was already running finishes through the real
+        # in-process persistence path, under the experiment that selected it and
+        # with nothing recorded against it.
+        record_measurement(store=chain.store, job=job, measure=selection)
+
+    row = await _await_row(chain.pool, measurement_id)
+    assert row["profiling_run_id"] == run_id
+    assert row["outcome"] == "completed"
+    assert row["collection_complete"] is True
+    record = json.loads(row["record"])
+    assert record["profiling_run_id"] == run_id
+    assert "profiling_stopped" not in record.get("facts", {})
 
 
 async def test_a_second_start_cannot_overlap_the_first(
