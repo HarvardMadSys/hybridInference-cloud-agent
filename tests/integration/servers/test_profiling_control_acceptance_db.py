@@ -564,6 +564,33 @@ async def test_a_measurement_open_when_the_switch_flips_still_lands(
                 )
                 is None
             )
+            # -- the later stages of a selection already made -----------
+            # This is the hop the review found broken: the attempt was selected
+            # before the switch, and its container work happens *after* it. The
+            # fragment must still be collected, under the experiment that
+            # selected the attempt, or the stored record is silently partial.
+            # The stage the fragment belongs to, marked the way the runner
+            # marks it before it calls the broker.
+            measure.mark("supervisor_acquire")
+            fragment = measure.begin_call("supervisor_acquire")
+            context = measure.context(fragment)
+            assert context is not None
+            assert context["run"]["run_id"] == run_id
+            recorder = operation_profiling.start_stage_recording(context, producer="broker")
+            assert recorder is not None, "a selected operation keeps its later stages"
+            assert recorder.operation == "files.open"
+            with recorder.stage("admission"):
+                pass
+            assert measure.record_answer(
+                "supervisor_acquire",
+                fragment,
+                {
+                    "profiling_call_id": fragment,
+                    "profiling_recorded": True,
+                    "stages": list(recorder.stages),
+                },
+            )
+
             # The request's own work succeeded, which is what the route states
             # before it builds its response.
             measure.outcome = "completed"
@@ -577,10 +604,15 @@ async def test_a_measurement_open_when_the_switch_flips_still_lands(
     row = await _await_row(chain.pool, measurement_id)
     assert row["profiling_run_id"] == run_id
     assert row["outcome"] == "completed"
+    # Both the root record and the fragment that arrived after the switch are
+    # accounted for: nothing is missing, so the sample is usable.
     assert row["collection_complete"] is True
     record = json.loads(row["record"])
     assert record["profiling_run_id"] == run_id
     assert "profiling_stopped" not in record.get("facts", {})
+    assert "missing_fragments" not in record
+    stages = [item for group in record["stages"] for item in group.get("children", [])]
+    assert [item["stage"] for item in stages] == ["admission"]
 
 
 async def test_a_second_start_cannot_overlap_the_first(

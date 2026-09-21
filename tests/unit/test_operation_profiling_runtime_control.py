@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 
@@ -462,6 +464,206 @@ def test_a_record_states_the_configuration_version_that_selected_it(monkeypatch,
 
 
 # ---------------------------------------------------------------------------
+# The broker is offered the configuration again until it holds it
+# ---------------------------------------------------------------------------
+
+
+class _FlakyBroker:
+    """A broker client that refuses a fixed number of pushes, then accepts."""
+
+    def __init__(self, *, refuse_first: int = 0) -> None:
+        self._refuse_first = refuse_first
+        self.calls: list[dict[str, Any]] = []
+        self.delivered: dict[str, Any] | None = None
+
+    def apply_profiling_policy(self, policy: dict[str, Any]) -> dict[str, Any]:
+        """Refuse while the budget lasts, then accept and remember."""
+        self.calls.append(dict(policy))
+        if len(self.calls) <= self._refuse_first:
+            raise RuntimeError("broker is not ready")
+        self.delivered = dict(policy)
+        return {"accepted": True, "changed": True, "revision": policy["revision"]}
+
+
+class _FixedControlPlane:
+    """A configuration source that always answers with the same experiment."""
+
+    def __init__(self, answer: dict[str, Any]) -> None:
+        self.answer = answer
+        self.reads = 0
+
+    def post(self, *_args: Any, **_kwargs: Any) -> Any:
+        """Return the same answer, counting the read."""
+        self.reads += 1
+        return _FixedResponse(self.answer)
+
+
+class _FixedResponse:
+    """The subset of an HTTP response the sync reads."""
+
+    def __init__(self, answer: dict[str, Any]) -> None:
+        self._answer = answer
+        self.is_error = False
+
+    def json(self) -> dict[str, Any]:
+        """Return the answer body."""
+        return self._answer
+
+
+def _sync_with_broker(monkeypatch, broker) -> Any:
+    """A real sync, pointed at a fixed control-plane answer and one broker."""
+    from cloud_agent_host.profiling_policy import ProfilingPolicySync
+
+    run = _run(run_id=RUN_A, operations=("terminal.open",))
+    answer = {
+        "mode": profiling.MODE_ADMIN,
+        "revision": 1,
+        "run": {
+            "run_id": RUN_A,
+            "operations": ["terminal.open"],
+            "target": {},
+            "expires_at": run.expires_at_utc.isoformat(),
+            "config_version": 1,
+            "max_operations": 10,
+        },
+        "server_time": datetime.now(timezone.utc).isoformat(),
+    }
+    monkeypatch.setenv(profiling.ENV_PROFILING_MODE, profiling.MODE_ADMIN)
+    profiling.reset_cache()
+    sync = ProfilingPolicySync(
+        base_url="http://control-plane.invalid",
+        credential="credential",
+        host="host-a",
+        broker=broker,
+    )
+    monkeypatch.setattr(sync, "_client", _FixedControlPlane(answer))
+    return sync
+
+
+def test_a_failed_broker_push_is_offered_again(monkeypatch):
+    """A push that failed must not be the last word, or the broker never hears.
+
+    The runner records the revision as applied as soon as it reads it, so a
+    change-only push gave up permanently after two failed attempts: the
+    experiment ran with the broker contributing nothing, which is worse than
+    not running it at all because the root record still looks like a sample.
+    """
+    # Two attempts per pass, and four refusals: two whole passes fail before the
+    # broker comes up, which is the case that used to be permanent.
+    broker = _FlakyBroker(refuse_first=4)
+    sync = _sync_with_broker(monkeypatch, broker)
+
+    assert sync._sync_once() == 5.0
+    assert broker.delivered is None
+    assert sync.state()["broker_ok"] is False
+
+    # The configuration did not change, and that is the point: the next pass
+    # offers it again anyway, because the runner cannot tell a failed push from
+    # a broker that restarted.
+    assert sync._sync_once() == 5.0
+    assert broker.delivered is None
+
+    assert sync._sync_once() == 5.0
+    assert broker.delivered is not None
+    assert broker.delivered["run"]["run_id"] == RUN_A
+    assert sync.state()["broker_ok"] is True
+
+
+def test_a_restarted_broker_is_given_the_configuration_again(monkeypatch):
+    """The broker's configuration lives in memory, so a restart empties it."""
+    broker = _FlakyBroker()
+    sync = _sync_with_broker(monkeypatch, broker)
+    assert sync._sync_once() == 5.0
+    assert broker.delivered is not None
+
+    # The broker restarts: its applied state is gone and it will accept the same
+    # revision again. Nothing tells the runner, so it has to keep offering.
+    broker.delivered = None
+    for _ in range(3):
+        sync._sync_once()
+
+    assert broker.delivered is not None, "a restarted broker must be refilled"
+    assert broker.delivered["run"]["run_id"] == RUN_A
+
+
+# ---------------------------------------------------------------------------
+# A selected operation keeps collecting its later stages
+# ---------------------------------------------------------------------------
+
+
+def test_a_selected_operation_keeps_its_later_stages_after_a_stop(monkeypatch):
+    """The broker must not refuse the stages of work that was already chosen.
+
+    Disabling stops *selecting*. An attempt that was selected before the switch
+    still calls the broker for its container and its CLI process, and those
+    fragments belong to the experiment that selected the attempt. Refusing them
+    produced a record that was kept but incomplete -- the broker's stages simply
+    missing -- which reads as a slow or partial startup rather than as a
+    configuration change.
+    """
+    run = _run(run_id=RUN_A, operations=("attempt.startup",), target={"host": "host-a"})
+    _admin(monkeypatch, _state(run=run, revision=1))
+    measurement = profiling.start_operation(
+        operation="attempt.startup", host="host-a", producer="runner"
+    )
+    assert measurement is not None
+    assert profiling.bind(measurement, host="host-a") is True
+    context = profiling.measurement_context(measurement, "c1")
+    assert context is not None
+
+    # The switch goes off, in the broker's own store.
+    profiling.policy_store().publish(_stopped(revision=2))
+
+    recorder = profiling.start_stage_recording(context, producer="broker")
+    assert recorder is not None, "the continuation must outlive the switch"
+    assert recorder.operation == "attempt.startup"
+    with recorder.stage("container_start"):
+        pass
+    assert recorder.names() == ["container_start"]
+    # And a *new* root operation is still refused.
+    assert profiling.start_operation(operation="attempt.startup", host="host-a") is None
+
+
+def test_a_continuation_cannot_widen_the_operations_it_was_given(monkeypatch):
+    """The manifest's operation list still decides, not the caller's candidates.
+
+    A context may narrow what it offers -- a route states the candidates its own
+    call could still turn out to be -- and that narrowing is intersected with
+    the experiment. It may never widen it: a file read may not collect under an
+    operation the experiment that selected it never asked for.
+    """
+    run = _run(run_id=RUN_A, operations=("attempt.startup",))
+    _admin(monkeypatch, _state(run=run, revision=1))
+    measurement = profiling.start_operation(
+        operation="attempt.startup", host="host-a", producer="runner"
+    )
+    assert measurement is not None
+    context = profiling.measurement_context(measurement, "c1")
+    assert context is not None
+    profiling.policy_store().publish(_stopped(revision=2))
+
+    widened = dict(context)
+    widened["operations"] = ["files.open"]
+
+    assert profiling.start_stage_recording(widened, producer="broker") is None
+    # And the operation it *was* selected for still continues.
+    assert profiling.start_stage_recording(context, producer="broker") is not None
+
+
+def test_a_context_without_a_manifest_still_needs_the_local_configuration(monkeypatch):
+    """A caller that only names operations cannot enable collection by claiming."""
+    _admin(monkeypatch, _state(run=_run(run_id=RUN_A, operations=("attempt.startup",)), revision=1))
+    without_manifest = {
+        "run_id": RUN_A,
+        "operation": "files.open",
+        "operations": ["files.open"],
+        "expires_at": time.time() + 60,
+        "call_id": "c1",
+    }
+    assert profiling.start_stage_recording(without_manifest, producer="broker") is None
+
+
+# ---------------------------------------------------------------------------
 # The version never goes backwards, and a re-publish hands nothing back
 # ---------------------------------------------------------------------------
 
@@ -590,12 +792,13 @@ def test_handoff_carries_the_manifest_and_the_child_inherits_it(monkeypatch):
     assert context is not None
 
     assert context["run_id"] == RUN_A
-    assert context["operations"] == ["attempt.startup"]
-    assert context["target"] == {"host": "host-a"}
-    assert context["config_version"] == 3
-    assert context["max_operations"] == 7
-    assert context["control_revision"] == 5
-    assert context["run_expires_at"] == run.expires_at_utc.isoformat()
+    assert context["run"]["run_id"] == RUN_A
+    assert context["run"]["operations"] == ["attempt.startup"]
+    assert context["run"]["target"] == {"host": "host-a"}
+    assert context["run"]["config_version"] == 3
+    assert context["run"]["max_operations"] == 7
+    assert context["run"]["control_revision"] == 5
+    assert context["run"]["expires_at"] == run.expires_at_utc.isoformat()
 
     child = profiling.attach_selection(context, producer="runner")
     assert child is not None
@@ -616,8 +819,14 @@ def test_handoff_carries_the_manifest_and_the_child_inherits_it(monkeypatch):
     assert child_manifest is not None and child_manifest["run_id"] == RUN_A
 
 
-def test_attach_selection_refuses_an_attempt_from_the_previous_experiment(monkeypatch):
-    """A child that re-read its own snapshot must not file an old attempt under it."""
+def test_a_child_continues_the_experiment_its_parent_selected(monkeypatch):
+    """A late child keeps the *old* experiment rather than adopting the new one.
+
+    The parent hands over an attempt it already proved; by the time the child
+    starts, the deployment may have moved to another experiment. The child files
+    the attempt under the one that selected it -- reporting it under the new
+    experiment would attribute the sample to a run that never asked for it.
+    """
     run_a = _run(run_id=RUN_A, operations=("attempt.startup",), target={"host": "host-a"})
     _admin(monkeypatch, _state(run=run_a, revision=1))
     measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
@@ -625,8 +834,8 @@ def test_attach_selection_refuses_an_attempt_from_the_previous_experiment(monkey
     assert profiling.bind(measurement, host="host-a") is True
     context = profiling.handoff_context(measurement)
     assert context is not None
-    assert profiling.attach_selection(context) is not None
 
+    # The deployment moves on before the child gets to run.
     profiling.policy_store().publish(
         _state(
             run=_run(run_id=RUN_B, operations=("attempt.startup",), target={"host": "host-b"}),
@@ -634,4 +843,134 @@ def test_attach_selection_refuses_an_attempt_from_the_previous_experiment(monkey
         )
     )
 
-    assert profiling.attach_selection(context) is None
+    child = profiling.attach_selection(context)
+    assert child is not None
+    assert child.run_id == RUN_A
+    assert child.run_target == {"host": "host-a"}
+    assert child.measurement_id == measurement.measurement_id
+    assert child.started_mono_ns == measurement.started_mono_ns
+    # The child may not adopt the experiment that replaced its parent's.
+    assert child.run_id != RUN_B
+
+
+_CHILD_SCRIPT = r"""
+import json, os, sys
+from cloud_agent_profiling import operation_profiling
+
+payload = json.loads(sys.stdin.read())
+context = payload.get("_profiling")
+# What the deployment actually does: a brand-new interpreter under Admin
+# control, with no provider installed and no static descriptor. Its policy store
+# is empty until its own sync loop fills it -- and it must not need it.
+measurement = operation_profiling.attach_selection(context, producer="runner")
+if measurement is None:
+    print(json.dumps({"attached": False, "mode": operation_profiling.profile_mode()}))
+    raise SystemExit(0)
+operation_profiling.mark(measurement, "prompt_dispatch")
+operation_profiling.finish(measurement, outcome="dispatched")
+operation_profiling.flush_sink()
+print(json.dumps({
+    "attached": True,
+    "mode": operation_profiling.profile_mode(),
+    "run_id": measurement.run_id,
+    "measurement_id": measurement.measurement_id,
+    "started_mono_ns": measurement.started_mono_ns,
+    "run_source": measurement.run_source,
+    "operations": sorted(measurement.run_operations),
+    "target": dict(measurement.run_target),
+    "budget": operation_profiling.budget_state(measurement.run_id)["used"],
+}))
+"""
+
+
+def test_a_real_child_process_continues_an_admin_selection(monkeypatch, tmp_path):
+    """The deployment path runs the child in a new interpreter, so this does too.
+
+    Nothing about the handoff may depend on the child having selected the
+    experiment for itself: under Admin control a fresh process has an empty
+    policy store, no static descriptor, and therefore no run of its own. An
+    in-process test cannot see that, because it shares the parent's store --
+    which is exactly how ``attach_selection`` came to require a local run and
+    silently collect nothing in production.
+    """
+    import pathlib
+    import subprocess
+    import sys
+
+    sink = tmp_path / "child-records.jsonl"
+    run = _run(
+        run_id=RUN_A,
+        operations=("attempt.startup",),
+        target={"host": "host-a"},
+        max_operations=7,
+        config_version=3,
+    )
+    _admin(monkeypatch, _state(run=run, revision=5))
+    measurement = profiling.start_operation(
+        operation="attempt.startup", host="host-a", producer="runner"
+    )
+    assert measurement is not None
+    assert profiling.bind(measurement, host="host-a", job_id="ajob_1") is True
+    context = profiling.handoff_context(measurement)
+    assert context is not None
+
+    # The child's environment: Admin mode, no legacy switch, no descriptor.
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        # The package root the child has to import from, plus whatever this
+        # process was given.
+        "PYTHONPATH": os.pathsep.join(
+            filter(
+                None,
+                [
+                    str(pathlib.Path(profiling.__file__).resolve().parents[1]),
+                    os.environ.get("PYTHONPATH", ""),
+                ],
+            )
+        ),
+        profiling.ENV_PROFILING_MODE: profiling.MODE_ADMIN,
+        profiling.ENV_PROFILING_SINK: str(sink),
+    }
+    completed = subprocess.run(
+        [sys.executable, "-c", _CHILD_SCRIPT],
+        input=json.dumps({"_profiling": context}),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    answer = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert answer["mode"] == profiling.MODE_ADMIN
+    assert answer["attached"] is True, completed.stdout + completed.stderr
+    # The same measurement, continued rather than restarted.
+    assert answer["measurement_id"] == measurement.measurement_id
+    assert answer["started_mono_ns"] == measurement.started_mono_ns
+    # The same experiment, with the parent's identity and no second slot spent.
+    assert answer["run_id"] == RUN_A
+    assert answer["run_source"] == profiling.SOURCE_ADMIN
+    assert answer["operations"] == ["attempt.startup"]
+    assert answer["target"] == {"host": "host-a"}
+    assert answer["budget"] == 0
+    # And the record it emitted is filed under that experiment.
+    written = json.loads(sink.read_text().strip().splitlines()[-1])
+    assert written["profiling_run_id"] == RUN_A
+    assert written["measurement_id"] == measurement.measurement_id
+    assert written["control_revision"] == 5
+
+
+def test_an_expired_selection_is_refused_however_it_arrives(monkeypatch):
+    """Continuing is not a way around the experiment's own deadline."""
+    run = _run(run_id=RUN_A, operations=("attempt.startup",))
+    _admin(monkeypatch, _state(run=run, revision=1))
+    measurement = profiling.start_operation(operation="attempt.startup", host="host-a")
+    assert measurement is not None
+    context = profiling.handoff_context(measurement)
+    assert context is not None
+
+    expired = dict(context)
+    expired["expires_at"] = time.time() - 1.0
+
+    assert profiling.attach_selection(expired) is None
