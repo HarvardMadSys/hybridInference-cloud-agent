@@ -92,7 +92,7 @@ cd apps/frontend && npm run lint && npm run format:check && npm run type-check &
 | 命令 | 结果 |
 | --- | --- |
 | `pytest tests/unit tests/servers -q` | **4806 passed, 1 failed**（唯一失败见 §6.1，本机 `os.openpty` 被拒，与本 PR 无关） |
-| `pytest -q -m dbtest`（真实 PostgreSQL 16 容器，Alembic 迁移到 head） | **548 passed** |
+| `pytest -q -m dbtest`（真实 PostgreSQL 16 容器，Alembic 迁移到 head） | **543 passed, 5 failed**（5 个失败均为 base 上已存在的到期边界用例，见 §6.8） |
 | `pytest -q -m "not external and not dbtest"`（`make test` 的等价集合） | 同上第一条 |
 
 ### 3.3 真实 HTTP + PostgreSQL + 独立 broker 进程链路
@@ -197,6 +197,16 @@ runner、workspace broker，本地栈的 deployment 命名空间也按 `${...:-d
 
 ## 6. 未覆盖 / 环境限制
 
+8. **`dbtest` 里有 5 个用例在 base 上就失败**，与本 PR 无关：
+   `test_attempt_ledger.py::test_slow_early_read_cannot_consume_the_five_minute_reconciliation`
+   （两个参数）、`test_mcp_connection_store.py::test_a_decision_after_the_deadline_does_not_revive_a_call`、
+   `test_mcp_connection_store.py::test_expiring_held_calls_leaves_the_settled_ones_alone`、
+   `test_source_control_store.py::test_an_expired_oauth_state_cannot_be_consumed`。
+   这些用例都在断言"某个到期瞬间之后不能再使用"，依赖真实时钟与数据库往返的相对快慢；
+   在**未打本 PR 的 `9c88596` 干净 worktree** 上单独跑同样失败（已验证其中两个，命令与
+   输出见 §8）。它们属于 attempt ledger / MCP 连接 / source control 三个本 PR 完全没有
+   触碰的领域。
+
 1. **`tests/unit/test_chat_sandbox.py::test_retained_terminal_keeps_the_shell_in_the_docker_tty_process_group`
    在本机失败**，原因是 `os.openpty()` 被本机沙箱拒绝
    （`PermissionError: [Errno 1] Operation not permitted`），与本 PR 无关：该文件未被
@@ -256,7 +266,14 @@ $ PYTHONPATH=apps/backend:. pytest tests/unit tests/servers -q -p no:cacheprovid
      PermissionError: [Errno 1] Operation not permitted  (os.openpty，见 §6.1)
 
 $ PYTHONPATH=apps/backend:. TEST_DB_PORT=55432 pytest -q -m dbtest -p no:cacheprovider --timeout=300
-548 passed, 4875 deselected, 696 warnings in 449.10s
+5 failed, 543 passed, 4879 deselected, 696 warnings in 445.05s
+
+# 上面 5 个失败在 base 上同样存在。在干净的 9c88596 worktree 上复核：
+$ git worktree add --detach /tmp/dsh-baseline-check 9c88596 && cd /tmp/dsh-baseline-check
+$ PYTHONPATH=apps/backend:. TEST_DB_PORT=55432 TEST_DB_NAME=baseline_check_test_db pytest \
+      tests/integration/storage/test_mcp_connection_store.py::test_expiring_held_calls_leaves_the_settled_ones_alone \
+      tests/integration/storage/test_source_control_store.py::test_an_expired_oauth_state_cannot_be_consumed -q
+2 failed, 3 warnings in 1.15s
 
 $ PYTHONPATH=apps/backend:. TEST_DB_PORT=55432 pytest \
       tests/integration/servers/test_profiling_control_acceptance_db.py -q -m dbtest
