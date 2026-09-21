@@ -378,6 +378,52 @@ describe('GoalBar controls', () => {
     );
   });
 
+  it('lets a resume through once the round limit has been raised', async () => {
+    // `round_limit` is the history of why the goal stopped, not a standing
+    // verdict. Raising the cap leaves it on the row, and a band that refused on
+    // the reason alone would keep Resume disabled for a goal the server would
+    // now happily continue.
+    render(
+      <GoalBar
+        threadId="thread_1"
+        goal={goal({
+          state: 'paused',
+          pauseReason: 'round_limit',
+          pauseDetail: 'the goal used its whole automatic round budget',
+          roundsUsed: 1,
+          maxRounds: 2,
+        })}
+        state={idle}
+        onChanged={() => {}}
+      />,
+    );
+    expect(screen.getByRole('status')).not.toHaveTextContent('Raise the limit to continue.');
+    const resume = screen.getByRole('button', { name: 'Resume' });
+    expect(resume).toBeEnabled();
+    fireEvent.click(resume);
+    await waitFor(() => expect(resumeAgentGoal).toHaveBeenCalledWith('thread_1'));
+  });
+
+  it('keeps the dialog open, and the words in it, when an edit is refused', async () => {
+    vi.mocked(setAgentGoal).mockRejectedValueOnce(new Error('goal service unavailable'));
+    render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('Objective'), {
+      target: { value: 'ship the release notes' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Set condition' }));
+
+    // Still open, still holding what was typed, and saying why: closing on the
+    // way out would throw away the retry.
+    expect(await screen.findByRole('alert')).toHaveTextContent('goal service unavailable');
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByLabelText('Objective')).toHaveValue('ship the release notes');
+
+    vi.mocked(setAgentGoal).mockResolvedValue({ thread_id: 'thread_1', goal: null, revision: 5 });
+    fireEvent.click(screen.getByRole('button', { name: 'Set condition' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
   it('shows the whole objective on demand, however long it is', () => {
     const objective =
       'make every unit test pass, then update the changelog, then open a draft pull request against dev and leave the tree clean';

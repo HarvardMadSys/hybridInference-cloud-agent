@@ -356,6 +356,7 @@ export const en = {
     'How many turns the platform may run on its own, up to {max}. The budget restarts only when the objective changes.',
   'goal.dialog.tooLong': 'An objective can be at most {max} characters.',
   'goal.dialog.apply': 'Set condition',
+  'goal.dialog.applying': 'Saving…',
   'goal.dialog.cancel': 'Cancel',
   'goal.dialog.clear': 'Clear condition',
   'goal.close': 'Close',

@@ -343,6 +343,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'goal.dialog.roundsHint': '平台最多能自己跑多少轮,上限 {max}。只有目标变了才会重置已用轮次。',
   'goal.dialog.tooLong': '目标最多 {max} 个字符。',
   'goal.dialog.apply': '设定条件',
+  'goal.dialog.applying': '保存中…',
   'goal.dialog.cancel': '取消',
   'goal.dialog.clear': '清除条件',
   'goal.close': '关闭',

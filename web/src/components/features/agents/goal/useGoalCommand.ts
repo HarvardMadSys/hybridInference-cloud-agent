@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useId, useMemo, useState } from 'react';
-import type { KeyboardEvent } from 'react';
+import type { Dispatch, KeyboardEvent, SetStateAction } from 'react';
 import { useT } from '@/components/providers';
 import { isComposerSubmit } from '../composerKeys';
 import {
@@ -21,8 +21,14 @@ import {
 export interface GoalCommandWiring {
   /** The text in the box right now. */
   value: string;
-  /** Replace it, so a consumed command leaves nothing behind. */
-  setValue: (value: string) => void;
+  /**
+   * Replace it, so a consumed command leaves nothing behind.
+   *
+   * The box's own setter, updater form included: a command that is cleared
+   * only after its write lands has to look at what the box holds *then*, and
+   * the owner may have started typing the next message in the meantime.
+   */
+  setValue: Dispatch<SetStateAction<string>>;
   /** Open the goal dialog, seeded with the goal the conversation has. */
   onOpenDialog: () => void;
   /** Apply `/goal <objective>`; a rejection is reported, never swallowed. */
@@ -144,13 +150,18 @@ export function useGoalCommand({
       onOpenDialog();
       return true;
     }
+    const submitted = value;
     setBusy(true);
     try {
       await onApply(command.objective);
       // Consumed: the objective is a goal now, and the box must not also send
       // it as a message. On failure the text stays, because the retry is the
       // same command.
-      setValue('');
+      //
+      // Only if the box still holds that command, though. A write takes a
+      // round trip, and the owner may have started the next message in it —
+      // clearing then would delete something this command never owned.
+      setValue((current) => (current === submitted ? '' : current));
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : t('goal.commandFailed'));
     } finally {

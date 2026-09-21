@@ -941,16 +941,24 @@ export function JobDetail({
     onReload?.();
   }
 
-  /** Edit or clear from the command's dialog, which writes straight through. */
+  /**
+   * Edit or clear from the command's dialog, which writes straight through.
+   *
+   * The dialog stays open until the write lands. A refusal — above all the
+   * compare-and-set refusal, which is expected to be retried — has to leave the
+   * owner's words in the box, and it has to leave them there against the
+   * revision the page re-read after the refusal, which is what the next render
+   * of this closure carries.
+   */
   async function writeManagedGoal(draft: GoalDraft): Promise<void> {
+    const landed = await goalWrite.run(() => writeGoal(threadId, draft, currentGoal?.revision));
+    if (!landed) return;
     setGoalManageOpen(false);
     setGoalDraft(null);
-    await goalWrite.run(() => writeGoal(threadId, draft, currentGoal?.revision));
   }
 
   async function clearManagedGoal(): Promise<void> {
-    setGoalManageOpen(false);
-    await goalWrite.run(() => clearAgentGoal(threadId));
+    if (await goalWrite.run(() => clearAgentGoal(threadId))) setGoalManageOpen(false);
   }
 
   async function submitFollowUp(event: FormEvent<HTMLFormElement>) {
@@ -1583,6 +1591,8 @@ export function JobDetail({
                       : null
                   }
                   limits={config?.goal_limits}
+                  busy={goalWrite.busy}
+                  error={goalWrite.error}
                   onClose={() => setGoalManageOpen(false)}
                   onApply={(draft) => void writeManagedGoal(draft)}
                   onClear={currentGoal ? () => void clearManagedGoal() : undefined}
@@ -1753,12 +1763,15 @@ export function JobDetail({
                   </form>
                 )}
                 <ThreadStatsBar job={job} />
-                {actionError || goalWrite.error ? (
+                {/* A goal write's refusal is drawn inside the dialog that made
+                    it, beside the words it refused; this line is the composer's
+                    own failures, including a command's. */}
+                {actionError ? (
                   <p
                     className="mt-2 text-center text-xs text-red-600 dark:text-red-400"
                     role="alert"
                   >
-                    {ownerFailureMessage(actionError ?? goalWrite.error ?? '')}
+                    {ownerFailureMessage(actionError)}
                   </p>
                 ) : null}
               </div>

@@ -29,6 +29,8 @@ export function GoalDialog({
   open,
   initial,
   limits = DEFAULT_GOAL_LIMITS,
+  busy = false,
+  error = null,
   onClose,
   onApply,
   onClear,
@@ -36,6 +38,17 @@ export function GoalDialog({
   open: boolean;
   initial?: GoalDraft | null;
   limits?: GoalLimits;
+  /** A write is in flight; the buttons stand down until it lands. */
+  busy?: boolean;
+  /**
+   * Why the last attempt failed.
+   *
+   * The dialog stays open on a refusal, so this is where the refusal is read —
+   * and the draft is still in the box beside it, because the retry is the same
+   * words. Closing on the way out would throw away what the owner just typed
+   * for a write that never happened.
+   */
+  error?: string | null;
   onClose: () => void;
   onApply: (goal: GoalDraft) => void;
   /** Absent when there is nothing to clear — a goal that was never set. */
@@ -173,14 +186,23 @@ export function GoalDialog({
               {t('goal.dialog.tooLong', { max: limits.max_objective_chars })}
             </p>
           ) : null}
+
+          {/* The refusal, beside the words it refused. Dismissed with the
+              dialog, because cancelling is how a person abandons a retry. */}
+          {error ? (
+            <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">
+              {error}
+            </p>
+          ) : null}
         </div>
 
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-gray-100 px-6 py-4 dark:border-white/5">
           {onClear ? (
             <button
               type="button"
+              disabled={busy}
               onClick={onClear}
-              className={`${SKILL_BUTTON} mr-auto text-red-600 dark:text-red-400`}
+              className={`${SKILL_BUTTON} mr-auto text-red-600 dark:text-red-400 disabled:opacity-50`}
             >
               {t('goal.dialog.clear')}
             </button>
@@ -190,14 +212,15 @@ export function GoalDialog({
           </button>
           <button
             type="button"
-            disabled={!canApply}
+            // Disabled while a write is in flight, so one draft is one write.
+            disabled={!canApply || busy}
             onClick={() => {
-              if (!canApply) return;
+              if (!canApply || busy) return;
               onApply({ objective: trimmed, maxRounds: parsed });
             }}
             className={SKILL_PRIMARY}
           >
-            {t('goal.dialog.apply')}
+            {busy ? t('goal.dialog.applying') : t('goal.dialog.apply')}
           </button>
         </div>
       </div>

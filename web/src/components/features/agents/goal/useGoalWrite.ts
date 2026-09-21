@@ -14,6 +14,9 @@ import { isGoalRevisionConflict } from './goalApi';
  * *before* the owner tries again — the revision this screen holds is exactly
  * the stale thing the server just refused, so leaving it in place would refuse
  * the retry too.
+ *
+ * `run` answers whether the write landed. A band's controls can act and forget,
+ * but a dialog has to keep the words it was given until the server has them.
  */
 export function useGoalWrite(onChanged: () => void) {
   const t = useT();
@@ -21,15 +24,19 @@ export function useGoalWrite(onChanged: () => void) {
   const [error, setError] = useState<string | null>(null);
 
   const run = useCallback(
-    async (action: () => Promise<unknown>) => {
+    async (action: () => Promise<unknown>): Promise<boolean> => {
       setBusy(true);
       setError(null);
       try {
         await action();
         onChanged();
+        return true;
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : t('goal.actionFailed'));
         if (isGoalRevisionConflict(cause)) onChanged();
+        // A caller holding a draft — a dialog, above all — needs to know the
+        // write did not land, because the draft is the retry.
+        return false;
       } finally {
         setBusy(false);
       }

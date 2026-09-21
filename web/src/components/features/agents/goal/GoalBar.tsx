@@ -62,7 +62,12 @@ export function GoalBar({
   // A paused goal with nothing left to spend is the one stop the owner cannot
   // clear from here: the server refuses to resume it, so the band says what has
   // to happen first rather than offering a button that can only fail.
-  const spent = goal.roundsUsed >= goal.maxRounds || goal.pauseReason === 'round_limit';
+  //
+  // Read off the numbers, never off `pause_reason`. `round_limit` stays on the
+  // row after the cap is raised — it is the history of why the goal stopped,
+  // not a standing verdict — and a band that refused on the reason alone would
+  // keep Resume disabled for a goal the server would now happily continue.
+  const spent = goal.roundsUsed >= goal.maxRounds;
 
   let text: React.ReactNode;
   let actions: React.ReactNode;
@@ -215,7 +220,9 @@ export function GoalBar({
       {hint ? (
         <span className="w-full text-[11px] text-gray-500 dark:text-gray-400">{hint}</span>
       ) : null}
-      {error ? (
+      {/* While the dialog is open it carries the refusal beside the words that
+          were refused; the band would only be repeating it off-screen. */}
+      {error && !editing ? (
         <span role="alert" className="w-full text-red-600 dark:text-red-400">
           {error}
         </span>
@@ -224,16 +231,22 @@ export function GoalBar({
         open={editing}
         limits={limits}
         initial={{ objective: goal.objective, maxRounds: goal.maxRounds }}
+        busy={busy}
+        error={editing ? error : null}
         onClose={() => setEditing(false)}
         onApply={(draft: GoalDraft) => {
-          setEditing(false);
           // The revision this band was drawn from travels with the write, so an
-          // edit from a second tab is refused rather than overwritten.
-          void run(() => writeGoal(threadId, draft, goal.revision));
+          // edit from a second tab is refused rather than overwritten. The
+          // dialog closes only once the write has landed: a refusal has to
+          // leave the owner's words where the retry can reach them.
+          void run(() => writeGoal(threadId, draft, goal.revision)).then((landed) => {
+            if (landed) setEditing(false);
+          });
         }}
         onClear={() => {
-          setEditing(false);
-          void run(() => clearAgentGoal(threadId));
+          void run(() => clearAgentGoal(threadId)).then((landed) => {
+            if (landed) setEditing(false);
+          });
         }}
       />
     </div>

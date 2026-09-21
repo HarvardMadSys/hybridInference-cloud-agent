@@ -2621,6 +2621,52 @@ describe('JobDetail', () => {
       expect(setAgentGoal).not.toHaveBeenCalled();
     });
 
+    it('keeps the command dialog and its draft when the write is refused', async () => {
+      vi.mocked(setAgentGoal).mockRejectedValueOnce(new Error('goal service unavailable'));
+      const box = await composer();
+      fireEvent.change(box, { target: { value: '/goal' } });
+      fireEvent.keyDown(box, { key: 'Enter' });
+      const dialog = await screen.findByRole('dialog');
+      fireEvent.change(within(dialog).getByLabelText('Objective'), {
+        target: { value: 'ship the release notes' },
+      });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Set condition' }));
+
+      // The dialog stays where the retry can reach it, holding the words that
+      // were refused and the reason they were.
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+        'goal service unavailable',
+      );
+      expect(within(dialog).getByLabelText('Objective')).toHaveValue('ship the release notes');
+
+      vi.mocked(setAgentGoal).mockResolvedValue({ thread_id: 'thread_9', goal: null, revision: 5 });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Set condition' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    });
+
+    it('does not clear a message typed while the command is in flight', async () => {
+      // The write is a round trip. Anything typed during it is the owner's next
+      // message, and a command that finished late must not delete it.
+      let land: (value: unknown) => void = () => {};
+      vi.mocked(setAgentGoal).mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            land = resolve;
+          }) as never,
+      );
+      const box = await composer();
+      fireEvent.change(box, { target: { value: `/goal ${OBJECTIVE}` } });
+      fireEvent.keyDown(box, { key: 'Enter' });
+      await waitFor(() => expect(setAgentGoal).toHaveBeenCalled());
+
+      fireEvent.change(box, { target: { value: 'and then update the docs' } });
+      await act(async () => {
+        land({ thread_id: 'thread_9', goal: null, revision: 5 });
+      });
+
+      expect(box).toHaveValue('and then update the docs');
+    });
+
     it('clears the goal from the command dialog without touching the conversation', async () => {
       vi.mocked(clearAgentGoal).mockResolvedValue({
         thread_id: 'thread_9',

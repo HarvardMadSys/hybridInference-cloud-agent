@@ -262,7 +262,11 @@ Next.js app, with a stub control plane standing in for the one this environment
 cannot run: the command menu in both composers, the dialog `/goal` opens, a
 new task created once from `/goal <objective>`, an existing conversation's
 goal set through the thread's own route, and the band in light, dark and a
-phone width with a long, a paused, an exhausted and a completed objective. The
+phone width with a long, a paused, an exhausted and a completed objective.
+Three edges were reproduced there and are now covered by tests: a cap that was
+raised lets Resume through even though `round_limit` is still the recorded
+reason, a refused write leaves the dialog open with the words it refused, and a
+message typed while a command is in flight survives the command landing. The
 end-to-end run below is the part that still needs a real deployment.
 
 The one acceptance check that needs a real deployment is the end-to-end run:
