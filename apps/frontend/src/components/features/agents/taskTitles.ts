@@ -11,3 +11,22 @@ export function taskTitleNeedsGeneration(
     .replace(/^["'“”‘’` ]+/, '')
     .startsWith('⏳ The model is starting up');
 }
+
+/** Keep a resolved name when an older snapshot of the same conversation arrives. */
+export function preserveResolvedTaskTitle(
+  current: AgentJobApi | null,
+  incoming: AgentJobApi,
+): AgentJobApi {
+  if (
+    current?.title &&
+    current.title_source &&
+    (current.id === incoming.id ||
+      (current.thread_id && current.thread_id === incoming.thread_id)) &&
+    !taskTitleNeedsGeneration(current) &&
+    (taskTitleNeedsGeneration(incoming) ||
+      (current.title_source === 'manual' && incoming.title_source !== 'manual'))
+  ) {
+    return { ...incoming, title: current.title, title_source: current.title_source };
+  }
+  return incoming;
+}

@@ -26,7 +26,7 @@ import { announceAgentSessionsChanged, onAgentSessionsChanged } from '@/lib/api/
 import type { AgentJob } from './types';
 import { getConversationState } from './conversationState';
 import { isActiveJobState, isActiveConversationState } from './conversationJob';
-import { taskTitleNeedsGeneration } from './taskTitles';
+import { preserveResolvedTaskTitle, taskTitleNeedsGeneration } from './taskTitles';
 
 const ACTIVE_ATTEMPT_PHASES = new Set([
   'started',
@@ -387,7 +387,7 @@ export function useAgentJob(
       .then(([job, foundThread, foundEvents]) => {
         if (cancelled || requestGeneration !== generation.current) return;
         const ownEvents = foundEvents.filter((event) => event.job_id === jobId);
-        setApi(job);
+        setApi((current) => preserveResolvedTaskTitle(current, job));
         setEvents(ownEvents);
         setThreadEvents(foundEvents);
         setThread(foundThread);
@@ -481,11 +481,14 @@ export function useAgentJob(
       void getAgentJob(jobId)
         .then((latest) => {
           if (cancelled || generation.current !== version) return;
-          setApi((current) =>
-            current?.id === latest.id
-              ? { ...current, title: latest.title, title_source: latest.title_source }
-              : current,
-          );
+          setApi((current) => {
+            if (current?.id !== latest.id) return current;
+            return preserveResolvedTaskTitle(current, {
+              ...current,
+              title: latest.title,
+              title_source: latest.title_source,
+            });
+          });
           if (
             latest.thread_id &&
             latest.title_source === 'generated' &&
@@ -534,7 +537,8 @@ export function useAgentJob(
       // briefly reset unrelated UI state for no benefit.
       void getAgentJob(jobId)
         .then((latest) => {
-          if (!cancelled && generation.current === version) setApi(latest);
+          if (!cancelled && generation.current === version)
+            setApi((current) => preserveResolvedTaskTitle(current, latest));
         })
         .catch(() => {
           // This is a background freshness aid. Keep the last good terminal

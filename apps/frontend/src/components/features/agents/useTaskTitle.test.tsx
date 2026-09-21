@@ -112,6 +112,79 @@ describe('automatic task title refresh', () => {
     expect(result.current.job?.title).toBe(initial.title);
     expect(getAgentJob).toHaveBeenCalledTimes(66);
   });
+  it('keeps a recovered title when an older activity refresh arrives later', async () => {
+    const idle = { ...initial, state: 'succeeded', conversation_state: 'running' } as AgentJobApi;
+    vi.mocked(getAgentJob).mockResolvedValue(idle);
+    const { result } = renderHook(() => useAgentJob(initial.id));
+    await act(async () => {});
+    await act(async () => vi.advanceTimersByTimeAsync(4_000));
+    let resolve!: (row: AgentJobApi) => void;
+    vi.mocked(getAgentJob).mockReturnValueOnce(new Promise((done) => (resolve = done)));
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    vi.mocked(getAgentJob).mockResolvedValue({
+      ...idle,
+      title: 'Export CSV',
+      title_source: 'generated',
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    expect(result.current.job?.title).toBe('Export CSV');
+    await act(async () => resolve(idle));
+    expect(result.current.job?.title).toBe('Export CSV');
+  });
+  it('keeps a recovered title when an older full reload arrives later', async () => {
+    const { result } = renderHook(() => useAgentJob(initial.id));
+    await act(async () => {});
+    let resolve!: (row: AgentJobApi) => void;
+    vi.mocked(getAgentJob).mockReturnValueOnce(new Promise((done) => (resolve = done)));
+    await act(async () => result.current.reload());
+    vi.mocked(getAgentJob).mockResolvedValue({
+      ...initial,
+      title: 'Export CSV',
+      title_source: 'generated',
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(result.current.job?.title).toBe('Export CSV');
+    await act(async () => resolve(initial));
+    expect(result.current.job?.title).toBe('Export CSV');
+    expect(result.current.loading).toBe(false);
+  });
+  it('does not broadcast a stale generated title after a manual title is observed', async () => {
+    const idle = { ...initial, state: 'succeeded', conversation_state: 'running' } as AgentJobApi;
+    vi.mocked(getAgentJob).mockResolvedValue(idle);
+    const { result } = renderHook(() => useAgentJob(initial.id));
+    await act(async () => {});
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    let resolve!: (row: AgentJobApi) => void;
+    vi.mocked(getAgentJob).mockReturnValueOnce(new Promise((done) => (resolve = done)));
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    vi.mocked(getAgentJob).mockResolvedValue({ ...idle, title: 'My name', title_source: 'manual' });
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    expect(result.current.job?.title).toBe('My name');
+    const changed = vi.fn();
+    const unsubscribe = onAgentSessionsChanged(changed);
+    await act(async () =>
+      resolve({ ...idle, title: 'Old generated name', title_source: 'generated' }),
+    );
+    expect(result.current.job?.title).toBe('My name');
+    expect(changed).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+  it('does not carry a resolved title into a different conversation', async () => {
+    vi.mocked(getAgentJob).mockResolvedValue({
+      ...initial,
+      title: 'Export CSV',
+      title_source: 'generated',
+    });
+    const { result, rerender } = renderHook(({ id }) => useAgentJob(id), {
+      initialProps: { id: initial.id },
+    });
+    await act(async () => {});
+    const next = { ...initial, id: 'job-two', thread_id: 'thread-two', title: 'Fix login' };
+    vi.mocked(getAgentJob).mockResolvedValue(next);
+    rerender({ id: next.id });
+    await act(async () => {});
+    expect(result.current.job?.title).toBe('Fix login');
+  });
   it.each([
     { title: initial.title, title_source: 'fallback' },
     { title: '⏳ The model is starting up — this t…', title_source: 'generated' },
