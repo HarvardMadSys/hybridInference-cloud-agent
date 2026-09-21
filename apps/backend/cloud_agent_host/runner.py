@@ -3239,15 +3239,30 @@ def run_forever(
     # store holds nothing, which reads as "not collecting" -- a restart is a
     # Stop, never an accidental continuation.
     try:
+        # The broker client is the real one, built from this host's own
+        # environment. Without it the runner would know what to collect and the
+        # broker -- a separate container that shares no memory with it -- would
+        # never hear, so every file and terminal sample would arrive with its
+        # container sub-stages missing. A host that has no broker configured
+        # passes ``None`` and still syncs its own configuration.
+        try:
+            broker_client: SessionSupervisorClient | None = _session_supervisor_from_env()
+        except Exception:
+            broker_client = None
+            logger.info(
+                "agent_profiling_broker_unconfigured",
+                extra={"event": "agent_profiling_broker_unconfigured"},
+            )
         policy_sync = ProfilingPolicySync(
             base_url=base_url,
             credential=identity.credential,
             host=identity.host,
+            broker=broker_client,
         )
         policy_sync.install()
     except Exception:
-        # A host that cannot sync a *monitoring* policy still serves turns.
-        # Reporting the failure is enough; refusing to run would make an
+        # A host that cannot sync a *monitoring* configuration still serves
+        # turns. Reporting the failure is enough; refusing to run would make an
         # experiment's plumbing a prerequisite for the product.
         logger.warning("agent_profiling_policy_unavailable", exc_info=True)
         policy_sync = None
@@ -3264,8 +3279,8 @@ def run_forever(
         capabilities=lambda: [
             *_shared_live_host_capabilities(backend, stamp),
             HOST_CONCURRENCY_CAPABILITY,
-            # Advertised so the Admin page can tell a host that will apply a
-            # runtime policy from one that needs a redeploy to change, which is
+            # Advertised so an operator can tell a host that will pick up a
+            # runtime configuration from one that needs a redeploy, which is
             # the same distinction the concurrency capability draws.
             PROFILING_CONTROL_CAPABILITY,
         ],
@@ -3281,9 +3296,6 @@ def run_forever(
         # is older than the protocol allows: an unsent observation reads as
         # stale on the page, which is the truth.
         capacity_beats=None if capacity is None else lambda: capacity.latest()[0],
-        # Read per beat, so the revision reported is the one in force when the
-        # beat was built rather than one cached at startup.
-        profiling=None if policy_sync is None else policy_sync.report,
         on_residencies_lost=_handle_host_residencies_lost,
         on_retained_sandboxes_stop=_stop_retained_sandboxes,
     )

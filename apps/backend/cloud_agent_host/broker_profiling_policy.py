@@ -21,9 +21,10 @@ selection is only honoured when the broker's own policy already says that run is
 in force.
 
 **Revisions only move forwards.** A lower revision is refused rather than
-applied, so a retried or reordered push cannot resurrect a policy the runner has
-already moved past. An equal revision is idempotent and answers with what is
-already held.
+applied, so a delayed or reordered push cannot resurrect a configuration the
+runner has already moved past. An equal revision is idempotent and answers with
+what is already held. This is the same anti-rollback rule the host applies to
+the control plane, and it is the only ordering this channel needs.
 
 **Everything is bounded.** The message crosses a process boundary and is not
 trusted: a bounded number of operations, bounded strings, and a deadline that
@@ -70,7 +71,9 @@ MAX_DETAIL_CHARS = 200
 #: race each other into two different answers about which revision is applied.
 _POLICY_LOCK = threading.Lock()
 
-#: Broker-side participant state: what this process applied and how it is doing.
+#: What this broker has applied. Local state, read back by the runner that
+#: pushed it; nothing upstream depends on it and it is not an acknowledgement
+#: anybody waits for.
 _APPLIED: dict[str, Any] = {
     "revision": 0,
     "run_id": None,
@@ -79,7 +82,7 @@ _APPLIED: dict[str, Any] = {
 
 
 def applied_state() -> dict[str, Any]:
-    """Return what this broker has applied, for the runner to report upwards."""
+    """Return what this broker has applied, for the runner's own diagnostics."""
     return {
         "revision": int(_APPLIED["revision"]),
         "run_id": _APPLIED["run_id"],
@@ -110,7 +113,7 @@ def install_policy_provider() -> None:
             published = policy_store().published()
             if published is None:
                 return ControlState(mode=MODE_ADMIN)
-            return published.policy
+            return published.state
 
     install(_Pushed())
 
@@ -120,7 +123,7 @@ def apply_received_policy(payload: dict[str, Any]) -> dict[str, Any]:
 
     Idempotent by revision: the same revision answers with what is already held,
     and a lower one is refused. That is what makes a retried push harmless and a
-    reordered one unable to undo a Stop.
+    delayed one unable to undo a Stop.
 
     Authentication happens at the route, which is the broker's own
     ``authenticate`` dependency -- the same shared-token check every other broker
@@ -155,7 +158,7 @@ def apply_received_policy(payload: dict[str, Any]) -> dict[str, Any]:
             # configure: the broker keeps its own environment's answer, and a
             # policy that said otherwise would be the runner overruling a
             # deployment setting.
-            policy_store().publish(ControlState(mode=mode, control_revision=revision))
+            policy_store().publish(ControlState(mode=mode, config_version=revision))
         _APPLIED.update(
             {
                 "revision": revision,
@@ -170,15 +173,15 @@ def _publish(*, revision: int, run: ProfilingRun | None) -> None:
     """Publish one accepted policy into the broker's store."""
     store = policy_store()
     if run is None:
-        # A policy with no run is a Stop, not an absence. It carries the
-        # revision that stopped it, so a fragment already in flight can be told
-        # from one that arrived after.
+        # A configuration with no run means "stop selecting". It carries the
+        # revision that says so, so a fragment already in flight can be told
+        # from one that arrived after -- and work already selected is not
+        # touched by it.
         store.publish(
             ControlState(
                 mode=MODE_ADMIN,
-                control_revision=revision,
+                config_version=revision,
                 run=None,
-                authority_epoch=datetime.now(timezone.utc).timestamp(),
                 stop_reason="stopped",
             )
         )
@@ -186,10 +189,8 @@ def _publish(*, revision: int, run: ProfilingRun | None) -> None:
     store.publish(
         ControlState(
             mode=MODE_ADMIN,
-            control_revision=revision,
+            config_version=revision,
             run=run,
-            authority_epoch=datetime.now(timezone.utc).timestamp(),
-            authorization_ttl_s=0.0,
         ),
         run=run,
     )
