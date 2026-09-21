@@ -811,7 +811,7 @@ describe('measurement collection control', () => {
     render(<AdminMeasurementsPage />);
     await screen.findByRole('button', { name: 'Enable measurement' });
 
-    expect(within(card()).getByText('Off')).toBeInTheDocument();
+    expect(within(card()).getByText('Disabled')).toBeInTheDocument();
     // One button, never two: nothing here offers to stop what is not running.
     expect(within(card()).getAllByRole('button')).toHaveLength(1);
     expect(within(card()).queryByRole('button', { name: /disable/i })).not.toBeInTheDocument();
@@ -838,12 +838,12 @@ describe('measurement collection control', () => {
     render(<AdminMeasurementsPage />);
     await within(card()).findByText(explanation);
 
-    // The one-line status is configuration, and it is not "Off".
+    // The one-line status is configuration, and it is not "Disabled".
     const header = within(card()).getByRole('heading', {
       name: 'Measurement collection',
     }).parentElement!;
     expect(within(header).getByText(line)).toBeInTheDocument();
-    expect(within(card()).queryByText('Off')).not.toBeInTheDocument();
+    expect(within(card()).queryByText('Disabled')).not.toBeInTheDocument();
     // Not one button: not "Enable measurement", and not a disabled one either.
     expect(within(card()).queryAllByRole('button')).toHaveLength(0);
   });
@@ -894,7 +894,7 @@ describe('measurement collection control', () => {
     expect(body.request_id.length).toBeGreaterThan(0);
 
     // What is drawn is the snapshot the server returned, not a local guess.
-    expect(await screen.findByText('Measuring')).toBeInTheDocument();
+    expect(await screen.findByText('Enabled')).toBeInTheDocument();
     expect(screen.getByText('Operations: Sandbox startup, File access')).toBeInTheDocument();
     expect(screen.getByText('Host: host-a')).toBeInTheDocument();
     expect(screen.getByText(/^Expires at: /)).toBeInTheDocument();
@@ -909,7 +909,7 @@ describe('measurement collection control', () => {
     render(<AdminMeasurementsPage />);
     await screen.findByRole('button', { name: 'Disable measurement' });
 
-    expect(within(card()).getByText('Measuring')).toBeInTheDocument();
+    expect(within(card()).getByText('Enabled')).toBeInTheDocument();
     expect(within(card()).getAllByRole('button')).toHaveLength(1);
     expect(
       within(card()).queryByRole('button', { name: 'Enable measurement' }),
@@ -973,7 +973,7 @@ describe('measurement collection control', () => {
     expect(screen.getByLabelText('Duration')).toHaveValue('30');
     expect(screen.getByRole('button', { name: 'Enable measurement' })).toBeInTheDocument();
     // And nothing was drawn as though a run had begun.
-    expect(within(card()).getByText('Off')).toBeInTheDocument();
+    expect(within(card()).getByText('Disabled')).toBeInTheDocument();
     expect(within(card()).queryByRole('button', { name: /disable/i })).not.toBeInTheDocument();
   });
 
@@ -1028,7 +1028,7 @@ describe('measurement collection control', () => {
       expect(confirm).not.toHaveBeenCalled();
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
-      expect(await screen.findByText('Off')).toBeInTheDocument();
+      expect(await screen.findByText('Disabled')).toBeInTheDocument();
       expect(screen.getByText(/Last experiment: prun-1/)).toBeInTheDocument();
       expect(screen.getByText(/Stop reason: stopped_by_admin/)).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Enable measurement' })).toBeInTheDocument();
@@ -1096,7 +1096,7 @@ describe('measurement collection control', () => {
     render(<AdminMeasurementsPage />);
     await screen.findByText('Admin access required');
     expect(screen.queryByText('Measurement collection')).not.toBeInTheDocument();
-    expect(screen.queryByText('Off')).not.toBeInTheDocument();
+    expect(screen.queryByText('Disabled')).not.toBeInTheDocument();
   });
 
   it('keeps the last successful read when a background poll fails, flagged as stale', async () => {
@@ -1110,13 +1110,13 @@ describe('measurement collection control', () => {
     ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    await within(card()).findByText('Off');
+    await within(card()).findByText('Disabled');
 
     vi.mocked(getProfilingControl).mockRejectedValueOnce(new APIError('SERVER_ERROR', 'boom', 500));
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await screen.findByText(/showing the last successful read/);
     // The last good state is still on screen, and still says Off.
-    expect(within(card()).getByText('Off')).toBeInTheDocument();
+    expect(within(card()).getByText('Disabled')).toBeInTheDocument();
     expect(within(card()).getByRole('button', { name: 'Enable measurement' })).toBeEnabled();
   });
 

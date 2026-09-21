@@ -20,7 +20,7 @@
 //             offers no button at all and explains why instead.
 //
 // Every fact shown after a write is the server's: the response carries the
-// control snapshot the command produced, and showing "Measuring" before that
+// control snapshot the command produced, and showing "Enabled" before that
 // snapshot arrives would be this page's guess about a machine it cannot see.
 //
 // It also reads itself: a live run is re-read every five seconds, an idle
@@ -84,13 +84,14 @@ const SAMPLE_NOTE =
 /**
  * The one-line status, which is a statement about configuration.
  *
- * It is not a consensus and must not be read as one: an experiment is
- * "Measuring" the moment the deployment is configured to collect, whether or
- * not every process has caught up.
+ * It is not a consensus and must not be read as one: collection is "Enabled"
+ * the moment the deployment is configured for it, whether or not every process
+ * has caught up. The wording says exactly that -- "Enabled"/"Disabled" rather
+ * than "Measuring"/"Off", which would claim samples are arriving.
  */
 function statusLine(status: string): string {
-  if (status === 'off') return 'Off';
-  if (status === 'on') return 'Measuring';
+  if (status === 'off') return 'Disabled';
+  if (status === 'on') return 'Enabled';
   if (status === 'unmanaged') return 'Managed by deployment configuration';
   return 'Unavailable';
 }
@@ -102,8 +103,9 @@ function statusDetail(control: ProfilingControlSnapshot): string {
   }
   if (control.status === 'off') {
     return (
-      'Nothing is being collected. Measurement records server-side timings only, while ' +
-      'sandboxes, terminals and files are used.'
+      'No new operations are selected. Disabling stops selecting; a measurement that already ' +
+      'started finishes and is stored. Records server-side timings only, while sandboxes, ' +
+      'terminals and files are used.'
     );
   }
   if (control.status === 'unmanaged') {
