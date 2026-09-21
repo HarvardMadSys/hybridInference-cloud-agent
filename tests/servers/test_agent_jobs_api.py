@@ -1090,12 +1090,24 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         }
 
     async def latest_assistant_message(self, *, job_id: str) -> str | None:
+        message = await self.latest_assistant_message_state(job_id=job_id)
+        return None if message is None else str(message["content"])
+
+    async def latest_assistant_message_state(self, *, job_id: str) -> dict[str, Any] | None:
         said = [
-            message["content"]
+            message
             for message in self.messages
             if message["job_id"] == job_id and message["role"] == "assistant"
         ]
-        return said[-1] if said else None
+        if not said:
+            return None
+        newest = said[-1]
+        return {
+            "content": newest["content"],
+            # A runtime that clipped its text says so on the event, and the
+            # store carries it onto the row. The fake does the same.
+            "truncated": newest.get("truncated") is True,
+        }
 
     async def latest_terminal_turn(self, *, thread_id: str) -> dict[str, Any] | None:
         finished = sorted(

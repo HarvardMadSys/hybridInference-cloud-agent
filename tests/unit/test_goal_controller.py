@@ -68,6 +68,8 @@ def turn(
     detail: str | None = None,
     input_seq_at_create: int = 0,
     turn_no: int = 1,
+    archived_at: str | None = None,
+    runtime: str = "claude-code",
 ) -> dict[str, Any]:
     """One turn of the conversation, with only the fields a decision reads.
 
@@ -94,9 +96,9 @@ def turn(
         "goal_report_reason": report_reason,
         "goal_report_detail": report_detail,
         "detail": detail,
-        "runtime": "claude-code",
+        "runtime": runtime,
         "input_seq_at_create": input_seq_at_create,
-        "archived_at": None,
+        "archived_at": archived_at,
         "thread_sandbox": None,
     }
 
@@ -751,3 +753,76 @@ async def test_a_completion_is_refused_when_a_person_spoke_while_it_was_decided(
     assert await _consume(store) == "none"
     assert store.goal["state"] == "active"
     assert store.goal["completion_basis"] is None
+
+
+async def test_an_owner_wakeup_on_an_archived_conversation_pauses_and_says_so():
+    """Resume is authorized by the owner, not by "the conversation is fine".
+
+    Ignoring the last turn's *result* must not become ignoring the conversation:
+    an archived task, a lost session and a repository the owner can no longer
+    reach all stop a resume too, and leaving the goal silently active would show
+    a green badge over work nothing will ever run.
+    """
+    store = FakeStore(
+        goal=goal_row(state="paused", pause_reason="user", pause_detail="paused by the user"),
+        turns=[turn(id="job-1", input_seq_at_create=1, archived_at="2026-09-20T00:00:00Z")],
+        input_seq=1,
+    )
+    store.goal["state"] = "active"
+    store.goal_wakeups.arm(trigger="owner", trigger_ref="resume:2")
+
+    assert await _consume(store) == "pause"
+    assert (store.goal["state"], store.goal["pause_reason"]) == ("paused", "archived")
+    assert store.rounds() == []
+
+
+async def test_an_owner_wakeup_ignores_the_result_but_keeps_the_runtime():
+    """The turn's outcome is neutralised; the conversation's runtime is not.
+
+    A goal round can only run where its report can be read, and that is a fact
+    about the runtime rather than about how the last turn ended — so a resume on
+    a conversation whose runtime cannot deliver a report still pauses instead of
+    queueing a round nobody can hear from.
+    """
+    store = FakeStore(
+        goal=goal_row(),
+        turns=[
+            turn(id="job-1", state="cancelled", input_seq_at_create=1, runtime="not-a-runtime"),
+        ],
+        input_seq=1,
+    )
+    store.goal_wakeups.arm(trigger="owner", trigger_ref="resume:2")
+
+    assert await _consume(store) == "pause"
+    assert store.goal["pause_reason"] == "runtime_unsupported"
+
+
+async def test_a_truncated_final_message_is_unreadable_rather_than_absent():
+    """A clipped message is not a message that chose to say nothing.
+
+    The report block is at the *end* of a final message and the runtime's text
+    bound is what removes it, so reading a clipped message as "absent" would
+    keep a goal working forever on a turn that may have reported completion.
+    The runtime records that it clipped, and the reader has to consume it.
+    """
+    store = FakeStore(
+        goal=goal_row(rounds_used=1),
+        turns=[
+            turn(id="job-1", input_seq_at_create=1),
+            turn(
+                id="job-2",
+                turn_source="goal",
+                goal_id=GOAL_ID,
+                round_kind="work",
+                report_parse="unavailable",
+                report_detail="the runtime truncated this turn's final message",
+                input_seq_at_create=1,
+                turn_no=2,
+            ),
+        ],
+        input_seq=1,
+    )
+    store.goal_wakeups.arm(trigger="finish", trigger_ref="job:job-2")
+
+    assert await _consume(store) == "pause"
+    assert (store.goal["state"], store.goal["pause_reason"]) == ("paused", "report_unavailable")

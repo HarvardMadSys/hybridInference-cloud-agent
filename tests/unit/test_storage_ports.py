@@ -105,9 +105,13 @@ def test_every_port_method_matches_its_implementation(path: Path) -> None:
     assert not missing, f"{path.name}: implemented nowhere: {missing}"
     for name, described in port.items():
         actual = store[name]
-        if name in SIGNATURE_EXEMPT:
-            continue
-        assert described[0] == actual[0], f"{path.name}.{name}: async-ness differs"
+        # Only async-ness is exempt, and only for the names in
+        # ``SIGNATURE_EXEMPT``. The arguments, the return annotation and the
+        # documented contract are compared for every method a port declares,
+        # including those — a narrower list would let a port describe an
+        # operation whose repository counterpart takes something else.
+        if name not in SIGNATURE_EXEMPT:
+            assert described[0] == actual[0], f"{path.name}.{name}: async-ness differs"
         assert described[1] == actual[1], f"{path.name}.{name}: arguments differ"
         assert described[2] == actual[2], f"{path.name}.{name}: return annotation differs"
         assert described[3] == actual[3], f"{path.name}.{name}: docstring differs"

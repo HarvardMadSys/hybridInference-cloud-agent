@@ -184,19 +184,24 @@ async def consume_wakeup(
             wakeup_id=str(wakeup["id"]), processed=True, detail=f"goal {goal.get('state')}"
         )
         return "none"
-    if wakeup.get("trigger") == "owner":
+    owner_triggered = wakeup.get("trigger") == "owner"
+    if owner_triggered:
         # The owner asked for this. Their authorization is the trigger, and the
-        # last turn that happened is *not* an outcome to judge again: resuming a
-        # goal paused by a cancelled round would otherwise read that cancelled
-        # round and pause it straight back, which makes the only Resume button
-        # in the product a no-op. The decision below is "can new work start
-        # now", and it is made from the goal and the queue, not from history.
+        # last turn's *outcome* is not judged again: resuming a goal paused by a
+        # cancelled round would otherwise read that cancelled round and pause it
+        # straight back, which makes the only Resume button in the product a
+        # no-op.
+        #
+        # The conversation is still read, because whether work may start at all
+        # is a fact about the conversation and not about the last turn's result:
+        # an archived conversation, a lost session and a repository the owner
+        # can no longer reach all stop a resume too, and each has to say so.
         queued = await store.goals.live_turn_id(thread_id=thread_id)
         if queued is not None:
             await _park(store, wakeup=wakeup, job_id=queued)
             return "wait"
-        turn = None
-        context = _context_for(goal=goal, turn=None)
+        turn = await store.conversation_queries.latest_turn(thread_id=thread_id)
+        context = _context_for(goal=goal, turn=turn, owner_triggered=True)
     else:
         turn = await _turn_to_judge(store=store, wakeup=wakeup)
         if turn is not None and turn.get("state") in ("queued", "running"):
@@ -271,13 +276,24 @@ async def _turn_to_judge(*, store: _GoalStore, wakeup: dict[str, Any]) -> dict[s
     return await store.conversation_queries.latest_turn(thread_id=str(wakeup["thread_id"]))
 
 
-def _context_for(goal: dict[str, Any], turn: dict[str, Any] | None) -> GoalContext:
+def _context_for(
+    goal: dict[str, Any],
+    turn: dict[str, Any] | None,
+    *,
+    owner_triggered: bool = False,
+) -> GoalContext:
     """Everything the decision needs, from the goal and the turn it judges.
 
     A *person's* turn never carries a report: the completion protocol belongs to
     the automatic rounds the platform asked for. A person's turn is judged for
     what it means for scheduling — usually "carry on" — and the goal is
     completed only by a round that was run to work on it.
+
+    ``owner_triggered`` goes further and neutralises the turn's *result* as
+    well: a resume is authorized by the owner rather than by how the last turn
+    ended, so that turn cannot pause, stop or continue anything. Everything the
+    conversation itself contributes — the runtime that will run the round, and
+    the eligibility the caller checks separately — still applies.
     """
     runtime = str((turn or {}).get("runtime") or "")
     if turn is None:
@@ -297,7 +313,7 @@ def _context_for(goal: dict[str, Any], turn: dict[str, Any] | None) -> GoalConte
             report_parse=None,
             repairs_used=int(goal.get("repairs_used") or 0),
         )
-    is_goal_round = turn.get("goal_round_kind") is not None
+    is_goal_round = turn.get("goal_round_kind") is not None and not owner_triggered
     parse_result = cast("GoalReportParse", turn["goal_report_parse"]) if is_goal_round else None
     if turn["state"] == "failed" and parse_result in (None, "absent"):
         # A failed turn's message is not evidence that the model said nothing:
@@ -317,14 +333,23 @@ def _context_for(goal: dict[str, Any], turn: dict[str, Any] | None) -> GoalConte
         turn_job_id=str(turn["id"]),
         turn_goal_id=turn.get("goal_id"),
         turn_revision=turn.get("round_goal_revision"),
-        turn_state=str(turn["state"]),
-        turn_round_kind=turn.get("goal_round_kind"),
+        # The owner's authorization stands in for the turn's outcome; only the
+        # turn's report and result are ignored, never the conversation's own
+        # eligibility, which the caller checks separately.
+        turn_state="succeeded" if owner_triggered else str(turn["state"]),
+        turn_round_kind=None if owner_triggered else turn.get("goal_round_kind"),
         report_parse=parse_result,
         report=report,
         report_detail=turn.get("goal_report_detail"),
         turn_detail=turn.get("detail"),
         thread_has_queued_turn=False,
-        thread_has_newer_input=_has_newer_input(turn),
+        # A person's message since this turn was created means the turn's own
+        # outcome is no longer current — that is what stops a completion from
+        # finishing a goal the owner has moved past. An *owner trigger* is the
+        # opposite: the newer input it sees is the authorization it is acting
+        # on, and there is no report to judge, so it does not stand in the way
+        # of scheduling the work that authorization asked for.
+        thread_has_newer_input=_has_newer_input(turn) and not owner_triggered,
         repairs_used=int(goal.get("repairs_used") or 0),
         repair_supported=_repair_supported(runtime),
         runtime_supported=runtime in GOAL_REPORT_RUNTIMES,

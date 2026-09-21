@@ -941,7 +941,9 @@ async def test_a_replayed_round_creation_makes_one_row(store, pool):
     assert len([turn for turn in turns if turn["turn_source"] == "goal"]) == 1
 
 
-async def test_a_goal_created_with_the_first_message_queues_its_first_round(store, pool):
+async def test_a_goal_created_with_the_first_message_queues_its_first_round(
+    store, pool, monkeypatch: pytest.MonkeyPatch
+):
     """The whole first-round path, on the rows a real conversation writes.
 
     A goal created alongside the opening message is the ordinary way a goal
@@ -955,6 +957,9 @@ async def test_a_goal_created_with_the_first_message_queues_its_first_round(stor
     from cloud_agent.goals.controller import consume_wakeup, continue_after_finish
     from cloud_agent.goals.models import GOAL_REPORT_PROTOCOL
 
+    # The consumer checks the repository's entitlement before it schedules, so
+    # this deployment has to allow the repository the case runs against.
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "example-org/example-repo")
     job = await _create_job_with_goal(store, objective="ship it")
     thread_id = str(job["thread_id"])
     assert await store.goals.get_goal(thread_id=thread_id) is not None
@@ -1008,3 +1013,83 @@ async def _thread_turns(store, pool, thread_id: str) -> list[dict[str, Any]]:
             "SELECT id FROM agent_jobs WHERE thread_id = $1 ORDER BY turn_no", thread_id
         )
     return [await store.conversation_queries.get_job(str(row["id"])) for row in rows]
+
+
+async def test_a_clipped_assistant_message_is_recorded_as_incomplete(store, pool):
+    """The completeness marker travels from the event to the row and back.
+
+    A runtime that binds its text drops the *end* of a message, which is where
+    the report block lives. That has to survive the trip: the event carries it,
+    the stored message keeps it, and the read a report is taken from returns it,
+    so the reader can tell "the model said no more" from "the transport stopped
+    carrying what it said".
+    """
+    # While the attempt still holds its lease — which is when a runtime emits
+    # the message in the first place.
+    job, first, _ = await _live_goal_job(store)
+    assert await store.attempt_commands.append_event(
+        attempt_id=first["attempt_id"],
+        lease_generation=first["lease_generation"],
+        event_type="message",
+        payload={"text": "a long answer that was cut off", "truncated": True},
+    )
+    # A runtime that did not clip says nothing, and the default is complete.
+    assert await store.attempt_commands.append_event(
+        attempt_id=first["attempt_id"],
+        lease_generation=first["lease_generation"],
+        event_type="message",
+        payload={"text": "the whole answer"},
+    )
+
+    state = await store.conversation_queries.latest_assistant_message_state(job_id=str(job["id"]))
+    assert state == {"content": "the whole answer", "truncated": False}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT content, truncated FROM agent_thread_messages "
+            "WHERE job_id = $1 AND role = 'assistant' ORDER BY id",
+            job["id"],
+        )
+    assert [(row["content"], row["truncated"]) for row in rows] == [
+        ("a long answer that was cut off", True),
+        ("the whole answer", False),
+    ]
+
+
+async def test_a_resume_on_a_conversation_with_no_repository_access_pauses(
+    store, pool, monkeypatch: pytest.MonkeyPatch
+):
+    """An owner trigger ignores the last turn's result, not the conversation's state.
+
+    Resume is authorized by the owner, so the round that paused the goal is not
+    judged again — but the conversation still has to be one work can run in. A
+    repository this deployment does not allow is the case a real deployment hits
+    first, and leaving the goal silently active would show a green badge over
+    work that nothing will ever run.
+    """
+    from cloud_agent.goals.controller import consume_wakeup
+
+    job, first, goal = await _live_goal_job(store)
+    await _finish(pool, first)
+    assert await store.goals.pause_goal(
+        thread_id=str(job["thread_id"]), revision=goal["revision"], reason="user"
+    )
+
+    # A repository outside the allowlist, and no App installation to fall back
+    # on: entitlement is the one eligibility read that leaves the database.
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "someone-else/other-repo")
+    resumed = await store.goals.resume_goal(
+        thread_id=str(job["thread_id"]), user_id=job["user_id"], revision=goal["revision"] + 1
+    )
+    assert resumed is not None and resumed["state"] == "active"
+
+    claimed = await store.goal_wakeups.claim_wakeups(limit=1)
+    assert claimed, "resume did not record its obligation"
+    assert await consume_wakeup(store=store, wakeup=claimed[0]) == "pause"
+
+    after = await store.goals.get_goal(thread_id=str(job["thread_id"]))
+    assert (after["state"], after["pause_reason"]) == ("paused", "access_denied")
+    assert not [
+        row
+        for row in await _thread_turns(store, pool, str(job["thread_id"]))
+        if row["turn_source"] == "goal" and row["state"] == "queued"
+    ]

@@ -43,7 +43,12 @@ from cloud_agent.gateway import GatewayError
 from cloud_agent.github_app import AppNotInstalled
 from cloud_agent.goals.controller import continue_after_finish
 from cloud_agent.goals.prompts import prompt_with_goal
-from cloud_agent.goals.report import GoalReportEnvelope, parse_goal_report, source_digest
+from cloud_agent.goals.report import (
+    GoalReportEnvelope,
+    parse_goal_report,
+    source_digest,
+    unavailable,
+)
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.models import ConnectionStatus
@@ -1454,10 +1459,23 @@ async def _goal_envelope_for_turn(
     ``absent``, and an absent report simply means "keep going". A turn whose
     message could not be read is different in kind, and is reported as such
     rather than being quietly treated as silence.
+
+    A *clipped* message is the case that distinction exists for. The report
+    block sits at the end of a final message, so a runtime that bound its text
+    — Pi cuts at 4,000 characters — removes exactly the part a reader needs.
+    Reading the clipped text as "no report" would keep a goal working forever
+    on a turn that may well have reported completion, so the completeness
+    marker the runtime recorded travels back with the text.
     """
     if job.get("goal_id") is None or job.get("turn_source") != "goal":
         return None
-    text = await queries.latest_assistant_message(job_id=str(job["id"]))
+    message = await queries.latest_assistant_message_state(job_id=str(job["id"]))
+    if message is not None and message["truncated"]:
+        return GoalReportEnvelope.from_parsed(
+            unavailable("the runtime truncated this turn's final message"),
+            source_digest=None,
+        )
+    text = None if message is None else str(message["content"])
     parsed = parse_goal_report(text)
     return GoalReportEnvelope.from_parsed(parsed, source_digest=source_digest(text))
 
