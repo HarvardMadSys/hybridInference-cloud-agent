@@ -215,13 +215,22 @@ flowchart LR
    交接只在父进程里成立，真实子进程静默不采集。安全性来自通道而不是本地复查——这段
    context 由已经证明过该选择的父进程经管道交给它；子进程只重新声明，并仍然强制实验未过期。
 5. broker 的判定分两种情况，不能混为一谈：
-   - **延续**：context 带着不可变 manifest（`run` 对象）。这是"已经选中的操作在 Disable
-     之后继续调用 broker"，必须放行，否则根记录会以缺失 broker 阶段的形式悄悄入库——比
-     拒绝更糟。它带 `run` 这一点本身就说明它来自持有该实验的可信生产者，且只经 broker 的
-     共享令牌通道到达。
+   - **延续**：context 带着不可变 manifest（`run` 对象），**且本进程处于 `MODE=admin`**。
+     这是"已经选中的操作在 Disable 之后继续调用 broker"，必须放行，否则根记录会以缺失
+     broker 阶段的形式悄悄入库——比拒绝更糟。
    - **新选择**：context 只声明操作、不带 manifest。这时**本进程的配置说了算**：run 必须
      匹配且选中该操作。调用方不能靠声明 `operations` 覆盖 broker 的配置。
    普通 profiling header 单独不能让 broker 开启采集。
+
+   **`MODE=disabled` 与 Admin 卡片上的 Disable 是两件事，不能合并。** 前者是"本部署禁止
+   采集"，包括"什么都没配"的默认值：这样的进程不能被上游 context 说服去分配 measurement
+   或 recorder，否则分阶段部署无法真正静默某个 producer。所以接续**只在 `MODE=admin` 下
+   可用**；`MODE=environment` 继续由本进程的静态 descriptor 决定（父子环境相同，走原有
+   `_load()` 路径）。
+
+   接续的截止时间是三个上限取较早者：**原实验 manifest 的绝对到期时刻**、传输 context
+   的截止、以及（本地恰好同名时的）本地实验截止。manifest 已过期则直接拒绝——一个选择
+   不能因为"在路上"而获得额外时间。
 
 时限（实现值）：
 

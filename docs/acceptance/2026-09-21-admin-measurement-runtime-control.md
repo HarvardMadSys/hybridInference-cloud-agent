@@ -41,6 +41,21 @@ ACK 或复杂状态机。**
 展示收尾（非阻断）：状态词统一为 **Enabled / Disabled**；停用说明写清"停止选择新操作，
 已开始的测量会继续完成"；同步提示改为"正常约 30 秒"而非硬保证。
 
+## 0.2 接续边界复核修复（`d9a8c3a` 复核后的两项）
+
+第二轮复核确认上一轮三项正常场景已修好，又找到两处**接续分支的本地边界校验**缺失。同样
+在简化模型内修复，没有引入租约或 ACK。
+
+| 问题 | 根因 | 修复 | 回归证据 |
+| --- | --- | --- | --- |
+| **[P2] 接续绕过部署级 `disabled`** | 接续分支只看 `_load().run`，不看进程的控制模式；`MODE=disabled`（含"什么都没配"的默认值）下仍会分配 measurement 与 recorder | 接续**只在 `MODE=admin` 下可用**：`disabled` 是"本部署禁止采集"，与 Admin 卡片上的 Disable 是两件事；`environment` 继续由自己的静态 descriptor 决定（父子环境相同，走原有 `_load()` 路径） | `test_a_disabled_deployment_refuses_a_continuation`（含真实 `open_call` 解析路径）、`test_a_default_off_deployment_refuses_a_continuation`、`test_environment_mode_still_follows_its_own_descriptor`；subprocess 测试追加"同一份真实 handoff 交给 `MODE=disabled` 的新解释器 → `attached=false` 且 sink 无新行" |
+| **[P2] manifest 的 `expires_at` 被解析却未用于截止** | 子进程与 broker 的 deadline 只取顶层 `context.expires_at`；`run.expires_at` 只有在本地 run 恰好同名时才参与取最小值 | 接续时用**原实验的绝对到期时刻**建立本地单调截止，与传输上下文的截止、以及（同名时）本地同实验截止**三者取较早者**；manifest 已过期则直接拒绝 | `test_an_inherited_manifest_that_has_expired_is_refused`（manifest 过期 60 s、顶层还剩 300 s → 两处都拒绝）、`test_the_earlier_of_the_two_deadlines_wins`（manifest 剩 2 s、顶层剩 300 s → 两处剩余均 ≤3 s，而不是 300 s）、`test_a_context_cannot_outlive_the_experiment_it_names`（反向） |
+
+`test_a_configuration_change_does_not_truncate_an_in_flight_request` 更名为
+`test_a_disable_does_not_truncate_an_in_flight_request` 并改用 **Admin 模式**驱动——
+只有 Admin 控制会在运行中改变配置，而这次改动恰好把这点变成硬约束。断言同时补了反向：
+Disable 之后新到的请求不再被选中。
+
 ## 1. 交付范围
 
 管理员在 **Admin → Measurements** 顶部的一张卡片上点 **Enable measurement /
@@ -213,6 +228,7 @@ Alembic 迁移、真实 `asyncpg` 连接池、两个真实 FastAPI 应用各自�
 | 单次配置请求超时 | 2 s | 同上 |
 | 一次变更在所有进程生效上限 | 30 s（UI 写出该数字） | 同上 + `sync_note` |
 | 断联节点停止选取的边界 | 实验自己的 `expires_at` | 采集器 |
+| 接续可用的控制模式 | 仅 `MODE=admin`；`disabled`（含默认未配置）拒绝，`environment` 走本地 descriptor | `operation_profiling._manifest_for_continuation` |
 | broker 配置重发 | 每次同步（活动 5 s / 空闲 30 s） | `cloud_agent_host/profiling_policy.py` |
 
 **没有** 15 秒租约，也**没有** 20 秒全量失效承诺 —— 那套机制已随本次简化删除。
