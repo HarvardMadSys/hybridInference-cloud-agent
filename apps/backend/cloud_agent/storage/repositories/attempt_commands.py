@@ -40,6 +40,7 @@ from cloud_agent.storage._sql.jobs import (
 )
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
+from cloud_agent.task_titles import thread_title_needs_generation
 
 if TYPE_CHECKING:
     from cloud_agent.ports.attempt_commands import TurnSummaryWrite
@@ -181,7 +182,7 @@ class PostgresAttemptCommands:
             job_row = await conn.fetchrow(
                 f"""
                 SELECT {QUALIFIED_JOB_COLUMNS}, to_jsonb(s) AS thread_sandbox,
-                       t.title_source
+                       t.title_source, t.title
                 FROM agent_jobs j
                 JOIN agent_threads t ON t.id = j.thread_id
                 LEFT JOIN {THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
@@ -330,10 +331,8 @@ class PostgresAttemptCommands:
         claim["current_attempt_id"] = attempt["id"]
         claim["attempt_id"] = attempt["id"]
         claim["attempt_no"] = attempt["attempt_no"]
-        claim["title_generation_pending"] = (
-            job_row["title_source"] == "fallback"
-            and job_row["turn_no"] == 1
-            and attempt["attempt_no"] == 1
+        claim["title_generation_pending"] = thread_title_needs_generation(
+            job_row["title_source"], job_row["title"]
         )
         claim["lease_generation"] = attempt["lease_generation"]
         # The stamp as written, not as the host row reads later: a rolling

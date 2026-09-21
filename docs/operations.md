@@ -57,21 +57,30 @@ Two properties are load-bearing and easy to break by accident:
 ### Automatic task titles
 
 New conversations initially use the first meaningful prompt line, shortened to
-36 characters. After the first turn's first claim is dispatched, the control
-plane makes one background title request to `GATEWAY_BASE_URL` using that
-attempt's existing inference grant and selected model. This is a separate
-request, not a CLI turn: it does not alter the task prompt or conversation.
-It uses at most 4,000 input characters and 256 output tokens, has a 10-second
-deadline, and is attributed to the same owner and job by the gateway.
+36 characters. After a claim is dispatched, conversations that still need a
+title get a background request to `GATEWAY_BASE_URL` using that attempt's
+existing inference grant and selected model. This is a separate request, not a
+CLI turn: it does not alter the task prompt or conversation. It always summarizes
+the conversation's original prompt, including when a later turn recovers naming.
+Each call uses at most 4,000 input characters and 256 output tokens, has a
+10-second deadline, and is attributed to the same owner and current job.
 
 The generated title summarizes the task in the user's language and retains
-relevant identifiers. Failed or malformed responses leave the short fallback;
-there are no automatic retries. This includes reasoning-only responses from
-models that consume the output allowance without returning a title. The UI
-briefly refreshes title metadata during the first turn and its completion.
-Manual renames always take precedence, including a rename to the same text.
-Follow-ups keep the conversation name; forks inherit it. Existing conversation
-titles are preserved by migration and are not automatically regenerated.
+relevant identifiers. The proxy's `⏳ The model is starting up` response is a
+model-server warmup status, not a generated title, even when the gateway returns
+it as an HTTP 200 completion. Warmup responses, transport failures, and transient
+HTTP errors get up to five calls with backoff, within a 120-second total deadline.
+Other malformed responses, including reasoning-only output, leave the fallback.
+If this window is exhausted, a later claim can try again; there is no idle
+background regeneration. The UI refreshes eligible titles for up to 130 seconds
+without waiting for the running turn to finish, and notifies navigation lists
+when a title arrives after the conversation becomes idle.
+
+Manual renames always take precedence, including a rename to the same text;
+each retry rechecks title ownership and the attempt fence. Follow-ups keep a
+valid conversation name, and forks inherit it. Legacy automatic or inherited
+titles containing the warmup status can recover on their next claim. Other
+existing titles remain unchanged, and no title data migration is required.
 
 ### Conversation status and run history
 

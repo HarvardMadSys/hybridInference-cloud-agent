@@ -374,7 +374,6 @@ async def test_title_generation_is_scheduled_after_successful_claim(monkeypatch,
             job_id=_JOB,
             attempt_id=_ATTEMPT,
             lease_generation=_GENERATION,
-            prompt="fix it",
             model="glm-5.1",
             sandbox_token="agr.header.signature",
         )

@@ -22,10 +22,11 @@ import type {
   AgentThreadEventApi,
 } from '@/lib/api/agents';
 import { toDisplayJob } from './adapt';
-import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
+import { announceAgentSessionsChanged, onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import type { AgentJob } from './types';
 import { getConversationState } from './conversationState';
 import { isActiveJobState, isActiveConversationState } from './conversationJob';
+import { taskTitleNeedsGeneration } from './taskTitles';
 
 const ACTIVE_ATTEMPT_PHASES = new Set([
   'started',
@@ -360,6 +361,14 @@ export function useAgentJob(
         // ID cannot be compared with thread IDs, so invalidate any pending load.
         const threadId = api?.id === jobId ? api.thread_id : undefined;
         if (threadId && !change.threadIds.includes(threadId)) return;
+        if (threadId && change.titleSource === 'generated' && change.title !== undefined) {
+          setApi((current) =>
+            current && current.title_source !== 'manual'
+              ? { ...current, title: change.title, title_source: 'generated' }
+              : current,
+          );
+          return;
+        }
         if (change.deleted) setApi(null);
         reload();
       }),
@@ -453,12 +462,11 @@ export function useAgentJob(
     return () => controller.abort();
   }, [active, currentTurnNo, jobId, isLive, reload]);
 
-  // Title generation runs alongside the first attempt. Refresh just its metadata
-  // briefly, so a long-running task does not keep its temporary title until SSE ends.
+  // A claim may recover an earlier failed title, including on a follow-up.
+  // Outlast the server's bounded 120s retry window without waiting for SSE to end.
   const awaitingTitle =
     api?.id === jobId &&
-    api.title_source === 'fallback' &&
-    api.turn_no === 1 &&
+    taskTitleNeedsGeneration(api) &&
     (state === 'running' || state === 'publishing' || state === 'succeeded');
   useEffect(() => {
     if (!active || !awaitingTitle) return;
@@ -469,7 +477,7 @@ export function useAgentJob(
     const timer = setInterval(() => {
       if (pending) return;
       pending = true;
-      if (++requests >= 8) clearInterval(timer);
+      if (++requests >= 65) clearInterval(timer);
       void getAgentJob(jobId)
         .then((latest) => {
           if (cancelled || generation.current !== version) return;
@@ -478,6 +486,19 @@ export function useAgentJob(
               ? { ...current, title: latest.title, title_source: latest.title_source }
               : current,
           );
+          if (
+            latest.thread_id &&
+            latest.title_source === 'generated' &&
+            !taskTitleNeedsGeneration(latest)
+          ) {
+            // Completed conversations no longer drive sidebar polling. Publish
+            // the recovered title so every navigation list refreshes as well.
+            announceAgentSessionsChanged({
+              threadIds: [latest.thread_id],
+              title: latest.title ?? undefined,
+              titleSource: 'generated',
+            });
+          }
         })
         .catch(() => {
           // A title lookup must never interrupt the running conversation.

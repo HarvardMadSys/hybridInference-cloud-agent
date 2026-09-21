@@ -97,6 +97,31 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 describe('sidebar navigation interactions', () => {
+  it('refreshes a delayed automatic title after the conversation is idle', async () => {
+    localStorage.setItem(
+      sidebarPreferencesKey('alice'),
+      JSON.stringify({ ...DEFAULT_PREFERENCES, group: 'flat' }),
+    );
+    let row = conversation('a');
+    api.list.mockImplementation(async ({ pinned }: { pinned?: boolean }) => ({
+      conversations: pinned ? [] : [row],
+      next_cursor: null,
+    }));
+    render(<AgentsSidebar />);
+    await screen.findByRole('link', { name: 'Task a · owner/repo' });
+    row = { ...row, title: 'Export CSV' };
+    act(() =>
+      announceAgentSessionsChanged({
+        threadIds: ['thread-a'],
+        title: row.title,
+        titleSource: 'generated',
+      }),
+    );
+    expect(
+      await screen.findByRole('link', { name: 'Export CSV · owner/repo' }),
+    ).toBeInTheDocument();
+  });
+
   it('keeps renamed and pinned conversations visible after metadata updates', async () => {
     localStorage.setItem(
       sidebarPreferencesKey('alice'),

@@ -4,6 +4,8 @@ export interface AgentSessionsChange {
   threadIds: string[];
   archived?: boolean;
   title?: string;
+  /** Automatic title refreshes update metadata without reloading the live turn. */
+  titleSource?: 'generated';
   pinnedAt?: string | null;
   deleted?: boolean;
 }

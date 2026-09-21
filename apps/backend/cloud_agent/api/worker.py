@@ -750,13 +750,12 @@ async def worker_claim(
     )
     if claim.get("title_generation_pending") is True:
         # FastAPI sends the claim first; title inference cannot delay the runner.
-        # The store only marks the first eligible claim, so follow-ups and retries
-        # retain a stable title without making further title-generation calls.
+        # Only unnamed/contaminated conversations are eligible. A later claim
+        # can recover a failed generation using the original conversation prompt.
         background_tasks.add_task(
             generate_thread_title,
             job_store.conversation_commands,
             **fence,
-            prompt=claim["task_prompt"],
             model=claim["model"],
             sandbox_token=sandbox_token,
         )

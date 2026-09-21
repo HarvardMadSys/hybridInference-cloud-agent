@@ -5362,7 +5362,8 @@ async def test_manual_same_title_sets_provenance(store: Storage):
 
 
 @pytest.mark.parametrize(
-    "fence_break", ["generation", "job", "expired", "failed", "cancelled", "deleted"]
+    "fence_break",
+    ["generation", "job", "expired", "failed", "cancelled", "cancel_requested", "deleted"],
 )
 async def test_generated_title_rejects_stale_or_deleted_work(
     pool, store: Storage, fence_break: str
@@ -5393,11 +5394,21 @@ async def test_generated_title_rejects_stale_or_deleted_work(
                     "WHERE id = $1",
                     claim["attempt_id"],
                 )
+            elif fence_break == "cancel_requested":
+                await conn.execute(
+                    "UPDATE agent_jobs SET cancel_requested = TRUE WHERE id = $1", job_id
+                )
             else:
                 await conn.execute(
                     "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1",
                     job["thread_id"],
                 )
+    assert (
+        await store.conversation_commands.get_thread_title_prompt(
+            job_id=job_id, attempt_id=claim["attempt_id"], lease_generation=generation
+        )
+        is None
+    )
     assert not await store.conversation_commands.set_generated_thread_title(
         job_id=job_id,
         attempt_id=claim["attempt_id"],
@@ -5408,8 +5419,8 @@ async def test_generated_title_rejects_stale_or_deleted_work(
     assert saved is not None and saved["title"] == job["title"]
 
 
-async def test_title_generation_is_not_repeated_on_retry(store: Storage):
-    """Failed first-claim generation keeps the short fallback on a later attempt."""
+async def test_title_generation_recovers_on_retry_but_rejects_the_old_attempt(store: Storage):
+    """A fresh lease can recover naming; the superseded attempt still cannot write."""
     job = await _create_job(store)
     first = await _claim(store, worker_id="first-worker", lease_ttl_seconds=60)
     assert first is not None and first["title_generation_pending"]
@@ -5419,14 +5430,109 @@ async def test_title_generation_is_not_repeated_on_retry(store: Storage):
         lease_generation=first["lease_generation"],
     )
     second = await _claim(store, worker_id="second-worker", lease_ttl_seconds=60)
-    assert second is not None and not second["title_generation_pending"]
-    for claim in [first, second]:
-        assert not await store.conversation_commands.set_generated_thread_title(
+    assert second is not None and second["title_generation_pending"]
+    assert (
+        await store.conversation_commands.get_thread_title_prompt(
             job_id=job["id"],
-            attempt_id=claim["attempt_id"],
-            lease_generation=claim["lease_generation"],
-            title="Late summary",
+            attempt_id=first["attempt_id"],
+            lease_generation=first["lease_generation"],
         )
+        is None
+    )
+    assert not await store.conversation_commands.set_generated_thread_title(
+        job_id=job["id"],
+        attempt_id=first["attempt_id"],
+        lease_generation=first["lease_generation"],
+        title="Stale summary",
+    )
+    assert (
+        await store.conversation_commands.get_thread_title_prompt(
+            job_id=job["id"],
+            attempt_id=second["attempt_id"],
+            lease_generation=second["lease_generation"],
+        )
+        == job["task_prompt"]
+    )
+    assert await store.conversation_commands.set_generated_thread_title(
+        job_id=job["id"],
+        attempt_id=second["attempt_id"],
+        lease_generation=second["lease_generation"],
+        title="Recovered summary",
+    )
+
+
+@pytest.mark.parametrize("source", ["fallback", "generated", "inherited", "manual"])
+async def test_followup_recovers_original_topic_and_legacy_warmup_title(pool, store, source):
+    """A later turn repairs automatic warmup titles without taking manual ownership."""
+    prompt = "Implement CSV export for SPRUCE_8462"
+    job, claim, sandbox = await _reserve_shared_chat(store, task_prompt=prompt)
+    fence = {
+        "job_id": job["id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+    }
+    assert not await store.conversation_commands.set_generated_thread_title(
+        **fence, title="⏳ The model is starting up — this t…"
+    )
+    if source != "fallback":
+        # Model the already-persisted bug, its fork, or a deliberate user title.
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_threads SET title = $2, title_source = $3 WHERE id = $1",
+                job["thread_id"],
+                "⏳ The model is starting up — this t…",
+                source,
+            )
+    sandbox_fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **sandbox_fence, container_id="title-recovery", context_status="new"
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(**sandbox_fence, job_id=job["id"])
+    assert await store.sandbox.settle_thread_sandbox(
+        **sandbox_fence,
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="title-recovery-session",
+        idle_timeout_seconds=1800,
+        base_sha=job["base_sha"],
+    )
+    assert await store.attempt_commands.transition(
+        **fence, from_states=("running",), to_state="succeeded"
+    )
+    child = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id=job["user_id"], prompt="Now add JSON too"
+    )
+    assert child is not None and child.get("error") is None
+    next_claim = await _claim(
+        store,
+        worker_id="title-recovery-worker",
+        lease_ttl_seconds=60,
+        host="shared-runner",
+        host_credential_hash="test-credential-hash",
+    )
+    assert next_claim is not None
+    assert next_claim["title_generation_pending"] is (source != "manual")
+    next_fence = {
+        "job_id": child["id"],
+        "attempt_id": next_claim["attempt_id"],
+        "lease_generation": next_claim["lease_generation"],
+    }
+    assert await store.conversation_commands.get_thread_title_prompt(**next_fence) == (
+        prompt if source != "manual" else None
+    )
+    assert await store.conversation_commands.set_generated_thread_title(
+        **next_fence, title="SPRUCE_8462 CSV export"
+    ) is (source != "manual")
+    saved = await store.conversation_queries.get_job(child["id"])
+    assert saved["title"] == (
+        "SPRUCE_8462 CSV export" if source != "manual" else "⏳ The model is starting up — this t…"
+    )
 
 
 async def test_successful_short_task_accepts_delayed_title(pool, store: Storage):
@@ -5443,6 +5549,7 @@ async def test_successful_short_task_accepts_delayed_title(pool, store: Storage)
     assert await store.attempt_commands.transition(
         **fence, from_states=("running",), to_state="succeeded"
     )
+    assert await store.conversation_commands.get_thread_title_prompt(**fence) == job["task_prompt"]
     assert await store.conversation_commands.set_generated_thread_title(
         **fence, title="Fix flaky test"
     )
