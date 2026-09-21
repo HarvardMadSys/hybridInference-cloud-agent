@@ -826,3 +826,35 @@ async def test_a_truncated_final_message_is_unreadable_rather_than_absent():
 
     assert await _consume(store) == "pause"
     assert (store.goal["state"], store.goal["pause_reason"]) == ("paused", "report_unavailable")
+
+
+async def test_an_owner_wakeup_after_a_failed_round_schedules_instead_of_pausing():
+    """A failed round is a result, and a resume is not a verdict on it.
+
+    The failed-turn rule turns a turn that did not finish saying what it meant
+    into an unreadable report, so the platform stops rather than looping. That
+    is right for a decision made *from* the turn, and wrong for an owner trigger,
+    which is authorized by the owner instead — otherwise resuming a goal paused
+    by a failure pauses it straight back, one failure mode over from the
+    cancelled turn this rule was already excluded for.
+    """
+    failed = turn(
+        id="failed-round",
+        state="failed",
+        turn_source="goal",
+        goal_id=GOAL_ID,
+        round_kind="work",
+        report_parse="absent",
+        input_seq_at_create=1,
+    )
+    failed["thread_sandbox"] = {
+        "context_status": "new",
+        "native_state": "new",
+        "state": "starting",
+    }
+    store = FakeStore(goal=goal_row(), turns=[failed], input_seq=1)
+    store.goal_wakeups.arm(trigger="owner", trigger_ref="resume:1")
+
+    assert await _consume(store) == "queue_work_round"
+    assert store.goal["state"] == "active"
+    assert len(store.queued_rounds()) == 1

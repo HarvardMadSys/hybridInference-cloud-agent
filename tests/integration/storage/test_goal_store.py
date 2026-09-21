@@ -1093,3 +1093,89 @@ async def test_a_resume_on_a_conversation_with_no_repository_access_pauses(
         for row in await _thread_turns(store, pool, str(job["thread_id"]))
         if row["turn_source"] == "goal" and row["state"] == "queued"
     ]
+
+
+async def test_latest_turn_reports_the_conversations_real_state(
+    store, pool, monkeypatch: pytest.MonkeyPatch
+):
+    """The eligibility read has to see archiving and a lost session.
+
+    ``latest_turn`` is what a decision reads to ask "may work start here", and
+    those answers live on the conversation and its sandbox rather than on the
+    turn — so a projection that carries neither makes an archived conversation
+    look idle, and a resume queues a round into a place nothing will run. This
+    pins the two reads agreeing, which is the property the check depends on.
+    """
+    from cloud_agent.goals.controller import consume_wakeup
+
+    job, first, goal = await _live_goal_job(store)
+    thread_id = str(job["thread_id"])
+
+    # A live conversation: both reads agree, and the sandbox is readable.
+    latest = await store.conversation_queries.latest_turn(thread_id=thread_id)
+    full = await store.conversation_queries.get_job(str(first["id"]))
+    assert latest["id"] == full["id"]
+    assert latest["archived_at"] == full["archived_at"] is None
+    assert latest["thread_sandbox"] is not None
+
+    await _finish(pool, first)
+    assert await store.goals.pause_goal(
+        thread_id=thread_id, revision=goal["revision"], reason="user"
+    )
+
+    # Archiving the conversation is visible to both reads.
+    await store.conversation_commands.set_thread_archived(
+        job_id=str(first["id"]), user_id=job["user_id"], archived=True
+    )
+    latest = await store.conversation_queries.latest_turn(thread_id=thread_id)
+    full = await store.conversation_queries.get_job(str(first["id"]))
+    assert latest["archived_at"] is not None
+    assert latest["archived_at"] == full["archived_at"]
+
+    # And a resume on it pauses with the reason, rather than queueing a round
+    # into an archived conversation.
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "example-org/example-repo")
+    resumed = await store.goals.resume_goal(
+        thread_id=thread_id, user_id=job["user_id"], revision=goal["revision"] + 1
+    )
+    assert resumed is not None and resumed["state"] == "active"
+    claimed = await store.goal_wakeups.claim_wakeups(limit=1)
+    assert claimed, "resume did not record its obligation"
+    assert await consume_wakeup(store=store, wakeup=claimed[0]) == "pause"
+    after = await store.goals.get_goal(thread_id=thread_id)
+    assert (after["state"], after["pause_reason"]) == ("paused", "archived")
+
+
+async def test_a_resume_on_a_lost_session_pauses(store, pool, monkeypatch: pytest.MonkeyPatch):
+    """A session that is gone stops a resume, and says which condition stopped it.
+
+    The sandbox state is on the sandbox rather than the turn, so the eligibility
+    read has to join it: a conversation whose retained session was lost cannot be
+    resumed into one, and a round queued there would either never run or run
+    without the history the owner resumed for.
+    """
+    from cloud_agent.goals.controller import consume_wakeup
+
+    job, first, goal = await _live_goal_job(store)
+    thread_id = str(job["thread_id"])
+    await _finish(pool, first)
+    assert await store.goals.pause_goal(
+        thread_id=thread_id, revision=goal["revision"], reason="user"
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_thread_sandbox_memberships SET context_status = 'lost', "
+            "native_state = 'lost' WHERE thread_id = $1",
+            thread_id,
+        )
+
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "example-org/example-repo")
+    resumed = await store.goals.resume_goal(
+        thread_id=thread_id, user_id=job["user_id"], revision=goal["revision"] + 1
+    )
+    assert resumed is not None and resumed["state"] == "active"
+    claimed = await store.goal_wakeups.claim_wakeups(limit=1)
+    assert claimed, "resume did not record its obligation"
+    assert await consume_wakeup(store=store, wakeup=claimed[0]) == "pause"
+    after = await store.goals.get_goal(thread_id=thread_id)
+    assert (after["state"], after["pause_reason"]) == ("paused", "context_lost")

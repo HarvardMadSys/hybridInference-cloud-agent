@@ -315,10 +315,16 @@ def _context_for(
         )
     is_goal_round = turn.get("goal_round_kind") is not None and not owner_triggered
     parse_result = cast("GoalReportParse", turn["goal_report_parse"]) if is_goal_round else None
-    if turn["state"] == "failed" and parse_result in (None, "absent"):
+    if not owner_triggered and turn["state"] == "failed" and parse_result in (None, "absent"):
         # A failed turn's message is not evidence that the model said nothing:
         # it is a turn that did not finish saying it.
-        parse_result = "unavailable" if turn["state"] == "failed" else parse_result
+        #
+        # An owner trigger is the exception, and it is the same exception as the
+        # report above: "the last turn failed" is a result, and a resume is not
+        # a verdict on it. Without this the goal paused on the very turn the
+        # owner resumed from, which is the no-op Resume button again, one
+        # failure mode over.
+        parse_result = "unavailable"
     report = None
     if parse_result == "valid":
         outcome = turn.get("goal_report_outcome")

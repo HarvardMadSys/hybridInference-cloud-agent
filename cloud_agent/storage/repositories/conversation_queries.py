@@ -118,7 +118,16 @@ class PostgresConversationQueries:
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                f"{JOB_SELECT} WHERE j.thread_id = $1 ORDER BY j.turn_no DESC LIMIT 1",
+                f"""
+                SELECT {QUALIFIED_JOB_SUMMARY_COLUMNS}, t.title, t.title_source,
+                       t.pinned_at, t.archived_at, t.deleted_at,
+                       to_jsonb(s) AS thread_sandbox
+                FROM agent_jobs j
+                LEFT JOIN agent_threads t ON t.id = j.thread_id
+                LEFT JOIN {THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
+                WHERE j.thread_id = $1
+                ORDER BY j.turn_no DESC LIMIT 1
+                """,
                 thread_id,
             )
         return None if row is None else job_row_to_dict(row)
