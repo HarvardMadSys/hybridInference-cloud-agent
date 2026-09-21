@@ -273,3 +273,18 @@ $ npm run test          # Test Files 103 passed (103) / Tests 1674 passed (1674)
 ```
 
 未跑：`scripts/bench_*`（未做性能基准）、`pytest -m external`（需要外部服务）。
+
+### CI
+
+简化后的分支 CI 全绿（16 个提交，最终 `350492e`）：
+
+```
+CI Gate pass · Classify Changes pass · Gitleaks pass · Compose resolves pass
+Lint pass · Tests pass · Tests (Postgres) pass · Web pass
+control (arm64) pass · runner (amd64) pass · sandbox (amd64) pass · egress (amd64) pass
+tunnel (amd64) pass · web-agents (arm64) pass · web-root (arm64) pass
+Candidate on real Kata: skipping（未触发）
+```
+
+`Tests (Postgres)` 在 CI 上同样是绿的，与本机 `dbtest` 全量 549 passed 一致；`Tests` 绿也说
+明 §6.1 的 `os.openpty` 失败只发生在本机沙箱。
