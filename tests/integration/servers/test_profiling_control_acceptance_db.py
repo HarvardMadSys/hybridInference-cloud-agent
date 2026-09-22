@@ -303,8 +303,10 @@ async def _measurement_count(chain: _ControlChain, run_id: str) -> int:
         )
 
 
+@pytest.mark.parametrize("duration_seconds", [600, None])
 async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
     control_chain: _ControlChain,
+    duration_seconds: int | None,
 ) -> None:
     """The whole acceptance: Start, collect, read back, Stop, stay stopped."""
     import httpx
@@ -337,7 +339,7 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
                 "expected_revision": 0,
                 "operations": ["files.list", "files.open", "attempt.startup"],
                 "target": {"host": HOST},
-                "duration_seconds": DURATION_SECONDS,
+                "duration_seconds": duration_seconds,
             },
         )
         assert started.status_code == 201, started.text
@@ -348,7 +350,9 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         # The experiment is visible with zero samples: the point of persisting
         # it before anything is collected.
         assert body["control"]["stored_samples"] == 0
-        assert body["control"]["budget_scope"] == "producer_instance"
+        assert body["control"]["budget_scope"] == (
+            "unlimited" if duration_seconds is None else "producer_instance"
+        )
 
         # A retry with the same id and body is the same experiment, not a
         # second one -- and does not reset the deadline.
@@ -359,7 +363,7 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
                 "expected_revision": 0,
                 "operations": ["files.list", "files.open", "attempt.startup"],
                 "target": {"host": HOST},
-                "duration_seconds": DURATION_SECONDS,
+                "duration_seconds": duration_seconds,
             },
         )
         assert retried.status_code == 201, retried.text
@@ -441,7 +445,12 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         assert live["stored_samples"] == 1
         assert live["status"] == "on"
         assert live["run_active"] is True
-        assert live["run"]["seconds_remaining"] > 0
+        if duration_seconds is None:
+            assert live["run"]["expires_at"] is None
+            assert live["run"]["continuous"] is True
+            assert record["run_expires_at"] is None
+        else:
+            assert live["run"]["seconds_remaining"] > 0
         # The one sample is readable through the history API, which is what
         # "preserve history" means.
         history = await admin.get("/admin/agent/measurements", params={"run_id": run_id})
@@ -502,8 +511,10 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         assert final["stored_samples"] == 0
 
 
+@pytest.mark.parametrize("duration_seconds", [600, None])
 async def test_a_measurement_open_when_the_switch_flips_still_lands(
     control_chain: _ControlChain,
+    duration_seconds: int | None,
 ) -> None:
     """Disabling stops selecting; it does not cancel or truncate work in flight.
 
@@ -530,7 +541,7 @@ async def test_a_measurement_open_when_the_switch_flips_still_lands(
                 "expected_revision": 0,
                 "operations": ["files.open"],
                 "target": {"host": HOST},
-                "duration_seconds": DURATION_SECONDS,
+                "duration_seconds": duration_seconds,
             },
         )
         assert started.status_code == 201, started.text

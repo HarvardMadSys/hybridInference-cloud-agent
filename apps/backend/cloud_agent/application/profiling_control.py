@@ -8,7 +8,8 @@ half-true. Four rules shape it.
 never sent by the browser, and every read re-decides "is this still running"
 from the authoritative clock rather than from a stored boolean. A page that is
 closed, a sweep that never ran and a process that restarted all leave the
-experiment ending at the instant it was asked to end.
+timed experiment ending at the instant it was asked to end. Continuous runs
+have no expiry and stay enabled until a Stop.
 
 **The card reports the configuration, not a consensus.** ``on`` means the
 deployment's stored configuration names an experiment that has not expired; it
@@ -26,7 +27,7 @@ run nobody is collecting for.
 **The budget is a per-producer allowance and says so.** The design explicitly
 declines to add a fleet-wide cap in this slice: a local counter presented as a
 global limit would be a quota nobody enforces. Every answer that mentions a
-budget names its scope.
+budget names its scope. Continuous runs have no cumulative sample limit.
 """
 
 from __future__ import annotations
@@ -131,7 +132,7 @@ class StartRequest:
     expected_revision: int
     operations: tuple[str, ...]
     host: str | None
-    duration_seconds: int
+    duration_seconds: int | None
     actor_id: str | None
 
     def fingerprint(self) -> str:
@@ -146,7 +147,7 @@ class StartRequest:
             "action": "start",
             "operations": sorted(self.operations),
             "host": self.host or "",
-            "duration_seconds": int(self.duration_seconds),
+            "duration_seconds": self.duration_seconds,
         }
         return _fingerprint(body)
 
@@ -208,7 +209,7 @@ class ProfilingControlService:
         expected_revision: int,
         operations: Sequence[str],
         host: str | None,
-        duration_seconds: int,
+        duration_seconds: int | None,
         actor_id: str | None,
         known_hosts: Sequence[str] | None,
     ) -> StartRequest | Refusal:
@@ -224,7 +225,10 @@ class ProfilingControlService:
             return Refusal(CONTROL_REFUSED_INVALID, "request_id is required and bounded")
         if expected_revision < 0:
             return Refusal(CONTROL_REFUSED_INVALID, "expected_revision must not be negative")
-        if not MIN_DURATION_SECONDS <= int(duration_seconds) <= MAX_DURATION_SECONDS:
+        if (
+            duration_seconds is not None
+            and not MIN_DURATION_SECONDS <= duration_seconds <= MAX_DURATION_SECONDS
+        ):
             return Refusal(
                 CONTROL_REFUSED_INVALID,
                 f"duration_seconds must be between {MIN_DURATION_SECONDS} and "
@@ -251,7 +255,7 @@ class ProfilingControlService:
             expected_revision=int(expected_revision),
             operations=selected,
             host=target,
-            duration_seconds=int(duration_seconds),
+            duration_seconds=duration_seconds,
             actor_id=actor_id,
         )
 
@@ -271,7 +275,9 @@ class ProfilingControlService:
 
     # -- commands ----------------------------------------------------------
 
-    def build_run(self, request: StartRequest, *, now: datetime) -> tuple[dict[str, Any], datetime]:
+    def build_run(
+        self, request: StartRequest, *, now: datetime
+    ) -> tuple[dict[str, Any], datetime | None]:
         """Return the manifest a Start creates, and the instant it expires.
 
         The run id and the expiry are minted here from the server's own clock.
@@ -280,7 +286,11 @@ class ProfilingControlService:
         and the per-producer allowance. Lifecycle and provenance are separate
         columns, so a Stop never rewrites anything a producer validated against.
         """
-        expires_at = now + timedelta(seconds=request.duration_seconds)
+        expires_at = (
+            now + timedelta(seconds=request.duration_seconds)
+            if request.duration_seconds is not None
+            else None
+        )
         run_id = f"admin-{now.strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
         manifest = {
             "run_id": run_id,
@@ -288,7 +298,8 @@ class ProfilingControlService:
             "target": {"host": request.host} if request.host else {},
             "expires_at": expires_at,
             "config_version": 1,
-            "max_operations": DEFAULT_MAX_OPERATIONS,
+            "max_operations": DEFAULT_MAX_OPERATIONS if expires_at is not None else 0,
+            **({"continuous": True} if expires_at is None else {}),
             # The admission identity of the process that created this run. The
             # per-producer budgets of the processes that actually collect are
             # merged into the catalogue row as they report.
@@ -347,7 +358,7 @@ class ProfilingControlService:
                 },
             )
             return []
-        if run["expires_at"] > now:
+        if run["expires_at"] is None or run["expires_at"] > now:
             return []
         result = await self._control.expire_run(deployment=self._deployment, run_id=run_id, now=now)
         if result.applied:
@@ -409,9 +420,13 @@ class ProfilingControlService:
             "run_active": run is not None,
             "last_stopped_run": _run_payload(stopped_run, now=now),
             "stored_samples": stored,
-            "budget_scope": "producer_instance",
+            "budget_scope": "unlimited"
+            if run is not None and run.get("expires_at") is None
+            else "producer_instance",
             "budget_note": (
-                "max_operations is per root producer process, not a deployment-wide "
+                "Continuous collection until Disable, with bounded export queues."
+                if run is not None and run.get("expires_at") is None
+                else "max_operations is per root producer process, not a deployment-wide "
                 "cap; a run on two replicas may admit up to that number on each"
             ),
             # How stale a page may be. Stated as a number because the honest
@@ -506,6 +521,7 @@ def _run_payload(run: Mapping[str, Any] | None, *, now: datetime) -> dict[str, A
         "operations": list(run.get("operations") or ()),
         "target": dict(run.get("target") or {}),
         "expires_at": expires_at,
+        "continuous": expires_at is None,
         "started_at": run.get("started_at") or run.get("created_at"),
         "stopped_at": run.get("stopped_at"),
         "stop_reason": run.get("stop_reason"),

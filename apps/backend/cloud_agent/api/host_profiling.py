@@ -10,9 +10,9 @@ Three properties, and each replaces something the earlier design got wrong.
 
 **The answer is the configuration, not a permission.** It says which experiment
 is in force, until when, and which operations it selects. The host keeps that
-until it hears something else, and the experiment's own absolute expiry is what
-ends collection on a node that never hears anything again. That is the honest
-bound on a lost control plane, and it needs no renewal to enforce.
+until it hears something else. Timed runs also stop at their absolute expiry;
+continuous runs have no expiry, so a disconnected node needs synchronization
+to resume before Disable reaches it.
 
 **A host is told its own configuration.** The route authenticates the caller, so
 the answer is computed for whoever asked and a host cannot ask about another
@@ -122,8 +122,11 @@ async def build_policy_for_host(
             "operations": [str(item) for item in run.get("operations") or ()],
             "target": {str(key): str(value) for key, value in (run.get("target") or {}).items()},
             "expires_at": run["expires_at"],
+            "continuous": run.get("continuous") is True,
             "config_version": 1,
-            "max_operations": int(snapshot.get("bounds", {}).get("default_max_operations") or 100),
+            "max_operations": 0
+            if run.get("continuous") is True
+            else int(snapshot.get("bounds", {}).get("default_max_operations") or 100),
             "admission_instances": [],
         }
     return {

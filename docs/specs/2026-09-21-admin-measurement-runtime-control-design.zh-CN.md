@@ -1,5 +1,10 @@
 # Admin 按需测量：开始、停止和运行时生效
 
+> 2026-09-22 更新：Admin 页面已改为持续采集直到 Disable，移除时长选择和 Details。
+> 本文的定时实验说明及旧验收结果保留为历史记录；当前行为见
+> [持续采集设计](../specs/2026-09-22-continuous-admin-measurement.zh-CN.md)。
+
+
 日期：2026-09-21（2026-09-21 修订：按简化后的需求重写 §3–§8；短期授权续租、
 参与者 ACK、由全体参与者推导的复合状态与分布式停止时限均已从设计中移除，实现、
 测试与文档同步删除，不再保留兼容层）。状态：已实现，见
@@ -103,8 +108,8 @@ Changes reach every process through a background sync; allow up to 30 seconds.
 不低于 0）、已入库样本数、一句同步延迟提示。**状态词是 Enabled / Disabled**，不是
 Measuring / Off：前者说的是配置，后者会暗示样本正在到达。**暂时没有样本时**要明确提示"开启后需要
 先执行对应操作才会产生记录"，不能让它看起来像失败。关闭状态下若上一轮实验刚结束，
-用 `last_stopped_run` 说明"刚关掉的是哪个实验、原因是什么"。诊断信息（mode、revision、
-deployment、run_id、预算口径）折叠在 Details 里，不堆在主区域。
+用 `last_stopped_run` 说明"刚关掉的是哪个实验、原因是什么"。内部诊断字段（mode、revision、deployment、预算口径）保留在 Admin API，
+页面不再展示 Details 区块。
 
 **一个按钮，不是两个**：按钮文字随状态在 `Enable measurement` / `Disable measurement`
 之间切换（提交中显示 `Enabling…` / `Disabling…`）。Stop 不需要确认弹窗。

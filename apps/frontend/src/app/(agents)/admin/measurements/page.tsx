@@ -481,7 +481,7 @@ function RunRow({ run, selection }: { run: ProfilingRun; selection: MeasurementS
         {number(run.config_version)}
       </td>
       <td className="whitespace-nowrap px-5 py-3 text-xs text-gray-500 dark:text-gray-400">
-        {dateTime(run.expires_at)}
+        {run.expires_at === null ? 'Until disabled' : dateTime(run.expires_at)}
       </td>
       <td className="whitespace-nowrap px-5 py-3 text-xs text-gray-500 dark:text-gray-400">
         {dateTime(run.received_at)}
@@ -525,7 +525,9 @@ function RunManifest({ runId, catalogue }: { runId: string; catalogue: Profiling
     <dl className="grid gap-x-8 gap-y-2 border-b border-gray-100 bg-gray-50/50 px-5 py-4 text-xs sm:grid-cols-2 lg:grid-cols-3 dark:border-white/5 dark:bg-white/[0.02]">
       <ManifestItem label="Experiment">{run.run_id}</ManifestItem>
       <ManifestItem label="Configured version">{number(run.config_version)}</ManifestItem>
-      <ManifestItem label="Configured expiry">{dateTime(run.expires_at)}</ManifestItem>
+      <ManifestItem label="Configured expiry">
+        {run.expires_at === null ? 'Until disabled' : dateTime(run.expires_at)}
+      </ManifestItem>
       <ManifestItem label="Operations">
         {run.operations.length ? run.operations.join(', ') : 'No operation selected'}
       </ManifestItem>{' '}
@@ -1262,7 +1264,9 @@ function RecordBody({ detail }: { detail: MeasurementDetail }) {
         <ManifestItem label="Received at (database clock)">
           {dateTime(detail.received_at)}
         </ManifestItem>
-        <ManifestItem label="Run expiry">{dateTime(record.run_expires_at)}</ManifestItem>
+        <ManifestItem label="Run expiry">
+          {record.run_expires_at === null ? 'Until disabled' : dateTime(record.run_expires_at)}
+        </ManifestItem>
         <ManifestItem label="Boundary frozen">
           {record.boundary_frozen === undefined
             ? 'Not reported'

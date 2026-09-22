@@ -858,7 +858,7 @@ describe('measurement collection control', () => {
     expect(screen.getByRole('checkbox', { name: 'File access' })).toBeChecked();
     // Nothing is preselected: the admin chooses, and there is no host default.
     expect(screen.getByLabelText('Host')).toHaveValue('');
-    expect(screen.getByLabelText('Duration')).toHaveValue('10');
+    expect(screen.queryByLabelText('Duration')).not.toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'Choose a host…' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'All hosts' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'host-a' })).toBeInTheDocument();
@@ -866,13 +866,37 @@ describe('measurement collection control', () => {
     expect(within(card()).queryByRole('button', { name: /disable/i })).not.toBeInTheDocument();
   });
 
-  it('sends the chosen groups, host and duration with the revision it read, and draws the answer', async () => {
+  it('offers enrolled online runners without obsolete registrations', async () => {
+    vi.mocked(getAgentRunnerHosts).mockResolvedValue({
+      hosts: [
+        host(),
+        host({ host: 'old-runner', status: 'offline' }),
+        host({ host: 'not-enrolled', enrolled: false }),
+        host({ host: 'draining-runner', status: 'draining' }),
+      ],
+      active_host: null,
+      runtime_versions: {},
+      observed_at: '2026-09-22T00:00:00Z',
+    });
+    render(<AdminMeasurementsPage />);
+    await openForm();
+    expect(screen.getByRole('option', { name: 'host-a' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'draining-runner' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'old-runner' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'not-enrolled' })).not.toBeInTheDocument();
+  });
+
+  it('enables the chosen operations until Disable with the revision it read', async () => {
     vi.mocked(startProfilingRun).mockImplementation(async () => {
       live = control({
         revision: 4,
         status: 'on',
         run_active: true,
-        run: controlRun({ operations: ['attempt.startup', 'files.list', 'files.open'] }),
+        run: controlRun({
+          operations: ['attempt.startup', 'files.list', 'files.open'],
+          expires_at: null,
+          seconds_remaining: 0,
+        }),
         stored_samples: 0,
       });
       return { control: live, run_id: 'prun-1', revision: 4 };
@@ -888,7 +912,7 @@ describe('measurement collection control', () => {
     const body = vi.mocked(startProfilingRun).mock.calls[0][0];
     expect(body.operations).toEqual(['attempt.startup', 'files.list', 'files.open']);
     expect(body.target).toEqual({ host: 'host-a' });
-    expect(body.duration_seconds).toBe(600);
+    expect(body.duration_seconds).toBeNull();
     expect(body.expected_revision).toBe(3);
     expect(typeof body.request_id).toBe('string');
     expect(body.request_id.length).toBeGreaterThan(0);
@@ -897,8 +921,9 @@ describe('measurement collection control', () => {
     expect(await screen.findByText('Enabled')).toBeInTheDocument();
     expect(screen.getByText('Operations: Sandbox startup, File access')).toBeInTheDocument();
     expect(screen.getByText('Host: host-a')).toBeInTheDocument();
-    expect(screen.getByText(/^Expires at: /)).toBeInTheDocument();
-    expect(screen.getByText('Time left: 10:00')).toBeInTheDocument();
+    expect(screen.getByText('Collecting until you disable measurement.')).toBeInTheDocument();
+    expect(screen.queryByText(/^Expires at: /)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Time left: /)).not.toBeInTheDocument();
     expect(screen.getByText('Stored samples: 0')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Disable measurement' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Enable measurement' })).not.toBeInTheDocument();
@@ -963,14 +988,13 @@ describe('measurement collection control', () => {
 
     fireEvent.click(screen.getByRole('checkbox', { name: 'File access' }));
     fireEvent.change(screen.getByLabelText('Host'), { target: { value: 'host-b' } });
-    fireEvent.change(screen.getByLabelText('Duration'), { target: { value: '30' } });
     submit();
 
     await screen.findByText('measurement storage is unavailable');
     // The form is still open with the values that produced the failure.
     expect(screen.getByRole('checkbox', { name: 'File access' })).not.toBeChecked();
     expect(screen.getByLabelText('Host')).toHaveValue('host-b');
-    expect(screen.getByLabelText('Duration')).toHaveValue('30');
+    expect(screen.queryByLabelText('Duration')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Enable measurement' })).toBeInTheDocument();
     // And nothing was drawn as though a run had begun.
     expect(within(card()).getByText('Disabled')).toBeInTheDocument();
@@ -1073,7 +1097,7 @@ describe('measurement collection control', () => {
     expect(screen.queryByText(/No matching operation has happened yet/)).not.toBeInTheDocument();
   });
 
-  it('repeats the server’s sync note and folds the diagnostics away behind Details', async () => {
+  it('keeps the sync note without exposing internal diagnostics', async () => {
     render(<AdminMeasurementsPage />);
     await screen.findByRole('button', { name: 'Enable measurement' });
 
@@ -1081,14 +1105,10 @@ describe('measurement collection control', () => {
     // so in the server's own words instead of implying instant agreement.
     expect(within(card()).getByText(/allow up to 30 seconds/)).toBeInTheDocument();
 
-    const details = card().querySelector('details')!;
-    expect(details).not.toHaveAttribute('open');
-    expect(within(details).getByText('Details')).toBeInTheDocument();
-    expect(within(details).getByText('Mode')).toBeInTheDocument();
-    expect(within(details).getByText('admin')).toBeInTheDocument();
-    expect(within(details).getByText('Revision')).toBeInTheDocument();
-    expect(within(details).getByText('test')).toBeInTheDocument();
-    expect(within(details).getByText('producer_instance')).toBeInTheDocument();
+    expect(card().querySelector('details')).toBeNull();
+    expect(within(card()).queryByText('Mode')).not.toBeInTheDocument();
+    expect(within(card()).queryByText('Revision')).not.toBeInTheDocument();
+    expect(within(card()).queryByText('producer_instance')).not.toBeInTheDocument();
   });
 
   it('clears the page for a revoked control read rather than showing a state', async () => {

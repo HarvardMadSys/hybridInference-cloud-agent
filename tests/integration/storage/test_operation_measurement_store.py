@@ -825,3 +825,31 @@ async def test_the_same_measurement_retried_at_once_is_one_sample(store):
     assert sorted(results) == ["duplicate", "stored"]
     page = await store.list_operation_measurements()
     assert [row["measurement_id"] for row in page] == ["msm_1"]
+
+
+@pytest.mark.parametrize(
+    "first_expiry, second_expiry", [(None, RUN_EXPIRES_AT), (RUN_EXPIRES_AT, None)]
+)
+async def test_continuous_and_timed_manifests_cannot_share_an_identity(
+    store, first_expiry, second_expiry
+):
+    """A null expiry is an immutable choice, not a missing comparison field."""
+    initial = _run(expires_at=first_expiry)
+    assert (
+        await store.record_operation_measurement(measurement=_measurement(), run=initial)
+        == "stored"
+    )
+    assert (
+        await store.record_operation_measurement(measurement=_measurement(), run=initial)
+        == "duplicate"
+    )
+    assert (
+        await store.record_operation_measurement(
+            measurement=_measurement(measurement_id="msm_changed", payload_hash="changed"),
+            run=_run(expires_at=second_expiry),
+        )
+        == "run_conflict"
+    )
+    assert await store.get_operation_measurement("msm_changed") is None
+    stored = await store.get_profiling_run("run-1")
+    assert stored["expires_at"] == first_expiry

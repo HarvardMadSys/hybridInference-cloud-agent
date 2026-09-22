@@ -9,10 +9,8 @@ container that shares no memory with the runner.
 Four things are deliberate.
 
 **There is no lease.** A configuration is what it is until the control plane
-says otherwise, and the experiment's own absolute ``expires_at`` is what ends
-collection on a node that never hears anything again. That is the honest bound
-on a lost control plane, and it needs no renewal to enforce -- which is why
-there is no renewal here to get wrong.
+says otherwise. Timed experiments additionally stop at ``expires_at``; continuous
+ones retain the last applied configuration until synchronization returns.
 
 **A version never goes backwards.** Every answer carries the deployment's
 configuration version, and an answer older than the one already applied is
@@ -372,8 +370,12 @@ def _parse_policy_run(run: Mapping[str, Any]) -> ProfilingRun | None:
         "target": {str(key): str(value) for key, value in (run.get("target") or {}).items()},
         "admission_instances": [],
     }
+    if run.get("continuous") is True:
+        if "expires_at" not in run:
+            return None
+        descriptor.update(continuous=True, expires_at=run.get("expires_at"), max_operations=0)
     try:
-        parsed = parse_run(json.dumps(descriptor))
+        parsed = parse_run(json.dumps(descriptor), allow_continuous=True)
     except ValueError:
         logger.warning(
             "agent_profiling_policy_descriptor_unusable",

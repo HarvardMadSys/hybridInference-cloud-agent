@@ -16,7 +16,8 @@ span, and the export thread exists only once a run has produced a record.
 Admin enables a run through persisted control state; absent an active run,
 nothing is selected. Existing static experiments remain supported through
 ``AGENT_OPERATION_PROFILING_ENABLED`` and a valid ``AGENT_OPERATION_PROFILING_RUN``
-descriptor. An explicit mode overrides that compatibility path.
+descriptor. An explicit mode overrides that compatibility path. Admin runs can
+collect continuously until Disable, without an expiry or cumulative sample cap.
 
 Three costs are bounded on purpose, because this measures a path users wait on:
 
@@ -34,7 +35,7 @@ Three costs are bounded on purpose, because this measures a path users wait on:
 
 Known limits of this slice, all deliberate:
 
-* Selection happens at each producer's root operation. ``max_operations`` is
+* Selection happens at each producer's root operation. For timed runs, ``max_operations`` is
   therefore a per-process budget, not a fleet-wide one, and a deployment
   experiments with one admission instance until shared admission exists.
 * ``target`` accepts ``host`` (known before claim) plus ``job_id``,
@@ -54,6 +55,7 @@ import atexit
 import contextlib
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -301,9 +303,10 @@ class ProfilingRun:
     run_id: str
     operations: frozenset[str]
     expires_at: str
-    expires_at_utc: datetime
+    expires_at_utc: datetime | None
     deadline_mono: float
     max_operations: int
+    continuous: bool = False
     target: Mapping[str, str] = field(default_factory=dict)
     config_version: int = 1
     admission_instances: tuple[Mapping[str, Any], ...] = ()
@@ -591,6 +594,7 @@ class Measurement:
     run_operations: frozenset[str] = frozenset()
     run_target: Mapping[str, str] = field(default_factory=dict)
     run_max_operations: int = 0
+    run_continuous: bool = False
     run_config_version: int = 1
     #: Which control source selected this measurement. A reader can then tell a
     #: legacy static-descriptor experiment from an administrator's, which is
@@ -818,7 +822,7 @@ def _parse_expiry(raw: str) -> float:
     return time.monotonic() + (moment - datetime.now(timezone.utc)).total_seconds()
 
 
-def parse_run(raw: str) -> ProfilingRun:
+def parse_run(raw: str, *, allow_continuous: bool = False) -> ProfilingRun:
     """Build a run descriptor from its JSON form.
 
     Raises:
@@ -848,14 +852,22 @@ def parse_run(raw: str) -> ProfilingRun:
     if not operations:
         raise ValueError("run descriptor selects no operations")
 
+    continuous = body.get("continuous") is True
+    if continuous and (
+        not allow_continuous or "expires_at" not in body or body["expires_at"] is not None
+    ):
+        raise ValueError("continuous runs require Admin control and an explicit null expires_at")
+    if "continuous" in body and not isinstance(body["continuous"], bool):
+        raise ValueError("continuous must be a boolean")
+
     try:
         if isinstance(body.get("max_operations"), bool):
             raise TypeError
         max_operations = int(body["max_operations"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("run descriptor has no valid max_operations") from exc
-    if max_operations <= 0:
-        raise ValueError("max_operations must be positive")
+    if (continuous and max_operations != 0) or (not continuous and max_operations <= 0):
+        raise ValueError("max_operations must be zero for continuous runs, positive otherwise")
 
     try:
         if isinstance(body.get("config_version"), bool):
@@ -887,8 +899,8 @@ def parse_run(raw: str) -> ProfilingRun:
             budget = int(raw_budget)
         except ValueError as exc:
             raise ValueError("admission_instances entries need max_operations") from exc
-        if budget <= 0:
-            raise ValueError("admission instance max_operations must be positive")
+        if budget < 0 or (budget == 0 and not continuous):
+            raise ValueError("admission instance max_operations must be positive unless continuous")
         admissions.append({"instance": instance, "max_operations": budget})
     if not any(item["instance"] == PRODUCER_INSTANCE_ID for item in admissions):
         admissions.append({"instance": PRODUCER_INSTANCE_ID, "max_operations": max_operations})
@@ -910,8 +922,9 @@ def parse_run(raw: str) -> ProfilingRun:
         run_id=run_id,
         operations=operations,
         expires_at=raw_expiry.strip(),
-        expires_at_utc=_parse_absolute_expiry(raw_expiry),
-        deadline_mono=_parse_expiry(raw_expiry),
+        expires_at_utc=None if continuous else _parse_absolute_expiry(raw_expiry),
+        deadline_mono=math.inf if continuous else _parse_expiry(raw_expiry),
+        continuous=continuous,
         max_operations=max_operations,
         target=target,
         config_version=config_version,
@@ -927,7 +940,8 @@ def manifest_for_run(run: ProfilingRun | None) -> dict[str, Any] | None:
         "run_id": run.run_id,
         "operations": sorted(run.operations),
         "target": dict(run.target),
-        "expires_at": run.expires_at_utc.isoformat(),
+        "expires_at": run.expires_at_utc.isoformat() if run.expires_at_utc else None,
+        **({"continuous": True} if run.continuous else {}),
         "config_version": run.config_version,
         "max_operations": run.max_operations,
         "admission_instances": [dict(item) for item in run.admission_instances],
@@ -958,9 +972,13 @@ def manifest_for_measurement(measurement: Measurement | None) -> dict[str, Any] 
     # The configured expiry travels with the record, so a measurement that was
     # handed over rather than selected here still states the experiment's
     # identity instead of deriving a different instant from its own clock.
-    if measurement.run_expires_at is None:
+    if measurement.run_expires_at is None and not measurement.run_continuous:
         return None
-    manifest["expires_at"] = measurement.run_expires_at.isoformat()
+    manifest["expires_at"] = (
+        measurement.run_expires_at.isoformat() if measurement.run_expires_at else None
+    )
+    if measurement.run_continuous:
+        manifest["continuous"] = True
     return manifest
 
 
@@ -1132,6 +1150,8 @@ def reason() -> str:
 
 def _claim_budget(run: ProfilingRun) -> bool:
     """Reserve one root-operation slot for this run, or refuse when used up."""
+    if run.continuous:
+        return True
     with _BUDGET_LOCK:
         budget = _BUDGETS.get(run.run_id)
         if budget is None:
@@ -1233,6 +1253,7 @@ def start_operation(
         run_operations=run.operations,
         run_target=dict(run.target),
         run_max_operations=run.max_operations,
+        run_continuous=run.continuous,
         run_config_version=run.config_version,
         run_source=run.source,
         producer=producer,
@@ -1566,7 +1587,8 @@ def measurement_context(
     the request: run id, operation, and an absolute wall-clock expiry, since
     two processes share no monotonic clock.
 
-    The expiry is the experiment's own end. There is no shorter lease to hand
+    Continuous runs carry an explicit null expiry and their immutable manifest.
+    For timed runs, the expiry is the experiment's own end. There is no shorter lease to hand
     over, so a process that inherits this selection may keep collecting until
     the experiment was always going to end -- which is exactly what a Stop
     means here: stop selecting new operations, and let the ones already running
@@ -1598,7 +1620,9 @@ def measurement_context(
         # be stating attribution it never authenticated.
         "facts": dict(measurement.facts),
         "call_id": call_id or "",
-        "expires_at": time.time() + max(0.0, deadline - time.monotonic()),
+        "expires_at": None
+        if math.isinf(deadline)
+        else time.time() + max(0.0, deadline - time.monotonic()),
         # The parent's own start, in nanoseconds. A child on the same host
         # shares this monotonic clock, so a turn it runs can be timed from the
         # claim rather than from whenever the child happened to start --
@@ -1634,6 +1658,8 @@ def _context_run(measurement: Measurement) -> dict[str, Any]:
     }
     if measurement.run_expires_at is not None:
         run["expires_at"] = measurement.run_expires_at.isoformat()
+    elif measurement.run_continuous:
+        run.update(expires_at=None, continuous=True)
     return run
 
 
@@ -1742,8 +1768,17 @@ def _inherited_manifest(context: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     if config_version <= 0 or max_operations < 0:
         return None
+    continuous = raw.get("continuous") is True
     expires_at = _parse_context_instant(raw.get("expires_at"))
-    if expires_at is None:
+    if continuous:
+        if (
+            "expires_at" not in raw
+            or raw["expires_at"] is not None
+            or max_operations != 0
+            or raw.get("source") != SOURCE_ADMIN
+        ):
+            return None
+    elif expires_at is None:
         return None
     try:
         control_revision = max(0, int(raw.get("control_revision") or 0))
@@ -1756,6 +1791,7 @@ def _inherited_manifest(context: Mapping[str, Any]) -> dict[str, Any] | None:
         "config_version": config_version,
         "max_operations": max_operations,
         "expires_at": expires_at,
+        "continuous": continuous,
         "control_revision": control_revision,
         "source": str(raw.get("source") or SOURCE_ADMIN),
     }
@@ -1774,9 +1810,8 @@ def _manifest_for_continuation(context: Mapping[str, Any]) -> dict[str, Any] | N
     collection outright, so a process configured that way must not be talked
     into collecting by an upstream context, however well formed -- otherwise a
     staged rollout or a deliberately silenced producer could be made to allocate
-    recorders and measurements by whoever holds the broker token. The default
-    for a deployment that configures nothing is ``disabled``, so this is also
-    what keeps default-off meaning off.
+    recorders and measurements by whoever holds the broker token. Explicit
+    disabled remains a deployment-level override.
 
     ``environment`` follows its own static descriptor, and it is the same
     descriptor in parent and child (the environment is inherited), so the
@@ -1798,6 +1833,8 @@ def _manifest_deadline(manifest: Mapping[str, Any]) -> float | None:
     selection never buys time by travelling.
     """
     expires_at = manifest.get("expires_at")
+    if manifest.get("continuous") is True and expires_at is None:
+        return math.inf
     if not isinstance(expires_at, datetime):
         return None
     remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
@@ -1907,6 +1944,7 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
         run_config_version = manifest["config_version"]
         run_target = dict(manifest["target"])
         run_max_operations = manifest["max_operations"]
+        run_continuous = manifest["continuous"]
         run_admission_instances: tuple[Mapping[str, Any], ...] = ()
         run_expires_at: datetime | None = manifest["expires_at"]
     elif local is not None:
@@ -1921,6 +1959,7 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
         run_config_version = local.config_version
         run_target = dict(local.target)
         run_max_operations = local.max_operations
+        run_continuous = local.continuous
         run_admission_instances = local.admission_instances
         run_expires_at = _context_expiry(context) or local.expires_at_utc
     else:
@@ -1967,7 +2006,8 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
                 not instance
                 or not isinstance(budget, int)
                 or isinstance(budget, bool)
-                or budget <= 0
+                or budget < 0
+                or (budget == 0 and not run_continuous)
             ):
                 return None
             parsed_admissions.append({"instance": instance, "max_operations": budget})
@@ -1981,7 +2021,7 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
     # re-derived from this process's own clock. A context from an Admin
     # experiment that omits it cannot be filed under a run, so it is refused
     # rather than given a deadline this process invented.
-    if run_expires_at is None:
+    if run_expires_at is None and not run_continuous:
         return None
     measurement = Measurement(
         operation=operation,
@@ -2001,6 +2041,7 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
         run_operations=allowed_operations,
         run_target=run_target,
         run_max_operations=run_max_operations,
+        run_continuous=run_continuous,
         run_config_version=run_config_version,
         run_source=source,
         producer=str(context.get("producer") or producer),
@@ -2156,6 +2197,9 @@ def _resolved_operations(run: ProfilingRun, context: Mapping[str, Any]) -> froze
 
 def _context_deadline(context: Mapping[str, Any]) -> float | None:
     """Convert a caller's wall-clock expiry into this process's monotonic one."""
+    if "expires_at" in context and context["expires_at"] is None:
+        manifest = _inherited_manifest(context)
+        return math.inf if manifest is not None and manifest["continuous"] else None
     try:
         expires_at = float(str(context.get("expires_at")))
     except (TypeError, ValueError):
@@ -2212,11 +2256,14 @@ def parse_context(raw: Any) -> dict[str, Any] | None:
             return None
     if not isinstance(body, dict):
         return None
-    try:
-        expires_at = float(str(body.get("expires_at")))
-    except (TypeError, ValueError):
-        return None
-    parsed = {
+    if "expires_at" in body and body["expires_at"] is None:
+        expires_at = None
+    else:
+        try:
+            expires_at = float(str(body.get("expires_at")))
+        except (TypeError, ValueError):
+            return None
+    parsed: dict[str, Any] = {
         "run_id": _bounded_context_str(body.get("run_id"), MAX_RUN_ID_CHARS),
         "measurement_id": _bounded_context_str(body.get("measurement_id")),
         "operation": _bounded_context_str(body.get("operation")),
@@ -2252,7 +2299,10 @@ def _bounded_context_run(run: Mapping[str, Any]) -> dict[str, Any]:
         "max_operations": run.get("max_operations"),
         "control_revision": run.get("control_revision"),
         "source": _bounded_context_str(run.get("source")),
-        "expires_at": _bounded_context_str(run.get("expires_at")),
+        "expires_at": None
+        if "expires_at" in run and run["expires_at"] is None
+        else _bounded_context_str(run.get("expires_at")),
+        **({"continuous": True} if run.get("continuous") is True else {}),
     }
     operations = run.get("operations")
     if isinstance(operations, list):
@@ -2732,6 +2782,8 @@ def to_record(
     # identity -- the one thing it must not guess at.
     if measurement.run_expires_at is not None:
         record["run_expires_at"] = measurement.run_expires_at.isoformat()
+    elif measurement.run_continuous:
+        record["run_expires_at"] = None
     if measurement.operation == STARTUP_OPERATION:
         # A v1 consumer reads this field by name. It is written only where the
         # name is true -- for the runner's own startup operation -- so a file

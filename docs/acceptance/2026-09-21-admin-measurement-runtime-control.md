@@ -1,5 +1,10 @@
 # Admin 按需测量：启用、停用和运行时生效 —— 实现与验收
 
+> 2026-09-22 更新：Admin 页面已改为持续采集直到 Disable，移除时长选择和 Details。
+> 本文的定时实验说明及旧验收结果保留为历史记录；当前行为见
+> [持续采集设计](../specs/2026-09-22-continuous-admin-measurement.zh-CN.md)。
+
+
 日期：2026-09-21（同日晚修订：按简化后的需求重写）。被测分支：
 `murphy/deepseek/admin-measurement-runtime-control`，目标 `dev`，基线 `2aa35f4`（PR #258
 合并提交）+ 最新 `dev`（`9c88596`）。设计文档：
@@ -97,7 +102,7 @@ Disable measurement**（**同一个按钮**，文字随状态切换），即可�
 5. 点 **Disable measurement** 立即停止**选取新操作**；不弹确认框，不中断任何用户操作，
    不删除数据，已经开始的 measurement 正常完成并入库。
 6. 到期自动停止：期限是权威时间，不依赖页面打开或清扫执行；CP 重启和页面关闭不会改变持久化开关。
-7. 诊断信息（mode / revision / deployment / run_id / 预算口径）折叠在 Details 里。
+7. 内部诊断字段保留在 Admin API，页面不展示 Details 区块。
 
 ### 2.3 状态与延迟口径
 
