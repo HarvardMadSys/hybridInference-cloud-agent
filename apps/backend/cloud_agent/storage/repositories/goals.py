@@ -200,9 +200,15 @@ class PostgresGoalRepository:
 
         Raises ``GoalConflict`` when ``expected_revision`` no longer matches.
         Replacing the objective mints a new ``goal_id`` and starts the round
-        budget over; editing only the cap keeps both. A completed goal set again
+        count over; editing only the bound keeps both. A completed goal set again
         is a new authorization and mints a new identity even when the text is
         identical. A paused goal that is edited stays paused.
+
+        ``goal.max_rounds`` is tri-state: omitted leaves whatever bound the goal
+        already carries untouched, a number sets one, and an explicit ``null``
+        lifts one. A writer reads :attr:`GoalInput.states_max_rounds` rather than
+        the field, or an edit that only rewrites the objective would delete a
+        limit its owner stated.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             current = await conn.fetchrow(
@@ -236,6 +242,11 @@ class PostgresGoalRepository:
                 state,
                 reauthorized,
                 EDITED_WHILE_PAUSED_DETAIL,
+                # Absence is not ``None``: a request that says nothing about the
+                # bound leaves the owner's alone, and only an explicit ``null``
+                # lifts it. Reading the field instead would make every edit that
+                # rewrites the objective a silent removal.
+                goal.states_max_rounds,
             )
             # A queued round belongs to the objective it was written for. Both
             # paths that replace an objective — this one and the follow-up

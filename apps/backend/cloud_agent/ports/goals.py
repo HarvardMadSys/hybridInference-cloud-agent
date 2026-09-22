@@ -70,9 +70,15 @@ class GoalRepository(Protocol):
 
         Raises ``GoalConflict`` when ``expected_revision`` no longer matches.
         Replacing the objective mints a new ``goal_id`` and starts the round
-        budget over; editing only the cap keeps both. A completed goal set again
+        count over; editing only the bound keeps both. A completed goal set again
         is a new authorization and mints a new identity even when the text is
         identical. A paused goal that is edited stays paused.
+
+        ``goal.max_rounds`` is tri-state: omitted leaves whatever bound the goal
+        already carries untouched, a number sets one, and an explicit ``null``
+        lifts one. A writer reads :attr:`GoalInput.states_max_rounds` rather than
+        the field, or an edit that only rewrites the objective would delete a
+        limit its owner stated.
         """
         ...
 

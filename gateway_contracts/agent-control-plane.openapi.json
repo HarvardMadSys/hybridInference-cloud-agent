@@ -6354,7 +6354,7 @@
         "type": "object"
       },
       "GoalInput": {
-        "description": "An owner's completion condition for one conversation.",
+        "description": "An owner's completion condition for one conversation.\n\n``max_rounds`` is **tri-state**, and the three states mean three different\nthings. Omitted — the ordinary case, and what every client sends — leaves\nwhatever bound the goal already carries exactly as it is, so a caller that\nonly changes the words cannot silently delete a limit its owner stated.\nA number states a bound; an explicit ``null`` lifts one. That is why no\nwriter reads the field directly: what the request *said* is\n:attr:`states_max_rounds`, and absence is not the same fact as ``None``.",
         "properties": {
           "max_rounds": {
             "anyOf": [
@@ -6366,7 +6366,7 @@
                 "type": "null"
               }
             ],
-            "description": "An explicit maximum number of automatic rounds. Omitted means no limit: the goal continues until the objective is met, paused, cleared, blocked on the owner, or stopped by an existing run-time limit. There is no default and no maximum.",
+            "description": "An explicit maximum number of automatic rounds. A number sets it and an explicit null lifts it; omitting the field leaves whatever bound the goal already carries unchanged. Omitting it on a goal that has none means no limit: the goal continues until the objective is met, paused, cleared, blocked on the owner, or stopped by an existing run-time limit. There is no default and no maximum.",
             "title": "Max Rounds"
           },
           "objective": {

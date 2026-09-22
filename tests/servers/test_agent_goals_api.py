@@ -51,6 +51,11 @@ def _deployment_environment(monkeypatch):
 #: The goal the product creates: an objective, and no round bound at all.
 GOAL = {"objective": "make `pytest` pass"}
 
+#: "The request said nothing about the bound", which is a different fact from
+#: ``max_rounds: null``. ``GoalInput.states_max_rounds`` is where the difference
+#: lives, and a caller that only rewrites the objective relies on it.
+OMITTED = object()
+
 
 def _path(thread_id: str, suffix: str = "") -> str:
     return f"/v1/agent/threads/{thread_id}/goal{suffix}"
@@ -67,17 +72,18 @@ async def _set(
     thread_id: str,
     *,
     objective: str = GOAL["objective"],
-    max_rounds: int | None = None,
+    max_rounds: int | None | object = OMITTED,
     revision: int | None = None,
 ) -> dict[str, Any]:
     """Write the goal and hand back the response body.
 
-    ``max_rounds`` is omitted unless the test asks for one, because that is what
-    every client does: the field is not "unset" by sending a number, it is unset
-    by not being there.
+    ``max_rounds`` is omitted unless the test asks for something, because that
+    is what every client does. Passing ``None`` *states* absence, which is the
+    only way to lift a bound; leaving the argument alone leaves the goal's own
+    bound where it is.
     """
     goal: dict[str, Any] = {"objective": objective}
-    if max_rounds is not None:
+    if max_rounds is not OMITTED:
         goal["max_rounds"] = max_rounds
     body: dict[str, Any] = {"goal": goal}
     if revision is not None:
@@ -193,6 +199,41 @@ async def test_editing_only_the_bound_keeps_the_identity_and_the_rounds_spent(cl
     assert edited["goal"]["max_rounds"] == 4
     assert edited["goal"]["rounds_used"] == 1
     assert edited["revision"] == 2
+
+
+async def test_editing_only_the_objective_keeps_the_bound_it_did_not_mention(client, store):
+    """Opening the editor and pressing Save must not delete a stated limit.
+
+    The inline editor edits one thing — the objective — so the request it sends
+    says nothing about the bound. If omission meant "no limit", every such edit
+    would silently remove a constraint the owner had written, with no prompt and
+    nothing to undo it.
+    """
+    _, thread_id = await _conversation(client, store)
+    await _set(client, thread_id, objective="ship it", max_rounds=5)
+
+    edited = await _set(client, thread_id, objective="ship it safely", revision=1)
+
+    assert edited["goal"]["max_rounds"] == 5
+
+
+async def test_stating_no_bound_is_how_a_bound_is_lifted(client, store):
+    """The other half of the tri-state: an explicit ``null`` does remove it."""
+    _, thread_id = await _conversation(client, store)
+    await _set(client, thread_id, objective="ship it", max_rounds=5)
+
+    lifted = await _set(client, thread_id, objective="ship it", max_rounds=None, revision=1)
+
+    assert lifted["goal"]["max_rounds"] is None
+
+
+async def test_a_bound_stated_on_a_goal_that_had_none_is_written(client, store):
+    _, thread_id = await _conversation(client, store)
+    await _set(client, thread_id, objective="ship it")
+
+    bounded = await _set(client, thread_id, objective="ship it", max_rounds=5000, revision=1)
+
+    assert bounded["goal"]["max_rounds"] == 5000
 
 
 async def test_replacing_the_objective_mints_an_identity_and_cancels_the_queued_round(

@@ -550,3 +550,99 @@ async def test_downgrading_bounds_the_goals_the_old_shape_cannot_hold(at_0020):
 
     assert row["goal_objective"] == "ship it"
     assert row["goal_max_rounds"] == 10
+
+
+async def _seed_unbounded_goal_at_head(config) -> str:
+    """One goal with no bound, at head, ready to be given a large one."""
+    thread_id = await _seed_0020_goal(config, objective=None, state=None, max_rounds=None)
+    apply_migrations(config, "head")
+    conn = await asyncpg.connect(**config)
+    try:
+        await conn.execute(
+            "UPDATE agent_threads SET goal_objective = 'ship it', goal_id = 'goal-1', "
+            "goal_state = 'active' WHERE id = $1",
+            thread_id,
+        )
+    finally:
+        await conn.close()
+    return thread_id
+
+
+async def test_a_bound_larger_than_the_old_ceiling_survives_the_downgrade(at_0020):
+    """``0020`` has no ceiling, so ``0021``'s downgrade must not invent one.
+
+    ``0019`` declared ``BETWEEN 1 AND 50`` inline on the column and ``0020``
+    dropped it. A downgrade that re-added it would make a bound this service
+    legitimately accepts — there is no maximum any more — impossible to roll
+    back, and the rollback would fail with a check violation rather than
+    restoring the schema it names.
+    """
+    thread_id = await _seed_unbounded_goal_at_head(at_0020)
+    conn = await asyncpg.connect(**at_0020)
+    try:
+        await conn.execute(
+            "UPDATE agent_threads SET goal_max_rounds = 100 WHERE id = $1", thread_id
+        )
+    finally:
+        await conn.close()
+
+    downgrade_to(at_0020, "0020_goal_controller")
+
+    conn = await asyncpg.connect(**at_0020)
+    try:
+        assert (
+            await conn.fetchval(
+                "SELECT goal_max_rounds FROM agent_threads WHERE id = $1", thread_id
+            )
+            == 100
+        )
+        # And the constraint that is actually 0020's is the one that is back.
+        predicate = await conn.fetchval(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid = 'agent_threads'::regclass "
+            "AND conname = 'ck_agent_threads_goal_shape'"
+        )
+        legacy = await conn.fetchval(
+            "SELECT count(*) FROM pg_constraint WHERE conrelid = 'agent_threads'::regclass "
+            "AND conname = 'agent_threads_goal_max_rounds_check'"
+        )
+    finally:
+        await conn.close()
+
+    assert "goal_max_rounds IS NULL" in predicate
+    assert legacy == 0, "0020 does not carry the old ceiling; restoring it is not a rollback"
+
+
+async def test_a_large_bound_never_blocks_a_rollback_however_far_it_goes(at_0020):
+    """A bound this service accepts must not make a downgrade raise.
+
+    ``0020`` has no ceiling, and ``0019``'s inline one is not something
+    ``0020``'s own ``downgrade`` puts back — that gap predates this revision and
+    is not this test's subject. What it pins is the property that matters to an
+    operator rolling back: whatever the value, the walk completes and the
+    objective — the thing the owner wrote — is still there at the bottom.
+    """
+    thread_id = await _seed_unbounded_goal_at_head(at_0020)
+    conn = await asyncpg.connect(**at_0020)
+    try:
+        await conn.execute(
+            "UPDATE agent_threads SET goal_max_rounds = 100 WHERE id = $1", thread_id
+        )
+    finally:
+        await conn.close()
+
+    downgrade_to(at_0020, "0019_conversation_goal")
+
+    conn = await asyncpg.connect(**at_0020)
+    try:
+        row = dict(
+            await conn.fetchrow(
+                "SELECT goal_objective, goal_max_rounds FROM agent_threads WHERE id = $1",
+                thread_id,
+            )
+        )
+    finally:
+        await conn.close()
+
+    assert row["goal_objective"] == "ship it"
+    assert row["goal_max_rounds"] == 100

@@ -301,8 +301,11 @@ describe('GoalBar controls', () => {
       target: { value: 'ship the release notes' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    // The revision the band was drawn from travels with the write, and no round
-    // bound is sent: the goal the owner asked for is bounded by nothing.
+    // The revision the band was drawn from travels with the write, and the
+    // request says nothing about a round bound. That omission is the contract,
+    // not an oversight: the server reads an absent `max_rounds` as "leave the
+    // bound alone", so editing the words of a goal somebody bounded cannot
+    // delete that bound. Sending `null` here would be the removal.
     await waitFor(() =>
       expect(setAgentGoal).toHaveBeenCalledWith('thread_1', {
         goal: { objective: 'ship the release notes' },

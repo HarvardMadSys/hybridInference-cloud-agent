@@ -88,6 +88,14 @@ def downgrade() -> None:
     revision allowed are given the old default rather than dropped or paused:
     losing a goal's *objective* on a downgrade would be a far worse outcome than
     bounding it, and the objective is what the owner wrote.
+
+    **Nothing else about the bound is touched, and no ceiling is restored.**
+    ``0020`` has no upper bound on ``goal_max_rounds`` at all — it dropped the
+    inline ``BETWEEN 1 AND 50`` that ``0019`` had declared on the column. A
+    downgrade that re-added it would not be restoring ``0020``; it would be
+    inventing a check that revision never had, and it would fail outright on a
+    bound this service legitimately accepts (there is no maximum any more). What
+    is restored here is ``0020``'s constraint, exactly as it shipped.
     """
     op.execute(
         """
@@ -103,9 +111,6 @@ def downgrade() -> None:
             ADD CONSTRAINT ck_agent_threads_goal_shape CHECK ("""
         + _FINITE_SHAPE
         + """
-            ),
-            ADD CONSTRAINT agent_threads_goal_max_rounds_check
-                CHECK (goal_max_rounds IS NULL
-                       OR goal_max_rounds BETWEEN 1 AND 50)
+            )
         """
     )

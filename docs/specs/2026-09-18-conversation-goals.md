@@ -251,7 +251,14 @@ reported.
 names the objective's bound and nothing else, because a deployment that
 advertised a round ceiling was telling every client that "unlimited" meant
 "fifty". `goal.max_rounds` is optional and absent in every request this UI
-sends; when a caller states one, the server honors it exactly. The automatic
+sends; when a caller states one, the server honors it exactly.
+
+**Absence is not `null`.** The field is tri-state, and the three states are three
+different requests: omitted leaves whatever bound the goal carries exactly as it
+is, a number sets one, and an explicit `null` lifts one. Anything else makes the
+ordinary edit destructive — the band's editor edits only the objective, so a
+request that does not mention a bound would otherwise delete a limit its owner
+stated, silently, with nothing to undo it. The automatic
 continuation path never accepts a goal at all: an agent cannot edit the goal it
 is running for. Clearing a goal keeps `goal_revision` counting, so a round
 created against the removed goal can never be confused with one created against

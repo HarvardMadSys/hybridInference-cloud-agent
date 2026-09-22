@@ -333,6 +333,62 @@ async def test_editing_a_paused_goal_leaves_it_paused(store):
     assert (edited["state"], edited["pause_reason"], edited["revision"]) == ("paused", "user", 3)
 
 
+async def test_editing_only_the_objective_keeps_a_bound_it_did_not_mention(store):
+    """A request that says nothing about the bound leaves the owner's alone.
+
+    This is not a whole-goal replacement: ``max_rounds`` is optional, and a
+    caller that only changes the words must not silently delete a limit its
+    owner stated. Opening the band's editor and pressing Save without touching
+    the objective is exactly that request.
+    """
+    job, goal = await _goal_job(store)
+    assert goal["max_rounds"] == 5
+
+    edited = await store.goals.set_goal(
+        thread_id=job["thread_id"],
+        user_id=job["user_id"],
+        goal=GoalInput(objective="ship it safely"),
+        expected_revision=goal["revision"],
+    )
+
+    assert edited["max_rounds"] == 5
+
+
+async def test_stating_no_bound_is_how_a_bound_is_cleared(store):
+    """Absence is "unchanged"; an explicit ``null`` is the way to lift one."""
+    job, goal = await _goal_job(store)
+
+    cleared = await store.goals.set_goal(
+        thread_id=job["thread_id"],
+        user_id=job["user_id"],
+        goal=GoalInput(objective="ship it", max_rounds=None),
+        expected_revision=goal["revision"],
+    )
+
+    assert cleared["max_rounds"] is None
+
+
+async def test_a_bound_can_be_stated_on_a_goal_that_had_none(store):
+    """The same rule the other way round: an explicit number is written."""
+    job, first = await _goal_job(store)
+    unbounded = await store.goals.set_goal(
+        thread_id=job["thread_id"],
+        user_id=job["user_id"],
+        goal=GoalInput(objective="ship it", max_rounds=None),
+        expected_revision=first["revision"],
+    )
+    assert unbounded["max_rounds"] is None
+
+    bounded = await store.goals.set_goal(
+        thread_id=job["thread_id"],
+        user_id=job["user_id"],
+        goal=GoalInput(objective="ship it", max_rounds=5000),
+        expected_revision=unbounded["revision"],
+    )
+
+    assert bounded["max_rounds"] == 5000
+
+
 async def test_setting_a_completed_goal_again_mints_a_new_identity(store):
     """Identical words, a new authorization: the last one was spent."""
     job, goal = await _goal_job(store)
@@ -1249,11 +1305,13 @@ async def test_an_unbounded_goal_queues_round_fifty_one(store, pool, monkeypatch
     job, first, _ = await _live_goal_job(store)
     thread_id = str(job["thread_id"])
     await _finish(pool, first)
-    # The goal the product creates: an objective, and no bound at all.
+    # The bound this fixture's goal carries is lifted explicitly. Leaving the
+    # field out would *keep* it, which is the rule the three cases above pin:
+    # only a stated ``null`` removes a limit, so an ordinary edit cannot.
     goal = await store.goals.set_goal(
         thread_id=thread_id,
         user_id=job["user_id"],
-        goal=GoalInput(objective="ship it"),
+        goal=GoalInput(objective="ship it", max_rounds=None),
         expected_revision=1,
     )
     assert goal["max_rounds"] is None

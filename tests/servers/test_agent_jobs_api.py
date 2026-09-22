@@ -244,7 +244,14 @@ class FakeGoals:
             # Every accepted write moves the control version, even one that
             # only changed the cap.
             "revision": revision + 1,
-            "max_rounds": goal.max_rounds,
+            # The real store's tri-state: a request that says nothing about the
+            # bound leaves the goal's own alone, and only an explicit ``null``
+            # lifts it. Reading the field directly would clear it every time.
+            "max_rounds": (
+                goal.max_rounds
+                if goal.states_max_rounds or current is None
+                else current["max_rounds"]
+            ),
             # Rounds belong to the identity, so a minted one starts from zero.
             "rounds_used": 0 if minted else current["rounds_used"],
             "created_at": (current or {}).get("created_at"),

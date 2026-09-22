@@ -182,26 +182,50 @@ class GoalConflict(GoalError):
 
 
 class GoalInput(BaseModel):
-    """An owner's completion condition for one conversation."""
+    """An owner's completion condition for one conversation.
+
+    ``max_rounds`` is **tri-state**, and the three states mean three different
+    things. Omitted — the ordinary case, and what every client sends — leaves
+    whatever bound the goal already carries exactly as it is, so a caller that
+    only changes the words cannot silently delete a limit its owner stated.
+    A number states a bound; an explicit ``null`` lifts one. That is why no
+    writer reads the field directly: what the request *said* is
+    :attr:`states_max_rounds`, and absence is not the same fact as ``None``.
+    """
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
     objective: str = Field(min_length=1, max_length=MAX_OBJECTIVE_CHARS)
-    #: An *optional* bound the owner states. Omitted — the ordinary case, and
-    #: what every client sends — means the goal runs until it is finished,
-    #: stopped, blocked or the run-time limits that govern any turn apply.
-    #: Present, it is honored exactly: the goal pauses rather than spending a
-    #: round past it, and the owner is told which bound they set.
+    #: An *optional* bound the owner states. Omitted means "leave the bound
+    #: alone" — never "no limit", which would make every edit that does not
+    #: mention one a silent removal. An explicit ``null`` is how a bound is
+    #: lifted; a number is how one is set, and it is honored exactly, with no
+    #: maximum, because there is no longer a ceiling for the platform to impose.
     max_rounds: int | None = Field(
         None,
         ge=1,
         description=(
-            "An explicit maximum number of automatic rounds. Omitted means no "
-            "limit: the goal continues until the objective is met, paused, "
-            "cleared, blocked on the owner, or stopped by an existing run-time "
-            "limit. There is no default and no maximum."
+            "An explicit maximum number of automatic rounds. A number sets it "
+            "and an explicit null lifts it; omitting the field leaves whatever "
+            "bound the goal already carries unchanged. Omitting it on a goal "
+            "that has none means no limit: the goal continues until the "
+            "objective is met, paused, cleared, blocked on the owner, or "
+            "stopped by an existing run-time limit. There is no default and no "
+            "maximum."
         ),
     )
+
+    @property
+    def states_max_rounds(self) -> bool:
+        """Whether the request said anything about the bound at all.
+
+        Pydantic keeps the keys the caller actually sent, which is the only
+        place the difference between "omitted" and "explicitly null" survives
+        validation — both arrive as ``None``. Every writer of the column reads
+        this rather than the field, or an edit that mentions nothing about a
+        bound would clear one.
+        """
+        return "max_rounds" in self.model_fields_set
 
 
 class GoalView(BaseModel):

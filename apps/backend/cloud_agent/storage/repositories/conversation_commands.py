@@ -883,6 +883,11 @@ class PostgresConversationCommands:
                     "paused" if thread["goal_state"] == "paused" else "active",
                     thread["goal_state"] == "complete",
                     EDITED_WHILE_PAUSED_DETAIL,
+                    # The same tri-state the goal repository's own ``set_goal``
+                    # applies, and for the same reason: a message that carries a
+                    # new objective and says nothing about a bound must not
+                    # delete one the owner stated earlier.
+                    goal.states_max_rounds,
                 )
                 # The same rule the goal repository's own ``set_goal`` applies,
                 # and it has to be applied here too: a round queued for the old
