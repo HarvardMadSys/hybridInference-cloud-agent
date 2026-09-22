@@ -20,9 +20,12 @@ The rules, in the order they are read — the order *is* the specification:
    behind it.
 6. A valid terminal report is honored: ``needs_input`` pauses, ``complete``
    completes.
-7. The round budget, checked *after* the report, so a valid completion on the
-   last permitted round still counts.
-8. Otherwise, work continues.
+7. The round bound, checked *after* the report, so a valid completion on the
+   last permitted round still counts. **There is no bound unless the owner
+   stated one.** An unset bound is the ordinary case and stops nothing; this
+   rule exists for the owner who asked for a specific number, and for the rows
+   written when the platform still imposed a default of its own.
+8. Otherwise, work continues — for as long as the goal says it should.
 """
 
 from __future__ import annotations
@@ -52,7 +55,10 @@ class GoalContext:
     state: GoalState
     goal_id: str
     revision: int
-    max_rounds: int
+    #: The owner's own bound, or ``None`` when they stated none — which is the
+    #: ordinary case. Never a sentinel: a decision that read ``999999`` here
+    #: could not tell "no limit" from "a very large limit".
+    max_rounds: int | None
     rounds_used: int
     # -- the turn that just reached a terminal state -----------------------
     turn_job_id: str
@@ -165,14 +171,20 @@ def decide(ctx: GoalContext) -> GoalAction:
     if ctx.report_parse == "valid" and ctx.report is not None:
         return _accept(ctx.report)
 
-    # 9. The round budget, checked *after* the report above, so a valid
+    # 9. The owner's own bound, checked *after* the report above, so a valid
     #    completion reported on the last permitted round still completes.
-    if ctx.rounds_used >= ctx.max_rounds:
+    #
+    #    An unset bound stops nothing: this is the branch that used to end every
+    #    goal at a default of ten rounds, and it now does nothing at all unless
+    #    somebody explicitly asked for a number. ``rounds_used`` is read here and
+    #    reported to the owner, but on its own it is not a reason to stop.
+    if ctx.max_rounds is not None and ctx.rounds_used >= ctx.max_rounds:
         return GoalAction(
             kind="pause",
             reason="round_limit",
             message=(
-                f"the goal used all {ctx.max_rounds} automatic rounds without reporting completion"
+                f"the goal reached the {ctx.max_rounds} automatic rounds you set "
+                "for it; resume it to continue without that limit"
             ),
         )
 

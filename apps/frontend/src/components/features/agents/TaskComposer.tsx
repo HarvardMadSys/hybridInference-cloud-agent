@@ -14,13 +14,11 @@ import { ComposerCommandMenu } from './ComposerCommandMenu';
 import { AttachmentStrip } from './attachments/AttachmentStrip';
 import { useAttachments } from './attachments/useAttachments';
 import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
-import { GoalDialog, type GoalDraft } from './goal/GoalDialog';
-import { useGoalCommand } from './goal/useGoalCommand';
+import { GOAL_COMMAND_PREFIX, useGoalCommand } from './goal/useGoalCommand';
 import { useComposerMcp } from './mcp/useComposerMcp';
 import { SkillSelectionDialog } from './skills/SkillPicker';
 import { useSkillLibrary } from './skills/useSkillLibrary';
 import type { SelectedSkillApi } from '@/lib/api/skills';
-import { DEFAULT_GOAL_LIMITS } from '@/lib/goalLimits';
 
 // New-task composer (the /agents index state). Runtime × model are first-class
 // controls — BYOA × BYOM is the product, not an advanced option.
@@ -51,12 +49,11 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   // The attach menu's own state. What this message will carry, as opposed to
   // how it runs; an untouched composer sends neither `skill_ids` nor a goal.
   const [skillsOpen, setSkillsOpen] = useState(false);
-  // What this message would set the conversation's goal to, and nothing else:
-  // the draft rides the message, because a goal with no message attached has
-  // nothing to work on yet.
-  const [goalOpen, setGoalOpen] = useState(false);
-  const [goalDraft, setGoalDraft] = useState<GoalDraft | null>(null);
+  // What to say when `/goal` was typed with nothing after it. Guidance, not a
+  // failure: nothing was created and nothing was sent.
+  const [goalHint, setGoalHint] = useState<string | null>(null);
   const [dropping, setDropping] = useState(false);
+  const taskBox = useRef<HTMLTextAreaElement>(null);
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
   const [models, setModels] = useState<string[]>([]);
   const [repo, setRepo] = useState('');
@@ -70,13 +67,11 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   const [error, setError] = useState<string | null>(null);
   const attachments = useAttachments(t, config?.attachment_limits);
   const mcp = useComposerMcp(t);
-  // The bounds the server advertises, so a command that names no round count
-  // asks for the same default the dialog would have offered.
-  const goalLimits = config?.goal_limits ?? DEFAULT_GOAL_LIMITS;
   const goalCommand = useGoalCommand({
     value: task,
     setValue: setTask,
-    onOpenDialog: () => setGoalOpen(true),
+    focusComposer: () => taskBox.current?.focus(),
+    onNeedsObjective: () => setGoalHint(t('goal.needsObjective')),
     onApply: applyGoalObjective,
     onError: setError,
   });
@@ -175,10 +170,26 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     !attachments.uploading &&
     Boolean(repo && runtime && model);
 
-  /** Drop the drafted goal without sending it. */
-  function discardGoalDraft() {
-    setGoalDraft(null);
-    setGoalOpen(false);
+  /**
+   * The plus menu's Goal row: put `/goal ` in the box and leave the caret after
+   * it, so the interaction is typing where the owner was already typing.
+   *
+   * There is nothing else for the row to open. A goal is an objective and the
+   * band above the messages manages it afterwards, so a dialog here would be a
+   * second place to say the same one thing — and the one the owner has to
+   * dismiss before they can type the sentence they came to type.
+   */
+  function insertGoalCommand() {
+    setGoalHint(null);
+    setTask((current) => {
+      // Already the command: nothing to add, and prefixing again would make
+      // `/goal /goal …` an objective nobody wrote.
+      if (/^\s*\/goal(\s|$)/i.test(current)) return current;
+      // Anything already typed *is* the objective — the row means "make this
+      // message a goal", and an objective is a whole sentence.
+      return current.trim() ? `${GOAL_COMMAND_PREFIX}${current}` : GOAL_COMMAND_PREFIX;
+    });
+    taskBox.current?.focus();
   }
 
   /**
@@ -219,21 +230,20 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   /**
    * `/goal <objective>` on a task that does not exist yet.
    *
-   * One request, because there is one task to create: the objective is the
-   * first turn's content *and* the condition that continues it, so the run
-   * starts working instead of waiting for a second message saying "begin". A
-   * refused creation is thrown rather than drawn here — the command reports it
-   * and keeps the text, because the retry is the same command.
+   * **One request, one task.** The objective is the first turn's content *and*
+   * the condition that continues it, so the run starts working instead of
+   * waiting for a second message saying "begin"; and because it is one call,
+   * the command cannot leave a task behind if it fails. A refused creation is
+   * thrown rather than drawn here — the command reports it and keeps the text,
+   * because the retry is the same command.
+   *
+   * No `max_rounds`: the goal the owner asked for has no round limit. The field
+   * is absent from the request rather than filled with a number, because
+   * "unlimited" is the absence of a bound and a large number is not.
    */
   async function applyGoalObjective(objective: string): Promise<void> {
-    const job = await createAgentJob(
-      requestBody(objective, {
-        objective,
-        // A round count already chosen in the dialog is a choice this screen
-        // is holding; the command replaces the words, not the budget.
-        max_rounds: goalDraft?.maxRounds ?? goalLimits.default_rounds,
-      }),
-    );
+    setGoalHint(null);
+    const job = await createAgentJob(requestBody(objective, { objective }));
     router.push(`/${job.id}`);
   }
 
@@ -245,10 +255,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     setSubmitting(true);
     setError(null);
     try {
-      const goal = goalDraft
-        ? { objective: goalDraft.objective, max_rounds: goalDraft.maxRounds }
-        : undefined;
-      const job = await createAgentJob(requestBody(task.trim(), goal));
+      const job = await createAgentJob(requestBody(task.trim()));
       router.push(`/${job.id}`);
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : t('composer.startFailed'));
@@ -321,9 +328,13 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           onChoose={goalCommand.onChoose}
         />
         <textarea
+          ref={taskBox}
           rows={4}
           value={task}
-          onChange={(event) => setTask(event.target.value)}
+          onChange={(event) => {
+            setTask(event.target.value);
+            if (goalHint) setGoalHint(null);
+          }}
           onKeyDown={(event) => {
             // The menu owns the keys while it is showing: Enter confirms the
             // highlighted command instead of sending half of one to the model.
@@ -383,8 +394,8 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
                 skillSummary={
                   pendingSkillDefaults ? t('attach.skillsDefaults') : String(selectedSkills.length)
                 }
-                goalSummary={goalDraft ? goalDraft.objective : t('attach.goalNone')}
-                onOpenGoal={() => setGoalOpen(true)}
+                goalSummary={t('attach.goalNone')}
+                onOpenGoal={insertGoalCommand}
                 mcp={mcp}
                 mcpBlockedReason={mcpBlockedReason}
               />
@@ -467,18 +478,6 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
         />
       ) : null}
 
-      <GoalDialog
-        open={goalOpen}
-        initial={goalDraft}
-        limits={config?.goal_limits}
-        onClose={() => setGoalOpen(false)}
-        onApply={(draft) => {
-          setGoalDraft(draft);
-          setGoalOpen(false);
-        }}
-        onClear={goalDraft ? discardGoalDraft : undefined}
-      />
-
       {skillLibrary.error ? (
         <div className="mt-3 text-center text-sm text-red-600 dark:text-red-400" role="alert">
           {skillLibrary.error} You can still start a task with your account defaults.{' '}
@@ -486,6 +485,15 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
             Retry loading skills
           </button>
         </div>
+      ) : null}
+
+      {/* `/goal` on its own is not an objective. It is consumed rather than
+          sent to the model, and this is where the owner is told what is
+          missing — beside the box the token is still sitting in. */}
+      {goalHint ? (
+        <p className="mt-3 text-center text-[13px] text-gray-500 dark:text-gray-400" role="status">
+          {goalHint}
+        </p>
       ) : null}
 
       {error ? (

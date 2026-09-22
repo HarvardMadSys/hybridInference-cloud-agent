@@ -433,9 +433,16 @@ async def set_agent_goal(
     """Create, replace or edit the conversation's completion condition.
 
     A new objective is a new authorization: it mints a new goal identity, starts
-    the round budget over, and becomes active. Editing the cap of an active goal
-    leaves the identity and the rounds spent alone; editing a paused one leaves
-    it paused, because changing the words is not resuming it.
+    the round count over, and becomes active. Editing the bound of an active
+    goal leaves the identity and the rounds spent alone; editing a paused one
+    leaves it paused, because changing the words is not resuming it.
+
+    ``max_rounds`` is the owner's own bound and is *optional*: omitted — what
+    every client sends — means the goal runs until it is finished, stopped,
+    cleared, blocked on the owner, or an existing run-time limit applies. There
+    is no default and no maximum. An explicit value is honored exactly, and is
+    distinguishable from its absence because absence is ``null``, never a large
+    integer.
 
     ``revision`` is what makes two edits from two tabs resolvable — the second is
     refused with a 409 rather than silently overwriting the first. Omitted means
@@ -522,6 +529,13 @@ async def resume_agent_goal(
     The owner's authorization is the trigger: no model report is needed to start
     working again, and the wakeup this writes is what makes the next round
     happen — the request does not wait for it, and does not need to.
+
+    A goal that paused because it reached a bound the *owner* set is resumed
+    without that bound, and the response says so: ``max_rounds`` comes back
+    ``null``. Refusing instead would leave the only Resume control in the
+    product pointing at a state nothing can clear — the round bound has no
+    configuration surface — which is the dead end this endpoint exists to
+    remove.
     """
     job_store = _require_store(store)
     state = await job_store.goals.get_thread_goal_state(
@@ -535,22 +549,6 @@ async def resume_agent_goal(
     expected = body.revision if body is not None else None
     if expected is not None and expected != int(state["revision"]):
         raise _goal_conflict_error()
-    if goal["state"] == "paused" and int(goal["rounds_used"]) >= int(goal["max_rounds"]):
-        # Resuming would authorize a round the budget cannot pay for. The owner
-        # has to raise the cap first, and telling them that here is better than
-        # a goal that becomes active and pauses itself on the next decision.
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": {
-                    "type": "goal_rounds_exhausted",
-                    "message": (
-                        f"This goal has used all {goal['max_rounds']} of its automatic "
-                        "rounds. Raise the limit, then resume it."
-                    ),
-                }
-            },
-        )
     if goal["state"] != "paused":
         # Already active or complete. Active needs nothing; complete needs a new
         # authorization, which is a set, not a resume.

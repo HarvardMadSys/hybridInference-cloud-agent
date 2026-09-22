@@ -1,9 +1,11 @@
 // Fallbacks for older control planes; /config advertises the server bounds.
-// They are the same numbers ``cloud_agent/goals/models.py`` enforces, and a
-// client that guessed lower would refuse a goal the server would have taken.
+//
+// Only the objective is bounded, and that is the whole list. There is no round
+// ceiling and no round default to fall back to, because the server has neither:
+// a goal runs until it is finished, stopped, cleared, blocked on its owner, or
+// one of the run-time limits that already governs every turn applies. A client
+// that wants a bound states one; nothing here may invent one.
 export const DEFAULT_GOAL_LIMITS = {
   max_objective_chars: 4000,
-  max_rounds: 50,
-  default_rounds: 10,
 };
 export type GoalLimits = typeof DEFAULT_GOAL_LIMITS;

@@ -177,8 +177,10 @@ class AgentJobCreate(BaseModel):
         description=(
             "A completion condition for this conversation. The platform judges it at "
             "the end of every turn and queues the next turn itself while the objective "
-            "is unmet, up to max_rounds. Omitted means no goal: nothing continues "
-            "without the owner asking again."
+            "is unmet. There is no round limit unless the caller states one with "
+            "max_rounds: by default the goal continues until it is met, paused, cleared, "
+            "blocked on the owner, or stopped by an existing run-time limit. Omitted "
+            "means no goal: nothing continues without the owner asking again."
         ),
     )
     metadata: dict[str, Any] | None = Field(None, description="Opaque caller metadata.")

@@ -1,6 +1,5 @@
 import { getAgentGoal, setAgentGoal } from '@/lib/api/agents';
 import { APIError } from '@/lib/utils/errors';
-import type { GoalDraft } from './GoalDialog';
 
 // The two things every goal writer has to get right, in one place: proving the
 // revision it read, and recognising the refusal that says it did not.
@@ -13,6 +12,11 @@ export function isGoalRevisionConflict(cause: unknown): boolean {
 /**
  * Write the conversation's goal, proving the revision it was read at.
  *
+ * The objective is the whole draft. A goal has no round field to carry: the
+ * bound is optional, this UI never states one, and a goal that has none is
+ * bounded by nothing — so the request simply does not mention it. Sending a
+ * number here is what used to make every goal finite at a default nobody chose.
+ *
  * A conversation whose goal this client has never read has no revision to
  * prove. The read that produces one is also what proves nothing was written
  * between it and the write — so it is done here rather than by sending the
@@ -21,12 +25,9 @@ export function isGoalRevisionConflict(cause: unknown): boolean {
  */
 export async function writeGoal(
   threadId: string,
-  draft: GoalDraft,
+  objective: string,
   knownRevision?: number,
 ): Promise<void> {
   const revision = knownRevision ?? (await getAgentGoal(threadId)).revision;
-  await setAgentGoal(threadId, {
-    goal: { objective: draft.objective, max_rounds: draft.maxRounds },
-    revision,
-  });
+  await setAgentGoal(threadId, { goal: { objective }, revision });
 }

@@ -9,8 +9,22 @@ has.
 Three durable states, and only three: ``active``, ``paused`` and ``complete``.
 *Why* a goal stopped is data, not a state — ``pause_reason`` carries it — which
 is what lets "the owner paused this", "the model says it needs input" and "the
-platform ran out of rounds" share one lifecycle and one resume path instead of
-three.
+owner's own round cap was reached" share one lifecycle and one resume path
+instead of three.
+
+**A goal has no round limit by default.** The product asks the owner for one
+thing — how far they want the work taken — and then keeps going until the
+objective is met, the owner stops it, the platform hits a condition that needs
+the owner, or one of the run-time limits that already governs every turn
+(account quota, a single execution's deadline, cancellation) applies. There is
+no default budget and no maximum; a goal is not a subscription that expires, and
+"999999 rounds" is not how a design says "no limit".
+
+``max_rounds`` survives for one reason only: an owner may still state a bound
+explicitly, and a goal that already carries one must not silently lose it. When
+it is set it is enforced, and it is *distinguishable* from the absence of one —
+:data:`UNLIMITED_ROUNDS` is ``None``, never a sentinel integer. ``rounds_used``
+is a statistic the owner reads, not a stop condition.
 
 ``revision`` is the thread-level control version: it moves on every accepted
 goal write, including ``clear``, and never resets. ``goal_id`` is the *identity*
@@ -56,11 +70,14 @@ GOAL_REPORT_RUNTIMES = frozenset({"claude-code", "codex", "kilo", "opencode", "p
 #: told which format was wrong. Adding a name here is a claim that has to be
 #: earned against a real pinned version, and the design says so.
 REPORT_REPAIR_RUNTIMES: frozenset[str] = frozenset()
-#: A goal that cannot finish in fifty automatic rounds is not a task, it is a
-#: subscription. The owner's account quota is what bounds spend; this bounds
-#: how long the platform keeps spending it without being asked again.
-MAX_ROUNDS = 50
-DEFAULT_ROUNDS = 10
+#: What "no round limit" is spelled as, everywhere: the absence of a value.
+#:
+#: Deliberately not a large integer. A sentinel is indistinguishable from a real
+#: bound in the column, in an API response and in a bug report, and it forces
+#: every reader to know the magic number — after which "raise the cap" and
+#: "remove the cap" look like the same operation. ``None`` says what it means and
+#: cannot be confused with a number an owner chose.
+UNLIMITED_ROUNDS: None = None
 #: A turn whose report block is present but malformed gets one bounded chance to
 #: restate it. Only when the runtime can be pinned to tool-free execution, and
 #: only once: a second failure pauses.
@@ -94,6 +111,11 @@ GoalRoundKind = Literal["work", "repair"]
 #: condition stopped it. ``fork`` is recorded on the *child* task, never on the
 #: parent, because a fork copies an objective without inheriting the authority
 #: to run it.
+#:
+#: ``round_limit`` is not a default stop any more — it is reachable only when the
+#: owner stated a bound themselves, and it stays in the vocabulary because rows
+#: written before that change still carry it. Resuming one releases the spent
+#: bound, so the state is never a dead end.
 GOAL_PAUSE_REASONS = (
     "user",
     "fork",
@@ -140,11 +162,15 @@ GoalWakeupState = Literal["pending", "processed"]
 
 
 class GoalLimits(BaseModel):
-    """Advertise the server's goal bounds to clients before they submit."""
+    """Advertise the server's goal bounds to clients before they submit.
+
+    Only the objective is bounded. There is no advertised round ceiling and no
+    advertised default, because there is neither: a client that wants a bound
+    states one, and a client that does not leaves the field out. Advertising a
+    number here is what made "unlimited" look like "fifty" to every reader.
+    """
 
     max_objective_chars: int = MAX_OBJECTIVE_CHARS
-    max_rounds: int = MAX_ROUNDS
-    default_rounds: int = DEFAULT_ROUNDS
 
 
 class GoalError(ValueError):
@@ -161,7 +187,21 @@ class GoalInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     objective: str = Field(min_length=1, max_length=MAX_OBJECTIVE_CHARS)
-    max_rounds: int = Field(DEFAULT_ROUNDS, ge=1, le=MAX_ROUNDS)
+    #: An *optional* bound the owner states. Omitted — the ordinary case, and
+    #: what every client sends — means the goal runs until it is finished,
+    #: stopped, blocked or the run-time limits that govern any turn apply.
+    #: Present, it is honored exactly: the goal pauses rather than spending a
+    #: round past it, and the owner is told which bound they set.
+    max_rounds: int | None = Field(
+        None,
+        ge=1,
+        description=(
+            "An explicit maximum number of automatic rounds. Omitted means no "
+            "limit: the goal continues until the objective is met, paused, "
+            "cleared, blocked on the owner, or stopped by an existing run-time "
+            "limit. There is no default and no maximum."
+        ),
+    )
 
 
 class GoalView(BaseModel):
@@ -171,7 +211,12 @@ class GoalView(BaseModel):
     objective: str
     state: GoalState
     revision: int
-    max_rounds: int
+    #: ``None`` is "no limit was set", which is the ordinary case. It is never a
+    #: large number: a reader must be able to tell "the owner bounded this" from
+    #: "nothing bounds this" without knowing a convention.
+    max_rounds: int | None = None
+    #: How many automatic rounds have actually been charged. A statistic the
+    #: owner reads, not a stop condition.
     rounds_used: int
     pause_reason: GoalPauseReason | None = None
     pause_detail: str | None = None
@@ -181,15 +226,29 @@ class GoalView(BaseModel):
     updated_at: datetime | None = None
 
 
-class GoalSummary(BaseModel):
-    """The control version of a conversation that has no goal.
-
-    ``GET`` on a conversation whose goal was cleared still has to answer with
-    the version it is at, because the next write's ``expected_revision`` is
-    compared against it: a client that read "no goal" and then created one must
-    be able to prove nothing was created in between.
-    """
-
-    goal: GoalView | None = None
-    revision: int
-    max_rounds: int = MAX_ROUNDS
+__all__ = [
+    "ARM_AFTER_S",
+    "GOAL_PAUSE_REASONS",
+    "GOAL_REPORT_PROTOCOL",
+    "GOAL_REPORT_RUNTIMES",
+    "MAX_OBJECTIVE_CHARS",
+    "MAX_REASON_CHARS",
+    "MAX_REPORT_REPAIRS",
+    "MAX_WAKEUP_ATTEMPTS",
+    "REPORT_REPAIR_RUNTIMES",
+    "STALLED_AFTER_S",
+    "UNLIMITED_ROUNDS",
+    "WAKEUP_BACKOFF_MAX_S",
+    "WAKEUP_BACKOFF_S",
+    "CompletionBasis",
+    "GoalConflict",
+    "GoalError",
+    "GoalInput",
+    "GoalLimits",
+    "GoalPauseReason",
+    "GoalRoundKind",
+    "GoalState",
+    "GoalView",
+    "GoalWakeupState",
+    "GoalWakeupTrigger",
+]

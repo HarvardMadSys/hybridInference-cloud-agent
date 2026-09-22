@@ -32,7 +32,9 @@ def goal_row(
     goal_id: str = GOAL_ID,
     revision: int = 1,
     objective: str = "ship it",
-    max_rounds: int = 10,
+    # No bound by default: the goal the product creates is unbounded, and a test
+    # about a stated bound passes one explicitly.
+    max_rounds: int | None = None,
     rounds_used: int = 0,
     repairs_used: int = 0,
     pause_reason: str | None = None,
@@ -463,7 +465,8 @@ async def test_an_owner_wakeup_on_an_idle_conversation_queues_the_first_work_rou
         1,
     )
     assert (queued["goal_id"], queued["round_goal_revision"]) == (GOAL_ID, 1)
-    assert '<goal_round kind="work" round="1" of="10">' in queued["task_prompt"]
+    # No `of=`: this goal has no bound, and the round says only which one it is.
+    assert '<goal_round kind="work" round="1">' in queued["task_prompt"]
     assert queued["client_request_id"] == client_request_id_for(
         thread_id=THREAD_ID, goal_id=GOAL_ID, kind="work", trigger_ref="set:1"
     )
@@ -498,6 +501,66 @@ async def test_a_finish_wakeup_with_an_absent_report_queues_the_next_work_round(
     assert queued["client_request_id"] == client_request_id_for(
         thread_id=THREAD_ID, goal_id=GOAL_ID, kind="work", trigger_ref="job:job-2"
     )
+
+
+async def test_an_unbounded_goal_queues_round_fifty_one():
+    """The ten- and fifty-round defaults are gone from the scheduling path too.
+
+    A goal the owner never bounded has to keep producing rounds however many it
+    has run. This is the same regression the decision test pins, asserted one
+    layer up so that a reader that clamped or defaulted the column would fail
+    here rather than only there.
+    """
+    store = FakeStore(
+        goal=goal_row(rounds_used=50),
+        turns=[
+            turn(id="job-1", input_seq_at_create=1),
+            turn(
+                id="job-50",
+                turn_source="goal",
+                goal_id=GOAL_ID,
+                round_kind="work",
+                report_parse="absent",
+                input_seq_at_create=1,
+                turn_no=50,
+            ),
+        ],
+        input_seq=1,
+    )
+    store.goal_wakeups.arm(trigger="finish", trigger_ref="job:job-50")
+
+    assert await _consume(store) == "queue_work_round"
+
+    queued = store.queued_rounds()[0]
+    assert queued["goal_round"] == 51
+    assert '<goal_round kind="work" round="51">' in queued["task_prompt"]
+    assert store.goal["state"] == "active"
+
+
+async def test_a_bound_the_owner_stated_still_stops_the_rounds():
+    """Removing the platform's default is not removing the owner's choice."""
+    store = FakeStore(
+        goal=goal_row(rounds_used=5, max_rounds=5),
+        turns=[
+            turn(id="job-1", input_seq_at_create=1),
+            turn(
+                id="job-5",
+                turn_source="goal",
+                goal_id=GOAL_ID,
+                round_kind="work",
+                report_parse="absent",
+                input_seq_at_create=1,
+                turn_no=5,
+            ),
+        ],
+        input_seq=1,
+    )
+    store.goal_wakeups.arm(trigger="finish", trigger_ref="job:job-5")
+
+    assert await _consume(store) == "pause"
+
+    assert store.queued_rounds() == []
+    assert (store.goal["state"], store.goal["pause_reason"]) == ("paused", "round_limit")
 
 
 async def test_a_complete_report_completes_the_goal_on_the_turn_that_earned_it():

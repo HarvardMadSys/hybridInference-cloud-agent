@@ -9,11 +9,14 @@ import { composerCommandMatches, composerCommandQuery, parseGoalCommand } from '
 
 describe('parseGoalCommand', () => {
   it('recognises the bare command, with or without an argument', () => {
-    expect(parseGoalCommand('/goal')).toEqual({ kind: 'open' });
-    expect(parseGoalCommand('/goal   ')).toEqual({ kind: 'open' });
+    // `empty` is not an objective. The composer consumes it and asks for the
+    // rest of the sentence rather than creating a goal with no content or
+    // sending the token to the model as prose.
+    expect(parseGoalCommand('/goal')).toEqual({ kind: 'empty' });
+    expect(parseGoalCommand('/goal   ')).toEqual({ kind: 'empty' });
     // Leading whitespace is still the start of the input: refusing it would be
     // a rule about a stray space rather than about what the input is.
-    expect(parseGoalCommand('  /goal')).toEqual({ kind: 'open' });
+    expect(parseGoalCommand('  /goal')).toEqual({ kind: 'empty' });
     expect(parseGoalCommand('/goal fix the flaky test')).toEqual({
       kind: 'set',
       objective: 'fix the flaky test',

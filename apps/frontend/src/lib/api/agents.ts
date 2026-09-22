@@ -551,7 +551,13 @@ export interface GoalApi {
   objective: string;
   state: 'active' | 'paused' | 'complete';
   revision: number;
-  max_rounds: number;
+  /**
+   * The bound the owner stated themselves, or `null` when they stated none —
+   * which is the ordinary case. Never a large integer: "no limit" is the
+   * absence of a value, so a reader can tell a chosen bound from no bound.
+   */
+  max_rounds: number | null;
+  /** Rounds actually charged. A statistic, not a stop condition. */
   rounds_used: number;
   /** Why an active goal stopped continuing; null in every other state. */
   pause_reason: GoalPauseReason | null;
@@ -590,13 +596,18 @@ export type GoalReportOutcome = 'complete' | 'needs_input';
 /** What a client sends to set one. */
 export interface GoalInputApi {
   objective: string;
+  /**
+   * An explicit maximum number of automatic rounds. This UI never sends one:
+   * the product asks the owner what to achieve, not how many rounds to spend,
+   * and a goal without this field has no limit at all. The field exists for a
+   * caller that wants to state a bound, and the server honors it exactly.
+   */
   max_rounds?: number;
 }
 
+/** What the deployment advertises about goals: the objective bound, and only it. */
 export interface GoalLimitsApi {
   max_objective_chars: number;
-  max_rounds: number;
-  default_rounds: number;
 }
 
 export interface AgentConfigApi {

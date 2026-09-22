@@ -1,9 +1,14 @@
 """The continuation rules, one case at a time, in the order they are read.
 
 The order *is* the specification: a person's message beats a completion claim,
-a readable completion beats the round budget, and a runtime that cannot deliver
-a report stops the goal instead of looping. These cases pin each rule and the
-places where one rule deliberately outranks another.
+a readable completion beats the owner's own round bound, and a runtime that
+cannot deliver a report stops the goal instead of looping. These cases pin each
+rule and the places where one rule deliberately outranks another.
+
+The default context carries **no round bound at all**, because that is what the
+product creates: a goal keeps going until something real stops it. The bound
+cases exist for the owner who stated a number, and are deliberately written as
+the exception rather than the rule.
 """
 
 from __future__ import annotations
@@ -21,7 +26,8 @@ def context(**overrides) -> GoalContext:
         state="active",
         goal_id="goal-1",
         revision=3,
-        max_rounds=10,
+        # No bound: the ordinary case. A test that needs one states it.
+        max_rounds=None,
         rounds_used=1,
         turn_job_id="job-1",
         turn_goal_id="goal-1",
@@ -137,14 +143,40 @@ def test_input_accepted_since_the_turn_was_created_beats_a_completion_claim():
     assert action.kind == "none"
 
 
-def test_the_round_budget_stops_a_goal_that_never_reported_completion():
+def test_a_goal_with_no_bound_keeps_going_past_the_old_defaults():
+    """The regression this whole change exists for.
+
+    Ten was the product's default and fifty its ceiling. Neither is a reason to
+    stop a goal any more: a goal nobody bounded is bounded by nothing, and the
+    rounds it has run are a statistic rather than a stop condition.
+    """
+    for rounds in (9, 10, 11, 49, 50, 51, 5_000):
+        assert decide(context(rounds_used=rounds)).kind == "queue_work_round", rounds
+        assert decide(context(rounds_used=rounds, report_parse="absent")).kind == (
+            "queue_work_round"
+        ), rounds
+
+
+def test_no_bound_is_the_absence_of_a_value_not_a_large_one():
+    """``None`` and a huge integer must not be the same decision.
+
+    A sentinel would make "raise the cap" and "remove the cap" indistinguishable
+    in the column, in the API and in a bug report.
+    """
+    assert context(max_rounds=None, rounds_used=10**9).max_rounds is None
+    assert decide(context(max_rounds=None, rounds_used=10**9)).kind == "queue_work_round"
+
+
+def test_a_bound_the_owner_stated_is_honored_exactly():
     action = decide(context(rounds_used=10, max_rounds=10, report_parse="absent"))
     assert (action.kind, action.reason) == ("pause", "round_limit")
     assert "10" in (action.message or "")
+    # One round short of it is still work, not a stop.
+    assert decide(context(rounds_used=9, max_rounds=10)).kind == "queue_work_round"
 
 
 def test_a_completion_on_the_last_permitted_round_still_completes():
-    """The budget is checked after the report, so the last round is not wasted."""
+    """The bound is checked after the report, so the last round is not wasted."""
     action = decide(replace(complete_report(), rounds_used=10, max_rounds=10))
     assert action.kind == "complete"
 

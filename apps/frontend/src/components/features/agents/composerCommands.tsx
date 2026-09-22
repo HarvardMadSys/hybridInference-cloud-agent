@@ -57,8 +57,8 @@ export function composerCommandMatches(text: string): ComposerCommand[] {
   return COMPOSER_COMMANDS.filter((command) => command.name.startsWith(query));
 }
 
-/** What a typed `/goal` asks for: the dialog, or the objective it carries. */
-export type GoalCommand = { kind: 'open' } | { kind: 'set'; objective: string };
+/** What a typed `/goal` holds: an objective, or nothing after the token. */
+export type GoalCommand = { kind: 'set'; objective: string } | { kind: 'empty' };
 
 /**
  * The goal command, when this input *is* one.
@@ -68,10 +68,14 @@ export type GoalCommand = { kind: 'open' } | { kind: 'set'; objective: string };
  * it are all ordinary text, and are left for the model. Everything after the
  * token is the objective, because an objective is prose and may run to several
  * lines.
+ *
+ * A bare `/goal` is `empty`, and that is not an objective: the composer asks
+ * for the rest of the sentence rather than creating a goal with no content or
+ * sending the token to the model as prose.
  */
 export function parseGoalCommand(text: string): GoalCommand | null {
   const match = /^\s*\/goal(?=\s|$)([\s\S]*)$/i.exec(text);
   if (!match) return null;
   const objective = match[1].trim();
-  return objective ? { kind: 'set', objective } : { kind: 'open' };
+  return objective ? { kind: 'set', objective } : { kind: 'empty' };
 }

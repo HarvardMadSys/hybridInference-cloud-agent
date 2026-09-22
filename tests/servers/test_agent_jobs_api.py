@@ -297,8 +297,14 @@ class FakeGoals:
         current = self._goal(thread_id)
         if current is None or current["revision"] != revision or current["state"] != "paused":
             return None
+        # The real store's rule, modelled here because the API test has to be
+        # able to observe it: a bound the goal has already reached is released
+        # by the owner's own resume, and a bound it has not reached is kept.
+        bound = current.get("max_rounds")
+        spent = bound is not None and int(current.get("rounds_used") or 0) >= bound
         written = {
             **current,
+            "max_rounds": None if spent else bound,
             "state": "active",
             "pause_reason": None,
             "pause_detail": None,

@@ -711,35 +711,48 @@ describe('JobDetail', () => {
     );
   });
 
-  it('does not put a goal draft on the following message', async () => {
-    // A draft belongs to the message it was written for. Left in state, it
-    // rides every follow-up after this one — including one sent after the owner
-    // paused the goal, which the write would silently reactivate, budget and
-    // all. Pausing has to mean paused.
+  it('puts the goal on the conversation, never on a message', async () => {
+    // A goal is not something a message carries any more: `/goal <objective>`
+    // writes it to the thread, and the next message is an ordinary one. The old
+    // draft rode every follow-up after it — including one sent after the owner
+    // paused the goal, which the write would silently reactivate.
     vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
-    render(<JobDetail job={makeJob()} />);
+    vi.mocked(setAgentGoal).mockResolvedValue({ thread_id: 'thread_9', goal: null, revision: 5 });
+    render(
+      <JobDetail
+        job={makeJob({
+          threadId: 'thread_9',
+          goal: {
+            objective: 'make `pytest` pass',
+            state: 'active',
+            revision: 4,
+            roundsUsed: 2,
+            maxRounds: null,
+          },
+        })}
+      />,
+    );
+    const box = await screen.findByLabelText('Add a follow-up');
 
     fireEvent.click(screen.getByRole('button', { name: 'Add files or skills' }));
     fireEvent.click(
       within(screen.getByRole('menu')).getByRole('menuitem', { name: /Completion condition/ }),
     );
-    fireEvent.change(screen.getByLabelText('Objective'), {
-      target: { value: 'make `pytest` pass' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Set condition' }));
+    // The row starts a command in the box; it opens nothing.
+    expect(box).toHaveValue('/goal ');
 
-    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'first' } });
-    fireEvent.keyDown(screen.getByLabelText('Add a follow-up'), { key: 'Enter' });
+    fireEvent.change(box, { target: { value: '/goal make the suite pass' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
     await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenCalledWith(
-        'ajob_1',
-        expect.objectContaining({ goal: { objective: 'make `pytest` pass', max_rounds: 10 } }),
-      ),
+      expect(setAgentGoal).toHaveBeenCalledWith('thread_9', {
+        goal: { objective: 'make the suite pass' },
+        revision: 4,
+      }),
     );
+    expect(followUpAgentJob).not.toHaveBeenCalled();
 
-    vi.mocked(followUpAgentJob).mockClear();
-    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'second' } });
-    fireEvent.keyDown(screen.getByLabelText('Add a follow-up'), { key: 'Enter' });
+    fireEvent.change(box, { target: { value: 'first' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
     await waitFor(() => expect(followUpAgentJob).toHaveBeenCalledTimes(1));
     expect(vi.mocked(followUpAgentJob).mock.calls[0][1]).not.toHaveProperty('goal');
   });
@@ -2676,12 +2689,15 @@ describe('JobDetail', () => {
 
       await waitFor(() =>
         expect(setAgentGoal).toHaveBeenCalledWith('thread_9', {
-          goal: { objective: OBJECTIVE, max_rounds: 10 },
+          // No round bound: the goal the owner asked for is bounded by nothing,
+          // and the field is absent rather than filled with a default.
+          goal: { objective: OBJECTIVE },
           // The revision this page read, so a write from another tab is refused
           // rather than silently overwritten.
           revision: 4,
         }),
       );
+      expect(vi.mocked(setAgentGoal).mock.calls[0][1].goal).not.toHaveProperty('max_rounds');
       // The command is not a prompt: the goal starts the work.
       expect(followUpAgentJob).not.toHaveBeenCalled();
       expect(navigation.push).not.toHaveBeenCalled();
@@ -2706,44 +2722,64 @@ describe('JobDetail', () => {
       await waitFor(() => expect(getAgentGoal).toHaveBeenCalledWith('thread_9'));
       await waitFor(() =>
         expect(setAgentGoal).toHaveBeenCalledWith('thread_9', {
-          goal: { objective: OBJECTIVE, max_rounds: 10 },
+          goal: { objective: OBJECTIVE },
           revision: 7,
         }),
       );
     });
 
-    it('opens the dialog for a bare /goal, showing the goal it already has', async () => {
+    it('asks for the objective when /goal carries none', async () => {
       const box = await composer();
-      fireEvent.change(box, { target: { value: '/goal' } });
+      fireEvent.change(box, { target: { value: '/goal ' } });
       fireEvent.keyDown(box, { key: 'Enter' });
 
-      const dialog = await screen.findByRole('dialog');
-      expect(within(dialog).getByLabelText('Objective')).toHaveValue('make `pytest` pass');
+      // Nothing created, nothing sent, and nothing opened over the chat: the
+      // token stays where the owner can finish the sentence.
+      expect(await screen.findByText(/Add what .done. means/)).toBeInTheDocument();
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(box).toHaveValue('/goal ');
       expect(setAgentGoal).not.toHaveBeenCalled();
       expect(followUpAgentJob).not.toHaveBeenCalled();
     });
 
-    it('writes what the dialog was given, still paused-safe and never as a message', async () => {
+    it('edits the goal on the band, in place, with no modal over the chat', async () => {
       vi.mocked(setAgentGoal).mockResolvedValue({
         thread_id: 'thread_9',
         goal: null,
         revision: 5,
       });
-      const box = await composer();
-      fireEvent.change(box, { target: { value: '/goal' } });
-      fireEvent.keyDown(box, { key: 'Enter' });
-      const dialog = await screen.findByRole('dialog');
-      fireEvent.change(within(dialog).getByLabelText('Objective'), {
+      await composer();
+      fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      fireEvent.change(screen.getByLabelText('Objective'), {
         target: { value: 'ship the release notes' },
       });
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Set condition' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
       await waitFor(() =>
         expect(setAgentGoal).toHaveBeenCalledWith('thread_9', {
-          goal: { objective: 'ship the release notes', max_rounds: 10 },
+          goal: { objective: 'ship the release notes' },
           revision: 4,
         }),
       );
+      expect(followUpAgentJob).not.toHaveBeenCalled();
+    });
+
+    it('starts the command inside the box and keeps the caret there', async () => {
+      // The plus menu's Goal row is not a second interaction: it writes the
+      // command into the message box, where the objective would have been typed
+      // anyway, and leaves the caret after it.
+      const box = await composer();
+      fireEvent.click(screen.getByRole('button', { name: 'Add files or skills' }));
+      fireEvent.click(
+        within(screen.getByRole('menu')).getByRole('menuitem', { name: /Completion condition/ }),
+      );
+
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(box).toHaveValue('/goal ');
+      expect(box).toHaveFocus();
+      expect(setAgentGoal).not.toHaveBeenCalled();
       expect(followUpAgentJob).not.toHaveBeenCalled();
     });
 
@@ -2804,27 +2840,23 @@ describe('JobDetail', () => {
       expect(setAgentGoal).not.toHaveBeenCalled();
     });
 
-    it('keeps the command dialog and its draft when the write is refused', async () => {
+    it('keeps the band editor and its draft when the write is refused', async () => {
       vi.mocked(setAgentGoal).mockRejectedValueOnce(new Error('goal service unavailable'));
-      const box = await composer();
-      fireEvent.change(box, { target: { value: '/goal' } });
-      fireEvent.keyDown(box, { key: 'Enter' });
-      const dialog = await screen.findByRole('dialog');
-      fireEvent.change(within(dialog).getByLabelText('Objective'), {
+      await composer();
+      fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+      fireEvent.change(screen.getByLabelText('Objective'), {
         target: { value: 'ship the release notes' },
       });
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Set condition' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-      // The dialog stays where the retry can reach it, holding the words that
+      // The editor stays where the retry can reach it, holding the words that
       // were refused and the reason they were.
-      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
-        'goal service unavailable',
-      );
-      expect(within(dialog).getByLabelText('Objective')).toHaveValue('ship the release notes');
+      expect(await screen.findByRole('alert')).toHaveTextContent('goal service unavailable');
+      expect(screen.getByLabelText('Objective')).toHaveValue('ship the release notes');
 
       vi.mocked(setAgentGoal).mockResolvedValue({ thread_id: 'thread_9', goal: null, revision: 5 });
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Set condition' }));
-      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(screen.queryByLabelText('Objective')).not.toBeInTheDocument());
     });
 
     it('does not clear a message typed while the command is in flight', async () => {
@@ -2850,72 +2882,53 @@ describe('JobDetail', () => {
       expect(box).toHaveValue('and then update the docs');
     });
 
-    it('keeps the command dialog draft through the re-read a conflict forces', async () => {
+    it('keeps the band editor draft through the re-read a conflict forces', async () => {
       // The refusal makes the page re-read the conversation, which moves the
-      // dialog's `initial` under it. The new revision is what that re-read is
-      // for; the owner's words are the retry, and they stay.
+      // objective under the open editor. The new revision is what that re-read
+      // is for; the owner's words are the retry, and they stay.
       vi.mocked(setAgentGoal).mockRejectedValueOnce(
         new APIError('goal_revision_conflict', 'This goal changed while you were editing it.'),
       );
-      const withGoal = (overrides: { objective: string; revision: number; maxRounds: number }) =>
+      const withGoal = (overrides: { objective: string; revision: number }) =>
         makeJob({
           threadId: 'thread_9',
-          goal: { state: 'active', roundsUsed: 2, ...overrides },
+          goal: { state: 'active', roundsUsed: 2, maxRounds: null, ...overrides },
         });
       const { rerender } = render(
-        <JobDetail
-          job={withGoal({ objective: 'make `pytest` pass', revision: 4, maxRounds: 10 })}
-        />,
+        <JobDetail job={withGoal({ objective: 'make `pytest` pass', revision: 4 })} />,
       );
-      const box = await screen.findByLabelText('Add a follow-up');
-      fireEvent.change(box, { target: { value: '/goal' } });
-      fireEvent.keyDown(box, { key: 'Enter' });
-      const dialog = await screen.findByRole('dialog');
-      fireEvent.change(within(dialog).getByLabelText('Objective'), {
+      await screen.findByLabelText('Add a follow-up');
+      fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+      fireEvent.change(screen.getByLabelText('Objective'), {
         target: { value: 'ship the release notes' },
       });
-      fireEvent.change(within(dialog).getByLabelText('Maximum automatic rounds'), {
-        target: { value: '15' },
-      });
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Set condition' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
       await waitFor(() => expect(setAgentGoal).toHaveBeenCalledTimes(1));
 
       rerender(
-        <JobDetail
-          job={withGoal({ objective: 'the other tab’s objective', revision: 5, maxRounds: 20 })}
-        />,
+        <JobDetail job={withGoal({ objective: 'the other tab’s objective', revision: 5 })} />,
       );
 
-      expect(within(screen.getByRole('dialog')).getByLabelText('Objective')).toHaveValue(
-        'ship the release notes',
-      );
-      expect(
-        within(screen.getByRole('dialog')).getByLabelText('Maximum automatic rounds'),
-      ).toHaveValue(15);
+      expect(screen.getByLabelText('Objective')).toHaveValue('ship the release notes');
 
       vi.mocked(setAgentGoal).mockResolvedValue({ thread_id: 'thread_9', goal: null, revision: 6 });
-      fireEvent.click(
-        within(screen.getByRole('dialog')).getByRole('button', { name: 'Set condition' }),
-      );
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
       await waitFor(() =>
         expect(setAgentGoal).toHaveBeenLastCalledWith('thread_9', {
-          goal: { objective: 'ship the release notes', max_rounds: 15 },
+          goal: { objective: 'ship the release notes' },
           revision: 5,
         }),
       );
     });
 
-    it('clears the goal from the command dialog without touching the conversation', async () => {
+    it('clears the goal from the band without touching the conversation', async () => {
       vi.mocked(clearAgentGoal).mockResolvedValue({
         thread_id: 'thread_9',
         cleared: true,
         revision: 5,
       });
-      const box = await composer();
-      fireEvent.change(box, { target: { value: '/goal' } });
-      fireEvent.keyDown(box, { key: 'Enter' });
-      const dialog = await screen.findByRole('dialog');
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Clear condition' }));
+      await composer();
+      fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
 
       await waitFor(() => expect(clearAgentGoal).toHaveBeenCalledWith('thread_9'));
       // Clearing removes the goal and the rounds queued for it; the chat and

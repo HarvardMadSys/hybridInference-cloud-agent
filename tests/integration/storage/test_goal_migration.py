@@ -1,10 +1,11 @@
-"""Upgrading a goal the previous release wrote into the three-state one.
+"""Upgrading a goal the previous release wrote into the shape that stands now.
 
-``0018`` has to cope with the data ``0017`` left behind, not only with a fresh
-database: a ``blocked`` state that was really a reason, a ``complete`` row with
-no basis recorded, and a scheduling obligation that did not exist yet. These
-cases build that shape and upgrade over it, and they leave the shared database
-at head whatever the revision makes of the rows.
+Each revision has to cope with the data the one before it left behind, not only
+with a fresh database: a ``blocked`` state that was really a reason, a
+``complete`` row with no basis recorded, a scheduling obligation that did not
+exist yet, and — since ``0021`` — goals that carry no round bound at all. These
+cases build each old shape and upgrade over it, and they leave the shared
+database at head whatever the revision makes of the rows.
 """
 
 from __future__ import annotations
@@ -39,6 +40,22 @@ async def _rebuild_at_0017(config) -> None:
     finally:
         await conn.close()
     apply_migrations(config, "0019_conversation_goal")
+
+
+async def _rebuild_at_0020(config) -> None:
+    """Build the shape ``0020`` leaves, from an empty database.
+
+    ``0020`` is the release that made ``goal_max_rounds`` a *required* half of a
+    goal and capped it at fifty. The cases about ``0021`` are about what happens
+    to the rows written under that rule, so this is their input.
+    """
+    conn = await asyncpg.connect(**config)
+    try:
+        await conn.execute("DROP SCHEMA public CASCADE")
+        await conn.execute("CREATE SCHEMA public")
+    finally:
+        await conn.close()
+    apply_migrations(config, "0020_goal_controller")
 
 
 async def _reset_to_head(config) -> None:
@@ -127,6 +144,52 @@ async def _seed_0017_goal(
     finally:
         await conn.close()
     return thread_id, job_id
+
+
+async def _seed_0020_goal(
+    config,
+    *,
+    objective: str = "ship it",
+    state: str = "active",
+    max_rounds: int | None = 10,
+    pause_reason: str | None = None,
+    pause_detail: str | None = None,
+) -> str:
+    """One conversation as ``0020`` held it, with the goal the caller describes."""
+    thread_id = f"athr_{uuid.uuid4().hex}"
+    conn = await asyncpg.connect(**config)
+    try:
+        await conn.execute(
+            """
+            INSERT INTO agent_threads
+                (id, user_id, repo, title, title_source, setup_script, execution_profile,
+                 goal_objective, goal_id, goal_state, goal_max_rounds, goal_revision,
+                 goal_pause_reason, goal_pause_detail, goal_created_at, goal_updated_at)
+            VALUES ($1, 'user-1', 'owner/name', 'ship it', 'fallback', NULL, 'trusted-v1',
+                    $2, $3, $4, $5, 4, $6, $7, NOW(), NOW())
+            """,
+            thread_id,
+            objective,
+            f"goal_{uuid.uuid4().hex}" if objective is not None else None,
+            state,
+            max_rounds,
+            pause_reason,
+            pause_detail,
+        )
+    finally:
+        await conn.close()
+    return thread_id
+
+
+@pytest_asyncio.fixture
+async def at_0020():
+    """A database built to ``0020``'s shape, restored to head afterwards."""
+    config = _db_config()
+    await _rebuild_at_0020(config)
+    try:
+        yield config
+    finally:
+        await _reset_to_head(config)
 
 
 @pytest_asyncio.fixture
@@ -321,8 +384,9 @@ async def _round_trip(config, job) -> None:
         await conn.close()
 
     # Every new column takes its default, and the shape constraint's promise —
-    # no objective without a state, a budget and an identity — holds for the
-    # row the previous release wrote.
+    # no objective without an identity, and no state without an objective —
+    # holds for the row the previous release wrote. A *bound* is deliberately
+    # not part of that promise any more.
     assert after["turn_source"] == "human"
     assert after["goal_round_kind"] is None and after["goal_report_parse"] is None
     assert thread["goal_objective"] is None
@@ -333,9 +397,9 @@ async def _round_trip(config, job) -> None:
     # counter column to have a default.
     assert "goal_rounds_used" not in thread
 
-    # A goal written under the new revision is rejected when half of it is
-    # missing: the constraint is what stops a conversation that has an
-    # objective nothing can run.
+    # A goal written under the new revision is rejected when its identity is
+    # missing: the constraint is what stops a conversation whose objective
+    # nothing can be attributed to.
     conn = await asyncpg.connect(**config)
     try:
         with pytest.raises(asyncpg.CheckViolationError):
@@ -354,3 +418,135 @@ async def _round_trip(config, job) -> None:
         assert rolled_back == before
     finally:
         await conn.close()
+
+
+async def test_the_upgrade_keeps_a_round_bound_and_leaves_the_goal_paused(at_0020):
+    """Nothing an owner set is removed, and nothing paused is restarted.
+
+    ``10`` is what the old client sent by default, which makes it suspicious —
+    and it is not proof. The same value is an ordinary thing for a caller to
+    have asked for, and a migration that guessed would be deleting a constraint
+    its owner stated. The way out is the owner's own Resume, which lifts a bound
+    that has been reached; this revision changes what a goal may *look like*,
+    never what it is doing.
+    """
+    thread_id = await _seed_0020_goal(
+        at_0020,
+        state="paused",
+        max_rounds=10,
+        pause_reason="round_limit",
+        pause_detail="the goal used its whole automatic round budget",
+    )
+
+    apply_migrations(at_0020, "head")
+
+    conn = await asyncpg.connect(**at_0020)
+    try:
+        row = dict(
+            await conn.fetchrow(
+                "SELECT goal_state, goal_pause_reason, goal_max_rounds "
+                "FROM agent_threads WHERE id = $1",
+                thread_id,
+            )
+        )
+    finally:
+        await conn.close()
+
+    assert row["goal_max_rounds"] == 10
+    assert row["goal_state"] == "paused"
+    assert row["goal_pause_reason"] == "round_limit"
+
+
+async def test_a_goal_with_no_round_bound_is_the_ordinary_shape_after_the_upgrade(at_0020):
+    """An objective on its own is a goal; a bound is an optional extra.
+
+    ``0020`` asserted ``(goal_objective IS NULL) = (goal_max_rounds IS NULL)``,
+    which made every goal finite. The absence of a value is now what "no limit"
+    is spelled as — there is no ceiling and no default — and a bound that *is*
+    present is still bounded below, so ``0`` is not a way to spell "unlimited".
+    """
+    thread_id = await _seed_0020_goal(at_0020, objective=None, state=None, max_rounds=None)
+    apply_migrations(at_0020, "head")
+
+    conn = await asyncpg.connect(**at_0020)
+    try:
+        await conn.execute(
+            "UPDATE agent_threads SET goal_objective = 'ship it', goal_id = 'goal-1', "
+            "goal_state = 'active' WHERE id = $1",
+            thread_id,
+        )
+        unbounded = await conn.fetchval(
+            "SELECT goal_max_rounds FROM agent_threads WHERE id = $1", thread_id
+        )
+        with pytest.raises(asyncpg.CheckViolationError):
+            await conn.execute(
+                "UPDATE agent_threads SET goal_max_rounds = 0 WHERE id = $1", thread_id
+            )
+        # No ceiling: the old one was fifty, and an owner who states a number is
+        # not second-guessed about how large it is.
+        await conn.execute(
+            "UPDATE agent_threads SET goal_max_rounds = 5000 WHERE id = $1", thread_id
+        )
+        large = await conn.fetchval(
+            "SELECT goal_max_rounds FROM agent_threads WHERE id = $1", thread_id
+        )
+    finally:
+        await conn.close()
+
+    assert unbounded is None
+    assert large == 5000
+
+
+async def test_a_bound_cannot_outlive_the_objective_it_bounds(at_0020):
+    """A limit with no objective would be a bound on nothing."""
+    thread_id = await _seed_0020_goal(at_0020, objective="ship it", max_rounds=5)
+    apply_migrations(at_0020, "head")
+
+    conn = await asyncpg.connect(**at_0020)
+    try:
+        with pytest.raises(asyncpg.CheckViolationError):
+            await conn.execute(
+                "UPDATE agent_threads SET goal_objective = NULL, goal_id = NULL, "
+                "goal_state = NULL WHERE id = $1",
+                thread_id,
+            )
+    finally:
+        await conn.close()
+
+
+async def test_downgrading_bounds_the_goals_the_old_shape_cannot_hold(at_0020):
+    """The reverse direction is lossy, and it fills rather than discards.
+
+    ``0020`` cannot represent a goal without a number, so a downgrade has to
+    choose one. Losing the objective would be far worse than bounding it — the
+    objective is what the owner wrote — so the old default is used and the row
+    survives the round trip.
+    """
+    thread_id = await _seed_0020_goal(at_0020, objective=None, state=None, max_rounds=None)
+    apply_migrations(at_0020, "head")
+
+    conn = await asyncpg.connect(**at_0020)
+    try:
+        await conn.execute(
+            "UPDATE agent_threads SET goal_objective = 'ship it', goal_id = 'goal-1', "
+            "goal_state = 'active' WHERE id = $1",
+            thread_id,
+        )
+    finally:
+        await conn.close()
+
+    downgrade_to(at_0020, "0020_goal_controller")
+
+    conn = await asyncpg.connect(**at_0020)
+    try:
+        row = dict(
+            await conn.fetchrow(
+                "SELECT goal_objective, goal_max_rounds FROM agent_threads WHERE id = $1",
+                thread_id,
+            )
+        )
+    finally:
+        await conn.close()
+
+    assert row["goal_objective"] == "ship it"
+    assert row["goal_max_rounds"] == 10

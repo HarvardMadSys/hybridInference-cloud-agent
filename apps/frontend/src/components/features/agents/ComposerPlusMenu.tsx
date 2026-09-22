@@ -292,7 +292,12 @@ export function ComposerPlusMenu({
 
           {/* Its own group. Skills and MCP connections are things this
               message *carries*; the completion condition is what the whole
-              conversation is for, and it outlives every message after it. */}
+              conversation is for, and it outlives every message after it.
+
+              No chevron, unlike its neighbours: this row opens nothing. It puts
+              `/goal ` in the message box and hands the caret back, so the
+              objective is typed where the owner was already typing and the band
+              above the messages is the only place a goal is managed. */}
           <div className="my-1 h-px bg-gray-100 dark:bg-white/5" />
           <button
             type="button"
@@ -310,7 +315,6 @@ export function ComposerPlusMenu({
                 {goalSummary}
               </span>
             </span>
-            <ChevronIcon />
           </button>
 
           {mcp ? (

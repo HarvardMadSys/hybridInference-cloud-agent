@@ -48,7 +48,8 @@ def _deployment_environment(monkeypatch):
     yield
 
 
-GOAL = {"objective": "make `pytest` pass", "max_rounds": 3}
+#: The goal the product creates: an objective, and no round bound at all.
+GOAL = {"objective": "make `pytest` pass"}
 
 
 def _path(thread_id: str, suffix: str = "") -> str:
@@ -66,11 +67,19 @@ async def _set(
     thread_id: str,
     *,
     objective: str = GOAL["objective"],
-    max_rounds: int = GOAL["max_rounds"],
+    max_rounds: int | None = None,
     revision: int | None = None,
 ) -> dict[str, Any]:
-    """Write the goal and hand back the response body."""
-    body: dict[str, Any] = {"goal": {"objective": objective, "max_rounds": max_rounds}}
+    """Write the goal and hand back the response body.
+
+    ``max_rounds`` is omitted unless the test asks for one, because that is what
+    every client does: the field is not "unset" by sending a number, it is unset
+    by not being there.
+    """
+    goal: dict[str, Any] = {"objective": objective}
+    if max_rounds is not None:
+        goal["max_rounds"] = max_rounds
+    body: dict[str, Any] = {"goal": goal}
     if revision is not None:
         body["revision"] = revision
     response = await client.put(_path(thread_id), json=body)
@@ -113,11 +122,10 @@ async def test_set_creates_the_goal_with_an_identity_and_a_revision(client, stor
     assert body["revision"] == 1
     goal = body["goal"]
     assert goal["goal_id"]
-    assert (goal["state"], goal["objective"], goal["max_rounds"]) == (
-        "active",
-        GOAL["objective"],
-        GOAL["max_rounds"],
-    )
+    assert (goal["state"], goal["objective"]) == ("active", GOAL["objective"])
+    # No bound, and the wire says so with `null` rather than with a number: a
+    # sentinel would be indistinguishable from a limit the owner chose.
+    assert goal["max_rounds"] is None
     assert goal["rounds_used"] == 0
     assert (goal["pause_reason"], goal["completion_basis"]) == (None, None)
 
@@ -149,7 +157,7 @@ async def test_a_stale_revision_is_refused_on_every_write(client, store):
 
     stale_set = await client.put(
         _path(thread_id),
-        json={"goal": {"objective": "something else", "max_rounds": 3}, "revision": 0},
+        json={"goal": {"objective": "something else"}, "revision": 0},
     )
     assert stale_set.status_code == 409
     assert _error_type(stale_set) == "goal_revision_conflict"
@@ -171,8 +179,8 @@ async def test_a_stale_revision_is_refused_on_every_write(client, store):
     assert current.json()["goal"]["state"] == "paused"
 
 
-async def test_editing_only_the_cap_keeps_the_identity_and_the_rounds_spent(client, store):
-    """A cap is not an objective: the same authorization keeps working."""
+async def test_editing_only_the_bound_keeps_the_identity_and_the_rounds_spent(client, store):
+    """A bound is not an objective: the same authorization keeps working."""
     _, thread_id = await _conversation(client, store)
     first = await _set(client, thread_id, objective="ship it", max_rounds=2)
     # The rounds a goal has started are derived from them in the real store, so
@@ -286,8 +294,15 @@ async def test_resume_returns_the_goal_to_active_and_records_a_wakeup(client, st
     assert pending[0]["revision"] == 3
 
 
-async def test_resume_refuses_a_goal_that_has_spent_its_rounds(client, store):
-    """Resuming would authorize a round the budget cannot pay for."""
+async def test_resume_releases_a_bound_the_goal_has_spent(client, store):
+    """The escape hatch a paused ``round_limit`` goal cannot do without.
+
+    A bound is only ever present because an owner stated one, and there is no
+    surface that changes it. If Resume refused here — which is what it used to
+    do — the goal would sit paused for ever with a control that can only fail.
+    So the owner's own "continue" lifts the spent bound, and the response says
+    so: ``max_rounds`` comes back ``null``.
+    """
     _, thread_id = await _conversation(client, store)
     await _set(client, thread_id, objective="never finish", max_rounds=1)
     store.thread_goals[thread_id]["rounds_used"] = 1
@@ -295,11 +310,50 @@ async def test_resume_refuses_a_goal_that_has_spent_its_rounds(client, store):
 
     resumed = await client.post(_path(thread_id, "/resume"), json={"revision": 2})
 
-    assert resumed.status_code == 422, resumed.text
-    assert _error_type(resumed) == "goal_rounds_exhausted"
-    # Refused means refused: the goal is still paused, at the version it was.
-    assert (await client.get(_path(thread_id))).json()["goal"]["state"] == "paused"
-    assert store.thread_goals[thread_id]["revision"] == 2
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["goal"]["state"] == "active"
+    assert resumed.json()["goal"]["max_rounds"] is None
+    # The rounds already spent are history, not something a resume rewrites.
+    assert resumed.json()["goal"]["rounds_used"] == 1
+
+
+async def test_resume_keeps_a_bound_the_goal_has_not_reached(client, store):
+    """Releasing a spent bound is not a general amnesty.
+
+    "At most fifty, paused by the owner at three" still means fifty.
+    """
+    _, thread_id = await _conversation(client, store)
+    await _set(client, thread_id, objective="ship it", max_rounds=50)
+    store.thread_goals[thread_id]["rounds_used"] = 3
+    await client.post(_path(thread_id, "/pause"), json={"revision": 1})
+
+    resumed = await client.post(_path(thread_id, "/resume"), json={"revision": 2})
+
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["goal"]["max_rounds"] == 50
+
+
+async def test_an_explicit_bound_is_recorded_and_returned_as_stated(client, store):
+    """Stated bounds survive the round trip, so the distinction is observable."""
+    _, thread_id = await _conversation(client, store)
+
+    bounded = await _set(client, thread_id, objective="ship it", max_rounds=3)
+
+    assert bounded["goal"]["max_rounds"] == 3
+    read_back = await client.get(_path(thread_id))
+    assert read_back.json()["goal"]["max_rounds"] == 3
+
+
+async def test_a_bound_of_zero_is_refused(client, store):
+    """A bound is a positive number of rounds or it is absent."""
+    _, thread_id = await _conversation(client, store)
+
+    response = await client.put(
+        _path(thread_id), json={"goal": {"objective": "ship it", "max_rounds": 0}}
+    )
+
+    assert response.status_code == 422, response.text
+    assert store.thread_goals == {}
 
 
 async def test_resume_leaves_an_active_goal_exactly_as_it_was(client, store):
@@ -372,13 +426,15 @@ async def test_the_job_scoped_goal_routes_are_gone(client, store):
         assert response.status_code in (404, 405), (method, path, response.status_code)
 
 
-async def test_config_advertises_the_goal_bounds(client):
+async def test_config_advertises_no_round_bound(client):
+    """The deployment advertises what it enforces: an objective bound, and no
+    round default or ceiling for a client to treat as one."""
     response = await client.get("/v1/agent/config")
     assert response.status_code == 200, response.text
     limits = response.json()["goal_limits"]
     assert limits["max_objective_chars"] == 4000
-    assert limits["max_rounds"] == 50
-    assert limits["default_rounds"] == 10
+    assert "max_rounds" not in limits
+    assert "default_rounds" not in limits
 
 
 async def test_an_over_long_objective_is_refused_before_anything_is_written(client, store):

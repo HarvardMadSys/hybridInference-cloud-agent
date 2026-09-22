@@ -300,7 +300,6 @@ export const en = {
   // ── Composer attachments ────────────────────────────────────────────────
   'attach.goal': 'Completion condition',
   'attach.goalNone': 'Keep going until…',
-  'attach.goalSet': 'Sets a goal: {objective}',
   'attach.open': 'Add files or skills',
   'attach.upload': 'Upload files',
   'attach.mcp': 'MCP servers',
@@ -344,25 +343,14 @@ export const en = {
   'skills.appliesNext': 'Applies to your next message.',
   'skills.pickerLabel': 'Skills for this conversation: {count} selected',
   // ── Conversation goal ───────────────────────────────────────────────────
-  'goal.dialog.title': 'Completion condition',
-  'goal.dialog.description':
-    "The platform reads the agent's report at the end of every round and queues the next one itself until the objective is met or the goal stops.",
-  'goal.dialog.objective': 'Objective',
-  'goal.dialog.objectivePlaceholder': 'e.g. Make `pytest tests/unit` pass and leave the tree clean',
-  'goal.dialog.objectiveHint':
-    'Say what “done” means: the agent reports completion itself, and the platform does not re-run the check for you.',
-  'goal.dialog.rounds': 'Maximum automatic rounds',
-  'goal.dialog.roundsHint':
-    'How many turns the platform may run on its own, up to {max}. The budget restarts only when the objective changes.',
-  'goal.dialog.tooLong': 'An objective can be at most {max} characters.',
-  'goal.dialog.apply': 'Set condition',
-  'goal.dialog.applying': 'Saving…',
-  'goal.dialog.cancel': 'Cancel',
-  'goal.dialog.clear': 'Clear condition',
-  'goal.close': 'Close',
-  'goal.draft': 'Sets a goal: {objective}',
-  'goal.discardDraft': 'Discard',
-  'goal.rounds': '{used}/{max} rounds',
+  // Everything here is the compact band above the message box and the `/goal`
+  // command below it. There is no dialog, so there is no dialog copy.
+  'goal.objective': 'Objective',
+  'goal.objectiveTooLong': 'An objective can be at most {max} characters.',
+  // Rounds are a count, and a total only when the owner stated one themselves.
+  // "1/10" for a goal nobody bounded reported a limit that did not exist.
+  'goal.roundsRun': '{used} rounds run',
+  'goal.roundsBounded': '{used} of at most {max} rounds',
   'goal.active': 'Goal in progress · {rounds}',
   'goal.activeWaiting': 'Goal running · {rounds} · no round in flight',
   'goal.activeRepairing': 'Restating the completion report · {rounds}',
@@ -381,10 +369,22 @@ export const en = {
   // What each control does, said for a pointer rather than for a screen
   // reader: the name is the verb, the tooltip is the consequence.
   'goal.resumeHint': 'Continue the goal and queue its next round',
-  'goal.editHint': 'Change the objective or the round limit; the round in flight is left alone',
+  'goal.editHint': 'Change the objective; the round in flight is left alone',
   'goal.clearHint': 'Remove the goal and stop future rounds; the chat and its history stay',
-  'goal.limitReached': 'All {max} automatic rounds are used. Raise the limit to continue.',
-  'goal.limitReachedHint': 'All rounds are used — raise the limit first',
+  // The one bound that exists is one the owner wrote, and nothing in the
+  // product edits it. So Resume is what lifts it, and the band says so.
+  'goal.limitResumeLifts':
+    'Resuming continues without the {max}-round limit you set for this goal.',
+  'goal.limitResumeLiftsHint': 'Resume without the round limit you set',
+  // Editing happens on the band, so these are the buttons beside the words
+  // rather than the footer of a dialog.
+  'goal.editSave': 'Save',
+  'goal.editSaving': 'Saving…',
+  'goal.editCancel': 'Cancel',
+  // `/goal` with nothing after it is not an objective. The composer asks for
+  // the rest of the sentence instead of creating an empty goal or sending the
+  // token to the model as prose.
+  'goal.needsObjective': 'Add what “done” means — e.g. /goal make the unit tests pass',
   // Why a goal stopped, one phrase per reason the platform records.
   'goal.pauseUser': 'you paused it',
   'goal.pauseFork': 'this conversation was forked',

@@ -303,7 +303,7 @@ def _context_for(
             state=cast("GoalState", goal["state"]),
             goal_id=str(goal["goal_id"]),
             revision=int(goal["revision"]),
-            max_rounds=int(goal["max_rounds"]),
+            max_rounds=_max_rounds(goal),
             rounds_used=int(goal["rounds_used"] or 0),
             turn_job_id="",
             turn_goal_id=None,
@@ -334,7 +334,7 @@ def _context_for(
         state=cast("GoalState", goal["state"]),
         goal_id=str(goal["goal_id"]),
         revision=int(goal["revision"]),
-        max_rounds=int(goal["max_rounds"]),
+        max_rounds=_max_rounds(goal),
         rounds_used=int(goal["rounds_used"] or 0),
         turn_job_id=str(turn["id"]),
         turn_goal_id=turn.get("goal_id"),
@@ -360,6 +360,21 @@ def _context_for(
         repair_supported=_repair_supported(runtime),
         runtime_supported=runtime in GOAL_REPORT_RUNTIMES,
     )
+
+
+def _max_rounds(goal: dict[str, Any]) -> int | None:
+    """The owner's own round bound, or ``None`` when they stated none.
+
+    One reader, so that "no limit" cannot be spelled two ways. The store hands
+    the column back as ``None`` for a goal nobody bounded — the ordinary case —
+    and that ``None`` travels to the decision unchanged. A malformed value is
+    treated as absent rather than guessed at: the alternative is inventing a
+    bound the owner never set.
+    """
+    value = goal.get("max_rounds")
+    if value is None or isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 1 else None
 
 
 def _has_newer_input(turn: dict[str, Any]) -> bool:
@@ -624,7 +639,7 @@ async def _queue_round(
         prompt = render_round_prompt(
             objective=str(goal["objective"]),
             round_number=round_number,
-            max_rounds=int(goal["max_rounds"]),
+            max_rounds=_max_rounds(goal),
             previous=context.turn_detail or (context.report.reason if context.report else None),
         )
     trigger_ref = str(wakeup["trigger_ref"])

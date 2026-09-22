@@ -476,6 +476,58 @@ async def test_resume_arms_the_obligation_to_schedule(store, pool):
     assert (wakeup["goal_id"], wakeup["revision"]) == (goal["goal_id"], resumed["revision"])
 
 
+async def test_resume_releases_a_bound_the_goal_has_spent(store, pool):
+    """The bound is the owner's, so the owner's own Resume is what lifts it.
+
+    There is no other way out: the round bound has no configuration surface at
+    all. A Resume that refused here — which is what it used to do — left a
+    paused goal with a control that could only fail.
+    """
+    job, first, _ = await _live_goal_job(store)
+    await _finish(pool, first)
+    # One round is the whole bound, so the goal is at it the moment it is
+    # charged.
+    bounded = await store.goals.set_goal(
+        thread_id=job["thread_id"],
+        user_id=job["user_id"],
+        goal=GoalInput(objective="ship it", max_rounds=1),
+        expected_revision=1,
+    )
+    work = await _round(store, job=job, goal=bounded, round_number=1)
+    claimed = await _claim_round(store)
+    assert claimed["id"] == work["id"]
+    assert await _rounds_used(store, job["thread_id"]) == 1
+
+    paused = await store.goals.pause_goal(
+        thread_id=job["thread_id"], revision=bounded["revision"], reason="round_limit"
+    )
+    resumed = await store.goals.resume_goal(
+        thread_id=job["thread_id"], user_id=job["user_id"], revision=paused["revision"]
+    )
+
+    assert resumed["max_rounds"] is None
+    # The rounds already spent are history, not something a resume rewrites.
+    assert resumed["rounds_used"] == 1
+    # And the goal is genuinely unbounded now, not bounded by a large number.
+    assert (await store.goals.get_goal(thread_id=job["thread_id"]))["max_rounds"] is None
+
+
+async def test_resume_keeps_a_bound_the_goal_has_not_reached(store, pool):
+    """Releasing a spent bound is not a general amnesty.
+
+    "At most five, paused by the owner at none" still means five.
+    """
+    job, first, goal = await _live_goal_job(store)
+    await _finish(pool, first)
+    paused = await store.goals.pause_goal(thread_id=job["thread_id"], revision=1, reason="user")
+
+    resumed = await store.goals.resume_goal(
+        thread_id=job["thread_id"], user_id=job["user_id"], revision=paused["revision"]
+    )
+
+    assert resumed["max_rounds"] == goal["max_rounds"] == 5
+
+
 async def test_lock_goal_state_holds_the_conversations_row(store, pool):
     """The last read before a decision is written is under the same lock."""
     job, _ = await _goal_job(store)
@@ -1179,3 +1231,104 @@ async def test_a_resume_on_a_lost_session_pauses(store, pool, monkeypatch: pytes
     assert await consume_wakeup(store=store, wakeup=claimed[0]) == "pause"
     after = await store.goals.get_goal(thread_id=thread_id)
     assert (after["state"], after["pause_reason"]) == ("paused", "context_lost")
+
+
+async def test_an_unbounded_goal_queues_round_fifty_one(store, pool, monkeypatch):
+    """Bounded scheduling on real rows: the decision runs once, and queues one.
+
+    Fifty is the ceiling the platform used to impose on every goal, and ten was
+    its default. Neither exists any more, and this walks the whole path that
+    used to enforce them — the SQL that counts a goal's charged rounds, the
+    context built from it, and the rule that reads it — with fifty already
+    spent and no bound stated. One wakeup is consumed and exactly one round is
+    created: no agent is started, and nothing loops.
+    """
+    from cloud_agent.goals.controller import consume_wakeup
+
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "example-org/example-repo")
+    job, first, _ = await _live_goal_job(store)
+    thread_id = str(job["thread_id"])
+    await _finish(pool, first)
+    # The goal the product creates: an objective, and no bound at all.
+    goal = await store.goals.set_goal(
+        thread_id=thread_id,
+        user_id=job["user_id"],
+        goal=GoalInput(objective="ship it"),
+        expected_revision=1,
+    )
+    assert goal["max_rounds"] is None
+
+    last = None
+    for number in range(1, 51):
+        queued = await _round(store, job=job, goal=goal, round_number=number)
+        claimed = await _claim_round(store)
+        assert claimed["id"] == queued["id"]
+        await _finish(pool, claimed)
+        last = claimed
+    assert await _rounds_used(store, thread_id) == 50
+
+    # The obligation round fifty's finish owed, judged in the context that
+    # obligation belongs to.
+    wakeup_id = await store.goal_wakeups.arm_wakeup(
+        thread_id=thread_id,
+        goal_id=str(goal["goal_id"]),
+        revision=goal["revision"],
+        trigger="finish",
+        trigger_ref=f"job:{last['id']}",
+    )
+    assert wakeup_id is not None
+    # The newest obligation of this conversation is the one just armed: setting
+    # the goal armed an owner wakeup of its own, and it is older.
+    armed = await store.goal_wakeups.pending_wakeup(thread_id=thread_id)
+    assert armed is not None and armed["id"] == wakeup_id
+
+    assert await consume_wakeup(store=store, wakeup=armed) == "queue_work_round"
+
+    rounds = [
+        row for row in await _thread_turns(store, pool, thread_id) if row["turn_source"] == "goal"
+    ]
+    assert len(rounds) == 51
+    assert rounds[-1]["goal_round"] == 51
+    # The round says which one it is and no total: there is no total.
+    assert '<goal_round kind="work" round="51">' in rounds[-1]["task_prompt"]
+    after = await store.goals.get_goal(thread_id=thread_id)
+    assert (after["state"], after["max_rounds"]) == ("active", None)
+
+
+async def test_a_goal_at_its_own_bound_pauses_instead_of_queueing(store, pool, monkeypatch):
+    """Removing the platform's ceiling is not removing the owner's own number."""
+    from cloud_agent.goals.controller import consume_wakeup
+
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "example-org/example-repo")
+    job, first, _ = await _live_goal_job(store)
+    thread_id = str(job["thread_id"])
+    await _finish(pool, first)
+    goal = await store.goals.set_goal(
+        thread_id=thread_id,
+        user_id=job["user_id"],
+        goal=GoalInput(objective="ship it", max_rounds=1),
+        expected_revision=1,
+    )
+    queued = await _round(store, job=job, goal=goal, round_number=1)
+    claimed = await _claim_round(store)
+    assert claimed["id"] == queued["id"]
+    await _finish(pool, claimed)
+    assert await _rounds_used(store, thread_id) == 1
+
+    wakeup_id = await store.goal_wakeups.arm_wakeup(
+        thread_id=thread_id,
+        goal_id=str(goal["goal_id"]),
+        revision=goal["revision"],
+        trigger="finish",
+        trigger_ref=f"job:{claimed['id']}",
+    )
+    assert wakeup_id is not None
+    armed = await store.goal_wakeups.pending_wakeup(thread_id=thread_id)
+    assert armed is not None and armed["id"] == wakeup_id
+
+    assert await consume_wakeup(store=store, wakeup=armed) == "pause"
+
+    after = await store.goals.get_goal(thread_id=thread_id)
+    assert (after["state"], after["pause_reason"]) == ("paused", "round_limit")
+    turns = await _thread_turns(store, pool, thread_id)
+    assert len([row for row in turns if row["turn_source"] == "goal"]) == 1

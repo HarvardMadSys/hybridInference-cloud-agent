@@ -53,6 +53,24 @@ ROUNDS_USED_SQL = """(
           )
     ) AS goal_rounds_used"""
 
+#: The same count as :data:`ROUNDS_USED_SQL`, as a scalar expression over one
+#: thread, for a statement that has to decide *inside itself* whether the
+#: owner's stated bound has been reached.
+#:
+#: Written once so the "what counts as a spent round" rule cannot drift between
+#: the counter the owner reads and the rule that governs resuming.
+SPENT_ROUNDS_SQL = """(
+        SELECT count(*) FROM agent_jobs work
+        WHERE work.thread_id = t.id
+          AND work.turn_source = 'goal'
+          AND work.goal_id = t.goal_id
+          AND work.goal_id IS NOT NULL
+          AND EXISTS (
+                SELECT 1 FROM agent_attempts a
+                WHERE a.job_id = work.id AND a.status <> 'aborted'
+          )
+    )"""
+
 #: Repair rounds spent on the *current* objective, which is what bounds the
 #: report-repair loop. Reset with the objective, exactly like the budget.
 REPAIRS_USED_SQL = """(
@@ -72,15 +90,20 @@ REPAIRS_USED_SQL = """(
 #: and there is no ordering of "set the objective" / "set the identity" /
 #: "set the state" that does.
 #:
-#: ``$2`` objective, ``$3`` max_rounds, ``$4`` the identity to mint, ``$5``
-#: the state to leave the goal in, ``$6`` force a fresh identity (a goal that
-#: had already completed, set again).
+#: ``$2`` objective, ``$3`` max_rounds or ``NULL`` for "the owner set no
+#: limit", ``$4`` the identity to mint, ``$5`` the state to leave the goal in,
+#: ``$6`` force a fresh identity (a goal that had already completed, set again).
+#:
+#: ``NULL`` in ``$3`` is the ordinary value, not a missing one: a goal with no
+#: stated bound is what the product creates when somebody describes how far
+#: they want the work taken. It is never rendered as a large integer, here or
+#: anywhere downstream.
 #:
 #: A new objective mints a new ``goal_id`` *and* resets the repair counter: the
 #: rounds spent on the old objective are not rounds spent on this one, and a
 #: malformed report about the old objective has nothing to say about the new
 #: one. The revision moves on every accepted write, including one that changed
-#: only the cap, so a queued round carrying an older revision is discarded
+#: only the bound, so a queued round carrying an older revision is discarded
 #: rather than charged to the new one.
 SET_GOAL_SQL = """
 UPDATE agent_threads

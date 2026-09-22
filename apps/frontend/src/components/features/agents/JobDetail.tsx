@@ -18,7 +18,6 @@ import { basePath } from '@/config/env';
 import { useT } from '@/components/providers';
 import {
   cancelAgentJob,
-  clearAgentGoal,
   followUpAgentJob,
   forkAgentJob,
   getAgentConfig,
@@ -43,15 +42,12 @@ import { highestEffort, offeredEfforts } from './effort';
 import { LedgerUsage, useLedgerUsage } from './LedgerUsage';
 import { PaneResizer } from './PaneResizer';
 import { Picker } from './Picker';
-import { ComposerPlusMenu, GoalIcon } from './ComposerPlusMenu';
+import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
 import { GoalBar } from './goal/GoalBar';
-import { GoalDialog, type GoalDraft } from './goal/GoalDialog';
 import { isGoalRevisionConflict, writeGoal } from './goal/goalApi';
-import { useGoalCommand } from './goal/useGoalCommand';
-import { useGoalWrite } from './goal/useGoalWrite';
+import { GOAL_COMMAND_PREFIX, useGoalCommand } from './goal/useGoalCommand';
 import { hasLiveWork } from './goal/liveWork';
-import { DEFAULT_GOAL_LIMITS } from '@/lib/goalLimits';
 import { SkillSelectionDialog } from './skills/SkillPicker';
 import { AttachmentStrip } from './attachments/AttachmentStrip';
 import { useAttachments } from './attachments/useAttachments';
@@ -568,16 +564,10 @@ export function JobDetail({
   }, [events, threadJobs, job.id, job.prompt, job.turnNo, job.createdAt]);
   const [followUp, setFollowUp] = useState('');
   const [chosenSkills, setChosenSkills] = useState<SelectedSkillApi[] | null>(null);
-  // What the next message would set the conversation's goal to, and nothing
-  // else: the draft rides that message, because a goal with no message
-  // attached has nothing to work on yet. The band above manages the goal the
-  // conversation already has; the two are never on screen together.
-  const [goalOpen, setGoalOpen] = useState(false);
-  const [goalDraft, setGoalDraft] = useState<GoalDraft | null>(null);
-  // The command's dialog. It writes the conversation's goal itself rather than
-  // drafting one to ride a message: `/goal` is a request to set the goal now,
-  // and the platform schedules the first round from that write.
-  const [goalManageOpen, setGoalManageOpen] = useState(false);
+  // What to say when `/goal` was typed with nothing after it. Guidance, not a
+  // failure: nothing was created and nothing was sent.
+  const [goalHint, setGoalHint] = useState<string | null>(null);
+  const followUpBox = useRef<HTMLTextAreaElement>(null);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [dropping, setDropping] = useState(false);
   const [readingFiles, setReadingFiles] = useState(false);
@@ -590,10 +580,10 @@ export function JobDetail({
     { turnNo: job.turnNo ?? 1, skills: job.skills ?? [] },
   ).skills;
   useEffect(() => setChosenSkills(null), [job.id]);
-  // The same rule for the goal draft. This component is deliberately not
+  // The same rule for the goal guidance. This component is deliberately not
   // remounted when the conversation moves to its next turn, so anything that
   // belongs to *one* message has to be reset explicitly when that turn does.
-  useEffect(() => setGoalDraft(null), [job.id]);
+  useEffect(() => setGoalHint(null), [job.id]);
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
   const attachments = useAttachments(t, config?.attachment_limits);
   const mcp = useThreadComposerMcp(job.threadId);
@@ -610,19 +600,16 @@ export function JobDetail({
   const [forking, setForking] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  // The bounds the server advertises. A command that names no round count asks
-  // for the same default the dialog would have offered.
-  const goalLimits = config?.goal_limits ?? DEFAULT_GOAL_LIMITS;
   // The goal this conversation already has, as the page last read it. Every
   // goal write travels with this revision, so an edit made in another tab is
   // refused rather than silently overwritten.
   const currentGoal = job.goal ?? null;
   const threadId = job.threadId ?? job.id;
-  const goalWrite = useGoalWrite(() => onReload?.());
   const goalCommand = useGoalCommand({
     value: followUp,
     setValue: setFollowUp,
-    onOpenDialog: () => setGoalManageOpen(true),
+    focusComposer: () => followUpBox.current?.focus(),
+    onNeedsObjective: () => setGoalHint(t('goal.needsObjective')),
     onApply: applyGoalObjective,
     onError: setActionError,
   });
@@ -914,10 +901,23 @@ export function JobDetail({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isActive, stop]);
 
-  /** Drop the drafted goal without sending it. */
-  function discardGoalDraft() {
-    setGoalDraft(null);
-    setGoalOpen(false);
+  /**
+   * The plus menu's Goal row: put `/goal ` in the box and leave the caret after
+   * it. Nothing opens, because there is nothing left to open — the band above
+   * the messages is where a goal is read and managed, and this row is how the
+   * sentence that sets one gets started.
+   */
+  function insertGoalCommand() {
+    setGoalHint(null);
+    setFollowUp((current) => {
+      // Already the command: nothing to add, and prefixing again would make
+      // `/goal /goal …` an objective nobody wrote.
+      if (/^\s*\/goal(\s|$)/i.test(current)) return current;
+      // Anything already typed *is* the objective — the row means "make this
+      // message a goal", and an objective is a whole sentence.
+      return current.trim() ? `${GOAL_COMMAND_PREFIX}${current}` : GOAL_COMMAND_PREFIX;
+    });
+    followUpBox.current?.focus();
   }
 
   /**
@@ -931,16 +931,12 @@ export function JobDetail({
    */
   async function applyGoalObjective(objective: string): Promise<void> {
     try {
-      await writeGoal(
-        threadId,
-        {
-          objective,
-          // The cap the conversation already carries is a choice this page is
-          // holding; the command replaces the words, not the budget.
-          maxRounds: currentGoal?.maxRounds ?? goalLimits.default_rounds,
-        },
-        currentGoal?.revision,
-      );
+      // No round bound travels with it: the goal the owner asked for is
+      // bounded by nothing. A bound the conversation already carries is a
+      // choice somebody made elsewhere, and replacing the objective does not
+      // silently restate it — nor silently drop it, which is why the field is
+      // simply absent here rather than echoed back.
+      await writeGoal(threadId, objective, currentGoal?.revision);
     } catch (cause) {
       // The revision this page held is the stale thing the server just
       // refused, so the conversation has to be read back before the owner
@@ -949,31 +945,9 @@ export function JobDetail({
       if (isGoalRevisionConflict(cause)) onReload?.();
       throw cause;
     }
-    // The draft was for a message that has not been sent. The goal is set now,
-    // and letting a stale draft ride the next message would replace it.
-    setGoalDraft(null);
+    setGoalHint(null);
     setActionError(null);
     onReload?.();
-  }
-
-  /**
-   * Edit or clear from the command's dialog, which writes straight through.
-   *
-   * The dialog stays open until the write lands. A refusal — above all the
-   * compare-and-set refusal, which is expected to be retried — has to leave the
-   * owner's words in the box, and it has to leave them there against the
-   * revision the page re-read after the refusal, which is what the next render
-   * of this closure carries.
-   */
-  async function writeManagedGoal(draft: GoalDraft): Promise<void> {
-    const landed = await goalWrite.run(() => writeGoal(threadId, draft, currentGoal?.revision));
-    if (!landed) return;
-    setGoalManageOpen(false);
-    setGoalDraft(null);
-  }
-
-  async function clearManagedGoal(): Promise<void> {
-    if (await goalWrite.run(() => clearAgentGoal(threadId))) setGoalManageOpen(false);
   }
 
   async function submitFollowUp(event: FormEvent<HTMLFormElement>) {
@@ -998,12 +972,6 @@ export function JobDetail({
       const child = await followUpAgentJob(job.id, {
         prompt,
         ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
-        // A drafted goal rides this message. It is the same endpoint that
-        // carries a skills change, so one message can set both, and the goal is
-        // written in the transaction that appends the turn.
-        ...(goalDraft
-          ? { goal: { objective: goalDraft.objective, max_rounds: goalDraft.maxRounds } }
-          : {}),
         ...(attachments.ids.length ? { attachment_ids: attachments.ids } : {}),
         // Omitted controls inherit the parent's validated model and effort.
         ...composerOverrides(job, model, effort),
@@ -1020,11 +988,6 @@ export function JobDetail({
       // disabled with the sent text still in it, because nothing else ever
       // cleared either.
       setFollowUp('');
-      // The draft went with the message it was attached to. Leaving it here
-      // would put it on every follow-up after this one — including one sent
-      // after the owner paused the goal, which the write would silently
-      // reactivate, budget and all. Pausing has to mean paused.
-      setGoalDraft(null);
       attachments.reset();
       setSubmitting(false);
     } catch (cause: unknown) {
@@ -1571,21 +1534,6 @@ export function JobDetail({
                 ref={scroll.composerRef}
                 className="sticky bottom-0 z-10 -mx-2 mt-10 bg-gradient-to-t from-gray-50 via-gray-50/95 px-2 pb-2 pt-8 dark:from-gray-950 dark:via-gray-950/95"
               >
-                {goalDraft ? (
-                  <div className="mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-gray-300 px-3 py-2 text-xs text-gray-500 dark:border-white/15 dark:text-gray-400">
-                    <GoalIcon className="h-3.5 w-3.5 shrink-0" />
-                    <span className="min-w-0 flex-1 basis-48 truncate" title={goalDraft.objective}>
-                      {t('attach.goalSet', { objective: goalDraft.objective })}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={discardGoalDraft}
-                      className="shrink-0 rounded-md border border-gray-200 px-2 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/5"
-                    >
-                      {t('goal.discardDraft')}
-                    </button>
-                  </div>
-                ) : null}
                 {job.goal ? (
                   <GoalBar
                     threadId={threadId}
@@ -1604,35 +1552,15 @@ export function JobDetail({
                     }}
                   />
                 ) : null}
-                {/* What `/goal` opens: the conversation's own goal, set or
-                    changed here and now. The draft dialog below is the other
-                    half of the feature — a condition carried by the next
-                    message — and the two are never open together. */}
-                <GoalDialog
-                  open={goalManageOpen}
-                  initial={
-                    currentGoal
-                      ? { objective: currentGoal.objective, maxRounds: currentGoal.maxRounds }
-                      : null
-                  }
-                  limits={config?.goal_limits}
-                  busy={goalWrite.busy}
-                  error={goalWrite.error}
-                  onClose={() => setGoalManageOpen(false)}
-                  onApply={(draft) => void writeManagedGoal(draft)}
-                  onClear={currentGoal ? () => void clearManagedGoal() : undefined}
-                />
-                <GoalDialog
-                  open={goalOpen}
-                  initial={goalDraft}
-                  limits={config?.goal_limits}
-                  onClose={() => setGoalOpen(false)}
-                  onApply={(draft) => {
-                    setGoalDraft(draft);
-                    setGoalOpen(false);
-                  }}
-                  onClear={goalDraft ? discardGoalDraft : undefined}
-                />
+                {/* `/goal` on its own is not an objective. It is consumed
+                    rather than sent to the model, and this is where the owner
+                    is told what is missing — beside the box the token is still
+                    sitting in. */}
+                {goalHint ? (
+                  <p className="mb-2 text-[11px] text-gray-500 dark:text-gray-400" role="status">
+                    {goalHint}
+                  </p>
+                ) : null}
                 <McpSessionPanel
                   jobId={job.id}
                   threadId={job.threadId ?? job.id}
@@ -1707,9 +1635,13 @@ export function JobDetail({
                       onChoose={goalCommand.onChoose}
                     />
                     <ComposerTextarea
+                      textareaRef={followUpBox}
                       rows={2}
                       value={followUp}
-                      onChange={(event) => setFollowUp(event.target.value)}
+                      onChange={(event) => {
+                        setFollowUp(event.target.value);
+                        if (goalHint) setGoalHint(null);
+                      }}
                       // The menu owns the keys while it is showing: Enter
                       // confirms the highlighted command rather than sending
                       // half of one to the model.
@@ -1744,8 +1676,8 @@ export function JobDetail({
                         onFiles={attachments.add}
                         onOpenSkills={() => setSkillsOpen(true)}
                         skillSummary={String(selectedSkills.length)}
-                        goalSummary={goalDraft ? goalDraft.objective : t('attach.goalNone')}
-                        onOpenGoal={() => setGoalOpen(true)}
+                        goalSummary={t('attach.goalNone')}
+                        onOpenGoal={insertGoalCommand}
                         mcp={mcp}
                         onOpen={mcp.reload}
                         mcpBlockedReason={mcpBlockedReason}

@@ -16,12 +16,15 @@ from cloud_agent.goals.prompts import (
     render_round_prompt,
 )
 
+#: A goal the owner never bounded, which is what the product creates.
 ACTIVE = {
     "objective": "make `pytest` pass",
     "state": "active",
     "rounds_used": 2,
-    "max_rounds": 10,
+    "max_rounds": None,
 }
+#: The same goal, for the owner who stated a number themselves.
+BOUNDED = {**ACTIVE, "max_rounds": 10}
 
 
 def test_no_goal_returns_the_prompt_unchanged():
@@ -44,7 +47,10 @@ def test_the_preamble_goes_first_and_carries_the_report_block():
     assert prompt.endswith("\n\nfix it")
     assert REPORT_INSTRUCTIONS in prompt
     assert '"make `pytest` pass"' in prompt
-    assert "Automatic rounds used: 2/10" in prompt
+    # Rounds run is a fact; a total is not, because there is not one.
+    assert "Automatic rounds run so far: 2" in prompt
+    assert "2/10" not in prompt
+    assert "the user allows" not in prompt
 
 
 def test_the_report_instructions_name_the_fence_and_its_schema():
@@ -70,7 +76,24 @@ def test_an_objective_with_quotes_stays_one_line():
 def test_a_counter_that_is_missing_reads_as_zero_rather_than_raising():
     """The goal arrives as the store's dict; a prompt that cannot be built is a turn that cannot run."""
     prompt = prompt_with_goal("x", {"objective": "ship it", "state": "active"})
-    assert "Automatic rounds used: 0/0" in prompt
+    assert "Automatic rounds run so far: 0" in prompt
+
+
+def test_a_stated_bound_is_named_and_an_absent_one_is_not():
+    """The model is told a limit exactly when the owner set one.
+
+    "of 999999" would be a limit nobody chose, and a model that believes it is
+    on a budget plans differently from one that was told to finish the job.
+    """
+    assert "of at most 10 the user allows" in prompt_with_goal("x", BOUNDED)
+    assert "the user allows" not in prompt_with_goal("x", ACTIVE)
+
+
+def test_a_nonsense_bound_is_treated_as_no_bound():
+    """A prompt that cannot be built is a turn that cannot run; a guess is worse."""
+    for bad in (0, -1, "ten", True):
+        prompt = prompt_with_goal("x", {**ACTIVE, "max_rounds": bad})
+        assert "the user allows" not in prompt
 
 
 def test_a_work_round_names_its_number_and_what_the_last_turn_reported():
@@ -87,8 +110,15 @@ def test_a_work_round_names_its_number_and_what_the_last_turn_reported():
     assert prompt.endswith("</goal_round>")
 
 
+def test_a_round_of_an_unbounded_goal_names_no_total():
+    """Round 90 of nothing is still a round: no `of=` attribute at all."""
+    prompt = render_round_prompt(objective="ship it", round_number=90, max_rounds=None)
+    assert '<goal_round kind="work" round="90">' in prompt
+    assert 'of="' not in prompt
+
+
 def test_a_work_round_with_nothing_reported_says_nothing_about_it():
-    prompt = render_round_prompt(objective="ship it", round_number=2, max_rounds=5)
+    prompt = render_round_prompt(objective="ship it", round_number=2, max_rounds=None)
     assert "What the previous turn reported" not in prompt
     assert "was paused since the last turn" not in prompt
 

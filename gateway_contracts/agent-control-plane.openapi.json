@@ -2747,7 +2747,7 @@
                 "type": "null"
               }
             ],
-            "description": "A completion condition for this conversation. The platform judges it at the end of every turn and queues the next turn itself while the objective is unmet, up to max_rounds. Omitted means no goal: nothing continues without the owner asking again."
+            "description": "A completion condition for this conversation. The platform judges it at the end of every turn and queues the next turn itself while the objective is unmet. There is no round limit unless the caller states one with max_rounds: by default the goal continues until it is met, paused, cleared, blocked on the owner, or stopped by an existing run-time limit. Omitted means no goal: nothing continues without the owner asking again."
           },
           "mcp_bindings": {
             "anyOf": [
@@ -6357,11 +6357,17 @@
         "description": "An owner's completion condition for one conversation.",
         "properties": {
           "max_rounds": {
-            "default": 10,
-            "maximum": 50.0,
-            "minimum": 1.0,
-            "title": "Max Rounds",
-            "type": "integer"
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An explicit maximum number of automatic rounds. Omitted means no limit: the goal continues until the objective is met, paused, cleared, blocked on the owner, or stopped by an existing run-time limit. There is no default and no maximum.",
+            "title": "Max Rounds"
           },
           "objective": {
             "maxLength": 4000,
@@ -6377,21 +6383,11 @@
         "type": "object"
       },
       "GoalLimits": {
-        "description": "Advertise the server's goal bounds to clients before they submit.",
+        "description": "Advertise the server's goal bounds to clients before they submit.\n\nOnly the objective is bounded. There is no advertised round ceiling and no\nadvertised default, because there is neither: a client that wants a bound\nstates one, and a client that does not leaves the field out. Advertising a\nnumber here is what made \"unlimited\" look like \"fifty\" to every reader.",
         "properties": {
-          "default_rounds": {
-            "default": 10,
-            "title": "Default Rounds",
-            "type": "integer"
-          },
           "max_objective_chars": {
             "default": 4000,
             "title": "Max Objective Chars",
-            "type": "integer"
-          },
-          "max_rounds": {
-            "default": 50,
-            "title": "Max Rounds",
             "type": "integer"
           }
         },
@@ -6514,8 +6510,15 @@
             "type": "string"
           },
           "max_rounds": {
-            "title": "Max Rounds",
-            "type": "integer"
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Rounds"
           },
           "objective": {
             "title": "Objective",
@@ -6594,7 +6597,6 @@
           "objective",
           "state",
           "revision",
-          "max_rounds",
           "rounds_used"
         ],
         "title": "GoalView",
@@ -20795,7 +20797,7 @@
         "summary": "Get Agent Goal"
       },
       "put": {
-        "description": "Create, replace or edit the conversation's completion condition.\n\nA new objective is a new authorization: it mints a new goal identity, starts\nthe round budget over, and becomes active. Editing the cap of an active goal\nleaves the identity and the rounds spent alone; editing a paused one leaves\nit paused, because changing the words is not resuming it.\n\n``revision`` is what makes two edits from two tabs resolvable — the second is\nrefused with a 409 rather than silently overwriting the first. Omitted means\n\"write it whatever it currently says\", which is what a first set wants.",
+        "description": "Create, replace or edit the conversation's completion condition.\n\nA new objective is a new authorization: it mints a new goal identity, starts\nthe round count over, and becomes active. Editing the bound of an active\ngoal leaves the identity and the rounds spent alone; editing a paused one\nleaves it paused, because changing the words is not resuming it.\n\n``max_rounds`` is the owner's own bound and is *optional*: omitted — what\nevery client sends — means the goal runs until it is finished, stopped,\ncleared, blocked on the owner, or an existing run-time limit applies. There\nis no default and no maximum. An explicit value is honored exactly, and is\ndistinguishable from its absence because absence is ``null``, never a large\ninteger.\n\n``revision`` is what makes two edits from two tabs resolvable — the second is\nrefused with a 409 rather than silently overwriting the first. Omitted means\n\"write it whatever it currently says\", which is what a first set wants.",
         "operationId": "set_agent_goal_v1_agent_threads__thread_id__goal_put",
         "parameters": [
           {
@@ -20934,7 +20936,7 @@
     },
     "/v1/agent/threads/{thread_id}/goal/resume": {
       "post": {
-        "description": "Start a paused goal moving again, and record the obligation to schedule.\n\nThe owner's authorization is the trigger: no model report is needed to start\nworking again, and the wakeup this writes is what makes the next round\nhappen — the request does not wait for it, and does not need to.",
+        "description": "Start a paused goal moving again, and record the obligation to schedule.\n\nThe owner's authorization is the trigger: no model report is needed to start\nworking again, and the wakeup this writes is what makes the next round\nhappen — the request does not wait for it, and does not need to.\n\nA goal that paused because it reached a bound the *owner* set is resumed\nwithout that bound, and the response says so: ``max_rounds`` comes back\n``null``. Refusing instead would leave the only Resume control in the\nproduct pointing at a state nothing can clear — the round bound has no\nconfiguration surface — which is the dead end this endpoint exists to\nremove.",
         "operationId": "resume_agent_goal_v1_agent_threads__thread_id__goal_resume_post",
         "parameters": [
           {

@@ -885,40 +885,46 @@ describe('TaskComposer goal command', () => {
     }
   });
 
-  it('confirms the highlighted command with Enter, and closes on Escape', async () => {
+  it('choosing the command writes it into the box and keeps the caret there', async () => {
     const box = await composer();
     fireEvent.change(box, { target: { value: '/go' } });
     fireEvent.keyDown(box, { key: 'ArrowDown' });
     fireEvent.keyDown(box, { key: 'ArrowUp' });
     fireEvent.keyDown(box, { key: 'Enter' });
 
-    // Enter confirmed the command rather than sending half of one as a prompt.
-    expect(
-      await screen.findByRole('heading', { name: 'Completion condition' }),
-    ).toBeInTheDocument();
+    // Enter chose the command rather than sending half of one as a prompt, and
+    // choosing it opened nothing: the interaction is the box.
     expect(createAgentJob).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(box).toHaveValue('/goal ');
+    expect(box).toHaveFocus();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    // Escape still stands the menu down without clearing the box.
     fireEvent.change(box, { target: { value: '/go' } });
     fireEvent.keyDown(box, { key: 'Escape' });
     expect(menu()).not.toBeInTheDocument();
-    // Dismissing the menu is not clearing the box.
     expect(box).toHaveValue('/go');
   });
 
-  it('opens the dialog for a bare /goal instead of creating a task', async () => {
+  it('asks for the rest of the sentence when /goal carries no objective', async () => {
     const box = await composer();
-    fireEvent.change(box, { target: { value: '/goal' } });
+    // The token, chosen (so the menu has already handed the caret back) and
+    // then submitted with nothing after it.
+    fireEvent.change(box, { target: { value: '/goal ' } });
     fireEvent.keyDown(box, { key: 'Enter' });
 
-    expect(
-      await screen.findByRole('heading', { name: 'Completion condition' }),
-    ).toBeInTheDocument();
+    // No empty goal, no task, and nothing sent to the model as prose: the
+    // token stays in the box, ready to be finished.
+    expect(await screen.findByRole('status')).toHaveTextContent('Add what “done” means');
     expect(createAgentJob).not.toHaveBeenCalled();
     expect(navigation.push).not.toHaveBeenCalled();
-    // The command was consumed, so the dialog's answer is the only thing left
-    // to send.
-    expect(box).toHaveValue('');
+    expect(box).toHaveValue('/goal ');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    // And typing the objective clears the guidance: it is about a sentence the
+    // owner has not finished, not a standing warning.
+    fireEvent.change(box, { target: { value: '/goal make the suite pass' } });
+    expect(screen.queryByText(/Add what “done” means/)).not.toBeInTheDocument();
   });
 
   it('creates exactly one task for /goal <objective>, with the objective as its first turn', async () => {
@@ -927,15 +933,21 @@ describe('TaskComposer goal command', () => {
     fireEvent.change(box, { target: { value: '/goal make the suite pass' } });
     fireEvent.keyDown(box, { key: 'Enter' });
 
+    // One request, one task: the objective is the first turn's content *and*
+    // the condition that continues it. A second call here is the bug this
+    // asserts against — the old two-step draft set a goal and still needed a
+    // second Enter to start anything.
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
     expect(vi.mocked(createAgentJob).mock.calls[0][0]).toMatchObject({
       repo: 'owner/repository',
       task_prompt: 'make the suite pass',
-      goal: { objective: 'make the suite pass', max_rounds: 10 },
+      // No round bound: the field is absent rather than filled with a default.
+      goal: { objective: 'make the suite pass' },
       runtime: 'claude-code',
       model: 'model-a',
       base_ref: 'dev',
     });
+    expect(vi.mocked(createAgentJob).mock.calls[0][0].goal).not.toHaveProperty('max_rounds');
     expect(navigation.push).toHaveBeenCalledWith('/ajob_1');
   });
 

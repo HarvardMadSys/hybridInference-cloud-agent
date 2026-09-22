@@ -63,12 +63,16 @@ def prompt_with_goal(prompt: str, goal: dict[str, Any] | None) -> str:
     """
     if not goal or not goal.get("objective") or str(goal.get("state")) != "active":
         return prompt
-    rounds_used = _as_int(goal.get("rounds_used"))
-    max_rounds = _as_int(goal.get("max_rounds"))
     header = (
         "<conversation_goal>\n"
         f"Objective: {json.dumps(str(goal['objective']), ensure_ascii=False)}\n"
-        f"Automatic rounds used: {rounds_used}/{max_rounds}\n"
+        # How many rounds have run, and — only when the owner asked for one —
+        # how many they allowed. A goal with no stated bound says so by saying
+        # nothing about one; printing "3/50" here told the model it was on a
+        # budget nobody had set, and told the owner the same thing when the
+        # report came back.
+        f"Automatic rounds run so far: {_as_int(goal.get('rounds_used'))}"
+        f"{_rounds_bound(goal)}\n"
         "This conversation has a completion goal set by the user. Work toward it "
         "in every turn. "
         f"{REPORT_INSTRUCTIONS}\n"
@@ -78,6 +82,19 @@ def prompt_with_goal(prompt: str, goal: dict[str, Any] | None) -> str:
         "</conversation_goal>\n\n"
     )
     return f"{header}{prompt}"
+
+
+def _rounds_bound(goal: dict[str, Any]) -> str:
+    """The owner's own bound, as a clause, or nothing when they set none.
+
+    A goal nobody bounded gets no clause at all rather than a large number: a
+    model told "of 999999" plans differently from one told nothing, and the
+    former is a limit the owner never chose.
+    """
+    bound = goal.get("max_rounds")
+    if bound is None or isinstance(bound, bool) or not isinstance(bound, int) or bound < 1:
+        return ""
+    return f" of at most {bound} the user allows"
 
 
 def _as_int(value: Any) -> int:
@@ -94,19 +111,28 @@ def render_round_prompt(
     *,
     objective: str,
     round_number: int,
-    max_rounds: int,
+    max_rounds: int | None,
     previous: str | None = None,
     previous_paused: bool = False,
 ) -> str:
     """The body of one automatic work round, generated server-side.
+
+    ``max_rounds`` is the owner's own bound, or ``None`` when they stated none.
+    The unset case is not rendered as a big number: the round says which one it
+    is and nothing about a total, because there is no total.
 
     The workspace line is the one that matters most here: rounds can be hours
     apart and the container may have restarted between them, so a model that
     trusts its own earlier narration over what it can see now is a model that
     reports success against a tree that no longer exists.
     """
+    counted = (
+        f'round="{round_number}" of="{max_rounds}"'
+        if max_rounds is not None
+        else f'round="{round_number}"'
+    )
     lines = [
-        f'<goal_round kind="work" round="{round_number}" of="{max_rounds}">',
+        f'<goal_round kind="work" {counted}>',
         "This turn was started by the platform because the conversation has an "
         "active goal. Continue working toward the objective in this same "
         "conversation. Treat the current workspace, tool results and files as "

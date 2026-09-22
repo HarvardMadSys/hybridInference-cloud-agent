@@ -1,5 +1,5 @@
 'use client';
-import type { TextareaHTMLAttributes } from 'react';
+import type { Ref, TextareaHTMLAttributes } from 'react';
 import { isComposerSubmit } from './composerKeys';
 import type { AgentJob } from './types';
 
@@ -14,11 +14,23 @@ export function composerOverrides(job: AgentJob, model: string, effort: string) 
 }
 export function ComposerTextarea({
   onKeyDown,
+  textareaRef,
   ...props
-}: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+}: TextareaHTMLAttributes<HTMLTextAreaElement> & {
+  /**
+   * The box itself.
+   *
+   * A named prop rather than a forwarded `ref`: a slash command *writes into*
+   * this box rather than opening anything, and clicking the menu row moves
+   * focus to the row — so the composer that chose the command needs the
+   * element back to put the caret where the next character goes.
+   */
+  textareaRef?: Ref<HTMLTextAreaElement>;
+}) {
   return (
     <textarea
       {...props}
+      ref={textareaRef}
       onKeyDown={(event) => {
         // A caller's handler runs first and has the last word: the command menu
         // consumes the keys it owns — including the Enter that would otherwise

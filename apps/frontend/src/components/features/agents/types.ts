@@ -240,7 +240,12 @@ export interface AgentGoal {
   state: 'active' | 'paused' | 'complete';
   revision: number;
   roundsUsed: number;
-  maxRounds: number;
+  /**
+   * The bound the owner stated themselves, or `null` when they stated none —
+   * the ordinary case. Never a large integer: the absence of a limit is the
+   * absence of a value, so the band can tell "3 rounds run" from "3 of 10".
+   */
+  maxRounds: number | null;
   /** Set while paused, paired with the sentence behind it. */
   pauseReason?: GoalPauseReason;
   pauseDetail?: string;
