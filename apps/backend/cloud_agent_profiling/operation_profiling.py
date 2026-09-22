@@ -6,19 +6,17 @@ Design and field semantics live in
 This module implements the first slice: the opt-in switch, the run descriptor,
 a pure-timing collector, and one structured record per selected root operation.
 
-The default is **off**, and off has to stay cheap: no collector, no measurement
-id, no clock reads, no span objects, no serialization, no background work. The
+Collection defaults to **off**, with Admin control available without configuration.
+The off request path stays cheap: no collector, measurement id, clock reads,
+span objects or serialization. Background policy sync still runs. The
 entry points therefore take a ``Measurement | None`` and answer ``None``/``False``
 without allocating. Environment variables are parsed once per process, never per
 span, and the export thread exists only once a run has produced a record.
 
-A run is only live when all of the following hold; anything else leaves the
-business path untouched and logs one warning:
-
-* ``AGENT_OPERATION_PROFILING_ENABLED`` is truthy,
-* ``AGENT_OPERATION_PROFILING_RUN`` is a JSON descriptor with a ``run_id``, a
-  non-empty ``operations`` list, a future ``expires_at``, a positive
-  ``max_operations``, and a ``target`` that names only known fields.
+Admin enables a run through persisted control state; absent an active run,
+nothing is selected. Existing static experiments remain supported through
+``AGENT_OPERATION_PROFILING_ENABLED`` and a valid ``AGENT_OPERATION_PROFILING_RUN``
+descriptor. An explicit mode overrides that compatibility path.
 
 Three costs are bounded on purpose, because this measures a path users wait on:
 
@@ -74,19 +72,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: Deployment-level master switch. Absent or false means "do not profile".
+#: Legacy static-experiment switch. Absent or false leaves control to Admin.
 ENV_PROFILING_ENABLED = "AGENT_OPERATION_PROFILING_ENABLED"
 
 #: JSON descriptor for the current profiling run. See :class:`ProfilingRun`.
 ENV_PROFILING_RUN = "AGENT_OPERATION_PROFILING_RUN"
 
 #: Which control source this deployment allows. One of :data:`PROFILING_MODES`.
-#: Absent keeps the pre-control semantics exactly (``ENABLED`` + ``RUN``, read
-#: once per process); ``admin`` is what makes an Admin Start/Stop take effect
-#: without a restart, and the only mode in which a runtime policy replaces the
-#: environment. It is read once per process: it is deployment configuration,
-#: and the design says the mode is *how* a deployment may be controlled, never
-#: the per-experiment switch itself.
+#: Absent or blank defaults to Admin control, with collection off until an
+#: administrator enables a run. An explicitly enabled legacy static experiment
+#: keeps its environment mode. This optional override is read once per process;
+#: it selects the control source, never the per-experiment switch itself.
 ENV_PROFILING_MODE = "AGENT_OPERATION_PROFILING_MODE"
 
 #: Optional JSONL path. Each finished measurement is appended as one line.
@@ -1007,9 +1003,10 @@ def _read_mode() -> str:
     """
     raw = (os.environ.get(ENV_PROFILING_MODE) or "").strip().lower()
     if not raw:
-        # Absent means the old semantics, unchanged: enabled + run descriptor,
-        # which is what a deployment that never sets the new variable expects.
-        return MODE_ENVIRONMENT if _truthy(os.environ.get(ENV_PROFILING_ENABLED)) else MODE_DISABLED
+        # Keep deliberately enabled static experiments working. Otherwise the
+        # Admin button is available without deployment setup; the absence of
+        # an active persisted run, not the absence of this variable, means off.
+        return MODE_ENVIRONMENT if _truthy(os.environ.get(ENV_PROFILING_ENABLED)) else MODE_ADMIN
     global _INVALID_MODE
     if raw not in PROFILING_MODES:
         # Remembered rather than logged here: the caller reports it outside the

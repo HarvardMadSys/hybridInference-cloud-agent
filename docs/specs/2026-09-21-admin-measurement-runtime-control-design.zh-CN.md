@@ -175,14 +175,14 @@ Start 请求示例：
 
 ### 5.1 显式选择控制来源
 
-建议新增 `AGENT_OPERATION_PROFILING_MODE=disabled|environment|admin`：
+可选覆盖项 `AGENT_OPERATION_PROFILING_MODE=disabled|environment|admin`（默认行为由 [2026-09-22 设计](2026-09-22-measurement-admin-default.zh-CN.md) 更新）：
 
-- 未设置时，完全保留旧 `ENABLED` + `RUN` 语义，默认关闭。
+- 未设置或空白时默认由 Admin 控制，没有活动实验就不采集。旧 `ENABLED=true` 仍保留静态实验语义；`ENABLED=false` 不再隐藏按钮。
 - `disabled`：部署级禁止采集，Admin 显示不可用。
 - `environment`：只读旧配置，Admin 显示“由部署配置管理”，不提供假 Stop。
 - `admin`：只使用持久化控制状态；旧 `ENABLED=false` 不再否决 Admin 命令，旧 RUN 也不得在 Admin Stop 后作为 fallback 被启用。初次没有活动实验就是关闭。
 
-这个 mode 是部署允许使用何种控制方式，不是每次实验的开关。首次升级需要将 CP、runner 和 broker 接到 Admin 模式；此后每次 Start/Stop 不得要求重启。
+这个可选 mode 用于覆盖控制方式，不是每次实验的开关。CP、runner、broker 和 turn 子进程升级后默认支持 Admin，无需设置变量；每次 Enable/Disable 不要求重启。
 
 ### 5.2 传播方式与时限
 

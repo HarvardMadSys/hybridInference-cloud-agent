@@ -153,9 +153,9 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", REPO)
     monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "acceptance-broker-token")
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(tmp_path / "records.jsonl"))
-    # Admin control, and *only* Admin control: the legacy switch is left off and
-    # a stale descriptor is deliberately left behind to prove it is ignored.
-    monkeypatch.setenv(operation_profiling.ENV_PROFILING_MODE, operation_profiling.MODE_ADMIN)
+    # The product default needs no opt-in mode or namespace. A stale descriptor
+    # without the legacy switch must not silently start a static experiment.
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_MODE, raising=False)
     monkeypatch.delenv(operation_profiling.ENV_PROFILING_ENABLED, raising=False)
     monkeypatch.setenv(
         operation_profiling.ENV_PROFILING_RUN,
@@ -168,7 +168,7 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
             }
         ),
     )
-    monkeypatch.setenv("AGENT_OPERATION_PROFILING_DEPLOYMENT", "acceptance")
+    monkeypatch.delenv("AGENT_OPERATION_PROFILING_DEPLOYMENT", raising=False)
     operation_profiling.reset_cache()
     operation_profiling.reset_policy()
 
@@ -315,6 +315,9 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         before_response = await admin.get("/admin/agent/profiling-control")
         assert before_response.status_code == 200, before_response.text
         before = before_response.json()
+        assert before["mode"] == operation_profiling.MODE_ADMIN
+        assert before["deployment"] == "default"
+        assert before["configured"] is True
         assert before["status"] == "off"
         assert before["run"] is None
         assert before["run_active"] is False

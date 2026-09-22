@@ -48,7 +48,7 @@ ACK 或复杂状态机。**
 
 | 问题 | 根因 | 修复 | 回归证据 |
 | --- | --- | --- | --- |
-| **[P2] 接续绕过部署级 `disabled`** | 接续分支只看 `_load().run`，不看进程的控制模式；`MODE=disabled`（含"什么都没配"的默认值）下仍会分配 measurement 与 recorder | 接续**只在 `MODE=admin` 下可用**：`disabled` 是"本部署禁止采集"，与 Admin 卡片上的 Disable 是两件事；`environment` 继续由自己的静态 descriptor 决定（父子环境相同，走原有 `_load()` 路径） | `test_a_disabled_deployment_refuses_a_continuation`（含真实 `open_call` 解析路径）、`test_a_default_off_deployment_refuses_a_continuation`、`test_environment_mode_still_follows_its_own_descriptor`；subprocess 测试追加"同一份真实 handoff 交给 `MODE=disabled` 的新解释器 → `attached=false` 且 sink 无新行" |
+| **[P2] 接续绕过部署级 `disabled`** | 接续分支只看 `_load().run`，不看进程的控制模式；`MODE=disabled`（当时也包括未配置的默认值；2026-09-22 起未配置改为 Admin）下仍会分配 measurement 与 recorder | 接续**只在 `MODE=admin` 下可用**：`disabled` 是"本部署禁止采集"，与 Admin 卡片上的 Disable 是两件事；`environment` 继续由自己的静态 descriptor 决定（父子环境相同，走原有 `_load()` 路径） | `test_a_disabled_deployment_refuses_a_continuation`（含真实 `open_call` 解析路径）、`test_a_default_off_deployment_refuses_a_continuation`、`test_environment_mode_still_follows_its_own_descriptor`；subprocess 测试追加"同一份真实 handoff 交给 `MODE=disabled` 的新解释器 → `attached=false` 且 sink 无新行" |
 | **[P2] manifest 的 `expires_at` 被解析却未用于截止** | 子进程与 broker 的 deadline 只取顶层 `context.expires_at`；`run.expires_at` 只有在本地 run 恰好同名时才参与取最小值 | 接续时用**原实验的绝对到期时刻**建立本地单调截止，与传输上下文的截止、以及（同名时）本地同实验截止**三者取较早者**；manifest 已过期则直接拒绝 | `test_an_inherited_manifest_that_has_expired_is_refused`（manifest 过期 60 s、顶层还剩 300 s → 两处都拒绝）、`test_the_earlier_of_the_two_deadlines_wins`（manifest 剩 2 s、顶层剩 300 s → 两处剩余均 ≤3 s，而不是 300 s）、`test_a_context_cannot_outlive_the_experiment_it_names`（反向） |
 
 `test_a_configuration_change_does_not_truncate_an_in_flight_request` 更名为
@@ -75,35 +75,28 @@ Disable measurement**（**同一个按钮**，文字随状态切换），即可�
 
 ## 2. 使用说明
 
-### 2.1 部署侧一次性开启（每个环境一次，之后不再需要）
+### 2.1 部署默认行为（2026-09-22 更新）
 
-```bash
-# 三个采集进程都要有：CP、runner、workspace broker（后两个是两个容器）
-AGENT_OPERATION_PROFILING_MODE=admin
+正常升级 CP、runner、broker 并完成 `alembic upgrade head` 后，无需设置 profiling 环境
+变量。Admin 默认可控制；新数据库没有活动实验，页面显示 Disabled 与 Enable measurement。
+旧部署的显式 `MODE=admin` 可保留。旧 `ENABLED=true` 保持静态实验兼容；显式
+`MODE=disabled` 仍禁止采集。详见 [默认行为设计](../specs/2026-09-22-measurement-admin-default.zh-CN.md)。
 
-# 只有共享同一个数据库的多个部署需要设置；单部署留空即 default
-AGENT_OPERATION_PROFILING_DEPLOYMENT=staging
-```
-
-其余 `AGENT_OPERATION_PROFILING_ENABLED / _RUN / _SINK` 保持原样即可，`admin` 模式下
-它们**不再决定**是否采集：旧的 `RUN` 不会在停用后被当作 fallback，旧的 `ENABLED=false`
-也不会否决管理员的启用。迁移用 `alembic upgrade head`（新增 `0018_profiling_control`）。
-
-`MODE` 是"这个部署允许用什么方式控制"，不是每次实验的开关；改它需要重启，**此后每次
-启用/停用都不需要**。
+只有多个独立部署共享同一个数据库时，才需配置不同的 `AGENT_OPERATION_PROFILING_DEPLOYMENT`。
+控制状态持久化，服务重启恢复未到期实验，不会因重启或关闭页面自动停止。
 
 ### 2.2 管理员操作
 
 1. 打开 **Admin → Measurements**，页面顶部是 `Measurement collection` 卡片。
 2. 点 **Enable measurement**，选择测量对象（默认全选三项）、目标（一台 host 或 All
    hosts，必须显式选择）、持续时间（1 / 5 / 10 / 30 分钟，默认 10），提交。
-3. 按钮变成 **Disable measurement**，卡片显示 `Measuring`、选中的操作、`Host:`、
+3. 按钮变成 **Disable measurement**，卡片显示 `Enabled`、选中的操作、`Host:`、
    `Expires at:`、`Time left: mm:ss`、`Stored samples: N`，以及一行同步延迟提示。
 4. 期间正常使用产品即可：浏览文件、打开终端、启动沙盒都会产生记录。**测量不会主动启动
    沙盒、打开终端、读取文件或运行模型**；还没有匹配操作时显示明确提示，而不是 0 ms。
 5. 点 **Disable measurement** 立即停止**选取新操作**；不弹确认框，不中断任何用户操作，
    不删除数据，已经开始的 measurement 正常完成并入库。
-6. 到期（或 CP 重启、页面关闭）都会自动停止：期限是权威时间，不依赖页面打开或清扫执行。
+6. 到期自动停止：期限是权威时间，不依赖页面打开或清扫执行；CP 重启和页面关闭不会改变持久化开关。
 7. 诊断信息（mode / revision / deployment / run_id / 预算口径）折叠在 Details 里。
 
 ### 2.3 状态与延迟口径
@@ -116,7 +109,7 @@ AGENT_OPERATION_PROFILING_DEPLOYMENT=staging
 | `Managed by deployment configuration` | 部署未处于 `admin` 模式；不提供按钮 |
 
 页面展示的是**采集配置状态**，不声称已经获得所有进程确认。同步延迟：CP 空闲 30 s / 活动
-5 s 轮询，host 同样节奏，单次请求超时 2 s —— 页面把"最多 30 秒"直接写给操作者。断联节点
+5 s 轮询，host 同样节奏，单次请求超时 2 s —— 页面说明正常约 30 秒，不作断网时限保证。断联节点
 在实验自己的 `expires_at` 停止选取。
 
 ## 3. 实测通过（真实组件）
