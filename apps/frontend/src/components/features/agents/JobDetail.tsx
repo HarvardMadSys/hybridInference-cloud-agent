@@ -1534,24 +1534,6 @@ export function JobDetail({
                 ref={scroll.composerRef}
                 className="sticky bottom-0 z-10 -mx-2 mt-10 bg-gradient-to-t from-gray-50 via-gray-50/95 px-2 pb-2 pt-8 dark:from-gray-950 dark:via-gray-950/95"
               >
-                {job.goal ? (
-                  <GoalBar
-                    threadId={threadId}
-                    goal={job.goal}
-                    limits={config?.goal_limits}
-                    state={{
-                      live: hasLiveWork(job),
-                      repairing: job.goalTurn?.kind === 'repair' && isActive,
-                    }}
-                    onChanged={() => {
-                      // The goal belongs to the conversation, so the page's own
-                      // reload is what re-reads it. Reimplementing
-                      // fetch-and-adapt here would be a second reader of the
-                      // same endpoint, and the two would drift.
-                      onReload?.();
-                    }}
-                  />
-                ) : null}
                 {/* `/goal` on its own is not an objective. It is consumed
                     rather than sent to the model, and this is where the owner
                     is told what is missing — beside the box the token is still
@@ -1567,181 +1549,216 @@ export function JobDetail({
                   active={isActive}
                   approvalsOnly
                 />
-                {isArchived ? (
-                  <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-gray-900">
-                    <div className="min-w-0 flex-1 basis-64">
-                      <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                        {t('sessionArchive.title')}
-                      </p>
-                      <p className="mt-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                <div
+                  className={
+                    isArchived
+                      ? undefined
+                      : `relative rounded-xl border bg-white dark:bg-gray-900 shadow-[0_16px_40px_-28px_rgba(17,24,39,0.55)] transition focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05] ${dropping ? 'border-crimson/40 ring-4 ring-crimson/[0.08]' : 'border-gray-200/90 dark:border-white/10'}`
+                  }
+                >
+                  {job.goal ? (
+                    <GoalBar
+                      attached={!isArchived}
+                      onCleared={() => followUpBox.current?.focus()}
+                      threadId={threadId}
+                      goal={job.goal}
+                      limits={config?.goal_limits}
+                      state={{
+                        live: hasLiveWork(job),
+                        repairing: job.goalTurn?.kind === 'repair' && isActive,
+                      }}
+                      onChanged={() => {
+                        // The goal belongs to the conversation, so the page's own
+                        // reload is what re-reads it. Reimplementing
+                        // fetch-and-adapt here would be a second reader of the
+                        // same endpoint, and the two would drift.
+                        onReload?.();
+                      }}
+                    />
+                  ) : null}
+                  {isArchived ? (
+                    <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-gray-900">
+                      <div className="min-w-0 flex-1 basis-64">
+                        <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                          {t('sessionArchive.title')}
+                        </p>
+                        <p className="mt-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                          {t(
+                            contextLost
+                              ? 'sessionArchive.contextLost'
+                              : isActive
+                                ? 'sessionArchive.running'
+                                : 'sessionArchive.body',
+                          )}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={restoring}
+                        onClick={() => void unarchive()}
+                        className="rounded-lg bg-gray-900 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-gray-700 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+                      >
                         {t(
-                          contextLost
-                            ? 'sessionArchive.contextLost'
-                            : isActive
-                              ? 'sessionArchive.running'
-                              : 'sessionArchive.body',
+                          restoring
+                            ? 'sessionArchive.restoring'
+                            : contextLost
+                              ? 'sessionArchive.restore'
+                              : 'sessionArchive.continue',
                         )}
-                      </p>
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      disabled={restoring}
-                      onClick={() => void unarchive()}
-                      className="rounded-lg bg-gray-900 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-gray-700 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+                  ) : (
+                    <form
+                      onSubmit={(event) => void submitFollowUp(event)}
+                      onDragOver={(event) => {
+                        if (
+                          contextLost ||
+                          submitting ||
+                          !event.dataTransfer.types.includes('Files')
+                        )
+                          return;
+                        event.preventDefault();
+                        setDropping(true);
+                      }}
+                      onDragLeave={(event) => {
+                        if (event.currentTarget.contains(event.relatedTarget as Node | null))
+                          return;
+                        setDropping(false);
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        setDropping(false);
+                        if (contextLost || submitting) return;
+                        setReadingFiles(true);
+                        void filesFromDataTransfer(event.dataTransfer)
+                          .then(attachments.add)
+                          .catch((cause: unknown) => {
+                            setActionError(
+                              cause instanceof Error
+                                ? cause.message
+                                : 'Could not read dropped files',
+                            );
+                          })
+                          .finally(() => setReadingFiles(false));
+                      }}
+                      className="relative"
                     >
-                      {t(
-                        restoring
-                          ? 'sessionArchive.restoring'
-                          : contextLost
-                            ? 'sessionArchive.restore'
-                            : 'sessionArchive.continue',
-                      )}
-                    </button>
-                  </div>
-                ) : (
-                  <form
-                    onSubmit={(event) => void submitFollowUp(event)}
-                    onDragOver={(event) => {
-                      if (contextLost || submitting || !event.dataTransfer.types.includes('Files'))
-                        return;
-                      event.preventDefault();
-                      setDropping(true);
-                    }}
-                    onDragLeave={(event) => {
-                      if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
-                      setDropping(false);
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      setDropping(false);
-                      if (contextLost || submitting) return;
-                      setReadingFiles(true);
-                      void filesFromDataTransfer(event.dataTransfer)
-                        .then(attachments.add)
-                        .catch((cause: unknown) => {
-                          setActionError(
-                            cause instanceof Error ? cause.message : 'Could not read dropped files',
-                          );
-                        })
-                        .finally(() => setReadingFiles(false));
-                    }}
-                    className={`relative rounded-xl border bg-white dark:bg-gray-900 shadow-[0_16px_40px_-28px_rgba(17,24,39,0.55)] transition focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05] ${dropping ? 'border-crimson/40 ring-4 ring-crimson/[0.08]' : 'border-gray-200/90 dark:border-white/10'}`}
-                  >
-                    <ComposerCommandMenu
-                      id={goalCommand.menuId}
-                      entries={goalCommand.entries}
-                      activeIndex={goalCommand.activeIndex}
-                      onHighlight={goalCommand.onHighlight}
-                      onChoose={goalCommand.onChoose}
-                    />
-                    <ComposerTextarea
-                      textareaRef={followUpBox}
-                      rows={2}
-                      value={followUp}
-                      onChange={(event) => {
-                        setFollowUp(event.target.value);
-                        if (goalHint) setGoalHint(null);
-                      }}
-                      // The menu owns the keys while it is showing: Enter
-                      // confirms the highlighted command rather than sending
-                      // half of one to the model.
-                      onKeyDown={(event) => {
-                        goalCommand.onKeyDown(event);
-                      }}
-                      // The list is this box's own popup, and the highlighted
-                      // row is named to it — the caret never leaves here.
-                      // `aria-expanded` is deliberately not used: the textbox
-                      // role does not support it, and `aria-controls` pointing
-                      // at a list that is only in the DOM while it is open says
-                      // the same thing without lying.
-                      aria-autocomplete="list"
-                      aria-controls={goalCommand.open ? goalCommand.menuId : undefined}
-                      aria-activedescendant={goalCommand.activeId}
-                      disabled={contextLost}
-                      placeholder={
-                        contextLost
-                          ? 'Unable to reconnect this chat'
-                          : 'Message or run a task, / commands, @ files or sessions'
-                      }
-                      aria-label="Add a follow-up"
-                      className="w-full resize-none rounded-t-xl border-0 bg-transparent px-4 pt-3 text-sm leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
-                    />
-                    <AttachmentStrip
-                      entries={attachments.entries}
-                      onRemove={attachments.remove}
-                      disabled={contextLost || submitting}
-                    />
-                    <div className="relative flex flex-wrap items-center gap-1.5 border-t border-gray-100/90 dark:border-white/5 px-3 py-2.5">
-                      <ComposerPlusMenu
-                        onFiles={attachments.add}
-                        onOpenSkills={() => setSkillsOpen(true)}
-                        skillSummary={String(selectedSkills.length)}
-                        goalSummary={t('attach.goalNone')}
-                        onOpenGoal={insertGoalCommand}
-                        mcp={mcp}
-                        onOpen={mcp.reload}
-                        mcpBlockedReason={mcpBlockedReason}
+                      <ComposerCommandMenu
+                        id={goalCommand.menuId}
+                        entries={goalCommand.entries}
+                        activeIndex={goalCommand.activeIndex}
+                        onHighlight={goalCommand.onHighlight}
+                        onChoose={goalCommand.onChoose}
+                      />
+                      <ComposerTextarea
+                        textareaRef={followUpBox}
+                        rows={2}
+                        value={followUp}
+                        onChange={(event) => {
+                          setFollowUp(event.target.value);
+                          if (goalHint) setGoalHint(null);
+                        }}
+                        // The menu owns the keys while it is showing: Enter
+                        // confirms the highlighted command rather than sending
+                        // half of one to the model.
+                        onKeyDown={(event) => {
+                          goalCommand.onKeyDown(event);
+                        }}
+                        // The list is this box's own popup, and the highlighted
+                        // row is named to it — the caret never leaves here.
+                        // `aria-expanded` is deliberately not used: the textbox
+                        // role does not support it, and `aria-controls` pointing
+                        // at a list that is only in the DOM while it is open says
+                        // the same thing without lying.
+                        aria-autocomplete="list"
+                        aria-controls={goalCommand.open ? goalCommand.menuId : undefined}
+                        aria-activedescendant={goalCommand.activeId}
+                        disabled={contextLost}
+                        placeholder={
+                          contextLost
+                            ? 'Unable to reconnect this chat'
+                            : 'Message or run a task, / commands, @ files or sessions'
+                        }
+                        aria-label="Add a follow-up"
+                        className="w-full resize-none rounded-xl border-0 bg-transparent px-4 pt-3 text-sm leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
+                      />
+                      <AttachmentStrip
+                        entries={attachments.entries}
+                        onRemove={attachments.remove}
                         disabled={contextLost || submitting}
                       />
-                      <span className="h-4 w-px bg-gray-200 dark:bg-white/10" />
-                      {modelOptions.length > 0 ? (
-                        <>
-                          {/* The harness stays the thread's; the model is offered
+                      <div className="relative flex flex-wrap items-center gap-1.5 border-t border-gray-100/90 dark:border-white/5 px-3 py-2.5">
+                        <ComposerPlusMenu
+                          onFiles={attachments.add}
+                          onOpenSkills={() => setSkillsOpen(true)}
+                          skillSummary={String(selectedSkills.length)}
+                          goalSummary={t('attach.goalNone')}
+                          onOpenGoal={insertGoalCommand}
+                          mcp={mcp}
+                          onOpen={mcp.reload}
+                          mcpBlockedReason={mcpBlockedReason}
+                          disabled={contextLost || submitting}
+                        />
+                        <span className="h-4 w-px bg-gray-200 dark:bg-white/10" />
+                        {modelOptions.length > 0 ? (
+                          <>
+                            {/* The harness stays the thread's; the model is offered
                           again. A model change restarts this member's CLI and
                           native-resumes it in the same retained workspace; it
                           does not replace or clone the sandbox. */}
-                          <span className="shrink-0 text-[11px] text-gray-400 dark:text-gray-500">
-                            {contextLost
-                              ? 'Start a new chat ·'
-                              : job.state === 'cancelled'
-                                ? `Restores any saved changes · ${job.runtime} ·`
-                                : `Inherits ${job.runtime} ·`}
-                          </span>
-                          <Picker
-                            label="Model for this turn"
-                            value={model}
-                            options={modelOptions}
-                            onChange={setModel}
-                          />
-                          <Picker
-                            label="Reasoning for this turn"
-                            value={effort}
-                            options={efforts}
-                            onChange={setEffort}
-                          />
-                          {isActive ? (
-                            <span className="min-w-0 truncate text-[11px] text-gray-400 dark:text-gray-500">
-                              · queued after this run
+                            <span className="shrink-0 text-[11px] text-gray-400 dark:text-gray-500">
+                              {contextLost
+                                ? 'Start a new chat ·'
+                                : job.state === 'cancelled'
+                                  ? `Restores any saved changes · ${job.runtime} ·`
+                                  : `Inherits ${job.runtime} ·`}
                             </span>
-                          ) : null}
-                        </>
-                      ) : (
-                        <span className="min-w-0 flex-1 truncate text-[11px] text-gray-400 dark:text-gray-500">
-                          {contextLost
-                            ? `Start a new chat · ${job.runtime} · ${job.model}`
-                            : job.state === 'cancelled'
-                              ? `Restores any saved changes · ${job.runtime} · ${job.model}`
-                              : `Inherits ${job.runtime} · ${job.model}`}
-                          {isActive ? ' · queued after this run' : ''}
-                        </span>
-                      )}
-                      <ComposerSendButton
-                        label="Send follow-up"
-                        title="Send follow-up — ⏎ to send, ⇧⏎ for a new line"
-                        disabled={
-                          contextLost ||
-                          !followUp.trim() ||
-                          submitting ||
-                          attachments.uploading ||
-                          readingFiles ||
-                          mcp.saving ||
-                          goalCommand.busy
-                        }
-                        busy={submitting || goalCommand.busy}
-                      />
-                    </div>
-                  </form>
-                )}
+                            <Picker
+                              label="Model for this turn"
+                              value={model}
+                              options={modelOptions}
+                              onChange={setModel}
+                            />
+                            <Picker
+                              label="Reasoning for this turn"
+                              value={effort}
+                              options={efforts}
+                              onChange={setEffort}
+                            />
+                            {isActive ? (
+                              <span className="min-w-0 truncate text-[11px] text-gray-400 dark:text-gray-500">
+                                · queued after this run
+                              </span>
+                            ) : null}
+                          </>
+                        ) : (
+                          <span className="min-w-0 flex-1 truncate text-[11px] text-gray-400 dark:text-gray-500">
+                            {contextLost
+                              ? `Start a new chat · ${job.runtime} · ${job.model}`
+                              : job.state === 'cancelled'
+                                ? `Restores any saved changes · ${job.runtime} · ${job.model}`
+                                : `Inherits ${job.runtime} · ${job.model}`}
+                            {isActive ? ' · queued after this run' : ''}
+                          </span>
+                        )}
+                        <ComposerSendButton
+                          label="Send follow-up"
+                          title="Send follow-up — ⏎ to send, ⇧⏎ for a new line"
+                          disabled={
+                            contextLost ||
+                            !followUp.trim() ||
+                            submitting ||
+                            attachments.uploading ||
+                            readingFiles ||
+                            mcp.saving ||
+                            goalCommand.busy
+                          }
+                          busy={submitting || goalCommand.busy}
+                        />
+                      </div>
+                    </form>
+                  )}
+                </div>
                 {skillsOpen ? (
                   <SkillSelectionDialog
                     limits={config?.skill_limits}
@@ -1760,7 +1777,7 @@ export function JobDetail({
                   />
                 ) : null}
                 <ThreadStatsBar job={job} />
-                {/* A goal write's refusal is drawn inside the dialog that made
+                {/* A goal write's refusal is drawn inside the editor that made
                     it, beside the words it refused; this line is the composer's
                     own failures, including a command's. */}
                 {actionError ? (

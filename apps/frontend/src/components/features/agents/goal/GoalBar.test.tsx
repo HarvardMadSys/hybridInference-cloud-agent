@@ -65,9 +65,8 @@ describe('GoalBar', () => {
     // "2/10" reported a limit nobody had set, and made "no limit" — the
     // ordinary case — impossible to say.
     render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
-    expect(screen.getByRole('status')).toHaveTextContent(
-      'Goal running · 2 rounds run · no round in flight',
-    );
+    expect(screen.getByRole('status')).toHaveTextContent('Waiting for next round');
+    expect(screen.getByRole('status')).toHaveTextContent('2 rounds run');
     expect(screen.getByRole('status')).not.toHaveTextContent('/');
     expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument();
   });
@@ -106,7 +105,7 @@ describe('GoalBar', () => {
         onChanged={() => {}}
       />,
     );
-    expect(screen.getByRole('status')).toHaveTextContent('Goal in progress · 2 rounds run');
+    expect(screen.getByRole('status')).toHaveTextContent('In progress');
   });
 
   it('names a repair round as its own state, not as more work', () => {
@@ -118,9 +117,7 @@ describe('GoalBar', () => {
         onChanged={() => {}}
       />,
     );
-    expect(screen.getByRole('status')).toHaveTextContent(
-      'Restating the completion report · 2 rounds run',
-    );
+    expect(screen.getByRole('status')).toHaveTextContent('Updating report');
   });
 
   it('carries the reason a paused goal stopped, and the sentence behind it', () => {
@@ -137,7 +134,7 @@ describe('GoalBar', () => {
       />,
     );
     expect(screen.getByRole('status')).toHaveTextContent(
-      "Goal paused · the sandbox context was lost · the conversation's session is gone",
+      "the sandbox context was lost · the conversation's session is gone",
     );
     expect(screen.getByRole('button', { name: 'Resume' })).toBeInTheDocument();
   });
@@ -182,7 +179,7 @@ describe('GoalBar', () => {
       />,
     );
     expect(screen.getByRole('status')).toHaveTextContent(
-      'Goal paused · all rounds used · the goal reached the round limit its owner set',
+      'all rounds used · the goal reached the round limit its owner set',
     );
     rerender(
       <GoalBar
@@ -197,7 +194,7 @@ describe('GoalBar', () => {
       />,
     );
     expect(screen.getByRole('status')).toHaveTextContent(
-      'Goal paused · the completion report could not be read · the goal report could not be read (malformed_json)',
+      'the completion report could not be read · the goal report could not be read (malformed_json)',
     );
   });
 
@@ -236,10 +233,10 @@ describe('GoalBar', () => {
         onChanged={() => {}}
       />,
     );
-    expect(screen.getByRole('status')).toHaveTextContent(
-      'Goal complete · reported by the agent · 2 rounds run',
-    );
-    expect(screen.getByRole('button', { name: 'Clear' })).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Reported complete by the agent.');
+    fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
+    expect(screen.getByRole('menuitem', { name: 'Clear goal' })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Edit goal' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Pause' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument();
   });
@@ -255,8 +252,9 @@ describe('GoalBar', () => {
         onChanged={() => {}}
       />,
     );
-    expect(screen.getByRole('status')).toHaveTextContent('Goal complete · 2 rounds run');
-    expect(screen.getByRole('status')).not.toHaveTextContent('reported by the agent');
+    expect(screen.getByRole('status')).toHaveTextContent('Complete');
+    expect(screen.getByRole('status')).toHaveTextContent('2 rounds run');
+    expect(screen.getByRole('status')).not.toHaveTextContent('Reported complete by the agent.');
   });
 });
 
@@ -264,15 +262,70 @@ describe('GoalBar', () => {
 // each one does — and, more importantly, what it does not do — is behaviour
 // worth pinning down.
 describe('GoalBar controls', () => {
+  it('keeps only Pause and the options trigger visible until the menu opens', () => {
+    render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
+    expect(screen.getByRole('button', { name: 'Pause' })).toBeVisible();
+    expect(screen.queryByRole('menuitem')).not.toBeInTheDocument();
+    const trigger = screen.getByRole('button', { name: 'Goal options' });
+    fireEvent.click(trigger);
+    expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('menuitem', { name: 'Edit goal' })).toHaveFocus();
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(screen.getByRole('menuitem', { name: 'Clear goal' })).toHaveFocus();
+    fireEvent.keyDown(document.activeElement!, { key: 'Home' });
+    expect(screen.getByRole('menuitem', { name: 'Edit goal' })).toHaveFocus();
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    expect(clearAgentGoal).not.toHaveBeenCalled();
+  });
+
+  it('opens at the last menu item on ArrowUp and dismisses on an outside pointer', () => {
+    render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Goal options' }), { key: 'ArrowUp' });
+    expect(screen.getByRole('menuitem', { name: 'Clear goal' })).toHaveFocus();
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(clearAgentGoal).not.toHaveBeenCalled();
+  });
+
+  it('returns focus to the menu trigger when an edit is cancelled', () => {
+    render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
+    const trigger = screen.getByRole('button', { name: 'Goal options' });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
+    expect(screen.getByLabelText('Objective')).toHaveFocus();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(trigger).toHaveFocus();
+  });
+
+  it('names a pause that needs input separately from an ordinary user pause', () => {
+    render(
+      <GoalBar
+        threadId="thread_1"
+        goal={goal({ state: 'paused', pauseReason: 'needs_input', pauseDetail: 'Which branch?' })}
+        state={idle}
+        onChanged={() => {}}
+      />,
+    );
+    expect(screen.getByRole('status')).toHaveTextContent('Needs your input');
+    expect(screen.getByRole('status')).toHaveTextContent('Which branch?');
+    expect(screen.getByRole('button', { name: 'Resume' })).toBeEnabled();
+  });
+
   it('names every control and says what it does', () => {
     render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
+    expect(screen.getByRole('button', { name: 'Pause' })).toHaveAttribute(
+      'title',
+      expect.stringMatching(/round in flight/),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
     const hints: [string, RegExp][] = [
-      ['Pause', /round in flight/],
-      ['Edit', /round in flight is left alone/],
-      ['Clear', /chat and its history stay/],
+      ['Edit goal', /round in flight is left alone/],
+      ['Clear goal', /chat and its history stay/],
     ];
     for (const [name, hint] of hints) {
-      const control = screen.getByRole('button', { name });
+      const control = screen.getByRole('menuitem', { name });
       expect(control.getAttribute('title')).toMatch(hint);
     }
   });
@@ -294,7 +347,8 @@ describe('GoalBar controls', () => {
 
   it('edits a running goal in place, without opening anything', async () => {
     render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
     // In place: the band grows an editor, and no modal appears over the chat.
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Objective'), {
@@ -317,7 +371,8 @@ describe('GoalBar controls', () => {
 
   it('closes the editor on Cancel and abandons what was typed', async () => {
     render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
     fireEvent.change(screen.getByLabelText('Objective'), { target: { value: 'never mind' } });
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByLabelText('Objective')).not.toBeInTheDocument();
@@ -327,7 +382,8 @@ describe('GoalBar controls', () => {
 
   it('saves on Cmd/Ctrl+Enter, and leaves plain Enter to break the line', async () => {
     render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
     const field = screen.getByLabelText('Objective');
     fireEvent.change(field, { target: { value: 'ship the release notes' } });
     // Enter is a newline: an objective is prose and may run to several lines.
@@ -348,7 +404,8 @@ describe('GoalBar controls', () => {
         onChanged={() => {}}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
     fireEvent.change(screen.getByLabelText('Objective'), {
       target: { value: 'ship the release notes' },
     });
@@ -366,7 +423,8 @@ describe('GoalBar controls', () => {
         onChanged={() => {}}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear goal' }));
     await waitFor(() => expect(clearAgentGoal).toHaveBeenCalledWith('thread_1'));
     expect(pauseAgentGoal).not.toHaveBeenCalled();
   });
@@ -435,7 +493,8 @@ describe('GoalBar controls', () => {
       new APIError('goal_revision_conflict', 'This goal changed while you were editing it.'),
     );
     render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={onChanged} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
     fireEvent.change(screen.getByLabelText('Objective'), {
       target: { value: 'ship the release notes' },
     });
@@ -451,7 +510,8 @@ describe('GoalBar controls', () => {
   it('keeps the editor open, and the words in it, when an edit is refused', async () => {
     vi.mocked(setAgentGoal).mockRejectedValueOnce(new Error('goal service unavailable'));
     render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
     fireEvent.change(screen.getByLabelText('Objective'), {
       target: { value: 'ship the release notes' },
     });
@@ -477,7 +537,8 @@ describe('GoalBar controls', () => {
     const { rerender } = render(
       <GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
     fireEvent.change(screen.getByLabelText('Objective'), {
       target: { value: 'ship the release notes' },
     });
@@ -509,7 +570,8 @@ describe('GoalBar controls', () => {
 
   it('will not save an empty objective', () => {
     render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
     fireEvent.change(screen.getByLabelText('Objective'), { target: { value: '   ' } });
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));

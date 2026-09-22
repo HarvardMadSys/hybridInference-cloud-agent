@@ -345,25 +345,28 @@ export const en = {
   // ── Conversation goal ───────────────────────────────────────────────────
   // Everything here is the compact band above the message box and the `/goal`
   // command below it. There is no dialog, so there is no dialog copy.
+  'goal.region': 'Current goal',
+  'goal.options': 'Goal options',
+  'goal.needsInput': 'Needs your input',
   'goal.objective': 'Objective',
   'goal.objectiveTooLong': 'An objective can be at most {max} characters.',
   // Rounds are a count, and a total only when the owner stated one themselves.
   // "1/10" for a goal nobody bounded reported a limit that did not exist.
   'goal.roundsRun': '{used} rounds run',
   'goal.roundsBounded': '{used} of at most {max} rounds',
-  'goal.active': 'Goal in progress · {rounds}',
-  'goal.activeWaiting': 'Goal running · {rounds} · no round in flight',
-  'goal.activeRepairing': 'Restating the completion report · {rounds}',
-  'goal.paused': 'Goal paused · {reason}',
+  'goal.active': 'In progress',
+  'goal.activeWaiting': 'Waiting for next round',
+  'goal.activeRepairing': 'Updating report',
+  'goal.paused': 'Paused',
   'goal.pausedFork': 'Forked conversation — the goal will not continue on its own',
   'goal.pausedRunning': 'The round already running will finish; use Stop to end it now.',
   'goal.pauseHint': 'Stops the goal after the round in flight; use Stop to interrupt it now.',
-  'goal.complete': 'Goal complete · {rounds}',
-  'goal.completeReported': 'Goal complete · reported by the agent · {rounds}',
+  'goal.complete': 'Complete',
+  'goal.completeReported': 'Reported complete by the agent.',
   'goal.pause': 'Pause',
   'goal.resume': 'Resume',
-  'goal.edit': 'Edit',
-  'goal.clear': 'Clear',
+  'goal.edit': 'Edit goal',
+  'goal.clear': 'Clear goal',
   'goal.actionFailed': 'Could not update the goal',
   'goal.commandFailed': 'Could not set the goal',
   // What each control does, said for a pointer rather than for a screen

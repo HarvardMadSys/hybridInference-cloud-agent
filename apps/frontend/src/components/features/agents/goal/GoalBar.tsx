@@ -8,6 +8,7 @@ import type { TranslationKey } from '@/lib/i18n/dictionaries/en';
 import { GoalIcon } from '../ComposerPlusMenu';
 import { writeGoal } from './goalApi';
 import { useGoalWrite } from './useGoalWrite';
+import { GoalActionsMenu } from './GoalActionsMenu';
 import { DEFAULT_GOAL_LIMITS, type GoalLimits } from '@/lib/goalLimits';
 
 /** What the band needs that the goal row does not carry. */
@@ -19,27 +20,9 @@ export interface GoalBandState {
 }
 
 /**
- * The goal's status, above the message box, and the only place it is managed.
- *
- * Three shapes, one per durable state. An owner looking at a stopped
- * conversation needs to know *which* stop it was, and that is data now: the
- * reason and the sentence behind it both come from the goal row, so a stop the
- * platform decided reads as specifically as one the owner asked for.
- *
- * The band is absent, not empty, when there is no goal. A conversation that is
- * simply a conversation must look like one.
- *
- * **Everything happens here.** Setting a goal is typing `/goal <objective>` in
- * the box below; reading, pausing, resuming and clearing it are the controls on
- * this line; and editing opens *in place*, on the row the objective is already
- * on, with Save and Cancel beside it. There is no dialog anywhere in the goal
- * feature, because there is nothing a dialog could hold that this band does not:
- * an objective, and the four things that can be done to it.
- *
- * Rounds are reported as a count of what has actually run. A total appears only
- * when the owner stated a bound themselves — which this product never asks for
- * and no client sends — so "3 rounds run" is the ordinary reading and "3 of at
- * most 10 rounds" is the exception.
+ * The objective leads the composer; status and round accounting sit beneath it.
+ * Pause/resume stays visible, while editing and clearing share the action menu.
+ * The editor keeps its draft across reloads and only closes once a write lands.
  */
 export function GoalBar({
   threadId,
@@ -47,208 +30,174 @@ export function GoalBar({
   limits = DEFAULT_GOAL_LIMITS,
   state,
   onChanged,
+  onCleared,
+  attached = false,
 }: {
   threadId: string;
   goal: AgentGoal;
   limits?: GoalLimits;
   state: GoalBandState;
-  /**
-   * Called after a write lands. The goal belongs to the conversation, so the
-   * caller re-reads it from the thread rather than from the write's answer.
-   */
+  /** Re-read the authoritative thread goal after a write or revision conflict. */
   onChanged: () => void;
+  /** Return focus to the message box when clearing removes this component. */
+  onCleared?: () => void;
+  /** Share the message box's outer surface instead of drawing a separate card. */
+  attached?: boolean;
 }) {
   const t = useT();
   const [editing, setEditing] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  const { busy, error, run } = useGoalWrite(onChanged);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const wasEditing = useRef(false);
+  const { busy, error, run, clearError } = useGoalWrite(onChanged);
+
+  useEffect(() => {
+    if (wasEditing.current && !editing) trigger.current?.focus();
+    wasEditing.current = editing;
+  }, [editing]);
 
   const rounds = roundsText(t, goal);
-  // A bound is only ever present because the owner stated one, and there is no
-  // surface that changes it. A goal sitting at that bound cannot be continued
-  // while it still applies, so resuming is what lifts it — the server does
-  // exactly that, and the band says so rather than offering a disabled button
-  // and telling the owner to go and find a form that does not exist.
-  const spent = goal.maxRounds !== null && goal.roundsUsed >= goal.maxRounds;
-
-  let text: React.ReactNode;
-  let actions: React.ReactNode;
-  let hint: string | null = null;
-  if (goal.state === 'active') {
-    // Between rounds the platform is not idle, it is waiting for its own next
-    // turn to be claimed — often because a person's message is queued ahead of
-    // it, and sometimes because the round has not been queued yet. The label
-    // says which, so "no round running" is never mistaken for "the goal
-    // stopped".
-    text = state.repairing
-      ? t('goal.activeRepairing', { rounds })
-      : state.live
-        ? t('goal.active', { rounds })
-        : t('goal.activeWaiting', { rounds });
-    actions = (
-      <>
-        <GoalAction
-          disabled={busy}
-          label={t('goal.pause')}
-          hint={t('goal.pauseHint')}
-          onClick={() => void run(() => pauseAgentGoal(threadId))}
-        >
-          <PauseIcon />
-        </GoalAction>
-        {/* Editing is not a stop. A round already running finishes on the
-            objective it started with, and only the rounds after it read the
-            new words. */}
-        <GoalAction
-          disabled={busy}
-          label={t('goal.edit')}
-          hint={t('goal.editHint')}
-          onClick={() => setEditing(true)}
-        >
-          <EditIcon />
-        </GoalAction>
-        <GoalAction
-          disabled={busy}
-          label={t('goal.clear')}
-          hint={t('goal.clearHint')}
-          onClick={() => void run(() => clearAgentGoal(threadId))}
-        >
-          <ClearIcon />
-        </GoalAction>
-      </>
-    );
-  } else if (goal.state === 'paused') {
-    // The reason and the platform's own sentence are separate nodes: a template
-    // with a hole for the detail renders a dangling separator when there is
-    // none.
-    text = (
-      <>
-        {t(goal.pauseReason === 'fork' ? 'goal.pausedFork' : 'goal.paused', {
-          reason: t(pauseKey(goal.pauseReason)),
-        })}
-        {goal.pauseDetail ? ` · ${goal.pauseDetail}` : ''}
-      </>
-    );
-    if (spent) {
-      hint = t('goal.limitResumeLifts', { max: goal.maxRounds ?? 0 });
-    } else if (state.live) {
-      // Pausing stops what comes next, not what is already running. Saying so
-      // on the band is the difference between an owner waiting for the round to
-      // land and an owner believing the button did nothing.
-      hint = t('goal.pausedRunning');
-    }
-    actions = (
-      <>
-        <GoalAction
-          disabled={busy}
-          tone="primary"
-          label={t('goal.resume')}
-          hint={spent ? t('goal.limitResumeLiftsHint') : t('goal.resumeHint')}
-          onClick={() => void run(() => resumeAgentGoal(threadId))}
-        >
-          <ResumeIcon />
-        </GoalAction>
-        <GoalAction
-          disabled={busy}
-          label={t('goal.edit')}
-          hint={t('goal.editHint')}
-          onClick={() => setEditing(true)}
-        >
-          <EditIcon />
-        </GoalAction>
-        <GoalAction
-          disabled={busy}
-          label={t('goal.clear')}
-          hint={t('goal.clearHint')}
-          onClick={() => void run(() => clearAgentGoal(threadId))}
-        >
-          <ClearIcon />
-        </GoalAction>
-      </>
-    );
-  } else {
-    // The platform never ran the objective itself. A first-version completion
-    // is the model's own report, and the band is the one place that says so.
-    text =
-      goal.completionBasis === 'model_reported'
-        ? t('goal.completeReported', { rounds })
-        : t('goal.complete', { rounds });
-    actions = (
-      <GoalAction
-        disabled={busy}
-        label={t('goal.clear')}
-        hint={t('goal.clearHint')}
-        onClick={() => void run(() => clearAgentGoal(threadId))}
-      >
-        <ClearIcon />
-      </GoalAction>
-    );
-  }
+  const paused = goal.state === 'paused';
+  const complete = goal.state === 'complete';
+  const needsInput = paused && goal.pauseReason === 'needs_input';
+  const waiting = goal.state === 'active' && !state.live;
+  const spent = goal.maxRounds != null && goal.roundsUsed >= goal.maxRounds;
+  const activeStatus = state.repairing
+    ? 'goal.activeRepairing'
+    : waiting
+      ? 'goal.activeWaiting'
+      : 'goal.active';
+  const status = complete
+    ? t('goal.complete')
+    : paused
+      ? t(needsInput ? 'goal.needsInput' : 'goal.paused')
+      : t(activeStatus);
+  const reason = paused
+    ? `${t(goal.pauseReason === 'fork' ? 'goal.pausedFork' : pauseKey(goal.pauseReason))}${goal.pauseDetail ? ` · ${goal.pauseDetail}` : ''}`
+    : complete && goal.completionBasis === 'model_reported'
+      ? t('goal.completeReported')
+      : null;
+  const resumeHint = spent ? t('goal.limitResumeLiftsHint') : t('goal.resumeHint');
 
   return (
-    <div className="mb-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600 dark:border-white/10 dark:bg-gray-900 dark:text-gray-300">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <GoalIcon className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-gray-500" />
-        {/* Named, because the page has a second status region — the
-            conversation's own navigation notice — and an unnamed pair
-            announces as two anonymous "status" updates.
-
-            No `basis-48` on it either: a flex basis is what a wrapping row
-            breaks on, so one long status sentence would push the controls onto
-            their own line above the objective. With a basis of zero the
-            sentence wraps inside its own box instead, and the controls stay
-            where the design puts them — the end of the first line. */}
-        <span role="status" aria-label={t('attach.goal')} className="min-w-0 flex-1">
-          {text}
-        </span>
-        <span className="flex shrink-0 items-center gap-0.5">{actions}</span>
+    <section
+      aria-label={t('goal.region')}
+      className={`bg-gray-50/80 px-3 py-3 text-gray-600 dark:bg-gray-950/40 dark:text-gray-300 sm:px-4 ${
+        attached
+          ? 'rounded-t-xl border-b border-gray-200/80 dark:border-white/10'
+          : 'mb-2 rounded-xl border border-gray-200 dark:border-white/10'
+      }`}
+    >
+      <div className="flex items-start gap-2.5">
+        <GoalIcon className="mt-1 h-4 w-4 shrink-0 text-crimson dark:text-crimson-light" />
+        <div className="min-w-0 flex-1">
+          {!editing ? (
+            <button
+              type="button"
+              onClick={() => setExpanded((value) => !value)}
+              aria-expanded={expanded}
+              title={goal.objective}
+              className={`block w-full min-w-0 rounded py-0.5 text-left text-sm font-medium text-gray-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-crimson dark:text-gray-100 ${
+                expanded ? 'whitespace-pre-wrap break-words' : 'truncate'
+              }`}
+            >
+              {goal.objective}
+            </button>
+          ) : null}
+          <div role="status" aria-label={t('attach.goal')}>
+            <div
+              className={`flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs ${editing ? 'pt-1' : 'mt-1.5'}`}
+            >
+              <span
+                className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 ${
+                  paused
+                    ? 'bg-amber-50 text-amber-800 dark:bg-amber-400/10 dark:text-amber-200'
+                    : waiting
+                      ? 'bg-gray-100 text-gray-600 dark:bg-white/5 dark:text-gray-300'
+                      : 'bg-emerald-50 text-emerald-800 dark:bg-emerald-400/10 dark:text-emerald-200'
+                }`}
+              >
+                <StatusIcon
+                  kind={complete ? 'complete' : paused ? 'paused' : waiting ? 'waiting' : 'active'}
+                />
+                {status}
+              </span>
+              <span className="text-gray-500 dark:text-gray-400">{rounds}</span>
+            </div>
+            {reason ? (
+              <p className="mt-2 break-words text-xs leading-relaxed text-gray-600 dark:text-gray-400">
+                {reason}
+              </p>
+            ) : null}
+            {paused && spent ? (
+              <p className="mt-2 text-xs leading-relaxed text-gray-600 dark:text-gray-400">
+                {t('goal.limitResumeLifts', { max: goal.maxRounds ?? 0 })}
+              </p>
+            ) : null}
+            {paused && state.live ? (
+              <p className="mt-2 text-xs leading-relaxed text-gray-600 dark:text-gray-400">
+                {t('goal.pausedRunning')}
+              </p>
+            ) : null}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-0.5">
+          {!complete && !editing ? (
+            <GoalAction
+              disabled={busy}
+              tone={paused ? 'primary' : 'plain'}
+              label={t(paused ? 'goal.resume' : 'goal.pause')}
+              hint={paused ? resumeHint : t('goal.pauseHint')}
+              onClick={() =>
+                void run(() => (paused ? resumeAgentGoal(threadId) : pauseAgentGoal(threadId)))
+              }
+            >
+              {paused ? <ResumeIcon /> : <PauseIcon />}
+            </GoalAction>
+          ) : null}
+          <GoalActionsMenu
+            triggerRef={trigger}
+            canEdit={!complete}
+            disabled={busy || editing}
+            onEdit={() => {
+              clearError();
+              setEditing(true);
+            }}
+            onClear={() => {
+              void run(() => clearAgentGoal(threadId)).then((landed) => {
+                if (landed) onCleared?.();
+              });
+            }}
+          />
+        </div>
       </div>
-      <div className="mt-1">
-        {editing ? (
+      {editing ? (
+        <div className="mt-3 sm:ml-[26px]">
           <GoalEditor
             initial={goal.objective}
             limits={limits}
             busy={busy}
             error={error}
-            onCancel={() => setEditing(false)}
+            onCancel={() => {
+              clearError();
+              setEditing(false);
+            }}
             onSave={(objective) => {
-              // The revision this band was drawn from travels with the write,
-              // so an edit from a second tab is refused rather than
-              // overwritten. The editor closes only once the write has landed:
-              // a refusal has to leave the owner's words where the retry can
-              // reach them, and `useGoalWrite` re-reads on a conflict so the
-              // retry goes out against the revision that refusal revealed.
+              // A reload may update the revision, but the mounted editor owns
+              // its draft until the server accepts it or the owner cancels.
               void run(() => writeGoal(threadId, objective, goal.revision)).then((landed) => {
                 if (landed) setEditing(false);
               });
             }}
           />
-        ) : (
-          /* The objective is what the band is about, and a tooltip is not a
-             display: an owner looking at a stopped goal needs to read what it
-             was working toward. Collapsed it ellipsises to keep the band one
-             line tall; opened it wraps, in full. */
-          <button
-            type="button"
-            onClick={() => setExpanded((was) => !was)}
-            aria-expanded={expanded}
-            title={goal.objective}
-            className={`w-full min-w-0 rounded text-left text-[11px] text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 ${
-              expanded ? 'whitespace-pre-wrap break-words' : 'truncate'
-            }`}
-          >
-            {goal.objective}
-          </button>
-        )}
-      </div>
-      {hint ? <p className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">{hint}</p> : null}
-      {/* While the editor is open it carries the refusal beside the words that
-          were refused; the band would only be repeating it off-screen. */}
+        </div>
+      ) : null}
       {error && !editing ? (
-        <p role="alert" className="mt-1 text-red-600 dark:text-red-400">
+        <p role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">
           {error}
         </p>
       ) : null}
-    </div>
+    </section>
   );
 }
 
@@ -286,9 +235,7 @@ function GoalEditor({
     const control = field.current;
     if (!control) return;
     control.focus();
-    // The whole objective, so replacing it is one keystroke and appending to it
-    // is one arrow key. This is an edit of what is already there, not a blank
-    // form.
+    // Keep the caret at the end so the owner can append to the current goal.
     control.setSelectionRange(control.value.length, control.value.length);
   }, []);
 
@@ -297,15 +244,26 @@ function GoalEditor({
   const canSave = trimmed.length > 0 && !tooLong && !busy;
 
   return (
-    <div className="w-full">
-      <label htmlFor={fieldId} className="sr-only">
+    <div
+      className="w-full"
+      onKeyDown={(event) => {
+        if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!busy) onCancel();
+        }
+      }}
+    >
+      <label htmlFor={fieldId} className="mb-1.5 block text-xs text-gray-500 dark:text-gray-400">
         {t('goal.objective')}
       </label>
       <textarea
         id={fieldId}
         ref={field}
-        rows={3}
+        rows={2}
         value={draft}
+        readOnly={busy}
         maxLength={limits.max_objective_chars}
         aria-invalid={tooLong || undefined}
         onChange={(event) => setDraft(event.target.value)}
@@ -313,14 +271,6 @@ function GoalEditor({
           // An IME's Escape cancels the candidate it is showing, not the edit.
           // The composers' own guard reads the same two fields for Enter.
           if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
-          if (event.key === 'Escape') {
-            // Consumed here rather than left to bubble: the job page stops the
-            // run on Escape, and abandoning an edit must not also stop the run.
-            event.preventDefault();
-            event.stopPropagation();
-            onCancel();
-            return;
-          }
           // The objective is prose and may run to several lines, so Enter is a
           // newline here. Cmd/Ctrl+Enter is the chord that saves.
           if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
@@ -328,32 +278,32 @@ function GoalEditor({
             if (canSave) onSave(trimmed);
           }
         }}
-        className="w-full resize-y rounded-md border border-gray-200 bg-transparent px-2 py-1.5 text-[11px] text-gray-800 focus:border-gray-400 focus:outline-none dark:border-white/10 dark:text-gray-100 dark:focus:border-white/30"
+        className="block w-full resize-y rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-base leading-relaxed text-gray-900 focus:border-crimson/40 focus:outline-none focus:ring-2 focus:ring-crimson/10 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100 sm:text-sm"
       />
-      <div className="mt-1 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          disabled={!canSave}
-          onClick={() => onSave(trimmed)}
-          className="inline-flex items-center rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
-        >
-          {busy ? t('goal.editSaving') : t('goal.editSave')}
-        </button>
+      <div className="mt-2 flex flex-wrap items-center justify-end gap-2">
         <button
           type="button"
           disabled={busy}
           onClick={onCancel}
-          className="inline-flex items-center rounded-md border border-gray-200 px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:text-gray-200 dark:hover:bg-white/5"
+          className="inline-flex min-h-8 items-center rounded-lg px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-200/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-crimson disabled:cursor-not-allowed disabled:opacity-40 dark:text-gray-300 dark:hover:bg-white/10 [@media(pointer:coarse)]:min-h-11"
         >
           {t('goal.editCancel')}
         </button>
+        <button
+          type="button"
+          disabled={!canSave}
+          onClick={() => onSave(trimmed)}
+          className="inline-flex min-h-8 items-center rounded-lg bg-crimson px-3 py-1.5 text-xs font-medium text-white hover:bg-crimson-dark focus-visible:outline focus-visible:outline-2 focus-visible:outline-crimson disabled:cursor-not-allowed disabled:opacity-40 [@media(pointer:coarse)]:min-h-11"
+        >
+          {busy ? t('goal.editSaving') : t('goal.editSave')}
+        </button>
         {tooLong ? (
-          <span role="alert" className="text-red-600 dark:text-red-400">
+          <span role="alert" className="w-full text-xs text-red-600 dark:text-red-400">
             {t('goal.objectiveTooLong', { max: limits.max_objective_chars })}
           </span>
         ) : null}
         {error ? (
-          <span role="alert" className="text-red-600 dark:text-red-400">
+          <span role="alert" className="w-full text-xs text-red-600 dark:text-red-400">
             {error}
           </span>
         ) : null}
@@ -402,13 +352,14 @@ function GoalAction({
       disabled={disabled}
       aria-label={label}
       title={hint}
-      className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+      className={`inline-flex min-h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-xs transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-crimson disabled:cursor-not-allowed disabled:opacity-40 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11 ${
         tone === 'primary'
-          ? 'text-crimson hover:bg-crimson/10 dark:text-crimson-light dark:hover:bg-crimson/15'
-          : 'text-gray-400 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-500 dark:hover:bg-white/10 dark:hover:text-gray-200'
+          ? 'bg-crimson text-white hover:bg-crimson-dark'
+          : 'text-gray-500 hover:bg-gray-200/60 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100'
       }`}
     >
       {children}
+      <span className="hidden sm:inline">{label}</span>
     </button>
   );
 }
@@ -445,40 +396,28 @@ function ResumeIcon() {
   );
 }
 
-function EditIcon() {
+function StatusIcon({ kind }: { kind: 'active' | 'waiting' | 'paused' | 'complete' }) {
   return (
     <svg
+      aria-hidden="true"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth={1.7}
-      aria-hidden="true"
-      className={ICON}
+      strokeWidth={1.8}
+      className="h-3 w-3 shrink-0"
     >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M4 20h4.2L19 9.2a2.3 2.3 0 0 0-3.2-3.2L5 16.8V20Zm9.6-13.6 3.2 3.2"
-      />
-    </svg>
-  );
-}
-
-function ClearIcon() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.7}
-      aria-hidden="true"
-      className={ICON}
-    >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M4.5 7h15m-10 4v6m5-6v6M6.5 7l.9 13h9.2l.9-13M9.5 7V4h5v3"
-      />
+      {kind === 'complete' ? (
+        <path strokeLinecap="round" strokeLinejoin="round" d="m5 12 4 4L19 6" />
+      ) : kind === 'paused' ? (
+        <path strokeLinecap="round" d="M9 5v14M15 5v14" />
+      ) : kind === 'waiting' ? (
+        <>
+          <circle cx="12" cy="12" r="8" />
+          <path strokeLinecap="round" d="M12 7v5l3 2" />
+        </>
+      ) : (
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3 12h4l3-7 4 14 3-7h4" />
+      )}
     </svg>
   );
 }

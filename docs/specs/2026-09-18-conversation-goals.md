@@ -198,13 +198,18 @@ writes the command into the box and hands the caret back. It joins that menu as
 its own group, after the uploads, Skills and MCP entries, and it has no
 chevron, because it opens nothing.
 
-A conversation that already has a goal gets a compact band above its message
-box, in one of three shapes — in progress (including the round in flight and
-the repair round that restates a report), paused with the reason it stopped, or
-complete with the basis it completed on. The band is absent, not empty, when
-there is no goal. Each shape offers exactly the actions that state admits, as
-icon controls with both an accessible name and a tooltip carrying the
-operation's own semantics: Pause stops what comes next and leaves the round
+A conversation that already has a goal gets a compact header sharing its
+message box's outer surface. The objective is the primary text; a short status
+label and the rounds run sit beneath it. Paused goals retain their reason and
+detail, and completed goals name the completion basis. The header is absent,
+not empty, when there is no goal. Archived conversations keep a standalone
+goal band above their restore action.
+
+Pause or Resume stays visible. The **Goal options** menu holds Edit and Clear
+(only Clear after completion), with keyboard navigation, outside-click
+dismissal and Escape returning focus to its trigger without stopping the run.
+Every control has an accessible name and a tooltip carrying the operation's
+own semantics: Pause stops what comes next and leaves the round
 already running alone (interrupting that round is the existing Stop button),
 Edit changes the objective without interrupting the round in flight, Clear
 removes the goal and its queued rounds and never the chat, and Resume is the

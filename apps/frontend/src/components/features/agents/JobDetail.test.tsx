@@ -2749,7 +2749,8 @@ describe('JobDetail', () => {
         revision: 5,
       });
       await composer();
-      fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
 
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
       fireEvent.change(screen.getByLabelText('Objective'), {
@@ -2843,7 +2844,8 @@ describe('JobDetail', () => {
     it('keeps the band editor and its draft when the write is refused', async () => {
       vi.mocked(setAgentGoal).mockRejectedValueOnce(new Error('goal service unavailable'));
       await composer();
-      fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
       fireEvent.change(screen.getByLabelText('Objective'), {
         target: { value: 'ship the release notes' },
       });
@@ -2898,7 +2900,8 @@ describe('JobDetail', () => {
         <JobDetail job={withGoal({ objective: 'make `pytest` pass', revision: 4 })} />,
       );
       await screen.findByLabelText('Add a follow-up');
-      fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
       fireEvent.change(screen.getByLabelText('Objective'), {
         target: { value: 'ship the release notes' },
       });
@@ -2928,12 +2931,58 @@ describe('JobDetail', () => {
         revision: 5,
       });
       await composer();
-      fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Clear goal' }));
 
       await waitFor(() => expect(clearAgentGoal).toHaveBeenCalledWith('thread_9'));
       // Clearing removes the goal and the rounds queued for it; the chat and
       // its history are not the client's to delete.
       expect(followUpAgentJob).not.toHaveBeenCalled();
+      expect(cancelAgentJob).not.toHaveBeenCalled();
+    });
+
+    it('keeps goal-menu and editor Escape separate from the Stop shortcut', async () => {
+      const box = await composer();
+      const trigger = screen.getByRole('button', { name: 'Goal options' });
+      fireEvent.click(trigger);
+      fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Edit goal' }), { key: 'Escape' });
+      expect(screen.queryByRole('menu', { name: 'Goal options' })).not.toBeInTheDocument();
+      expect(trigger).toHaveFocus();
+      expect(cancelAgentJob).not.toHaveBeenCalled();
+
+      fireEvent.click(trigger);
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
+      // Escape also belongs to the editor when one of its buttons has focus.
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Save' }), { key: 'Escape' });
+      expect(screen.queryByLabelText('Objective')).not.toBeInTheDocument();
+      expect(cancelAgentJob).not.toHaveBeenCalled();
+      expect(followUpAgentJob).not.toHaveBeenCalled();
+      expect(box).toHaveValue('');
+
+      fireEvent.keyDown(window, { key: 'Escape' });
+      await waitFor(() => expect(cancelAgentJob).toHaveBeenCalledWith('ajob_1'));
+    });
+
+    it('keeps editing outside the message form and returns focus after clearing', async () => {
+      const box = await composer();
+      fireEvent.change(box, { target: { value: 'my next message' } });
+      const trigger = screen.getByRole('button', { name: 'Goal options' });
+      fireEvent.click(trigger);
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
+      const objective = screen.getByLabelText('Objective');
+      expect(objective.closest('form')).toBeNull();
+      fireEvent.keyDown(objective, { key: 'Enter' });
+      expect(followUpAgentJob).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      vi.mocked(clearAgentGoal).mockResolvedValue({
+        thread_id: 'thread_9',
+        cleared: true,
+        revision: 5,
+      });
+      fireEvent.click(trigger);
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Clear goal' }));
+      await waitFor(() => expect(box).toHaveFocus());
+      expect(box).toHaveValue('my next message');
       expect(cancelAgentJob).not.toHaveBeenCalled();
     });
 
