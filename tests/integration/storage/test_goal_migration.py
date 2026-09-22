@@ -3,7 +3,7 @@
 Each revision has to cope with the data the one before it left behind, not only
 with a fresh database: a ``blocked`` state that was really a reason, a
 ``complete`` row with no basis recorded, a scheduling obligation that did not
-exist yet, and — since ``0021`` — goals that carry no round bound at all. These
+exist yet, and — since ``0022`` — goals that carry no round bound at all. These
 cases build each old shape and upgrade over it, and they leave the shared
 database at head whatever the revision makes of the rows.
 """
@@ -46,8 +46,8 @@ async def _rebuild_at_0020(config) -> None:
     """Build the shape ``0020`` leaves, from an empty database.
 
     ``0020`` is the release that made ``goal_max_rounds`` a *required* half of a
-    goal and capped it at fifty. The cases about ``0021`` are about what happens
-    to the rows written under that rule, so this is their input.
+    goal. The cases about ``0022`` use rows written under that rule as their
+    input.
     """
     conn = await asyncpg.connect(**config)
     try:
@@ -514,6 +514,46 @@ async def test_a_bound_cannot_outlive_the_objective_it_bounds(at_0020):
         await conn.close()
 
 
+async def test_goal_upgrade_and_rollback_preserve_continuous_measurement(at_0020):
+    """Goal changes follow the deployed measurement revision and leave its rows intact."""
+    apply_migrations(at_0020, "0021_continuous_measurement")
+    thread_id = await _seed_0020_goal(at_0020)
+    conn = await asyncpg.connect(**at_0020)
+    try:
+        await conn.execute(
+            "INSERT INTO agent_operation_profiling_runs (run_id, operations, expires_at) "
+            "VALUES ('continuous-before-goal', ARRAY['agent.turn'], NULL)"
+        )
+        before = dict(await conn.fetchrow("SELECT * FROM agent_operation_profiling_runs"))
+    finally:
+        await conn.close()
+
+    apply_migrations(at_0020, "head")
+    conn = await asyncpg.connect(**at_0020)
+    try:
+        await conn.execute(
+            "UPDATE agent_threads SET goal_max_rounds = NULL WHERE id = $1", thread_id
+        )
+        assert dict(await conn.fetchrow("SELECT * FROM agent_operation_profiling_runs")) == before
+    finally:
+        await conn.close()
+
+    downgrade_to(at_0020, "0021_continuous_measurement")
+    conn = await asyncpg.connect(**at_0020)
+    try:
+        assert (
+            await conn.fetchval("SELECT version_num FROM alembic_version")
+            == "0021_continuous_measurement"
+        )
+        assert dict(await conn.fetchrow("SELECT * FROM agent_operation_profiling_runs")) == before
+        goal = await conn.fetchrow(
+            "SELECT goal_objective, goal_max_rounds FROM agent_threads WHERE id = $1", thread_id
+        )
+        assert dict(goal) == {"goal_objective": "ship it", "goal_max_rounds": 10}
+    finally:
+        await conn.close()
+
+
 async def test_downgrading_bounds_the_goals_the_old_shape_cannot_hold(at_0020):
     """The reverse direction is lossy, and it fills rather than discards.
 
@@ -569,7 +609,7 @@ async def _seed_unbounded_goal_at_head(config) -> str:
 
 
 async def test_a_bound_larger_than_the_old_ceiling_survives_the_downgrade(at_0020):
-    """``0020`` has no ceiling, so ``0021``'s downgrade must not invent one.
+    """``0020`` has no ceiling, so ``0022``'s downgrade must not invent one.
 
     ``0019`` declared ``BETWEEN 1 AND 50`` inline on the column and ``0020``
     dropped it. A downgrade that re-added it would make a bound this service

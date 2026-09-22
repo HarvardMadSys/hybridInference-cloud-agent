@@ -1,7 +1,7 @@
 """Let a goal run without a round limit, and keep the limits owners did set.
 
-Revision ID: 0021_goal_open_ended
-Revises: 0020_goal_controller
+Revision ID: 0022_goal_open_ended
+Revises: 0021_continuous_measurement
 
 ``0019`` and ``0020`` made ``goal_max_rounds`` a required half of a goal: the
 shape constraint asserted ``(goal_objective IS NULL) = (goal_max_rounds IS
@@ -32,8 +32,8 @@ it: this migration changes what a goal may look like, never what it is doing.
 
 from alembic import op
 
-revision = "0021_goal_open_ended"
-down_revision = "0020_goal_controller"
+revision = "0022_goal_open_ended"
+down_revision = "0021_continuous_measurement"
 branch_labels = None
 depends_on = None
 

@@ -279,13 +279,13 @@ is history, and the bound was the owner's to lift.
 ## Rollout
 
 1. Apply the additive Alembic revisions `0019_conversation_goal`,
-   `0020_goal_controller` and `0021_goal_open_ended` before starting the new
-   control plane. Nothing is backfilled at any step.
+   `0020_goal_controller`, `0021_continuous_measurement`, and
+   `0022_goal_open_ended` before starting the new control plane. Nothing is backfilled at any step.
 2. Upgrade the control plane. No host rebuild is needed: the goal reaches the
    agent through the existing prompt channel.
 3. No new secret, environment variable, or egress destination.
 
-`0021` is the revision that makes a bound optional. It changes no row: a goal
+`0022` is the revision that makes a bound optional. It changes no row: a goal
 that carries `goal_max_rounds = 10` keeps it, because the old client's default
 was ten but ten is also an ordinary number for a caller to have asked for, and a
 migration that guessed would be deleting a constraint its owner stated. Nothing
