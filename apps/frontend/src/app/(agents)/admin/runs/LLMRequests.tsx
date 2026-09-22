@@ -19,7 +19,7 @@ export const LLM_REQUEST_PAGE_SIZE = 50;
 /** How often a visible, still-first-page read is repeated while a run executes. */
 const AUTO_REFRESH_MS = 15_000;
 
-const UNAVAILABLE = 'Unavailable';
+const UNAVAILABLE = '—';
 
 /** `HTTP 200`, never a claim about the task or the stream. */
 export function statusLabel(code: number | null): string {
@@ -39,9 +39,42 @@ export function modelLabel(row: AdminLlmRequest): { text: string; title?: string
   };
 }
 
-/** A duration in milliseconds, or an explicit "not reported". */
+function nonnegative(value: number | null): value is number {
+  return value !== null && Number.isFinite(value) && value >= 0;
+}
+
+/** Keep short timings in milliseconds and longer ones in seconds. */
 export function durationLabel(value: number | null): string {
-  return value == null ? 'Not reported' : `${number(value)} ms`;
+  if (!nonnegative(value)) return UNAVAILABLE;
+  return value < 1000 ? `${number(value)} ms` : `${(value / 1000).toFixed(3)} s`;
+}
+
+/** Input already includes cache reads; cache writes are not hits. */
+export function cacheHitRate(row: AdminLlmRequest): number | null {
+  const { tokens_in: input, cache_read: cached } = row;
+  if (!nonnegative(input) || input === 0 || !nonnegative(cached) || cached > input) return null;
+  return (cached / input) * 100;
+}
+
+/** An estimate: the ledger measures response completion, not the last token. */
+export function timePerOutputToken(row: AdminLlmRequest): number | null {
+  const { tokens_out: output, ttft_ms: first, latency_ms: total } = row;
+  if (!nonnegative(output) || output <= 1 || !nonnegative(first) || !nonnegative(total))
+    return null;
+  if (total < first) return null;
+  const value = (total - first) / (output - 1);
+  return Number.isFinite(value) ? value : null;
+}
+
+function tokenLabel(value: number | null): string {
+  return nonnegative(value) ? number(value) : UNAVAILABLE;
+}
+
+function startTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? UNAVAILABLE
+    : date.toLocaleTimeString('en-GB', { timeZone: 'UTC', hour12: false });
 }
 
 const SOURCE_REASONS: Record<string, string> = {
@@ -80,26 +113,20 @@ function isRestart(error: unknown): boolean {
   );
 }
 
-/**
- * Per-request gateway detail for one execution, read on demand.
- *
- * Collapsed until asked: nothing here runs on a page load, and nothing here
- * writes. Each page reports its own read time because the ledger is written
- * after a response completes, so the count is "records loaded", never a claim
- * that the window has been reconciled.
- */
+/** Per-request metrics for the selected execution, loaded when the panel mounts. */
 export function LLMRequests({
   jobId,
   attemptId,
   running,
+  refreshKey = 0,
   onAccessDenied,
 }: {
   jobId: string;
   attemptId?: number;
   running: boolean;
+  refreshKey?: number;
   onAccessDenied: () => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const [sources, setSources] = useState<AdminLlmRequestSource[] | null>(null);
   const [sourcesFor, setSourcesFor] = useState<string | null>(null);
   const [sourceReason, setSourceReason] = useState<string | null>(null);
@@ -186,7 +213,6 @@ export function LLMRequests({
   // The references this execution holds. Metadata only: no gateway is called
   // until one of them is actually read.
   useEffect(() => {
-    if (!expanded) return;
     const controller = new AbortController();
     const current = retireAll();
     sourcesRequest.current = controller;
@@ -235,7 +261,7 @@ export function LLMRequests({
       controller.abort();
       if (sourcesRequest.current === controller) sourcesRequest.current = null;
     };
-  }, [expanded, jobId, attemptId, executionKey, revision, retireAll, fail]);
+  }, [jobId, attemptId, executionKey, revision, refreshKey, retireAll, fail]);
 
   // One page at a time, for one reference. A refresh keeps the rows that are
   // already on screen until the new ones arrive; switching reference clears
@@ -244,7 +270,7 @@ export function LLMRequests({
     // The selected source is only usable once the list in front of us was read
     // for this execution: on the render where the execution changes, the old
     // id is still in state and must not be queried.
-    if (!expanded || !sourceId || sourcesFor !== executionKey) return;
+    if (!sourceId || sourcesFor !== executionKey) return;
     const controller = new AbortController();
     const current = pageGeneration.current;
     const run = ++pageRun.current;
@@ -283,7 +309,7 @@ export function LLMRequests({
       controller.abort();
       if (pageRequest.current === controller) pageRequest.current = null;
     };
-  }, [expanded, jobId, executionKey, sourceId, sourcesFor, revision, key, fail]);
+  }, [jobId, executionKey, sourceId, sourcesFor, revision, refreshKey, key, fail]);
 
   // Changing job, execution or source retires every in-flight read first, so a
   // page that arrives late is dropped instead of being appended to a list it
@@ -299,14 +325,14 @@ export function LLMRequests({
   // and never while a read is already in flight. After "load more" the page set
   // is a deliberate read and stops moving.
   useEffect(() => {
-    if (!expanded || !sourceId || !running || pagesLoaded !== 1 || restart) return;
+    if (!sourceId || !running || pagesLoaded !== 1 || restart) return;
     if (loading || moreLoading) return;
     const timer = window.setInterval(() => {
       if (document.visibilityState !== 'visible') return;
       setRevision((value) => value + 1);
     }, AUTO_REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [expanded, sourceId, running, pagesLoaded, restart, loading, moreLoading]);
+  }, [sourceId, running, pagesLoaded, restart, loading, moreLoading]);
 
   async function loadMore() {
     // A first-page read replaces the page this continuation came from, so a
@@ -356,172 +382,157 @@ export function LLMRequests({
 
   const queryable = (sources ?? []).filter((source) => source.availability === 'queryable');
   const unavailable = (sources ?? []).filter((source) => source.availability !== 'queryable');
-  const selected = (sources ?? []).find((source) => source.source_id === sourceId) ?? null;
-  // The rows on screen were read from one fixed window. Fresh source metadata
-  // describes the read that has not happened yet, so a failed refresh must not
-  // relabel rows that belong to the window before it.
-  // The page wins over the source: those are the rows on screen.
-  const shownAttemptNo = page?.attempt_no ?? selected?.attempt_no ?? null;
-  const shownSince = page?.window.since ?? selected?.window_since ?? null;
-  const shownUntil = page?.window.until ?? selected?.window_until ?? null;
-
   return (
     <section aria-labelledby="llm-requests-heading" className="mt-8">
-      <details
-        className={`${CARD} overflow-hidden`}
-        onToggle={(event) => setExpanded(event.currentTarget.open)}
+      <h2
+        id="llm-requests-heading"
+        className="text-lg font-semibold text-gray-900 dark:text-gray-50"
       >
-        <summary
-          id="llm-requests-heading"
-          className="flex cursor-pointer flex-wrap items-center justify-between gap-3 px-5 py-4 text-lg font-semibold text-gray-900 dark:text-gray-50"
-        >
-          LLM requests
-          <span className="text-xs font-normal text-gray-500 dark:text-gray-400">
-            Per-request detail from the gateway ledger
-          </span>
-        </summary>
-        <div className="border-t border-gray-100 px-5 py-4 dark:border-white/5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-xs text-gray-500 dark:text-gray-400">
-              {shownAttemptNo !== null
-                ? `Execution ${shownAttemptNo} · Window ${dateTime(shownSince)} – ${dateTime(shownUntil)}`
-                : `Execution ${attemptId ?? 'unavailable'}`}
-            </p>
-            <button
-              type="button"
-              className={BUTTON}
-              disabled={loading || loadingSources || !sourceId}
-              onClick={() => setRevision((value) => value + 1)}
+        LLM requests
+      </h2>
+      <div className={`${CARD} mt-4 overflow-hidden`}>
+        {loadingSources && !page && (
+          <p role="status" className="px-5 py-4 text-sm text-gray-500 dark:text-gray-400">
+            Loading requests…
+          </p>
+        )}
+        {queryable.length > 1 && (
+          <label className="block px-5 py-4 text-sm">
+            Source
+            <select
+              className="ml-3 rounded-lg border border-gray-200 bg-white px-2 py-1 text-sm dark:border-white/10 dark:bg-gray-900"
+              value={sourceId ?? ''}
+              onChange={(event) => setSourceId(event.target.value || null)}
             >
-              Refresh
-            </button>
-          </div>
-          {stale && (
-            <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-              Read at {dateTime(stale)}. Logs may arrive later; a refresh reads the first page
-              again.
-            </p>
-          )}
-          {loadingSources && (
-            <p role="status" className="mt-3 text-sm text-gray-500 dark:text-gray-400">
-              Loading request sources…
-            </p>
-          )}
-          {queryable.length > 1 && (
-            <label className="mt-3 block text-sm">
-              Source
-              <select
-                className="ml-3 rounded-lg border border-gray-200 bg-white px-2 py-1 text-sm dark:border-white/10 dark:bg-gray-900"
-                value={sourceId ?? ''}
-                onChange={(event) => setSourceId(event.target.value || null)}
-              >
-                <option value="">Choose an execution</option>
-                {queryable.map((source) => (
-                  <option key={source.source_id} value={source.source_id ?? ''}>
-                    Execution {source.attempt_no} · {dateTime(source.window_since)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {sources !== null && queryable.length === 0 && !loadingSources && (
-            <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">
-              {sourceReason === 'not_started'
-                ? 'No execution has started in this run.'
-                : 'This execution has no queryable gateway source.'}
-            </p>
-          )}
-          {unavailable.length > 0 && (
-            <ul className="mt-2 space-y-1 text-xs text-amber-700 dark:text-amber-400">
-              {unavailable.map((source) => (
-                <li key={`${source.attempt_id}:${source.source_id ?? 'none'}`}>
-                  Execution {source.attempt_no}: {sourceExplanation(source)}
-                </li>
+              <option value="">Choose an execution</option>
+              {queryable.map((source) => (
+                <option key={source.source_id} value={source.source_id ?? ''}>
+                  Execution {source.attempt_no} · {dateTime(source.window_since)}
+                </option>
               ))}
-            </ul>
-          )}
-          {error && (
+            </select>
+          </label>
+        )}
+        {sources !== null && queryable.length === 0 && !loadingSources && (
+          <p className="px-5 py-4 text-sm text-gray-500 dark:text-gray-400">
+            {sourceReason === 'not_started'
+              ? 'No execution has started in this run.'
+              : 'This execution has no queryable gateway source.'}
+          </p>
+        )}
+        {unavailable.length > 0 && (
+          <ul className="space-y-1 px-5 py-3 text-xs text-amber-700 dark:text-amber-400">
+            {unavailable.map((source) => (
+              <li key={`${source.attempt_id}:${source.source_id ?? 'none'}`}>
+                Execution {source.attempt_no}: {sourceExplanation(source)}
+              </li>
+            ))}
+          </ul>
+        )}
+        {error && (
+          <div className="px-5 pb-4">
             <ErrorNotice>
               {error}
-              {rows.length > 0 && ' Showing the last successful read.'}
+              {rows.length > 0 && ` Showing the last successful read from ${dateTime(stale)}.`}
             </ErrorNotice>
-          )}
-          {restart && (
             <button
               type="button"
               className={`${BUTTON} mt-2`}
+              disabled={loading || loadingSources}
               onClick={() => setRevision((value) => value + 1)}
             >
-              Start again from the first page
+              {restart ? 'Start again from the first page' : 'Retry'}
             </button>
-          )}
-          {sourceId && (
-            <>
-              <div className="mt-4 overflow-x-auto">
-                <table className="w-full text-left text-sm">
-                  <thead className="text-xs text-gray-500 dark:text-gray-400">
+          </div>
+        )}
+        {sourceId && (
+          <>
+            <div
+              className="overflow-x-auto"
+              role="region"
+              aria-label="LLM request metrics"
+              tabIndex={0}
+            >
+              <table
+                aria-label="LLM requests"
+                className="w-full min-w-[64rem] text-right text-sm tabular-nums"
+              >
+                <thead className="border-b border-gray-100 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
+                  <tr className="[&>th]:px-3 [&>th]:py-4 [&>th]:font-medium [&>th]:whitespace-nowrap">
+                    <th
+                      scope="col"
+                      className="text-left !pl-5"
+                      title="Request model and start time in UTC"
+                    >
+                      Request
+                    </th>
+                    <th scope="col">HTTP</th>
+                    <th scope="col" title="Input tokens, including cache">
+                      Input
+                    </th>
+                    <th scope="col">Output</th>
+                    <th scope="col">Cache read</th>
+                    <th scope="col">Cache write</th>
+                    <th scope="col" title="Cache read tokens / input tokens (including cache)">
+                      Cache hit rate
+                    </th>
+                    <th scope="col" title="Time to first token">
+                      TTFT
+                    </th>
+                    <th
+                      scope="col"
+                      title="Estimated time per output token: (duration − TTFT) / (output tokens − 1), in ms/token"
+                    >
+                      TPOT
+                    </th>
+                    <th scope="col">Duration</th>
+                    <th scope="col" className="!pr-5">
+                      Cost
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-white/5">
+                  {loading && rows.length === 0 && (
                     <tr>
-                      <th className="px-3 py-2 font-medium">Started</th>
-                      <th className="px-3 py-2 font-medium">Model</th>
-                      <th className="px-3 py-2 font-medium">HTTP</th>
-                      <th className="px-3 py-2 font-medium">Input / output</th>
-                      <th className="px-3 py-2 font-medium">Cost</th>
-                      <th className="px-3 py-2 font-medium">TTFT</th>
-                      <th className="px-3 py-2 font-medium">Duration</th>
+                      <td
+                        colSpan={11}
+                        className="px-5 py-4 text-left text-gray-500 dark:text-gray-400"
+                      >
+                        Loading requests…
+                      </td>
                     </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100 dark:divide-white/5">
-                    {loading && rows.length === 0 && (
-                      <tr>
-                        <td
-                          colSpan={7}
-                          className="px-3 py-3 text-sm text-gray-500 dark:text-gray-400"
-                        >
-                          Loading requests…
-                        </td>
-                      </tr>
-                    )}
-                    {rows.map((row) => (
-                      <RequestRow key={row.request_id} row={row} />
-                    ))}
-                    {!loading && rows.length === 0 && (
-                      <tr>
-                        <td
-                          colSpan={7}
-                          className="px-3 py-3 text-sm text-gray-500 dark:text-gray-400"
-                        >
-                          No request records are stored for this window yet.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+                  )}
+                  {rows.map((row) => (
+                    <RequestRow key={row.request_id} row={row} />
+                  ))}
+                  {!loading && rows.length === 0 && !error && (
+                    <tr>
+                      <td
+                        colSpan={11}
+                        className="px-5 py-4 text-left text-gray-500 dark:text-gray-400"
+                      >
+                        No request records are stored for this window yet.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            {page?.next_cursor && (
+              <div className="flex justify-end border-t border-gray-100 px-5 py-3 dark:border-white/5">
+                <button
+                  type="button"
+                  className={BUTTON}
+                  disabled={moreLoading || loading || loadingSources || restart}
+                  onClick={() => void loadMore()}
+                >
+                  {moreLoading ? 'Loading…' : 'Load more'}
+                </button>
               </div>
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-                <p className="text-xs text-gray-500 dark:text-gray-400">
-                  Loaded {rows.length} record{rows.length === 1 ? '' : 's'}.
-                  {pagesLoaded > 1 ? ` ${pagesLoaded} pages read.` : ''}
-                </p>
-                {page?.next_cursor && (
-                  <button
-                    type="button"
-                    className={BUTTON}
-                    disabled={moreLoading || loading}
-                    onClick={() => void loadMore()}
-                  >
-                    {moreLoading ? 'Loading…' : 'Load more'}
-                  </button>
-                )}
-              </div>
-            </>
-          )}
-          <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-            Request logs are written after a response completes, so this list can lag the run, and a
-            refresh can reveal rows a later page will not. Gateway totals above cover the whole
-            window and are not a subtotal of this page.
-          </p>
-        </div>
-      </details>
+            )}
+          </>
+        )}
+      </div>
     </section>
   );
 }
@@ -529,64 +540,46 @@ export function LLMRequests({
 function RequestRow({ row }: { row: AdminLlmRequest }) {
   const amount = money(row.spent_usd);
   const model = modelLabel(row);
+  const hitRate = cacheHitRate(row);
+  const tpot = timePerOutputToken(row);
   return (
-    <>
-      <tr>
-        <td className="px-3 py-2 whitespace-nowrap tabular-nums">
-          {dateTime(row.request_started_at)}
-        </td>
-        <td className="max-w-[16rem] px-3 py-2 break-words" title={model.title}>
+    <tr className="[&>td]:px-3 [&>td]:py-4 [&>td]:whitespace-nowrap">
+      <td className="min-w-[10rem] max-w-[16rem] text-left !pl-5" title={row.request_id}>
+        <div className="whitespace-normal break-words font-medium" title={model.title}>
           {model.text}
-        </td>
-        <td className="px-3 py-2 tabular-nums">{statusLabel(row.status_code)}</td>
-        <td className="px-3 py-2 tabular-nums">
-          {number(row.tokens_in)} / {number(row.tokens_out)}
-        </td>
-        <td className="px-3 py-2 tabular-nums" title={amount.exact ?? undefined}>
-          {amount.display}
-        </td>
-        <td className="px-3 py-2 tabular-nums">{durationLabel(row.ttft_ms)}</td>
-        <td className="px-3 py-2 tabular-nums">{durationLabel(row.latency_ms)}</td>
-      </tr>
-      <tr>
-        <td colSpan={7} className="px-3 pb-3">
-          <details>
-            <summary className="cursor-pointer text-xs text-gray-500 dark:text-gray-400">
-              Request detail
-            </summary>
-            <dl className="mt-2 grid grid-cols-1 gap-x-6 gap-y-1 text-xs text-gray-600 sm:grid-cols-2 dark:text-gray-400">
-              <div className="min-w-0">
-                <dt className="text-gray-500 dark:text-gray-500">Request ID</dt>
-                <dd className="break-all font-mono">{row.request_id}</dd>
-              </div>
-              <div className="min-w-0">
-                <dt className="text-gray-500 dark:text-gray-500">Logged at</dt>
-                <dd>{dateTime(row.logged_at)}</dd>
-              </div>
-              <div className="min-w-0">
-                <dt className="text-gray-500 dark:text-gray-500">Cache read / write</dt>
-                <dd className="tabular-nums">
-                  {number(row.cache_read)} / {number(row.cache_write)}
-                </dd>
-              </div>
-              <div className="min-w-0">
-                <dt className="text-gray-500 dark:text-gray-500">Reasoning tokens</dt>
-                <dd className="tabular-nums">{number(row.reasoning)}</dd>
-              </div>
-              <div className="min-w-0">
-                <dt className="text-gray-500 dark:text-gray-500">Exact recorded cost</dt>
-                <dd className="font-mono">{row.spent_usd ?? UNAVAILABLE}</dd>
-              </div>
-              <div className="min-w-0">
-                <dt className="text-gray-500 dark:text-gray-500">Usage</dt>
-                <dd>
-                  {row.usage_estimated ? 'Contains estimated usage' : 'Reported by the gateway'}
-                </dd>
-              </div>
-            </dl>
-          </details>
-        </td>
-      </tr>
-    </>
+        </div>
+        <time
+          className="mt-1 block text-xs text-gray-500 dark:text-gray-400"
+          dateTime={row.request_started_at}
+          title={dateTime(row.request_started_at)}
+        >
+          {startTime(row.request_started_at)}
+        </time>
+        {row.usage_estimated && (
+          <span
+            className="mt-1 block text-xs text-amber-700 dark:text-amber-400"
+            title="Contains estimated usage"
+          >
+            Estimated
+          </span>
+        )}
+      </td>
+      <td title={statusLabel(row.status_code)}>{row.status_code ?? UNAVAILABLE}</td>
+      <td>{tokenLabel(row.tokens_in)}</td>
+      <td
+        title={row.reasoning == null ? undefined : `Reasoning tokens: ${tokenLabel(row.reasoning)}`}
+      >
+        {tokenLabel(row.tokens_out)}
+      </td>
+      <td>{tokenLabel(row.cache_read)}</td>
+      <td>{tokenLabel(row.cache_write)}</td>
+      <td>{hitRate === null ? UNAVAILABLE : `${hitRate.toFixed(1)}%`}</td>
+      <td>{durationLabel(row.ttft_ms)}</td>
+      <td>{tpot === null ? UNAVAILABLE : `${tpot.toFixed(2)} ms/token`}</td>
+      <td>{durationLabel(row.latency_ms)}</td>
+      <td className="!pr-5" title={amount.exact ?? undefined}>
+        {amount.exact === null ? UNAVAILABLE : amount.display}
+      </td>
+    </tr>
   );
 }

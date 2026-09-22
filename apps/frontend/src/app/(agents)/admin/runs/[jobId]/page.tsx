@@ -244,6 +244,7 @@ function RunDetails({ jobId }: { jobId: string }) {
             {detail.capabilities.llm_requests ? (
               <LLMRequests
                 key={`requests:${attemptId}`}
+                refreshKey={revision}
                 jobId={jobId}
                 attemptId={attemptId ?? undefined}
                 running={attempt?.finished_at == null}

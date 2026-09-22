@@ -921,7 +921,6 @@ describe('admin run observation', () => {
     await screen.findByText('host-a');
     expect(screen.getByText('failed')).toBeInTheDocument();
     expect(getAdminAttemptResources).toHaveBeenLastCalledWith('job-1', 10, expect.any(AbortSignal));
-    fireEvent.click(screen.getByText('LLM requests'));
     await waitFor(() =>
       expect(getAdminLlmRequestSources).toHaveBeenLastCalledWith(
         'job-1',
@@ -938,16 +937,23 @@ describe('admin run observation', () => {
         ],
       }),
     );
+    vi.mocked(getAdminLlmRequestSources).mockClear();
     fireEvent.click(screen.getByRole('button', { name: 'Refresh run' }));
     await screen.findByRole('button', { name: 'Previous attempts (2)' });
     expect(screen.getByLabelText('View attempt')).toHaveValue('10');
     expect(screen.getByText('host-a')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(getAdminLlmRequestSources).toHaveBeenCalledWith(
+        'job-1',
+        { attempt_id: 10, limit: 100 },
+        expect.any(AbortSignal),
+      ),
+    );
 
     fireEvent.click(screen.getByRole('button', { name: 'Previous attempts (2)' }));
     await screen.findByText('host-c');
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
     expect(getAdminAttemptResources).toHaveBeenLastCalledWith('job-1', 30, expect.any(AbortSignal));
-    fireEvent.click(screen.getByText('LLM requests'));
     await waitFor(() =>
       expect(getAdminLlmRequestSources).toHaveBeenLastCalledWith(
         'job-1',
@@ -1004,8 +1010,12 @@ describe('admin run observation', () => {
       screen.queryByRole('table', { name: 'Usage source comparison' }),
     ).not.toBeInTheDocument();
     expect(screen.getByText('LLM requests')).toBeInTheDocument();
-    // Collapsed by default: naming the surface must not read the gateway.
-    expect(getAdminLlmRequestSources).not.toHaveBeenCalled();
+    // Request metrics now load with the section; an empty source list makes no gateway read.
+    expect(getAdminLlmRequestSources).toHaveBeenCalledWith(
+      'job-1',
+      { attempt_id: 10, limit: 100 },
+      expect.any(AbortSignal),
+    );
     expect(getAdminLlmRequests).not.toHaveBeenCalled();
     expect(screen.queryByText('Failure classification')).not.toBeInTheDocument();
     expect(
@@ -1166,6 +1176,8 @@ describe('admin run observation', () => {
     const view = render(<AdminRunPage />);
     await screen.findByText('host-b');
     fireEvent.click(screen.getByRole('button', { name: 'Previous attempts (1)' }));
+    const pending = deferred<Awaited<ReturnType<typeof getAdminLlmRequestSources>>>();
+    vi.mocked(getAdminLlmRequestSources).mockReturnValueOnce(pending.promise);
     fireEvent.change(screen.getByLabelText('View attempt'), { target: { value: '10' } });
     await screen.findByText('host-a');
     // Resources follow the selected history. Both summary sections continue to
@@ -1178,9 +1190,6 @@ describe('admin run observation', () => {
         name: 'Model calls 2',
       }),
     ).toBeVisible();
-    const pending = deferred<Awaited<ReturnType<typeof getAdminLlmRequestSources>>>();
-    vi.mocked(getAdminLlmRequestSources).mockReturnValueOnce(pending.promise);
-    fireEvent.click(screen.getByText('LLM requests'));
     await waitFor(() => expect(getAdminLlmRequestSources).toHaveBeenCalled());
     auth.access = { allowed: true, permissions: ['agent.use'] };
     view.rerender(<AdminRunPage />);
@@ -1196,10 +1205,9 @@ describe('admin run observation', () => {
     vi.mocked(getAdminRun).mockResolvedValueOnce(attemptsDetail());
     const view = render(<AdminRunPage />);
     fireEvent.click(await screen.findByRole('button', { name: 'Previous attempts (1)' }));
-    fireEvent.change(screen.getByLabelText('View attempt'), { target: { value: '10' } });
     const pending = deferred<Awaited<ReturnType<typeof getAdminLlmRequestSources>>>();
     vi.mocked(getAdminLlmRequestSources).mockReturnValueOnce(pending.promise);
-    fireEvent.click(screen.getByText('LLM requests'));
+    fireEvent.change(screen.getByLabelText('View attempt'), { target: { value: '10' } });
     await waitFor(() => expect(getAdminLlmRequestSources).toHaveBeenCalled());
     const historyRead = vi.mocked(getAdminLlmRequestSources).mock.lastCall![2];
 

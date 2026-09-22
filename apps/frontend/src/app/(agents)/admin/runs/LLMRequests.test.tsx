@@ -18,6 +18,8 @@ vi.mock('@/lib/api/adminRuns', () => ({
 
 import { getAdminLlmRequestSources, getAdminLlmRequests } from '@/lib/api/adminRuns';
 import {
+  cacheHitRate,
+  timePerOutputToken,
   continues,
   durationLabel,
   LLMRequests,
@@ -118,9 +120,7 @@ function renderPanel(
   );
 }
 
-async function expand() {
-  fireEvent.click(screen.getByText('LLM requests'));
-  // Opening is what triggers the metadata read; nothing runs while collapsed.
+async function waitForRead() {
   await waitFor(() => expect(sources).toHaveBeenCalled());
 }
 
@@ -158,19 +158,20 @@ describe('field labels', () => {
       ]),
     );
     renderPanel();
-    await expand();
+    await waitForRead();
     expect(await screen.findByTitle('0.00978569')).toHaveTextContent('$0.0097');
     // A real charge below the displayed places is marked, never shown as free.
     expect(screen.getByTitle('0.00000001')).toHaveTextContent('<$0.0001');
     expect(screen.getByTitle('0')).toHaveTextContent('$0');
     expect(screen.queryByTitle('Unavailable')).not.toBeInTheDocument();
-    expect(screen.getAllByText('Unavailable').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByTitle('req_none').closest('tr')?.lastElementChild).toHaveTextContent('—');
   });
 
   it('separates a null duration from a measured zero', () => {
-    expect(durationLabel(null)).toBe('Not reported');
+    expect(durationLabel(null)).toBe('—');
+    expect(durationLabel(4954)).toBe('4.954 s');
     expect(durationLabel(0)).toBe('0 ms');
-    expect(statusLabel(null)).toBe('Unavailable');
+    expect(statusLabel(null)).toBe('—');
     expect(statusLabel(429)).toBe('HTTP 429');
   });
 
@@ -178,7 +179,41 @@ describe('field labels', () => {
     expect(modelLabel(row()).text).toBe('model-alias → model-version');
     expect(modelLabel(row({ served_model_id: null })).text).toBe('model-alias');
     expect(modelLabel(row({ served_model_id: 'model-alias' })).text).toBe('model-alias');
-    expect(modelLabel(row({ model: null, served_model_id: null })).text).toBe('Unavailable');
+    expect(modelLabel(row({ model: null, served_model_id: null })).text).toBe('—');
+  });
+
+  it('computes cache hit rate from inclusive input and preserves zero hits', () => {
+    expect(cacheHitRate(row({ tokens_in: 100, cache_read: 75, cache_write: 25 }))).toBe(75);
+    expect(cacheHitRate(row({ tokens_in: 100, cache_read: 0 }))).toBe(0);
+    for (const override of [
+      { tokens_in: null },
+      { tokens_in: 0 },
+      { tokens_in: -1 },
+      { tokens_in: Infinity },
+      { cache_read: null },
+      { cache_read: -1 },
+      { cache_read: NaN },
+      { cache_read: 50000 },
+    ])
+      expect(cacheHitRate(row(override))).toBeNull();
+  });
+
+  it('estimates TPOT only when timing and output support the calculation', () => {
+    expect(timePerOutputToken(row({ latency_ms: 1100, ttft_ms: 100, tokens_out: 101 }))).toBe(10);
+    expect(timePerOutputToken(row({ latency_ms: 100, ttft_ms: 100 }))).toBe(0);
+    for (const override of [
+      { tokens_out: null },
+      { tokens_out: 0 },
+      { tokens_out: 1 },
+      { tokens_out: Infinity },
+      { ttft_ms: null },
+      { ttft_ms: -1 },
+      { ttft_ms: 851 },
+      { latency_ms: null },
+      { latency_ms: -1 },
+      { latency_ms: NaN },
+    ])
+      expect(timePerOutputToken(row(override))).toBeNull();
   });
 
   it('explains an unavailable source without promising a gateway read', () => {
@@ -188,15 +223,21 @@ describe('field labels', () => {
 });
 
 describe('LLM requests panel', () => {
-  it('stays collapsed and reads nothing until it is opened', () => {
-    renderPanel();
-    expect(sources).not.toHaveBeenCalled();
-    expect(requests).not.toHaveBeenCalled();
+  it('loads on mount without disclosure, refresh, or information controls', async () => {
+    const { container } = renderPanel();
+    await screen.findByTitle('req_example');
+    expect(sources).toHaveBeenCalledTimes(1);
+    expect(requests).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('details')).toBeNull();
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Loaded|Read at|Window|gateway ledger|Logs may arrive/),
+    ).not.toBeInTheDocument();
   });
 
-  it('reads the only queryable source and shows its window and read time', async () => {
+  it('reads the only queryable source and shows all metrics in a single row', async () => {
     renderPanel();
-    await expand();
+    await waitForRead();
     await waitFor(() => expect(requests).toHaveBeenCalledTimes(1));
     expect(sources).toHaveBeenCalledWith(
       'job-1',
@@ -208,12 +249,32 @@ describe('LLM requests panel', () => {
       { source_id: '42', limit: 50 },
       expect.anything(),
     );
-    expect(await screen.findByText(/Execution 1 · Window/)).toBeInTheDocument();
-    expect(screen.getByText(/Read at/)).toBeInTheDocument();
-    expect(screen.getByText(/Logs may arrive later/)).toBeInTheDocument();
-    const rowCells = screen.getByRole('row', {
-      name: /model-alias → model-version HTTP 200 40,086 \/ 413/,
-    });
+    const rowCells = (await screen.findByTitle('req_example')).closest('tr')!;
+    expect(screen.getAllByRole('columnheader').map((cell) => cell.textContent)).toEqual([
+      'Request',
+      'HTTP',
+      'Input',
+      'Output',
+      'Cache read',
+      'Cache write',
+      'Cache hit rate',
+      'TTFT',
+      'TPOT',
+      'Duration',
+      'Cost',
+    ]);
+    expect(within(rowCells).getAllByRole('cell')).toHaveLength(11);
+    expect(within(rowCells).getByText('03:20:04')).toHaveAttribute(
+      'datetime',
+      '2026-09-11T03:20:04Z',
+    );
+    expect(within(rowCells).getByTitle('HTTP 200')).toHaveTextContent('200');
+    expect(within(rowCells).getByText('40,086')).toBeInTheDocument();
+    expect(within(rowCells).getByText('413')).toBeInTheDocument();
+    expect(within(rowCells).getByText('19,712')).toBeInTheDocument();
+    expect(within(rowCells).getByText('49.2%')).toBeInTheDocument();
+    expect(within(rowCells).getByText('1.48 ms/token')).toBeInTheDocument();
+    expect(screen.queryByText(/≈/)).not.toBeInTheDocument();
     expect(within(rowCells).getByTitle('0.00978569')).toHaveTextContent('$0.0097');
     expect(within(rowCells).getByText('240 ms')).toBeInTheDocument();
     expect(within(rowCells).getByText('850 ms')).toBeInTheDocument();
@@ -227,7 +288,7 @@ describe('LLM requests panel', () => {
       ]),
     );
     renderPanel();
-    await expand();
+    await waitForRead();
     const selector = await screen.findByRole('combobox');
     expect(requests).not.toHaveBeenCalled();
     fireEvent.change(selector, { target: { value: '43' } });
@@ -254,7 +315,7 @@ describe('LLM requests panel', () => {
       ]),
     );
     renderPanel();
-    await expand();
+    await waitForRead();
     expect(await screen.findByText(/never attributed to a gateway ledger/)).toBeInTheDocument();
     expect(screen.getByText(/no queryable gateway source/)).toBeInTheDocument();
     expect(requests).not.toHaveBeenCalled();
@@ -263,7 +324,7 @@ describe('LLM requests panel', () => {
   it('says a run has not started rather than showing an empty ledger', async () => {
     sources.mockResolvedValue(sourcesPage([], 'not_started'));
     renderPanel();
-    await expand();
+    await waitForRead();
     expect(await screen.findByText('No execution has started in this run.')).toBeInTheDocument();
     expect(requests).not.toHaveBeenCalled();
   });
@@ -283,40 +344,67 @@ describe('LLM requests panel', () => {
       ]),
     );
     renderPanel();
-    await expand();
-    expect((await screen.findAllByText('Unavailable')).length).toBeGreaterThanOrEqual(3);
-    expect(screen.getAllByText('Not reported').length).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText('Contains estimated usage')).toBeInTheDocument();
+    await waitForRead();
+    const cells = within((await screen.findByTitle('req_example')).closest('tr')!);
+    expect(cells.getAllByText('—')).toHaveLength(6);
+    expect(cells.getByTitle('Contains estimated usage')).toHaveTextContent('Estimated');
   });
 
-  it('appends the next page and says how much of the window is loaded', async () => {
+  it('shows measured zero cache usage separately from missing metrics', async () => {
+    requests.mockResolvedValue(page([row({ cache_read: 0, cache_write: 0, tokens_out: 1 })]));
+    renderPanel();
+    const cells = within((await screen.findByTitle('req_example')).closest('tr')!).getAllByRole(
+      'cell',
+    );
+    expect(cells[4]).toHaveTextContent(/^0$/);
+    expect(cells[5]).toHaveTextContent(/^0$/);
+    expect(cells[6]).toHaveTextContent('0.0%');
+    expect(cells[8]).toHaveTextContent('—');
+  });
+
+  it.each(['sources', 'requests'])(
+    'can retry an initial %s failure without a permanent refresh control',
+    async (failedRead) => {
+      const api = failedRead === 'sources' ? sources : requests;
+      api.mockRejectedValueOnce(new APIError('SERVICE_UNAVAILABLE', 'unavailable', 503));
+      renderPanel();
+      fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+      await screen.findByTitle('req_example');
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button')).not.toBeInTheDocument();
+    },
+  );
+
+  it('appends the next page without adding a loaded count', async () => {
     requests
       .mockResolvedValueOnce(page([row()], 'cursor-1'))
       .mockResolvedValueOnce(
         page([row({ request_id: 'req_second', request_started_at: '2026-09-11T03:20:06Z' })]),
       );
     renderPanel();
-    await expand();
+    await waitForRead();
     const more = await screen.findByRole('button', { name: 'Load more' });
     fireEvent.click(more);
-    await waitFor(() => expect(screen.getByText(/Loaded 2 records/)).toBeInTheDocument());
+    await screen.findByTitle('req_second');
+    expect(screen.getAllByRole('row')).toHaveLength(3);
+    expect(screen.queryByText(/Loaded/)).not.toBeInTheDocument();
     expect(requests).toHaveBeenLastCalledWith(
       'job-1',
       { source_id: '42', limit: 50, cursor: 'cursor-1' },
       expect.anything(),
     );
-    expect(screen.getByText('req_second')).toBeInTheDocument();
+    expect(screen.getByTitle('req_second')).toBeInTheDocument();
   });
 
   it('keeps a failed page and its cursor for a retry instead of ending the list', async () => {
     requests.mockResolvedValueOnce(page([row()], 'cursor-1'));
     renderPanel();
-    await expand();
+    await waitForRead();
     requests.mockRejectedValueOnce(new APIError('SERVER_ERROR', 'gateway down', 503));
     fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
     await screen.findByText(/Server error/);
     expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument();
-    expect(screen.getByText('req_example')).toBeInTheDocument();
+    expect(screen.getByTitle('req_example')).toBeInTheDocument();
     requests.mockResolvedValueOnce(page([]));
     fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
     await waitFor(() =>
@@ -329,28 +417,46 @@ describe('LLM requests panel', () => {
   });
 
   it('keeps the rows it has when a refresh fails, and says how old they are', async () => {
-    renderPanel();
-    await expand();
-    await screen.findByText('req_example');
+    const view = renderPanel();
+    await waitForRead();
+    await screen.findByTitle('req_example');
     requests.mockRejectedValueOnce(new APIError('SERVICE_UNAVAILABLE', 'unavailable', 503));
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    view.rerender(
+      <LLMRequests
+        jobId="job-1"
+        attemptId={10}
+        running={false}
+        refreshKey={1}
+        onAccessDenied={() => {}}
+      />,
+    );
     expect(await screen.findByText(/Service temporarily unavailable/)).toBeInTheDocument();
-    expect(screen.getByText('req_example')).toBeInTheDocument();
-    expect(screen.getByText(/Read at/)).toBeInTheDocument();
+    expect(screen.getByTitle('req_example')).toBeInTheDocument();
+    expect(
+      screen.getByText(/last successful read from Sep 11, 2026, 3:22:01 AM UTC/),
+    ).toBeInTheDocument();
   });
 
   it('drops old pages and reads the first page again on refresh', async () => {
     requests.mockResolvedValueOnce(page([row()], 'cursor-1'));
-    renderPanel();
-    await expand();
+    const view = renderPanel();
+    await waitForRead();
     await screen.findByRole('button', { name: 'Load more' });
     requests.mockResolvedValueOnce(page([row({ request_id: 'req_second' })]));
     fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
-    await screen.findByText('req_second');
+    await screen.findByTitle('req_second');
     requests.mockResolvedValueOnce(page([row({ request_id: 'req_third' })]));
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    await screen.findByText('req_third');
-    expect(screen.queryByText('req_second')).not.toBeInTheDocument();
+    view.rerender(
+      <LLMRequests
+        jobId="job-1"
+        attemptId={10}
+        running={false}
+        refreshKey={1}
+        onAccessDenied={() => {}}
+      />,
+    );
+    await screen.findByTitle('req_third');
+    expect(screen.queryByTitle('req_second')).not.toBeInTheDocument();
     expect(requests).toHaveBeenLastCalledWith(
       'job-1',
       { source_id: '42', limit: 50 },
@@ -362,35 +468,35 @@ describe('LLM requests panel', () => {
     const late = deferred<AdminLlmRequestPage>();
     requests.mockReturnValueOnce(late.promise);
     const view = renderPanel();
-    await expand();
+    await waitForRead();
     await waitFor(() => expect(requests).toHaveBeenCalledTimes(1));
     requests.mockResolvedValue(page([row({ request_id: 'req_current' })]));
     view.rerender(
       <LLMRequests jobId="job-1" attemptId={11} running={false} onAccessDenied={() => {}} />,
     );
     late.resolve(page([row({ request_id: 'req_stale' })]));
-    expect(await screen.findByText('req_current')).toBeInTheDocument();
-    expect(screen.queryByText('req_stale')).not.toBeInTheDocument();
+    expect(await screen.findByTitle('req_current')).toBeInTheDocument();
+    expect(screen.queryByTitle('req_stale')).not.toBeInTheDocument();
   });
 
   it('hands a revoked session to the page instead of showing an empty list', async () => {
     const denied = vi.fn();
     requests.mockRejectedValue(new APIError('UNKNOWN_ERROR', 'expired', 403));
     renderPanel({ denied });
-    await expand();
+    await waitForRead();
     await waitFor(() => expect(denied).toHaveBeenCalled());
   });
 
   it('asks for a restart when the continuation no longer describes the query', async () => {
     requests.mockRejectedValue(new APIError('request_cursor_expired', 'That page expired.', 409));
     renderPanel();
-    await expand();
+    await waitForRead();
     const restart = await screen.findByRole('button', {
       name: 'Start again from the first page',
     });
     requests.mockResolvedValue(page([row()]));
     fireEvent.click(restart);
-    await screen.findByText('req_example');
+    await screen.findByTitle('req_example');
     expect(requests).toHaveBeenLastCalledWith(
       'job-1',
       { source_id: '42', limit: 50 },
@@ -402,7 +508,7 @@ describe('LLM requests panel', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const denied = vi.fn();
     const view = renderPanel({ running: true, denied });
-    await expand();
+    await waitForRead();
     await waitFor(() => expect(requests).toHaveBeenCalledTimes(1));
     await vi.advanceTimersByTimeAsync(15_000);
     await waitFor(() => expect(requests).toHaveBeenCalledTimes(2));
@@ -423,10 +529,10 @@ describe('LLM requests panel', () => {
     );
     requests.mockResolvedValueOnce(page([row({ request_id: 'req_a' })], 'cursor-a'));
     renderPanel();
-    await expand();
+    await waitForRead();
     const selector = await screen.findByRole('combobox');
     fireEvent.change(selector, { target: { value: '42' } });
-    await screen.findByText('req_a');
+    await screen.findByTitle('req_a');
 
     const late = deferred<AdminLlmRequestPage>();
     requests.mockReturnValueOnce(late.promise);
@@ -434,15 +540,15 @@ describe('LLM requests panel', () => {
 
     requests.mockResolvedValueOnce(page([row({ request_id: 'req_b' })], 'cursor-b'));
     fireEvent.change(selector, { target: { value: '43' } });
-    await screen.findByText('req_b');
+    await screen.findByTitle('req_b');
 
     await act(async () => {
       late.resolve(page([row({ request_id: 'req_late_a' })], 'cursor-a'));
       await late.promise;
     });
-    expect(screen.queryByText('req_late_a')).not.toBeInTheDocument();
-    expect(screen.queryByText('req_a')).not.toBeInTheDocument();
-    expect(screen.getByText(/Loaded 1 record/)).toBeInTheDocument();
+    expect(screen.queryByTitle('req_late_a')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('req_a')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('row')).toHaveLength(2);
 
     // The continuation is the page on screen, not the one that arrived late.
     requests.mockResolvedValue(page([]));
@@ -458,8 +564,8 @@ describe('LLM requests panel', () => {
 
   it('leaves the page button usable when a refresh cancels a page in flight', async () => {
     requests.mockResolvedValueOnce(page([row()], 'cursor-1'));
-    renderPanel();
-    await expand();
+    const view = renderPanel();
+    await waitForRead();
     await screen.findByRole('button', { name: 'Load more' });
 
     const late = deferred<AdminLlmRequestPage>();
@@ -468,15 +574,23 @@ describe('LLM requests panel', () => {
     expect(await screen.findByRole('button', { name: 'Loading…' })).toBeDisabled();
 
     requests.mockResolvedValueOnce(page([row({ request_id: 'req_refreshed' })], 'cursor-2'));
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    await screen.findByText('req_refreshed');
+    view.rerender(
+      <LLMRequests
+        jobId="job-1"
+        attemptId={10}
+        running={false}
+        refreshKey={1}
+        onAccessDenied={() => {}}
+      />,
+    );
+    await screen.findByTitle('req_refreshed');
     expect(await screen.findByRole('button', { name: 'Load more' })).toBeEnabled();
 
     await act(async () => {
       late.resolve(page([row({ request_id: 'req_late' })]));
       await late.promise;
     });
-    expect(screen.queryByText('req_late')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('req_late')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Load more' })).toBeEnabled();
   });
 
@@ -484,7 +598,7 @@ describe('LLM requests panel', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     requests.mockResolvedValueOnce(page([row()], 'cursor-1'));
     renderPanel({ running: true });
-    await expand();
+    await waitForRead();
     await screen.findByRole('button', { name: 'Load more' });
 
     const late = deferred<AdminLlmRequestPage>();
@@ -500,34 +614,51 @@ describe('LLM requests panel', () => {
     });
   });
 
-  it('keeps the window that produced the rows when a refresh fails', async () => {
-    requests.mockResolvedValueOnce(page([row()]));
-    renderPanel();
-    await expand();
-    await screen.findByText('req_example');
-    expect(screen.getByText(/3:20:00 AM/)).toBeInTheDocument();
-    expect(screen.getByText(/3:21:00 AM/)).toBeInTheDocument();
-
-    // The stored reference now covers a longer window, but the read failed, so
-    // the rows on screen still belong to the window they were read from.
+  it('keeps the previous cursor and window when a refresh fails', async () => {
+    requests.mockResolvedValueOnce(page([row()], 'cursor-1'));
+    const view = renderPanel();
+    await screen.findByTitle('req_example');
     sources.mockResolvedValue(sourcesPage([source({ window_until: '2026-09-11T03:30:00Z' })]));
     requests.mockRejectedValueOnce(new APIError('SERVICE_UNAVAILABLE', 'unavailable', 503));
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    view.rerender(
+      <LLMRequests
+        jobId="job-1"
+        attemptId={10}
+        running={false}
+        refreshKey={1}
+        onAccessDenied={() => {}}
+      />,
+    );
     await screen.findByText(/Service temporarily unavailable/);
-    expect(screen.getByText(/3:21:00 AM/)).toBeInTheDocument();
-    expect(screen.queryByText(/3:30:00 AM/)).not.toBeInTheDocument();
-    expect(screen.getByText('req_example')).toBeInTheDocument();
+    expect(screen.getByTitle('req_example')).toBeInTheDocument();
+    requests.mockResolvedValueOnce(page([row({ request_id: 'req_continued' })]));
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    await screen.findByTitle('req_continued');
+    expect(screen.getByTitle('req_example')).toBeInTheDocument();
+    expect(requests).toHaveBeenLastCalledWith(
+      'job-1',
+      { source_id: '42', limit: 50, cursor: 'cursor-1' },
+      expect.anything(),
+    );
   });
 
   it('does not page a read a refresh is already replacing', async () => {
     requests.mockResolvedValueOnce(page([row({ request_id: 'req_first' })], 'cursor-1'));
-    renderPanel();
-    await expand();
-    await screen.findByText('req_first');
+    const view = renderPanel();
+    await waitForRead();
+    await screen.findByTitle('req_first');
 
     const refreshed = deferred<AdminLlmRequestPage>();
     requests.mockReturnValueOnce(refreshed.promise);
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    view.rerender(
+      <LLMRequests
+        jobId="job-1"
+        attemptId={10}
+        running={false}
+        refreshKey={1}
+        onAccessDenied={() => {}}
+      />,
+    );
     expect(screen.getByRole('button', { name: 'Load more' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
     expect(requests).toHaveBeenCalledTimes(2);
@@ -547,17 +678,17 @@ describe('LLM requests panel', () => {
       refreshed.resolve(fresh);
       await refreshed.promise;
     });
-    expect(await screen.findByText('req_fresh')).toBeInTheDocument();
-    expect(screen.queryByText('req_first')).not.toBeInTheDocument();
-    expect(screen.getByText(/3:25:00 AM/)).toBeInTheDocument();
-    expect(screen.queryByText(/3:21:00 AM/)).not.toBeInTheDocument();
+    expect(await screen.findByTitle('req_fresh')).toBeInTheDocument();
+    expect(screen.queryByTitle('req_first')).not.toBeInTheDocument();
+    expect(screen.getByTitle('req_fresh')).toBeInTheDocument();
+    expect(screen.getAllByRole('row')).toHaveLength(2);
   });
 
   it('drops a page that was in flight when the read it belonged to was replaced', async () => {
     requests.mockResolvedValueOnce(page([row({ request_id: 'req_first' })], 'cursor-1'));
-    renderPanel();
-    await expand();
-    await screen.findByText('req_first');
+    const view = renderPanel();
+    await waitForRead();
+    await screen.findByTitle('req_first');
 
     const oldPage = deferred<AdminLlmRequestPage>();
     requests.mockReturnValueOnce(oldPage.promise);
@@ -572,8 +703,16 @@ describe('LLM requests panel', () => {
       },
     };
     requests.mockResolvedValueOnce(fresh);
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    await screen.findByText('req_fresh');
+    view.rerender(
+      <LLMRequests
+        jobId="job-1"
+        attemptId={10}
+        running={false}
+        refreshKey={1}
+        onAccessDenied={() => {}}
+      />,
+    );
+    await screen.findByTitle('req_fresh');
 
     await act(async () => {
       oldPage.resolve(
@@ -584,8 +723,8 @@ describe('LLM requests panel', () => {
       );
       await oldPage.promise;
     });
-    expect(screen.queryByText('req_late')).not.toBeInTheDocument();
-    expect(screen.getByText(/3:25:00 AM/)).toBeInTheDocument();
+    expect(screen.queryByTitle('req_late')).not.toBeInTheDocument();
+    expect(screen.getByTitle('req_fresh')).toBeInTheDocument();
 
     // The continuation on offer is still the fresh read's, not the stale one.
     requests.mockResolvedValue(page([], 'cursor-3'));
@@ -602,8 +741,8 @@ describe('LLM requests panel', () => {
   it('asks for a restart when a page answers a different read', async () => {
     requests.mockResolvedValueOnce(page([row({ request_id: 'req_first' })], 'cursor-1'));
     renderPanel();
-    await expand();
-    await screen.findByText('req_first');
+    await waitForRead();
+    await screen.findByTitle('req_first');
 
     // A continuation whose window differs from the page on screen: the server
     // never sends one, so the panel must not merge it if it ever arrives.
@@ -619,8 +758,8 @@ describe('LLM requests panel', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
     await screen.findByRole('button', { name: 'Start again from the first page' });
-    expect(screen.queryByText('req_other_window')).not.toBeInTheDocument();
-    expect(screen.getByText('req_first')).toBeInTheDocument();
+    expect(screen.queryByTitle('req_other_window')).not.toBeInTheDocument();
+    expect(screen.getByTitle('req_first')).toBeInTheDocument();
   });
 
   it("does not query the previous execution's source after switching execution", async () => {
@@ -642,15 +781,15 @@ describe('LLM requests panel', () => {
     requests.mockResolvedValueOnce(first).mockResolvedValue(second);
 
     const view = renderPanel({ attemptId: 10, denied });
-    await expand();
-    await screen.findByText('req_10');
+    await waitForRead();
+    await screen.findByTitle('req_10');
     requests.mockClear();
 
     view.rerender(
       <LLMRequests jobId="job-1" attemptId={11} running={false} onAccessDenied={denied} />,
     );
-    await screen.findByText('req_11');
-    expect(screen.queryByText('req_10')).not.toBeInTheDocument();
+    await screen.findByTitle('req_11');
+    expect(screen.queryByTitle('req_10')).not.toBeInTheDocument();
     expect(requests.mock.calls.map((call) => call[1])).toEqual([{ source_id: '77', limit: 50 }]);
   });
 
@@ -667,15 +806,15 @@ describe('LLM requests panel', () => {
     sources.mockImplementation((_jobId, filters) => sourcesForAttempt(filters?.attempt_id));
     requests.mockResolvedValue(page([row({ request_id: 'req_10' })]));
     const view = renderPanel({ attemptId: 10, denied });
-    await expand();
-    await screen.findByText('req_10');
+    await waitForRead();
+    await screen.findByTitle('req_10');
     requests.mockClear();
 
     view.rerender(
       <LLMRequests jobId="job-1" attemptId={11} running={false} onAccessDenied={denied} />,
     );
     expect(await screen.findByText(/Service temporarily unavailable/)).toBeInTheDocument();
-    expect(screen.queryByText('req_10')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('req_10')).not.toBeInTheDocument();
     expect(requests).not.toHaveBeenCalled();
   });
 
