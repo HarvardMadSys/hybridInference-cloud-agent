@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import time
 from types import SimpleNamespace
 
@@ -21,6 +22,7 @@ from cloud_agent_host.shared_session_supervisor import (
     SharedSessionLease,
     SharedTurnTelemetry,
 )
+from cloud_agent_host.tool_windows import ToolMark
 from cloud_agent_host.workspace_broker import (
     MAX_TERMINAL_BUFFER_BYTES,
     MAX_TERMINAL_BUFFER_EVENTS,
@@ -879,8 +881,8 @@ async def test_shared_turn_returns_closed_member_telemetry_and_exact_tool_marks(
                 origin_guest_mono_ns=1_000_000_000,
             ),
             tool_marks=(
-                (marks["pre"], "pre", "toolu_exact"),
-                (marks["post"], "post", "toolu_exact"),
+                ToolMark(marks["pre"], "pre", "toolu_exact"),
+                ToolMark(marks["post"], "post", "toolu_exact"),
             ),
         )
     )
@@ -912,3 +914,68 @@ async def test_shared_turn_returns_closed_member_telemetry_and_exact_tool_marks(
     assert resources["process_observation_complete"] is True
     assert resources["processes"][0]["pid"] == 412
     assert resources["tool_calls"][0]["timing_source"] == "exact"
+
+
+def test_build_turn_resources_adopts_late_announced_guest_marks_and_logs_them(caplog):
+    """A short call whose announcing line reached the broker after it ran:
+    the guest pair is adopted, its process is attributed on the guest clock,
+    and the log carries the lag for a reviewer to check per call."""
+    from cloud_agent_host.tool_windows import ToolWindowTracker
+    from cloud_agent_host.workspace_broker import build_turn_resources
+
+    tracker = ToolWindowTracker()
+    tracker.observe("tool_use", {"id": "toolu_late", "name": "Read"}, mono=100.050)
+    tracker.observe("tool_result", {"tool_use_id": "toolu_late"}, mono=100.120)
+    process = GuestProcess(
+        process_seq=1,
+        uid=11001,
+        pid=412,
+        tgid=412,
+        ppid=41,
+        comm="rg",
+        executable="/usr/bin/rg",
+        started_guest_mono_ns=5_005_000_000,
+        exited_guest_mono_ns=5_015_000_000,
+        started_host_mono=100.005,
+        exited_host_mono=100.015,
+        exit_code=0,
+        observed_fork=True,
+        observed_exec=True,
+        observed_exit=True,
+        cpu_usec=1_200,
+        mem_peak_bytes=4096,
+        io_read_bytes=0,
+        io_write_bytes=0,
+    )
+    telemetry = SharedTurnTelemetry(
+        observation=GuestObservation(
+            source="kata-guest-ebpf-v1",
+            complete=True,
+            lost_events=0,
+            truncated=False,
+            processes=(process,),
+            origin_guest_mono_ns=5_000_000_000,
+            clock_error_ns=150_000_000,
+        ),
+        tool_marks=(
+            ToolMark(100.000, "pre", "toolu_late", guest_mono_ns=5_000_000_000),
+            ToolMark(100.021, "post", "toolu_late", guest_mono_ns=5_021_000_000),
+        ),
+    )
+
+    with caplog.at_level(logging.INFO, logger="cloud_agent_host.workspace_broker"):
+        resources = build_turn_resources(telemetry, tracker, thread_id="athr_late")
+
+    (call,) = resources["tool_calls"]
+    assert call["timing_source"] == "exact"
+    assert call["duration_ms"] == 21
+    assert call["process_count"] == 1
+    assert call["process_cpu_usec"] == 1_200
+    assert call["process_resources_partial"] is False
+    assert resources["processes"][0]["tool_call_seqs"] == [1]
+    line = next(
+        record.getMessage() for record in caplog.records if "tool marks" in record.getMessage()
+    )
+    assert "thread=athr_late" in line
+    assert "applied=1" in line
+    assert "1:Read:applied:lag=+50/+99:msg=70ms:exact=21ms" in line

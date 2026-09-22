@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.tool_windows import TOOL_MARK_HELPER
+from cloud_agent_host.tool_windows import TOOL_MARK_HELPER, ToolMark
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -177,9 +177,10 @@ class GuestObservation:
     lost_events: int
     truncated: bool
     processes: tuple[GuestProcess, ...] = ()
-    # Guest-root accepted boundary records, already bridged onto the broker's
-    # monotonic clock.  They share the process journal's UID/loss fence.
-    tool_marks: tuple[tuple[float, str, str], ...] = ()
+    # Guest-root accepted boundary records, each carrying the guest's own
+    # monotonic reading and its bridged position on the broker's clock. They
+    # share the process journal's UID/loss fence.
+    tool_marks: tuple[ToolMark, ...] = ()
     origin_guest_mono_ns: int = 0
     clock_error_ns: int = 0
     detail: str | None = None
@@ -847,7 +848,7 @@ def parse_events(
     payload: bytes,
     *,
     cursor: GuestObserverCursor,
-) -> tuple[tuple[GuestProcess, ...], tuple[tuple[float, str, str], ...], bool]:
+) -> tuple[tuple[GuestProcess, ...], tuple[ToolMark, ...], bool]:
     """Reconstruct every process of ``cursor.uid`` from one journal slice.
 
     The return flag is true when input was malformed or exceeded the process
@@ -869,7 +870,7 @@ def parse_events(
     # thread can exit after its leader's record was already closed, and its
     # share of the group's CPU still belongs to that row.
     by_tgid: dict[int, _MutableProcess] = {}
-    tool_marks: list[tuple[float, str, str]] = []
+    tool_marks: list[ToolMark] = []
     next_process_seq = 1
     # The byte fence and event fence describe the same append-only journal.
     # Re-reading an event from at or before the cursor means those two fences
@@ -935,10 +936,11 @@ def parse_events(
                     # their calls on message-level timing.
                     continue
                 tool_marks.append(
-                    (
-                        (mono_ns + cursor.mono_offset_ns) / 1_000_000_000,
-                        "pre" if kind == "tool_pre" else "post",
-                        tool_use_id,
+                    ToolMark(
+                        host_mono=(mono_ns + cursor.mono_offset_ns) / 1_000_000_000,
+                        phase="pre" if kind == "tool_pre" else "post",
+                        tool_use_id=tool_use_id,
+                        guest_mono_ns=mono_ns,
                     )
                 )
                 continue
@@ -1129,13 +1131,16 @@ def attribute_processes(
 
     A process is attributed by its kernel-observed start, not by a sampler
     tick.  When two tool windows overlap, both call sequence numbers are kept
-    on the process row instead of arbitrarily picking one.  The guest/host
-    clock bridge has a measured error bound; widening windows by that bound is
-    conservative and prevents a boundary-adjacent process from being assigned
-    with false precision. If any tool window was dropped, no retained window
-    may claim a process: the missing call could have overlapped every one of
-    them. The process census is still returned, but its per-call links stay
-    empty and the parent ``tool_calls_truncated`` flag carries the loss.
+    on the process row instead of arbitrarily picking one.  A window the
+    guest's own hooks bounded is on the process journal's clock already and
+    is compared directly.  A message-level window is on the broker's clock;
+    the guest/host bridge has a measured error bound, and widening such a
+    window by that bound is conservative and prevents a boundary-adjacent
+    process from being assigned with false precision.  If any tool window
+    was dropped, no retained window may claim a process: the missing call
+    could have overlapped every one of them.  The process census is still
+    returned, but its per-call links stay empty and the parent
+    ``tool_calls_truncated`` flag carries the loss.
     """
     error_s: float = max(
         0, observation.clock_error_ns if clock_error_ns is None else clock_error_ns
@@ -1154,10 +1159,7 @@ def attribute_processes(
         call_seqs: list[int] = []
         if not platform_process and windows_complete:
             for index, window in enumerate(windows, start=1):
-                end = window.closed_mono
-                if process.started_host_mono + error_s < window.opened_mono:
-                    continue
-                if end is not None and process.started_host_mono - error_s > end:
+                if not _started_inside(process, window, error_s):
                     continue
                 call_seqs.append(index)
                 counts[index] += 1
@@ -1197,6 +1199,23 @@ def attribute_processes(
             }
         )
     return rows, counts
+
+
+def _started_inside(process: GuestProcess, window: ToolWindow, error_s: float) -> bool:
+    """Whether the process began inside the window, on the clock the window is on.
+
+    A window the guest's own hooks bounded shares the process journal's
+    clock, so the comparison is direct and carries no error band. A
+    message-level window lives on the broker's clock, and the process start
+    is bridged onto it with the measured error, which widens the window by
+    that much rather than claiming a boundary the bridge cannot support.
+    """
+    if window.opened_guest_ns is not None and window.closed_guest_ns is not None:
+        return window.opened_guest_ns <= process.started_guest_mono_ns <= window.closed_guest_ns
+    if process.started_host_mono + error_s < window.opened_mono:
+        return False
+    end = window.closed_mono
+    return end is None or process.started_host_mono - error_s <= end
 
 
 def add_process_counts(

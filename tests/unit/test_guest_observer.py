@@ -24,7 +24,7 @@ from cloud_agent_host.guest_observer import (
     parse_snapshot,
     parse_status,
 )
-from cloud_agent_host.tool_windows import TOOL_MARK_HELPER, ToolWindow
+from cloud_agent_host.tool_windows import TOOL_MARK_HELPER, ToolMark, ToolWindow
 
 
 def _cursor(**overrides) -> GuestObserverCursor:
@@ -407,8 +407,8 @@ def test_authenticated_guest_marks_share_the_uid_and_monotonic_fence():
     )
 
     assert observation.tool_marks == (
-        (11.001, "pre", "toolu_1"),
-        (11.004, "post", "toolu_1"),
+        ToolMark(11.001, "pre", "toolu_1", guest_mono_ns=1_001_000_000),
+        ToolMark(11.004, "post", "toolu_1", guest_mono_ns=1_004_000_000),
     )
 
 
@@ -536,6 +536,34 @@ def test_overlapping_tool_windows_keep_ambiguity_instead_of_picking_one():
 
     assert rows[0]["tool_call_seqs"] == [1, 2]
     assert counts == {1: 1, 2: 1}
+
+
+def test_an_exact_window_is_compared_on_the_guest_clock_without_the_error_band():
+    """Hook marks and process events share the guest clock; only a
+    message-level bracket needs the bridge and its error."""
+    observation = finish_observation(
+        cursor=_cursor(clock_error_ns=100_000_000),
+        snapshot=_snapshot(),
+        payload=_event(1, "fork", 1_050_000_000),
+        truncated=False,
+    )
+    exact = ToolWindow(
+        "one",
+        "Read",
+        opened_mono=11.060,
+        closed_mono=11.080,
+        source="exact",
+        opened_guest_ns=1_060_000_000,
+        closed_guest_ns=1_080_000_000,
+    )
+    bracket = ToolWindow("two", "Read", opened_mono=11.060, closed_mono=11.080)
+
+    rows, counts = attribute_processes(observation, [exact, bracket])
+
+    # 10 ms before the exact window is outside it, full stop. The same 10 ms
+    # is inside the 100 ms error band a message-level window must allow.
+    assert rows[0]["tool_call_seqs"] == [2]
+    assert counts == {1: 0, 2: 1}
 
 
 def test_a_dropped_tool_window_prevents_false_process_ownership():

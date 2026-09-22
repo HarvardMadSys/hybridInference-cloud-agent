@@ -23,6 +23,7 @@ from cloud_agent_host.tool_windows import (
     TOOL_MARK_FILE,
     TOOL_MARK_HELPER,
     TOOL_MARK_SANDBOX_PATH,
+    ToolMark,
     ToolMarkReader,
     ToolWindow,
     ToolWindowTracker,
@@ -382,12 +383,16 @@ def test_marks_narrow_a_window_and_label_it_exact():
     tracker.observe("tool_use", {"id": "t1", "name": "Bash"}, mono=1.0)
     tracker.observe("tool_result", {"tool_use_id": "t1"}, mono=9.0)
 
-    upgraded = tracker.apply_marks([(2.0, "pre", "t1"), (8.0, "post", "t1")])
+    report = tracker.apply_marks([ToolMark(2.0, "pre", "t1"), ToolMark(8.0, "post", "t1")])
 
     (window,) = tracker.windows()
-    assert upgraded == 1
+    (outcome,) = report.outcomes
+    assert report.upgraded == 1
     assert window.source == "exact"
     assert window.duration_ms == 6_000
+    assert outcome.status == "applied"
+    assert (outcome.open_lag_ms, outcome.close_lag_ms) == (-1000, 1000)
+    assert (outcome.message_duration_ms, outcome.exact_duration_ms) == (8_000, 6_000)
 
 
 def test_duplicate_marks_do_not_claim_an_ambiguous_exact_window():
@@ -395,31 +400,60 @@ def test_duplicate_marks_do_not_claim_an_ambiguous_exact_window():
     tracker.observe("tool_use", {"id": "t1", "name": "Bash"}, mono=1.0)
     tracker.observe("tool_result", {"tool_use_id": "t1"}, mono=9.0)
 
-    upgraded = tracker.apply_marks(
+    report = tracker.apply_marks(
         [
-            (2.0, "pre", "t1"),
-            (3.0, "pre", "t1"),
-            (8.0, "post", "t1"),
+            ToolMark(2.0, "pre", "t1"),
+            ToolMark(3.0, "pre", "t1"),
+            ToolMark(8.0, "post", "t1"),
         ]
     )
 
     (window,) = tracker.windows()
-    assert upgraded == 0
+    assert report.upgraded == 0
     assert window.source == "message"
+    assert report.outcomes[0].status == "duplicate"
 
 
-def test_a_mark_outside_the_window_it_would_narrow_is_refused():
-    """A stepped clock must not move a call somewhere it never ran."""
+def test_a_legacy_mark_outside_the_window_it_would_narrow_is_refused():
+    """The agent-writable file carries a wall clock: a clock that stepped
+    mid-turn must not move a call somewhere it never ran."""
     tracker = ToolWindowTracker()
     tracker.observe("tool_use", {"id": "t1", "name": "Bash"}, mono=1.0)
     tracker.observe("tool_result", {"tool_use_id": "t1"}, mono=9.0)
 
-    upgraded = tracker.apply_marks([(0.5, "pre", "t1"), (8.0, "post", "t1")])
+    report = tracker.apply_marks([ToolMark(0.5, "pre", "t1"), ToolMark(8.0, "post", "t1")])
 
     (window,) = tracker.windows()
-    assert upgraded == 0
+    assert report.upgraded == 0
     assert window.source == "message"
     assert window.opened_mono == 1.0
+    assert report.outcomes[0].status == "outside_window"
+
+
+def test_guest_marks_are_taken_even_when_the_message_arrived_after_the_call_ran():
+    """The pipe, not the clock: a 21 ms call can run and finish before the
+    broker reads the line announcing it. Guest marks are fenced by the
+    observer, so the message bracket is diagnostics, never a bound."""
+    tracker = ToolWindowTracker()
+    tracker.observe("tool_use", {"id": "t1", "name": "Read"}, mono=1.050)
+    tracker.observe("tool_result", {"tool_use_id": "t1"}, mono=1.120)
+
+    report = tracker.apply_marks(
+        [
+            ToolMark(1.000, "pre", "t1", guest_mono_ns=5_000_000_000),
+            ToolMark(1.021, "post", "t1", guest_mono_ns=5_021_000_000),
+        ]
+    )
+
+    (window,) = tracker.windows()
+    (outcome,) = report.outcomes
+    assert report.upgraded == 1
+    assert window.source == "exact"
+    assert window.duration_ms == 21
+    assert (window.opened_guest_ns, window.closed_guest_ns) == (5_000_000_000, 5_021_000_000)
+    assert outcome.status == "applied"
+    assert (outcome.open_lag_ms, outcome.close_lag_ms) == (50, 99)
+    assert (outcome.message_duration_ms, outcome.exact_duration_ms) == (70, 21)
 
 
 def test_half_a_pair_of_marks_leaves_the_call_alone():
@@ -428,9 +462,112 @@ def test_half_a_pair_of_marks_leaves_the_call_alone():
     tracker.observe("tool_use", {"id": "t1", "name": "Bash"}, mono=1.0)
     tracker.observe("tool_result", {"tool_use_id": "t1"}, mono=9.0)
 
-    tracker.apply_marks([(2.0, "pre", "t1")])
+    report = tracker.apply_marks([ToolMark(2.0, "pre", "t1")])
 
     assert tracker.windows()[0].source == "message"
+    assert report.outcomes[0].status == "unpaired"
+
+
+def test_a_misordered_pair_is_refused_and_named():
+    tracker = ToolWindowTracker()
+    tracker.observe("tool_use", {"id": "t1", "name": "Bash"}, mono=1.0)
+    tracker.observe("tool_result", {"tool_use_id": "t1"}, mono=9.0)
+
+    report = tracker.apply_marks(
+        [
+            ToolMark(3.0, "pre", "t1", guest_mono_ns=3_000_000_000),
+            ToolMark(2.0, "post", "t1", guest_mono_ns=2_000_000_000),
+        ]
+    )
+
+    assert tracker.windows()[0].source == "message"
+    assert report.outcomes[0].status == "misordered"
+    assert report.outcomes[0].exact_duration_ms is None
+
+
+def test_a_call_the_turn_never_closed_keeps_its_open_row():
+    """A cancel or timeout mid-call: the sandbox may still have seen the
+    call finish, and the log says so, but the row stays the record of a
+    result the broker never received."""
+    tracker = ToolWindowTracker()
+    tracker.observe("tool_use", {"id": "t1", "name": "Bash"}, mono=1.0)
+
+    report = tracker.apply_marks(
+        [
+            ToolMark(1.2, "pre", "t1", guest_mono_ns=1_200_000_000),
+            ToolMark(1.9, "post", "t1", guest_mono_ns=1_900_000_000),
+        ]
+    )
+
+    (window,) = tracker.windows()
+    (outcome,) = report.outcomes
+    assert report.upgraded == 0
+    assert window.source == "message"
+    assert window.duration_ms is None
+    assert outcome.status == "call_open"
+    assert outcome.exact_duration_ms == 700
+    assert outcome.close_lag_ms is None
+    assert tool_time_ms(tracker.windows()) is None
+
+
+def test_marks_for_a_call_the_stream_never_announced_are_counted_not_applied():
+    """Duplicate ids are tombstoned by the tracker; their hooks still fire."""
+    tracker = ToolWindowTracker()
+    tracker.observe("tool_use", {"id": "dup", "name": "Bash"}, mono=1.0)
+    tracker.observe("tool_use", {"id": "dup", "name": "Bash"}, mono=1.1)
+    tracker.observe("tool_use", {"id": "kept", "name": "Read"}, mono=1.2)
+    tracker.observe("tool_result", {"tool_use_id": "kept"}, mono=1.3)
+
+    report = tracker.apply_marks(
+        [
+            ToolMark(1.01, "pre", "dup", guest_mono_ns=1_010_000_000),
+            ToolMark(1.05, "post", "dup", guest_mono_ns=1_050_000_000),
+            ToolMark(1.21, "pre", "kept", guest_mono_ns=1_210_000_000),
+            ToolMark(1.25, "post", "kept", guest_mono_ns=1_250_000_000),
+            ToolMark(1.26, "post", "subagent", guest_mono_ns=1_260_000_000),
+        ]
+    )
+
+    assert tracker.truncated
+    assert [window.tool_use_id for window in tracker.windows()] == ["kept"]
+    assert report.unknown_calls == 3
+    assert [outcome.status for outcome in report.outcomes] == ["applied"]
+    assert report.outcomes[0].call_seq == 1
+
+
+def test_an_unmarked_call_is_reported_as_such():
+    tracker = ToolWindowTracker()
+    tracker.observe("tool_use", {"id": "t1", "name": "Bash"}, mono=1.0)
+    tracker.observe("tool_result", {"tool_use_id": "t1"}, mono=1.5)
+
+    report = tracker.apply_marks([])
+
+    assert report.counts() == {"no_marks": 1}
+    assert report.describe() == (
+        "windows=1 applied=0 unknown_calls=0 no_marks=1 "
+        "calls=[1:Bash:no_marks:lag=-/-:msg=500ms:exact=-]"
+    )
+
+
+def test_guest_marks_outrank_legacy_marks_for_the_same_call():
+    """Where the observer spoke, the agent-writable file is not consulted."""
+    tracker = ToolWindowTracker()
+    tracker.observe("tool_use", {"id": "t1", "name": "Bash"}, mono=1.0)
+    tracker.observe("tool_result", {"tool_use_id": "t1"}, mono=9.0)
+
+    report = tracker.apply_marks(
+        [
+            ToolMark(2.0, "pre", "t1"),
+            ToolMark(8.0, "post", "t1"),
+            ToolMark(0.5, "pre", "t1", guest_mono_ns=500_000_000),
+            ToolMark(0.9, "post", "t1", guest_mono_ns=900_000_000),
+        ]
+    )
+
+    (window,) = tracker.windows()
+    assert report.outcomes[0].status == "applied"
+    assert window.duration_ms == 400
+    assert window.opened_guest_ns == 500_000_000
 
 
 def test_exact_windows_stop_parallel_calls_sharing_when_they_did_not_overlap():
@@ -450,7 +587,12 @@ def test_exact_windows_stop_parallel_calls_sharing_when_they_did_not_overlap():
     assert all(row["cpu_usec_exclusive"] is None for row in before)
 
     tracker.apply_marks(
-        [(0.5, "pre", "a"), (5.0, "post", "a"), (6.0, "pre", "b"), (11.5, "post", "b")]
+        [
+            ToolMark(0.5, "pre", "a"),
+            ToolMark(5.0, "post", "a"),
+            ToolMark(6.0, "pre", "b"),
+            ToolMark(11.5, "post", "b"),
+        ]
     )
     after = attribute(samples, tracker.windows())
 
@@ -480,7 +622,7 @@ def test_the_reader_only_takes_marks_written_after_it_was_built(tmp_path):
     with path.open("a") as handle:
         handle.write("101.0 pre new\n")
 
-    assert [mark[2] for mark in reader.read()] == ["new"]
+    assert [mark.tool_use_id for mark in reader.read()] == ["new"]
 
 
 def test_the_remote_reader_fences_retained_marks_and_bounds_the_slice():
@@ -499,7 +641,7 @@ def test_the_remote_reader_fences_retained_marks_and_bounds_the_slice():
     )
     content.extend(b"101.0 pre new\n101.5 post new\n")
 
-    assert [mark[2] for mark in reader.read()] == ["new", "new"]
+    assert [mark.tool_use_id for mark in reader.read()] == ["new", "new"]
     assert reads == [(len(b"100.0 pre old\n"), 1024 * 1024)]
 
 
@@ -534,7 +676,7 @@ def test_a_malformed_mark_is_skipped_not_raised(tmp_path):
         "1.0 pre t1;rm -rf /\n"
         "1.0 pre good\n"
     )
-    assert [mark[2] for mark in reader.read()] == ["good"]
+    assert [mark.tool_use_id for mark in reader.read()] == ["good"]
 
 
 def test_no_state_mount_means_no_marks_and_no_error():

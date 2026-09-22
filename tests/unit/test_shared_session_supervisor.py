@@ -35,6 +35,7 @@ from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
     SharedMemberManifest,
 )
+from cloud_agent_host.tool_windows import ToolMark
 from cloud_agent_host.workspace_broker import SharedSandboxIdentityRequest, create_app
 from cloud_agent_profiling import operation_profiling
 
@@ -1592,8 +1593,8 @@ def test_kata_turn_observation_is_uid_scoped_and_closes_before_platform_cleanup(
             return replace(
                 observation,
                 tool_marks=(
-                    (10.0, "pre", "toolu_1"),
-                    (10.1, "post", "toolu_1"),
+                    ToolMark(10.0, "pre", "toolu_1"),
+                    ToolMark(10.1, "post", "toolu_1"),
                 ),
             )
 
@@ -1629,8 +1630,8 @@ def test_kata_turn_observation_is_uid_scoped_and_closes_before_platform_cleanup(
 
     assert telemetry.complete is True
     assert telemetry.tool_marks == (
-        (10.0, "pre", "toolu_1"),
-        (10.1, "post", "toolu_1"),
+        ToolMark(10.0, "pre", "toolu_1"),
+        ToolMark(10.1, "post", "toolu_1"),
     )
     # The window is fenced by the observation that reads it back: the opening
     # census lands after the fence is taken, the closing census lands before
@@ -1825,7 +1826,7 @@ def test_shared_claude_turn_fences_and_returns_exact_tool_marks():
 
             def read():
                 self.events.append(("marks-finish",))
-                return [(10.0, "pre", "toolu_1"), (10.1, "post", "toolu_1")]
+                return [ToolMark(10.0, "pre", "toolu_1"), ToolMark(10.1, "post", "toolu_1")]
 
             return SimpleNamespace(read=read)
 
@@ -1856,8 +1857,8 @@ def test_shared_claude_turn_fences_and_returns_exact_tool_marks():
     telemetry = supervisor.complete_turn("athr_source", lease.token, turn)
 
     assert telemetry.tool_marks == (
-        (10.0, "pre", "toolu_1"),
-        (10.1, "post", "toolu_1"),
+        ToolMark(10.0, "pre", "toolu_1"),
+        ToolMark(10.1, "post", "toolu_1"),
     )
     assert manager.events[-5:] == [
         ("census", 0),
