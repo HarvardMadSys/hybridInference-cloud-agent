@@ -6,8 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ComposerPlusMenu } from './ComposerPlusMenu';
 
-// The menu is the composer's one attach point, and the goal row is its own
-// group inside it: what this message carries, next to Skills and MCP.
+// Files and Goal share the Add group; Skills and MCP keep their own tool actions.
 
 afterEach(cleanup);
 
@@ -16,7 +15,7 @@ function renderMenu(props: Partial<Parameters<typeof ComposerPlusMenu>[0]> = {})
     <ComposerPlusMenu
       onOpenSkills={() => {}}
       skillSummary="2"
-      goalSummary="Keep going until…"
+      goalSummary="Set or view the goal for a long-running task"
       onOpenGoal={() => {}}
       {...props}
     />,
@@ -24,35 +23,35 @@ function renderMenu(props: Partial<Parameters<typeof ComposerPlusMenu>[0]> = {})
 }
 
 function open() {
-  fireEvent.click(screen.getByRole('button', { name: 'Add files or skills' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Add to message' }));
   return screen.getByRole('menu');
 }
 
 describe('ComposerPlusMenu', () => {
   it('shows the goal this message would carry', () => {
     renderMenu({ goalSummary: 'make `pytest` pass' });
-    expect(
-      within(open()).getByRole('menuitem', { name: /Completion condition/ }),
-    ).toHaveTextContent('make `pytest` pass');
+    expect(within(open()).getByRole('menuitem', { name: /Goal/ })).toHaveTextContent(
+      'make `pytest` pass',
+    );
   });
 
   it('reads as an invitation when nothing is set', () => {
     renderMenu();
-    expect(
-      within(open()).getByRole('menuitem', { name: /Completion condition/ }),
-    ).toHaveTextContent('Keep going until…');
+    expect(within(open()).getByRole('menuitem', { name: /Goal/ })).toHaveTextContent(
+      'Set or view the goal for a long-running task',
+    );
   });
 
   it('hands the goal row to the caller rather than opening anything itself', () => {
     const onOpenGoal = vi.fn();
     renderMenu({ onOpenGoal });
-    fireEvent.click(within(open()).getByRole('menuitem', { name: /Completion condition/ }));
+    fireEvent.click(within(open()).getByRole('menuitem', { name: /Goal/ }));
     expect(onOpenGoal).toHaveBeenCalledTimes(1);
   });
 
   it('opens on arrow-down from the trigger and returns focus on Escape', async () => {
     renderMenu();
-    const trigger = screen.getByRole('button', { name: 'Add files or skills' });
+    const trigger = screen.getByRole('button', { name: 'Add to message' });
     fireEvent.keyDown(trigger, { key: 'ArrowDown' });
     expect(trigger).toHaveAttribute('aria-expanded', 'true');
     fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
@@ -68,7 +67,7 @@ describe('ComposerPlusMenu', () => {
     expect(menu.queryByRole('menuitem', { name: /Upload files/ })).not.toBeInTheDocument();
     expect(menu.queryByRole('menuitem', { name: /MCP servers/ })).not.toBeInTheDocument();
     expect(menu.getByRole('menuitem', { name: /Skills/ })).toBeInTheDocument();
-    expect(menu.getByRole('menuitem', { name: /Completion condition/ })).toBeInTheDocument();
+    expect(menu.getByRole('menuitem', { name: /Goal/ })).toBeInTheDocument();
   });
 
   it('hands the skills row to the caller too', () => {
@@ -76,5 +75,39 @@ describe('ComposerPlusMenu', () => {
     renderMenu({ onOpenSkills });
     fireEvent.click(within(open()).getByRole('menuitem', { name: /Skills/ }));
     expect(onOpenSkills).toHaveBeenCalledTimes(1);
+  });
+
+  it('navigates the grouped rows without stopping on headings', () => {
+    renderMenu({ onFiles: vi.fn() });
+    const trigger = screen.getByRole('button', { name: 'Add to message' });
+    fireEvent.keyDown(trigger, { key: 'ArrowUp' });
+    expect(screen.getByRole('menuitem', { name: /Skills/ })).toHaveFocus();
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Home' });
+    expect(screen.getByRole('menuitem', { name: 'Upload files' })).toHaveFocus();
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'ArrowDown' });
+    expect(screen.getByRole('menuitem', { name: /Goal/ })).toHaveFocus();
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'End' });
+    expect(screen.getByRole('menuitem', { name: /Skills/ })).toHaveFocus();
+  });
+
+  it('keeps MCP navigation inside the panel and resets it after dismissal', () => {
+    renderMenu({
+      mcp: { choices: [], loading: false, error: null, count: 0, reload: vi.fn(), toggle: vi.fn() },
+    });
+    fireEvent.click(within(open()).getByRole('menuitem', { name: 'MCP servers' }));
+    const panel = screen.getByRole('dialog', { name: 'MCP servers' });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    const search = within(panel).getByRole('searchbox');
+    expect(search).toHaveFocus();
+    fireEvent.keyDown(search, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'MCP servers' })).toHaveFocus();
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'MCP servers' }));
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(within(open()).getByRole('menuitem', { name: /Goal/ })).toHaveFocus();
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+    expect(screen.getByRole('button', { name: 'Add to message' })).toHaveFocus();
   });
 });

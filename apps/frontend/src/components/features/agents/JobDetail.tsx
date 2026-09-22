@@ -44,6 +44,7 @@ import { PaneResizer } from './PaneResizer';
 import { Picker } from './Picker';
 import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
+import { composerCommandMatches } from './composerCommands';
 import { GoalBar } from './goal/GoalBar';
 import { isGoalRevisionConflict, writeGoal } from './goal/goalApi';
 import { GOAL_COMMAND_PREFIX, useGoalCommand } from './goal/useGoalCommand';
@@ -910,6 +911,10 @@ export function JobDetail({
   function insertGoalCommand() {
     setGoalHint(null);
     setFollowUp((current) => {
+      // Switching menus while typing a command completes its partial token.
+      if (composerCommandMatches(current).some((entry) => entry.name === 'goal')) {
+        return GOAL_COMMAND_PREFIX;
+      }
       // Already the command: nothing to add, and prefixing again would make
       // `/goal /goal …` an objective nobody wrote.
       if (/^\s*\/goal(\s|$)/i.test(current)) return current;
@@ -1641,7 +1646,6 @@ export function JobDetail({
                           })
                           .finally(() => setReadingFiles(false));
                       }}
-                      className="relative"
                     >
                       <ComposerCommandMenu
                         id={goalCommand.menuId}
@@ -1687,15 +1691,18 @@ export function JobDetail({
                         onRemove={attachments.remove}
                         disabled={contextLost || submitting}
                       />
-                      <div className="relative flex flex-wrap items-center gap-1.5 border-t border-gray-100/90 dark:border-white/5 px-3 py-2.5">
+                      <div className="flex flex-wrap items-center gap-1.5 border-t border-gray-100/90 dark:border-white/5 px-3 py-2.5">
                         <ComposerPlusMenu
                           onFiles={attachments.add}
                           onOpenSkills={() => setSkillsOpen(true)}
                           skillSummary={String(selectedSkills.length)}
-                          goalSummary={t('attach.goalNone')}
+                          goalSummary={t('commands.goalHint')}
                           onOpenGoal={insertGoalCommand}
                           mcp={mcp}
-                          onOpen={mcp.reload}
+                          onOpen={() => {
+                            goalCommand.dismiss();
+                            mcp.reload();
+                          }}
                           mcpBlockedReason={mcpBlockedReason}
                           disabled={contextLost || submitting}
                         />

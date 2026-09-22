@@ -193,10 +193,13 @@ platform's next round is what starts the work — nothing has to be sent saying
 content *and* the goal, in the one create request, so a command can never queue
 two tasks and a failed command can never leave one behind.
 
-The composer's plus menu keeps a Goal row, and it is the same interaction: it
-writes the command into the box and hands the caret back. It joins that menu as
-its own group, after the uploads, Skills and MCP entries, and it has no
-chevron, because it opens nothing.
+The composer's plus menu and slash suggestions share a panel spanning the
+composer, above the whole input surface. Rows put the icon and name on the
+left and their description on the right. File and Goal sit in the Add group;
+Skills and MCP servers sit under Tools. Goal uses the same name and description
+in both menus. Choosing it writes `/goal ` into the box and returns the caret,
+without opening a dialog. MCP choices open within the same panel with Back,
+so the panel does not expand past the edge of a narrow screen.
 
 A conversation that already has a goal gets a compact header sharing its
 message box's outer surface. The objective is the primary text; a short status

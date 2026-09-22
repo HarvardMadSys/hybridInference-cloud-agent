@@ -668,7 +668,7 @@ describe('JobDetail', () => {
     // latest turn carries none, so a "1" here would mean the picker had gone
     // back to reading the URL's turn instead of the conversation's newest one.
     // (The control moved into the attach menu; what it reports did not change.)
-    fireEvent.click(screen.getByRole('button', { name: 'Add files or skills' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add to message' }));
     expect(screen.getByRole('menuitem', { name: /Skills\s*0/ })).toBeInTheDocument();
   });
 
@@ -695,7 +695,7 @@ describe('JobDetail', () => {
         })}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Add files or skills' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add to message' }));
     fireEvent.click(screen.getByRole('menuitem', { name: /Skills\s*1/ }));
     fireEvent.click(await screen.findByRole('switch'));
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
@@ -734,10 +734,8 @@ describe('JobDetail', () => {
     );
     const box = await screen.findByLabelText('Add a follow-up');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add files or skills' }));
-    fireEvent.click(
-      within(screen.getByRole('menu')).getByRole('menuitem', { name: /Completion condition/ }),
-    );
+    fireEvent.click(screen.getByRole('button', { name: 'Add to message' }));
+    fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: /Goal/ }));
     // The row starts a command in the box; it opens nothing.
     expect(box).toHaveValue('/goal ');
 
@@ -788,7 +786,7 @@ describe('JobDetail', () => {
 
   it('opens the shared plus menu from the follow-up and restores keyboard focus', () => {
     render(<JobDetail job={makeJob({ state: 'done' })} />);
-    const plus = screen.getByRole('button', { name: 'Add files or skills' });
+    const plus = screen.getByRole('button', { name: 'Add to message' });
     expect(screen.queryByRole('button', { name: /Skills for this conversation/ })).toBeNull();
     fireEvent.keyDown(plus, { key: 'ArrowDown' });
     expect(screen.getByRole('menuitem', { name: 'Upload files' })).toHaveFocus();
@@ -813,7 +811,7 @@ describe('JobDetail', () => {
     const box = screen.getByLabelText('Add a follow-up');
     fireEvent.change(box, { target: { value: 'Use this spec' } });
     const file = new File(['requirements'], 'spec.txt');
-    fireEvent.click(screen.getByRole('button', { name: 'Add files or skills' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add to message' }));
     const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
     const pick = vi.spyOn(input, 'click');
     fireEvent.click(screen.getByRole('menuitem', { name: 'Upload files' }));
@@ -899,7 +897,7 @@ describe('JobDetail', () => {
     );
     render(<JobDetail job={makeJob({ threadId: 'thread-existing' })} />);
     fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'Continue' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Add files or skills' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add to message' }));
     fireEvent.click(screen.getByRole('menuitem', { name: /MCP/ }));
     const toggle = await screen.findByRole('switch', { name: 'Notion' });
     expect(toggle).toHaveAttribute('aria-checked', 'true');
@@ -2772,10 +2770,8 @@ describe('JobDetail', () => {
       // command into the message box, where the objective would have been typed
       // anyway, and leaves the caret after it.
       const box = await composer();
-      fireEvent.click(screen.getByRole('button', { name: 'Add files or skills' }));
-      fireEvent.click(
-        within(screen.getByRole('menu')).getByRole('menuitem', { name: /Completion condition/ }),
-      );
+      fireEvent.click(screen.getByRole('button', { name: 'Add to message' }));
+      fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: /Goal/ }));
 
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
       expect(box).toHaveValue('/goal ');

@@ -135,7 +135,7 @@ async function pick(container: HTMLElement, files: File[]) {
 }
 
 async function openAttachMenu() {
-  fireEvent.click(await screen.findByRole('button', { name: 'Add files or skills' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Add to message' }));
   return screen.findByRole('menu');
 }
 
@@ -883,6 +883,20 @@ describe('TaskComposer goal command', () => {
       fireEvent.change(box, { target: { value: typed } });
       expect(menu(), typed).not.toBeInTheDocument();
     }
+  });
+
+  it('opens Add without leaving slash suggestions behind it', async () => {
+    const box = await composer();
+    fireEvent.change(box, { target: { value: '/go' } });
+    expect(menu()).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Add to message' }));
+    expect(menu()).not.toBeInTheDocument();
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+    expect(box).toHaveValue('/go');
+    fireEvent.click(screen.getByRole('menuitem', { name: /Goal/ }));
+    expect(box).toHaveValue('/goal ');
+    expect(box).toHaveFocus();
+    expect(createAgentJob).not.toHaveBeenCalled();
   });
 
   it('choosing the command writes it into the box and keeps the caret there', async () => {

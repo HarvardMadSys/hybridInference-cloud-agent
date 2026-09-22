@@ -11,6 +11,7 @@ import { useT } from '@/components/providers';
 import { Picker } from './Picker';
 import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
+import { composerCommandMatches } from './composerCommands';
 import { AttachmentStrip } from './attachments/AttachmentStrip';
 import { useAttachments } from './attachments/useAttachments';
 import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
@@ -182,6 +183,10 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   function insertGoalCommand() {
     setGoalHint(null);
     setTask((current) => {
+      // Switching menus while typing a command completes its partial token.
+      if (composerCommandMatches(current).some((entry) => entry.name === 'goal')) {
+        return GOAL_COMMAND_PREFIX;
+      }
       // Already the command: nothing to add, and prefixing again would make
       // `/goal /goal …` an objective nobody wrote.
       if (/^\s*\/goal(\s|$)/i.test(current)) return current;
@@ -366,7 +371,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           />
         )}
 
-        <div className="relative flex flex-wrap items-center gap-2 border-t border-gray-100/90 dark:border-white/5 px-3.5 py-2.5">
+        <div className="flex flex-wrap items-center gap-2 border-t border-gray-100/90 dark:border-white/5 px-3.5 py-2.5">
           {disconnected ? (
             <span className="inline-flex min-w-0 flex-1 items-center gap-2 text-[13px] text-gray-400 dark:text-gray-500">
               <svg
@@ -389,12 +394,13 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
             <>
               <ComposerPlusMenu
                 disabled={busy}
+                onOpen={goalCommand.dismiss}
                 onFiles={attachments.add}
                 onOpenSkills={() => setSkillsOpen(true)}
                 skillSummary={
                   pendingSkillDefaults ? t('attach.skillsDefaults') : String(selectedSkills.length)
                 }
-                goalSummary={t('attach.goalNone')}
+                goalSummary={t('commands.goalHint')}
                 onOpenGoal={insertGoalCommand}
                 mcp={mcp}
                 mcpBlockedReason={mcpBlockedReason}

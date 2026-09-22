@@ -288,9 +288,12 @@ export const zhCN: Record<TranslationKey, string> = {
   'commands.goalHint': '为长时间运行的任务设置或查看目标',
 
   // ── 输入框附件 ──────────────────────────────────────────────────────────
-  'attach.goal': '完成条件',
-  'attach.goalNone': '一直做到……',
-  'attach.open': '添加文件或 Skills',
+  'attach.goal': '目标',
+  'attach.open': '添加到消息',
+  'attach.add': '添加',
+  'attach.tools': '工具',
+  'attach.file': '文件',
+  'attach.back': '返回',
   'attach.upload': '上传文件',
   'attach.mcp': 'MCP 服务器',
   'attach.mcpSearch': '搜索 MCP 服务器…',

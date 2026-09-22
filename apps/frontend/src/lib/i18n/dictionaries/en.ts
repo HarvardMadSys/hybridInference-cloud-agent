@@ -298,9 +298,12 @@ export const en = {
   'commands.goalHint': 'Set or view the goal for a long-running task',
 
   // ── Composer attachments ────────────────────────────────────────────────
-  'attach.goal': 'Completion condition',
-  'attach.goalNone': 'Keep going until…',
-  'attach.open': 'Add files or skills',
+  'attach.goal': 'Goal',
+  'attach.open': 'Add to message',
+  'attach.add': 'Add',
+  'attach.tools': 'Tools',
+  'attach.file': 'File',
+  'attach.back': 'Back',
   'attach.upload': 'Upload files',
   'attach.mcp': 'MCP servers',
   'attach.mcpSearch': 'Search MCP servers…',

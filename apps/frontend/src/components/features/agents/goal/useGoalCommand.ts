@@ -69,6 +69,8 @@ export interface GoalCommandControls {
   onHighlight: (index: number) => void;
   /** Take the highlighted row, as Enter would. */
   onChoose: (index: number) => void;
+  /** Hide suggestions while another composer menu takes focus. */
+  dismiss: () => void;
   /** True while a `/goal <objective>` write is in flight. */
   busy: boolean;
   /** Take a key while the menu is open; true means it was consumed. */
@@ -200,6 +202,7 @@ export function useGoalCommand({
     activeId: open && matches[activeIndex] ? `${menuId}-${matches[activeIndex].name}` : undefined,
     onHighlight,
     onChoose: choose,
+    dismiss: () => setDismissed(true),
     busy,
     onKeyDown,
     submit,
