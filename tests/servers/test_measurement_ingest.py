@@ -870,3 +870,23 @@ async def test_invalid_manifest_config_version_is_a_422(client: AsyncClient, sto
 
     assert response.status_code == 422
     assert store.measurements.rows == []
+
+
+def test_continuous_ingest_requires_an_explicit_untimed_manifest():
+    """Only a declared continuous run accepts a null expiry and zero allowance."""
+    manifest = _manifest(
+        continuous=True,
+        expires_at=None,
+        max_operations=0,
+        admission_instances=[{"instance": "cp-1", "max_operations": 0}],
+    )
+    accepted = measurement_ingest.validate_run(manifest)
+    assert accepted["expires_at"] is None
+    for invalid in (
+        {k: v for k, v in manifest.items() if k != "expires_at"},
+        {**manifest, "continuous": False},
+        {**manifest, "max_operations": 100},
+        {**manifest, "expires_at": _manifest()["expires_at"]},
+    ):
+        with pytest.raises(MeasurementRejected):
+            measurement_ingest.validate_run(invalid)

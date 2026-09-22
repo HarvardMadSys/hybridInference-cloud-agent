@@ -17,8 +17,8 @@ Four numbers run this loop, and each is here for a different reason:
   keeps one code path authoritative.
 * **No lease, and no query on the hot path.** No file or terminal request ever
   reads the database: it consults this process's published snapshot, which the
-  loop below keeps current. The experiment's own absolute deadline is what ends
-  collection if the loop itself cannot run.
+  loop below keeps current. Timed runs expire independently; continuous runs
+  retain the last applied state while the loop cannot run.
 * **A sweep.** Landing the terminal state of a lapsed run is bookkeeping, not
   authority: readers already treat a past deadline as over. Doing it here keeps
   the control row honest for the *next* Start, which is the one place the
@@ -221,8 +221,12 @@ def _descriptor_for_run(run: Mapping[str, Any]) -> ProfilingRun | None:
         "target": dict(run.get("target") or {}),
         "admission_instances": [dict(item) for item in run.get("admission_instances") or ()],
     }
+    if run.get("continuous") is True:
+        if "expires_at" not in run:
+            return None
+        descriptor.update(continuous=True, expires_at=run.get("expires_at"), max_operations=0)
     try:
-        parsed = parse_profile_run(json.dumps(descriptor))
+        parsed = parse_profile_run(json.dumps(descriptor), allow_continuous=True)
     except Exception:
         return None
     # The parsed descriptor states which control source rooted it. That travels

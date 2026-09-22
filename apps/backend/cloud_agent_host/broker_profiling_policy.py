@@ -235,8 +235,12 @@ def _parse_run_payload(value: Any) -> ProfilingRun | None:
         "target": target,
         "admission_instances": [],
     }
+    if value.get("continuous") is True:
+        if "expires_at" not in value:
+            return None
+        descriptor.update(continuous=True, expires_at=value.get("expires_at"), max_operations=0)
     try:
-        return parse_run(json.dumps(descriptor))
+        return parse_run(json.dumps(descriptor), allow_continuous=True)
     except ValueError:
         return None
 

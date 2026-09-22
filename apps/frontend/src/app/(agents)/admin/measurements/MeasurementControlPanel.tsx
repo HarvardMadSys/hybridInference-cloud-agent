@@ -29,7 +29,7 @@
 // stale, because a card that empties itself on a network blip is a card that
 // reports an outage nobody had.
 
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 
 import { getAgentRunnerHosts, type AgentRunnerHost } from '@/lib/api/admin';
 import {
@@ -53,9 +53,6 @@ const TICK_MS = 1000;
 
 /** The `<select>` value for "All hosts"; the API takes a null target for it. */
 const ALL_HOSTS = '\u0000all-hosts';
-
-const DURATION_MINUTES = [1, 5, 10, 30];
-const DEFAULT_DURATION_MINUTES = 10;
 
 const OPERATION_GROUPS: { group: MeasurementOperationGroup; label: string }[] = [
   { group: 'sandbox_startup', label: 'Sandbox startup' },
@@ -119,10 +116,6 @@ function statusDetail(control: ProfilingControlSnapshot): string {
     'This deployment is not configured for Admin control: there is no control state here to ' +
     'start or stop. That is not the same as off.'
   );
-}
-
-function durationLabel(minutes: number): string {
-  return minutes === 1 ? '1 minute' : `${minutes} minutes`;
 }
 
 function operationWords(operations: string[]): string {
@@ -195,7 +188,6 @@ export function MeasurementControlPanel({
   const [formOpen, setFormOpen] = useState(false);
   const [groups, setGroups] = useState<MeasurementOperationGroup[]>(ALL_GROUP_NAMES);
   const [host, setHost] = useState('');
-  const [minutes, setMinutes] = useState(DEFAULT_DURATION_MINUTES);
 
   const [hosts, setHosts] = useState<AgentRunnerHost[] | null>(null);
   const [hostsError, setHostsError] = useState<string | null>(null);
@@ -238,7 +230,9 @@ export function MeasurementControlPanel({
     setSnapshot({
       control: next,
       expiresAtMs:
-        next.run === null ? null : applied + Math.max(0, next.run.seconds_remaining) * 1000,
+        next.run?.expires_at == null
+          ? null
+          : applied + Math.max(0, next.run.seconds_remaining) * 1000,
     });
     setNowMs(applied);
     setRefreshFailed(false);
@@ -330,7 +324,11 @@ export function MeasurementControlPanel({
     getAgentRunnerHosts(controller.signal)
       .then((pool) => {
         if (controller.signal.aborted) return;
-        setHosts(pool.hosts ?? []);
+        setHosts(
+          (pool.hosts ?? []).filter(
+            (item) => item.enrolled && ['online', 'draining'].includes(item.status),
+          ),
+        );
       })
       .catch((e: unknown) => {
         if (controller.signal.aborted) return;
@@ -418,7 +416,6 @@ export function MeasurementControlPanel({
       revision: control.revision,
       operations,
       host: targetHost,
-      duration: minutes,
     });
     const requestId =
       enableAttempt.current?.fingerprint === fingerprint
@@ -437,7 +434,7 @@ export function MeasurementControlPanel({
           expected_revision: control.revision,
           operations,
           target: { host: targetHost },
-          duration_seconds: minutes * 60,
+          duration_seconds: null,
         },
         controller.signal,
       );
@@ -623,33 +620,6 @@ export function MeasurementControlPanel({
                 </p>
               )}
             </div>
-
-            <div>
-              <label
-                className="block text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400"
-                htmlFor="measurement-duration"
-              >
-                Duration
-              </label>
-              <select
-                id="measurement-duration"
-                className={`${INPUT} mt-1`}
-                value={String(minutes)}
-                disabled={busy}
-                onChange={(event) => setMinutes(Number(event.target.value))}
-              >
-                {DURATION_MINUTES.map((value) => (
-                  <option key={value} value={String(value)}>
-                    {durationLabel(value)}
-                  </option>
-                ))}
-              </select>
-              {Number.isFinite(control.bounds?.min_duration_seconds) && (
-                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  {`The server accepts ${control.bounds.min_duration_seconds}–${control.bounds.max_duration_seconds} seconds.`}
-                </p>
-              )}
-            </div>
           </div>
 
           <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -662,8 +632,6 @@ export function MeasurementControlPanel({
           </div>
         </form>
       )}
-
-      {control !== null && <ControlDetails control={control} />}
     </section>
   );
 }
@@ -683,8 +651,14 @@ function RunFacts({
       <ul className="mt-3 space-y-1 text-sm text-gray-700 dark:text-gray-300">
         <li>{`Operations: ${operationWords(run.operations)}`}</li>
         <li>{`Host: ${hostWords(run)}`}</li>
-        <li>{`Expires at: ${dateTime(run.expires_at)}`}</li>
-        <li>{`Time left: ${secondsLeft === null ? 'Unavailable' : mmss(secondsLeft)}`}</li>
+        {run.expires_at === null ? (
+          <li>Collecting until you disable measurement.</li>
+        ) : (
+          <>
+            <li>{`Expires at: ${dateTime(run.expires_at)}`}</li>
+            <li>{`Time left: ${secondsLeft === null ? 'Unavailable' : mmss(secondsLeft)}`}</li>
+          </>
+        )}
         <li>{`Stored samples: ${number(control.stored_samples)}`}</li>
       </ul>
       {control.stored_samples === 0 && (
@@ -695,83 +669,5 @@ function RunFacts({
       )}
       <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">{SAMPLE_NOTE}</p>
     </>
-  );
-}
-
-/**
- * The diagnostic material, folded away.
- *
- * Everything here is either an internal identifier, a server clock, or the
- * bound the server applies to one producer. It is useful when a run is not
- * behaving and noise when it is, so the card keeps it behind one click rather
- * than in the reading path.
- */
-function ControlDetails({ control }: { control: ProfilingControlSnapshot }) {
-  const selectable = Object.entries(control.operations?.selectable ?? {});
-  return (
-    <details className="mt-4 border-t border-gray-100 pt-3 dark:border-white/5">
-      <summary className="cursor-pointer text-xs font-medium text-gray-500 dark:text-gray-400">
-        Details
-      </summary>
-      <dl className="mt-3 grid gap-x-8 gap-y-2 text-xs sm:grid-cols-2 lg:grid-cols-3">
-        <DetailItem label="Mode">{control.mode}</DetailItem>
-        <DetailItem label="Revision">{number(control.revision)}</DetailItem>
-        <DetailItem label="Deployment">{control.deployment}</DetailItem>
-        <DetailItem label="Server time">{dateTime(control.server_time)}</DetailItem>
-        <DetailItem label="Configured">{control.configured ? 'Yes' : 'No'}</DetailItem>
-        <DetailItem label="Run active">{control.run_active ? 'Yes' : 'No'}</DetailItem>
-        <DetailItem label="Run ID">
-          {control.run?.run_id ?? control.last_stopped_run?.run_id ?? 'No run recorded'}
-        </DetailItem>
-        <DetailItem label="Experiment started">
-          {dateTime(control.run?.started_at ?? control.last_stopped_run?.started_at)}
-        </DetailItem>
-        <DetailItem label="Experiment stopped">
-          {dateTime(control.run?.stopped_at ?? control.last_stopped_run?.stopped_at)}
-        </DetailItem>
-        <DetailItem label="Lifecycle">
-          {control.run?.lifecycle ?? control.last_stopped_run?.lifecycle ?? 'Not reported'}
-        </DetailItem>
-        <DetailItem label="Source">
-          {control.run?.source ?? control.last_stopped_run?.source ?? 'Not reported'}
-        </DetailItem>
-        <DetailItem label="Created by">
-          {control.run?.created_by ?? control.last_stopped_run?.created_by ?? 'Not reported'}
-        </DetailItem>
-        <DetailItem label="Control revision">
-          {number(control.run?.control_revision ?? control.last_stopped_run?.control_revision)}
-        </DetailItem>
-        <DetailItem label="Stored samples">{number(control.stored_samples)}</DetailItem>
-        <DetailItem label="Budget scope">{control.budget_scope}</DetailItem>
-        <DetailItem label="Budget note">{control.budget_note || 'Not stated'}</DetailItem>
-        <DetailItem label="Selectable operations">
-          {selectable.length > 0
-            ? selectable.map(([group, names]) => `${group}: ${names.join(', ')}`).join(' · ')
-            : 'None offered by this deployment'}
-        </DetailItem>
-        <DetailItem label="Known operations">
-          {control.operations?.all?.length ? control.operations.all.join(', ') : 'None reported'}
-        </DetailItem>
-        <DetailItem label="Duration bounds">
-          {Number.isFinite(control.bounds?.min_duration_seconds)
-            ? `${control.bounds.min_duration_seconds}–${control.bounds.max_duration_seconds} seconds`
-            : 'Not reported'}
-        </DetailItem>
-        <DetailItem label="Operation bounds">
-          {Number.isFinite(control.bounds?.default_max_operations)
-            ? `${number(control.bounds.default_max_operations)} by default, ${number(control.bounds.hard_max_operations)} at most`
-            : 'Not reported'}
-        </DetailItem>
-      </dl>
-    </details>
-  );
-}
-
-function DetailItem({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div>
-      <dt className="font-medium text-gray-500 dark:text-gray-400">{label}</dt>
-      <dd className="mt-0.5 break-words text-gray-700 dark:text-gray-300">{children}</dd>
-    </div>
   );
 }

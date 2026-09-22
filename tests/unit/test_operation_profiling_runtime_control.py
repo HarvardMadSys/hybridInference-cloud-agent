@@ -9,8 +9,8 @@ publishes, and that is only safe if four properties hold:
 * a Stop stops *selecting new operations* -- and does **not** reach into work
   that already started, which finishes and delivers under the configuration that
   selected it;
-* the experiment's own absolute deadline is what ends collection, including on a
-  node that never hears anything again;
+* timed experiments end at their absolute deadline; continuous experiments
+  keep selecting until a Stop reaches the producer;
 * nothing about the previous experiment leaks into the next one.
 
 Each test here pins one of those through the same ``install_policy_provider`` /
@@ -95,6 +95,7 @@ def _run(
     config_version: int = 1,
     expires_at: str | None = None,
     source: str = profiling.SOURCE_ADMIN,
+    continuous: bool = False,
 ) -> profiling.ProfilingRun:
     """Return a parsed run descriptor, as the control loop builds one.
 
@@ -110,7 +111,11 @@ def _run(
         "config_version": config_version,
         "max_operations": max_operations,
     }
-    return replace(profiling.parse_run(json.dumps(descriptor)), source=source)
+    if continuous:
+        descriptor.update(continuous=True, expires_at=None, max_operations=0)
+    return replace(
+        profiling.parse_run(json.dumps(descriptor), allow_continuous=True), source=source
+    )
 
 
 def _state(
@@ -176,9 +181,15 @@ def _records(caplog) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def test_no_mode_and_no_switch_is_disabled():
-    """A deployment that configures nothing must collect nothing."""
-    assert profiling.profile_mode() == profiling.MODE_DISABLED
+@pytest.mark.parametrize("mode", [None, "", "  "])
+@pytest.mark.parametrize("enabled", [None, "false"])
+def test_default_admin_control_does_not_start_collection(monkeypatch, mode, enabled):
+    """Unset and Compose's blank mode expose control without selecting work."""
+    if mode is not None:
+        monkeypatch.setenv(profiling.ENV_PROFILING_MODE, mode)
+    if enabled is not None:
+        monkeypatch.setenv(profiling.ENV_PROFILING_ENABLED, enabled)
+    assert profiling.profile_mode() == profiling.MODE_ADMIN
     assert profiling.active_run() is None
     assert profiling.reason() == "not_enabled"
     assert profiling.start_operation(operation="attempt.startup", host="host-a") is None
@@ -260,11 +271,11 @@ def test_an_unrecognised_mode_is_disabled_and_says_so(monkeypatch, caplog):
 
 def test_the_mode_is_read_once_per_process(monkeypatch):
     """Changing how a deployment may be controlled is a redeploy, not a request."""
-    assert profiling.profile_mode() == profiling.MODE_DISABLED
+    assert profiling.profile_mode() == profiling.MODE_ADMIN
 
-    monkeypatch.setenv(profiling.ENV_PROFILING_MODE, profiling.MODE_ADMIN)
+    monkeypatch.setenv(profiling.ENV_PROFILING_MODE, profiling.MODE_DISABLED)
 
-    assert profiling.profile_mode() == profiling.MODE_DISABLED
+    assert profiling.profile_mode() == profiling.MODE_ADMIN
 
 
 # ---------------------------------------------------------------------------
@@ -703,18 +714,23 @@ def test_a_disabled_deployment_refuses_a_continuation(monkeypatch):
     assert open_call(json.dumps(context), operations=("attempt.startup",)).recording is False
 
 
-def test_a_default_off_deployment_refuses_a_continuation(monkeypatch):
-    """A deployment that configures nothing collects nothing, however it is asked."""
+def test_default_admin_control_continues_selected_work_without_selecting_new_work(monkeypatch):
+    """A fresh producer can continue a trusted selection with no local run."""
     _measurement, context = _admin_context(monkeypatch)
 
     monkeypatch.delenv(profiling.ENV_PROFILING_MODE, raising=False)
     monkeypatch.delenv(profiling.ENV_PROFILING_ENABLED, raising=False)
     monkeypatch.delenv(profiling.ENV_PROFILING_RUN, raising=False)
+    profiling.install_policy_provider(None)
     profiling.reset_cache()
 
-    assert profiling.profile_mode() == profiling.MODE_DISABLED
-    assert profiling.attach_selection(context) is None
-    assert profiling.start_stage_recording(context, producer="broker") is None
+    profiling.reset_policy()
+
+    assert profiling.profile_mode() == profiling.MODE_ADMIN
+    assert profiling.active_run() is None
+    assert profiling.start_operation(operation="attempt.startup", host="host-a") is None
+    assert profiling.attach_selection(context) is not None
+    assert profiling.start_stage_recording(context, producer="broker") is not None
 
 
 def test_environment_mode_still_follows_its_own_descriptor(monkeypatch):
@@ -1016,7 +1032,9 @@ print(json.dumps({
 """
 
 
-def test_a_real_child_process_continues_an_admin_selection(monkeypatch, tmp_path):
+@pytest.mark.parametrize("mode", [None, "", profiling.MODE_ADMIN])
+@pytest.mark.parametrize("continuous", [False, True])
+def test_a_real_child_process_continues_an_admin_selection(monkeypatch, tmp_path, mode, continuous):
     """The deployment path runs the child in a new interpreter, so this does too.
 
     Nothing about the handoff may depend on the child having selected the
@@ -1037,6 +1055,7 @@ def test_a_real_child_process_continues_an_admin_selection(monkeypatch, tmp_path
         target={"host": "host-a"},
         max_operations=7,
         config_version=3,
+        continuous=continuous,
     )
     _admin(monkeypatch, _state(run=run, revision=5))
     measurement = profiling.start_operation(
@@ -1047,7 +1066,7 @@ def test_a_real_child_process_continues_an_admin_selection(monkeypatch, tmp_path
     context = profiling.handoff_context(measurement)
     assert context is not None
 
-    # The child's environment: Admin mode, no legacy switch, no descriptor.
+    # No deployment setup is needed in the child. Explicit admin still works.
     env = {
         "PATH": os.environ.get("PATH", ""),
         # The package root the child has to import from, plus whatever this
@@ -1061,9 +1080,10 @@ def test_a_real_child_process_continues_an_admin_selection(monkeypatch, tmp_path
                 ],
             )
         ),
-        profiling.ENV_PROFILING_MODE: profiling.MODE_ADMIN,
         profiling.ENV_PROFILING_SINK: str(sink),
     }
+    if mode is not None:
+        env[profiling.ENV_PROFILING_MODE] = mode
     completed = subprocess.run(
         [sys.executable, "-c", _CHILD_SCRIPT],
         input=json.dumps({"_profiling": context}),
@@ -1092,6 +1112,7 @@ def test_a_real_child_process_continues_an_admin_selection(monkeypatch, tmp_path
     assert written["profiling_run_id"] == RUN_A
     assert written["measurement_id"] == measurement.measurement_id
     assert written["control_revision"] == 5
+    assert (written["run_expires_at"] is None) == continuous
 
     # The same child process, told the deployment does not collect at all,
     # refuses the very same handoff.
@@ -1126,3 +1147,63 @@ def test_an_expired_selection_is_refused_however_it_arrives(monkeypatch):
     expired["expires_at"] = time.time() - 1.0
 
     assert profiling.attach_selection(expired) is None
+
+
+def test_continuous_collection_survives_time_and_old_sample_limit_until_disable(monkeypatch):
+    """No hidden expiry or hundred-record cap may stop an Enabled deployment."""
+    run = _run(continuous=True)
+    provider = _admin(monkeypatch, _state(run=run))
+    later = time.monotonic() + 86400
+    monkeypatch.setattr(profiling.time, "monotonic", lambda: later)
+    for _ in range(125):
+        selected = profiling.start_operation(operation="terminal.open", host="host-a")
+        assert selected is not None
+        profiling.finish(selected, outcome="completed")
+    active = profiling.start_operation(operation="terminal.open", host="host-a")
+    assert active is not None
+    context = profiling.measurement_context(active, call_id="continuous-call")
+    assert context is not None
+    json.dumps(context, allow_nan=False)
+    assert context["expires_at"] is None
+    assert context["run"]["continuous"] is True
+    provider.state = _stopped()
+    profiling.refresh_policy()
+    assert profiling.start_operation(operation="terminal.open", host="host-a") is None
+    recorder = profiling.start_stage_recording(context, producer="broker")
+    assert recorder is not None
+    with recorder.stage("admission"):
+        pass
+    assert recorder.stages and not recorder.stopped_early()
+    manifest = profiling.manifest_for_measurement(active)
+    assert manifest is not None
+    assert manifest["expires_at"] is None
+    assert manifest["continuous"] is True
+    assert manifest["admission_instances"][0]["max_operations"] == 0
+    json.dumps(manifest, allow_nan=False)
+    profiling.finalize(active, outcome="completed")
+    record = profiling.to_record(active, outcome="completed")
+    json.dumps(record, allow_nan=False)
+    assert record["run_expires_at"] is None
+    assert record["collection_complete"] is True
+    profiling.discard(active)
+
+
+def test_continuous_descriptor_requires_admin_and_explicit_null():
+    """A missing finite deadline must never silently become unlimited collection."""
+    descriptor = {
+        "run_id": RUN_A,
+        "operations": ["files.open"],
+        "continuous": True,
+        "expires_at": None,
+        "max_operations": 0,
+    }
+    with pytest.raises(ValueError):
+        profiling.parse_run(json.dumps(descriptor))
+    assert profiling.parse_run(json.dumps(descriptor), allow_continuous=True).continuous
+    for bad in (
+        {k: v for k, v in descriptor.items() if k != "expires_at"},
+        {**descriptor, "continuous": False},
+        {**descriptor, "max_operations": 100},
+    ):
+        with pytest.raises(ValueError):
+            profiling.parse_run(json.dumps(bad), allow_continuous=True)

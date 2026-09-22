@@ -153,9 +153,9 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", REPO)
     monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "acceptance-broker-token")
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(tmp_path / "records.jsonl"))
-    # Admin control, and *only* Admin control: the legacy switch is left off and
-    # a stale descriptor is deliberately left behind to prove it is ignored.
-    monkeypatch.setenv(operation_profiling.ENV_PROFILING_MODE, operation_profiling.MODE_ADMIN)
+    # The product default needs no opt-in mode or namespace. A stale descriptor
+    # without the legacy switch must not silently start a static experiment.
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_MODE, raising=False)
     monkeypatch.delenv(operation_profiling.ENV_PROFILING_ENABLED, raising=False)
     monkeypatch.setenv(
         operation_profiling.ENV_PROFILING_RUN,
@@ -168,7 +168,7 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
             }
         ),
     )
-    monkeypatch.setenv("AGENT_OPERATION_PROFILING_DEPLOYMENT", "acceptance")
+    monkeypatch.delenv("AGENT_OPERATION_PROFILING_DEPLOYMENT", raising=False)
     operation_profiling.reset_cache()
     operation_profiling.reset_policy()
 
@@ -303,8 +303,10 @@ async def _measurement_count(chain: _ControlChain, run_id: str) -> int:
         )
 
 
+@pytest.mark.parametrize("duration_seconds", [600, None])
 async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
     control_chain: _ControlChain,
+    duration_seconds: int | None,
 ) -> None:
     """The whole acceptance: Start, collect, read back, Stop, stay stopped."""
     import httpx
@@ -315,6 +317,9 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         before_response = await admin.get("/admin/agent/profiling-control")
         assert before_response.status_code == 200, before_response.text
         before = before_response.json()
+        assert before["mode"] == operation_profiling.MODE_ADMIN
+        assert before["deployment"] == "default"
+        assert before["configured"] is True
         assert before["status"] == "off"
         assert before["run"] is None
         assert before["run_active"] is False
@@ -334,7 +339,7 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
                 "expected_revision": 0,
                 "operations": ["files.list", "files.open", "attempt.startup"],
                 "target": {"host": HOST},
-                "duration_seconds": DURATION_SECONDS,
+                "duration_seconds": duration_seconds,
             },
         )
         assert started.status_code == 201, started.text
@@ -345,7 +350,9 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         # The experiment is visible with zero samples: the point of persisting
         # it before anything is collected.
         assert body["control"]["stored_samples"] == 0
-        assert body["control"]["budget_scope"] == "producer_instance"
+        assert body["control"]["budget_scope"] == (
+            "unlimited" if duration_seconds is None else "producer_instance"
+        )
 
         # A retry with the same id and body is the same experiment, not a
         # second one -- and does not reset the deadline.
@@ -356,7 +363,7 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
                 "expected_revision": 0,
                 "operations": ["files.list", "files.open", "attempt.startup"],
                 "target": {"host": HOST},
-                "duration_seconds": DURATION_SECONDS,
+                "duration_seconds": duration_seconds,
             },
         )
         assert retried.status_code == 201, retried.text
@@ -438,7 +445,12 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         assert live["stored_samples"] == 1
         assert live["status"] == "on"
         assert live["run_active"] is True
-        assert live["run"]["seconds_remaining"] > 0
+        if duration_seconds is None:
+            assert live["run"]["expires_at"] is None
+            assert live["run"]["continuous"] is True
+            assert record["run_expires_at"] is None
+        else:
+            assert live["run"]["seconds_remaining"] > 0
         # The one sample is readable through the history API, which is what
         # "preserve history" means.
         history = await admin.get("/admin/agent/measurements", params={"run_id": run_id})
@@ -499,8 +511,10 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         assert final["stored_samples"] == 0
 
 
+@pytest.mark.parametrize("duration_seconds", [600, None])
 async def test_a_measurement_open_when_the_switch_flips_still_lands(
     control_chain: _ControlChain,
+    duration_seconds: int | None,
 ) -> None:
     """Disabling stops selecting; it does not cancel or truncate work in flight.
 
@@ -527,7 +541,7 @@ async def test_a_measurement_open_when_the_switch_flips_still_lands(
                 "expected_revision": 0,
                 "operations": ["files.open"],
                 "target": {"host": HOST},
-                "duration_seconds": DURATION_SECONDS,
+                "duration_seconds": duration_seconds,
             },
         )
         assert started.status_code == 201, started.text

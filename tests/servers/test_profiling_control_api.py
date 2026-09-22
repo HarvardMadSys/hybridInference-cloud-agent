@@ -261,9 +261,11 @@ def _control_app(storage: _FakeStorage) -> FastAPI:
 
 
 @pytest.fixture(autouse=True)
-def _admin_mode(monkeypatch):
-    """Every test here is about Admin control, so the mode is set for all."""
-    monkeypatch.setenv(operation_profiling.ENV_PROFILING_MODE, operation_profiling.MODE_ADMIN)
+def _default_admin_mode(monkeypatch):
+    """Admin control works without a profiling mode or static experiment."""
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_MODE, raising=False)
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_ENABLED, raising=False)
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_RUN, raising=False)
     monkeypatch.setenv("ADMIN_TOKEN", "test-admin-token")
     monkeypatch.setenv("AGENT_OPERATION_PROFILING_DEPLOYMENT", "test")
     operation_profiling.reset_cache()
@@ -276,6 +278,22 @@ def _admin_mode(monkeypatch):
 def _client(storage: _FakeStorage) -> TestClient:
     """A client for the control surface, authenticated as the administrator."""
     return TestClient(_control_app(storage), headers=ADMIN)
+
+
+def test_default_control_is_available_but_collection_is_disabled(monkeypatch) -> None:
+    """A fresh deployment returns exactly the state that exposes Enable."""
+    monkeypatch.delenv("AGENT_OPERATION_PROFILING_DEPLOYMENT", raising=False)
+    with _client(_FakeStorage()) as client:
+        response = client.get("/admin/agent/profiling-control")
+    assert response.status_code == 200
+    control = response.json()
+    assert control["deployment"] == "default"
+    assert control["mode"] == operation_profiling.MODE_ADMIN
+    assert control["configured"] is True
+    assert control["status"] == "off"
+    assert control["run"] is None
+    assert control["run_active"] is False
+    assert control["stored_samples"] == 0
 
 
 def test_a_start_creates_the_experiment_and_reports_it() -> None:

@@ -825,7 +825,7 @@ def require_record_matches_its_experiment(
     if operation and operation not in {str(item) for item in run["operations"]}:
         raise MeasurementRejected(f"run does not select operation {operation!r}")
     expires_at = run["expires_at"]
-    if now > expires_at + timedelta(seconds=DELIVERY_GRACE_S):
+    if expires_at is not None and now > expires_at + timedelta(seconds=DELIVERY_GRACE_S):
         raise MeasurementRejected(
             f"experiment ended more than {DELIVERY_GRACE_S // 60} minutes before this delivery"
         )
@@ -860,11 +860,16 @@ def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(value, (str, int)) or isinstance(value, bool) or not str(value).strip():
             raise MeasurementRejected(f"run.target.{key} must be a non-empty string or integer")
         normalized_target[str(key)] = str(value)
+    continuous = run.get("continuous") is True
+    if continuous and ("expires_at" not in run or run["expires_at"] is not None):
+        raise MeasurementRejected("continuous runs require explicit null expires_at")
     max_operations = run.get("max_operations", 1)
     if not isinstance(max_operations, int) or isinstance(max_operations, bool):
         raise MeasurementRejected("run.max_operations must be an integer")
-    if max_operations <= 0:
-        raise MeasurementRejected("run.max_operations must be positive")
+    if (continuous and max_operations != 0) or (not continuous and max_operations <= 0):
+        raise MeasurementRejected(
+            "run.max_operations must be zero if continuous, positive otherwise"
+        )
     instances = run.get("admission_instances") or []
     if not isinstance(instances, list):
         raise MeasurementRejected("run.admission_instances must be a list")
@@ -878,7 +883,12 @@ def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:
         budget = item.get("max_operations")
         if not isinstance(instance, str) or not instance or len(instance) > MAX_ATTRIBUTE_CHARS:
             raise MeasurementRejected("run admission instance must be a bounded string")
-        if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
+        if (
+            not isinstance(budget, int)
+            or isinstance(budget, bool)
+            or budget < 0
+            or (budget == 0 and not continuous)
+        ):
             raise MeasurementRejected("run admission max_operations must be a positive integer")
         normalized_instances.append({"instance": instance, "max_operations": budget})
     config_version = run.get("config_version", 1)
@@ -892,7 +902,7 @@ def validate_run(run: Mapping[str, Any]) -> dict[str, Any]:
         "run_id": run_id,
         "operations": operations,
         "target": normalized_target,
-        "expires_at": _timestamp(run, "expires_at"),
+        "expires_at": None if continuous else _timestamp(run, "expires_at"),
         "config_version": config_version,
         "admission_instances": normalized_instances,
     }

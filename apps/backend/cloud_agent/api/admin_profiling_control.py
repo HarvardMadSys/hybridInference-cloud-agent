@@ -214,7 +214,9 @@ async def start_profiling_run(
         expected_revision=_as_int(payload.get("expected_revision")),
         operations=_as_operations(payload.get("operations")),
         host=_as_host(payload.get("target")),
-        duration_seconds=_as_int(payload.get("duration_seconds")),
+        duration_seconds=None
+        if payload.get("duration_seconds") is None
+        else _as_int(payload["duration_seconds"]),
         actor_id=_admin_id,
         known_hosts=host_list,
     )

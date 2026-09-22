@@ -55,8 +55,8 @@ export interface ProfilingRun {
   operations: string[];
   /** The target selectors the manifest scoped itself to. */
   target: Record<string, string>;
-  /** The configured absolute expiry, not the deadline a producer has left. */
-  expires_at: string;
+  /** The configured expiry; null means collection continues until Disable. */
+  expires_at: string | null;
   config_version: number;
   admission_instances: ProfilingAdmissionInstance[];
   /** When the row was written, and when it was last received. */
@@ -193,7 +193,7 @@ export interface MeasurementRecord {
   missing_producers?: string[];
   failure_stage?: string;
   startup_path?: string | null;
-  run_expires_at?: string;
+  run_expires_at?: string | null;
   observed_at: string;
   spans?: MeasurementSpan[];
   milestones?: MeasurementMilestone[];
@@ -423,7 +423,7 @@ export interface ProfilingControlRun {
   /** The root operation names this run selects. */
   operations: string[];
   target: { host?: string };
-  expires_at: string;
+  expires_at: string | null;
   started_at: string | null;
   stopped_at: string | null;
   stop_reason: string | null;
@@ -527,7 +527,8 @@ export interface StartMeasurementRequest {
   operations: string[];
   /** `null` means every host. */
   target: { host: string | null };
-  duration_seconds: number;
+  /** null collects until Disable; positive values support older timed clients. */
+  duration_seconds: number | null;
 }
 
 export interface StartMeasurementResponse {

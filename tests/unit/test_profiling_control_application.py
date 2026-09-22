@@ -529,3 +529,24 @@ async def test_the_sweep_ends_a_lapsed_experiment_and_nothing_else() -> None:
     assert await service.sweep(now=NOW + timedelta(seconds=30)) == []
     assert await service.sweep(now=NOW + timedelta(seconds=601)) == [started.run_id]
     assert fake.runs[str(started.run_id)]["lifecycle"] == LIFECYCLE_EXPIRED
+
+
+@pytest.mark.asyncio
+async def test_continuous_control_does_not_expire_when_read_days_later(monkeypatch):
+    """Neither the sweeper nor a new service instance imposes a hidden deadline."""
+    monkeypatch.setenv("AGENT_OPERATION_PROFILING_MODE", "admin")
+    fake = _FakeControl()
+    service = _service(fake)
+    command = _start_request(duration_seconds=None)
+    result = await service.start(command, now=NOW)
+    assert result.run_id is not None
+    restored = _service(fake)
+    later = NOW + timedelta(days=7)
+    assert await restored.sweep(now=later) == []
+    snapshot = await restored.control_snapshot(now=later)
+    assert snapshot["status"] == "on"
+    assert snapshot["run"]["run_id"] == result.run_id
+    assert snapshot["run"]["expires_at"] is None
+    assert snapshot["run"]["continuous"] is True
+    assert snapshot["budget_scope"] == "unlimited"
+    assert command.fingerprint() != _start_request(duration_seconds=600).fingerprint()

@@ -12,8 +12,8 @@ calls out by name.
 **A Stop is a configuration change, not a withdrawal.** It moves the version and
 records the tombstone; it waits for nothing to acknowledge it and reaches into
 no work that already started. An operation selected before the Stop finishes and
-delivers under the manifest that selected it, and the only thing bounding a
-process that never hears the Stop is the experiment's own ``expires_at``.
+delivers under the manifest that selected it. Timed runs are also bounded by
+``expires_at``; continuous runs persist until the producer receives the Stop.
 
 **The request is checked before the revision.** A Start whose response was lost
 is retried with the same request id and the same body, and it must return the
