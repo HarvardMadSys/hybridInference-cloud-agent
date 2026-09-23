@@ -25,6 +25,7 @@ from cloud_agent.api._job_views import (
     _event_response,
     _iso,
     _job_response,
+    _pending_response,
 )
 from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
 from cloud_agent.api.deps import get_storage, require_store
@@ -129,6 +130,10 @@ async def get_agent_thread(
         created_at=_iso(thread["created_at"]),
         updated_at=_iso(thread["updated_at"]),
         archived_at=_iso(thread.get("archived_at")),
+        pending_messages=[
+            _pending_response(message) for message in thread.get("pending_messages") or []
+        ],
+        queue_paused_reason=thread.get("queue_paused_reason"),
     )
 
 

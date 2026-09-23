@@ -951,8 +951,37 @@ class AgentThreadPinResponse(BaseModel):
     pinned_at: str | None = None
 
 
-class AgentFollowUpRequest(BaseModel):
-    """A new user turn appended to an existing task thread."""
+class AgentThreadMessageResponse(BaseModel):
+    """One durable user or assistant message in a task thread."""
+
+    id: int
+    role: str
+    content: str
+    job_id: str
+    created_at: str | None = None
+
+
+PendingMessageState = Literal["queued", "held", "sending"]
+QueuePausedReason = Literal["stopped", "failed", "archived"]
+
+
+def _visible_prompt(value: str) -> str:
+    """Reject a visually empty message and keep the trimmed text."""
+    prompt = value.strip()
+    if not prompt:
+        raise ValueError("prompt must not be blank")
+    return prompt
+
+
+class AgentThreadMessageCreate(BaseModel):
+    """A message for a conversation: the next turn now, or queued behind the running one.
+
+    A follow-up without ``runtime`` or ``goal``. The harness is the thread's and
+    cannot change, and a goal has its own routes; a request that still sends
+    either is refused rather than having the field quietly dropped.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     prompt: str = Field(..., min_length=1, max_length=100_000)
     skill_ids: list[Annotated[int, Field(gt=0, strict=True)]] | None = Field(
@@ -964,17 +993,8 @@ class AgentFollowUpRequest(BaseModel):
         None,
         max_length=50,
         description=(
-            "Further uploads for this turn. Omitted adds none — earlier turns' files "
-            "are already under /uploads and are re-imported whenever the sandbox is "
-            "rebuilt, so inheriting here would only copy them twice."
-        ),
-    )
-    runtime: str | None = Field(
-        None,
-        description=(
-            "Accepted only when it names the thread's own harness — a thread's "
-            "harness is fixed (its session is the unit of continuity). Any "
-            "other value is a 400; start a new chat to switch."
+            "Uploads for this message's turn. While the message waits they are pinned "
+            "to it, so they are neither swept nor deletable from the composer."
         ),
     )
     model: str | None = Field(None, description="Optional model override for this turn.")
@@ -982,19 +1002,8 @@ class AgentFollowUpRequest(BaseModel):
         None,
         max_length=32,
         description=(
-            "Optional reasoning-effort override for this turn. Omitted inherits "
-            "the previous turn's, as an omitted model does. The literal "
-            f"{RESET_REASONING_EFFORT!r} resets to Auto — effort needs a way "
-            "back that model never did, because null is a value a turn can "
-            "legitimately hold rather than the absence of one."
-        ),
-    )
-    goal: GoalInput | None = Field(
-        None,
-        description=(
-            "Set or replace this conversation's completion condition along with "
-            "this message. Omitted leaves the goal as it is. A turn queued by the "
-            "goal itself never carries one."
+            "Optional reasoning-effort override for this turn. Omitted inherits the "
+            f"previous turn's; the literal {RESET_REASONING_EFFORT!r} resets to Auto."
         ),
     )
 
@@ -1002,20 +1011,103 @@ class AgentFollowUpRequest(BaseModel):
     @classmethod
     def validate_prompt(cls, value: str) -> str:
         """Reject visually empty turns and persist the user's trimmed text."""
-        prompt = value.strip()
-        if not prompt:
-            raise ValueError("prompt must not be blank")
-        return prompt
+        return _visible_prompt(value)
 
 
-class AgentThreadMessageResponse(BaseModel):
-    """One durable user or assistant message in a task thread."""
+class AgentPendingMessageUpdate(BaseModel):
+    """An edit to a waiting message, made against the revision the caller read.
+
+    Only the fields sent change. ``state`` is how an editor holds the message
+    while it is rewritten (``held``) and lets it go again (``queued``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(..., ge=1)
+    prompt: str | None = Field(None, min_length=1, max_length=100_000)
+    skill_ids: list[Annotated[int, Field(gt=0, strict=True)]] | None = Field(None, max_length=16)
+    attachment_ids: list[Annotated[int, Field(gt=0, strict=True)]] | None = Field(
+        None, max_length=50
+    )
+    model: str | None = None
+    reasoning_effort: str | None = Field(None, max_length=32)
+    state: Literal["held", "queued"] | None = None
+
+    @field_validator("prompt")
+    @classmethod
+    def validate_prompt(cls, value: str | None) -> str | None:
+        """A rewritten message still has to say something."""
+        if value is None:
+            raise ValueError("prompt cannot be null; omit it to keep the text")
+        return _visible_prompt(value)
+
+    @field_validator("state")
+    @classmethod
+    def validate_state(cls, value: str | None) -> str | None:
+        """Omit the state to keep it; null is not a state a message can be in."""
+        if value is None:
+            raise ValueError("state cannot be null; omit it to keep the state")
+        return value
+
+
+class AgentPendingMessageAttachment(BaseModel):
+    """One upload a waiting message holds, without its bytes."""
 
     id: int
-    role: str
-    content: str
-    job_id: str
+    path: str
+    content_type: str
+    size_bytes: int
+
+
+class AgentPendingMessageResponse(BaseModel):
+    """A message the owner wrote that has not become a turn yet."""
+
+    id: str
+    thread_id: str
+    #: The order it will be sent in. Assigned once; editing never moves it.
+    position: int
+    state: PendingMessageState
+    #: What the next edit or delete must name, so a stale tab loses cleanly.
+    revision: int
+    prompt: str
+    skill_ids: list[int] | None = None
+    attachment_ids: list[int] | None = None
+    attachments: list[AgentPendingMessageAttachment] = Field(default_factory=list)
+    model: str | None = None
+    reasoning_effort: str | None = None
+    #: Why the platform held this message instead of sending it, if it did.
+    last_error: str | None = None
     created_at: str | None = None
+    updated_at: str | None = None
+
+
+class AgentThreadQueueResponse(BaseModel):
+    """A conversation's queue, and its newest turn, without the transcript.
+
+    What a page polls while messages wait: small enough to ask for often, and
+    enough to notice the moment one of them became the next turn.
+    """
+
+    thread_id: str
+    pending_messages: list[AgentPendingMessageResponse] = Field(default_factory=list)
+    queue_paused_reason: QueuePausedReason | None = None
+    latest_job_id: str | None = None
+    latest_turn_no: int | None = None
+    latest_job_state: str | None = None
+
+
+class AgentThreadMessageResult(BaseModel):
+    """What a queue action left behind.
+
+    ``job`` is the turn this request started, if it started one: the message
+    just sent when nothing was running, or an older waiting message that went
+    first. ``pending`` is the message this request wrote or changed, while it is
+    still waiting.
+    """
+
+    pending: AgentPendingMessageResponse | None = None
+    job: AgentJobResponse | None = None
+    queue_paused_reason: QueuePausedReason | None = None
 
 
 class AgentThreadResponse(BaseModel):
@@ -1029,6 +1121,10 @@ class AgentThreadResponse(BaseModel):
     created_at: str | None = None
     updated_at: str | None = None
     archived_at: str | None = None
+    #: Messages written while a turn was running, in the order they will go.
+    pending_messages: list[AgentPendingMessageResponse] = Field(default_factory=list)
+    #: Why the queue is not moving by itself, until the owner continues it.
+    queue_paused_reason: QueuePausedReason | None = None
 
 
 class AgentThreadStatsResponse(BaseModel):

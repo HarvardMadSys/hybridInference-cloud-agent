@@ -42,6 +42,7 @@ from cloud_agent import broker_routing
 from cloud_agent.api import routes as agent_jobs_router, worker, workspace as agent_workspace
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_storage
+from cloud_agent.domain.pending_messages import SettleOutcome
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.storage.repositories.goals import _pause_detail
@@ -388,6 +389,12 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         self.mcp_capabilities: dict[int, dict[str, Any]] = {}
         self.mcp_bindings: dict[str, list[dict[str, Any]]] = {}
         self.session_forks: dict[str, dict[str, Any]] = {}
+        #: The owner's waiting messages, and each thread's two queue facts, the
+        #: way ``agent_pending_messages`` and ``agent_threads`` hold them.
+        self.pending: dict[str, dict[str, Any]] = {}
+        self.queue_paused: dict[str, str] = {}
+        self.queue_settled: dict[str, str] = {}
+        self._next_pending = 1
         self._next_connection = 1
         self._next_event_id = 1
         self._next_job = 1
@@ -772,6 +779,225 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         )
         return job
 
+    # -- Pending messages --
+    #
+    # The queue the message route writes. A message that is sent becomes a turn
+    # through ``create_follow_up`` above, so it becomes exactly the turn a
+    # follow-up always made here, and the cases about a turn's fields keep
+    # asserting on the same fake.
+
+    def _thread_turns(self, thread_id: str) -> list[dict[str, Any]]:
+        return sorted(
+            (job for job in self.jobs.values() if job["thread_id"] == thread_id),
+            key=lambda job: job["turn_no"],
+        )
+
+    def _thread_live(self, thread_id: str) -> bool:
+        return any(job["state"] in ("queued", "running") for job in self._thread_turns(thread_id))
+
+    def _waiting(self, thread_id: str) -> list[dict[str, Any]]:
+        return sorted(
+            (row for row in self.pending.values() if row["thread_id"] == thread_id),
+            key=lambda row: row["position"],
+        )
+
+    def _pause(self, thread_id: str, reason: str) -> None:
+        """Mirrors ``PAUSE_QUEUE_SQL``: only a queue with something in it, first reason wins."""
+        if self._waiting(thread_id):
+            self.queue_paused.setdefault(thread_id, reason)
+
+    def _continue_if_idle(self, thread_id: str) -> None:
+        turns = self._thread_turns(thread_id)
+        if turns and not self._thread_live(thread_id):
+            self.queue_paused.pop(thread_id, None)
+            self.queue_settled[thread_id] = turns[-1]["id"]
+
+    async def latest_turn(self, *, thread_id: str) -> dict[str, Any] | None:
+        turns = self._thread_turns(thread_id)
+        return None if not turns else await self.get_job(turns[-1]["id"])
+
+    async def replayed_message(
+        self, *, user_id: str, client_request_id: str, fingerprint: str | None
+    ) -> dict[str, Any] | None:
+        for row in self.pending.values():
+            if row["user_id"] == user_id and row["client_request_id"] == client_request_id:
+                if row["client_request_fingerprint"] != fingerprint:
+                    return {"error": "client_request_conflict"}
+                return {"message": dict(row)}
+        return None
+
+    async def submit_message(
+        self,
+        *,
+        thread_id: str,
+        user_id: str,
+        prompt: str,
+        skill_ids: list[int] | None,
+        attachment_ids: list[int] | None,
+        model: str | None,
+        reasoning_effort: str | None,
+        client_request_id: str | None = None,
+        client_request_fingerprint: str | None = None,
+    ) -> dict[str, Any]:
+        turns = self._thread_turns(thread_id)
+        if not turns or turns[-1]["user_id"] != user_id:
+            return {"error": "not_found"}
+        if client_request_id is not None:
+            made = await self.replayed_submission(
+                user_id=user_id,
+                client_request_id=client_request_id,
+                fingerprint=client_request_fingerprint,
+            )
+            if made is not None:
+                return made if made.get("error") else {"job_id": made["id"]}
+            waiting = await self.replayed_message(
+                user_id=user_id,
+                client_request_id=client_request_id,
+                fingerprint=client_request_fingerprint,
+            )
+            if waiting is not None:
+                return waiting
+        if thread_id in self.archived_threads:
+            return {"error": "session_archived"}
+        self._continue_if_idle(thread_id)
+        message_id = f"apmsg_{self._next_pending:04d}"
+        self._next_pending += 1
+        self.pending[message_id] = {
+            "id": message_id,
+            "thread_id": thread_id,
+            "user_id": user_id,
+            "position": self._next_pending,
+            "state": "queued",
+            "revision": 1,
+            "prompt": prompt,
+            "skill_ids": skill_ids,
+            "attachment_ids": attachment_ids or None,
+            "attachments": [],
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "client_request_id": client_request_id,
+            "client_request_fingerprint": client_request_fingerprint,
+            "last_error": None,
+            "created_at": None,
+            "updated_at": None,
+        }
+        return {"message": dict(self.pending[message_id])}
+
+    async def queue_state(self, *, thread_id: str, user_id: str) -> dict[str, Any] | None:
+        turns = self._thread_turns(thread_id)
+        if not turns or turns[-1]["user_id"] != user_id:
+            return None
+        return {
+            "queue_paused_reason": self.queue_paused.get(thread_id),
+            "messages": [dict(row) for row in self._waiting(thread_id)],
+        }
+
+    def _changeable(
+        self, *, thread_id: str, user_id: str, message_id: str, revision: int
+    ) -> dict[str, Any]:
+        row = self.pending.get(message_id)
+        if row is None or row["thread_id"] != thread_id or row["user_id"] != user_id:
+            return {"error": "not_found"}
+        if row["revision"] != revision:
+            return {"error": "revision_conflict", "current": dict(row)}
+        return row
+
+    async def edit_message(
+        self,
+        *,
+        thread_id: str,
+        user_id: str,
+        message_id: str,
+        revision: int,
+        changes: dict[str, Any],
+    ) -> dict[str, Any]:
+        row = self._changeable(
+            thread_id=thread_id, user_id=user_id, message_id=message_id, revision=revision
+        )
+        if row.get("error"):
+            return row
+        row.update(changes)
+        if row["state"] == "queued":
+            row["last_error"] = None
+        row["revision"] += 1
+        return {"message": dict(row)}
+
+    async def delete_message(
+        self, *, thread_id: str, user_id: str, message_id: str, revision: int
+    ) -> dict[str, Any]:
+        row = self._changeable(
+            thread_id=thread_id, user_id=user_id, message_id=message_id, revision=revision
+        )
+        if row.get("error"):
+            return row
+        del self.pending[message_id]
+        return {"deleted": message_id}
+
+    async def resume_queue(self, *, thread_id: str, user_id: str) -> dict[str, Any]:
+        turns = self._thread_turns(thread_id)
+        if not turns or turns[-1]["user_id"] != user_id:
+            return {"error": "not_found"}
+        if thread_id in self.archived_threads:
+            return {"error": "session_archived"}
+        self.queue_paused.pop(thread_id, None)
+        self._continue_if_idle(thread_id)
+        return {"queue_paused_reason": None}
+
+    async def settle_queue(self, *, thread_id: str, prepared: Any = None) -> SettleOutcome:
+        """Mirrors the store's settlement, sending through ``create_follow_up``."""
+        turns = self._thread_turns(thread_id)
+        if not turns or self._thread_live(thread_id):
+            return SettleOutcome()
+        latest = turns[-1]
+        if self.queue_settled.get(thread_id) != latest["id"]:
+            self.queue_settled[thread_id] = latest["id"]
+            reason = {"failed": "failed", "cancelled": "stopped"}.get(latest["state"])
+            if reason is not None and self._waiting(thread_id):
+                self._pause(thread_id, reason)
+                return SettleOutcome()
+        if thread_id in self.archived_threads or thread_id in self.queue_paused:
+            return SettleOutcome()
+        waiting = self._waiting(thread_id)
+        if not waiting or waiting[0]["state"] != "queued":
+            return SettleOutcome()
+        head = waiting[0]
+        if prepared is None or (
+            prepared.message_id,
+            prepared.revision,
+            prepared.parent_job_id,
+        ) != (head["id"], head["revision"], latest["id"]):
+            return SettleOutcome(head=dict(head), parent_job_id=latest["id"])
+        if prepared.error is not None:
+            head.update(state="held", last_error=prepared.error, revision=head["revision"] + 1)
+            return SettleOutcome()
+        job = await self.create_follow_up(
+            parent_job_id=latest["id"],
+            user_id=head["user_id"],
+            prompt=head["prompt"],
+            model=prepared.model,
+            reasoning_effort=prepared.reasoning_effort,
+            reset_reasoning_effort=prepared.reset_reasoning_effort,
+            skills=prepared.skills,
+            attachments=prepared.attachments,
+            yield_to_queued=True,
+            client_request_id=head["client_request_id"],
+            client_request_fingerprint=head["client_request_fingerprint"],
+        )
+        if job is None or job.get("error"):
+            if job is not None and job.get("error") == "sandbox_context_lost":
+                head.update(
+                    state="held",
+                    last_error="This chat's retained sandbox has an indeterminate or lost "
+                    "context and cannot safely accept another message.",
+                    revision=head["revision"] + 1,
+                )
+            return SettleOutcome()
+        del self.pending[head["id"]]
+        return SettleOutcome(job=job, message_id=head["id"])
+
+    async def threads_to_settle(self, *, limit: int = 50) -> list[str]:
+        return sorted({row["thread_id"] for row in self.pending.values()})[:limit]
+
     async def _copy_fork_history(
         self, *, source_job_id: str, user_id: str
     ) -> dict[str, Any] | None:
@@ -1065,6 +1291,8 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
                 ),
             ),
             "jobs": jobs,
+            "pending_messages": [dict(row) for row in self._waiting(thread_id)],
+            "queue_paused_reason": self.queue_paused.get(thread_id),
         }
 
     async def thread_stats_inputs(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
@@ -1331,6 +1559,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         thread_id = job["thread_id"]
         if archived:
             archived_at = self.archived_threads.setdefault(thread_id, datetime.now(timezone.utc))
+            self._pause(thread_id, "archived")
         else:
             self.archived_threads.pop(thread_id, None)
             archived_at = None
@@ -1365,6 +1594,8 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         job = self.jobs.get(job_id)
         if job is None or (user_id is not None and job["user_id"] != user_id):
             return None
+        if job["state"] in ("queued", "running"):
+            self._pause(job["thread_id"], "stopped")
         job["cancel_requested"] = True
         if job["state"] == "queued":
             job["state"] = "cancelled"
@@ -1833,6 +2064,48 @@ async def _create_job(client: AsyncClient, *, model: str = "glm-5.1") -> str:
     return response.json()["id"]
 
 
+def _thread_of(store: FakeStorage, job_id: str) -> str:
+    """The conversation a job belongs to; messages are addressed to it."""
+    return str(store.jobs[job_id]["thread_id"])
+
+
+async def _send(
+    client: AsyncClient,
+    store: FakeStorage,
+    job_id: str,
+    body: dict[str, Any],
+    *,
+    headers: dict[str, str] | None = None,
+) -> Any:
+    """Send a message to the conversation containing ``job_id``."""
+    return await client.post(
+        f"/v1/agent/threads/{_thread_of(store, job_id)}/messages", json=body, headers=headers
+    )
+
+
+async def _next_turn(
+    client: AsyncClient,
+    store: FakeStorage,
+    after: str,
+    body: dict[str, Any],
+    *,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """End ``after``, then send a message, which is the next turn at once.
+
+    A message sent while a turn is live waits in the queue rather than becoming
+    a turn. Cases that need the second turn itself — to read its fields, pin it,
+    archive it — end the turn in front first, which is what the owner's page
+    waits for too.
+    """
+    store.jobs[after]["state"] = "succeeded"
+    response = await _send(client, store, after, body, headers=headers)
+    assert response.status_code == 201, response.text
+    job = response.json()["job"]
+    assert job is not None, response.text
+    return job
+
+
 class _WorkspaceContentsApp:
     """GitHub Contents stand-in that records the pinned reads the API makes."""
 
@@ -1908,10 +2181,10 @@ async def test_follow_up_inherits_profile_instead_of_rereading_policy(
     store.jobs[source_id]["state"] = "succeeded"
 
     monkeypatch.setenv("AGENT_DEFAULT_EXECUTION_PROFILE", "trusted-v1")
-    child = await client.post(f"/v1/agent/jobs/{source_id}/follow-ups", json={"prompt": "continue"})
+    child = await _send(client, store, source_id, {"prompt": "continue"})
 
     assert child.status_code == 201
-    assert child.json()["execution_profile"] == "untrusted-kata-v1"
+    assert child.json()["job"]["execution_profile"] == "untrusted-kata-v1"
 
 
 async def test_jobs_page_by_repo_and_projects_summarize_the_task_tree(client: AsyncClient):
@@ -2079,11 +2352,8 @@ async def test_thread_stats_summarize_every_turn_in_the_thread(
 ):
     """The bar counts the whole conversation, not just the job asked about."""
     parent_id = await _create_job(client)
-    follow_up = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "and the docs too"},
-    )
-    child_id = follow_up.json()["id"]
+    follow_up = await _next_turn(client, store, parent_id, {"prompt": "and the docs too"})
+    child_id = follow_up["id"]
     _seed_event(
         store,
         job_id=parent_id,
@@ -2112,7 +2382,7 @@ async def test_thread_stats_summarize_every_turn_in_the_thread(
 
         assert response.status_code == 200
         body = response.json()
-        assert body["thread_id"] == follow_up.json()["thread_id"]
+        assert body["thread_id"] == follow_up["thread_id"]
         assert body["turns"] == 2
         assert body["tool_calls"] == 1
         assert body["failed_tool_calls"] == 1
@@ -2173,12 +2443,9 @@ async def test_archive_and_restore_filter_the_entire_thread_without_cancelling(
 ):
     """Archive hides every turn while leaving a live run untouched."""
     parent_id = await _create_job(client)
-    follow_up = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "also update the docs"},
-    )
-    child_id = follow_up.json()["id"]
-    thread_id = follow_up.json()["thread_id"]
+    follow_up = await _next_turn(client, store, parent_id, {"prompt": "also update the docs"})
+    child_id = follow_up["id"]
+    thread_id = follow_up["thread_id"]
     store.jobs[parent_id]["state"] = "running"
 
     archived = await client.post(f"/v1/agent/jobs/{child_id}/archive")
@@ -2215,17 +2482,15 @@ async def test_rename_from_a_follow_up_updates_the_conversation_and_preserves_pr
 ):
     """Any turn renames all owner-facing views while keeping execution inputs intact."""
     parent_id = await _create_job(client)
-    follow_up = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups", json={"prompt": "also update the docs"}
-    )
-    child_id = follow_up.json()["id"]
+    follow_up = await _next_turn(client, store, parent_id, {"prompt": "also update the docs"})
+    child_id = follow_up["id"]
     prompts = {job_id: store.jobs[job_id]["task_prompt"] for job_id in (parent_id, child_id)}
     response = await client.patch(
         f"/v1/agent/jobs/{child_id}/title", json={"title": "  Export CSV 导出  "}
     )
     assert response.status_code == 200
     assert response.json() == {
-        "thread_id": follow_up.json()["thread_id"],
+        "thread_id": follow_up["thread_id"],
         "title": "Export CSV 导出",
     }
     for job_id in (parent_id, child_id):
@@ -2238,10 +2503,8 @@ async def test_rename_from_a_follow_up_updates_the_conversation_and_preserves_pr
         job["title"] == "Export CSV 导出"
         for job in (await client.get("/v1/agent/jobs")).json()["jobs"]
     )
-    next_turn = await client.post(
-        f"/v1/agent/jobs/{child_id}/follow-ups", json={"prompt": "one more change"}
-    )
-    assert next_turn.json()["title"] == "Export CSV 导出"
+    next_turn = await _next_turn(client, store, child_id, {"prompt": "one more change"})
+    assert next_turn["title"] == "Export CSV 导出"
 
 
 @pytest.mark.parametrize("title", ["", " \n\t ", "x" * 161, None, 123])
@@ -2281,12 +2544,9 @@ async def test_pin_and_unpin_are_thread_scoped_idempotent_and_reorder_lists(
 ):
     """Any turn pins the conversation and its project without touching run state."""
     parent_id = await _create_job(client)
-    follow_up = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "also update the docs"},
-    )
-    child_id = follow_up.json()["id"]
-    thread_id = follow_up.json()["thread_id"]
+    follow_up = await _next_turn(client, store, parent_id, {"prompt": "also update the docs"})
+    child_id = follow_up["id"]
+    thread_id = follow_up["thread_id"]
     newer = await store.conversation_commands.create_job(
         user_id=_OWNER,
         repo="owner/newer",
@@ -2334,51 +2594,46 @@ async def test_pin_and_unpin_are_thread_scoped_idempotent_and_reorder_lists(
     assert [project["repo"] for project in projects] == ["owner/newer", "owner/name"]
 
 
-async def test_follow_up_response_inherits_the_thread_pin(
-    client: AsyncClient,
-):
+async def test_follow_up_response_inherits_the_thread_pin(client: AsyncClient, store: FakeStorage):
     """A new turn reports the conversation state without waiting for a list refresh."""
     parent_id = await _create_job(client)
     pinned = await client.post(f"/v1/agent/jobs/{parent_id}/pin")
 
-    follow_up = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "also update the docs"},
-    )
+    follow_up = await _next_turn(client, store, parent_id, {"prompt": "also update the docs"})
 
-    assert follow_up.status_code == 201
-    assert follow_up.json()["pinned_at"] == pinned.json()["pinned_at"]
+    assert follow_up["pinned_at"] == pinned.json()["pinned_at"]
 
 
-async def test_follow_up_queues_after_parent_and_uses_native_session_context(
+async def test_a_message_sent_during_a_turn_waits_then_follows_it_in_native_context(
     client: AsyncClient, store: FakeStorage
 ):
-    """A user can send the next turn while the current sandbox is active."""
-    parent_id = await _create_job(client)
-    follow_up = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "now add a regression test", "model": "qwen-next"},
-    )
-    assert follow_up.status_code == 201
-    child = follow_up.json()
-    assert child["state"] == "queued"
-    assert child["parent_job_id"] == parent_id
-    assert child["turn_no"] == 2
-    assert child["model"] == "qwen-next"
+    """A user can send the next message while the current turn is active.
 
-    thread = await client.get(f"/v1/agent/jobs/{child['id']}/thread")
+    It waits in the queue — editable, not yet in the transcript — and becomes
+    the next turn when the current one finishes, continuing the same native
+    session rather than a replayed one.
+    """
+    parent_id = await _create_job(client)
+    sent = await _send(
+        client, store, parent_id, {"prompt": "now add a regression test", "model": "qwen-next"}
+    )
+    assert sent.status_code == 201
+    assert sent.json()["job"] is None
+    waiting = sent.json()["pending"]
+    assert waiting["state"] == "queued"
+    assert waiting["prompt"] == "now add a regression test"
+    assert waiting["model"] == "qwen-next"
+
+    thread = await client.get(f"/v1/agent/jobs/{parent_id}/thread")
     assert thread.status_code == 200
-    assert [message["content"] for message in thread.json()["messages"]] == [
-        "fix it",
-        "now add a regression test",
-    ]
+    assert [message["content"] for message in thread.json()["messages"]] == ["fix it"]
+    assert [row["id"] for row in thread.json()["pending_messages"]] == [waiting["id"]]
 
     claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
     assert claim["job_id"] == parent_id
     blocked = await client.post("/v1/agent/worker/claim", json={"worker_id": "w2"})
     assert blocked.status_code == 200
     assert blocked.json() is None
-    assert store.jobs[child["id"]]["state"] == "queued"
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
     await client.post(
         f"/v1/agent/worker/jobs/{parent_id}/events",
@@ -2391,7 +2646,20 @@ async def test_follow_up_queues_after_parent_and_uses_native_session_context(
         headers=auth,
     )
     assert finished.status_code == 200
-    assert store.jobs[child["id"]]["state"] == "queued"
+
+    thread = (await client.get(f"/v1/agent/jobs/{parent_id}/thread")).json()
+    assert thread["pending_messages"] == []
+    child = next(job for job in thread["jobs"] if job["id"] != parent_id)
+    assert child["state"] == "queued"
+    assert child["parent_job_id"] == parent_id
+    assert child["turn_no"] == 2
+    assert child["model"] == "qwen-next"
+    # The message is in the transcript now, after the turn it waited for.
+    assert [message["content"] for message in thread["messages"]] == [
+        "fix it",
+        "implemented the fix",
+        "now add a regression test",
+    ]
 
     child_claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w2"})).json()
     assert child_claim["job_id"] == child["id"]
@@ -2403,22 +2671,25 @@ async def test_follow_up_queues_after_parent_and_uses_native_session_context(
 async def test_cancelled_middle_turn_does_not_release_a_later_queued_turn(
     client: AsyncClient, store: FakeStorage
 ):
-    """Every unfinished earlier turn blocks a claim, even across a cancellation."""
+    """Every unfinished earlier turn blocks a claim, even across a cancellation.
+
+    Two turns queued behind a live one cannot come from the message route any
+    more — it holds later messages in the queue — so they are appended through
+    the store, which automatic rounds still do.
+    """
     parent_id = await _create_job(client)
-    middle = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "skip this follow-up"},
+    middle = await store.create_follow_up(
+        parent_job_id=parent_id, user_id=_OWNER, prompt="skip this follow-up"
     )
-    assert middle.status_code == 201
-    middle_id = middle.json()["id"]
-    latest = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "run this after the first turn"},
+    assert middle is not None
+    middle_id = middle["id"]
+    latest = await store.create_follow_up(
+        parent_job_id=parent_id, user_id=_OWNER, prompt="run this after the first turn"
     )
-    assert latest.status_code == 201
-    latest_id = latest.json()["id"]
-    assert latest.json()["parent_job_id"] == middle_id
-    assert latest.json()["state"] == "queued"
+    assert latest is not None
+    latest_id = latest["id"]
+    assert latest["parent_job_id"] == middle_id
+    assert latest["state"] == "queued"
 
     cancelled = await client.post(f"/v1/agent/jobs/{middle_id}/cancel")
     assert cancelled.status_code == 200
@@ -2453,15 +2724,17 @@ async def test_create_fails_fast_on_a_model_this_deployment_cannot_serve(client:
     assert "glm-5.1" in detail["message"]
 
 
-async def test_follow_up_model_switch_gets_the_same_fail_fast(client: AsyncClient):
-    """Switching models on a follow-up is validated like a fresh job."""
+async def test_follow_up_model_switch_gets_the_same_fail_fast(
+    client: AsyncClient, store: FakeStorage
+):
+    """Switching models in a message is validated like a fresh job, before it waits."""
     parent_id = await _create_job(client)
-    response = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "try another model", "model": "gpt-nonexistent"},
+    response = await _send(
+        client, store, parent_id, {"prompt": "try another model", "model": "gpt-nonexistent"}
     )
     assert response.status_code == 400
     assert response.json()["detail"]["error"]["type"] == "model_not_available"
+    assert store.pending == {}
 
 
 async def test_an_unregistered_runtime_is_refused_at_create(client: AsyncClient):
@@ -2479,33 +2752,19 @@ async def test_an_unregistered_runtime_is_refused_at_create(client: AsyncClient)
     assert "no-such-harness" in response.json()["detail"]["error"]["message"]
 
 
-async def test_a_follow_up_cannot_switch_the_threads_harness(client: AsyncClient):
+async def test_a_message_cannot_name_a_harness(client: AsyncClient, store: FakeStorage):
     """The harness is fixed per thread; its session is the memory.
 
-    Echoing the thread's own runtime stays a 201 — existing callers do that —
-    and a *different* registered runtime is refused. Native fork preserves the
-    runtime too, so the response points at a genuinely new chat.
+    A message has no ``runtime`` field at all — not even one echoing the
+    thread's own, which the removed follow-up route tolerated. A request that
+    names one is refused outright rather than having the field dropped.
     """
     parent_id = await _create_job(client)
-
-    switched = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "continue on another harness", "runtime": "codex"},
-    )
-    assert switched.status_code == 400
-    assert "start a new chat" in switched.json()["detail"]["error"]["message"]
-
-    echoed = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "continue here", "runtime": "claude-code"},
-    )
-    assert echoed.status_code == 201
-
-    invented = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "continue on nothing", "runtime": "no-such-harness"},
-    )
-    assert invented.status_code == 400
+    for runtime in ("codex", "claude-code", "no-such-harness"):
+        response = await _send(client, store, parent_id, {"prompt": "continue", "runtime": runtime})
+        assert response.status_code == 422, (runtime, response.text)
+    assert store.pending == {}
+    assert len(store.jobs) == 1
 
 
 async def test_config_offers_the_models_the_create_endpoint_accepts(client: AsyncClient):
@@ -2520,32 +2779,37 @@ async def test_config_offers_the_models_the_create_endpoint_accepts(client: Asyn
     assert config.json()["github_connected"] is True
 
 
-async def test_follow_ups_append_to_latest_turn_and_reject_blank_prompts(
-    client: AsyncClient,
+async def test_messages_append_to_latest_turn_and_reject_blank_prompts(
+    client: AsyncClient, store: FakeStorage
 ):
-    """Old links still append linearly, and whitespace is not a durable turn."""
+    """Messages continue the conversation linearly, and whitespace is not a turn."""
     parent_id = await _create_job(client)
-    first = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "first follow-up"},
-    )
-    assert first.status_code == 201
+    first = await _next_turn(client, store, parent_id, {"prompt": "first follow-up"})
+    assert first["parent_job_id"] == parent_id
 
-    # Submit from the old parent URL again. It must attach to the current tip,
-    # not create a sibling that could run against the same branch concurrently.
-    second = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "second follow-up"},
-    )
+    # Sent while that turn is live: it waits, and becomes the turn after it —
+    # never a sibling that could run against the same branch concurrently.
+    second = await _send(client, store, parent_id, {"prompt": "second follow-up"})
     assert second.status_code == 201
-    assert second.json()["parent_job_id"] == first.json()["id"]
-    assert second.json()["turn_no"] == 3
-    assert second.json()["state"] == "queued"
-
-    blank = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "   \n  "},
+    assert second.json()["job"] is None
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    assert claim["job_id"] == first["id"]
+    finished = await client.post(
+        f"/v1/agent/worker/jobs/{first['id']}/finish",
+        json={"state": "succeeded"},
+        headers={"Authorization": f"Bearer {claim['worker_token']}"},
     )
+    assert finished.status_code == 200
+    third = max(
+        (job for job in store.jobs.values() if job["thread_id"] == first["thread_id"]),
+        key=lambda job: job["turn_no"],
+    )
+    assert third["task_prompt"] == "second follow-up"
+    assert third["parent_job_id"] == first["id"]
+    assert third["turn_no"] == 3
+    assert third["state"] == "queued"
+
+    blank = await _send(client, store, parent_id, {"prompt": "   \n  "})
     assert blank.status_code == 422
 
 
@@ -2560,14 +2824,12 @@ async def test_follow_up_is_refused_when_retained_context_is_lost(
         "context_status": "lost",
     }
 
-    response = await client.post(
-        f"/v1/agent/jobs/{job_id}/follow-ups",
-        json={"prompt": "try the next message"},
-    )
+    response = await _send(client, store, job_id, {"prompt": "try the next message"})
 
     assert response.status_code == 409
     assert response.json()["detail"]["error"]["type"] == "sandbox_context_lost"
     assert len(store.jobs) == 1
+    assert store.pending == {}
 
 
 async def test_follow_up_handles_context_loss_during_admission_checks(
@@ -2575,20 +2837,26 @@ async def test_follow_up_handles_context_loss_during_admission_checks(
     store: FakeStorage,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The locked store check closes the gap after the advisory API read."""
+    """The locked store check closes the gap after the advisory API read.
+
+    The context is lost between the checks the route made and the turn being
+    written. The message is not lost with it: it is held, with the reason on
+    it, and no turn is created.
+    """
     job_id = await _create_job(client)
+    store.jobs[job_id]["state"] = "succeeded"
 
     async def _lost_during_create(**_kwargs):
         return {"error": "sandbox_context_lost"}
 
     monkeypatch.setattr(store, "create_follow_up", _lost_during_create)
-    response = await client.post(
-        f"/v1/agent/jobs/{job_id}/follow-ups",
-        json={"prompt": "race with a lost activation"},
-    )
+    response = await _send(client, store, job_id, {"prompt": "race with a lost activation"})
 
-    assert response.status_code == 409
-    assert response.json()["detail"]["error"]["type"] == "sandbox_context_lost"
+    assert response.status_code == 201
+    assert response.json()["job"] is None
+    held = response.json()["pending"]
+    assert held["state"] == "held"
+    assert "lost context" in held["last_error"]
     assert len(store.jobs) == 1
 
 
@@ -2837,12 +3105,11 @@ async def test_shared_chat_can_fork_from_a_specific_historical_turn(
             "resident_slot_capacity": 8,
             "group_members": [],
         }
-        second_response = await client.post(
-            f"/v1/agent/jobs/{first_id}/follow-ups",
-            json={"prompt": "a second completed turn"},
+        second_response = await _send(
+            client, store, first_id, {"prompt": "a second completed turn"}
         )
         assert second_response.status_code == 201
-        second = store.jobs[second_response.json()["id"]]
+        second = store.jobs[second_response.json()["job"]["id"]]
         second["state"] = "succeeded"
 
         response = await client.post(
@@ -5484,9 +5751,9 @@ async def test_a_follow_up_runs_when_an_account_connection_was_disconnected(
         await store.mcp.disconnect_mcp_connection(connection_id=row["id"], user_id=_OWNER) is True
     )
 
-    follow_up = await client.post(f"/v1/agent/jobs/{job_id}/follow-ups", json={"prompt": "again"})
+    follow_up = await _next_turn(client, store, job_id, {"prompt": "again"})
 
-    assert follow_up.status_code == 201
+    assert follow_up["state"] == "queued"
     from cloud_agent.mcp.registry import servers_for_thread
 
     assert await servers_for_thread(store.mcp, thread_id=created.json()["thread_id"]) == {}
@@ -5501,11 +5768,9 @@ async def test_a_follow_up_still_runs_while_its_thread_s_connection_is_connected
         "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
     )
 
-    follow_up = await client.post(
-        f"/v1/agent/jobs/{created.json()['id']}/follow-ups", json={"prompt": "again"}
-    )
+    follow_up = await _next_turn(client, store, created.json()["id"], {"prompt": "again"})
 
-    assert follow_up.status_code == 201
+    assert follow_up["state"] == "queued"
 
 
 async def test_disconnecting_leaves_a_running_jobs_binding_list_alone(
@@ -6501,7 +6766,9 @@ async def test_an_effort_on_a_model_that_takes_none_is_refused(client: AsyncClie
     assert response.json()["detail"]["error"]["message"].endswith("Available: none.")
 
 
-async def test_a_follow_up_inherits_the_efforts_of_the_turn_before_it(client: AsyncClient):
+async def test_a_follow_up_inherits_the_efforts_of_the_turn_before_it(
+    client: AsyncClient, store: FakeStorage
+):
     created = await client.post(
         "/v1/agent/jobs",
         json={
@@ -6513,21 +6780,18 @@ async def test_a_follow_up_inherits_the_efforts_of_the_turn_before_it(client: As
     )
     parent_id = created.json()["id"]
 
-    inherited = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups", json={"prompt": "keep going"}
+    inherited = await _next_turn(client, store, parent_id, {"prompt": "keep going"})
+    assert inherited["reasoning_effort"] == "high"
+
+    switched = await _next_turn(
+        client, store, inherited["id"], {"prompt": "now the easy bit", "reasoning_effort": "low"}
     )
-    assert inherited.status_code == 201
-    assert inherited.json()["reasoning_effort"] == "high"
-
-    switched = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "now the easy bit", "reasoning_effort": "low"},
-    )
-    assert switched.status_code == 201
-    assert switched.json()["reasoning_effort"] == "low"
+    assert switched["reasoning_effort"] == "low"
 
 
-async def test_a_follow_up_can_reset_an_inherited_effort_to_auto(client: AsyncClient):
+async def test_a_follow_up_can_reset_an_inherited_effort_to_auto(
+    client: AsyncClient, store: FakeStorage
+):
     """Null already means "inherit", so clearing takes the explicit sentinel."""
     created = await client.post(
         "/v1/agent/jobs",
@@ -6540,17 +6804,15 @@ async def test_a_follow_up_can_reset_an_inherited_effort_to_auto(client: AsyncCl
     )
     parent_id = created.json()["id"]
 
-    reset = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "back to normal", "reasoning_effort": "auto"},
+    reset = await _next_turn(
+        client, store, parent_id, {"prompt": "back to normal", "reasoning_effort": "auto"}
     )
 
-    assert reset.status_code == 201
-    assert reset.json()["reasoning_effort"] is None
+    assert reset["reasoning_effort"] is None
 
 
 async def test_a_follow_up_effort_is_checked_against_the_model_it_switches_to(
-    client: AsyncClient,
+    client: AsyncClient, store: FakeStorage
 ):
     """A pair offered last turn need not be offered this one."""
     created = await client.post(
@@ -6564,13 +6826,16 @@ async def test_a_follow_up_effort_is_checked_against_the_model_it_switches_to(
     )
     parent_id = created.json()["id"]
 
-    response = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "switch", "model": "qwen-next", "reasoning_effort": "high"},
+    response = await _send(
+        client,
+        store,
+        parent_id,
+        {"prompt": "switch", "model": "qwen-next", "reasoning_effort": "high"},
     )
 
     assert response.status_code == 400
     assert response.json()["detail"]["error"]["type"] == "reasoning_effort_not_available"
+    assert store.pending == {}
 
 
 async def test_a_level_the_runtime_cannot_express_is_refused_at_create(client: AsyncClient):
@@ -6629,11 +6894,14 @@ async def test_a_thread_read_returns_what_earlier_turns_did(
         json={"event_type": "message", "payload": {"text": "done"}},
         headers=auth,
     )
-    await client.post(f"/v1/agent/worker/jobs/{first_id}/finish", json={"state": "succeeded"})
-    second = await client.post(
-        f"/v1/agent/jobs/{first_id}/follow-ups", json={"prompt": "and now the docs"}
+    # With the worker's credential: the first turn has to have finished for
+    # the message below to become the next turn rather than wait for it.
+    finished = await client.post(
+        f"/v1/agent/worker/jobs/{first_id}/finish", json={"state": "succeeded"}, headers=auth
     )
-    second_id = second.json()["id"]
+    assert finished.status_code == 200
+    second = await _send(client, store, first_id, {"prompt": "and now the docs"})
+    second_id = second.json()["job"]["id"]
 
     per_job = (await client.get(f"/v1/agent/jobs/{second_id}/events")).json()
     assert per_job["events"] == []
@@ -6808,24 +7076,24 @@ async def test_archived_history_is_readable_but_follow_up_requires_unarchive(
     detail = await client.get(f"/v1/agent/jobs/{job_id}")
     assert detail.status_code == 200 and detail.json()["archived_at"] is not None
     assert (await client.get(f"/v1/agent/jobs/{job_id}/thread")).status_code == 200
-    blocked = await client.post(f"/v1/agent/jobs/{job_id}/follow-ups", json={"prompt": "continue"})
+    blocked = await _send(client, store, job_id, {"prompt": "continue"})
     assert blocked.status_code == 409
     assert blocked.json()["detail"]["error"]["type"] == "session_archived"
     assert len(store.jobs) == 1
+    assert store.pending == {}
     assert (await client.delete(f"/v1/agent/jobs/{job_id}/archive")).status_code == 200
-    assert (
-        await client.post(f"/v1/agent/jobs/{job_id}/follow-ups", json={"prompt": "continue"})
-    ).status_code == 201
+    assert (await _send(client, store, job_id, {"prompt": "continue"})).status_code == 201
 
 
 async def test_follow_up_rechecks_archive_at_the_atomic_store_boundary(
     client: AsyncClient, store: FakeStorage, monkeypatch
 ):
+    """The store's locked check wins over the route's advisory read."""
     job_id = await _create_job(client)
     monkeypatch.setattr(
-        store, "create_follow_up", AsyncMock(return_value={"error": "session_archived"})
+        store, "submit_message", AsyncMock(return_value={"error": "session_archived"})
     )
-    response = await client.post(f"/v1/agent/jobs/{job_id}/follow-ups", json={"prompt": "continue"})
+    response = await _send(client, store, job_id, {"prompt": "continue"})
     assert response.status_code == 409
     assert response.json()["detail"]["error"]["type"] == "session_archived"
 
@@ -6834,6 +7102,7 @@ async def test_deleted_history_cannot_be_read_resumed_forked_or_used_as_workspac
     client: AsyncClient, store: FakeStorage
 ):
     job_id = await _create_job(client)
+    thread_id = _thread_of(store, job_id)
     store.jobs[job_id]["deleted_at"] = datetime.now(timezone.utc)
     for suffix in (
         "",
@@ -6847,9 +7116,19 @@ async def test_deleted_history_cannot_be_read_resumed_forked_or_used_as_workspac
     ):
         response = await client.get(f"/v1/agent/jobs/{job_id}{suffix}")
         assert response.status_code == 404, (suffix, response.text)
-    for suffix, body in (("/follow-ups", {"prompt": "continue"}), ("/fork", {}), ("/cancel", {})):
+    for suffix, body in (("/fork", {}), ("/cancel", {})):
         response = await client.post(f"/v1/agent/jobs/{job_id}{suffix}", json=body)
         assert response.status_code == 404, (suffix, response.text)
+    # The conversation's own routes answer the same way: a message, the queue,
+    # and continuing it.
+    for method, path, body in (
+        ("POST", f"/v1/agent/threads/{thread_id}/messages", {"prompt": "continue"}),
+        ("GET", f"/v1/agent/threads/{thread_id}/messages", None),
+        ("POST", f"/v1/agent/threads/{thread_id}/queue/resume", None),
+    ):
+        response = await client.request(method, path, json=body)
+        assert response.status_code == 404, (path, response.text)
+        assert response.json()["detail"]["error"]["type"] == "not_found"
 
 
 @pytest.fixture(autouse=True)
@@ -6873,13 +7152,12 @@ async def test_a_submission_key_reaches_the_store_with_a_fingerprint(
     assert len(created["client_request_fingerprint"]) == 64
 
     parent_id = response.json()["id"]
-    follow = await client.post(
-        f"/v1/agent/jobs/{parent_id}/follow-ups",
-        json={"prompt": "and then"},
-        headers={"Idempotency-Key": "turn-2"},
+    follow = await _send(
+        client, store, parent_id, {"prompt": "and then"}, headers={"Idempotency-Key": "turn-2"}
     )
     assert follow.status_code == 201, follow.text
-    key, fingerprint = store.last_follow_up_request
+    waiting = store.pending[follow.json()["pending"]["id"]]
+    key, fingerprint = waiting["client_request_id"], waiting["client_request_fingerprint"]
     assert key == "turn-2" and isinstance(fingerprint, str) and len(fingerprint) == 64
 
 
@@ -6918,19 +7196,20 @@ async def test_a_follow_up_resend_after_archiving_returns_the_first_turn(
     archive would give a genuinely new turn.
     """
     parent_id = await _create_job(client)
+    store.jobs[parent_id]["state"] = "succeeded"
     body = {"prompt": "and then"}
     headers = {"Idempotency-Key": "turn-2"}
 
-    first = await client.post(f"/v1/agent/jobs/{parent_id}/follow-ups", json=body, headers=headers)
+    first = await _send(client, store, parent_id, body, headers=headers)
     assert first.status_code == 201, first.text
 
     await store.conversation_commands.set_thread_archived(
         job_id=parent_id, user_id=_OWNER, archived=True
     )
 
-    again = await client.post(f"/v1/agent/jobs/{parent_id}/follow-ups", json=body, headers=headers)
+    again = await _send(client, store, parent_id, body, headers=headers)
     assert again.status_code == 201, again.text
-    assert again.json()["id"] == first.json()["id"]
+    assert again.json()["job"]["id"] == first.json()["job"]["id"]
     assert len(store.jobs) == 2
 
 
@@ -6939,17 +7218,18 @@ async def test_a_follow_up_resend_after_the_sandbox_is_lost_returns_the_first_tu
 ):
     """Same rule for the other advisory check the handler runs before the store."""
     parent_id = await _create_job(client)
+    store.jobs[parent_id]["state"] = "succeeded"
     body = {"prompt": "and then"}
     headers = {"Idempotency-Key": "turn-2"}
 
-    first = await client.post(f"/v1/agent/jobs/{parent_id}/follow-ups", json=body, headers=headers)
+    first = await _send(client, store, parent_id, body, headers=headers)
     assert first.status_code == 201, first.text
 
     store.jobs[parent_id]["thread_sandbox"] = {"shared_live": True, "context_status": "lost"}
 
-    again = await client.post(f"/v1/agent/jobs/{parent_id}/follow-ups", json=body, headers=headers)
+    again = await _send(client, store, parent_id, body, headers=headers)
     assert again.status_code == 201, again.text
-    assert again.json()["id"] == first.json()["id"]
+    assert again.json()["job"]["id"] == first.json()["job"]["id"]
 
 
 async def test_a_create_resend_after_a_connection_disconnects_returns_the_first_job(
@@ -7041,22 +7321,14 @@ async def test_selected_skills_are_snapshotted_and_delivered_only_to_worker(
     assert "A later edit." not in claim.json()["task_prompt"]
     assert claim.json()["task_prompt"].endswith("User task:\nfix it")
     assert store.messages[0]["content"] == "fix it"
-    follow = await client.post(
-        f"/v1/agent/jobs/{job['id']}/follow-ups", json={"prompt": "Continue"}
-    )
-    assert follow.status_code == 201, follow.text
-    assert follow.json()["skills"][0]["revision"] == 1
+    follow = await _next_turn(client, store, job["id"], {"prompt": "Continue"})
+    assert follow["skills"][0]["revision"] == 1
     lookup.assert_not_awaited()
-    updated = await client.post(
-        f"/v1/agent/jobs/{job['id']}/follow-ups", json={"prompt": "Update", "skill_ids": [5]}
-    )
-    assert updated.status_code == 201, updated.text
-    assert updated.json()["skills"][0]["revision"] == 2
-    cleared = await client.post(
-        f"/v1/agent/jobs/{job['id']}/follow-ups", json={"prompt": "Clear", "skill_ids": []}
-    )
-    assert cleared.status_code == 201 and cleared.json()["skills"] == []
-    assert store.jobs[cleared.json()["id"]]["skills"] == []
+    updated = await _next_turn(client, store, follow["id"], {"prompt": "Update", "skill_ids": [5]})
+    assert updated["skills"][0]["revision"] == 2
+    cleared = await _next_turn(client, store, updated["id"], {"prompt": "Clear", "skill_ids": []})
+    assert cleared["skills"] == []
+    assert store.jobs[cleared["id"]]["skills"] == []
 
 
 @pytest.mark.parametrize(
@@ -7172,6 +7444,7 @@ async def test_follow_up_receipts_include_retained_membership_on_create_and_repl
 ):
     """Commands return bare SQL job rows; the HTTP receipt must use the owner read."""
     parent_id = await _create_job(client)
+    store.jobs[parent_id]["state"] = "succeeded"
     sandbox = {
         "sandbox_id": "asbx_side_contract",
         "shared_live": True,
@@ -7194,19 +7467,19 @@ async def test_follow_up_receipts_include_retained_membership_on_create_and_repl
 
     monkeypatch.setattr(store, "create_follow_up", bare_create)
     monkeypatch.setattr(store, "replayed_submission", bare_replay)
-    path = f"/v1/agent/jobs/{parent_id}/follow-ups"
-    first = await client.post(
-        path, json={"prompt": "side reply"}, headers={"Idempotency-Key": "side-send"}
+    first = await _send(
+        client, store, parent_id, {"prompt": "side reply"}, headers={"Idempotency-Key": "side-send"}
     )
-    again = await client.post(
-        path, json={"prompt": "side reply"}, headers={"Idempotency-Key": "side-send"}
+    again = await _send(
+        client, store, parent_id, {"prompt": "side reply"}, headers={"Idempotency-Key": "side-send"}
     )
     for response in (first, again):
         assert response.status_code == 201, response.text
-        assert response.json()["sandbox_id"] == sandbox["sandbox_id"]
-        assert response.json()["fork_anchor_job_id"] == sandbox["fork_anchor_job_id"]
-        assert response.json()["workspace_shared"] is True
-    assert first.json()["id"] == again.json()["id"]
+        receipt = response.json()["job"]
+        assert receipt["sandbox_id"] == sandbox["sandbox_id"]
+        assert receipt["fork_anchor_job_id"] == sandbox["fork_anchor_job_id"]
+        assert receipt["workspace_shared"] is True
+    assert first.json()["job"]["id"] == again.json()["job"]["id"]
     assert len(store.jobs) == 2
 
 

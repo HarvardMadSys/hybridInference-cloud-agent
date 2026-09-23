@@ -23,6 +23,8 @@ from cloud_agent.schemas import (
     AgentAttemptSummary,
     AgentJobEvent,
     AgentJobResponse,
+    AgentPendingMessageAttachment,
+    AgentPendingMessageResponse,
     AttemptResources,
     GoalView,
     McpBindingSummary,
@@ -233,4 +235,27 @@ def _event_response(event: dict[str, Any]) -> AgentJobEvent:
         event_type=event["event_type"],
         payload=event["payload"],
         created_at=_iso(event["created_at"]),
+    )
+
+
+def _pending_response(message: dict[str, Any]) -> AgentPendingMessageResponse:
+    """Shape a waiting message for its owner, without its idempotency key."""
+    return AgentPendingMessageResponse(
+        id=message["id"],
+        thread_id=message["thread_id"],
+        position=message["position"],
+        state=message["state"],
+        revision=message["revision"],
+        prompt=message["prompt"],
+        skill_ids=message.get("skill_ids"),
+        attachment_ids=message.get("attachment_ids"),
+        attachments=[
+            AgentPendingMessageAttachment(**attachment)
+            for attachment in message.get("attachments") or []
+        ],
+        model=message.get("model"),
+        reasoning_effort=message.get("reasoning_effort"),
+        last_error=message.get("last_error"),
+        created_at=_iso(message.get("created_at")),
+        updated_at=_iso(message.get("updated_at")),
     )

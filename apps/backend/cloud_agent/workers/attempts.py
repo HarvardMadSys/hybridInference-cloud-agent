@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 from typing import TYPE_CHECKING, Any, Protocol
 
+from cloud_agent.application.pending_messages import settle_waiting_queues
 from cloud_agent.gateway import GatewayError
 from cloud_agent.goals.controller import run_goal_wakeups
 from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
@@ -22,6 +23,7 @@ from cloud_agent.logging_utils import get_logger
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
+        AttachmentRepository,
         AttemptCommands,
         ConversationCommands,
         ConversationQueries,
@@ -29,9 +31,11 @@ if TYPE_CHECKING:
         GoalWakeupRepository,
         GrantRepository,
         HostPoolRepository,
+        PendingMessageRepository,
         ResidencyRepository,
         SandboxRepository,
         SessionForkRepository,
+        SkillRepository,
         SnapshotRepository,
         SourceControlRepository,
     )
@@ -61,11 +65,13 @@ class _Reaping(Protocol):
     """What one reaper pass reaches for, named rather than inherited.
 
     The pass is deliberately broad -- hosts, then residencies, then queued
-    follow-ups, then attempts, then the forks and snapshots an expiry
-    strands -- so this list is long. It is still a list: adding an eighth
-    capability is an edit here, not a call that happens to type-check.
+    follow-ups, then attempts, then the owner's waiting messages, then the
+    forks and snapshots an expiry strands -- so this list is long. It is still
+    a list: adding an eighth capability is an edit here, not a call that
+    happens to type-check.
     """
 
+    attachments: AttachmentRepository
     attempt_commands: AttemptCommands
     conversation_commands: ConversationCommands
     conversation_queries: ConversationQueries
@@ -74,9 +80,11 @@ class _Reaping(Protocol):
     grants: GrantRepository
     source_control: SourceControlRepository
     host_pool: HostPoolRepository
+    pending_messages: PendingMessageRepository
     residency: ResidencyRepository
     sandbox: SandboxRepository
     session_fork: SessionForkRepository
+    skills: SkillRepository
     snapshot: SnapshotRepository
 
 
@@ -525,6 +533,7 @@ async def reap_expired_attempts(
     max_attempts: int = MAX_ATTEMPTS,
     grants: Any | None = None,
     app_credentials: Any | None = None,
+    gateway: Any | None = None,
 ) -> None:
     """Periodically close attempts whose lease expired.
 
@@ -540,6 +549,10 @@ async def reap_expired_attempts(
             minter that check can only see the deployment's allowlist — so a
             repository the owner installed the App on would be reported as
             access denied.
+        gateway: The gateway client. Sending an owner's waiting message checks
+            the model and effort it names, exactly as sending it by hand does;
+            without one, a message naming either waits for a settlement that
+            can check it.
     """
     try:
         await _reconcile_settled_terminals(store)
@@ -590,7 +603,7 @@ async def reap_expired_attempts(
         # goal: every ordinary way an active goal stops being able to continue
         # says so where and when it happens.
         try:
-            await run_goal_wakeups(store=store, app_credentials=app_credentials)
+            await run_goal_wakeups(store=store, app_credentials=app_credentials, gateway=gateway)
         except Exception:
             logger.warning("Goal wakeup consumer pass failed", exc_info=True)
         try:
@@ -671,6 +684,16 @@ async def reap_expired_attempts(
                 )
         except Exception:
             logger.warning("Agent attempt reaper pass failed", exc_info=True)
+        # The owner's waiting messages after the attempt pass. A turn the
+        # reaper just ended — failed or cancelled — reached no finish route, so
+        # nothing else would act on it: this pauses its queue, and sends what a
+        # settlement missed, a control plane restarted between a turn's end and
+        # its settlement included. The backstop, not the mechanism; in its own
+        # try so a queue cannot stop attempts being recovered.
+        try:
+            await settle_waiting_queues(store, gateway=gateway, app_credentials=app_credentials)
+        except Exception:
+            logger.warning("Pending message queue sweep failed", exc_info=True)
         # After the reaper, so an attempt superseded in this very pass has its
         # grant withdrawn in the same one — and in its own try for the reason
         # the host reaper has one: a gateway having a bad minute must not stop

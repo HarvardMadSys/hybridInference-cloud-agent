@@ -55,6 +55,7 @@ from cloud_agent.api.deps import (
     verify_admin_access,
 )
 from cloud_agent.application.job_admission import _create_job_as
+from cloud_agent.application.pending_messages import settle_queue
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
     AgentJobCancelResponse,
@@ -71,6 +72,7 @@ if TYPE_CHECKING:
         ConversationQueries,
         ExecutionQueries,
         McpConnectionRepository,
+        PendingMessageRepository,
         SkillRepository,
         SourceControlRepository,
     )
@@ -96,6 +98,7 @@ class _ServiceJobsStorage(Protocol):
     conversation_queries: ConversationQueries
     execution_queries: ExecutionQueries
     mcp: McpConnectionRepository
+    pending_messages: PendingMessageRepository
     skills: SkillRepository
     source_control: SourceControlRepository
 
@@ -246,6 +249,8 @@ async def cancel_oncall_job(
     job_id: str,
     _caller: str = Depends(verify_oncall_dispatch),
     store: _ServiceJobsStorage | None = Depends(get_storage),
+    app_credentials: Any | None = Depends(get_agent_app_credentials),
+    gateway: Any = Depends(get_gateway_client),
 ) -> AgentJobCancelResponse:
     """Request cancellation of one on-call job.
 
@@ -262,8 +267,25 @@ async def cancel_oncall_job(
     """
     job_store = _require_store(store)
     user = _oncall_owner()
-    await _owned_job(job_store.conversation_queries, job_id, user)
+    owned = await _owned_job(job_store.conversation_queries, job_id, user)
     state = await job_store.attempt_commands.request_cancel(job_id=job_id, user_id=user["user_id"])
+    # The same settlement the owner's cancel runs, so a cancelled turn's
+    # ending is acted on the same way whichever door stopped it. Best effort:
+    # the cancel has committed, and the sweep repeats a settlement that fails.
+    if owned.get("thread_id") is not None:
+        try:
+            await settle_queue(
+                job_store,
+                thread_id=str(owned["thread_id"]),
+                gateway=gateway,
+                app_credentials=app_credentials,
+            )
+        except Exception:
+            logger.warning(
+                "agent_pending_queue_settle_failed",
+                extra={"event": "agent_pending_queue_settle_failed", "job_id": job_id},
+                exc_info=True,
+            )
     job = await job_store.conversation_queries.get_job(job_id)
     return AgentJobCancelResponse(
         id=job_id,

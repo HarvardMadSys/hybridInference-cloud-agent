@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from cloud_agent.domain.pending_messages import SettleOutcome
 from cloud_agent.goals.controller import client_request_id_for, consume_wakeup, run_goal_wakeups
 from cloud_agent.goals.models import MAX_WAKEUP_ATTEMPTS
 from cloud_agent.storage.repositories.goal_wakeups import wakeup_backoff
@@ -371,8 +372,36 @@ class FakeSourceControl:
         return []
 
 
+class FakePendingMessages:
+    """The owner's waiting messages: none, unless a case puts one in line.
+
+    Settling sends the first one as a person's turn when nothing is running,
+    which is all the consumer needs of the real settlement: whether it just
+    started a turn the goal has to wait behind.
+    """
+
+    def __init__(self, store: FakeStore) -> None:
+        self._store = store
+        self.waiting: list[str] = []
+
+    async def settle_queue(self, *, thread_id: str, prepared: Any = None) -> SettleOutcome:
+        if not self.waiting or self._store.live_turn() is not None:
+            return SettleOutcome()
+        prompt = self.waiting.pop(0)
+        self._store.input_seq += 1
+        sent = turn(
+            id=f"person_{len(self._store.turns) + 1}",
+            state="queued",
+            input_seq_at_create=self._store.input_seq,
+            turn_no=len(self._store.turns) + 1,
+        )
+        sent["task_prompt"] = prompt
+        self._store.turns.append(sent)
+        return SettleOutcome(job=sent, message_id=f"apmsg_{sent['id']}")
+
+
 class FakeStore:
-    """The four repositories the consumer reaches, over one conversation."""
+    """The repositories the consumer reaches, over one conversation."""
 
     def __init__(
         self,
@@ -396,6 +425,7 @@ class FakeStore:
         self.conversation_commands = FakeConversationCommands(self)
         self.conversation_queries = FakeConversationQueries(self)
         self.source_control = FakeSourceControl()
+        self.pending_messages = FakePendingMessages(self)
 
     def wakeup(self, wakeup_id: str) -> dict[str, Any]:
         return self.goal_wakeups._row(wakeup_id)
@@ -683,6 +713,48 @@ async def test_a_live_turn_parks_the_wakeup_instead_of_queueing_behind_it():
     parked = store.wakeup(wakeup["id"])
     assert (parked["state"], parked["waiting_job_id"]) == ("pending", "job-2")
     assert store.rounds() == []
+
+
+async def test_a_waiting_message_goes_before_the_round_the_goal_would_add():
+    """The owner's queued message is the next turn; the goal waits behind it.
+
+    A round just finished and the goal would continue, but the owner wrote
+    something while it ran. That message is sent first — the decision parks
+    behind the turn it became — and the goal is judged again once it ends.
+    """
+    store = FakeStore(
+        goal=goal_row(rounds_used=1),
+        turns=[
+            turn(id="job-1", input_seq_at_create=1),
+            turn(
+                id="round-1",
+                turn_source="goal",
+                goal_id=GOAL_ID,
+                round_kind="work",
+                report_parse="absent",
+                input_seq_at_create=1,
+                turn_no=2,
+            ),
+        ],
+        input_seq=1,
+    )
+    store.pending_messages.waiting.append("also update the changelog")
+    wakeup = store.goal_wakeups.arm(trigger="finish", trigger_ref="job:round-1")
+
+    assert await _consume(store) == "wait"
+
+    sent = store.latest_turn()
+    assert sent is not None
+    assert (sent["turn_source"], sent["task_prompt"]) == ("human", "also update the changelog")
+    parked = store.wakeup(wakeup["id"])
+    assert (parked["state"], parked["waiting_job_id"]) == ("pending", sent["id"])
+    assert [row["id"] for row in store.rounds()] == ["round-1"]
+
+    # The owner's turn ends; the goal is judged again and continues after it.
+    sent["state"] = "succeeded"
+    parked["waiting_job_id"] = None
+    assert await _consume(store) == "queue_work_round"
+    assert store.latest_turn()["turn_source"] == "goal"
 
 
 async def test_a_replayed_wakeup_creates_no_second_round():

@@ -21,8 +21,9 @@ appears in the conversation like any other message — marked as automatic.
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from cloud_agent.application.pending_messages import settle_queue
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.goals.decision import GoalAction, GoalContext, decide
 from cloud_agent.goals.models import (
@@ -33,6 +34,9 @@ from cloud_agent.goals.models import (
 )
 from cloud_agent.goals.prompts import render_repair_prompt, render_round_prompt
 from cloud_agent.goals.report import GoalReport, GoalReportParse
+
+if TYPE_CHECKING:
+    from cloud_agent.application.pending_messages import QueueStorage
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +75,21 @@ class _GoalStore(Protocol):
         """Repository entitlement."""
         ...
 
+    @property
+    def pending_messages(self) -> Any:
+        """The owner's waiting messages, which go before any automatic round."""
+        ...
+
+    @property
+    def attachments(self) -> Any:
+        """Uploads a waiting message carries, checked before it is sent."""
+        ...
+
+    @property
+    def skills(self) -> Any:
+        """Skills a waiting message names, checked before it is sent."""
+        ...
+
 
 def client_request_id_for(*, thread_id: str, goal_id: str, kind: str, trigger_ref: str) -> str:
     """The idempotency key of the round one decision would produce.
@@ -92,6 +111,7 @@ async def run_goal_wakeups(
     *,
     store: _GoalStore,
     app_credentials: Any | None = None,
+    gateway: Any | None = None,
     limit: int = 8,
 ) -> int:
     """Consume what is due, and return how many wakeups were handled.
@@ -103,7 +123,9 @@ async def run_goal_wakeups(
     handled = 0
     for wakeup in await store.goal_wakeups.claim_wakeups(limit=limit):
         try:
-            await consume_wakeup(store=store, wakeup=wakeup, app_credentials=app_credentials)
+            await consume_wakeup(
+                store=store, wakeup=wakeup, app_credentials=app_credentials, gateway=gateway
+            )
         except Exception:
             logger.warning(
                 "agent_goal_wakeup_failed",
@@ -124,6 +146,7 @@ async def continue_after_finish(
     store: _GoalStore,
     job_id: str,
     app_credentials: Any | None = None,
+    gateway: Any | None = None,
 ) -> int:
     """Drain what a finished turn made due, before the runner is acknowledged.
 
@@ -141,7 +164,9 @@ async def continue_after_finish(
         "agent_goal_finish_drain",
         extra={"event": "agent_goal_finish_drain", "job_id": job_id},
     )
-    return await run_goal_wakeups(store=store, app_credentials=app_credentials, limit=8)
+    return await run_goal_wakeups(
+        store=store, app_credentials=app_credentials, gateway=gateway, limit=8
+    )
 
 
 async def consume_wakeup(
@@ -149,12 +174,18 @@ async def consume_wakeup(
     store: _GoalStore,
     wakeup: dict[str, Any],
     app_credentials: Any | None = None,
+    gateway: Any | None = None,
 ) -> str:
     """Judge one goal and write what follows, atomically.
 
     Returns the decision's kind, for the log line and for the tests that assert
     on it. Never raises for a business reason: a goal that cannot continue is
     paused, not turned into a failed request.
+
+    The owner's waiting messages are sent before anything is decided: a
+    message the owner queued goes before a round the goal would add, and the
+    goal is judged again when that message's turn has ended. ``gateway`` is
+    what checking such a message against the turn it follows asks.
     """
     thread_id = str(wakeup["thread_id"])
     goal = await store.goals.get_goal(thread_id=thread_id)
@@ -184,6 +215,18 @@ async def consume_wakeup(
             wakeup_id=str(wakeup["id"]), processed=True, detail=f"goal {goal.get('state')}"
         )
         return "none"
+    # A person's waiting message goes first. The settlement is the same one
+    # every other entry point runs; when it sends a message, this obligation
+    # waits behind that turn exactly as it waits behind any person's turn.
+    settled = await settle_queue(
+        cast("QueueStorage", store),
+        thread_id=thread_id,
+        gateway=gateway,
+        app_credentials=app_credentials,
+    )
+    if settled.job is not None:
+        await _park(store, wakeup=wakeup, job_id=str(settled.job["id"]))
+        return "wait"
     owner_triggered = wakeup.get("trigger") == "owner"
     if owner_triggered:
         # The owner asked for this. Their authorization is the trigger, and the

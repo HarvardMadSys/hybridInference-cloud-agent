@@ -2011,104 +2011,6 @@
         "title": "AgentConversationListResponse",
         "type": "object"
       },
-      "AgentFollowUpRequest": {
-        "description": "A new user turn appended to an existing task thread.",
-        "properties": {
-          "attachment_ids": {
-            "anyOf": [
-              {
-                "items": {
-                  "exclusiveMinimum": 0.0,
-                  "type": "integer"
-                },
-                "maxItems": 50,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Further uploads for this turn. Omitted adds none — earlier turns' files are already under /uploads and are re-imported whenever the sandbox is rebuilt, so inheriting here would only copy them twice.",
-            "title": "Attachment Ids"
-          },
-          "goal": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/GoalInput"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Set or replace this conversation's completion condition along with this message. Omitted leaves the goal as it is. A turn queued by the goal itself never carries one."
-          },
-          "model": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Optional model override for this turn.",
-            "title": "Model"
-          },
-          "prompt": {
-            "maxLength": 100000,
-            "minLength": 1,
-            "title": "Prompt",
-            "type": "string"
-          },
-          "reasoning_effort": {
-            "anyOf": [
-              {
-                "maxLength": 32,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Optional reasoning-effort override for this turn. Omitted inherits the previous turn's, as an omitted model does. The literal 'auto' resets to Auto — effort needs a way back that model never did, because null is a value a turn can legitimately hold rather than the absence of one.",
-            "title": "Reasoning Effort"
-          },
-          "runtime": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Accepted only when it names the thread's own harness — a thread's harness is fixed (its session is the unit of continuity). Any other value is a 400; start a new chat to switch.",
-            "title": "Runtime"
-          },
-          "skill_ids": {
-            "anyOf": [
-              {
-                "items": {
-                  "exclusiveMinimum": 0.0,
-                  "type": "integer"
-                },
-                "maxItems": 16,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Omitted inherits the previous turn's skill snapshots; [] clears the selection.",
-            "title": "Skill Ids"
-          }
-        },
-        "required": [
-          "prompt"
-        ],
-        "title": "AgentFollowUpRequest",
-        "type": "object"
-      },
       "AgentGitChange": {
         "description": "One worktree status row.",
         "properties": {
@@ -3664,6 +3566,268 @@
         "title": "AgentOperationProfilingFragment",
         "type": "object"
       },
+      "AgentPendingMessageAttachment": {
+        "description": "One upload a waiting message holds, without its bytes.",
+        "properties": {
+          "content_type": {
+            "title": "Content Type",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "content_type",
+          "size_bytes"
+        ],
+        "title": "AgentPendingMessageAttachment",
+        "type": "object"
+      },
+      "AgentPendingMessageResponse": {
+        "description": "A message the owner wrote that has not become a turn yet.",
+        "properties": {
+          "attachment_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachment Ids"
+          },
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/AgentPendingMessageAttachment"
+            },
+            "title": "Attachments",
+            "type": "array"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "prompt": {
+            "title": "Prompt",
+            "type": "string"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "skill_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Skill Ids"
+          },
+          "state": {
+            "enum": [
+              "queued",
+              "held",
+              "sending"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "id",
+          "thread_id",
+          "position",
+          "state",
+          "revision",
+          "prompt"
+        ],
+        "title": "AgentPendingMessageResponse",
+        "type": "object"
+      },
+      "AgentPendingMessageUpdate": {
+        "additionalProperties": false,
+        "description": "An edit to a waiting message, made against the revision the caller read.\n\nOnly the fields sent change. ``state`` is how an editor holds the message\nwhile it is rewritten (``held``) and lets it go again (``queued``).",
+        "properties": {
+          "attachment_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "exclusiveMinimum": 0.0,
+                  "type": "integer"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachment Ids"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "prompt": {
+            "anyOf": [
+              {
+                "maxLength": 100000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
+          },
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "skill_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "exclusiveMinimum": 0.0,
+                  "type": "integer"
+                },
+                "maxItems": 16,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Skill Ids"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "held",
+                  "queued"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          }
+        },
+        "required": [
+          "revision"
+        ],
+        "title": "AgentPendingMessageUpdate",
+        "type": "object"
+      },
       "AgentProject": {
         "description": "One repo the caller has run tasks in, summarized for the task tree.",
         "properties": {
@@ -4483,6 +4647,82 @@
         "title": "AgentThreadEventsResponse",
         "type": "object"
       },
+      "AgentThreadMessageCreate": {
+        "additionalProperties": false,
+        "description": "A message for a conversation: the next turn now, or queued behind the running one.\n\nA follow-up without ``runtime`` or ``goal``. The harness is the thread's and\ncannot change, and a goal has its own routes; a request that still sends\neither is refused rather than having the field quietly dropped.",
+        "properties": {
+          "attachment_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "exclusiveMinimum": 0.0,
+                  "type": "integer"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Uploads for this message's turn. While the message waits they are pinned to it, so they are neither swept nor deletable from the composer.",
+            "title": "Attachment Ids"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional model override for this turn.",
+            "title": "Model"
+          },
+          "prompt": {
+            "maxLength": 100000,
+            "minLength": 1,
+            "title": "Prompt",
+            "type": "string"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional reasoning-effort override for this turn. Omitted inherits the previous turn's; the literal 'auto' resets to Auto.",
+            "title": "Reasoning Effort"
+          },
+          "skill_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "exclusiveMinimum": 0.0,
+                  "type": "integer"
+                },
+                "maxItems": 16,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Omitted inherits the previous turn's skill snapshots; [] clears the selection.",
+            "title": "Skill Ids"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "title": "AgentThreadMessageCreate",
+        "type": "object"
+      },
       "AgentThreadMessageResponse": {
         "description": "One durable user or assistant message in a task thread.",
         "properties": {
@@ -4523,6 +4763,49 @@
         "title": "AgentThreadMessageResponse",
         "type": "object"
       },
+      "AgentThreadMessageResult": {
+        "description": "What a queue action left behind.\n\n``job`` is the turn this request started, if it started one: the message\njust sent when nothing was running, or an older waiting message that went\nfirst. ``pending`` is the message this request wrote or changed, while it is\nstill waiting.",
+        "properties": {
+          "job": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentJobResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pending": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentPendingMessageResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "queue_paused_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "stopped",
+                  "failed",
+                  "archived"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Paused Reason"
+          }
+        },
+        "title": "AgentThreadMessageResult",
+        "type": "object"
+      },
       "AgentThreadPinResponse": {
         "description": "Pin state for the thread containing a requested job.",
         "properties": {
@@ -4551,6 +4834,76 @@
           "pinned"
         ],
         "title": "AgentThreadPinResponse",
+        "type": "object"
+      },
+      "AgentThreadQueueResponse": {
+        "description": "A conversation's queue, and its newest turn, without the transcript.\n\nWhat a page polls while messages wait: small enough to ask for often, and\nenough to notice the moment one of them became the next turn.",
+        "properties": {
+          "latest_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Job Id"
+          },
+          "latest_job_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Job State"
+          },
+          "latest_turn_no": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Turn No"
+          },
+          "pending_messages": {
+            "items": {
+              "$ref": "#/components/schemas/AgentPendingMessageResponse"
+            },
+            "title": "Pending Messages",
+            "type": "array"
+          },
+          "queue_paused_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "stopped",
+                  "failed",
+                  "archived"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Paused Reason"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id"
+        ],
+        "title": "AgentThreadQueueResponse",
         "type": "object"
       },
       "AgentThreadRenameRequest": {
@@ -4626,6 +4979,29 @@
             },
             "title": "Messages",
             "type": "array"
+          },
+          "pending_messages": {
+            "items": {
+              "$ref": "#/components/schemas/AgentPendingMessageResponse"
+            },
+            "title": "Pending Messages",
+            "type": "array"
+          },
+          "queue_paused_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "stopped",
+                  "failed",
+                  "archived"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Paused Reason"
           },
           "repo": {
             "title": "Repo",
@@ -16241,7 +16617,7 @@
     },
     "/v1/agent/jobs/{job_id}/cancel": {
       "post": {
-        "description": "Request cancellation of one of the caller's agent jobs.\n\nQueued jobs cancel immediately; a running job is flagged and the worker\nperforms the fenced terminal transition when it next heartbeats.",
+        "description": "Request cancellation of one of the caller's agent jobs.\n\nQueued jobs cancel immediately; a running job is flagged and the worker\nperforms the fenced terminal transition when it next heartbeats. Messages\nthe owner has waiting are paused by the same commit — Stop does not start\nthe next one — and stay until the owner continues.",
         "operationId": "cancel_agent_job_v1_agent_jobs__job_id__cancel_post",
         "parameters": [
           {
@@ -16516,89 +16892,6 @@
           }
         },
         "summary": "Write Agent Job Workspace File"
-      }
-    },
-    "/v1/agent/jobs/{job_id}/follow-ups": {
-      "post": {
-        "description": "Append a turn and queue its member in the retained shared sandbox.\n\nAn ``Idempotency-Key`` names this one submission, as for creation: a\nresend returns the turn the first send made, different content under the\nsame key is a 409 ``idempotency_conflict``.",
-        "operationId": "create_agent_follow_up_v1_agent_jobs__job_id__follow_ups_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "job_id",
-            "required": true,
-            "schema": {
-              "title": "Job Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Idempotency-Key",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "maxLength": 256,
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Idempotency-Key"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentFollowUpRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentJobResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Create Agent Follow Up"
       }
     },
     "/v1/agent/jobs/{job_id}/fork": {
@@ -20779,6 +21072,347 @@
         "summary": "Resume Agent Goal"
       }
     },
+    "/v1/agent/threads/{thread_id}/messages": {
+      "get": {
+        "description": "The conversation's waiting messages and its newest turn, without the transcript.\n\nThe page reads this while messages wait: when the newest turn changes to\none of them, it has been sent.",
+        "operationId": "get_thread_queue_v1_agent_threads__thread_id__messages_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentThreadQueueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Thread Queue"
+      },
+      "post": {
+        "description": "Send a message: the next turn now if nothing is running, otherwise queued.\n\nEvery message goes through here. It is checked against the conversation's\nnewest turn — the same checks a follow-up always passed — and put at the end\nof the thread's queue; the queue is then settled, which on an idle\nconversation makes it the next turn before this returns (``job``). With a\nturn running it waits (``pending``) and is sent, in order, when that turn\nends. Sending on an idle conversation whose queue was paused is the owner\ncontinuing: older waiting messages go first.\n\nAn ``Idempotency-Key`` names this one submission. A resend answers with what\nthe first send made — the turn if it has become one, the waiting message if\nnot — and the same key under different content is a 409\n``idempotency_conflict``.",
+        "operationId": "submit_thread_message_v1_agent_threads__thread_id__messages_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentThreadMessageCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentThreadMessageResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Thread Message"
+      }
+    },
+    "/v1/agent/threads/{thread_id}/messages/{message_id}": {
+      "delete": {
+        "description": "Withdraw a waiting message, at the revision the caller read.\n\nIts uploads go back to being staged. A stale ``revision`` is a 409\n``revision_conflict`` carrying the message as it is now.",
+        "operationId": "delete_thread_message_v1_agent_threads__thread_id__messages__message_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "title": "Message Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Revision",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentThreadMessageResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Thread Message"
+      },
+      "patch": {
+        "description": "Change a waiting message, at the revision the caller read.\n\nOnly the fields sent change. ``state: held`` is how an editor stops the\nqueue at this message while it is being rewritten; ``state: queued`` lets\nit go again. A stale ``revision`` is a 409 ``revision_conflict`` carrying\nthe message as it is now.",
+        "operationId": "edit_thread_message_v1_agent_threads__thread_id__messages__message_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "title": "Message Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentPendingMessageUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentThreadMessageResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Edit Thread Message"
+      }
+    },
+    "/v1/agent/threads/{thread_id}/queue/resume": {
+      "post": {
+        "description": "Continue a paused queue from its first message.\n\nThe pause is cleared and, when nothing is running, the ending that caused\nit counts as seen, so the queue does not stop again for the same turn. The\nqueue is then settled: on an idle conversation its first message becomes\nthe next turn before this returns (``job``).",
+        "operationId": "resume_thread_queue_v1_agent_threads__thread_id__queue_resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentThreadMessageResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resume Thread Queue"
+      }
+    },
     "/v1/agent/uploads": {
       "post": {
         "description": "Stage one file for a task the owner has not submitted yet.",
@@ -21211,7 +21845,7 @@
     },
     "/v1/agent/worker/jobs/{job_id}/finish": {
       "post": {
-        "description": "Drive the fenced terminal transition for this attempt.",
+        "description": "Drive the fenced terminal transition for this attempt.\n\nThen, before acknowledging, act on what the ending means for the rest of\nthe conversation: the owner's waiting messages first, then the goal.",
         "operationId": "worker_finish_v1_agent_worker_jobs__job_id__finish_post",
         "parameters": [
           {
