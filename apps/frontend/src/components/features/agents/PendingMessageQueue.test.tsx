@@ -73,13 +73,35 @@ function stored(row: PendingMessageApi): PendingMessageApi {
 }
 
 /** The hook and the cards together, the way the composer uses them. */
-function Harness({ onSent }: { onSent?: (jobId: string) => void }) {
+function Harness({
+  onSent,
+  onQueue,
+}: {
+  onSent?: (jobId: string) => void;
+  /** Hands the test the live queue, to read the server when it chooses. */
+  onQueue?: (queue: ReturnType<typeof usePendingMessages>) => void;
+}) {
   const queue = usePendingMessages({
     threadId: 'athr_1',
     active: true,
     onSent: onSent ? (jobId) => onSent(jobId) : undefined,
   });
+  onQueue?.(queue);
   return <PendingMessageQueue queue={queue} />;
+}
+
+/** An edit the way the server takes it: at the row's revision, or refused. */
+async function serverEdit(
+  _threadId: string,
+  messageId: string,
+  revision: number,
+  patch: { prompt?: string; state?: 'held' | 'queued' },
+) {
+  const row = server.pending_messages.find((candidate) => candidate.id === messageId)!;
+  if (row.revision !== revision) {
+    throw new APIError('revision_conflict', 'changed', 409, { current: structuredClone(row) });
+  }
+  return { pending: stored({ ...row, ...patch, revision: row.revision + 1 }), job: null };
 }
 
 beforeEach(() => {
@@ -207,6 +229,47 @@ describe('PendingMessageQueue', () => {
     expect(within(card).getByText('from the other tab')).toBeInTheDocument();
   });
 
+  it('saves at the revision the draft was written against, not the one read since', async () => {
+    vi.mocked(editPendingMessage).mockImplementation(serverEdit);
+    let queue!: ReturnType<typeof usePendingMessages>;
+    render(<Harness onQueue={(live) => (queue = live)} />);
+    const card = (await screen.findAllByRole('listitem'))[0];
+    fireEvent.click(within(card).getByRole('button', { name: 'Edit queued message' }));
+    const editor = await within(card).findByRole('textbox', { name: 'Edit queued message' });
+    fireEvent.change(editor, { target: { value: 'my version' } });
+
+    // Another tab saves the same message, and this page reads it.
+    const row = server.pending_messages[0];
+    stored({ ...row, prompt: 'from the other tab', state: 'queued', revision: row.revision + 1 });
+    await act(async () => {
+      await queue.refresh();
+    });
+    expect(within(card).getByText('from the other tab')).toBeInTheDocument();
+    fireEvent.click(within(card).getByRole('button', { name: 'Save' }));
+
+    // Refused: the draft was written against the held revision, 2.
+    expect(await within(card).findByRole('alert')).toHaveTextContent(/another tab/);
+    expect(editPendingMessage).toHaveBeenLastCalledWith('athr_1', 'apmsg_a', 2, {
+      prompt: 'my version',
+      state: 'queued',
+    });
+    expect(server.pending_messages[0].prompt).toBe('from the other tab');
+    expect(within(card).getByRole('textbox', { name: 'Edit queued message' })).toHaveValue(
+      'my version',
+    );
+
+    // Having seen what won, saving again is a choice to replace it.
+    fireEvent.click(within(card).getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(within(card).queryByRole('textbox', { name: 'Edit queued message' })).toBeNull(),
+    );
+    expect(editPendingMessage).toHaveBeenLastCalledWith('athr_1', 'apmsg_a', 3, {
+      prompt: 'my version',
+      state: 'queued',
+    });
+    expect(server.pending_messages[0].prompt).toBe('my version');
+  });
+
   it('deletes at the revision read, and the card goes', async () => {
     vi.mocked(deletePendingMessage).mockImplementation(async () => {
       server = { ...server, pending_messages: server.pending_messages.slice(1) };
@@ -232,6 +295,10 @@ describe('PendingMessageQueue', () => {
     render(<Harness onSent={onSent} />);
 
     expect(await screen.findByText('Paused: stopped')).toBeInTheDocument();
+    // The card does not promise to go when a turn ends: nothing will send it.
+    const card = screen.getAllByRole('listitem')[0];
+    expect(within(card).getByText('Paused')).toBeInTheDocument();
+    expect(within(card).queryByText('Waiting for this turn')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Continue sending queued messages' }));
 
     await waitFor(() => expect(resumeThreadQueue).toHaveBeenCalledWith('athr_1'));

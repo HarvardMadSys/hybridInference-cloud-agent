@@ -407,6 +407,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'queue.state.editing': '编辑中',
   'queue.state.refused': '校验失败',
   'queue.state.sending': '发送中',
+  'queue.state.paused': '已暂停',
   'queue.paused.stopped': '已暂停：已停止',
   'queue.paused.failed': '已暂停：上一轮失败',
   'queue.paused.archived': '已暂停：已归档',

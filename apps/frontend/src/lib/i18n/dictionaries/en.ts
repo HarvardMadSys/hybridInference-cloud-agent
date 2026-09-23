@@ -429,6 +429,7 @@ export const en = {
   'queue.state.editing': 'Editing',
   'queue.state.refused': 'Not sent',
   'queue.state.sending': 'Sending',
+  'queue.state.paused': 'Paused',
   'queue.paused.stopped': 'Paused: stopped',
   'queue.paused.failed': 'Paused: the last turn failed',
   'queue.paused.archived': 'Paused: archived',

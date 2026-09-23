@@ -14,6 +14,13 @@ type Translate = ReturnType<typeof useT>;
 
 interface EditorState {
   draft: string;
+  /**
+   * The revision the draft was written against. Saving and cancelling send
+   * this, not the card's latest revision: the card keeps reading the server,
+   * so its revision would quietly include another tab's change and let this
+   * draft overwrite it instead of being refused.
+   */
+  revision: number;
   saving: boolean;
   /** Why the last save or cancel did not go through; the draft stays. */
   note: string | null;
@@ -21,16 +28,21 @@ interface EditorState {
 
 const BADGE_CLASS = {
   queued: 'bg-gray-100 text-gray-500 dark:bg-white/5 dark:text-gray-400',
+  paused: 'bg-amber-50 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300',
   editing: 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-400',
   refused: 'bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-400',
   sending: 'bg-sky-50 text-sky-700 dark:bg-sky-500/10 dark:text-sky-400',
 } as const;
 
-/** The one word a card leads with. A held message is either being edited or refused. */
-function badgeFor(message: PendingMessageApi): keyof typeof BADGE_CLASS {
+/**
+ * The one word a card leads with. A held message is either being edited or
+ * refused; a waiting one in a paused queue is not waiting for any turn, so it
+ * says so rather than promising to go when this one ends.
+ */
+function badgeFor(message: PendingMessageApi, paused: boolean): keyof typeof BADGE_CLASS {
   if (message.state === 'sending') return 'sending';
   if (message.state === 'held') return message.last_error ? 'refused' : 'editing';
-  return 'queued';
+  return paused ? 'paused' : 'queued';
 }
 
 function attachmentSummary(message: PendingMessageApi, t: Translate): string | null {
@@ -94,9 +106,10 @@ export function PendingMessageQueue({
         setNotice(held.current ? t('queue.conflict') : held.error);
         return;
       }
+      const revision = held?.result.pending?.revision ?? message.revision;
       setEditors((current) => ({
         ...current,
-        [message.id]: { draft: message.prompt, saving: false, note: null },
+        [message.id]: { draft: message.prompt, revision, saving: false, note: null },
       }));
     },
     [queue, t],
@@ -114,8 +127,9 @@ export function PendingMessageQueue({
         return;
       }
       setEditors((current) => ({ ...current, [message.id]: { ...editor, saving: true } }));
+      const written = { ...message, revision: editor.revision };
       const result =
-        prompt === null ? await queue.release(message) : await queue.save(message, prompt.trim());
+        prompt === null ? await queue.release(written) : await queue.save(written, prompt.trim());
       if (result.ok) {
         setEditors((current) => without(current, message.id));
         return;
@@ -124,6 +138,9 @@ export function PendingMessageQueue({
         ...current,
         [message.id]: {
           ...(current[message.id] ?? editor),
+          // The owner has now been shown what won; saving again is theirs to
+          // choose, written over that version rather than refused forever.
+          revision: result.current?.revision ?? editor.revision,
           saving: false,
           note:
             result.code === 'revision_conflict'
@@ -199,7 +216,7 @@ export function PendingMessageQueue({
       <ul className="max-h-56 space-y-1.5 overflow-y-auto pr-0.5">
         {queue.messages.map((message) => {
           const editor = editors[message.id];
-          const badge = badgeFor(message);
+          const badge = badgeFor(message, queue.pausedReason !== null);
           const busy = queue.busyIds.has(message.id);
           const locked = message.state === 'sending' || disabled;
           const files = attachmentSummary(message, t);
