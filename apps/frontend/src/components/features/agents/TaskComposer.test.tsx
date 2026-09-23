@@ -41,8 +41,6 @@ function config(overrides: Partial<AgentConfigApi> = {}): AgentConfigApi {
     repos: ['owner/repository'],
     runtimes: ['claude-code'],
     models: ['model-a'],
-    setup_egress_tier: 'trusted',
-    agent_egress_tier: 'platform_only',
     github_connected: true,
     github_install_url: null,
     ...overrides,

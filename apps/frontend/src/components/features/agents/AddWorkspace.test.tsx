@@ -15,8 +15,6 @@ const config = (repos = ['owner/repo', 'owner/empty']): AgentConfigApi => ({
   github_install_url: null,
   models: [],
   runtimes: [],
-  setup_egress_tier: null,
-  agent_egress_tier: null,
 });
 afterEach(() => {
   cleanup();

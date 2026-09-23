@@ -288,7 +288,6 @@ export const en = {
   'composer.run': 'Run',
   'composer.starting': 'Starting…',
   'composer.runTitle': 'Run — ⏎ to send, ⇧⏎ for a new line',
-  'composer.network': 'Network: setup {setup} · agent {agent}',
   'composer.loadConfigFailed': 'could not load config',
   'composer.startFailed': 'could not start the job',
 

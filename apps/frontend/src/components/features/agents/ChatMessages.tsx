@@ -478,18 +478,6 @@ export function EventRow({
       </pre>
     );
   }
-  if (event.kind === 'egress_denied') {
-    return (
-      <div
-        data-block-key={blockKey}
-        className="my-2 flex items-center gap-2 rounded-lg bg-red-50 dark:bg-red-500/10 px-3 py-2 text-[13px] text-red-700 dark:text-red-400"
-      >
-        <span className="font-medium">Network request blocked</span>
-        <span className="font-mono text-xs">{event.host}</span>
-        <span className="text-red-500 dark:text-red-400">× {event.attempts}</span>
-      </div>
-    );
-  }
   return (
     <p data-block-key={blockKey} className="py-1 text-[11px] text-gray-400 dark:text-gray-500">
       {event.text}

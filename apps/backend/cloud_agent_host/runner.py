@@ -224,44 +224,6 @@ _SAFE_DIRECTORY_ENV = {
 }
 
 
-# A blocked egress attempt looks like a connection failure in the agent's own
-# tool output, because that is where it surfaces: on a deny-all network the
-# kernel drops the packet and the tool reports the failure. Recording these is
-# what the design asks for here — the evidence for what an external
-# default should allow. Deliberately narrow: a name-resolution or connection
-# error carrying a host, not every failing command.
-_EGRESS_FAILURE = re.compile(
-    r"(?:"
-    r"Could not resolve host|Name or service not known|Temporary failure in name resolution"
-    r"|Connection refused|Network is unreachable|No route to host|Connection timed out"
-    r"|getaddrinfo (?:failed|ENOTFOUND)|ENOTFOUND|EAI_AGAIN"
-    r")",
-    re.IGNORECASE,
-)
-# Hosts as they appear in those messages, or in any URL alongside them.
-_HOST_IN_TEXT = re.compile(
-    r"https?://([A-Za-z0-9.-]+\.[A-Za-z]{2,})|"
-    r"(?:host|ENOTFOUND|resolve)[:\s]+'?([A-Za-z0-9.-]+\.[A-Za-z]{2,})'?",
-    re.IGNORECASE,
-)
-
-
-def detect_blocked_egress(text: str) -> str | None:
-    """Return the host an agent failed to reach, if this reads as a denial.
-
-    Returns ``None`` for anything that is merely a failed command: a false
-    "the sandbox tried to phone home" is worse than a missed one, because the
-    whole point of the record is to be evidence.
-    """
-    if not text or not _EGRESS_FAILURE.search(text):
-        return None
-    match = _HOST_IN_TEXT.search(text)
-    if match is None:
-        return None
-    host = match.group(1) or match.group(2)
-    return host.strip("'\"").lower() or None
-
-
 class LeaseLost(Exception):
     """Raised when this attempt no longer owns the job and must stop."""
 
@@ -1649,7 +1611,6 @@ def _stream_shared_agent_turn(
     deadline = time.monotonic() + timeout_s
     tail: list[str] = []
     tool_errors: list[str] = []
-    denied_hosts: set[str] = set()
     result_frame: dict[str, Any] | None = None
     forced_exit_code: int | None = None
     interrupt_deadline: float | None = None
@@ -1695,10 +1656,6 @@ def _stream_shared_agent_turn(
                 if event_type == "tool_result" and payload.get("is_error"):
                     content = str(payload.get("content") or "")
                     tool_errors.append(content[:200])
-                    blocked = detect_blocked_egress(content)
-                    if blocked and blocked not in denied_hosts:
-                        denied_hosts.add(blocked)
-                        control.append_event(NormalizedEvent("error", {"host": blocked}))
                 if event_type and event_type != LINE:
                     control.append_event(NormalizedEvent(event_type, payload))
                 continue

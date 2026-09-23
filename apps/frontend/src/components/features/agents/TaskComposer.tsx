@@ -29,12 +29,6 @@ import type { SelectedSkillApi } from '@/lib/api/skills';
 // described a job nobody was running; and it showed those controls whether or
 // not any source control was connected, so it looked ready when nothing it
 // produced could run.
-const TIER_LABELS: Record<string, string> = {
-  platform_only: 'PlatformOnly',
-  trusted: 'Trusted',
-  custom: 'Custom',
-  full: 'Open',
-};
 
 export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   const router = useRouter();
@@ -499,18 +493,6 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
       {error ? (
         <p className="mt-3 text-center text-[13px] text-red-600 dark:text-red-400" role="alert">
           {error}
-        </p>
-      ) : null}
-
-      {/* Only what this deployment is actually running. Budget was shown here as
-          a fixed "$2.00" the composer never sent — it is a backend cap, not a
-          choice made on this screen, so it belongs on the job instead. */}
-      {config?.github_connected && config.agent_egress_tier ? (
-        <p className="mt-3 text-center text-[12px] text-gray-500 dark:text-gray-400">
-          {t('composer.network', {
-            setup: TIER_LABELS[config.setup_egress_tier ?? ''] ?? config.setup_egress_tier ?? '',
-            agent: TIER_LABELS[config.agent_egress_tier] ?? config.agent_egress_tier,
-          })}
         </p>
       ) : null}
     </section>

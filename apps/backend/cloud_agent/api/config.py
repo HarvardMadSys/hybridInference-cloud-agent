@@ -1,9 +1,9 @@
 """The deployment's own configuration, as the composer reads it.
 
-One endpoint: which runtimes and models this deployment offers, and the egress
-posture a job would get. It is owner-authenticated because it describes the
-account's choices rather than the deployment's secrets, and it reads MCP
-connections because the composer offers them beside the model.
+One endpoint: which runtimes and models this deployment offers. It is
+owner-authenticated because it describes the account's choices rather than the
+deployment's secrets, and it reads MCP connections because the composer offers
+them beside the model.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends
 
-from cloud_agent.api._job_views import _egress_tiers
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
@@ -76,7 +75,6 @@ async def get_agent_config(
     job nobody was running. A picker has to be built from the same answers the
     create endpoint enforces, or it is decoration.
     """
-    setup_tier, agent_tier = _egress_tiers()
     # This user's repositories, not the deployment's: what the picker offers
     # has to be what the create endpoint will accept for *them*.
     repos = await repos_for_user(
@@ -110,8 +108,6 @@ async def get_agent_config(
             )
         ],
         mcp_runtimes=runtimes_supporting_mcp(),
-        setup_egress_tier=setup_tier,
-        agent_egress_tier=agent_tier,
         # Both halves, and read from what is actually wired rather than from
         # the environment: an App the platform can mint tokens from, and at
         # least one repository this user may work on. Either alone leaves a

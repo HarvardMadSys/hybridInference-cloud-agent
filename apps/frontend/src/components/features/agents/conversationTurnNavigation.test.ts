@@ -33,15 +33,12 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     model: 'qwen-test',
     spentUsd: 0,
     timeoutLabel: '',
-    networkSetup: '',
-    networkAgent: '',
     sandbox: '',
     attempts: [{ no: 1, status: 'live' }],
     events: [],
     diffFiles: [],
     gates: [],
     usage: { tokensIn: '', tokensOut: '', cachePct: 0, turns: null },
-    egressDenials: 0,
     ...overrides,
   };
 }

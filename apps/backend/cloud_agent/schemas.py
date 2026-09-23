@@ -125,7 +125,7 @@ class AgentJobCreate(BaseModel):
         None,
         max_length=8000,
         description=(
-            "Shell run before the agent, under the setup egress tier. What it adds "
+            "Shell run in the sandbox before the agent starts. What it adds "
             "to the worktree is cached per repository, script, and sandbox image, "
             "so a retry does not reinstall."
         ),
@@ -702,10 +702,6 @@ class AgentJobResponse(BaseModel):
     # Only summaries are repeated in job reads; resource details are fetched
     # for the selected attempt through its own endpoint.
     attempt_telemetry: list[AgentAttemptSummary] = Field(default_factory=list)
-    # The deployment's egress posture for this job's two phases, so the owner
-    # can see what the sandbox could reach rather than take it on trust.
-    setup_egress_tier: str | None = None
-    agent_egress_tier: str | None = None
     # Source control connection state. The composer is gated on this rather
     # than offering pickers that submit something else: with no App installed
     # there is no repository to work on, and a task box that looks ready is a
@@ -1858,7 +1854,7 @@ class WorkerFinishRequest(BaseModel):
         None,
         max_length=8000,
         description=(
-            "Shell run before the agent, under the setup egress tier. What it adds "
+            "Shell run in the sandbox before the agent starts. What it adds "
             "to the worktree is cached per repository, script, and sandbox image, "
             "so a retry does not reinstall."
         ),
@@ -2024,8 +2020,6 @@ class AgentConfigResponse(BaseModel):
             "refuses a job that names any, rather than dropping them silently."
         ),
     )
-    setup_egress_tier: str | None = None
-    agent_egress_tier: str | None = None
     # Source control connection state. The composer is gated on this rather
     # than offering pickers that submit something else: with no App installed
     # there is no repository to work on, and a task box that looks ready is a

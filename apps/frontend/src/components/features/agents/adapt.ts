@@ -157,17 +157,12 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
   }
 
   if (type === 'error') {
-    // Egress denials arrive as an error subtype but are a first-class row:
-    // "the sandbox tried to reach X" is a different story from "it failed".
+    // Older runs recorded a failed connection with only the host it named.
+    // Say what happened without claiming a policy blocked it: the network is
+    // open to the public internet, so a failure there is usually the target's.
     const host = asText(payload, 'host');
-    if (host) {
-      const attempts =
-        typeof payload.attempts === 'number' &&
-        Number.isSafeInteger(payload.attempts) &&
-        payload.attempts > 0
-          ? payload.attempts
-          : 1;
-      return { kind: 'egress_denied', host, attempts, sourceEventId };
+    if (host && !asText(payload, 'detail', 'text')) {
+      return { kind: 'lifecycle', text: `Could not reach ${host}`, sourceEventId };
     }
     return {
       kind: 'lifecycle',
@@ -266,19 +261,6 @@ function diffStat(patch: string): { add: number; del: number } | undefined {
     else if (line.startsWith('-') && !line.startsWith('---')) del += 1;
   }
   return { add, del };
-}
-
-const TIER_LABELS: Record<string, string> = {
-  platform_only: 'platform relays only',
-  trusted: 'allowlist',
-  custom: 'custom',
-  full: 'open',
-};
-
-/** Render an egress tier for a reader who does not know the tier names. */
-function tierLabel(tier: string | null): string {
-  if (!tier) return '';
-  return TIER_LABELS[tier] ?? tier;
 }
 
 /** Describe the trusted execution backend reported for the current attempt. */
@@ -697,10 +679,6 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     };
   });
 
-  const egressDenials = renderedEvents.reduce(
-    (total, event) => total + (event.kind === 'egress_denied' ? event.attempts : 0),
-    0,
-  );
   const currentTurn =
     job.turn_no ?? options.thread?.jobs.find((threadJob) => threadJob.id === job.id)?.turn_no;
   let priorJobIds: Set<string> | null = null;
@@ -820,8 +798,6 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     ...(typeof job.duration_ms === 'number' ? { durationMs: job.duration_ms } : {}),
     ...(job.resources ? { resources: toTurnResources(job.resources) } : {}),
     timeoutLabel: '',
-    networkSetup: tierLabel(job.setup_egress_tier),
-    networkAgent: tierLabel(job.agent_egress_tier),
     sandbox: sandboxLabel(events, job.current_attempt_id),
     attempts,
     attemptTelemetryAvailable: job.attempt_telemetry !== undefined,
@@ -839,7 +815,6 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
       cachePct: 0,
       turns: job.model_calls,
     },
-    egressDenials,
     prLabel: publishedPrUrl ? `draft PR ${publishedPrUrl.split('/').pop()}` : undefined,
     prUrl: publishedPrUrl ?? undefined,
     threadId: job.thread_id ?? options.thread?.thread_id ?? undefined,

@@ -117,8 +117,6 @@ const AGENT_CONFIG = {
   repos: ['owner/repository'],
   runtimes: ['claude-code'],
   models: ['qwen-test', 'glm-test'],
-  setup_egress_tier: 'trusted',
-  agent_egress_tier: 'platform_only',
   github_connected: true,
   github_install_url: null,
 };
@@ -138,8 +136,6 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     spentUsd: 0.1,
     hasLedger: true,
     timeoutLabel: '',
-    networkSetup: 'allowlist',
-    networkAgent: 'platform relays only',
     sandbox: 'container',
     attempts: [{ no: 1, status: 'live' }],
     currentAttemptNo: 1,
@@ -166,7 +162,6 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     diffStat: { add: 1, del: 0 },
     gates: [],
     usage: { tokensIn: '1.2k', tokensOut: '80', cachePct: 0, turns: 2 },
-    egressDenials: 0,
     ...overrides,
   };
 }
@@ -652,8 +647,6 @@ describe('JobDetail', () => {
             tokens_in: null,
             tokens_out: null,
             model_calls: null,
-            setup_egress_tier: 'trusted',
-            agent_egress_tier: 'platform_only',
             turn_no: 2,
             state: 'queued',
             task_prompt: 'Later',
@@ -1518,26 +1511,6 @@ describe('JobDetail', () => {
     expect(screen.queryByRole('button', { name: 'View changes' })).not.toBeInTheDocument();
     expect(screen.queryByText(/0 files changed|No pull request yet/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Open workspace' })).toBeInTheDocument();
-  });
-
-  it('shows a warning only when the sandbox actually blocked a request', () => {
-    const { rerender } = render(<JobDetail job={makeJob()} />);
-    const task = screen.getByRole('region', { name: 'Task progress' });
-    expect(within(task).queryByRole('note')).not.toBeInTheDocument();
-    rerender(<JobDetail job={makeJob({ egressDenials: 3 })} />);
-    expect(within(task).getByRole('note')).toHaveTextContent(
-      '3 network requests were blocked by this workspace’s network settings.',
-    );
-    rerender(
-      <JobDetail
-        job={makeJob({
-          egressDenials: 3,
-          events: [{ kind: 'egress_denied', host: 'example.com', attempts: 3, attemptNo: 1 }],
-        })}
-      />,
-    );
-    expect(within(task).getByText('Network request blocked')).toBeInTheDocument();
-    expect(within(task).queryByRole('note')).not.toBeInTheDocument();
   });
 
   it('keeps an existing PR accessible when the workspace has no remaining changes', () => {

@@ -75,8 +75,6 @@ const anchor = {
   tokens_in: null,
   tokens_out: null,
   model_calls: null,
-  agent_egress_tier: 'platform_only',
-  setup_egress_tier: 'trusted',
 } as AgentJobApi;
 const copied: AgentJobApi = {
   ...anchor,

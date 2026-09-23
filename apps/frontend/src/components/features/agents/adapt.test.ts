@@ -88,8 +88,6 @@ const JOB: AgentJobApi = {
   tokens_in: null,
   tokens_out: null,
   model_calls: null,
-  setup_egress_tier: null,
-  agent_egress_tier: null,
 };
 
 function event(
@@ -158,12 +156,12 @@ describe('toDisplayEvent', () => {
     ).toBeNull();
   });
 
-  it('promotes an egress denial out of the generic error kind', () => {
-    // "the sandbox tried to reach X" is a different story from "it failed".
-    expect(toDisplayEvent(event(1, 'error', { host: 'evil.example', attempts: 3 }))).toEqual({
-      kind: 'egress_denied',
-      host: 'evil.example',
-      attempts: 3,
+  it('reads an older host-only failure as a connection that failed, not a block', () => {
+    // Earlier runs recorded failed connections with only the host. The network
+    // is open to the public internet, so the row must not claim a policy did it.
+    expect(toDisplayEvent(event(1, 'error', { host: 'example.com', attempts: 3 }))).toEqual({
+      kind: 'lifecycle',
+      text: 'Could not reach example.com',
       sourceEventId: 1,
     });
   });
@@ -461,16 +459,6 @@ describe('toDisplayJob', () => {
     expect(toDisplayJob(JOB, { patch: '' }).workspaceDiffAvailable).toBe(true);
     expect(toDisplayJob(JOB, { patch: null }).workspaceDiffAvailable).toBe(false);
     expect(toDisplayJob(JOB).workspaceDiffAvailable).toBe(false);
-  });
-
-  it('counts blocked requests inside aggregated denial records', () => {
-    const job = toDisplayJob(JOB, {
-      events: [
-        event(1, 'error', { host: 'first.example', attempts: 3 }),
-        event(2, 'error', { host: 'second.example' }),
-      ],
-    });
-    expect(job.egressDenials).toBe(4);
   });
 
   it('marks a superseded attempt rather than showing it live', () => {
@@ -929,15 +917,12 @@ describe('ledger-sourced fields', () => {
       tokens_in: 74523,
       tokens_out: 512,
       model_calls: 3,
-      agent_egress_tier: 'platform_only',
     });
 
     expect(job.spentUsd).toBe(0.0075);
     expect(job.hasLedger).toBe(true);
     expect(job.usage.tokensIn).toBe('74.5k');
     expect(job.usage.turns).toBe(3);
-    // The tier is rendered for a reader who does not know the tier names.
-    expect(job.networkAgent).toBe('platform relays only');
   });
 
   it('distinguishes "no ledger" from "spent nothing"', () => {
@@ -980,8 +965,6 @@ describe('lifecycle noise', () => {
     tokens_in: null,
     tokens_out: null,
     model_calls: null,
-    setup_egress_tier: null,
-    agent_egress_tier: null,
   };
 
   it('does not render an unknown phase as a completed milestone', () => {

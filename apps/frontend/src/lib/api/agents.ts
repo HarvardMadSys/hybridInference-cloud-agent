@@ -408,8 +408,6 @@ export interface AgentJobApi {
   tokens_in: number | null;
   tokens_out: number | null;
   model_calls: number | null;
-  setup_egress_tier: string | null;
-  agent_egress_tier: string | null;
   /** Attempt whose continuity and resource telemetry is attached below. */
   telemetry_attempt_id?: number | null;
   /** Which continuity rung this turn ran on. Null on turns that predate it. */
@@ -635,8 +633,6 @@ export interface AgentConfigApi {
    * too old to answer these produces.
    */
   model_reasoning_efforts?: Record<string, string[]>;
-  setup_egress_tier: string | null;
-  agent_egress_tier: string | null;
   github_connected: boolean;
   github_install_url: string | null;
 }

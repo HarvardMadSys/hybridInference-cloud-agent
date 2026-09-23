@@ -4847,15 +4847,20 @@ async def test_a_deployment_without_a_ledger_reports_absent_not_zero(client: Asy
     assert body["tokens_in"] is None
 
 
-async def test_the_owner_can_see_what_the_sandbox_could_reach(client: AsyncClient, monkeypatch):
-    """The egress posture is reported, not left to trust."""
-    monkeypatch.setenv("AGENT_SANDBOX_NETWORK", "agent-egress")
-    monkeypatch.setenv("AGENT_EGRESS_AGENT_TIER", "platform_only")
+async def test_a_job_reports_no_network_mode(client: AsyncClient):
+    """Every task runs on the same sandbox network, so there is no mode to show.
+
+    A per-job egress field would imply a choice that no longer exists; the
+    response and the deployment config both leave it out.
+    """
     job_id = await _create_job(client)
 
     body = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
+    config = (await client.get("/v1/agent/config")).json()
 
-    assert body["agent_egress_tier"] == "platform_only"
+    for payload in (body, config):
+        assert "setup_egress_tier" not in payload
+        assert "agent_egress_tier" not in payload
 
 
 async def test_a_worker_cannot_write_the_publish_record(client: AsyncClient):

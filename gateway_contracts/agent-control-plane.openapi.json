@@ -1836,17 +1836,6 @@
       "AgentConfigResponse": {
         "description": "What this deployment will actually accept, for the task composer.\n\nThe composer used to show a repository, a branch, a runtime and a model as\nstatic labels while submitting different hardcoded values — so the UI\ndescribed a job nobody was running. These are the real answers.",
         "properties": {
-          "agent_egress_tier": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Agent Egress Tier"
-          },
           "attachment_limits": {
             "$ref": "#/components/schemas/AttachmentLimits"
           },
@@ -1930,17 +1919,6 @@
             },
             "title": "Runtimes",
             "type": "array"
-          },
-          "setup_egress_tier": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Setup Egress Tier"
           },
           "skill_limits": {
             "$ref": "#/components/schemas/SkillLimits"
@@ -2819,7 +2797,7 @@
                 "type": "null"
               }
             ],
-            "description": "Shell run before the agent, under the setup egress tier. What it adds to the worktree is cached per repository, script, and sandbox image, so a retry does not reinstall.",
+            "description": "Shell run in the sandbox before the agent starts. What it adds to the worktree is cached per repository, script, and sandbox image, so a retry does not reinstall.",
             "title": "Setup Script"
           },
           "skill_ids": {
@@ -2947,17 +2925,6 @@
       "AgentJobResponse": {
         "description": "One agent job as returned to its owner.",
         "properties": {
-          "agent_egress_tier": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Agent Egress Tier"
-          },
           "archived_at": {
             "anyOf": [
               {
@@ -3414,17 +3381,6 @@
               }
             ],
             "title": "Sandbox Id"
-          },
-          "setup_egress_tier": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Setup Egress Tier"
           },
           "skills": {
             "items": {
@@ -10932,7 +10888,7 @@
                 "type": "null"
               }
             ],
-            "description": "Shell run before the agent, under the setup egress tier. What it adds to the worktree is cached per repository, script, and sandbox image, so a retry does not reinstall.",
+            "description": "Shell run in the sandbox before the agent starts. What it adds to the worktree is cached per repository, script, and sandbox image, so a retry does not reinstall.",
             "title": "Setup Script"
           },
           "state": {

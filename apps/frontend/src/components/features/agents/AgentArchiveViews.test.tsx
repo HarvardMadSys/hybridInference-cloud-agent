@@ -73,15 +73,12 @@ function job(overrides: Partial<AgentJob> = {}): AgentJob {
     model: 'model',
     spentUsd: 0,
     timeoutLabel: '',
-    networkSetup: '',
-    networkAgent: '',
     sandbox: '',
     attempts: [],
     events: [],
     diffFiles: [],
     gates: [],
     usage: { tokensIn: '', tokensOut: '', cachePct: 0, turns: 0 },
-    egressDenials: 0,
     ...overrides,
   };
 }

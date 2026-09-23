@@ -194,7 +194,7 @@ function RunActions({
   );
 }
 
-function RunNotices({ job, showNetworkWarning }: { job: AgentJob; showNetworkWarning: boolean }) {
+function RunNotices({ job }: { job: AgentJob }) {
   const publicationNote =
     job.workspacePublicationState === 'failed'
       ? 'Could not publish changes'
@@ -205,16 +205,6 @@ function RunNotices({ job, showNetworkWarning }: { job: AgentJob; showNetworkWar
     <>
       {!job.prUrl && publicationNote ? (
         <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">{publicationNote}</p>
-      ) : null}
-      {showNetworkWarning && job.egressDenials > 0 ? (
-        <p
-          role="note"
-          className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-500/10 dark:text-amber-300"
-        >
-          {job.egressDenials} network request{job.egressDenials === 1 ? ' was' : 's were'} blocked
-          by this workspace’s network settings. This may have prevented part of your task from
-          completing.
-        </p>
       ) : null}
     </>
   );
@@ -1515,14 +1505,7 @@ export function JobDetail({
                     </div>
 
                     <OutcomeCard job={job} onOpenDiff={() => openWorkspace('git')} />
-                    {selectedAttemptIsCurrent ? (
-                      <RunNotices
-                        job={job}
-                        showNetworkWarning={
-                          !visibleEvents.some((event) => event.kind === 'egress_denied')
-                        }
-                      />
-                    ) : null}
+                    {selectedAttemptIsCurrent ? <RunNotices job={job} /> : null}
                     {usageFooter && lastVisibleMessageIndex < 0 && currentReplyId === undefined ? (
                       <div className="mt-4">{usageFooter}</div>
                     ) : null}

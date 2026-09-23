@@ -39,15 +39,12 @@ function job(overrides: Partial<AgentJob> = {}): AgentJob {
     model: 'glm-4.6',
     spentUsd: 0,
     timeoutLabel: '',
-    networkSetup: '',
-    networkAgent: '',
     sandbox: '',
     attempts: [],
     events: [],
     diffFiles: [],
     gates: [],
     usage: { tokensIn: '0', tokensOut: '0', cachePct: 0, turns: 0 },
-    egressDenials: 0,
     ...overrides,
   };
 }
@@ -345,8 +342,6 @@ describe('the per-tool table on real data', () => {
     tokens_in: null,
     tokens_out: null,
     model_calls: null,
-    setup_egress_tier: null,
-    agent_egress_tier: null,
     created_at: '2026-08-19T10:00:00.000Z',
     updated_at: '2026-08-19T10:01:00.000Z',
   } as never;
@@ -409,8 +404,6 @@ describe('per-call resources, through both real adapters', () => {
     tokens_in: null,
     tokens_out: null,
     model_calls: null,
-    setup_egress_tier: null,
-    agent_egress_tier: null,
     created_at: '2026-08-19T10:00:00.000Z',
     updated_at: '2026-08-19T10:01:00.000Z',
   } as never;

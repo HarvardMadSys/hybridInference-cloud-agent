@@ -1,8 +1,8 @@
 """Owner-facing view construction for the agent surface.
 
 Store rows become API models here and nowhere else: the job response, its
-attempt summaries, the per-attempt resource rollup, the event envelope and the
-deployment's egress posture. Split out of the aggregator so the job, thread,
+attempt summaries, the per-attempt resource rollup and the event envelope.
+Split out of the aggregator so the job, thread,
 catalog, workspace and config routers share one definition of what a job looks
 like to its owner.
 
@@ -29,10 +29,6 @@ from cloud_agent.schemas import (
     ProcessObservation,
     ToolCallResources,
 )
-from cloud_agent_shared.egress import (
-    EgressPolicyError,
-    build_policy_from_env as build_egress_policy,
-)
 from cloud_agent_shared.git.patch_gate import branch_name_for
 
 if TYPE_CHECKING:
@@ -52,17 +48,6 @@ _SAFE_EVENT_TYPE = re.compile(EVENT_TYPE_PATTERN)
 def _iso(value: Any) -> str | None:
     """Render a timestamp column as ISO-8601 (or None)."""
     return value.isoformat() if value is not None else None
-
-
-def _egress_tiers() -> tuple[str | None, str | None]:
-    """Report the deployment's per-phase egress posture, if it has one."""
-    try:
-        policy = build_egress_policy()
-    except EgressPolicyError:
-        # A misconfigured policy is the runner's problem to refuse at preflight,
-        # not a reason to fail an owner reading their own job.
-        return None, None
-    return policy.tier_for("setup").value, policy.tier_for("agent").value
 
 
 def _attempt_duration_ms(telemetry: dict[str, Any] | None) -> int | None:
@@ -132,7 +117,6 @@ def _job_response(
 ) -> AgentJobResponse:
     """Shape a store job row for the owner-facing API."""
     usage = usage or {}
-    setup_tier, agent_tier = _egress_tiers()
     metadata = dict(job.get("metadata") or {})
     base_ref = metadata.pop(BASE_REF_METADATA_KEY, None)
     if not isinstance(base_ref, str):
@@ -201,8 +185,6 @@ def _job_response(
         tokens_in=usage.get("tokens_in"),
         tokens_out=usage.get("tokens_out"),
         model_calls=usage.get("model_calls"),
-        setup_egress_tier=setup_tier,
-        agent_egress_tier=agent_tier,
         telemetry_attempt_id=(telemetry or {}).get("attempt_id"),
         continuity_mode=(telemetry or {}).get("continuity_mode"),
         context_status=(telemetry or {}).get("context_status"),
