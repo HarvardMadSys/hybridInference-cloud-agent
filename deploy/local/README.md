@@ -116,6 +116,11 @@ therefore covers
 source/child admission, group stop/restore, and completion of the final
 quiescent publication snapshot for all five CLIs.
 
+The local model answers at once. To act while a turn is still running — send
+messages that queue behind it, edit or delete them, press Stop — put
+`[local-hold:N]` in that turn's message: the gateway holds its answer for `N`
+seconds (at most 120). A marker in an earlier message has no effect.
+
 Useful commands:
 
 ```bash

@@ -40,6 +40,12 @@ GRANT_TTL_MAX_S = 900
 CONCURRENT_FORK_PROBE_WAIT_S = 15.0
 CONCURRENT_FORK_PROBE_HOLD_S = 1.0
 CONCURRENT_FORK_PROBE_PREFIX = "[local-concurrency-probe:"
+#: ``[local-hold:N]`` in a turn's message holds its model answer for N seconds,
+#: so a person can act while that turn is still running — queue a message
+#: behind it, edit or delete one, press Stop — without a real model's latency.
+#: Bounded so a mistyped number cannot wedge the local stack.
+LOCAL_HOLD_PREFIX = "[local-hold:"
+LOCAL_HOLD_MAX_S = 120.0
 
 app = FastAPI(title="Local development gateway", docs_url=None, redoc_url=None)
 
@@ -455,6 +461,30 @@ async def _hold_concurrent_fork_probe(body: dict[str, Any]) -> None:
                 _concurrency_probes.pop(key, None)
 
 
+def _hold_seconds(body: dict[str, Any]) -> float:
+    """How long a ``[local-hold:N]`` marker asks this answer to wait, or zero."""
+    text = _current_user_text(body)
+    start = text.find(LOCAL_HOLD_PREFIX)
+    if start < 0:
+        return 0.0
+    start += len(LOCAL_HOLD_PREFIX)
+    end = text.find("]", start)
+    try:
+        seconds = float(text[start:end]) if end >= 0 else 0.0
+    except ValueError:
+        return 0.0
+    if seconds != seconds or seconds <= 0:  # NaN or not a delay
+        return 0.0
+    return min(seconds, LOCAL_HOLD_MAX_S)
+
+
+async def _hold_marked_turn(body: dict[str, Any]) -> None:
+    """Keep a marked turn's model call open, so the turn stays running."""
+    seconds = _hold_seconds(body)
+    if seconds:
+        await asyncio.sleep(seconds)
+
+
 def _anthropic_sse(message_id: str) -> list[bytes]:
     text = "Local gateway response: the agent CLI, grant, and sandbox network are working."
 
@@ -517,6 +547,7 @@ async def anthropic_messages(
     model = str(body.get("model") or "")
     _require_grant(x_api_key, authorization, model)
     await _hold_concurrent_fork_probe(body)
+    await _hold_marked_turn(body)
     message_id = f"msg_local_{secrets.token_hex(8)}"
     if body.get("stream") is False:
         return {
@@ -574,6 +605,7 @@ async def openai_chat_completions(
     model = str(body.get("model") or "")
     _require_grant(None, authorization, model)
     await _hold_concurrent_fork_probe(body)
+    await _hold_marked_turn(body)
     completion_id = f"chatcmpl-local-{secrets.token_hex(8)}"
     if body.get("stream"):
         return StreamingResponse(
@@ -601,6 +633,7 @@ async def openai_responses(request: Request, authorization: str | None = Header(
     model = str(body.get("model") or "")
     _require_grant(None, authorization, model)
     await _hold_concurrent_fork_probe(body)
+    await _hold_marked_turn(body)
     response_id = f"resp_local_{secrets.token_hex(8)}"
     text = "Local gateway response: the agent CLI and sandbox are working."
     response = {

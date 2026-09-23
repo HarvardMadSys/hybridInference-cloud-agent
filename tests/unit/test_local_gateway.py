@@ -235,3 +235,37 @@ async def test_concurrent_fork_probe_fails_a_serialized_single_arrival(monkeypat
     assert captured.value.kind == "concurrency_probe_timeout"
     assert gateway._concurrency_probes == {}
     assert not gateway._completed_concurrency_probes
+
+
+def test_a_hold_marker_keeps_only_the_current_turn_open(monkeypatch) -> None:
+    """A marked message holds its answer; history, junk and huge values do not."""
+    assert gateway._hold_seconds({"input": "queue behind me [local-hold:20]"}) == 20.0
+    assert gateway._hold_seconds({"input": "ordinary turn"}) == 0.0
+    assert gateway._hold_seconds({"input": "[local-hold:soon]"}) == 0.0
+    assert gateway._hold_seconds({"input": "[local-hold:-5]"}) == 0.0
+    assert gateway._hold_seconds({"input": "[local-hold:9999]"}) == gateway.LOCAL_HOLD_MAX_S
+    assert (
+        gateway._hold_seconds(
+            {
+                "messages": [
+                    {"role": "user", "content": "old [local-hold:30]"},
+                    {"role": "assistant", "content": "done"},
+                    {"role": "user", "content": "ordinary new turn"},
+                ]
+            }
+        )
+        == 0.0
+    )
+
+
+async def test_a_held_turn_waits_before_the_model_answers(monkeypatch) -> None:
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(gateway.asyncio, "sleep", fake_sleep)
+    await gateway._hold_marked_turn({"input": "ordinary"})
+    await gateway._hold_marked_turn({"input": "wait [local-hold:3.5]"})
+
+    assert slept == [3.5]
