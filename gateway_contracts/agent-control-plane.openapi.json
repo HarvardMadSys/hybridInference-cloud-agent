@@ -9863,6 +9863,18 @@
       "TurnCpuResources": {
         "description": "One member's own scheduler time inside the execution window.\n\nThe sum over every tracked work thread of its ``se.sum_exec_runtime``\ndelta. A thread that ran on two cores for ten seconds contributes about\ntwenty seconds, so this may legitimately exceed wall-clock duration.\nNever derived from a utilisation percentage, and never summed from tool\nrows in place of the whole turn.",
         "properties": {
+          "capacity_cores": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capacity Cores"
+          },
           "method": {
             "const": "live_and_exit_task_counters",
             "title": "Method",
