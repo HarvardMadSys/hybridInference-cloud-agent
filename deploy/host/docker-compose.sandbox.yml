@@ -84,10 +84,10 @@ services:
       TUNNEL_REMOTE_HOST: ${AGENT_MCP_TUNNEL_REMOTE_HOST:-127.0.0.1}
       # **8001, the MCP-only listener — never 8000.** A sandbox reaches the far
       # end of this tunnel; 8000 serves jobs, sessions, host registration and
-      # admin as well as the relay. Those refuse an `mcp`-scoped token, so
-      # pointing here was not exploitable — it put the entire trusted control
-      # plane one authorization bug away from untrusted code, which is a
-      # reachability decision and should not rest on an authorization one.
+      # admin, and no longer the relay at all. Pointing here fails every tool
+      # call, and it would put the entire trusted control plane one
+      # authorization bug away from untrusted code — a reachability decision
+      # that should not rest on an authorization one.
       TUNNEL_REMOTE_PORT: ${AGENT_MCP_TUNNEL_REMOTE_PORT:-8001}
       TUNNEL_LISTEN_PORT: ${AGENT_MCP_TUNNEL_LISTEN_PORT:-8000}
     volumes:

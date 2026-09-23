@@ -268,6 +268,13 @@ job, host, session, admin, or inference APIs. The sandbox authenticates to
 closed**: inference and MCP are the only agent-phase destinations. The upstream
 address and the owner's credential stay in the control plane.
 
+The converse holds too: the main API on 8000, which the public edge forwards
+`/api/*` to, serves no tool route, so an `mcp` token carried out of a sandbox
+cannot be replayed from the internet. Connection management, OAuth callbacks
+and approvals share the `/v1/agent/mcp` prefix but stay on 8000, because they
+are the browser's. Block tool calls by leaving the relay off 8000, never by
+blocking the prefix at the edge.
+
 There is no deployment registry and no in-code catalogue of servers. A person
 adds a connection through `/v1/agent/mcp` — a remote URL, an imported
 `mcpServers` snippet, or a stdio launch spec — and a row in
