@@ -23,6 +23,7 @@ from cloud_agent.domain.execution import (
     RUNNING,
     TERMINAL_STATES,
 )
+from cloud_agent.domain.pending_messages import QUEUE_PAUSED_STOPPED
 from cloud_agent.domain.runtimes import resolve_runtime_version
 from cloud_agent.execution_profiles import (
     KATA_RUNTIME,
@@ -40,6 +41,7 @@ from cloud_agent.storage._sql.jobs import (
     fail_unrunnable_follow_ups,
     lock_conversation_by_job,
 )
+from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent.task_titles import thread_title_needs_generation
@@ -1229,6 +1231,9 @@ class PostgresAttemptCommands:
         set — the worker observes it on its next heartbeat and performs the
         fenced transition. Terminal jobs are a no-op. ``user_id`` scopes the
         cancel to the owner. Returns ``None`` for an unknown job.
+
+        Cancelling a queued or running turn also pauses the conversation's
+        pending messages, if it has any, with the reason ``stopped``.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             # Conversation first: cancelling a queued automatic round pauses its
@@ -1244,6 +1249,13 @@ class PostgresAttemptCommands:
             if row is None:
                 return None
             state = row["state"]
+            if state in (QUEUED, RUNNING):
+                # Stop means the owner's waiting messages wait too: the turn
+                # after this one is theirs to start, not the queue's. Written in
+                # this transaction, under the conversation's lock taken above,
+                # so no settlement can slip the next message in between the
+                # cancel and the pause.
+                await conn.execute(PAUSE_QUEUE_SQL, [row["thread_id"]], QUEUE_PAUSED_STOPPED)
             if state == QUEUED:
                 await conn.execute(
                     "UPDATE agent_jobs SET state = 'cancelled', cancel_requested = TRUE, "

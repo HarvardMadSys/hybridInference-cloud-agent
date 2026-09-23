@@ -99,7 +99,7 @@ def test_the_ports_directory_is_not_empty() -> None:
     discovered -- a rename, a stray suffix, a directory move -- makes this fail
     instead of quietly shrinking what the tests below cover.
     """
-    assert len(_port_files()) == 23
+    assert len(_port_files()) == 24
 
 
 @pytest.mark.parametrize("path", _port_files(), ids=lambda p: p.stem)

@@ -26,6 +26,7 @@ from cloud_agent.storage.repositories.mcp_catalog import PostgresMcpCatalogRepos
 from cloud_agent.storage.repositories.operation_measurements import (
     PostgresOperationMeasurementRepository,
 )
+from cloud_agent.storage.repositories.pending_messages import PostgresPendingMessageRepository
 from cloud_agent.storage.repositories.profiling_control import (
     PostgresProfilingControlRepository,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "PostgresMcpCatalogRepository",
     "PostgresMcpConnectionRepository",
     "PostgresOperationMeasurementRepository",
+    "PostgresPendingMessageRepository",
     "PostgresProfilingControlRepository",
     "PostgresResidencyRepository",
     "PostgresSandboxRepository",

@@ -14,6 +14,7 @@ import asyncpg
 
 from cloud_agent.domain.execution import QUEUED, SUCCEEDED
 from cloud_agent.domain.ids import new_job_id, new_thread_id
+from cloud_agent.domain.pending_messages import QUEUE_PAUSED_ARCHIVED
 from cloud_agent.domain.requests import check_client_request
 from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.goals.models import GOAL_REPORT_PROTOCOL
@@ -27,6 +28,7 @@ from cloud_agent.storage._sql.goals import (
 )
 from cloud_agent.storage._sql.jobs import JOB_SELECT, SESSION_DELETE_BLOCK_SQL
 from cloud_agent.storage._sql.mcp import write_mcp_bindings
+from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 from cloud_agent.storage.repositories.goals import new_goal_id
@@ -410,6 +412,9 @@ class PostgresConversationCommands:
                     "the conversation was archived; resume the goal to continue it",
                 )
                 await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, thread_ids)
+                # Messages the owner left waiting stay waiting, and stay
+                # stopped after a restore: continuing is their call.
+                await conn.execute(PAUSE_QUEUE_SQL, thread_ids, QUEUE_PAUSED_ARCHIVED)
         return {"sessions": [dict(row) for row in updated]}
 
     async def delete_sessions(self, *, thread_ids: list[str], user_id: str) -> dict[str, Any]:
@@ -468,6 +473,24 @@ class PostgresConversationCommands:
                 thread_ids,
                 user_id,
             )
+            # Messages that were never sent are the owner's content for the
+            # same reason, and so are the uploads they hold — which are still
+            # staged, with no thread of their own, so the delete above cannot
+            # see them.
+            await conn.execute(
+                """
+                DELETE FROM agent_job_attachments
+                WHERE user_id = $2 AND pending_message_id IN (
+                    SELECT id FROM agent_pending_messages WHERE thread_id = ANY($1::text[])
+                )
+                """,
+                thread_ids,
+                user_id,
+            )
+            await conn.execute(
+                "DELETE FROM agent_pending_messages WHERE thread_id = ANY($1::text[])",
+                thread_ids,
+            )
         return {"thread_ids": thread_ids}
 
     async def set_thread_archived(
@@ -512,6 +535,9 @@ class PostgresConversationCommands:
                     "the conversation was archived; resume the goal to continue it",
                 )
                 await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, [row["thread_id"]])
+                # The same for the owner's waiting messages: archived, they do
+                # not send themselves, and restoring does not start them.
+                await conn.execute(PAUSE_QUEUE_SQL, [row["thread_id"]], QUEUE_PAUSED_ARCHIVED)
             return {"thread_id": row["thread_id"], "archived_at": row["archived_at"]}
 
     async def set_thread_title(

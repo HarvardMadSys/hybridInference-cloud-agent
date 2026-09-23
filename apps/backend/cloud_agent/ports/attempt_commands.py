@@ -168,6 +168,9 @@ class AttemptCommands(Protocol):
         set — the worker observes it on its next heartbeat and performs the
         fenced transition. Terminal jobs are a no-op. ``user_id`` scopes the
         cancel to the owner. Returns ``None`` for an unknown job.
+
+        Cancelling a queued or running turn also pauses the conversation's
+        pending messages, if it has any, with the reason ``stopped``.
         """
         ...
 

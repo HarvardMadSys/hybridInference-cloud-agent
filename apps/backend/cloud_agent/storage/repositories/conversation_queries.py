@@ -18,6 +18,7 @@ from cloud_agent.storage._sql.jobs import (
     QUALIFIED_JOB_SUMMARY_COLUMNS,
     SESSION_DELETE_BLOCK_SQL,
 )
+from cloud_agent.storage._sql.pending_messages import list_pending_messages
 from cloud_agent.storage._sql.rows import job_row_to_dict, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent.storage._sql.sessions import (
@@ -42,12 +43,17 @@ class PostgresConversationQueries:
         self._pool = pool
 
     async def get_thread_for_job(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
-        """Return the conversation containing an owned job."""
+        """Return the conversation containing an owned job.
+
+        With its turns and transcript, and with the messages still waiting to
+        become turns (``pending_messages``, in send order) and why the queue is
+        not moving by itself (``queue_paused_reason``), read together.
+        """
         async with self._pool.acquire() as conn:
             thread = await conn.fetchrow(
                 """
                 SELECT t.id, t.repo, t.title, t.created_at, t.updated_at,
-                       t.pinned_at, t.archived_at
+                       t.pinned_at, t.archived_at, t.queue_paused_reason
                 FROM agent_threads t
                 JOIN agent_jobs j ON j.thread_id = t.id
                 WHERE j.id = $1 AND j.user_id = $2 AND t.deleted_at IS NULL
@@ -82,6 +88,10 @@ class PostgresConversationQueries:
                 job["archived_at"] = thread["archived_at"]
                 if sandbox is not None:
                     job["thread_sandbox"] = sandbox_row_to_dict(sandbox)
+            # Read with the turns, on the same connection: the page renders the
+            # queue beside the transcript, and a message that became a turn has
+            # to disappear from one in the same read that shows it in the other.
+            pending = await list_pending_messages(conn, thread["id"])
         return {
             "id": thread["id"],
             "repo": thread["repo"],
@@ -91,6 +101,8 @@ class PostgresConversationQueries:
             "archived_at": thread["archived_at"],
             "messages": [dict(message) for message in messages],
             "jobs": job_rows,
+            "pending_messages": pending,
+            "queue_paused_reason": thread["queue_paused_reason"],
         }
 
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
