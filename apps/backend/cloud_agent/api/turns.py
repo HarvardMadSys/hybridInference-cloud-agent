@@ -27,20 +27,17 @@ from cloud_agent.api.deps import (
     get_storage,
     require_store,
 )
-from cloud_agent.application.job_admission import (
-    _idempotency_conflict,
-    _require_offered_effort,
-    _require_registered_runtime,
-    _require_resolvable_model,
-    _resolve_attachment_selection,
-    _resolve_skill_selection,
+from cloud_agent.application.follow_ups import (
+    prepare_follow_up,
+    sandbox_context_lost_error,
+    session_archived_error,
 )
+from cloud_agent.application.job_admission import _idempotency_conflict
 from cloud_agent.application.session_fork import materialize_session_fork
 from cloud_agent.domain.execution import SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.requests import request_fingerprint
-from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.schemas import RESET_REASONING_EFFORT, AgentFollowUpRequest, AgentJobResponse
+from cloud_agent.schemas import AgentFollowUpRequest, AgentJobResponse
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -85,35 +82,6 @@ class _TurnsStorage(Protocol):
 def _require_store(store: _TurnsStorage | None) -> _TurnsStorage:
     """Return the store or fail with a clear 503 when the DB is absent."""
     return require_store(store)
-
-
-def _sandbox_context_lost_error() -> HTTPException:
-    """Return the stable owner-facing error for an unrunnable retained chat."""
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "sandbox_context_lost",
-                "message": (
-                    "This chat's retained sandbox has an indeterminate or lost "
-                    "context and cannot safely accept another message."
-                ),
-            }
-        },
-    )
-
-
-def _session_archived_error() -> HTTPException:
-    """Require an explicit unarchive before accepting another conversation turn."""
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "session_archived",
-                "message": "Unarchive this session before continuing the conversation.",
-            }
-        },
-    )
 
 
 @router.post("/jobs/{job_id}/follow-ups", response_model=AgentJobResponse, status_code=201)
@@ -162,80 +130,17 @@ async def create_agent_follow_up(
             return _job_response(
                 await _owned_job(job_store.conversation_queries, str(replayed["id"]), user)
             )
-    if parent.get("archived_at") is not None:
-        raise _session_archived_error()
-    retained = parent.get("thread_sandbox")
-    if isinstance(retained, dict) and (
-        retained.get("context_status") == "lost"
-        or retained.get("state") in {"stopped_dirty", "lost"}
-    ):
-        raise _sandbox_context_lost_error()
-    # The harness is fixed per thread: continuity is the harness
-    # session, and no other harness can continue it. The field survives as an
-    # explicit no-op so existing callers that echo the thread's runtime keep
-    # working; a *different* runtime is refused rather than silently starting
-    # a turn the thread's memory cannot follow.
-    if body.runtime is not None:
-        _require_registered_runtime(body.runtime)
-        if body.runtime != parent["runtime"]:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": (
-                            f"this thread runs on {parent['runtime']!r} and a thread's "
-                            "harness is fixed; start a new chat to use "
-                            f"{body.runtime!r}"
-                        ),
-                    }
-                },
-            )
-    # A follow-up may switch models; the switched-to model gets the same
-    # fail-fast as a fresh job. An omitted model inherits the parent's, which
-    # was validated when it was chosen.
-    model = None
-    if body.model:
-        model = await _require_resolvable_model(body.model, gateway=gateway, user=user)
-    # Effort is per turn, like the model, and inherits when omitted. Unlike the
-    # model it needs a way *back*: null already means "no override, inherit", so
-    # clearing an inherited effort takes the explicit reset sentinel. Validated
-    # against the model this turn will run — which may be the switched-to one,
-    # and a pair that was offered last turn need not be offered this one.
-    reasoning_effort: str | None = None
-    reset_effort = body.reasoning_effort == RESET_REASONING_EFFORT
-    if body.reasoning_effort is not None and not reset_effort:
-        reasoning_effort = await _require_offered_effort(
-            body.reasoning_effort,
-            runtime=parent["runtime"],
-            model=model or parent["model"],
-            gateway=gateway,
-            user=user,
-        )
-    try:
-        await require_entitled_repo(
-            parent["repo"],
-            user["user_id"],
-            store=job_store.source_control,
-            app_credentials=app_credentials,
-        )
-    except RepoNotAllowed as exc:
-        raise HTTPException(
-            status_code=403,
-            detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
-        ) from exc
-    # An unavailable account integration must not prevent unrelated conversation
-    # work. The runner receives only usable servers, resolved when it claims
-    # this turn, and Tools retains each connection's diagnosis.
-    skills = (
-        await _resolve_skill_selection(
-            job_store.skills, user_id=user["user_id"], skill_ids=body.skill_ids
-        )
-        if body.skill_ids is not None
-        else None
-    )
-    attachments = await _resolve_attachment_selection(
-        job_store.attachments, user_id=user["user_id"], attachment_ids=body.attachment_ids
+    prepared = await prepare_follow_up(
+        parent,
+        user=user,
+        skill_ids=body.skill_ids,
+        attachment_ids=body.attachment_ids,
+        runtime=body.runtime,
+        model=body.model,
+        reasoning_effort=body.reasoning_effort,
+        store=job_store,
+        app_credentials=app_credentials,
+        gateway=gateway,
     )
     job = await job_store.conversation_commands.create_follow_up(
         parent_job_id=job_id,
@@ -244,15 +149,15 @@ async def create_agent_follow_up(
         runtime=body.runtime,
         # Canonical, or the parent's when omitted — never the alias the caller
         # typed, which the gateway's grant would not match.
-        model=model if body.model else None,
-        reasoning_effort=reasoning_effort,
-        reset_reasoning_effort=reset_effort,
+        model=prepared.model,
+        reasoning_effort=prepared.reasoning_effort,
+        reset_reasoning_effort=prepared.reset_reasoning_effort,
         # Named rather than splatted. Omitted and ``None`` mean the same thing
         # to the store — inherit — and an unpacked dict makes the argument
         # types unknowable at the call site, which is exactly what a later
         # added keyword parameter silently broke.
-        skills=skills,
-        attachments=attachments,
+        skills=prepared.skills,
+        attachments=prepared.attachments,
         # A message can set or replace the conversation's completion condition.
         # Omitted leaves the goal exactly as it is, which is what every turn the
         # platform queues for itself sends — and why an automatic round can
@@ -271,12 +176,12 @@ async def create_agent_follow_up(
     if job.get("error") == "client_request_conflict":
         raise _idempotency_conflict()
     if job.get("error") == "session_archived":
-        raise _session_archived_error()
+        raise session_archived_error()
     if job.get("error") == "sandbox_context_lost":
         # The durable store repeats the check under its thread/sandbox locks.
         # It can legitimately disagree with the advisory read above when the
         # active attempt becomes indeterminate during entitlement/tool checks.
-        raise _sandbox_context_lost_error()
+        raise sandbox_context_lost_error()
     logger.info(
         "agent_follow_up_created",
         extra={
