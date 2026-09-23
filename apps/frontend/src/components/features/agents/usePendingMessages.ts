@@ -232,6 +232,13 @@ export function usePendingMessages({
       if (result.pending) {
         const pending = result.pending;
         setMessages((current) => upsert(current, pending));
+        // Waiting from now on, as far as the next read is concerned. The turn
+        // in front of it can end before any read sees it here, and the read
+        // that finds it gone must still know it was one that could be sent.
+        snapshot.current = {
+          ids: new Set([...(snapshot.current?.ids ?? []), pending.id]),
+          latestJobId: snapshot.current?.latestJobId ?? null,
+        };
       }
       if (result.queue_paused_reason !== undefined) {
         setPausedReason(result.queue_paused_reason ?? null);

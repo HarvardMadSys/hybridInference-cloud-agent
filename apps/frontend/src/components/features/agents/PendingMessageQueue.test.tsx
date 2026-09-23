@@ -267,6 +267,29 @@ describe('usePendingMessages', () => {
     expect(onSent).toHaveBeenCalledTimes(1);
   });
 
+  it('reports a message this page sent even when no read saw it waiting', async () => {
+    queueWith([]);
+    const onSent = vi.fn();
+    const { result } = renderHook(() =>
+      usePendingMessages({ threadId: 'athr_1', active: true, onSent }),
+    );
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+
+    // Sent while ajob_1 runs; ajob_1 ends before the next read, and the server
+    // sends the message as the next turn.
+    act(() => {
+      result.current.apply({ pending: message(), job: null });
+    });
+    expect(result.current.messages.map((row) => row.id)).toEqual(['apmsg_a']);
+    queueWith([], { latest_job_id: 'ajob_2', latest_turn_no: 2, latest_job_state: 'queued' });
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    expect(onSent).toHaveBeenCalledExactlyOnceWith('ajob_2', { requested: false, after: 'ajob_1' });
+    expect(result.current.messages).toEqual([]);
+  });
+
   it('does not mistake a message this page deleted for one that was sent', async () => {
     const onSent = vi.fn();
     vi.mocked(deletePendingMessage).mockResolvedValue({ pending: null, job: null });
