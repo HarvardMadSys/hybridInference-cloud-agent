@@ -165,6 +165,8 @@ export interface TurnCpuResourcesApi {
   status: ResourceMetricStatus;
   method: 'live_and_exit_task_counters';
   usec: number | null;
+  /** Sandbox CPU quota in cores captured for this window; absent in older records. */
+  capacity_cores?: number | null;
   reason_codes: TurnResourceReasonCode[];
 }
 
@@ -212,7 +214,8 @@ export interface TurnStorageIoResourcesApi {
  * the UI can say how far it actually got instead of rounding it up to the end
  * of the task.
  */
-export interface TurnResourceSummaryApi extends TurnResourceWindowApi {
+export interface TurnResourceSummaryApi {
+  window: TurnResourceWindowApi;
   measurement_id: string;
   state: TurnResourceState | 'interrupted';
   /** The capability string that produced the summary; never added across sources. */

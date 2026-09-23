@@ -311,14 +311,17 @@ function turnSummary(overrides: Partial<TurnResourceSummaryApi> = {}): TurnResou
     state: 'final',
     source: 'kata-guest-member-window-v1',
     received_at: '2026-09-10T08:02:00Z',
-    duration_ms: 130_000,
-    observed_through_ms: 130_000,
-    open_scan_ms: 12,
-    close_scan_ms: 15,
+    window: {
+      duration_ms: 130_000,
+      observed_through_ms: 130_000,
+      open_scan_ms: 12,
+      close_scan_ms: 15,
+    },
     cpu: {
       status: 'available',
       method: 'live_and_exit_task_counters',
       usec: 80_000_000,
+      capacity_cores: 2,
       reason_codes: [],
     },
     memory: {
@@ -1063,7 +1066,10 @@ describe('admin run observation', () => {
   it('shows the whole-turn window at the contract\u2019s scope and length', async () => {
     render(<AdminRunPage />);
     expect(await screen.findByText('Turn resource summary')).toBeInTheDocument();
-    expect(screen.getByText('80 CPU-s')).toBeInTheDocument();
+    expect(
+      within(screen.getByText('Turn resource summary').parentElement!).getByText('CPU usage (avg)'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('30.8%')).toBeInTheDocument();
     expect(screen.getByText('1.2 GiB \u00b7 sampled')).toBeInTheDocument();
     // The panel must never imply the number is the platform's whole cost.
     expect(
@@ -1097,7 +1103,10 @@ describe('admin run observation', () => {
   it('keeps an interrupted collection out of the finalised form and names its cut-off', async () => {
     vi.mocked(getAdminAttemptResources).mockResolvedValue({
       ...resources({
-        turn_summary: turnSummary({ state: 'interrupted', observed_through_ms: 130_000 }),
+        turn_summary: turnSummary({
+          state: 'interrupted',
+          window: { ...turnSummary().window, observed_through_ms: 130_000 },
+        }),
       }),
     });
     render(<AdminRunPage />);
@@ -1112,7 +1121,7 @@ describe('admin run observation', () => {
     expect(screen.queryByText(/Collection finished with the turn/)).not.toBeInTheDocument();
   });
 
-  it('keeps the lower bound off a partial memory peak and on a partial CPU one', async () => {
+  it('withholds partial CPU utilisation while preserving the observed memory peak', async () => {
     vi.mocked(getAdminAttemptResources).mockResolvedValue({
       ...resources({
         turn_summary: turnSummary({
@@ -1137,10 +1146,16 @@ describe('admin run observation', () => {
     });
     render(<AdminRunPage />);
     await screen.findByText('Turn resource summary');
-    expect(screen.getByText('\u2265 80 CPU-s')).toBeInTheDocument();
+    expect(screen.queryByText(/CPU-s/)).not.toBeInTheDocument();
+    expect(
+      within(screen.getByText('Turn resource summary').parentElement!).getByText('CPU usage (avg)')
+        .nextElementSibling,
+    ).toHaveTextContent('—');
     expect(screen.getByText('1.2 GiB \u00b7 sampled \u00b7 observed')).toBeInTheDocument();
     expect(screen.queryByText(/\u2265 1\.2 GiB/)).not.toBeInTheDocument();
-    expect(screen.getAllByText(/This value is a lower bound/).length).toBeGreaterThan(1);
+    expect(
+      screen.getAllByText(/Average CPU usage requires a complete execution measurement/).length,
+    ).toBeGreaterThan(1);
   });
 
   it('says a missing window was not collected rather than showing a zero', async () => {

@@ -8,6 +8,7 @@ import type {
 } from '@/lib/api/adminRuns';
 
 import {
+  averageCpuUsage,
   attemptCoverageNote,
   collectingSentence,
   completenessSentence,
@@ -36,14 +37,17 @@ function summary(overrides: Partial<TurnResourceSummaryApi> = {}): TurnResourceS
     state: 'final',
     source: 'kata-guest-member-window-v1',
     received_at: '2026-09-10T08:02:00Z',
-    duration_ms: 130_000,
-    observed_through_ms: 130_000,
-    open_scan_ms: 12,
-    close_scan_ms: 15,
+    window: {
+      duration_ms: 130_000,
+      observed_through_ms: 130_000,
+      open_scan_ms: 12,
+      close_scan_ms: 15,
+    },
     cpu: {
       status: 'available',
       method: 'live_and_exit_task_counters',
       usec: 80_000_000,
+      capacity_cores: 2,
       reason_codes: [],
     },
     memory: {
@@ -74,7 +78,7 @@ function runSummary(overrides: Partial<RunResourceSummaryApi> = {}): RunResource
     cpu_usec: full.cpu.usec,
     memory_peak_bytes: full.memory.peak_bytes,
     state: 'final',
-    observed_through_ms: full.observed_through_ms,
+    observed_through_ms: full.window.observed_through_ms,
     cpu: AVAILABLE,
     memory: AVAILABLE,
     storage_io: AVAILABLE,
@@ -321,7 +325,7 @@ describe('detail panel rows', () => {
   it('shows each metric, its method and its own completeness', () => {
     const rows = turnSummaryRows({ ...summary(), attempts_measured: 3, attempts_total: 5 });
     const byLabel = Object.fromEntries(rows.map((row) => [row.label, row]));
-    expect(byLabel['CPU usage'].value).toBe('80 CPU-s');
+    expect(byLabel['CPU usage (avg)'].value).toBe('30.8%');
     expect(byLabel['Memory peak'].value).toBe('1.2 GiB \u00b7 sampled');
     expect(byLabel['Process storage I/O'].value).toBe('2 MiB read / 512 KiB written');
     // The panel must never imply the number is the platform's whole cost.
@@ -352,25 +356,32 @@ describe('detail panel rows', () => {
     expect(byLabel['Process storage I/O'].detail).toContain(
       'do not prove which filesystem this I/O reached',
     );
-    expect(byLabel['CPU usage'].value).toBe('80 CPU-s');
+    expect(byLabel['CPU usage (avg)'].value).toBe('30.8%');
     expect(byLabel.Completeness.value).toContain('I/O unavailable.');
     expect(byLabel.Completeness.value).toContain('CPU complete.');
   });
 
   it('says the cut-off in the metrics an interrupted collection did reach', () => {
-    const rows = turnSummaryRows(summary({ state: 'interrupted', observed_through_ms: 130_000 }));
+    const rows = turnSummaryRows(
+      summary({
+        state: 'interrupted',
+        window: { ...summary().window, observed_through_ms: 130_000 },
+      }),
+    );
     const byLabel = Object.fromEntries(rows.map((row) => [row.label, row]));
-    expect(byLabel['CPU usage'].detail).toContain('data reached 2m 10s');
-    expect(byLabel['CPU usage'].value).not.toContain('final');
+    expect(byLabel['CPU usage (avg)'].detail).toContain('data reached 2m 10s');
+    expect(byLabel['CPU usage (avg)'].value).not.toContain('final');
   });
 
-  it('keeps the lower-bound wording on the partial metrics only', () => {
+  it('withholds average CPU usage when the cumulative CPU counter is partial', () => {
     const rows = turnSummaryRows(
       summary({ cpu: { ...summary().cpu, status: 'partial', reason_codes: ['ring_loss'] } }),
     );
     const byLabel = Object.fromEntries(rows.map((row) => [row.label, row]));
-    expect(byLabel['CPU usage'].value).toBe('\u2265 80 CPU-s');
-    expect(byLabel['CPU usage'].detail).toContain('lower bound');
+    expect(byLabel['CPU usage (avg)'].value).toBe('—');
+    expect(byLabel['CPU usage (avg)'].detail).toContain(
+      'requires a complete execution measurement',
+    );
     expect(byLabel['Memory peak'].value).not.toContain('\u2265');
   });
 });
@@ -398,5 +409,40 @@ describe('not collected', () => {
     );
     // A complete metric is not downgraded by an unmeasured one beside it.
     expect(sentence).toContain('CPU complete.');
+  });
+});
+
+describe('average CPU usage', () => {
+  it('uses the recorded sandbox quota as 100%, including fractional core quotas', () => {
+    const turn = summary({
+      window: { ...summary().window, duration_ms: 10_000, observed_through_ms: 10_000 },
+    });
+    expect(averageCpuUsage({ ...turn, cpu: { ...turn.cpu, usec: 10_000_000 } })).toBe(50);
+    expect(averageCpuUsage({ ...turn, cpu: { ...turn.cpu, usec: 20_000_000 } })).toBe(100);
+    expect(
+      averageCpuUsage({ ...turn, cpu: { ...turn.cpu, usec: 2_500_000, capacity_cores: 0.5 } }),
+    ).toBe(50);
+  });
+
+  it('preserves measured zero and tiny positive usage', () => {
+    expect(turnSummaryRows(summary({ cpu: { ...summary().cpu, usec: 0 } }))[0].value).toBe('0.0%');
+    expect(turnSummaryRows(summary({ cpu: { ...summary().cpu, usec: 1 } }))[0].value).toBe('<0.1%');
+  });
+
+  it('withholds percentages for old, partial, running, interrupted, or contradictory data', () => {
+    const turn = summary();
+    const cases: Partial<TurnResourceSummaryApi>[] = [
+      { state: 'collecting' },
+      { state: 'interrupted' },
+      { cpu: { ...turn.cpu, status: 'partial' } },
+      { cpu: { ...turn.cpu, status: 'unavailable', usec: null } },
+      ...[undefined, null, 0, -1, Infinity, NaN].map((capacity_cores) => ({
+        cpu: { ...turn.cpu, capacity_cores },
+      })),
+      ...[null, -1, Infinity, NaN, 1_000_000_000].map((usec) => ({ cpu: { ...turn.cpu, usec } })),
+      ...[0, -1, Infinity, NaN].map((duration_ms) => ({ window: { ...turn.window, duration_ms } })),
+      { window: { ...turn.window, observed_through_ms: 100_000 } },
+    ];
+    for (const change of cases) expect(averageCpuUsage(summary(change))).toBeNull();
   });
 });

@@ -30,6 +30,7 @@ can make that distinction from the metric's own kind.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -59,6 +60,17 @@ _REASON_NOT_MEASURED = "observer_unavailable"
 _REASON_MIXED_SOURCE = "source_mismatch"
 
 _METRIC_KEYS = ("cpu", "memory", "storage_io")
+
+
+def parse_cpu_capacity(value: object) -> float | None:
+    """Read a positive CPU quota in cores, preserving unknown/unlimited as absent."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        cores = float(value)
+    except (ValueError, OverflowError):
+        return None
+    return cores if math.isfinite(cores) and cores > 0 else None
 
 
 def _as_dict(value: Any) -> dict[str, Any] | None:
@@ -177,6 +189,9 @@ def summarize_turn_resources(
             "write_bytes",
         ),
     }
+    summary["cpu"]["capacity_cores"] = parse_cpu_capacity(
+        (_as_dict(stored["cpu"]) or {}).get("capacity_cores")
+    )
     memory = _as_dict(stored["memory"]) or {}
     projected_memory = _project_metric(memory, "peak_bytes")
     projected_memory.update(

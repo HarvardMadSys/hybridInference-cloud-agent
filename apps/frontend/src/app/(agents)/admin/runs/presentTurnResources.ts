@@ -21,7 +21,6 @@ import type {
   ResourceMetricBriefApi,
   ResourceMetricStatus,
   RunResourceSummaryApi,
-  TurnCpuResourcesApi,
   TurnMemoryResourcesApi,
   TurnResourceReasonCode,
   TurnResourceState,
@@ -484,10 +483,6 @@ export const CPU_BASIS =
 export const MEMORY_BASIS =
   'Proportional resident memory, shared between users of the same pages; it is not machine memory and not a sum over executions';
 
-function cpuBasis(metric: TurnCpuResourcesApi): string {
-  return isLowerBound(metric) ? `${CPU_BASIS}. This value is a lower bound.` : `${CPU_BASIS}.`;
-}
-
 function memoryBasis(metric: TurnMemoryResourcesApi): string {
   return isLowerBound(metric)
     ? `${MEMORY_BASIS}. This peak was observed, so the true peak may be higher.`
@@ -502,19 +497,52 @@ function ioValue(storage: TurnStorageIoResourcesApi): string | null {
   return `${read ?? UNAVAILABLE} read / ${write ?? UNAVAILABLE} written`;
 }
 
+/** Average share of this sandbox's CPU quota, only for a complete execution. */
+export function averageCpuUsage(summary: TurnResourceSummaryApi): number | null {
+  const { cpu, window } = summary;
+  const cores = cpu.capacity_cores;
+  const duration = window?.duration_ms;
+  if (
+    summary.state !== 'final' ||
+    cpu.status !== 'available' ||
+    cpu.usec === null ||
+    !Number.isFinite(cpu.usec) ||
+    cpu.usec < 0 ||
+    typeof cores !== 'number' ||
+    !Number.isFinite(cores) ||
+    cores <= 0 ||
+    typeof duration !== 'number' ||
+    !Number.isFinite(duration) ||
+    duration <= 0 ||
+    window.observed_through_ms !== duration
+  )
+    return null;
+  const percent = (cpu.usec / 1000 / duration / cores) * 100;
+  // A contradictory counter or quota must not be clamped into a plausible reading.
+  return Number.isFinite(percent) && percent <= 100 ? percent : null;
+}
+
 function cpuReading(summary: TurnResourceSummaryApi): ResourceReading {
-  const notes: string[] = [];
-  if (summary.state === 'interrupted') notes.push(interruptedSentence(summary.observed_through_ms));
-  else if (summary.state === 'collecting') {
-    notes.push(collectingSentence(summary.observed_through_ms));
+  const percent = averageCpuUsage(summary);
+  const notes = reasonSentences(summary.cpu.reason_codes);
+  if (summary.state === 'interrupted')
+    notes.unshift(interruptedSentence(summary.window?.observed_through_ms));
+  else if (summary.state === 'collecting')
+    notes.unshift(collectingSentence(summary.window?.observed_through_ms));
+  if (percent === null) {
+    notes.unshift(
+      'Average CPU usage requires a complete execution measurement and its recorded CPU quota.',
+    );
+  } else {
+    notes.unshift(
+      'Average share of the sandbox CPU quota used by this execution, including the agent and its tools.',
+    );
   }
-  notes.push(...reasonSentences(summary.cpu.reason_codes));
-  const shown = summary.cpu.status === 'unavailable' ? null : formatCpuSeconds(summary.cpu.usec);
-  if (shown === null) return { value: UNAVAILABLE, method: summary.cpu.method, notes };
   return {
-    value: withLowerBound(shown, isLowerBound(summary.cpu)),
-    method: summary.cpu.method,
-    notes: [cpuBasis(summary.cpu), ...notes],
+    value:
+      percent === null ? '—' : percent > 0 && percent < 0.1 ? '<0.1%' : `${percent.toFixed(1)}%`,
+    method: 'CPU time / (execution duration × sandbox CPU quota)',
+    notes,
   };
 }
 
@@ -536,9 +564,10 @@ function memoryReading(summary: TurnResourceSummaryApi): ResourceReading {
 
 function storageReading(summary: TurnResourceSummaryApi): ResourceReading {
   const notes: string[] = [];
-  if (summary.state === 'interrupted') notes.push(interruptedSentence(summary.observed_through_ms));
+  if (summary.state === 'interrupted')
+    notes.push(interruptedSentence(summary.window?.observed_through_ms));
   else if (summary.state === 'collecting') {
-    notes.push(collectingSentence(summary.observed_through_ms));
+    notes.push(collectingSentence(summary.window?.observed_through_ms));
   }
   notes.push(...reasonSentences(summary.storage_io.reason_codes));
   const shown = summary.storage_io.status === 'unavailable' ? null : ioValue(summary.storage_io);
@@ -574,7 +603,7 @@ export function turnSummaryReadings(summary: TurnResourceSummaryApi): ResourceRe
 export function turnSummaryRows(summary: TurnResourceSummaryApi): TurnSummaryRow[] {
   const [cpu, memory, storage] = turnSummaryReadings(summary);
   return [
-    { label: 'CPU usage', value: cpu.value, detail: cpu.notes.join(' ') || null },
+    { label: 'CPU usage (avg)', value: cpu.value, detail: cpu.notes.join(' ') || null },
     { label: 'Memory peak', value: memory.value, detail: memory.notes.join(' ') || null },
     {
       label: 'Process storage I/O',

@@ -11,11 +11,14 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
+from cloud_agent.schemas import WorkerTurnResourcesRequest
 from cloud_agent_host.turn_resources import (
     summarize_run_resources,
     summarize_turn_resources,
 )
+from cloud_agent_shared.turn_resources import parse_cpu_capacity
 
 MEASUREMENT_ID = "00000000-0000-4000-8000-000000000001"
 
@@ -320,3 +323,54 @@ class TestRunFolding:
 
         assert summary is not None
         assert summary["received_at"] is None
+
+
+@pytest.mark.parametrize(
+    "quota,expected",
+    [
+        ("2", 2.0),
+        ("0.5", 0.5),
+        (2, 2.0),
+        (None, None),
+        ("0", None),
+        (0, None),
+        (-1, None),
+        (True, None),
+        ("unlimited", None),
+        ("nan", None),
+        (float("inf"), None),
+    ],
+)
+def test_cpu_capacity_is_positive_finite_and_never_assumed(quota, expected):
+    """Unknown or unlimited quota cannot supply a utilisation denominator."""
+    assert parse_cpu_capacity(quota) == expected
+
+
+def test_cpu_capacity_survives_validation_and_projection():
+    """The capacity belongs to the stored window, including fractional quotas."""
+    payload = snapshot()
+    payload["cpu"]["capacity_cores"] = 0.5
+    stored = WorkerTurnResourcesRequest.model_validate(payload).model_dump()
+    projected = summarize_turn_resources(stored, attempt_terminal=True)
+    assert projected is not None
+    assert projected["cpu"]["capacity_cores"] == 0.5
+    assert projected["window"]["duration_ms"] == 130_000
+
+
+def test_legacy_cpu_capacity_stays_unknown_and_does_not_change_retry_payloads():
+    """An old snapshot gains no new key on a retry after a control-plane upgrade."""
+    payload = snapshot()
+    stored = WorkerTurnResourcesRequest.model_validate(payload).model_dump()
+    assert stored == payload
+    projected = summarize_turn_resources(stored, attempt_terminal=True)
+    assert projected is not None
+    assert projected["cpu"]["capacity_cores"] is None
+
+
+@pytest.mark.parametrize("quota", [0, -1, True, float("inf"), float("nan"), "2"])
+def test_invalid_wire_cpu_capacity_is_rejected(quota):
+    """The wire carries a positive finite number, not a guessed CPU capacity."""
+    payload = snapshot()
+    payload["cpu"]["capacity_cores"] = quota
+    with pytest.raises(ValidationError):
+        WorkerTurnResourcesRequest.model_validate(payload)
