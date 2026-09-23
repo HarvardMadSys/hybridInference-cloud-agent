@@ -18,7 +18,6 @@ import { basePath } from '@/config/env';
 import { useT } from '@/components/providers';
 import {
   cancelAgentJob,
-  followUpAgentJob,
   forkAgentJob,
   getAgentConfig,
   getAgentJobGit,
@@ -26,6 +25,7 @@ import {
   type AgentConfigApi,
   type AgentGitWorkspaceApi,
 } from '@/lib/api/agents';
+import { submitThreadMessage } from '@/lib/api/pendingMessages';
 
 import { ownerFailureMessage, toDiffFileDetails } from './adapt';
 import {
@@ -72,6 +72,8 @@ import {
 } from './TrajectoryInspector';
 import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
 import { shouldHoldReading, useConversationScroll } from './useConversationScroll';
+import { PendingMessageQueue } from './PendingMessageQueue';
+import { usePendingMessages } from './usePendingMessages';
 import { useResizablePane } from './useResizablePane';
 import { WorkspaceFiles } from './WorkspaceFiles';
 import {
@@ -969,29 +971,25 @@ export function JobDetail({
     setSubmitting(true);
     setActionError(null);
     try {
-      const child = await followUpAgentJob(job.id, {
+      // One request whatever the conversation is doing: idle, the message is
+      // the next turn when this returns; busy, it waits in the queue above the
+      // composer. ``queue.apply`` shows the card or, for a turn, moves to it.
+      const result = await submitThreadMessage(threadId, {
         prompt,
         ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
         ...(attachments.ids.length ? { attachment_ids: attachments.ids } : {}),
         // Omitted controls inherit the parent's validated model and effort.
         ...composerOverrides(job, model, effort),
       });
-      // A router.push remounts the dynamic [jobId] segment even with
-      // scroll:false and a stable JobDetail key. Native history updates Next's
-      // usePathname without replacing the page, preserving the conversation
-      // while useAgentJob loads the next turn. Reload and Back keep real URLs.
-      window.history.pushState(null, '', `${basePath}/${encodeURIComponent(child.id)}`);
-      // The reader asked for this turn, so following its output is what they
-      // asked for — the one place besides "back to bottom" that resumes it.
-      scroll.followLatest();
-      // Also what the remount used to do. Without it the composer stayed
-      // disabled with the sent text still in it, because nothing else ever
-      // cleared either.
+      queue.apply(result);
+      // Without this the composer stayed disabled with the sent text still in
+      // it, because nothing else ever cleared either. A queued message keeps
+      // its uploads: they are pinned to it, not discarded with the draft.
       setFollowUp('');
       attachments.reset();
       setSubmitting(false);
     } catch (cause: unknown) {
-      setActionError(cause instanceof Error ? cause.message : 'Could not queue the follow-up');
+      setActionError(cause instanceof Error ? cause.message : 'Could not send the message');
       setSubmitting(false);
     }
   }
@@ -1092,6 +1090,31 @@ export function JobDetail({
     turnKeys,
     conversationKey,
     active: tab === 'chat',
+  });
+  // The conversation's waiting messages. A message becomes a turn on the
+  // server, when the turn in front of it ends; the page follows it there when
+  // it asked for it, or when it was showing the turn the new one follows.
+  const followTurn = useCallback(
+    (jobId: string) => {
+      // A router.push remounts the dynamic [jobId] segment even with
+      // scroll:false and a stable JobDetail key. Native history updates Next's
+      // usePathname without replacing the page, preserving the conversation
+      // while useAgentJob loads the next turn. Reload and Back keep real URLs.
+      window.history.pushState(null, '', `${basePath}/${encodeURIComponent(jobId)}`);
+      // The reader asked for this turn, so following its output is what they
+      // asked for — the one place besides "back to bottom" that resumes it.
+      scroll.followLatest();
+    },
+    [scroll],
+  );
+  const viewedJobId = job.id;
+  const queue = usePendingMessages({
+    threadId: job.threadId,
+    active: hasLiveWork(job),
+    onSent: (jobId, how) => {
+      if (jobId === viewedJobId) return;
+      if (how.requested || how.after === viewedJobId) followTurn(jobId);
+    },
   });
   // Announced only for a jump the reader asked for, never for a streamed
   // event: a transcript that talks on every token is one nobody can listen to.
@@ -1576,6 +1599,7 @@ export function JobDetail({
                       }}
                     />
                   ) : null}
+                  <PendingMessageQueue queue={queue} disabled={isArchived || contextLost} />
                   {isArchived ? (
                     <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-gray-900">
                       <div className="min-w-0 flex-1 basis-64">

@@ -9,7 +9,6 @@ import {
   createAgentTerminal,
   deleteAgentTerminal,
   getAgentAttemptTelemetry,
-  followUpAgentJob,
   forkAgentJob,
   clearAgentGoal,
   getAgentGoal,
@@ -49,6 +48,7 @@ import {
   type McpInvocationApi,
 } from '@/lib/api/mcp';
 import { deleteAttachment, uploadAttachment } from '@/lib/api/attachments';
+import { getThreadQueue, submitThreadMessage } from '@/lib/api/pendingMessages';
 
 import { APIError } from '@/lib/utils/errors';
 
@@ -72,6 +72,27 @@ vi.mock('@/lib/api/mcp', async (importOriginal) => ({
   updateMcpThreadBinding: vi.fn(),
 }));
 
+vi.mock('@/lib/api/pendingMessages', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/pendingMessages')>()),
+  submitThreadMessage: vi.fn(),
+  getThreadQueue: vi.fn(),
+  editPendingMessage: vi.fn(),
+  deletePendingMessage: vi.fn(),
+  resumeThreadQueue: vi.fn(),
+}));
+
+/** The queue a conversation with nothing waiting reads back. */
+function emptyQueue(threadId: string) {
+  return {
+    thread_id: threadId,
+    pending_messages: [],
+    queue_paused_reason: null,
+    latest_job_id: null,
+    latest_turn_no: null,
+    latest_job_state: null,
+  };
+}
+
 vi.mock('@/lib/api/attachments', () => ({
   uploadAttachment: vi.fn(),
   deleteAttachment: vi.fn().mockResolvedValue(undefined),
@@ -84,7 +105,6 @@ vi.mock('@/lib/api/agents', () => ({
   cancelAgentJob: vi.fn(),
   createAgentTerminal: vi.fn(),
   deleteAgentTerminal: vi.fn(),
-  followUpAgentJob: vi.fn(),
   forkAgentJob: vi.fn(),
   getAgentJob: vi.fn(),
   getAgentJobThread: vi.fn(),
@@ -220,16 +240,17 @@ function sideChatFixture() {
     jobs.set(child.id, child);
     return child;
   });
-  vi.mocked(followUpAgentJob).mockImplementation(async (id, body) => {
+  vi.mocked(submitThreadMessage).mockImplementation(async (threadId, body) => {
+    const latest = [...jobs.values()].filter((row) => row.thread_id === threadId).at(-1)!;
     const child = {
-      ...jobs.get(id)!,
-      id: `${id}-next`,
+      ...latest,
+      id: `${latest.id}-next`,
       turn_no: 2,
       forked_from_job_id: null,
       task_prompt: body.prompt,
     };
     jobs.set(child.id, child);
-    return child;
+    return { pending: null, job: child };
   });
   return {
     source,
@@ -324,7 +345,7 @@ describe('JobDetail', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
     await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenCalledWith('tabs-child-2', { prompt: 'Second draft' }),
+      expect(submitThreadMessage).toHaveBeenCalledWith('tabs-thread-2', { prompt: 'Second draft' }),
     );
     fireEvent.click(screen.getByRole('tab', { name: 'Side Chat' }));
     expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue('First draft');
@@ -333,7 +354,7 @@ describe('JobDetail', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
     await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenCalledWith('tabs-child-1', { prompt: 'First draft' }),
+      expect(submitThreadMessage).toHaveBeenCalledWith('tabs-thread-1', { prompt: 'First draft' }),
     );
     expect(new Set(vi.mocked(forkAgentJob).mock.calls.map((call) => call[1]?.requestId)).size).toBe(
       2,
@@ -428,9 +449,10 @@ describe('JobDetail', () => {
 
   it('stops only the selected new side chat when Escape is pressed on its tab', async () => {
     const { source, job, userId, jobs } = sideChatFixture();
-    vi.mocked(followUpAgentJob).mockImplementationOnce(async (id, body) => {
+    vi.mocked(submitThreadMessage).mockImplementationOnce(async (threadId, body) => {
+      const latest = [...jobs.values()].filter((row) => row.thread_id === threadId).at(-1)!;
       const next = {
-        ...jobs.get(id)!,
+        ...latest,
         id: 'running-side',
         forked_from_job_id: null,
         turn_no: 2,
@@ -439,7 +461,7 @@ describe('JobDetail', () => {
         conversation_state: 'running' as const,
       };
       jobs.set(next.id, next);
-      return next;
+      return { pending: null, job: next };
     });
     render(<JobDetail job={{ ...job, state: 'running' }} userId={userId} threadJobs={[source]} />);
     openWorkspace();
@@ -563,7 +585,7 @@ describe('JobDetail', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(decideMcpInvocation).toHaveBeenCalledWith(11, true));
     expect(await screen.findByText('get_issue · approved')).toBeVisible();
-    expect(followUpAgentJob).not.toHaveBeenCalled();
+    expect(submitThreadMessage).not.toHaveBeenCalled();
   });
   it.each([undefined, 'previous-job'])(
     'uses the same queue message with parent %s',
@@ -585,7 +607,10 @@ describe('JobDetail', () => {
     vi.mocked(deleteAttachment).mockClear();
     navigation.push.mockReset();
     vi.mocked(cancelAgentJob).mockReset();
-    vi.mocked(followUpAgentJob).mockReset();
+    vi.mocked(submitThreadMessage).mockReset();
+    vi.mocked(getThreadQueue)
+      .mockReset()
+      .mockImplementation(async (threadId) => emptyQueue(threadId));
     vi.mocked(forkAgentJob).mockReset();
     vi.mocked(restoreAgentJob).mockReset();
     vi.mocked(renameAgentJob).mockReset();
@@ -673,7 +698,10 @@ describe('JobDetail', () => {
   });
 
   it('allows clearing saved skills for the next follow-up', async () => {
-    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_child' },
+    } as never);
     vi.mocked(listSkills).mockResolvedValue([
       {
         id: 7,
@@ -704,7 +732,7 @@ describe('JobDetail', () => {
     });
     fireEvent.keyDown(screen.getByLabelText('Add a follow-up'), { key: 'Enter' });
     await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
         prompt: 'Continue without skills',
         skill_ids: [],
       }),
@@ -716,7 +744,10 @@ describe('JobDetail', () => {
     // writes it to the thread, and the next message is an ordinary one. The old
     // draft rode every follow-up after it — including one sent after the owner
     // paused the goal, which the write would silently reactivate.
-    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_child' },
+    } as never);
     vi.mocked(setAgentGoal).mockResolvedValue({ thread_id: 'thread_9', goal: null, revision: 5 });
     render(
       <JobDetail
@@ -749,12 +780,12 @@ describe('JobDetail', () => {
         revision: 4,
       }),
     );
-    expect(followUpAgentJob).not.toHaveBeenCalled();
+    expect(submitThreadMessage).not.toHaveBeenCalled();
 
     fireEvent.change(box, { target: { value: 'first' } });
     fireEvent.keyDown(box, { key: 'Enter' });
-    await waitFor(() => expect(followUpAgentJob).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(followUpAgentJob).mock.calls[0][1]).not.toHaveProperty('goal');
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(submitThreadMessage).mock.calls[0][1]).not.toHaveProperty('goal');
   });
 
   it('manages the goal through its conversation, not through the turn on screen', async () => {
@@ -806,9 +837,9 @@ describe('JobDetail', () => {
         finishUpload = resolve;
       }),
     );
-    vi.mocked(followUpAgentJob)
+    vi.mocked(submitThreadMessage)
       .mockRejectedValueOnce(new Error('Try sending again'))
-      .mockResolvedValue({ id: 'ajob_child' } as never);
+      .mockResolvedValue({ pending: null, job: { id: 'ajob_child' } } as never);
     const { container } = render(<JobDetail job={makeJob()} />);
     const box = screen.getByLabelText('Add a follow-up');
     fireEvent.change(box, { target: { value: 'Use this spec' } });
@@ -823,7 +854,7 @@ describe('JobDetail', () => {
     expect(screen.getByText('spec.txt')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeDisabled();
     fireEvent.keyDown(box, { key: 'Enter' });
-    expect(followUpAgentJob).not.toHaveBeenCalled();
+    expect(submitThreadMessage).not.toHaveBeenCalled();
     await act(async () =>
       finishUpload({ id: 42, path: 'spec.txt', size_bytes: 12, content_type: 'text/plain' }),
     );
@@ -833,7 +864,7 @@ describe('JobDetail', () => {
     expect(box).toHaveValue('Use this spec');
     fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
     await waitFor(() => expect(box).toHaveValue(''));
-    expect(followUpAgentJob).toHaveBeenLastCalledWith('ajob_1', {
+    expect(submitThreadMessage).toHaveBeenLastCalledWith('ajob_1', {
       prompt: 'Use this spec',
       attachment_ids: [42],
     });
@@ -842,7 +873,7 @@ describe('JobDetail', () => {
     fireEvent.change(box, { target: { value: 'Next message' } });
     fireEvent.keyDown(box, { key: 'Enter' });
     await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenLastCalledWith('ajob_1', { prompt: 'Next message' }),
+      expect(submitThreadMessage).toHaveBeenLastCalledWith('ajob_1', { prompt: 'Next message' }),
     );
   });
 
@@ -853,7 +884,10 @@ describe('JobDetail', () => {
       size_bytes: 4,
       content_type: 'text/plain',
     });
-    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_child' },
+    } as never);
     render(<JobDetail job={makeJob()} />);
     const box = screen.getByLabelText('Add a follow-up');
     const file = new File(['data'], 'notes.txt');
@@ -866,7 +900,7 @@ describe('JobDetail', () => {
     fireEvent.change(box, { target: { value: 'Without the file' } });
     fireEvent.keyDown(box, { key: 'Enter' });
     await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', { prompt: 'Without the file' }),
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', { prompt: 'Without the file' }),
     );
   });
 
@@ -1301,27 +1335,60 @@ describe('JobDetail', () => {
     expect(cancelAgentJob).toHaveBeenCalledTimes(2);
   });
 
-  it('queues a follow-up even while the current run is active', async () => {
-    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+  it('queues a message sent while the run is active above the composer, without moving', async () => {
+    const waiting = {
+      id: 'apmsg_1',
+      thread_id: 'ajob_1',
+      position: 1,
+      state: 'queued' as const,
+      revision: 1,
+      prompt: 'Now add a regression test',
+    };
+    vi.mocked(submitThreadMessage).mockResolvedValue({ pending: waiting, job: null });
+    window.history.pushState(null, '', '/ajob_1');
     render(<JobDetail job={makeJob()} />);
 
     expect(screen.getByText(/queued after this run/i)).toBeInTheDocument();
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'Now add a regression test' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+
+    await waitFor(() =>
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
+        prompt: 'Now add a regression test',
+      }),
+    );
+    const queue = await screen.findByRole('region', { name: 'Queued messages' });
+    expect(within(queue).getByText('Now add a regression test')).toBeInTheDocument();
+    expect(within(queue).getByText('Waiting for this turn')).toBeInTheDocument();
+    // The message waits; the page stays on the turn it was showing.
+    expect(box).toHaveValue('');
+    expect(window.location.pathname).toBe('/ajob_1');
+    expect(navigation.push).not.toHaveBeenCalled();
+  });
+
+  it('moves to the turn an idle conversation starts at once', async () => {
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_child' },
+    } as never);
+    render(<JobDetail job={makeJob({ state: 'done' })} />);
+
     fireEvent.change(screen.getByLabelText('Add a follow-up'), {
       target: { value: 'Now add a regression test' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
 
-    await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
-        prompt: 'Now add a regression test',
-      }),
-    );
-    expect(window.location.pathname).toBe('/ajob_child');
+    await waitFor(() => expect(window.location.pathname).toBe('/ajob_child'));
     expect(navigation.push).not.toHaveBeenCalled();
+    expect(screen.queryByRole('region', { name: 'Queued messages' })).toBeNull();
   });
 
   it('sends the follow-up on Enter and keeps Shift+Enter a newline', async () => {
-    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_child' },
+    } as never);
     render(<JobDetail job={makeJob()} />);
 
     const composer = screen.getByLabelText('Add a follow-up');
@@ -1330,17 +1397,17 @@ describe('JobDetail', () => {
     // Shift+Enter and Alt+Enter stay the newline, so the browser keeps them.
     expect(fireEvent.keyDown(composer, { key: 'Enter', shiftKey: true })).toBe(true);
     expect(fireEvent.keyDown(composer, { key: 'Enter', altKey: true })).toBe(true);
-    expect(followUpAgentJob).not.toHaveBeenCalled();
+    expect(submitThreadMessage).not.toHaveBeenCalled();
 
     // An IME commits its candidate with Enter; that keypress is the word, not
     // the send.
     fireEvent.keyDown(composer, { key: 'Enter', isComposing: true });
-    expect(followUpAgentJob).not.toHaveBeenCalled();
+    expect(submitThreadMessage).not.toHaveBeenCalled();
 
     fireEvent.keyDown(composer, { key: 'Enter' });
 
     await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
         prompt: 'Now add a regression test',
       }),
     );
@@ -1358,11 +1425,14 @@ describe('JobDetail', () => {
     // nothing to send it does nothing at all. Shift+Enter still breaks the line.
     expect(fireEvent.keyDown(composer, { key: 'Enter' })).toBe(false);
     expect(fireEvent.keyDown(composer, { key: 'Enter', shiftKey: true })).toBe(true);
-    expect(followUpAgentJob).not.toHaveBeenCalled();
+    expect(submitThreadMessage).not.toHaveBeenCalled();
   });
 
   it('accepts the other send chord people arrive with', async () => {
-    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_child' },
+    } as never);
     render(<JobDetail job={makeJob()} />);
 
     const composer = screen.getByLabelText('Add a follow-up');
@@ -1370,14 +1440,17 @@ describe('JobDetail', () => {
     fireEvent.keyDown(composer, { key: 'Enter', metaKey: true });
 
     await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
         prompt: 'Now add a regression test',
       }),
     );
   });
 
   it('switches the model for the next turn without leaving the thread', async () => {
-    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_child' },
+    } as never);
     render(<JobDetail job={makeJob()} />);
 
     const picker = await screen.findByLabelText('Model for this turn');
@@ -1390,7 +1463,7 @@ describe('JobDetail', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
 
     await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
         prompt: 'Now try it on the other model',
         model: 'glm-test',
       }),
@@ -1408,7 +1481,10 @@ describe('JobDetail', () => {
 
   it('names the inherited model when the model list will not load', async () => {
     vi.mocked(getAgentConfig).mockRejectedValue(new Error('config unavailable'));
-    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_child' },
+    } as never);
     render(<JobDetail job={makeJob()} />);
 
     await waitFor(() => expect(getAgentConfig).toHaveBeenCalled());
@@ -1421,7 +1497,7 @@ describe('JobDetail', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
 
     await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', { prompt: 'Carry on' }),
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', { prompt: 'Carry on' }),
     );
   });
 
@@ -1713,7 +1789,7 @@ describe('JobDetail', () => {
     expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
     expect(refreshAgentJobUsage).not.toHaveBeenCalled();
     expect(cancelAgentJob).not.toHaveBeenCalled();
-    expect(followUpAgentJob).not.toHaveBeenCalled();
+    expect(submitThreadMessage).not.toHaveBeenCalled();
   });
 
   it.each([null, 0])('preserves an absent or zero Gateway model-call count (%s)', async (turns) => {
@@ -2699,7 +2775,7 @@ describe('JobDetail', () => {
       );
       expect(vi.mocked(setAgentGoal).mock.calls[0][1].goal).not.toHaveProperty('max_rounds');
       // The command is not a prompt: the goal starts the work.
-      expect(followUpAgentJob).not.toHaveBeenCalled();
+      expect(submitThreadMessage).not.toHaveBeenCalled();
       expect(navigation.push).not.toHaveBeenCalled();
       // Consumed, so the objective is not also left in the box.
       await waitFor(() => expect(box).toHaveValue(''));
@@ -2739,7 +2815,7 @@ describe('JobDetail', () => {
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
       expect(box).toHaveValue('/goal ');
       expect(setAgentGoal).not.toHaveBeenCalled();
-      expect(followUpAgentJob).not.toHaveBeenCalled();
+      expect(submitThreadMessage).not.toHaveBeenCalled();
     });
 
     it('edits the goal on the band, in place, with no modal over the chat', async () => {
@@ -2764,7 +2840,7 @@ describe('JobDetail', () => {
           revision: 4,
         }),
       );
-      expect(followUpAgentJob).not.toHaveBeenCalled();
+      expect(submitThreadMessage).not.toHaveBeenCalled();
     });
 
     it('starts the command inside the box and keeps the caret there', async () => {
@@ -2781,7 +2857,7 @@ describe('JobDetail', () => {
       expect(box).toHaveValue('/goal ');
       expect(box).toHaveFocus();
       expect(setAgentGoal).not.toHaveBeenCalled();
-      expect(followUpAgentJob).not.toHaveBeenCalled();
+      expect(submitThreadMessage).not.toHaveBeenCalled();
     });
 
     it('keeps the command in the box when the write is refused', async () => {
@@ -2792,7 +2868,7 @@ describe('JobDetail', () => {
 
       expect(await screen.findByRole('alert')).toHaveTextContent('goal service unavailable');
       expect(box).toHaveValue(`/goal ${OBJECTIVE}`);
-      expect(followUpAgentJob).not.toHaveBeenCalled();
+      expect(submitThreadMessage).not.toHaveBeenCalled();
     });
 
     it('re-reads the conversation after a version conflict instead of overwriting', async () => {
@@ -2828,13 +2904,17 @@ describe('JobDetail', () => {
     });
 
     it('leaves a message that merely mentions the command to the model', async () => {
-      vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+      vi.mocked(submitThreadMessage).mockResolvedValue({
+        pending: null,
+        job: { id: 'ajob_child' },
+      } as never);
       const box = await composer();
       fireEvent.change(box, { target: { value: 'remember the /goal syntax we discussed' } });
       fireEvent.keyDown(box, { key: 'Enter' });
 
+      // Messages are addressed to the conversation, which is `thread_9` here.
       await waitFor(() =>
-        expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+        expect(submitThreadMessage).toHaveBeenCalledWith('thread_9', {
           prompt: 'remember the /goal syntax we discussed',
         }),
       );
@@ -2937,7 +3017,7 @@ describe('JobDetail', () => {
       await waitFor(() => expect(clearAgentGoal).toHaveBeenCalledWith('thread_9'));
       // Clearing removes the goal and the rounds queued for it; the chat and
       // its history are not the client's to delete.
-      expect(followUpAgentJob).not.toHaveBeenCalled();
+      expect(submitThreadMessage).not.toHaveBeenCalled();
       expect(cancelAgentJob).not.toHaveBeenCalled();
     });
 
@@ -2956,7 +3036,7 @@ describe('JobDetail', () => {
       fireEvent.keyDown(screen.getByRole('button', { name: 'Save' }), { key: 'Escape' });
       expect(screen.queryByLabelText('Objective')).not.toBeInTheDocument();
       expect(cancelAgentJob).not.toHaveBeenCalled();
-      expect(followUpAgentJob).not.toHaveBeenCalled();
+      expect(submitThreadMessage).not.toHaveBeenCalled();
       expect(box).toHaveValue('');
 
       fireEvent.keyDown(window, { key: 'Escape' });
@@ -2972,7 +3052,7 @@ describe('JobDetail', () => {
       const objective = screen.getByLabelText('Objective');
       expect(objective.closest('form')).toBeNull();
       fireEvent.keyDown(objective, { key: 'Enter' });
-      expect(followUpAgentJob).not.toHaveBeenCalled();
+      expect(submitThreadMessage).not.toHaveBeenCalled();
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
       vi.mocked(clearAgentGoal).mockResolvedValue({
         thread_id: 'thread_9',
@@ -3024,10 +3104,13 @@ describe('JobDetail reasoning effort', () => {
 
   beforeEach(() => {
     navigation.push.mockReset();
-    vi.mocked(followUpAgentJob).mockReset();
+    vi.mocked(submitThreadMessage).mockReset();
     vi.mocked(getAgentConfig).mockReset();
     vi.mocked(getAgentConfig).mockResolvedValue(THINKING_CONFIG);
-    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_child' },
+    } as never);
   });
 
   afterEach(() => cleanup());
@@ -3056,11 +3139,11 @@ describe('JobDetail reasoning effort', () => {
     fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'again' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
     await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', { prompt: 'again' }),
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', { prompt: 'again' }),
     );
     unmount();
 
-    vi.mocked(followUpAgentJob).mockClear();
+    vi.mocked(submitThreadMessage).mockClear();
     render(<JobDetail job={makeJob({ reasoningEffort: 'high' })} />);
     fireEvent.change(await screen.findByLabelText('Reasoning for this turn'), {
       target: { value: 'low' },
@@ -3069,7 +3152,7 @@ describe('JobDetail reasoning effort', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
 
     await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
         prompt: 'easy one',
         reasoning_effort: 'low',
       }),
@@ -3086,7 +3169,7 @@ describe('JobDetail reasoning effort', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
 
     await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
         prompt: 'go',
         reasoning_effort: 'max',
       }),
@@ -3109,7 +3192,7 @@ describe('JobDetail reasoning effort', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
 
     await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
         prompt: 'switch',
         model: 'glm-test',
       }),
@@ -3340,14 +3423,17 @@ describe('sending a follow-up', () => {
     // A remount used to do this. Keying on the conversation rather than the
     // turn removed the remount, and with it the only thing that ever reset
     // either — the composer stayed disabled with the prompt still in it.
-    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_next' } as never);
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_next' },
+    } as never);
     render(<JobDetail job={makeJob()} />);
     const box = screen.getByLabelText('Add a follow-up');
 
     fireEvent.change(box, { target: { value: 'and now the docs' } });
     fireEvent.submit(box.closest('form') as HTMLFormElement);
 
-    await waitFor(() => expect(followUpAgentJob).toHaveBeenCalled());
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalled());
     await waitFor(() => expect((box as HTMLTextAreaElement).value).toBe(''));
     expect(box).not.toBeDisabled();
   });

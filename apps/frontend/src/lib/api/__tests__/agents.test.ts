@@ -15,7 +15,6 @@ import {
   deleteAgentTerminal,
   disconnectAgentIntegration,
   createAgentJob,
-  followUpAgentJob,
   forkAgentJob,
   getAgentGoal,
   getAgentIntegrations,
@@ -653,57 +652,6 @@ describe('agents api', () => {
     const second = fetchWithAuth.mock.calls[1][2]?.headers as Record<string, string>;
     expect(first['Idempotency-Key']).toEqual(expect.any(String));
     expect(second['Idempotency-Key']).not.toBe(first['Idempotency-Key']);
-  });
-
-  it('keeps the follow-up idempotency key while the response is lost', async () => {
-    fetchWithAuth
-      .mockRejectedValueOnce(new TypeError('network error'))
-      .mockResolvedValueOnce(jsonResponse({ id: 'ajob_child', state: 'queued' }, 201));
-
-    await expect(followUpAgentJob('ajob_parent', { prompt: 'and then' })).rejects.toThrow();
-    await expect(followUpAgentJob('ajob_parent', { prompt: 'and then' })).resolves.toMatchObject({
-      id: 'ajob_child',
-    });
-
-    const first = fetchWithAuth.mock.calls[0][2]?.headers as Record<string, string>;
-    const second = fetchWithAuth.mock.calls[1][2]?.headers as Record<string, string>;
-    expect(second['Idempotency-Key']).toBe(first['Idempotency-Key']);
-  });
-
-  it('rotates the submission key when the server reports different content under it', async () => {
-    fetchWithAuth
-      .mockResolvedValueOnce(
-        jsonResponse(
-          { detail: { error: { type: 'idempotency_conflict', message: 'different content' } } },
-          409,
-        ),
-      )
-      .mockResolvedValueOnce(jsonResponse({ id: 'ajob_edited', state: 'queued' }, 201));
-
-    await expect(
-      followUpAgentJob('ajob_edited_parent', { prompt: 'edited text' }),
-    ).resolves.toMatchObject({ id: 'ajob_edited' });
-
-    expect(fetchWithAuth).toHaveBeenCalledTimes(2);
-    const first = fetchWithAuth.mock.calls[0][2]?.headers as Record<string, string>;
-    const second = fetchWithAuth.mock.calls[1][2]?.headers as Record<string, string>;
-    expect(second['Idempotency-Key']).not.toBe(first['Idempotency-Key']);
-  });
-
-  it('queues a follow-up in the same conversation', async () => {
-    fetchWithAuth.mockResolvedValue(jsonResponse({ id: 'ajob_child', state: 'queued' }));
-
-    const child = await followUpAgentJob('ajob_parent', { prompt: 'please add a test' });
-
-    expect(child.id).toBe('ajob_child');
-    expect(fetchWithAuth).toHaveBeenCalledWith(
-      expect.any(String),
-      '/v1/agent/jobs/ajob_parent/follow-ups',
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({ prompt: 'please add a test' }),
-      }),
-    );
   });
 
   it('delivers events and the terminal frame', async () => {

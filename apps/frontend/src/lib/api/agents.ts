@@ -13,6 +13,7 @@ import type { SelectedSkillApi } from './skills';
 //    UI stays complete across that.
 
 import { fetchWithAuth, jsonOrThrow } from './client';
+import type { PendingMessageApi, QueuePausedReason } from './pendingMessages';
 import { announceAgentSessionsChanged } from './agentSessionEvents';
 import { config } from '@/config/env';
 
@@ -466,6 +467,10 @@ export interface AgentThreadApi {
   jobs: AgentJobApi[];
   created_at?: string | null;
   updated_at?: string | null;
+  /** Messages written while a turn ran, in the order they will be sent. */
+  pending_messages?: PendingMessageApi[];
+  /** Why the queue is not moving by itself, until the owner continues it. */
+  queue_paused_reason?: QueuePausedReason | null;
 }
 
 /**
@@ -1189,49 +1194,15 @@ export async function cancelAgentJob(
   return jsonOrThrow(resp);
 }
 
-export interface FollowUpAgentJobRequest {
-  /** Staged uploads to deliver with this turn. */
-  attachment_ids?: number[];
-  /** Omitted inherits saved content; explicit ids snapshot the current library. */
-  skill_ids?: number[];
-  /** Set or replace the conversation's goal along with this message. */
-  goal?: GoalInputApi;
-  prompt: string;
-  /** Omitted values inherit the parent run's harness and model. */
-  runtime?: string;
-  model?: string;
-  /**
-   * Omitted inherits the previous turn's effort. The literal `'auto'` clears
-   * it back to unset — null cannot mean "clear", it is already what "inherit"
-   * sends. No composer sends the sentinel (they always show a real level and
-   * send it); it stays because it is the only way an API caller can undo an
-   * inherited choice.
-   */
-  reasoning_effort?: string;
-}
-
-/** Queue another turn in the same thread, after its currently active run. */
-export async function followUpAgentJob(
-  jobId: string,
-  body: FollowUpAgentJobRequest,
-): Promise<AgentJobApi> {
-  return submitOnce(`follow-up:${jobId}`, (requestId) =>
-    fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/follow-ups`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': requestId },
-      body: JSON.stringify(body),
-    }),
-  );
-}
-
 /**
  * A submission is one user action, however many times its request is sent.
  *
- * The control plane recognises a resent create or follow-up by its
- * `Idempotency-Key` and answers with the job the first send made instead of
- * queueing a second task. So the key must outlive a lost response: it is
- * minted per pending submission scope (the composer, or one thread's next
- * turn), kept in session storage across a reload, and dropped only once a
+ * The control plane recognises a resent create by its `Idempotency-Key` and
+ * answers with the job the first send made instead of queueing a second task.
+ * (A message to an existing conversation carries its own key the same way; see
+ * `submitThreadMessage`.) So the key must outlive a lost response: it is
+ * minted per pending submission scope, kept in session storage across a
+ * reload, and dropped only once a
  * definitive answer arrives. A `409 idempotency_conflict` means the key was
  * reused for different content — an edited resubmit after a failure — and
  * that is a new action, so the key rotates and the request is sent once more.
