@@ -23,7 +23,6 @@ import {
   reasonSentences,
   runResourceCells,
   runStateLabel,
-  TURN_SCOPE_SENTENCE,
   turnSummaryRows,
   UNKNOWN_REASON_SENTENCE,
 } from './presentTurnResources';
@@ -322,21 +321,18 @@ describe('reason code sentences', () => {
 });
 
 describe('detail panel rows', () => {
-  it('shows each metric, its method and its own completeness', () => {
+  it('shows four concise readings with measurement context attached to each value', () => {
     const rows = turnSummaryRows({ ...summary(), attempts_measured: 3, attempts_total: 5 });
     const byLabel = Object.fromEntries(rows.map((row) => [row.label, row]));
+    expect(rows).toHaveLength(4);
     expect(byLabel['CPU usage (avg)'].value).toBe('30.8%');
-    expect(byLabel['Memory peak'].value).toBe('1.2 GiB \u00b7 sampled');
-    expect(byLabel['Process storage I/O'].value).toBe('2 MiB read / 512 KiB written');
-    // The panel must never imply the number is the platform's whole cost.
-    expect(TURN_SCOPE_SENTENCE).toBe('Sandbox member execution, including the agent and its tools');
-    expect(byLabel.Scope.value).toBe(TURN_SCOPE_SENTENCE);
-    expect(byLabel.Completeness.value).toBe(
-      'CPU complete. memory sampling complete. I/O complete.',
-    );
-    expect(byLabel.Completeness.detail).toBe(
-      '3 of 5 executions measured; this is not the run\u2019s total.',
-    );
+    expect(byLabel['CPU usage (avg)'].detail).toContain('sandbox CPU quota');
+    expect(byLabel['Peak memory (sampled)'].value).toBe('1.2 GiB');
+    expect(byLabel['Peak memory (sampled)'].detail).toContain('sampled every 1s');
+    expect(byLabel['Storage read'].value).toBe('2 MiB');
+    expect(byLabel['Storage write'].value).toBe('512 KiB');
+    expect(byLabel.Scope).toBeUndefined();
+    expect(byLabel.Completeness).toBeUndefined();
   });
 
   it('states an unmeasured metric independently of the measured ones', () => {
@@ -352,13 +348,12 @@ describe('detail panel rows', () => {
       }),
     );
     const byLabel = Object.fromEntries(rows.map((row) => [row.label, row]));
-    expect(byLabel['Process storage I/O'].value).toBe('Unavailable');
-    expect(byLabel['Process storage I/O'].detail).toContain(
+    expect(byLabel['Storage read'].value).toBe('Unavailable');
+    expect(byLabel['Storage write'].value).toBe('Unavailable');
+    expect(byLabel['Storage read'].detail).toContain(
       'do not prove which filesystem this I/O reached',
     );
     expect(byLabel['CPU usage (avg)'].value).toBe('30.8%');
-    expect(byLabel.Completeness.value).toContain('I/O unavailable.');
-    expect(byLabel.Completeness.value).toContain('CPU complete.');
   });
 
   it('says the cut-off in the metrics an interrupted collection did reach', () => {
@@ -370,7 +365,10 @@ describe('detail panel rows', () => {
     );
     const byLabel = Object.fromEntries(rows.map((row) => [row.label, row]));
     expect(byLabel['CPU usage (avg)'].detail).toContain('data reached 2m 10s');
-    expect(byLabel['CPU usage (avg)'].value).not.toContain('final');
+    expect(byLabel['CPU usage (avg)'].value).toBe('—');
+    expect(byLabel['Peak memory (sampled)'].value).toBe('1.2 GiB · observed');
+    expect(byLabel['Storage read'].value).toBe('≥ 2 MiB');
+    expect(byLabel['Storage write'].value).toBe('≥ 512 KiB');
   });
 
   it('withholds average CPU usage when the cumulative CPU counter is partial', () => {
@@ -382,7 +380,16 @@ describe('detail panel rows', () => {
     expect(byLabel['CPU usage (avg)'].detail).toContain(
       'requires a complete execution measurement',
     );
-    expect(byLabel['Memory peak'].value).not.toContain('\u2265');
+    expect(byLabel['Peak memory (sampled)'].value).not.toContain('\u2265');
+  });
+
+  it('keeps measured zero distinct from missing I/O directions', () => {
+    const rows = turnSummaryRows(
+      summary({ storage_io: { ...summary().storage_io, read_bytes: 0, write_bytes: null } }),
+    );
+    const byLabel = Object.fromEntries(rows.map((row) => [row.label, row]));
+    expect(byLabel['Storage read'].value).toBe('0 B');
+    expect(byLabel['Storage write'].value).toBe('Unavailable');
   });
 });
 

@@ -44,30 +44,22 @@ export interface ResourceCell {
   title?: string;
 }
 
-//: A value shown in the detail panel, with the method that produced it.
+//: Measurement context for the detail panel's concise rows.
 export interface ResourceReading {
   value: string;
-  /** How the number was measured, named beside it rather than left implied. */
+  /** How the number was measured, retained in the value's accessible description. */
   method: string | null;
   /** Why the number is short or missing, as fixed sentences. */
   notes: string[];
 }
 
-//: One row of the detail panel's summary grid.
+//: One concise row of the detail panel's resource summary.
 export interface TurnSummaryRow {
   label: string;
   value: string;
-  /** A second line carrying the sentences that do not fit in the value. */
+  /** Measurement context available on hover and to assistive technology. */
   detail: string | null;
 }
-
-/**
- * The scope sentence every view of these numbers must carry.
- *
- * The measurement covers the member's own execution inside a shared sandbox.
- * It is not the platform's cost of the task, and nothing here may imply it is.
- */
-export const TURN_SCOPE_SENTENCE = 'Sandbox member execution, including the agent and its tools';
 
 //: Said when a run has no summary at all, and for a metric with no number.
 export const NOT_COLLECTED = 'Not collected';
@@ -581,40 +573,44 @@ function storageReading(summary: TurnResourceSummaryApi): ResourceReading {
   };
 }
 
-/**
- * The full turn-level readings for the detail panel, in the contract's order.
- *
- * These are the same numbers the Runs list shows, at the length the detail view
- * can afford: each carries its method, and each carries the state of its own
- * collection rather than a single verdict for the turn.
- */
+/** Turn-level measurement context, in the contract's order. */
 export function turnSummaryReadings(summary: TurnResourceSummaryApi): ResourceReading[] {
   return [cpuReading(summary), memoryReading(summary), storageReading(summary)];
 }
 
-/**
- * The rows of the detail panel's summary grid, for one attempt's summary.
- *
- * The attempt counts are read from the summary when the run's compact
- * projection has been merged into it, and are otherwise absent: whether the
- * total covers the whole run is a run-level fact the attempt endpoint does not
- * carry.
- */
+/** Four scannable values for one execution; reasons stay attached to their metric. */
 export function turnSummaryRows(summary: TurnResourceSummaryApi): TurnSummaryRow[] {
   const [cpu, memory, storage] = turnSummaryReadings(summary);
+  const memoryValue =
+    summary.memory.status === 'unavailable' ? null : formatMemoryBytes(summary.memory.peak_bytes);
+  const memoryObserved = summary.memory.status === 'partial' || summary.state !== 'final';
+  const storagePartial = summary.storage_io.status === 'partial' || summary.state !== 'final';
+  const storageValue = (bytes: number | null) => {
+    const shown = summary.storage_io.status === 'unavailable' ? null : formatMemoryBytes(bytes);
+    return shown === null ? UNAVAILABLE : withLowerBound(shown, storagePartial);
+  };
+  const context = (reading: ResourceReading) => {
+    const method =
+      reading.method === 'task_io_accounting' ? 'Process I/O accounting' : reading.method;
+    return [method ? `${method}.` : null, ...reading.notes].filter(Boolean).join(' ');
+  };
   return [
-    { label: 'CPU usage (avg)', value: cpu.value, detail: cpu.notes.join(' ') || null },
-    { label: 'Memory peak', value: memory.value, detail: memory.notes.join(' ') || null },
+    { label: 'CPU usage (avg)', value: cpu.value, detail: context(cpu) },
     {
-      label: 'Process storage I/O',
-      value: storage.value,
-      detail: storage.notes.join(' ') || null,
+      label: 'Peak memory (sampled)',
+      value:
+        memoryValue === null ? UNAVAILABLE : `${memoryValue}${memoryObserved ? ' · observed' : ''}`,
+      detail: context(memory),
     },
-    { label: 'Scope', value: TURN_SCOPE_SENTENCE, detail: null },
     {
-      label: 'Completeness',
-      value: completenessSentence(summary),
-      detail: attemptCoverageNote(summary.attempts_measured, summary.attempts_total),
+      label: 'Storage read',
+      value: storageValue(summary.storage_io.read_bytes),
+      detail: context(storage),
+    },
+    {
+      label: 'Storage write',
+      value: storageValue(summary.storage_io.write_bytes),
+      detail: context(storage),
     },
   ];
 }

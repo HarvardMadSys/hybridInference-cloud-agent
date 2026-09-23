@@ -222,10 +222,6 @@ function RunDetails({ jobId }: { jobId: string }) {
                 key={`resources:${attemptId}:${revision}`}
                 jobId={jobId}
                 attemptId={attemptId}
-                // Whether the numbers cover the whole run is a run-level fact,
-                // not an attempt one: a total over three of five executions
-                // must not read as the run's total in this panel either.
-                attemptCoverage={detail.run.resource_summary ?? null}
                 onAccessDenied={onAccessDenied}
               />
             )}
