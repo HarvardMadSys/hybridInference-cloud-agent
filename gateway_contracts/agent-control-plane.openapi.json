@@ -3705,7 +3705,7 @@
       },
       "AgentPendingMessageSendNow": {
         "additionalProperties": false,
-        "description": "Send one waiting message into the running turn, at the revision read.",
+        "description": "Send one waiting message into the live turn, at the revision read.",
         "properties": {
           "revision": {
             "minimum": 1.0,
@@ -4762,17 +4762,6 @@
       "AgentThreadMessageResult": {
         "description": "What a queue action left behind.\n\n``job`` is the turn this request started, if it started one: the message\njust sent when nothing was running, or an older waiting message that went\nfirst. ``pending`` is the message this request wrote or changed, while it is\nstill waiting.",
         "properties": {
-          "delivered_to_job_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Delivered To Job Id"
-          },
           "job": {
             "anyOf": [
               {
@@ -21404,7 +21393,7 @@
     },
     "/v1/agent/threads/{thread_id}/messages/{message_id}/send-now": {
       "post": {
-        "description": "Send one waiting message into the running turn, now.\n\nWith a turn running on a host that can steer it, the message is handed to\nthat turn and joins its transcript where it arrived: ``delivered_to_job_id``\nnames the turn, and the message no longer waits. A turn that does not take\nit — Claude with no tool running has no point to fold it in at, or the turn\njust ended — leaves it waiting where it was, and ``not_delivered_reason``\nsays why. With nothing running, this is an ordinary send.",
+        "description": "Send one waiting message into the live turn.\n\nThe owner's choice, kept: the message goes in front of the model before\nits next tool call, and joins the transcript where the turn's own stream\nsays the turn took it. Until then it is ``sending``. A turn no host has\ntaken yet is given it once one has. A turn that answers without another\ntool call never takes it, and it goes as the next turn, as any waiting\nmessage does. A turn that cannot have it at all — its host is out of\nreach, or it just ended — leaves it waiting where it was, and\n``not_delivered_reason`` says why. With nothing live, this is an ordinary\nsend.",
         "operationId": "send_pending_message_now_v1_agent_threads__thread_id__messages__message_id__send_now_post",
         "parameters": [
           {

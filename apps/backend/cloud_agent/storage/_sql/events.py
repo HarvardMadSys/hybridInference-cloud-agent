@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from cloud_agent_shared.shared_protocol import USER_MESSAGE_EVENT
+
 if TYPE_CHECKING:
     from typing import Any
 
@@ -85,4 +87,49 @@ async def insert_event(
                 """,
             job_id,
         )
+    elif event_type == USER_MESSAGE_EVENT:
+        await _take_message_sent_into_turn(conn, job_id=job_id, event_id=event_id, payload=payload)
     return event_id
+
+
+async def _take_message_sent_into_turn(
+    conn: Any, *, job_id: str, event_id: int, payload: dict[str, Any] | None
+) -> None:
+    """Move a message the owner sent into this turn from the queue to the transcript.
+
+    The turn's host reports the point where the turn took the message; this is
+    where the queue lets go of it, whatever state it is in, because the model
+    has it now and sending it again would repeat it. The text is the queue's
+    own copy while it still has the message. The thread is locked before the
+    queue row, the order a settlement takes them in.
+    """
+    thread_id = await conn.fetchval("SELECT thread_id FROM agent_jobs WHERE id = $1", job_id)
+    if thread_id is None:
+        return
+    await conn.execute("SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE", thread_id)
+    message_id = (payload or {}).get("pending_message_id")
+    waiting = None
+    if isinstance(message_id, str) and message_id:
+        waiting = await conn.fetchrow(
+            "SELECT prompt FROM agent_pending_messages WHERE id = $1 AND thread_id = $2 FOR UPDATE",
+            message_id,
+            thread_id,
+        )
+    text = str(waiting["prompt"]) if waiting is not None else str((payload or {}).get("text") or "")
+    if not text.strip():
+        return
+    await conn.execute(
+        """
+        INSERT INTO agent_thread_messages
+            (thread_id, job_id, role, content, source_event_id, mid_turn)
+        VALUES ($1, $2, 'user', $3, $4, TRUE)
+        ON CONFLICT (source_event_id) DO NOTHING
+        """,
+        thread_id,
+        job_id,
+        text,
+        event_id,
+    )
+    if waiting is not None:
+        await conn.execute("DELETE FROM agent_pending_messages WHERE id = $1", message_id)
+    await conn.execute("UPDATE agent_threads SET updated_at = NOW() WHERE id = $1", thread_id)

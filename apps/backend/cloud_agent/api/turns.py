@@ -19,7 +19,9 @@ without an HTTP request. What stays is the anchor validation, the store's
 
 from __future__ import annotations
 
+import asyncio
 import secrets
+import time
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -560,6 +562,104 @@ def _mid_turn_input_unsupported() -> HTTPException:
     )
 
 
+#: How long a message chosen to go into a turn that no host has taken yet waits
+#: for one, and how often it looks. A turn that is still waiting after that
+#: keeps the message in line, and it goes as the next turn.
+HAND_OVER_WAIT_S = 600.0
+HAND_OVER_POLL_S = 0.5
+
+#: Hand-overs waiting for a host, kept so they are not collected mid-wait.
+_hand_overs: set[asyncio.Task[None]] = set()
+
+
+async def _hand_over(
+    job_store: _TurnsStorage, *, thread_id: str, attempt_id: int, message: dict[str, Any]
+) -> str | None:
+    """Give the attempt's host the message; ``None`` when its turn has it.
+
+    Otherwise the shared word for why not. The host puts it in front of the
+    model before the model's next tool call, and the turn's own stream says
+    when it did.
+    """
+    broker = await broker_for_attempt(job_store.host_pool, attempt_id)
+    if broker is None:
+        return INPUT_UNREACHABLE
+    try:
+        answer = await broker.inject_shared_input(
+            thread_id,
+            owner=f"attempt:{attempt_id}",
+            message_id=str(message["id"]),
+            text=str(message["prompt"]),
+        )
+    except WorkspaceBrokerError:
+        logger.warning(
+            "agent_send_now_unreachable",
+            extra={"event": "agent_send_now_unreachable", "thread_id": thread_id},
+            exc_info=True,
+        )
+        return INPUT_UNREACHABLE
+    if answer.get("accepted") is True:
+        return None
+    refused = answer.get("reason")
+    return refused if refused in INPUT_REFUSALS else INPUT_REFUSED
+
+
+async def _hand_over_once_claimed(
+    job_store: _TurnsStorage,
+    *,
+    thread_id: str,
+    job_id: str,
+    message: dict[str, Any],
+    gateway: Any,
+    app_credentials: Any | None,
+) -> None:
+    """Wait for a host to take the turn, then give it the message.
+
+    The message stays ``sending`` meanwhile, tied to the turn. A turn that ends
+    first puts it back in line with the rest of its ending, and one that is
+    still waiting at the deadline leaves it there too: either way it goes as
+    the next turn.
+    """
+    deadline = time.monotonic() + HAND_OVER_WAIT_S
+    try:
+        while time.monotonic() < deadline:
+            job = await job_store.conversation_queries.get_job(job_id)
+            if job is None or job.get("state") in TERMINAL_STATES:
+                return
+            queue = await job_store.pending_messages.queue_state(
+                thread_id=thread_id, user_id=str(message["user_id"])
+            )
+            current = next(
+                (row for row in (queue or {}).get("messages", []) if row["id"] == message["id"]),
+                None,
+            )
+            if current is None or current["state"] != "sending":
+                return
+            attempt_id = job.get("current_attempt_id")
+            if job.get("state") == RUNNING and attempt_id is not None:
+                reason = await _hand_over(
+                    job_store, thread_id=thread_id, attempt_id=int(attempt_id), message=message
+                )
+                if reason is not None:
+                    await job_store.pending_messages.return_to_queue(
+                        message_id=str(message["id"]), revision=int(message["revision"])
+                    )
+                    await _settle(
+                        job_store,
+                        thread_id=thread_id,
+                        gateway=gateway,
+                        app_credentials=app_credentials,
+                    )
+                return
+            await asyncio.sleep(HAND_OVER_POLL_S)
+    except Exception:
+        logger.warning(
+            "agent_send_now_hand_over_failed",
+            extra={"event": "agent_send_now_hand_over_failed", "thread_id": thread_id},
+            exc_info=True,
+        )
+
+
 @router.post(
     "/threads/{thread_id}/messages/{message_id}/send-now",
     response_model=AgentThreadMessageResult,
@@ -573,18 +673,21 @@ async def send_pending_message_now(
     gateway: Any = Depends(get_gateway_client),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentThreadMessageResult:
-    """Send one waiting message into the running turn, now.
+    """Send one waiting message into the live turn.
 
-    With a turn running on a host that can steer it, the message is handed to
-    that turn and joins its transcript where it arrived: ``delivered_to_job_id``
-    names the turn, and the message no longer waits. A turn that does not take
-    it — Claude with no tool running has no point to fold it in at, or the turn
-    just ended — leaves it waiting where it was, and ``not_delivered_reason``
-    says why. With nothing running, this is an ordinary send.
+    The owner's choice, kept: the message goes in front of the model before
+    its next tool call, and joins the transcript where the turn's own stream
+    says the turn took it. Until then it is ``sending``. A turn no host has
+    taken yet is given it once one has. A turn that answers without another
+    tool call never takes it, and it goes as the next turn, as any waiting
+    message does. A turn that cannot have it at all — its host is out of
+    reach, or it just ended — leaves it waiting where it was, and
+    ``not_delivered_reason`` says why. With nothing live, this is an ordinary
+    send.
     """
     job_store = _require_store(store)
     latest = await _owned_latest_turn(job_store, thread_id, user)
-    if latest.get("state") == RUNNING and not mid_turn_input_supported(latest):
+    if latest.get("state") not in TERMINAL_STATES and not mid_turn_input_supported(latest):
         raise _mid_turn_input_unsupported()
     began = await job_store.pending_messages.begin_send_now(
         thread_id=thread_id,
@@ -602,44 +705,49 @@ async def send_pending_message_now(
     if "error" in began:
         raise _send_now_refused(began)
     message = began["message"]
-    attempt_id = int(began["attempt_id"])
-    delivered = False
-    reason: str | None = INPUT_UNREACHABLE
-    broker = await broker_for_attempt(job_store.host_pool, attempt_id)
-    if broker is not None:
-        try:
-            answer = await broker.inject_shared_input(
-                thread_id, owner=f"attempt:{attempt_id}", text=str(message["prompt"])
+    if began["attempt_id"] is None:
+        task = asyncio.create_task(
+            _hand_over_once_claimed(
+                job_store,
+                thread_id=thread_id,
+                job_id=str(began["job_id"]),
+                message=message,
+                gateway=gateway,
+                app_credentials=app_credentials,
             )
-        except WorkspaceBrokerError:
-            logger.warning(
-                "agent_send_now_unreachable",
-                extra={"event": "agent_send_now_unreachable", "thread_id": thread_id},
-                exc_info=True,
-            )
-        else:
-            delivered = answer.get("accepted") is True
-            refused = answer.get("reason")
-            reason = None if delivered else refused if refused in INPUT_REFUSALS else INPUT_REFUSED
-    finished = await job_store.pending_messages.finish_send_now(
-        message_id=message_id,
-        revision=int(message["revision"]),
-        job_id=str(began["job_id"]),
-        attempt_id=attempt_id,
-        delivered=delivered,
+        )
+        _hand_overs.add(task)
+        task.add_done_callback(_hand_overs.discard)
+        return await _queue_result(
+            job_store,
+            thread_id=thread_id,
+            user=user,
+            outcome=SettleOutcome(),
+            message_id=message_id,
+        )
+    reason = await _hand_over(
+        job_store, thread_id=thread_id, attempt_id=int(began["attempt_id"]), message=message
     )
-    # The turn may have ended while the message was in flight; the settlement
-    # its ending ran left this message's place alone, so settle here.
+    if reason is None:
+        return await _queue_result(
+            job_store,
+            thread_id=thread_id,
+            user=user,
+            outcome=SettleOutcome(),
+            message_id=message_id,
+        )
+    await job_store.pending_messages.return_to_queue(
+        message_id=message_id, revision=int(message["revision"])
+    )
+    # The turn may have ended meanwhile, with this message out of line; now it
+    # is back, it goes next.
     outcome = await _settle(
         job_store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
     )
     result = await _queue_result(
         job_store, thread_id=thread_id, user=user, outcome=outcome, message_id=message_id
     )
-    if finished.get("delivered"):
-        result.delivered_to_job_id = str(began["job_id"])
-    else:
-        result.not_delivered_reason = reason or INPUT_REFUSED
+    result.not_delivered_reason = reason
     return result
 
 

@@ -1,16 +1,18 @@
-"""Sending a waiting message into the running turn, over the real store and routes.
+"""Sending a waiting message into the live turn, over the real store and routes.
 
-The owner's route, the store and the worker's finish are real; only the host's
-broker is a stand-in, answering the way the broker does: the turn took the
-message, or it did not and says why. What these cases pin is what the platform
-does with each answer — where the message ends up, and that it is never sent
-twice or lost.
+The owner's route, the store, the worker's event and finish routes are real;
+only the host's broker is a stand-in, answering the way the broker does: the
+turn has the message, or it cannot have it and says why. The host's report of
+where the turn took it arrives as the runner sends it, a ``user_message`` event.
+What these cases pin is what the platform does with each — where the message
+ends up, and that it is never sent twice or lost.
 
 The database is required (``-m dbtest``); a missing one fails, never skips.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -25,7 +27,6 @@ from tests.integration.servers.test_pending_message_queue import (
 )
 
 from cloud_agent.api import turns
-from cloud_agent.domain.pending_messages import SEND_NOW_IN_FLIGHT_S
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 from cloud_agent_shared.shared_protocol import (
     SHARED_SANDBOX_CAPABILITY,
@@ -42,10 +43,12 @@ class _Broker:
         self.answer = {"accepted": True, "reason": None} if answer is None else answer
         #: Something that happens on the host while the hand-over is in flight.
         self.during = during
-        self.calls: list[tuple[str, str, str]] = []
+        self.calls: list[tuple[str, str, str, str]] = []
 
-    async def inject_shared_input(self, thread_id: str, *, owner: str, text: str) -> Any:
-        self.calls.append((thread_id, owner, text))
+    async def inject_shared_input(
+        self, thread_id: str, *, owner: str, message_id: str, text: str
+    ) -> Any:
+        self.calls.append((thread_id, owner, message_id, text))
         if self.during is not None:
             await self.during()
         if isinstance(self.answer, Exception):
@@ -73,6 +76,17 @@ async def _send_now(api: Api, thread_id: str, message: dict[str, Any]) -> Any:
     return await api.client.post(
         f"/v1/agent/threads/{thread_id}/messages/{message['id']}/send-now",
         json={"revision": message["revision"]},
+    )
+
+
+async def _report(
+    api: Api, turn: dict[str, Any], event_type: str, payload: dict[str, Any], seq: int
+) -> Any:
+    """An event from the turn's stream, sent the way the runner sends it."""
+    return await api.client.post(
+        f"/v1/agent/worker/jobs/{turn['job_id']}/events",
+        json={"event_type": event_type, "payload": payload, "event_seq": seq},
+        headers={"Authorization": f"Bearer {turn['worker_token']}"},
     )
 
 
@@ -104,7 +118,9 @@ async def _waiting_behind_a_running_turn(api: Api, prompt: str = "also check the
     return job, thread_id, running, sent.json()["pending"]
 
 
-async def test_a_message_sent_now_joins_the_running_turn_and_is_not_sent_again(api, monkeypatch):
+async def test_the_turn_takes_it_before_its_next_tool_call_and_it_is_not_sent_again(
+    api, monkeypatch
+):
     await _steerable(api)
     broker = _Broker()
     _route_input_to(monkeypatch, broker)
@@ -119,17 +135,31 @@ async def test_a_message_sent_now_joins_the_running_turn_and_is_not_sent_again(a
 
     assert sent.status_code == 200, sent.text
     body = sent.json()
-    assert body["delivered_to_job_id"] == job["id"]
-    assert (body["pending"], body["job"], body["not_delivered_reason"]) == (None, None, None)
-    # Handed to the attempt that was running, and to nobody else.
-    assert broker.calls == [(thread_id, f"attempt:{running['attempt_id']}", "also check the docs")]
+    # The turn has it; it stays ``sending`` until the turn says where it took it.
+    assert (body["pending"]["state"], body["job"], body["not_delivered_reason"]) == (
+        "sending",
+        None,
+        None,
+    )
+    # Given to the attempt that was running, and to nobody else.
+    assert broker.calls == [
+        (thread_id, f"attempt:{running['attempt_id']}", waiting["id"], "also check the docs")
+    ]
+    assert [row["state"] for row in (await api.queue(thread_id))["messages"]] == ["sending"]
+    assert await _mid_turn_rows(api, job["id"]) == (
+        [],
+        [{"role": "user", "content": "fix it", "mid_turn": False, "source_event_id": None}],
+    )
+
+    # The host reports it taken, in the turn's own stream.
+    taken = {"text": "also check the docs", "pending_message_id": waiting["id"]}
+    reported = await _report(api, running, "user_message", taken, seq=40)
+    assert reported.status_code == 201, reported.text
+
     assert (await api.queue(thread_id))["messages"] == []
     events, rows = await _mid_turn_rows(api, job["id"])
     assert len(events) == 1 and events[0]["attempt_id"] == running["attempt_id"]
-    assert _payload(events[0]["payload"]) == {
-        "text": "also check the docs",
-        "pending_message_id": waiting["id"],
-    }
+    assert _payload(events[0]["payload"]) == taken
     assert [(row["role"], row["content"], row["mid_turn"]) for row in rows] == [
         ("user", "fix it", False),
         ("user", "also check the docs", True),
@@ -141,47 +171,33 @@ async def test_a_message_sent_now_joins_the_running_turn_and_is_not_sent_again(a
         ("fix it", False),
         ("also check the docs", True),
     ]
-    # Recording the same delivery again finds nothing left to record.
-    again = await api.store.pending_messages.finish_send_now(
-        message_id=waiting["id"],
-        revision=waiting["revision"] + 1,
-        job_id=job["id"],
-        attempt_id=running["attempt_id"],
-        delivered=True,
-    )
-    assert again == {"stale": True}
+    # The runner's retry of the same report records nothing more.
+    again = await _report(api, running, "user_message", taken, seq=40)
+    assert again.json()["event_id"] == reported.json()["event_id"]
     assert await _mid_turn_rows(api, job["id"]) == (events, rows)
 
-    # The turn ends: the message was delivered, so it is not a turn of its own.
+    # The turn ends: the message was taken, so it is not a turn of its own.
     await api.finish(running)
     assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it"]
 
 
-async def test_a_turn_that_cannot_take_it_now_leaves_it_to_go_when_the_turn_ends(api, monkeypatch):
+async def test_a_turn_that_answers_without_taking_it_sends_it_as_the_next_turn(api, monkeypatch):
     await _steerable(api)
-    _route_input_to(monkeypatch, _Broker({"accepted": False, "reason": "no_boundary"}))
+    _route_input_to(monkeypatch, _Broker())
     job, thread_id, running, waiting = await _waiting_behind_a_running_turn(api)
+    assert (await _send_now(api, thread_id, waiting)).json()["pending"]["state"] == "sending"
 
-    sent = await _send_now(api, thread_id, waiting)
-
-    assert sent.status_code == 200, sent.text
-    body = sent.json()
-    assert (body["delivered_to_job_id"], body["not_delivered_reason"]) == (None, "no_boundary")
-    # Back where it was: waiting, in line, at a newer revision.
-    assert (body["pending"]["state"], body["pending"]["revision"]) == (
-        "queued",
-        waiting["revision"] + 2,
-    )
-    assert await _mid_turn_rows(api, job["id"]) == (
-        [],
-        [{"role": "user", "content": "fix it", "mid_turn": False, "source_event_id": None}],
-    )
-
+    # No tool call came after it: the host never gave it to the model.
     await api.finish(running)
+
     assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == [
         "fix it",
         "also check the docs",
     ]
+    assert await _mid_turn_rows(api, job["id"]) == (
+        [],
+        [{"role": "user", "content": "fix it", "mid_turn": False, "source_event_id": None}],
+    )
 
 
 @pytest.mark.parametrize(
@@ -198,7 +214,10 @@ async def test_a_host_out_of_reach_leaves_it_waiting(api, monkeypatch, broker):
 
     assert sent.status_code == 200, sent.text
     assert sent.json()["not_delivered_reason"] == "unreachable"
-    assert [row["state"] for row in (await api.queue(thread_id))["messages"]] == ["queued"]
+    # Back where it was: waiting, in line, at a newer revision.
+    assert [
+        (row["state"], row["revision"]) for row in (await api.queue(thread_id))["messages"]
+    ] == [("queued", waiting["revision"] + 2)]
 
 
 async def test_send_now_with_nothing_running_is_an_ordinary_send(api, monkeypatch):
@@ -216,9 +235,36 @@ async def test_send_now_with_nothing_running_is_an_ordinary_send(api, monkeypatc
     body = sent.json()
     # Nothing to steer: it is the next turn, and the owner's "now" lifted the pause.
     assert body["job"]["task_prompt"] == "after the stop"
-    assert body["delivered_to_job_id"] is None
     assert broker.calls == []
     assert (await api.queue(thread_id))["queue_paused_reason"] is None
+
+
+async def test_a_turn_no_host_has_taken_yet_gets_it_once_one_has(api, monkeypatch):
+    monkeypatch.setattr(turns, "HAND_OVER_POLL_S", 0.05)
+    await _steerable(api)
+    broker = _Broker()
+    _route_input_to(monkeypatch, broker)
+    first = await api.create()
+    thread_id = first["thread_id"]
+    await api.run(first)
+    second = (await api.send(thread_id, "next step")).json()["job"]
+    waiting = (await api.send(thread_id, "and mind the tests")).json()["pending"]
+
+    sent = await _send_now(api, thread_id, waiting)
+
+    # The turn is still waiting for a host: nothing to give it to yet.
+    assert sent.status_code == 200, sent.text
+    assert sent.json()["pending"]["state"] == "sending"
+    await asyncio.sleep(0.2)
+    assert broker.calls == []
+
+    running = await api.start(second)
+    await asyncio.wait_for(asyncio.gather(*list(turns._hand_overs)), 10)
+
+    assert broker.calls == [
+        (thread_id, f"attempt:{running['attempt_id']}", waiting["id"], "and mind the tests")
+    ]
+    assert [row["state"] for row in (await api.queue(thread_id))["messages"]] == ["sending"]
 
 
 async def test_send_now_refuses_what_it_cannot_do_and_leaves_the_message_as_it_was(
@@ -227,70 +273,73 @@ async def test_send_now_refuses_what_it_cannot_do_and_leaves_the_message_as_it_w
     broker = _Broker()
     _route_input_to(monkeypatch, broker)
 
-    # A turn that has not started: nothing to hand it to yet.
-    queued_job = await api.create()
-    queued_thread = queued_job["thread_id"]
-    early = (await api.send(queued_thread, "too early")).json()["pending"]
-    refused = await _send_now(api, queued_thread, early)
-    assert refused.status_code == 409
-    assert refused.json()["detail"]["error"]["type"] == "not_running"
-
-    # A running turn on a host that cannot steer it.
-    await api.start(queued_job)
-    refused = await _send_now(api, queued_thread, early)
+    # A live turn whose host cannot take a message mid-turn.
+    job = await api.create()
+    thread_id = job["thread_id"]
+    early = (await api.send(thread_id, "too early")).json()["pending"]
+    refused = await _send_now(api, thread_id, early)
     assert refused.status_code == 409
     assert refused.json()["detail"]["error"]["type"] == "mid_turn_input_unsupported"
 
+    await api.start(job)
     await _steerable(api)
     # Uploads start a turn of their own.
     upload = await api.store.attachments.create_attachment(
         user_id=_OWNER, path="notes.txt", content=b"notes", content_type="text/plain"
     )
-    with_file = (await api.send(queued_thread, "read this", attachment_ids=[upload["id"]])).json()[
+    with_file = (await api.send(thread_id, "read this", attachment_ids=[upload["id"]])).json()[
         "pending"
     ]
-    refused = await _send_now(api, queued_thread, with_file)
+    refused = await _send_now(api, thread_id, with_file)
     assert refused.status_code == 409
     assert refused.json()["detail"]["error"]["type"] == "send_now_has_attachments"
 
     # A stale revision gets the message as it is now.
-    stale = await _send_now(api, queued_thread, {**early, "revision": early["revision"] + 5})
+    stale = await _send_now(api, thread_id, {**early, "revision": early["revision"] + 5})
     assert stale.status_code == 409
     assert stale.json()["detail"]["error"]["type"] == "revision_conflict"
     assert stale.json()["detail"]["error"]["current"]["id"] == early["id"]
 
     # A message being edited is the owner's to save first.
-    held = (await api.edit(queued_thread, early, state="held")).json()["pending"]
-    refused = await _send_now(api, queued_thread, held)
+    held = (await api.edit(thread_id, early, state="held")).json()["pending"]
+    refused = await _send_now(api, thread_id, held)
     assert refused.status_code == 409
     assert refused.json()["detail"]["error"]["type"] == "not_editable"
 
+    # A turn being stopped takes nothing more.
+    later = (await api.send(thread_id, "while it stops")).json()["pending"]
+    await api.client.post(f"/v1/agent/jobs/{job['id']}/cancel")
+    refused = await _send_now(api, thread_id, later)
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["error"]["type"] == "not_running"
+
     assert broker.calls == []
-    queue = await api.queue(queued_thread)
+    queue = await api.queue(thread_id)
     assert [(row["prompt"], row["state"]) for row in queue["messages"]] == [
         ("too early", "held"),
         ("read this", "queued"),
+        ("while it stops", "queued"),
     ]
 
 
-async def test_a_turn_ending_while_the_message_is_handed_over_does_not_send_it_twice(
-    api, monkeypatch
-):
+async def test_a_turn_ending_while_the_message_is_handed_over_sends_it_next_once(api, monkeypatch):
     await _steerable(api)
     job, thread_id, running, waiting = await _waiting_behind_a_running_turn(api)
-    # The turn ends on the host while the hand-over is in flight; its finish
-    # settles the queue, and must leave the in-flight message where it is.
+    # The turn ends on the host while the hand-over is in flight, without
+    # having taken it: its ending's settlement puts it back in line and sends it.
     broker = _Broker(during=lambda: api.finish(running))
     _route_input_to(monkeypatch, broker)
 
     sent = await _send_now(api, thread_id, waiting)
 
     assert sent.status_code == 200, sent.text
-    assert sent.json()["delivered_to_job_id"] == job["id"]
-    assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it"]
-    _events, rows = await _mid_turn_rows(api, job["id"])
-    assert [row["content"] for row in rows] == ["fix it", "also check the docs"]
+    assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == [
+        "fix it",
+        "also check the docs",
+    ]
     assert (await api.queue(thread_id))["messages"] == []
+    _events, rows = await _mid_turn_rows(api, job["id"])
+    assert [row["content"] for row in rows] == ["fix it"]
 
 
 async def test_a_turn_that_ended_before_taking_it_sends_it_next_at_once(api, monkeypatch):
@@ -304,35 +353,50 @@ async def test_a_turn_that_ended_before_taking_it_sends_it_next_at_once(api, mon
     sent = await _send_now(api, thread_id, waiting)
 
     assert sent.status_code == 200, sent.text
-    body = sent.json()
-    assert body["not_delivered_reason"] == "turn_ended"
+    assert sent.json()["not_delivered_reason"] == "turn_ended"
     # Back in line with nothing running: it is the next turn, now.
-    assert body["job"]["task_prompt"] == "also check the docs"
     assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == [
         "fix it",
         "also check the docs",
     ]
 
 
-async def test_a_hand_over_stranded_by_a_crash_goes_back_in_line_when_the_turn_ends(api):
+async def test_a_message_left_sending_by_a_crash_goes_back_in_line_when_the_turn_ends(api):
     await _steerable(api)
     _job, thread_id, running, waiting = await _waiting_behind_a_running_turn(api)
     began = await api.store.pending_messages.begin_send_now(
         thread_id=thread_id, user_id=_OWNER, message_id=waiting["id"], revision=waiting["revision"]
     )
     assert began["message"]["state"] == "sending"
-    # The control plane that began it never came back to say how it went.
-    async with api.pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE agent_pending_messages "
-            "SET send_now_requested_at = NOW() - make_interval(secs => $2) WHERE id = $1",
-            waiting["id"],
-            SEND_NOW_IN_FLIGHT_S + 60,
-        )
+    # The control plane that began it never got as far as the host.
 
     await api.finish(running)
 
     assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == [
         "fix it",
         "also check the docs",
+    ]
+
+
+async def test_a_report_for_a_message_no_longer_waiting_is_still_recorded_once(api):
+    job, thread_id, running, _waiting = await _waiting_behind_a_running_turn(api)
+
+    reported = await _report(
+        api,
+        running,
+        "user_message",
+        {"text": "said earlier", "pending_message_id": "apmsg_gone"},
+        seq=41,
+    )
+
+    assert reported.status_code == 201, reported.text
+    events, rows = await _mid_turn_rows(api, job["id"])
+    assert [(row["content"], row["mid_turn"]) for row in rows] == [
+        ("fix it", False),
+        ("said earlier", True),
+    ]
+    assert rows[1]["source_event_id"] == events[0]["id"]
+    # The message still waiting in line was not the one reported, so it waits.
+    assert [row["prompt"] for row in (await api.queue(thread_id))["messages"]] == [
+        "also check the docs"
     ]

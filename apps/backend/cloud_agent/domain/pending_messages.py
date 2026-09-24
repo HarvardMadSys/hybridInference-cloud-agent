@@ -3,9 +3,9 @@
 A pending message is one the owner wrote while a turn was running and that the
 platform has not turned into a turn yet. It is ``queued`` until the turn in
 front of it ends, ``held`` while the owner edits it or after the platform could
-not send it, and ``sending`` only while it is being handed to a running turn.
-Once sent it no longer exists here: the job and the transcript row it became are
-the record.
+not send it, and ``sending`` once the owner has chosen to send it into the
+running turn. Once sent it no longer exists here: the job and the transcript
+row it became are the record.
 
 The thread says why its queue stopped moving, if it did. The reason stays until
 the owner continues, however many times the queue is looked at in between.
@@ -16,25 +16,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from cloud_agent_shared.shared_protocol import USER_MESSAGE_EVENT as USER_MESSAGE_EVENT
+
 #: Waiting for the turn in front of it to end.
 PENDING_QUEUED = "queued"
 #: Being edited, or refused by the checks a turn has to pass. Nothing is sent
 #: past a held message; the queue waits for it.
 PENDING_HELD = "held"
-#: Being handed to the running turn ("send now"), for as long as that takes.
-#: A settlement puts any such row back in line once its turn has ended.
+#: Chosen to go into the live turn ("send now"): its host puts it in front of
+#: the model before the model's next tool call, and the turn's stream records
+#: where (``USER_MESSAGE_EVENT``), which is when it leaves the queue. A turn
+#: that ends without taking it leaves it here, and the settlement that ending
+#: runs puts it back in line: it goes as the next turn.
 PENDING_SENDING = "sending"
 PENDING_STATES = (PENDING_QUEUED, PENDING_HELD, PENDING_SENDING)
 
-#: How long a message may be ``sending`` before a settlement treats it as
-#: stranded. Handing one to a running turn is one request that waits at most
-#: 30 s for the host; while it is in flight the turn may end, and the settlement
-#: that ending runs must not send the same message again as the next turn.
-SEND_NOW_IN_FLIGHT_S = 120.0
-
-#: The job event a message sent into a running turn is recorded as, at the
-#: point in that turn's stream where it arrived.
-USER_MESSAGE_EVENT = "user_message"
 
 #: The owner stopped the turn this queue was waiting behind.
 QUEUE_PAUSED_STOPPED = "stopped"

@@ -1120,7 +1120,7 @@ class AgentThreadQueueResponse(BaseModel):
 
 
 class AgentPendingMessageSendNow(BaseModel):
-    """Send one waiting message into the running turn, at the revision read."""
+    """Send one waiting message into the live turn, at the revision read."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1139,11 +1139,10 @@ class AgentThreadMessageResult(BaseModel):
     pending: AgentPendingMessageResponse | None = None
     job: AgentJobResponse | None = None
     queue_paused_reason: QueuePausedReason | None = None
-    #: Send-now only: the running turn the message went into. It is part of
-    #: that turn's transcript now, and no longer waits.
-    delivered_to_job_id: str | None = None
-    #: Send-now only: why the running turn did not take it. It still waits, and
-    #: goes when the turn ends.
+    #: Send-now only: why the live turn cannot have it. It still waits, and
+    #: goes when the turn ends. Without one, the message is ``sending``: the
+    #: turn has it for the model's next step, and the transcript shows it once
+    #: the turn took it.
     not_delivered_reason: str | None = None
 
 

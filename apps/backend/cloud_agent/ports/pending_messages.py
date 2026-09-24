@@ -95,7 +95,7 @@ class PendingMessageRepository(Protocol):
     async def begin_send_now(
         self, *, thread_id: str, user_id: str, message_id: str, revision: int
     ) -> dict[str, Any]:
-        """Take one waiting message out of line to hand to the running turn.
+        """Choose one waiting message to go into the live turn.
 
         Under the thread's lock the message must be ``queued`` at the revision
         the owner read and carry no uploads — a turn's uploads arrive with its
@@ -103,11 +103,11 @@ class PendingMessageRepository(Protocol):
 
         - nothing is live: this is an ordinary send, so a paused queue
           continues and ``{"idle": True}`` asks the caller to settle it;
-        - its newest turn has not started, or is being stopped:
-          ``{"error": "not_running"}``;
-        - a turn is running: the message becomes ``sending``, tied to that
-          turn, and ``{"message", "job_id", "attempt_id"}`` names what to hand
-          it to.
+        - its newest turn is being stopped: ``{"error": "not_running"}``;
+        - a turn is live, running or still waiting for a host: the message
+          becomes ``sending``, tied to that turn, and ``{"message", "job_id",
+          "attempt_id"}`` names what to hand it to. ``attempt_id`` is ``None``
+          until a host has the turn.
 
         Other refusals read like an edit's — ``not_found``, and
         ``revision_conflict`` or ``not_editable`` with ``current`` — plus
@@ -115,29 +115,13 @@ class PendingMessageRepository(Protocol):
         """
         ...
 
-    async def finish_send_now(
-        self,
-        *,
-        message_id: str,
-        revision: int,
-        job_id: str,
-        attempt_id: int,
-        delivered: bool,
-    ) -> dict[str, Any]:
-        """Record what the running turn did with a message being sent now.
+    async def return_to_queue(self, *, message_id: str, revision: int) -> dict[str, Any] | None:
+        """Put a message its turn will not take back in line, as it was.
 
-        ``revision`` is the one the message took when it began sending.
-        Delivered, it joins that turn: a ``user_message`` event in the
-        attempt's stream, where it arrived, and a mid-turn transcript row; it
-        waits no longer. That holds even if a settlement put it back in line
-        meanwhile — it was delivered, and must not be sent twice. Not
-        delivered, a message still ``sending`` at ``revision`` waits again, as
-        it was. Locks the attempt before the thread, the order a turn's own
-        ending takes them in.
-
-        Answers ``{"delivered": True, "event_id": id}``,
-        ``{"delivered": False, "message": row}``, or ``{"stale": True}`` when
-        the message is gone.
+        ``revision`` is the one it took when it was chosen to send now; a
+        message the queue has moved on from since — taken by the turn, or
+        already back in line — is left alone. Returns the message as it now
+        is, or ``None`` when it is gone.
         """
         ...
 
