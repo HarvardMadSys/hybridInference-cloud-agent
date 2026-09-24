@@ -36,13 +36,24 @@ class FakeNft:
         self.calls: list[tuple[list[str], str | None]] = []
         self.tables: dict[tuple[str, str], dict[str, Any]] = {}
         self._next_handle = 1
+        #: What ``ip -4 -j route show table all`` answers on this host.
+        self.routes: list[dict[str, Any]] = [
+            {"dst": "default", "gateway": "192.168.1.1", "dev": "eth0", "table": "main"},
+            {"dst": "192.168.1.0/24", "dev": "eth0", "table": "main"},
+            {"type": "local", "dst": "192.168.1.10", "dev": "eth0", "table": "local"},
+            {"dst": "172.17.0.0/16", "dev": "docker0", "table": "main"},
+        ]
 
     # The guard's runner signature.
     def __call__(self, argv: list[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
         self.calls.append((argv, stdin))
         if argv[1:3] == ["container", "inspect"]:
             return subprocess.CompletedProcess(argv, 0, _IMAGE + "\n", "")
+        entrypoint = argv[argv.index("--entrypoint") + 1]
         args = argv[argv.index("--entrypoint") + 3 :]
+        if entrypoint == "ip":
+            assert args == ["-4", "-j", "route", "show", "table", "all"], args
+            return subprocess.CompletedProcess(argv, 0, json.dumps(self.routes), "")
         try:
             if args[:2] == ["-f", "-"]:
                 self.apply(stdin or "")
@@ -223,6 +234,53 @@ def test_a_later_overlapping_neighbour_refuses_and_the_earlier_keeps_running() -
     with pytest.raises(NetworkGuardError, match="overlaps"):
         later.ensure()
     earlier.ensure(max_age_s=0)  # does not raise
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        {"dst": "10.240.0.0/16", "dev": "eth1", "table": "main"},  # the lab LAN itself
+        {"dst": "10.0.0.0/8", "dev": "tun0", "table": "main"},  # a VPN around it
+        {"dst": "10.240.3.0/24", "dev": "wg0", "table": "51820"},  # inside it, any table
+        {"type": "unreachable", "dst": "10.240.9.0/24", "table": "main"},
+    ],
+)
+def test_a_pool_that_shares_addresses_with_a_host_route_is_refused(route) -> None:
+    """Docker would take the subnet as given and steal the host's traffic for it."""
+    nft = FakeNft()
+    nft.routes.append(route)
+    guard = _guard(nft)
+    with pytest.raises(NetworkGuardError, match="overlaps the host route"):
+        guard.ensure()
+    # A refusal is never remembered as a pass: the next activation asks again.
+    with pytest.raises(NetworkGuardError, match="overlaps the host route"):
+        guard.ensure()
+
+
+def test_default_routes_and_this_deployments_own_bridges_are_not_conflicts() -> None:
+    nft = FakeNft()
+    own = _network().bridge_name("freeinference-chat-net-x")
+    nft.routes += [
+        {"dst": "0.0.0.0/1", "dev": "tun0", "table": "main"},
+        {"dst": "128.0.0.0/1", "dev": "tun0", "table": "main"},
+        {"dst": "default", "dev": "wg0", "table": "51820"},
+        {"dst": "10.240.0.0/29", "dev": own, "table": "main"},
+        {"type": "local", "dst": "10.240.0.1", "dev": own, "table": "local"},
+        {"type": "broadcast", "dst": "10.240.0.7", "dev": own, "table": "local"},
+    ]
+    _guard(nft).ensure()
+
+
+def test_the_host_routes_are_read_without_any_capability() -> None:
+    nft = FakeNft()
+    _guard(nft).ensure()
+    reads = [argv for argv, _ in nft.calls if "ip" in argv and "--entrypoint" in argv]
+    reads = [argv for argv in reads if argv[argv.index("--entrypoint") + 1] == "ip"]
+    assert reads
+    for argv in reads:
+        assert "--cap-add" not in argv
+        assert argv[argv.index("--network") + 1] == "host"
+        assert argv[argv.index("--cap-drop") + 1] == "ALL"
 
 
 def test_neighbours_with_separate_pools_both_run() -> None:

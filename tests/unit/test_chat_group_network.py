@@ -13,18 +13,26 @@ kernel enforcing the rules) is the external tier's.
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import inspect
+import io
 import ipaddress
 import itertools
 import json
 import logging
+import os
+import socket
 import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from cloud_agent_host.chat_sandbox import (
+    _GUEST_NETWORK_CHECK,
     CHAT_BOOTSTRAP_NETWORK,
     CHAT_NAMESPACE_LABEL,
     CHAT_NETWORK_BRIDGE_OPTION,
@@ -32,6 +40,7 @@ from cloud_agent_host.chat_sandbox import (
     CHAT_NETWORK_SERVICES_LABEL,
     CHAT_NULL_NETWORK,
     CHAT_OFFLINE_DNS,
+    RELAY_GATEWAY_PRIORITY,
     ChatSandboxInspection,
     ChatSandboxManager,
     ChatSandboxSpec,
@@ -99,6 +108,8 @@ class FakeDocker:
         #: Runs just before a ``network rm``: how a test makes a sandbox win
         #: the race and attach after the cleanup's last inspection.
         self.before_rm: Any = None
+        #: False models a Docker older than 28, which drops ``--gw-priority``.
+        self.honours_gw_priority = True
         self._ids = itertools.count(1)
         relays = self.add_network(config.relay_network, subnet="172.30.0.0/24", internal=True)
         for container_id, alias in (("relay-gateway", "agent-gateway"), ("relay-mcp", "agent-mcp")):
@@ -181,7 +192,9 @@ class FakeDocker:
                 return container
         return None
 
-    def connect(self, network_id: str, container_id: str, aliases: list[str]) -> str:
+    def connect(
+        self, network_id: str, container_id: str, aliases: list[str], priority: int = 0
+    ) -> str:
         network = self.networks[network_id]
         container = self.containers[container_id]
         subnet = ipaddress.IPv4Network(network["IPAM"]["Config"][0]["Subnet"])
@@ -194,6 +207,7 @@ class FakeDocker:
             "IPAddress": address,
             "Aliases": list(aliases),
             "DNSNames": [*aliases, container["Name"].removeprefix("/")],
+            "GwPriority": priority,
         }
         return address
 
@@ -220,7 +234,10 @@ class FakeDocker:
                 return self._fail("no such network or container")
             if container["Id"] in network["endpoints"]:
                 return self._fail("endpoint already exists in network")
-            self.connect(network["Id"], container["Id"], aliases)
+            priority = 0
+            if "--gw-priority" in argv and self.honours_gw_priority:
+                priority = int(argv[argv.index("--gw-priority") + 1])
+            self.connect(network["Id"], container["Id"], aliases, priority)
             return self._ok("")
         if command == ["network", "disconnect"]:
             network_ref, container_ref = argv[-2], argv[-1]
@@ -431,6 +448,40 @@ def test_a_new_bridge_is_routable_named_for_the_host_rules_and_holds_only_its_re
         (endpoints["relay-mcp"]["ip"], 8000),
     }
     assert guard.events[0] == "ensure", "rules are proved before any bridge exists"
+
+
+def test_relays_join_a_group_bridge_that_can_never_become_their_way_out(monkeypatch):
+    """Their SSH upstream stays on the stack's own network, not the sandbox rules."""
+    manager, docker, _ = _world(monkeypatch)
+
+    name = manager._ensure_group_network(_spec())
+
+    connects = [argv for argv in docker.calls if argv[1:3] == ["network", "connect"]]
+    assert connects and all(
+        argv[argv.index("--gw-priority") + 1] == str(RELAY_GATEWAY_PRIORITY) for argv in connects
+    )
+    assert RELAY_GATEWAY_PRIORITY < 0
+    for relay in ("relay-gateway", "relay-mcp"):
+        assert docker.container(relay)["networks"][name]["GwPriority"] < 0
+
+
+def test_a_relay_attached_without_the_priority_is_attached_again_with_it(monkeypatch):
+    manager, docker, _ = _world(monkeypatch)
+    spec = _spec()
+    name, network = _group_bridge(manager, docker, spec)
+    docker.connect(network["Id"], "relay-gateway", ["agent-gateway"])  # priority 0
+
+    manager._ensure_group_network(spec)
+
+    assert ["docker", "network", "disconnect", "--force", name, "relay-gateway"] in docker.calls
+    assert docker.container("relay-gateway")["networks"][name]["GwPriority"] < 0
+
+
+def test_a_docker_that_ignores_the_gateway_priority_is_refused(monkeypatch):
+    manager, docker, _ = _world(monkeypatch)
+    docker.honours_gw_priority = False
+    with pytest.raises(SandboxError, match="gateway priority"):
+        manager._ensure_group_network(_spec())
 
 
 def test_no_bridge_is_built_on_a_host_whose_rules_fail(monkeypatch):
@@ -876,3 +927,125 @@ def test_stale_cleanup_restores_relays_when_its_own_sandbox_attaches_before_remo
 
     assert docker.names_on(name) == {"relay-gateway", "relay-mcp", "sandbox-container"}
     assert guard.relays[manager._network().bridge_name(name)]
+
+
+# ── the guest's own check, executed against a model of its network ────
+
+
+def _outcome(result: Any) -> None:
+    if result == "timeout":
+        raise TimeoutError("timed out")
+    if isinstance(result, int):
+        raise OSError(result, os.strerror(result))
+
+
+class _GuestUdp:
+    def __init__(self, outcomes: dict) -> None:
+        self.outcomes = outcomes
+        self.peer: tuple[str, int] | None = None
+
+    def settimeout(self, _seconds: float) -> None:
+        pass
+
+    def connect(self, address: tuple[str, int]) -> None:
+        self.peer = address
+
+    def send(self, data: bytes) -> int:
+        return len(data)
+
+    def recv(self, _size: int) -> bytes:
+        assert self.peer is not None
+        result = self.outcomes[(*self.peer, "udp")]
+        if isinstance(result, bytes):
+            return result
+        _outcome(result)
+        return b"x"
+
+
+class _GuestSockets:
+    """Just the socket module surface the guest check touches."""
+
+    AF_INET = socket.AF_INET
+    SOCK_DGRAM = socket.SOCK_DGRAM
+    inet_ntoa = staticmethod(socket.inet_ntoa)
+
+    def __init__(self, outcomes: dict) -> None:
+        self.outcomes = outcomes
+
+    def socket(self, _family: int, _kind: int) -> _GuestUdp:
+        return _GuestUdp(self.outcomes)
+
+    def create_connection(self, address: tuple[str, int], timeout: float | None = None) -> Any:
+        _outcome(self.outcomes[(*address, "tcp")])
+        return SimpleNamespace(close=lambda: None)
+
+
+_ROOT_ANSWER = bytes.fromhex("4321 8180 0001 000d 0000 0000".replace(" ", ""))
+
+
+def _guest_check(monkeypatch, *, route: str = "0100F00A", **changes: Any) -> list[str]:
+    """Run the check the way a guest does, with ``changes`` to what it meets."""
+    outcomes: dict = {
+        ("127.0.0.11", 53, "udp"): _ROOT_ANSWER,
+        ("agent-gateway", 8080, "tcp"): "ok",
+        ("agent-mcp", 8000, "tcp"): "ok",
+        ("10.240.0.1", 9, "udp"): errno.EHOSTUNREACH,
+        ("169.254.169.254", 80, "tcp"): errno.EHOSTUNREACH,
+    }
+    for key, value in changes.items():
+        outcomes[
+            {
+                "resolver": ("127.0.0.11", 53, "udp"),
+                "host": ("10.240.0.1", 9, "udp"),
+                "metadata": ("169.254.169.254", 80, "tcp"),
+                "relay": ("agent-mcp", 8000, "tcp"),
+            }[key]
+        ] = value
+    files = {
+        "/proc/net/route": "Iface\tDestination\tGateway\tFlags\n"
+        + (f"eth0\t00000000\t{route}\t0003\n" if route else "")
+        + "eth0\t0000F00A\t00000000\t0001\n",
+        "/etc/resolv.conf": "nameserver 127.0.0.11\noptions ndots:0\n",
+    }
+    monkeypatch.setitem(sys.modules, "socket", _GuestSockets(outcomes))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["-c", "127.0.0.11", json.dumps([["agent-gateway", 8080], ["agent-mcp", 8000]])],
+    )
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        exec(  # the shipped script, run as the guest runs it
+            compile(_GUEST_NETWORK_CHECK, "<guest-network-check>", "exec"),
+            {"__name__": "__main__", "open": lambda path: io.StringIO(files[path])},
+        )
+    return json.loads(printed.getvalue())
+
+
+def test_a_guest_behind_its_rules_passes(monkeypatch):
+    assert _guest_check(monkeypatch) == []
+
+
+@pytest.mark.parametrize(
+    ("change", "value", "problem"),
+    [
+        ("resolver", "timeout", "resolver 127.0.0.11 did not answer"),
+        # SERVFAIL: the resolver is there, but cannot resolve for this guest.
+        ("resolver", bytes.fromhex("4321 8182 0001 0000 0000 0000".replace(" ", "")), "usefully"),
+        ("resolver", bytes.fromhex("9999 8180 0001 0000 0000 0000".replace(" ", "")), "usefully"),
+        ("relay", errno.ECONNREFUSED, "relay agent-mcp:8000 unreachable"),
+        # The host answered "port unreachable" itself: no rule in the path.
+        ("host", errno.ECONNREFUSED, "refused by ECONNREFUSED, not by the network rules"),
+        ("host", "timeout", "was not refused within 2s"),
+        ("metadata", "ok", "answered; the network rules are not in this guest's path"),
+        ("metadata", "timeout", "was not refused within 2s"),
+    ],
+)
+def test_the_guest_check_names_what_it_found(monkeypatch, change, value, problem):
+    problems = _guest_check(monkeypatch, **{change: value})
+    assert len(problems) == 1 and problem in problems[0], problems
+
+
+def test_a_guest_with_no_default_route_is_reported_without_probing_the_host(monkeypatch):
+    problems = _guest_check(monkeypatch, route="")
+    assert problems == ["no default route"]

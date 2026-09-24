@@ -92,6 +92,13 @@ CHAT_NETWORK_PRUNE_GRACE_S = 300
 #: Docker's option naming a bridge's host interface. Group bridges carry this
 #: deployment's prefix there, which is how the host's rules recognise them.
 CHAT_NETWORK_BRIDGE_OPTION = "com.docker.network.bridge.name"
+#: The gateway priority a relay joins every group bridge with. A container on
+#: several networks takes its default route from the highest priority, then by
+#: network name, and ``freeinference-chat-net-*`` sorts before a stack's own
+#: network: at Docker's default of 0 the first group bridge a relay joined would
+#: become its way out, and its SSH upstream would meet the sandbox rules — which
+#: drop it, for every group sharing that relay. Below zero, never.
+RELAY_GATEWAY_PRIORITY = -1
 CHAT_BOOTSTRAP_NETWORK = "bridge"
 #: Docker's built-in null network. A container reports it once its last real
 #: endpoint is gone, which is exactly the state a completed release leaves
@@ -166,6 +173,71 @@ _FULL_OBJECT_ID = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 # this inert process as a latency optimization; continuity does not depend on
 # it. Docker's ``--init`` owns signal forwarding/reaping, while one never-
 # respawned child avoids manufacturing a same-UID process event every hour.
+# Run inside a guest as the sandbox user after every cold start, with $1 the
+# resolver the guest should use and $2 the relays as JSON. Prints the problems
+# it found as a JSON list; an empty list is a pass. Every probe has a short
+# bound and nothing here leaves the host: the resolver answers one query for the
+# root's name servers, and the two boundary probes aim at the host itself and at
+# the metadata address, which the host rules must refuse at once with their own
+# ICMP "administratively prohibited". A host without the rules would answer
+# "port unreachable" for itself instead, and route the other onwards.
+_GUEST_NETWORK_CHECK = """
+import errno, json, socket, struct, sys
+resolver, relays = sys.argv[1], json.loads(sys.argv[2])
+problems = []
+gateway = None
+for row in [line.split() for line in open('/proc/net/route').read().splitlines()[1:]]:
+    if len(row) > 2 and row[1] == '00000000':
+        gateway = socket.inet_ntoa(struct.pack('<L', int(row[2], 16)))
+        break
+if gateway is None:
+    problems.append('no default route')
+servers = [line.split()[1] for line in open('/etc/resolv.conf')
+           if line.startswith('nameserver') and len(line.split()) > 1]
+if servers != [resolver]:
+    problems.append('resolver is %r, expected %r' % (servers, [resolver]))
+query = bytes.fromhex('4321 0100 0001 0000 0000 0000 00 0002 0001'.replace(' ', ''))
+try:
+    dns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    dns.settimeout(3)
+    dns.connect((resolver, 53))
+    dns.send(query)
+    answer = dns.recv(512)
+    if len(answer) < 12 or answer[:2] != query[:2] or not answer[2] & 0x80 or answer[3] & 0x0F:
+        problems.append('resolver %s did not answer the query usefully' % resolver)
+except OSError as exc:
+    problems.append('resolver %s did not answer: %s' % (resolver, exc))
+for host, port in relays:
+    try:
+        socket.create_connection((host, port), timeout=5).close()
+    except OSError as exc:
+        problems.append('relay %s:%d unreachable: %s' % (host, port, exc))
+def refused_by_rules(label, attempt):
+    try:
+        attempt()
+    except TimeoutError:
+        problems.append('%s was not refused within 2s' % label)
+    except OSError as exc:
+        if exc.errno != errno.EHOSTUNREACH:
+            name = errno.errorcode.get(exc.errno or 0, str(exc.errno))
+            problems.append('%s was refused by %s, not by the network rules' % (label, name))
+    else:
+        problems.append("%s answered; the network rules are not in this guest's path" % label)
+def host_udp():
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    probe.settimeout(2)
+    probe.connect((gateway, 9))
+    probe.send(b'x')
+    probe.recv(1)
+if gateway is not None:
+    refused_by_rules('the host at %s:9/udp' % gateway, host_udp)
+refused_by_rules(
+    'the metadata address 169.254.169.254:80',
+    lambda: socket.create_connection(('169.254.169.254', 80), timeout=2).close(),
+)
+print(json.dumps(problems))
+"""
+
 _INIT_COMMAND = (
     'trap \'kill "$child" 2>/dev/null; wait "$child"; exit 0\' TERM INT; '
     'sleep 2147483647 & child=$!; wait "$child"'
@@ -642,6 +714,19 @@ class ChatSandboxManager:
         if result.returncode != 0:
             raise SandboxError("Kata guest network sync failed: " + result.stderr[:300])
 
+    def _relay_endpoint(self, container_id: str, network: str) -> tuple[set[str], int] | None:
+        """A relay's names and gateway priority on ``network``; ``None`` if absent."""
+        raw = self._inspect_containers([container_id]).get(container_id)
+        names = None if raw is None else self._endpoint_aliases(raw, network)
+        if raw is None or names is None:
+            return None
+        endpoint = raw["NetworkSettings"]["Networks"][network]
+        try:
+            priority = int(endpoint.get("GwPriority") or 0)
+        except (TypeError, ValueError):
+            priority = 0
+        return names, priority
+
     def _ensure_service_connection(
         self,
         *,
@@ -649,26 +734,43 @@ class ChatSandboxManager:
         container_id: str,
         aliases: builtins.list[str],
     ) -> None:
-        existing = self._container_network_aliases(container_id, network)
+        existing = self._relay_endpoint(container_id, network)
         if existing is not None:
-            if set(aliases).issubset(existing):
+            names, priority = existing
+            if not set(aliases).issubset(names):
+                raise SandboxError(
+                    f"fixed relay {container_id[:12]} is already attached to {network!r} "
+                    "without the required aliases"
+                )
+            if priority < 0:
                 return
-            raise SandboxError(
-                f"fixed relay {container_id[:12]} is already attached to {network!r} "
-                "without the required aliases"
-            )
-        command = [self.backend.docker_binary, "network", "connect"]
+            # Attached without the priority, by hand or by an earlier build: this
+            # bridge may already be the relay's way out. Attach it again below.
+            self._disconnect_endpoint(network, container_id)
+        command = [
+            self.backend.docker_binary,
+            "network",
+            "connect",
+            "--gw-priority",
+            str(RELAY_GATEWAY_PRIORITY),
+        ]
         for alias in sorted(aliases):
             command += ["--alias", alias]
         command += [network, container_id]
         connected = self._run(command, timeout=30)
-        observed = self._container_network_aliases(container_id, network)
+        observed = self._relay_endpoint(container_id, network)
         if connected.returncode != 0 and observed is None:
             raise SandboxError(
                 "fixed relay could not join the chat network: " + connected.stderr.strip()[:300]
             )
-        if observed is None or not set(aliases).issubset(observed):
+        if observed is None or not set(aliases).issubset(observed[0]):
             raise SandboxError("fixed relay joined the chat network without its required aliases")
+        if observed[1] >= 0:
+            raise SandboxError(
+                "fixed relay joined the chat network without its gateway priority, so the "
+                "group bridge could become the relay's default route; this Docker does not "
+                "honour --gw-priority (Docker 28 or newer is required)"
+            )
 
     def _reconcile_group_members(
         self,
@@ -1296,41 +1398,26 @@ class ChatSandboxManager:
         return self._attach_to_group_network(spec, current)
 
     def _verify_guest_network(self, spec: ChatSandboxSpec) -> None:
-        """Check, from inside the guest, that it is wired to the group bridge.
+        """Check, from inside the guest, that it sits behind the group's rules.
 
-        The guard proves the host's rules; this proves the guest sits behind
-        them the way the agent will: a default route, the one resolver, and
-        both relays answering on their service ports. It runs as the sandbox
-        user, so it sees what the agent sees. A failure stops the sandbox,
+        The guard proves the host's rules exist; this proves the guest is
+        behind them the way the agent will be: a default route, the one
+        resolver answering a real query, both relays accepting on their service
+        ports, and the host and the metadata address refused by the rules
+        themselves. It runs as the sandbox user, so it sees what the agent
+        sees. Reaching the public internet is deliberately not a condition: an
+        outside outage is not a broken boundary. A failure stops the sandbox,
         which releases the bridge and keeps the workspace.
         """
         network = self._network()
         expected_resolver = (
             str(network.dns_server) if self.backend.runtime == KATA_RUNTIME else "127.0.0.11"
         )
-        script = (
-            "import json, socket, sys\n"
-            "resolver, relays = sys.argv[1], json.loads(sys.argv[2])\n"
-            "problems = []\n"
-            "routes = [line.split() for line in open('/proc/net/route').read().splitlines()[1:]]\n"
-            "if not any(len(row) > 2 and row[1] == '00000000' for row in routes):\n"
-            "    problems.append('no default route')\n"
-            "servers = [line.split()[1] for line in open('/etc/resolv.conf')\n"
-            "           if line.startswith('nameserver') and len(line.split()) > 1]\n"
-            "if servers != [resolver]:\n"
-            "    problems.append('resolver is %r, expected %r' % (servers, [resolver]))\n"
-            "for host, port in relays:\n"
-            "    try:\n"
-            "        socket.create_connection((host, port), timeout=5).close()\n"
-            "    except OSError as exc:\n"
-            "        problems.append('relay %s:%d unreachable: %s' % (host, port, exc))\n"
-            "print(json.dumps(problems))\n"
-        )
         relays = [[relay.host, relay.port] for relay in network.relays]
         result = self.exec_capture(
             spec,
-            ["python3", "-c", script, expected_resolver, json.dumps(relays)],
-            timeout_s=30,
+            ["python3", "-c", _GUEST_NETWORK_CHECK, expected_resolver, json.dumps(relays)],
+            timeout_s=45,
         )
         try:
             problems = json.loads(result.stdout.decode(errors="replace").strip() or "null")

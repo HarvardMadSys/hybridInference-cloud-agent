@@ -540,6 +540,14 @@ A host therefore needs, before it can run a job:
 - A kernel with nftables, bridge family included. Every runner's preflight
   installs this deployment's tables and reads them back before it claims
   anything.
+- Docker 28 or newer, client and daemon. Each relay joins a group bridge with
+  a gateway priority of -1: a container on several networks takes its default
+  route from the highest priority and then by network name, and
+  `freeinference-chat-net-*` sorts before `<COMPOSE_PROJECT>_internal`, so at
+  the default priority the first group a relay joined would become its way
+  out — and its SSH session would meet the sandbox rules and die for every
+  group sharing it. Preflight refuses an older Docker, and a relay found on a
+  bridge without the priority is attached again with it.
 
 Four checks prove it, each from where its answer means something.
 `sandbox_host.sh prepare` reads the network settings with the candidate runner
@@ -2035,7 +2043,8 @@ rules, not the host's.
   several deployments can share a host.
 - **Relays by exact endpoint.** When a group's relays are attached, their
   bridge, address and port are written to a `relays` set in both tables, and
-  removed with the bridge.
+  removed with the bridge. The relay's own default route stays on its stack
+  network, because it joins every group bridge at gateway priority -1.
 - **Watched while groups run.** While any group of this deployment is
   running, the broker re-reads the tables at most once a minute and reinstalls
   whatever is missing. If that fails twice in a row, it logs
@@ -2074,8 +2083,20 @@ refuses, with `this deployment's pool … overlaps …, registered earlier by �
 and a request to give each deployment its own `AGENT_EGRESS_CHAT_NETWORK_POOL`.
 The earlier one keeps running, so a neighbour started with a copied pool cannot
 take a working deployment down, and because each checks after installing, two
-starting together cannot both miss each other. Keep the pools clear of the
-host's Docker, VPN and private-service routes as well.
+starting together cannot both miss each other.
+
+The pool must also stay clear of every network the host already routes.
+Docker takes an explicit subnet as given — it checks other Docker networks,
+never the host's own routes — so a group bridge inside a LAN, a VPN route or a
+private service's network would add a more specific route and draw the host's
+traffic for those addresses into a sandbox bridge. After installing, the guard
+reads every IPv4 route in every table (`ip -4 route show table all`, through
+the same helper with no capability at all) and refuses with
+`this deployment's pool … overlaps the host route … on …`. The default route,
+catch-alls wider than a `/8` such as a full-tunnel VPN's two `/1` halves, and
+this deployment's own bridges are not conflicts. A network reached only
+through the default gateway has no route of its own to find, so choose the pool
+with the site's addressing in mind as well.
 
 A retired deployment's tables stay until the host reboots, and keep its pool
 registered. Once that deployment is gone for good, delete its two tables — its
@@ -2100,9 +2121,10 @@ resolver at `127.0.0.11` answers the relay aliases and forwards every other
 name there. That setting is fixed when the container is created. A Kata guest
 cannot see Docker's resolver, so after every activation the trusted guest-root
 helper writes the address into the guest's `/etc/resolv.conf`, beside the
-relay block in `/etc/hosts`. The in-guest check confirms which resolver the
-guest is configured with, not that it answers: a resolver that stops answering
-shows up as failed lookups inside the sandbox.
+relay block in `/etc/hosts`. The in-guest check at every cold start confirms
+both that the guest is configured with this resolver and that it answers: one
+query for the root's name servers, which any working recursive resolver
+answers, within three seconds.
 
 #### Protecting more addresses
 
@@ -2148,8 +2170,11 @@ start:
   `… registers pool …, not …`, each naming the table — the tables changed
   after they were installed, or a runner and a broker with different settings
   are overwriting each other. Redeploy both from one `.env`;
-- `this deployment's pool … overlaps …` — see
-  [Overlapping pools](#overlapping-pools).
+- `this deployment's pool … overlaps …` — another deployment's pool, or
+  `… overlaps the host route … on …` — a network the host already has; see
+  [Overlapping pools](#overlapping-pools);
+- `the sandbox network needs Docker 28 or newer, client and daemon` — the
+  relays' gateway priority needs both; see §0.
 
 Group lifecycle. These fail the turn or operation that needed the group's
 network; the workspace is kept:
@@ -2161,8 +2186,23 @@ network; the workspace is kept:
   the pool is taken, by this deployment's groups or by other Docker networks
   inside the same range;
 - `group network check failed inside the sandbox: …` — the in-guest check
-  after a cold start found `no default route`, `resolver is […], expected […]`
-  or `relay host:port unreachable: …`. The sandbox is stopped, not deleted;
+  after a cold start found one of:
+  - `no default route`, `resolver is […], expected […]`;
+  - `resolver … did not answer: …` or `… did not answer the query usefully` —
+    the resolver is down, refuses recursion, or (under runc) the container was
+    created with a resolver the rules no longer allow;
+  - `relay host:port unreachable: …`;
+  - `the host at …:9/udp was refused by ECONNREFUSED, not by the network
+    rules`, `the metadata address 169.254.169.254:80 answered; the network
+    rules are not in this guest's path`, or `… was not refused within 2s` —
+    the host and the metadata address must be refused at once by the rules'
+    own ICMP answer, and were not: the guest's traffic is not passing this
+    deployment's tables.
+
+  The sandbox is stopped, not deleted. Reaching the public internet is not
+  part of the check — an outside outage is not a broken boundary;
+- `fixed relay joined the chat network without its gateway priority` — the
+  Docker daemon ignored `--gw-priority`; it needs Docker 28 or newer;
 - `Kata guest network sync failed: …` — the guest-root helper could not write
   `/etc/hosts` or `/etc/resolv.conf`;
 - `retained chat is attached to network '…', which is not its group bridge`,

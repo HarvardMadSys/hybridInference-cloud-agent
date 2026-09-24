@@ -317,6 +317,19 @@ def lab():
             lab.containers.append(name)
         lab.relays = {"gateway": gateway, "mcp": mcp}
 
+        # The relays' own way out, as a stack's `<project>_internal` network is
+        # for its SSH tunnels. Named to sort after `freeinference-chat-net-*`,
+        # as that network does: at equal gateway priority Docker would then
+        # hand a relay's default route to the first group bridge it joined.
+        upstream = f"zz-{namespace}-upstream"
+        _docker("network", "create", upstream)
+        lab.networks.append(upstream)
+        for name in (gateway, mcp):
+            _docker("network", "connect", upstream, name)
+        lab.addresses["upstream-gateway"] = json.loads(
+            _docker("network", "inspect", upstream).stdout
+        )[0]["IPAM"]["Config"][0]["Gateway"]
+
         # The host itself, listening on every address it has.
         host_listener = f"{namespace}-host"
         _docker(
@@ -610,6 +623,86 @@ def test_a_withdrawn_relay_exception_stops_its_live_flow(lab: Lab) -> None:
     assert set(after["mcp"]) == {"1"}, after["mcp"]
     # And lifecycle put the exception back from what Docker reports.
     assert lab.guard.relay_endpoints(bridge) == held
+    target = (lab.relays["gateway"], GATEWAY_PORT, "tcp")
+    assert lab.probe("a", [target])[_key(*target)] == "open"
+
+
+# ── the relays' own way out ────────────────────────────────────────────────
+
+
+def _default_route(container: str) -> str:
+    return _docker("exec", container, "ip", "-4", "route", "show", "default").stdout.strip()
+
+
+def test_a_new_network_at_equal_priority_does_take_a_relays_route(lab: Lab) -> None:
+    """The takeover the relays' gateway priority prevents is real on this Docker.
+
+    Without this, a check that the route stays put could pass only because
+    this Docker picks default routes some other way.
+    """
+    probe = f"aa-{lab.network.namespace}-probe"
+    _docker("network", "create", probe)
+    lab.networks.append(probe)
+    gateway = json.loads(_docker("network", "inspect", probe).stdout)[0]["IPAM"]["Config"][0][
+        "Gateway"
+    ]
+    relay = lab.relays["mcp"]
+    _docker("network", "connect", probe, relay)
+    try:
+        assert f"via {gateway} " in _default_route(relay) + " "
+    finally:
+        _docker("network", "disconnect", probe, relay)
+    assert f"via {lab.addresses['upstream-gateway']} " in _default_route(relay) + " "
+
+
+def test_relays_keep_their_way_out_while_groups_come_and_go(lab: Lab) -> None:
+    """A group bridge never becomes a relay's default route (review of #331).
+
+    The relay's own long-lived connection to a private address beyond the
+    host — its SSH session, in a deployment — must survive a group joining
+    and leaving, and the relay being attached to a bridge again.
+    """
+    upstream = lab.addresses["upstream-gateway"]
+    for relay in lab.relays.values():
+        assert f"via {upstream} " in _default_route(relay) + " ", relay
+    flow = subprocess.Popen(
+        ["docker", "exec", lab.relays["gateway"], "python3", "-c", FLOW, lab.routed, "80", "150"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    lab.listeners.append(flow)
+    assert flow.stdout is not None
+    ticks: list[str] = []
+    for line in flow.stdout:
+        ticks.append(line.split()[0])
+        if line.rstrip().endswith("ready"):
+            break
+    assert ticks and ticks[-1] == "1", f"the relay's upstream flow never started: {ticks}"
+    started = len(ticks)
+
+    visitor = ChatSandboxSpec(
+        thread_id=f"athr_net_{lab.token}_c",
+        sandbox_id=f"asbx_net_{lab.token}_c",
+        generation=1,
+        runtime_id="network-test",
+        memory_limit="512m",
+        cpu_limit="1",
+        resident_slot_capacity=2,
+    )
+    lab.manager.create(visitor)
+    lab.containers.append(visitor.container_name)
+    lab.manager.start(visitor)
+    lab.manager.stop(visitor)
+    _docker(
+        "network", "disconnect", lab.manager.network_for(lab.groups["a"]), lab.relays["gateway"]
+    )
+    lab.manager.require_network(lab.groups["a"])
+
+    ticks.extend(line.split()[0] for line in flow.stdout)
+    flow.wait(60)
+    assert set(ticks[started:]) == {"1"}, f"the relay's upstream flow broke: {ticks[started:]}"
+    for relay in lab.relays.values():
+        assert f"via {upstream} " in _default_route(relay) + " ", relay
     target = (lab.relays["gateway"], GATEWAY_PORT, "tcp")
     assert lab.probe("a", [target])[_key(*target)] == "open"
 

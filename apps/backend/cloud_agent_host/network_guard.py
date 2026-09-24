@@ -21,7 +21,10 @@ a failed check means no new group network and no activation.
 
 **Neighbours.** Every deployment registers its address pool in its own table.
 The check runs after the install, so of two deployments starting together with
-overlapping pools at least the later one sees the other and refuses.
+overlapping pools at least the later one sees the other and refuses. The pool
+must also stay clear of every network the host already routes: Docker takes an
+explicit subnet as given, so nothing else would stop a group bridge from
+drawing the host's own traffic for those addresses.
 """
 
 from __future__ import annotations
@@ -140,6 +143,7 @@ class HostNetworkGuard:
             self._nft(["-f", "-"], stdin=rendered)
             self._verify(rendered)
             self._refuse_overlapping_pools()
+            self._refuse_overlapping_routes()
             self._verified_at = time.monotonic()
 
     def invalidate(self) -> None:
@@ -259,6 +263,48 @@ class HostNetworkGuard:
                         "its own AGENT_EGRESS_CHAT_NETWORK_POOL"
                     )
 
+    def _refuse_overlapping_routes(self) -> None:
+        """Refuse a pool that shares addresses with a network the host routes.
+
+        Docker checks an explicit subnet against other Docker networks only,
+        never against the host's own routes. A group bridge inside a LAN, a VPN
+        route or anything else the host already reaches would add a more
+        specific route and draw the host's traffic for those addresses into a
+        sandbox bridge. The default route, and catch-alls wider than a /8 such
+        as a full-tunnel VPN's two /1 halves, claim no particular network; this
+        deployment's own bridges are its pool at work.
+        """
+        pool = self.network.pool
+        for route in self._host_routes():
+            destination = str(route.get("dst") or "")
+            if not destination or destination == "default":
+                continue
+            try:
+                network = ipaddress.IPv4Network(destination, strict=False)
+            except ValueError:
+                continue
+            device = str(route.get("dev") or "")
+            if network.prefixlen < 8 or device.startswith(self.network.interface_prefix):
+                continue
+            if network.overlaps(pool):
+                where = f"on {device}" if device else f"({route.get('type') or 'route'})"
+                raise NetworkGuardError(
+                    f"this deployment's pool {pool} overlaps the host route {network} "
+                    f"{where}; a group bridge there would take the host's traffic for those "
+                    "addresses. Give AGENT_EGRESS_CHAT_NETWORK_POOL a range no host network uses"
+                )
+
+    def _host_routes(self) -> list[dict[str, Any]]:
+        """Every IPv4 route the host has, in every table; reading needs no privilege."""
+        result = self._helper("ip", ["-4", "-j", "route", "show", "table", "all"], net_admin=False)
+        try:
+            routes = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            raise NetworkGuardError("ip returned an unreadable route listing") from exc
+        if not isinstance(routes, list):
+            raise NetworkGuardError("ip returned an unexpected route listing")
+        return [route for route in routes if isinstance(route, dict)]
+
     # ── nft through the helper ─────────────────────────────────────────
 
     def _relay_set(self, family: str) -> set[tuple[str, str, int]]:
@@ -285,6 +331,16 @@ class HostNetworkGuard:
     def _nft(
         self, args: list[str], *, stdin: str | None = None
     ) -> subprocess.CompletedProcess[str]:
+        return self._helper("nft", args, stdin=stdin)
+
+    def _helper(
+        self,
+        entrypoint: str,
+        args: list[str],
+        *,
+        stdin: str | None = None,
+        net_admin: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
         command = [
             self.docker_binary,
             "run",
@@ -300,22 +356,21 @@ class HostNetworkGuard:
             "runc",
             "--cap-drop",
             "ALL",
-            "--cap-add",
-            "NET_ADMIN",
+            *(["--cap-add", "NET_ADMIN"] if net_admin else []),
             "--security-opt",
             "no-new-privileges",
             "--read-only",
             "--user",
             "0:0",
             "--entrypoint",
-            "nft",
+            entrypoint,
             self._image(),
             *args,
         ]
         result = self._run(command, stdin)
         if result.returncode != 0:
             raise NetworkGuardError(
-                f"nft {' '.join(args[:4])} failed: "
+                f"{entrypoint} {' '.join(args[:4])} failed: "
                 + (result.stderr or result.stdout).strip()[:400]
             )
         return result

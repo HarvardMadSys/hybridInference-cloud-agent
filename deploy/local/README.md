@@ -19,7 +19,8 @@ not alternate code paths in the application.
 
 ## Run
 
-Prerequisites: Docker with Compose, `openssl`, `curl`, and Python 3. The script
+Prerequisites: Docker 28 or newer with Compose, `openssl`, `curl`, and Python 3
+(the sandbox network attaches its relays with a gateway priority). The script
 prefers the Compose v2 plugin and falls back to the standalone command. The
 single runner container runs up to `LOCAL_HOST_SLOTS` turns at once (default 2),
 which the concurrent-fork smoke needs; the admin Servers page can change that

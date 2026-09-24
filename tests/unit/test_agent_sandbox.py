@@ -216,6 +216,8 @@ def test_container_preflight_proves_guest_kernel_with_the_exact_runtime_and_imag
             return SimpleNamespace(returncode=0, stdout="guest-kernel\n", stderr="")
         if argv[1:3] == ["network", "inspect"]:
             return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
+        if argv[1] == "version" and "{{.Client.Version}}" in argv[-1]:
+            return SimpleNamespace(returncode=0, stdout="28.4.0 1.51\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="27.0\n", stderr="")
 
     monkeypatch.setattr(sandbox_mod.subprocess, "run", fake_run)
@@ -355,7 +357,9 @@ def test_a_backend_built_without_a_network_can_do_no_group_work():
         backend.network_guard()
 
 
-def _network_preflight(monkeypatch, *, internal: str = "true", exists: bool = True):
+def _network_preflight(
+    monkeypatch, *, internal: str = "true", exists: bool = True, docker: str = "28.4.0 1.51"
+):
     """Run the network half of preflight against a stubbed daemon and guard."""
     calls: list[list[str]] = []
     ensured: list[dict] = []
@@ -366,6 +370,8 @@ def _network_preflight(monkeypatch, *, internal: str = "true", exists: bool = Tr
             if not exists:
                 return SimpleNamespace(returncode=1, stdout="", stderr="No such network")
             return SimpleNamespace(returncode=0, stdout=f"{internal}\n", stderr="")
+        if argv[1] == "version" and "{{.Client.Version}}" in argv[-1]:
+            return SimpleNamespace(returncode=0, stdout=f"{docker}\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="27.0\n", stderr="")
 
     monkeypatch.setattr(sandbox_mod.subprocess, "run", fake_run)
@@ -399,6 +405,15 @@ def test_a_missing_relay_network_is_refused(monkeypatch):
     _network_preflight(monkeypatch, exists=False)
     with pytest.raises(SandboxError, match="does not exist"):
         ContainerBackend(image="img:1", sandbox_network=_NETWORK).preflight()
+
+
+@pytest.mark.parametrize("docker", ["27.5.1 1.51", "28.4.0 1.47", "", "garbage"])
+def test_a_docker_that_cannot_pin_the_relays_routes_is_refused(monkeypatch, docker):
+    """Without gateway priority a group bridge can become a relay's way out."""
+    _, ensured = _network_preflight(monkeypatch, docker=docker)
+    with pytest.raises(SandboxError, match="Docker 28 or newer"):
+        ContainerBackend(image="img:1", sandbox_network=_NETWORK).preflight()
+    assert ensured == []
 
 
 def test_the_candidate_preflight_touches_no_network(monkeypatch):

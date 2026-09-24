@@ -86,6 +86,12 @@ if getent hosts "$host" >/dev/null 2>&1; then echo dns-only; else echo unresolve
 # same mechanism with a different isolation boundary underneath.
 KATA_RUNTIME = "io.containerd.kata.v2"
 
+#: Docker 28 (API 1.48) gave a network endpoint its gateway priority, which is
+#: what keeps a group bridge from becoming a relay's default route. Both ends
+#: need it: the client to send it, the daemon to honour it.
+DOCKER_MIN_CLIENT_MAJOR = 28
+DOCKER_MIN_API = (1, 48)
+
 # Image labels carrying the CLI versions baked into a sandbox image, e.g.
 # ``org.freeinference.runtime.claude-code.version=1.2.3``. The image build
 # writes them; the runner only reads. Unlabeled images report no versions
@@ -808,6 +814,7 @@ class ContainerBackend(SandboxBackend):
         kernel, so a host that cannot enforce the boundary never claims.
         """
         network = self.require_sandbox_network()
+        self._require_gateway_priority()
         probe = subprocess.run(
             [
                 self.docker_binary,
@@ -833,6 +840,38 @@ class ContainerBackend(SandboxBackend):
                 "where the two relays are discovered, and must not route anywhere."
             )
         self.network_guard().ensure(max_age_s=0)
+
+    def _require_gateway_priority(self) -> None:
+        """Refuse a Docker too old to keep group bridges off the relays' routes."""
+        probe = subprocess.run(
+            [
+                self.docker_binary,
+                "version",
+                "--format",
+                "{{.Client.Version}} {{.Server.APIVersion}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        client, _, api = probe.stdout.strip().partition(" ")
+        try:
+            client_major = int(client.split(".")[0])
+            server_api = tuple(int(part) for part in api.split(".")[:2])
+        except ValueError:
+            client_major, server_api = 0, (0, 0)
+        if (
+            probe.returncode != 0
+            or client_major < DOCKER_MIN_CLIENT_MAJOR
+            or server_api < DOCKER_MIN_API
+        ):
+            raise SandboxError(
+                "the sandbox network needs Docker 28 or newer, client and daemon: relays "
+                "join each group bridge with a gateway priority, so that bridge never "
+                f"becomes their default route (client {client or 'unknown'}, daemon API "
+                f"{api or 'unknown'})"
+            )
 
     def check_gateway_reachable(self, base_url: str) -> None:
         """Fail startup if the sandbox cannot reach the gateway it will be given.
