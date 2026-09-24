@@ -425,6 +425,7 @@ export const en = {
   'queue.countOne': '1 pending',
   'queue.countMany': '{count} pending',
   'queue.afterThisTurn': 'sent after this turn',
+  'queue.steerHint': '⌘/Ctrl+↵ to send now',
   'queue.state.editing': 'Editing',
   'queue.state.refused': 'Not sent',
   'queue.state.sending': 'Sending',
@@ -437,6 +438,19 @@ export const en = {
   'queue.editLabel': 'Edit queued message',
   'queue.delete': 'Delete',
   'queue.deleteLabel': 'Delete queued message',
+  'queue.sendNow': 'Send now',
+  'queue.sendNowLabel': 'Send into the running turn now',
+  'queue.sendNowFiles':
+    'A message with files goes as a turn of its own; it cannot join the running one.',
+  'queue.notDelivered.noBoundary':
+    'The running turn has no point to take it right now; it will be sent when the turn ends.',
+  'queue.notDelivered.turnEnded': 'The turn just ended; this message goes next.',
+  'queue.notDelivered.unreachable':
+    'Could not reach the host running this turn; it will be sent when the turn ends.',
+  'queue.notDelivered.other': 'The turn did not take it; it will be sent when the turn ends.',
+  'queue.sendNowRefused.notRunning': 'The turn has not started yet; try again in a moment.',
+  'queue.sendNowRefused.unsupported':
+    'This conversation cannot take messages mid-turn; it will be sent when the turn ends.',
   'queue.save': 'Save',
   'queue.saving': 'Saving…',
   'queue.cancelEdit': 'Cancel',

@@ -29,3 +29,15 @@ export function isComposerSubmit(event: KeyboardEvent<HTMLElement>): boolean {
   if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === IME_KEY_CODE) return false;
   return !event.shiftKey && !event.altKey;
 }
+
+/**
+ * Cmd/Ctrl+Enter: send into the running turn now rather than after it.
+ *
+ * Only where a running turn can take a message does it mean anything more than
+ * Enter; the caller decides that. An IME's Enter is never this chord either.
+ */
+export function isSteerChord(event: KeyboardEvent<HTMLElement>): boolean {
+  if (event.key !== 'Enter') return false;
+  if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === IME_KEY_CODE) return false;
+  return (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey;
+}

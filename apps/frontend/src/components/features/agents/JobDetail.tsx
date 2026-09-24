@@ -25,7 +25,7 @@ import {
   type AgentConfigApi,
   type AgentGitWorkspaceApi,
 } from '@/lib/api/agents';
-import { submitThreadMessage } from '@/lib/api/pendingMessages';
+import { submitThreadMessage, type ThreadMessageResultApi } from '@/lib/api/pendingMessages';
 
 import { ownerFailureMessage, toDiffFileDetails } from './adapt';
 import {
@@ -72,7 +72,8 @@ import {
 } from './TrajectoryInspector';
 import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
 import { shouldHoldReading, useConversationScroll } from './useConversationScroll';
-import { PendingMessageQueue } from './PendingMessageQueue';
+import { notDeliveredText, PendingMessageQueue } from './PendingMessageQueue';
+import { isSteerChord } from './composerKeys';
 import { usePendingMessages } from './usePendingMessages';
 import { useResizablePane } from './useResizablePane';
 import { WorkspaceFiles } from './WorkspaceFiles';
@@ -954,6 +955,11 @@ export function JobDetail({
 
   async function submitFollowUp(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    await sendDraft();
+  }
+
+  /** Send what the composer holds; the result, or `null` if nothing went. */
+  async function sendDraft(): Promise<ThreadMessageResultApi | null> {
     if (
       submitting ||
       contextLost ||
@@ -962,12 +968,12 @@ export function JobDetail({
       readingFiles ||
       mcp.saving
     )
-      return;
+      return null;
     // A command is not a message. It runs the thing it names and leaves
     // nothing behind for the model to read as a prompt.
-    if (await goalCommand.submit()) return;
+    if (await goalCommand.submit()) return null;
     const prompt = followUp.trim();
-    if (!prompt) return;
+    if (!prompt) return null;
     setSubmitting(true);
     setActionError(null);
     try {
@@ -988,9 +994,39 @@ export function JobDetail({
       setFollowUp('');
       attachments.reset();
       setSubmitting(false);
+      return result;
     } catch (cause: unknown) {
       setActionError(cause instanceof Error ? cause.message : 'Could not send the message');
       setSubmitting(false);
+      return null;
+    }
+  }
+
+  /**
+   * Cmd/Ctrl+Enter while a turn that can take it is running: the draft joins
+   * the line, then everything waiting goes into the turn, oldest first. A turn
+   * that cannot take one message now will not take the next either, so the
+   * rest stay where they are and go when it ends.
+   */
+  async function steerNow() {
+    const drafted = followUp.trim() ? await sendDraft() : null;
+    // With nothing running the draft simply became the next turn.
+    if (drafted?.job) return;
+    const waiting = [...queue.messages, ...(drafted?.pending ? [drafted.pending] : [])]
+      .filter((message, index, all) => all.findIndex((other) => other.id === message.id) === index)
+      .filter((message) => message.state === 'queued' && !(message.attachments ?? []).length)
+      .sort((a, b) => a.position - b.position);
+    for (const message of waiting) {
+      const sent = await queue.sendNow(message);
+      if (!sent.ok) {
+        setActionError(sent.error);
+        return;
+      }
+      const reason = sent.result.not_delivered_reason;
+      if (reason) {
+        toast(notDeliveredText(reason, t));
+        return;
+      }
     }
   }
 
@@ -1109,7 +1145,8 @@ export function JobDetail({
   );
   const viewedJobId = job.id;
   const queue = usePendingMessages({
-    threadId: job.threadId,
+    // The queue this page writes to is the one it reads.
+    threadId,
     active: hasLiveWork(job),
     onSent: (jobId, how) => {
       if (jobId === viewedJobId) return;
@@ -1375,8 +1412,11 @@ export function JobDetail({
                     data-turn-key={currentTurn.key}
                   >
                     {threadMessages.map((message) => {
+                      // Only a prompt starts a turn a rewind could replace.
                       const rewindAnchor =
-                        message.role === 'user' && currentRewindAnchor !== message.jobId
+                        message.role === 'user' &&
+                        !message.midTurn &&
+                        currentRewindAnchor !== message.jobId
                           ? currentRewindAnchor
                           : undefined;
                       return (
@@ -1690,6 +1730,11 @@ export function JobDetail({
                         // half of one to the model.
                         onKeyDown={(event) => {
                           goalCommand.onKeyDown(event);
+                          if (event.defaultPrevented) return;
+                          if (queue.canSendNow && isSteerChord(event)) {
+                            event.preventDefault();
+                            void steerNow();
+                          }
                         }}
                         // The list is this box's own popup, and the highlighted
                         // row is named to it — the caret never leaves here.
@@ -1755,6 +1800,7 @@ export function JobDetail({
                             {isActive ? (
                               <span className="min-w-0 truncate text-[11px] text-gray-400 dark:text-gray-500">
                                 · {t('queue.afterThisTurn')}
+                                {queue.canSendNow ? ` · ${t('queue.steerHint')}` : ''}
                               </span>
                             ) : null}
                           </>
@@ -1766,6 +1812,7 @@ export function JobDetail({
                                 ? `Restores any saved changes · ${job.runtime} · ${job.model}`
                                 : `Inherits ${job.runtime} · ${job.model}`}
                             {isActive ? ` · ${t('queue.afterThisTurn')}` : ''}
+                            {queue.canSendNow ? ` · ${t('queue.steerHint')}` : ''}
                           </span>
                         )}
                         <ComposerSendButton

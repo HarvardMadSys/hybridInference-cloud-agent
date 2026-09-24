@@ -6,6 +6,7 @@ import {
   editPendingMessage,
   getThreadQueue,
   resumeThreadQueue,
+  sendPendingMessageNow,
   type PendingMessageApi,
   type QueuePausedReason,
   type ThreadMessageResultApi,
@@ -58,6 +59,8 @@ export interface PendingQueue {
   /** Messages with a write in flight, so their card can wait. */
   busyIds: ReadonlySet<string>;
   resuming: boolean;
+  /** A turn is running that can take a waiting message now. */
+  canSendNow: boolean;
   /** Fold a send's answer in, so its card appears without waiting for a read. */
   apply: (result: ThreadMessageResultApi) => void;
   /** Stop the line at this message while it is rewritten. */
@@ -67,6 +70,11 @@ export interface PendingQueue {
   /** Rewrite a message and put it back in line. */
   save: (message: PendingMessageApi, prompt: string) => Promise<QueueActionResult>;
   remove: (message: PendingMessageApi) => Promise<QueueActionResult>;
+  /**
+   * Hand a waiting message to the running turn. Taken, it leaves the queue for
+   * that turn's transcript; not taken, it stays in line and the result says why.
+   */
+  sendNow: (message: PendingMessageApi) => Promise<QueueActionResult>;
   resume: () => Promise<QueueActionResult>;
   refresh: () => Promise<void>;
 }
@@ -118,6 +126,7 @@ export function usePendingMessages({
   const [loaded, setLoaded] = useState(false);
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set<string>());
   const [resuming, setResuming] = useState(false);
+  const [canSendNow, setCanSendNow] = useState(false);
 
   const mounted = useRef(true);
   const threadRef = useRef(threadId);
@@ -154,6 +163,9 @@ export function usePendingMessages({
       snapshot.current = { ids, latestJobId: queue.latest_job_id };
       setMessages([...queue.pending_messages].sort((a, b) => a.position - b.position));
       setPausedReason(queue.queue_paused_reason ?? null);
+      setCanSendNow(
+        queue.mid_turn_input_supported === true && queue.latest_job_state === 'running',
+      );
       setLoaded(true);
       if (
         previous &&
@@ -189,6 +201,7 @@ export function usePendingMessages({
     appliedSeq.current = readSeq.current;
     setMessages([]);
     setPausedReason(null);
+    setCanSendNow(false);
     setLoaded(false);
     setBusyIds(new Set<string>());
     if (threadId) void refresh();
@@ -264,15 +277,25 @@ export function usePendingMessages({
     async (
       message: PendingMessageApi,
       send: () => Promise<ThreadMessageResultApi>,
-      { removing = false }: { removing?: boolean } = {},
+      {
+        removing = false,
+        optimistic,
+      }: { removing?: boolean; optimistic?: Partial<PendingMessageApi> } = {},
     ): Promise<QueueActionResult> => {
       track(message.id, true);
       setInFlight((count) => count + 1);
+      if (optimistic) {
+        setMessages((current) =>
+          current.map((row) => (row.id === message.id ? { ...row, ...optimistic } : row)),
+        );
+      }
       try {
         const result = await send();
         if (!mounted.current) return { ok: true, result };
         appliedSeq.current = ++readSeq.current;
-        if (removing) {
+        if (removing || result.delivered_to_job_id) {
+          // Out of line without becoming a turn of its own: withdrawn, or
+          // taken into the running turn, whose transcript now carries it.
           removedHere.current.add(message.id);
           setMessages((current) => current.filter((row) => row.id !== message.id));
         } else if (result.pending) {
@@ -352,6 +375,15 @@ export function usePendingMessages({
       ),
     [mutate],
   );
+  const sendNow = useCallback(
+    (message: PendingMessageApi) =>
+      mutate(
+        message,
+        () => sendPendingMessageNow(String(threadRef.current), message.id, message.revision),
+        { optimistic: { state: 'sending' } },
+      ),
+    [mutate],
+  );
   const resume = useCallback(async (): Promise<QueueActionResult> => {
     setResuming(true);
     setInFlight((count) => count + 1);
@@ -386,11 +418,13 @@ export function usePendingMessages({
     loaded,
     busyIds,
     resuming,
+    canSendNow,
     apply,
     hold,
     release,
     save,
     remove,
+    sendNow,
     resume,
     refresh,
   };

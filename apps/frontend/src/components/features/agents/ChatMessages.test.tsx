@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { ThreadTurn } from './ChatMessages';
+import { EventRow, ThreadTurn } from './ChatMessages';
 import type { AgentThreadMessage, GoalTurn } from './types';
 
 // The round marker is rendered directly: what it says about a report is the
@@ -76,5 +76,20 @@ describe('an automatic round', () => {
     expect(screen.queryByText('complete')).not.toBeInTheDocument();
     expect(screen.queryByText('needs input')).not.toBeInTheDocument();
     expect(screen.queryByText(/could not be read/)).not.toBeInTheDocument();
+  });
+});
+
+describe('a message sent into a running turn', () => {
+  it('reads as the owner speaking, where it arrived', () => {
+    render(
+      <EventRow
+        event={{ kind: 'user_message', text: 'also check the docs', sourceEventId: 5 }}
+        blockKey="ajob_1:event:5"
+      />,
+    );
+
+    const bubble = screen.getByText('also check the docs');
+    expect(bubble.closest('[data-block-key="ajob_1:event:5"]')).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Copy message' })).toBeInTheDocument();
   });
 });

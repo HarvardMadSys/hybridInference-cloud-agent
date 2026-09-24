@@ -62,6 +62,13 @@ export interface ThreadMessageResultApi {
   /** The turn this request started: the message just sent, or an older one that went first. */
   job: AgentJobApi | null;
   queue_paused_reason?: QueuePausedReason | null;
+  /** Send-now only: the running turn the message went into; it waits no longer. */
+  delivered_to_job_id?: string | null;
+  /**
+   * Send-now only: why the running turn did not take it — `no_boundary`,
+   * `turn_ended`, `unreachable`, … It still waits, and goes when the turn ends.
+   */
+  not_delivered_reason?: string | null;
 }
 
 export interface ThreadMessageRequest {
@@ -243,6 +250,23 @@ export async function deletePendingMessage(
   return queueJson<ThreadMessageResultApi>(resp);
 }
 
+/**
+ * Send a waiting message into the running turn now, at the revision it was
+ * read at. With nothing running this is an ordinary send.
+ */
+export async function sendPendingMessageNow(
+  threadId: string,
+  messageId: string,
+  revision: number,
+): Promise<ThreadMessageResultApi> {
+  const resp = await fetchWithAuth(API_BASE, `${messagePath(threadId, messageId)}/send-now`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ revision }),
+  });
+  return queueJson<ThreadMessageResultApi>(resp);
+}
+
 /** Let a paused queue move again, starting from its first message. */
 export async function resumeThreadQueue(threadId: string): Promise<ThreadMessageResultApi> {
   const resp = await fetchWithAuth(API_BASE, `${threadPath(threadId)}/queue/resume`, {
@@ -259,6 +283,8 @@ export interface ThreadQueueApi {
   latest_job_id: string | null;
   latest_turn_no: number | null;
   latest_job_state: string | null;
+  /** Whether a waiting message can be sent into the newest turn while it runs. */
+  mid_turn_input_supported?: boolean;
 }
 
 /** Read the queue without the transcript; this is what a page polls. */

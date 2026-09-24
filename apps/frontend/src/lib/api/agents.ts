@@ -427,6 +427,8 @@ export interface AgentJobApi {
   native_state?: 'new' | 'ready' | 'fork_preparing' | 'lost' | null;
   fork_anchor_job_id?: string | null;
   native_fork_available?: boolean;
+  /** Whether a waiting message can be sent into this job's turn while it runs. */
+  mid_turn_input_supported?: boolean;
   workspace_publication_state?:
     | 'pending'
     | 'capturing'
@@ -459,6 +461,11 @@ export interface AgentThreadMessageApi {
   content: string;
   job_id: string;
   created_at: string | null;
+  /**
+   * A message the owner sent into this job's turn while it ran, not the prompt
+   * that started it. It reads among the turn's replies, where it was sent.
+   */
+  mid_turn?: boolean;
 }
 
 export interface AgentThreadApi {

@@ -48,7 +48,11 @@ import {
   type McpInvocationApi,
 } from '@/lib/api/mcp';
 import { deleteAttachment, uploadAttachment } from '@/lib/api/attachments';
-import { getThreadQueue, submitThreadMessage } from '@/lib/api/pendingMessages';
+import {
+  getThreadQueue,
+  sendPendingMessageNow,
+  submitThreadMessage,
+} from '@/lib/api/pendingMessages';
 
 import { APIError } from '@/lib/utils/errors';
 
@@ -79,6 +83,7 @@ vi.mock('@/lib/api/pendingMessages', async (importOriginal) => ({
   editPendingMessage: vi.fn(),
   deletePendingMessage: vi.fn(),
   resumeThreadQueue: vi.fn(),
+  sendPendingMessageNow: vi.fn(),
 }));
 
 /** The queue a conversation with nothing waiting reads back. */
@@ -608,6 +613,7 @@ describe('JobDetail', () => {
     navigation.push.mockReset();
     vi.mocked(cancelAgentJob).mockReset();
     vi.mocked(submitThreadMessage).mockReset();
+    vi.mocked(sendPendingMessageNow).mockReset();
     vi.mocked(getThreadQueue)
       .mockReset()
       .mockImplementation(async (threadId) => emptyQueue(threadId));
@@ -1365,6 +1371,53 @@ describe('JobDetail', () => {
     expect(box).toHaveValue('');
     expect(window.location.pathname).toBe('/ajob_1');
     expect(navigation.push).not.toHaveBeenCalled();
+  });
+
+  it('sends the draft and what waits into a running turn that can take them, on Cmd+Enter', async () => {
+    const older = {
+      id: 'apmsg_old',
+      thread_id: 'ajob_1',
+      position: 1,
+      state: 'queued' as const,
+      revision: 1,
+      prompt: 'first, check the docs',
+      attachments: [],
+      last_error: null,
+    };
+    const drafted = { ...older, id: 'apmsg_new', position: 2, prompt: 'then run the linter' };
+    let waiting = [older];
+    vi.mocked(getThreadQueue).mockImplementation(async (threadId) => ({
+      ...emptyQueue(threadId),
+      pending_messages: waiting,
+      latest_job_id: 'ajob_1',
+      latest_turn_no: 1,
+      latest_job_state: 'running',
+      mid_turn_input_supported: true,
+    }));
+    vi.mocked(submitThreadMessage).mockImplementation(async () => {
+      waiting = [older, drafted];
+      return { pending: drafted, job: null };
+    });
+    vi.mocked(sendPendingMessageNow).mockImplementation(async (_threadId, messageId) => {
+      waiting = waiting.filter((message) => message.id !== messageId);
+      return { pending: null, job: null, delivered_to_job_id: 'ajob_1' };
+    });
+    render(<JobDetail job={makeJob()} />);
+
+    // Once the running turn can take one, the composer says what the chord does.
+    expect(await screen.findByText(/⌘\/Ctrl\+↵ to send now/)).toBeInTheDocument();
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'then run the linter' } });
+    fireEvent.keyDown(box, { key: 'Enter', metaKey: true });
+
+    // The draft joins the line, then the line goes in, oldest first.
+    await waitFor(() => expect(sendPendingMessageNow).toHaveBeenCalledTimes(2));
+    expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', { prompt: 'then run the linter' });
+    expect(vi.mocked(sendPendingMessageNow).mock.calls.map(([, messageId]) => messageId)).toEqual([
+      'apmsg_old',
+      'apmsg_new',
+    ]);
+    expect(window.location.pathname).not.toMatch(/apmsg/);
   });
 
   it('moves to the turn an idle conversation starts at once', async () => {

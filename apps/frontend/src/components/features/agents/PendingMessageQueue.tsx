@@ -33,7 +33,7 @@ function QueueIcon({
   name,
   className = 'h-3.5 w-3.5',
 }: {
-  name: 'chevron' | 'edit' | 'delete' | 'attachment';
+  name: 'chevron' | 'edit' | 'delete' | 'attachment' | 'send';
   className?: string;
 }) {
   return (
@@ -55,6 +55,7 @@ function QueueIcon({
         </>
       ) : null}
       {name === 'delete' ? <path d="M4 7h16M10 7V4h4v3M6 7l1 13h10l1-13M10 11v5M14 11v5" /> : null}
+      {name === 'send' ? <path d="M12 19V5M6 11l6-6 6 6" /> : null}
       {name === 'attachment' ? (
         <path d="m20 11.5-8.2 8.2a5 5 0 0 1-7.1-7.1l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9" />
       ) : null}
@@ -77,6 +78,26 @@ function attachmentSummary(message: PendingMessageApi, t: Translate): string | n
       : t('queue.attachmentsMany', { count: String(files.length) });
   return `${count} · ${names}${more} · ${formatBytes(bytes)}`;
 }
+
+/** Why the running turn did not take a message, in the owner's words. */
+export function notDeliveredText(reason: string, t: Translate): string {
+  if (reason === 'no_boundary') return t('queue.notDelivered.noBoundary');
+  if (reason === 'turn_ended') return t('queue.notDelivered.turnEnded');
+  if (reason === 'unreachable') return t('queue.notDelivered.unreachable');
+  return t('queue.notDelivered.other');
+}
+
+/** Why a message could not even be offered to the running turn. */
+function sendNowRefusal(code: string, error: string, t: Translate): string {
+  if (code === 'not_running') return t('queue.sendNowRefused.notRunning');
+  if (code === 'mid_turn_input_unsupported') return t('queue.sendNowRefused.unsupported');
+  if (code === 'send_now_has_attachments') return t('queue.sendNowFiles');
+  if (code === 'revision_conflict') return t('queue.conflict');
+  return error;
+}
+
+/** How long a "not taken" note stays under its message. */
+const NOTE_MS = 10_000;
 
 function without<T>(record: Record<string, T>, key: string): Record<string, T> {
   const next = { ...record };
@@ -118,6 +139,8 @@ export function PendingMessageQueue({
   const [collapsed, setCollapsed] = useState(false);
   const [editors, setEditors] = useState<Record<string, EditorState>>({});
   const [notice, setNotice] = useState<string | null>(null);
+  /** Per message: why the running turn did not take it just now. */
+  const [notes, setNotes] = useState<Record<string, string>>({});
   const known = new Set(queue.messages.map((message) => message.id));
   // A message that was sent or removed while its editor was open: the text is
   // kept so nothing the owner typed disappears with it.
@@ -209,6 +232,30 @@ export function PendingMessageQueue({
     const result = await queue.resume();
     if (!result.ok) setNotice(result.error);
   }, [queue]);
+
+  const sendNow = useCallback(
+    async (message: PendingMessageApi) => {
+      setNotice(null);
+      setNotes((current) => without(current, message.id));
+      const result = await queue.sendNow(message);
+      if (!result.ok) {
+        setNotice(sendNowRefusal(result.code, result.error, t));
+        return;
+      }
+      const reason = result.result.not_delivered_reason;
+      if (reason)
+        setNotes((current) => ({ ...current, [message.id]: notDeliveredText(reason, t) }));
+    },
+    [queue, t],
+  );
+
+  // A note says what just happened; it does not stay to become the card's story.
+  useEffect(() => {
+    const ids = Object.keys(notes);
+    if (!ids.length) return undefined;
+    const timer = setTimeout(() => setNotes({}), NOTE_MS);
+    return () => clearTimeout(timer);
+  }, [notes]);
 
   if (!queue.messages.length && !orphans.length && !queue.pausedReason) return null;
 
@@ -365,6 +412,14 @@ export function PendingMessageQueue({
                       {t('queue.state.refused')} · {message.last_error}
                     </p>
                   ) : null}
+                  {notes[message.id] ? (
+                    <p
+                      role="status"
+                      className="pb-0.5 text-[11px] leading-4 text-amber-700 dark:text-amber-400"
+                    >
+                      {notes[message.id]}
+                    </p>
+                  ) : null}
                 </div>
                 {files ? (
                   <span
@@ -407,6 +462,19 @@ export function PendingMessageQueue({
                   >
                     <QueueIcon name="delete" className="h-3 w-3" />
                   </button>
+                  {queue.canSendNow ? (
+                    <button
+                      type="button"
+                      data-action="send-now"
+                      aria-label={t('queue.sendNowLabel')}
+                      title={files ? t('queue.sendNowFiles') : t('queue.sendNow')}
+                      disabled={locked || busy || message.state !== 'queued' || Boolean(files)}
+                      onClick={() => void sendNow(message)}
+                      className={ICON_BUTTON}
+                    >
+                      <QueueIcon name="send" className="h-3 w-3" />
+                    </button>
+                  ) : null}
                 </div>
               </li>
             );

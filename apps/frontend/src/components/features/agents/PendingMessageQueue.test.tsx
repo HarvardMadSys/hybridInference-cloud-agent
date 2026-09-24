@@ -18,6 +18,7 @@ import {
   editPendingMessage,
   getThreadQueue,
   resumeThreadQueue,
+  sendPendingMessageNow,
   type PendingMessageApi,
   type ThreadQueueApi,
 } from '@/lib/api/pendingMessages';
@@ -32,6 +33,7 @@ vi.mock('@/lib/api/pendingMessages', async (importOriginal) => ({
   editPendingMessage: vi.fn(),
   deletePendingMessage: vi.fn(),
   resumeThreadQueue: vi.fn(),
+  sendPendingMessageNow: vi.fn(),
 }));
 vi.mock('react-hot-toast', () => ({ default: { success: vi.fn() } }));
 
@@ -316,6 +318,103 @@ describe('PendingMessageQueue', () => {
     await waitFor(() => expect(resumeThreadQueue).toHaveBeenCalledWith('athr_1'));
     await waitFor(() => expect(onSent).toHaveBeenCalledWith('ajob_2'));
     await waitFor(() => expect(screen.queryByText('Paused: stopped')).toBeNull());
+  });
+
+  it('offers to send now only while a turn that can take it is running', async () => {
+    queueWith([message()], { mid_turn_input_supported: false });
+    const { unmount } = render(<Harness />);
+    await screen.findAllByRole('listitem');
+    expect(screen.queryByRole('button', { name: 'Send into the running turn now' })).toBeNull();
+    unmount();
+
+    queueWith([message()], { mid_turn_input_supported: true, latest_job_state: 'queued' });
+    const second = render(<Harness />);
+    await screen.findAllByRole('listitem');
+    expect(screen.queryByRole('button', { name: 'Send into the running turn now' })).toBeNull();
+    second.unmount();
+
+    queueWith([message()], { mid_turn_input_supported: true, latest_job_state: 'running' });
+    render(<Harness />);
+    expect(
+      await screen.findByRole('button', { name: 'Send into the running turn now' }),
+    ).toBeEnabled();
+  });
+
+  it('sends a message into the running turn at the revision read, and the card goes', async () => {
+    queueWith([message(), message({ id: 'apmsg_b', position: 2, prompt: 'B' })], {
+      mid_turn_input_supported: true,
+    });
+    vi.mocked(sendPendingMessageNow).mockImplementation(async () => {
+      server = { ...server, pending_messages: server.pending_messages.slice(1) };
+      return { pending: null, job: null, delivered_to_job_id: 'ajob_1' };
+    });
+    const onSent = vi.fn();
+    render(<Harness onSent={onSent} />);
+    const card = (await screen.findAllByRole('listitem'))[0];
+
+    fireEvent.click(within(card).getByRole('button', { name: 'Send into the running turn now' }));
+
+    await waitFor(() => expect(sendPendingMessageNow).toHaveBeenCalledWith('athr_1', 'apmsg_a', 1));
+    await waitFor(() => expect(screen.getAllByRole('listitem')).toHaveLength(1));
+    expect(screen.getByText('B')).toBeInTheDocument();
+    // It joined the running turn: no new turn to follow.
+    expect(onSent).not.toHaveBeenCalled();
+  });
+
+  it('a message the running turn could not take stays in line and says why', async () => {
+    queueWith([message()], { mid_turn_input_supported: true });
+    vi.mocked(sendPendingMessageNow).mockImplementation(async () => ({
+      pending: stored(message({ revision: 3 })),
+      job: null,
+      not_delivered_reason: 'no_boundary',
+    }));
+    render(<Harness />);
+    const card = (await screen.findAllByRole('listitem'))[0];
+
+    fireEvent.click(within(card).getByRole('button', { name: 'Send into the running turn now' }));
+
+    expect(await within(card).findByRole('status')).toHaveTextContent(
+      'The running turn has no point to take it right now; it will be sent when the turn ends.',
+    );
+    expect(screen.getAllByRole('listitem')).toHaveLength(1);
+  });
+
+  it('a message with files cannot join the running turn', async () => {
+    queueWith(
+      [
+        message({
+          attachments: [
+            { id: 7, path: 'uploads/notes.txt', size_bytes: 5, content_type: 'text/plain' },
+          ],
+        }),
+      ],
+      { mid_turn_input_supported: true },
+    );
+    render(<Harness />);
+    const card = (await screen.findAllByRole('listitem'))[0];
+
+    const send = within(card).getByRole('button', { name: 'Send into the running turn now' });
+
+    expect(send).toBeDisabled();
+    expect(send).toHaveAttribute(
+      'title',
+      'A message with files goes as a turn of its own; it cannot join the running one.',
+    );
+  });
+
+  it("says in the owner's words why a message could not be offered to the turn", async () => {
+    queueWith([message()], { mid_turn_input_supported: true });
+    vi.mocked(sendPendingMessageNow).mockRejectedValue(
+      new APIError('not_running', 'The turn has not started', 409),
+    );
+    render(<Harness />);
+    const card = (await screen.findAllByRole('listitem'))[0];
+
+    fireEvent.click(within(card).getByRole('button', { name: 'Send into the running turn now' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The turn has not started yet; try again in a moment.',
+    );
   });
 });
 

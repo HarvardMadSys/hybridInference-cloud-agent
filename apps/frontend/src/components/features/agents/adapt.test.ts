@@ -619,6 +619,39 @@ describe('toDisplayJob', () => {
     ]);
   });
 
+  it('keeps a message sent into a running turn where it arrived, marked as such', () => {
+    expect(
+      toDisplayEvent(
+        event(9, 'user_message', { text: 'also check the docs', pending_message_id: 'apmsg_1' }),
+      ),
+    ).toEqual({ kind: 'user_message', text: 'also check the docs', sourceEventId: 9 });
+    const job = toDisplayJob(
+      { ...JOB, thread_id: 'thread_1', parent_job_id: 'ajob_0', turn_no: 2 },
+      {
+        thread: {
+          thread_id: 'thread_1',
+          title: 'Stable conversation title',
+          jobs: [],
+          messages: [
+            { id: 1, role: 'user', content: 'first question', job_id: 'ajob_0', created_at: null },
+            {
+              id: 2,
+              role: 'user',
+              content: 'also check the docs',
+              job_id: 'ajob_0',
+              created_at: null,
+              mid_turn: true,
+            },
+          ],
+        },
+      },
+    );
+    expect(job.threadMessages?.map((message) => [message.content, message.midTurn])).toEqual([
+      ['first question', undefined],
+      ['also check the docs', true],
+    ]);
+  });
+
   it('renders earlier thread messages without duplicating the current turn', () => {
     const job = toDisplayJob(
       { ...JOB, thread_id: 'thread_1', parent_job_id: 'ajob_0', turn_no: 2 },

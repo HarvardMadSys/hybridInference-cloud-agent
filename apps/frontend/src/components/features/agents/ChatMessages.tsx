@@ -452,6 +452,7 @@ export function EventRow({
       />
     );
   }
+  if (event.kind === 'user_message') return <UserMessage text={event.text} blockKey={blockKey} />;
   if (event.kind === 'tool_use') return <ToolActivity event={event} blockKey={blockKey} />;
   if (event.kind === 'tool_result') {
     return (
@@ -526,8 +527,9 @@ export function HistoryTurn({
       {turn.promptCard !== null ? (
         <UserMessage text={turn.promptCard} blockKey={`${jobId}:prompt`} />
       ) : null}
+      {/* The prompt opens the turn; a message sent into it reads where it arrived. */}
       {turn.messages
-        .filter((message) => message.role === 'user')
+        .filter((message) => message.role === 'user' && !message.midTurn)
         .map((message) => (
           <ThreadTurn
             key={message.id}

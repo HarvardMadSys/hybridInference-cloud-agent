@@ -122,6 +122,11 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
   if (type === 'thinking') return { kind: 'thinking', text: '', sourceEventId };
   if (type === 'message') return { kind: 'message', text: asText(payload, 'text'), sourceEventId };
   if (type === 'usage') return { kind: 'usage', text: asText(payload, 'text'), sourceEventId };
+  // A message the owner sent into the running turn reads where it arrived,
+  // between what the agent did before it and what it did after.
+  if (type === 'user_message') {
+    return { kind: 'user_message', text: asText(payload, 'text'), sourceEventId };
+  }
 
   if (type === 'tool_use') {
     const name = asText(payload, 'name', 'tool') || 'Bash';
@@ -717,6 +722,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     content: message.content,
     jobId: message.job_id,
     createdAt: message.created_at,
+    ...(message.mid_turn ? { midTurn: true } : {}),
   });
   const priorMessages = (options.thread?.messages ?? [])
     .filter((message) =>

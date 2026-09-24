@@ -82,7 +82,9 @@ export type AgentEvent =
       attemptNo?: number;
       sourceEventId?: number;
     }
-  | { kind: 'usage'; text: string; attemptNo?: number; sourceEventId?: number };
+  | { kind: 'usage'; text: string; attemptNo?: number; sourceEventId?: number }
+  /** A message the owner sent into the running turn, where it arrived. */
+  | { kind: 'user_message'; text: string; attemptNo?: number; sourceEventId?: number };
 
 export interface AgentThreadMessage {
   id: number;
@@ -90,6 +92,8 @@ export interface AgentThreadMessage {
   content: string;
   jobId: string;
   createdAt: string | null;
+  /** Sent into the turn while it ran; not the turn's prompt. */
+  midTurn?: boolean;
 }
 
 /** One completed turn reconstructed in the same order the agent produced it. */
