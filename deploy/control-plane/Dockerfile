@@ -7,10 +7,8 @@
 # `create_app()` imports that router, so dropping `cloud_agent_host/` here
 # produces an image whose control plane cannot start. The publisher's patch
 # gate and archive builders are no longer part of that reach: they live in
-# `cloud_agent_shared/git/`, which this image and the runner image both ship.
-# So does `cloud_agent_profiling/`: the measurement record both sides exchange,
-# and the ingest here reads the shape the runner writes. See MIGRATION.md,
-# "Manifest corrections".
+# `cloud_agent_shared/git/`, which this image and the runner image both ship. See
+# MIGRATION.md, "Manifest corrections".
 #
 # **No agent runtimes, no docker socket, no git credentials at build time.**
 # This image never executes an agent and never checks a repository out. The one
@@ -39,14 +37,12 @@ WORKDIR /app
 COPY pyproject.toml README.md LICENSE ./
 COPY apps/backend/cloud_agent/__init__.py apps/backend/cloud_agent/__init__.py
 COPY apps/backend/cloud_agent_host/__init__.py apps/backend/cloud_agent_host/__init__.py
-COPY apps/backend/cloud_agent_profiling/__init__.py apps/backend/cloud_agent_profiling/__init__.py
 ARG PIP_DEFAULT_TIMEOUT=120
 RUN pip install --no-cache-dir .
 
-# All four packages. See the header for why this image needs the host one.
+# All three packages. See the header for why this image needs the host one.
 COPY apps/backend/cloud_agent/ apps/backend/cloud_agent/
 COPY apps/backend/cloud_agent_shared/ apps/backend/cloud_agent_shared/
-COPY apps/backend/cloud_agent_profiling/ apps/backend/cloud_agent_profiling/
 COPY apps/backend/cloud_agent_host/ apps/backend/cloud_agent_host/
 
 # Alembic owns the schema. Nothing in this service creates a table at startup,

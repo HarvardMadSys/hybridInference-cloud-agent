@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 import httpx
 
-from cloud_agent_profiling.operation_profiling import (
+from cloud_agent_shared.operation_profiling import (
     MAX_CONTEXT_CHARS,
     PROFILING_CONTEXT_HEADER,
     answer_from_headers,

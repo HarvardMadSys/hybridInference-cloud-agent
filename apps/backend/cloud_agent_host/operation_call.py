@@ -26,7 +26,7 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Any
 
-from cloud_agent_profiling.operation_profiling import (
+from cloud_agent_shared.operation_profiling import (
     PROFILING_ANSWER_CALL_ID_HEADER,
     PROFILING_ANSWER_OPERATION_HEADER,
     PROFILING_ANSWER_RECORDED_HEADER,

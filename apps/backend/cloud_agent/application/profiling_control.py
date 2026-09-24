@@ -46,7 +46,7 @@ from cloud_agent.domain.profiling_control import (
 )
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage.repositories.profiling_control import TERMINAL_LIFECYCLES
-from cloud_agent_profiling.operation_profiling import profile_mode
+from cloud_agent_shared.operation_profiling import profile_mode
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence

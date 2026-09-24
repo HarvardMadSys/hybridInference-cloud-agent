@@ -18,7 +18,7 @@ from cloud_agent_host.runner import ClaimedJob, LeaseLost
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError
 from cloud_agent_host.session_supervisor_client import SessionSupervisorError
-from cloud_agent_profiling import operation_profiling
+from cloud_agent_shared import operation_profiling
 
 
 @pytest.fixture(autouse=True)

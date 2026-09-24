@@ -43,7 +43,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from cloud_agent_profiling.operation_profiling import (
+from cloud_agent_shared.operation_profiling import (
     MODE_ADMIN,
     MODE_DISABLED,
     MODE_ENVIRONMENT,
@@ -103,7 +103,7 @@ def install_policy_provider() -> None:
     direction, and the reason a broker that starts before its runner does not
     briefly measure for an experiment it has not been told about.
     """
-    from cloud_agent_profiling.operation_profiling import install_policy_provider as install
+    from cloud_agent_shared.operation_profiling import install_policy_provider as install
 
     class _Pushed:
         """Serves the collector from the store the policy endpoint writes."""

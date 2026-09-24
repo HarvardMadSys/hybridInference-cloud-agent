@@ -30,7 +30,7 @@ What that buys, stated as the properties under test:
 * profiling off is no tasks, no deliveries, no writes, and no new fields.
 
 Nothing here re-implements a producer: the broker stand-in answers the real
-fragment protocol (:mod:`cloud_agent_profiling.operation_call`), the writer is
+fragment protocol (:mod:`cloud_agent_host.operation_call`), the writer is
 the application's own, and every row is read back through SQL and through the
 Admin routes a reader uses.
 """
@@ -61,7 +61,11 @@ from cloud_agent.operation_measurement import INTERACTION_HEADER
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError, WorkspaceBrokerStream
-from cloud_agent_host import runner as runner_mod
+from cloud_agent_host import operation_call, runner as runner_mod
+from cloud_agent_host.measurement_delivery import (
+    DELIVERY_DRAIN_S,
+    DELIVERY_HANDOFF_DRAIN_S,
+)
 from cloud_agent_host.runner import ClaimedJob, ControlPlane
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
@@ -71,16 +75,12 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
-from cloud_agent_profiling import operation_call, operation_profiling
-from cloud_agent_profiling.measurement_delivery import (
-    DELIVERY_DRAIN_S,
-    DELIVERY_HANDOFF_DRAIN_S,
-)
+from cloud_agent_shared import operation_profiling
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
 
-    from cloud_agent_profiling.operation_profiling import Measurement
+    from cloud_agent_shared.operation_profiling import Measurement
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

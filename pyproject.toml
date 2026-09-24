@@ -50,8 +50,6 @@ include = [
   "cloud_agent.*",
   "cloud_agent_host",
   "cloud_agent_host.*",
-  "cloud_agent_profiling",
-  "cloud_agent_profiling.*",
   "cloud_agent_shared",
   "cloud_agent_shared.*",
 ]
@@ -151,7 +149,6 @@ files = [
   "apps/backend/cloud_agent",
   "apps/backend/cloud_agent_host",
   "apps/backend/cloud_agent_shared",
-  "apps/backend/cloud_agent_profiling",
 ]
 # Where the three packages live. Without this, a file checked from outside that
 # tree -- `tests/fixtures/ports_negative/miswired_port.py`, which exists to be

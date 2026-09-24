@@ -39,7 +39,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from cloud_agent.api.hosts import authenticate_host
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.profiling_control_config import profiling_control_deployment
-from cloud_agent_profiling.operation_profiling import MODE_ADMIN, profile_mode
+from cloud_agent_shared.operation_profiling import MODE_ADMIN, profile_mode
 
 logger = get_logger(__name__)
 

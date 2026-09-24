@@ -74,7 +74,6 @@ ENV PATH="/app/.venv/bin:$PATH"
 # Flattened from apps/backend/: this image installs no package and runs
 # from /app, so the in-image layout is what the imports expect.
 COPY apps/backend/cloud_agent_shared/ cloud_agent_shared/
-COPY apps/backend/cloud_agent_profiling/ cloud_agent_profiling/
 COPY apps/backend/cloud_agent_host/ cloud_agent_host/
 # A new runner may adopt retained containers created from the previous image.
 # Keep the reviewed helper on the trusted side so it can atomically upgrade
