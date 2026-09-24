@@ -81,7 +81,6 @@ function attachmentSummary(message: PendingMessageApi, t: Translate): string | n
 
 /** Why the running turn did not take a message, in the owner's words. */
 export function notDeliveredText(reason: string, t: Translate): string {
-  if (reason === 'no_boundary') return t('queue.notDelivered.noBoundary');
   if (reason === 'turn_ended') return t('queue.notDelivered.turnEnded');
   if (reason === 'unreachable') return t('queue.notDelivered.unreachable');
   return t('queue.notDelivered.other');
@@ -432,6 +431,7 @@ export function PendingMessageQueue({
                 ) : null}
                 {tag ? (
                   <span
+                    title={tag === 'sending' ? t('queue.state.sendingTitle') : undefined}
                     className={`flex h-6 shrink-0 items-center text-[11px] ${tag === 'sending' ? 'text-sky-600 dark:text-sky-400' : 'text-amber-600 dark:text-amber-400'}`}
                   >
                     {t(`queue.state.${tag}`)}

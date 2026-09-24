@@ -52,6 +52,7 @@ import {
   getThreadQueue,
   sendPendingMessageNow,
   submitThreadMessage,
+  type PendingMessageApi,
 } from '@/lib/api/pendingMessages';
 
 import { APIError } from '@/lib/utils/errors';
@@ -1366,7 +1367,7 @@ describe('JobDetail', () => {
     expect(navigation.push).not.toHaveBeenCalled();
   });
 
-  it('sends the draft and what waits into a running turn that can take them, on Cmd+Enter', async () => {
+  it('adds the draft, and only the draft, to a live turn that can take it, on Cmd+Enter', async () => {
     const older = {
       id: 'apmsg_old',
       thread_id: 'ajob_1',
@@ -1378,7 +1379,7 @@ describe('JobDetail', () => {
       last_error: null,
     };
     const drafted = { ...older, id: 'apmsg_new', position: 2, prompt: 'then run the linter' };
-    let waiting = [older];
+    let waiting: PendingMessageApi[] = [older];
     vi.mocked(getThreadQueue).mockImplementation(async (threadId) => ({
       ...emptyQueue(threadId),
       pending_messages: waiting,
@@ -1392,24 +1393,22 @@ describe('JobDetail', () => {
       return { pending: drafted, job: null };
     });
     vi.mocked(sendPendingMessageNow).mockImplementation(async (_threadId, messageId) => {
-      waiting = waiting.filter((message) => message.id !== messageId);
-      return { pending: null, job: null, delivered_to_job_id: 'ajob_1' };
+      const sending = { ...drafted, state: 'sending' as const, revision: 2 };
+      waiting = waiting.map((message) => (message.id === messageId ? sending : message));
+      return { pending: sending, job: null };
     });
     render(<JobDetail job={makeJob()} />);
 
-    // Once the running turn can take one, the composer says what the chord does.
-    expect(await screen.findByText(/⌘\/Ctrl\+↵ to send now/)).toBeInTheDocument();
+    // Once the live turn can take one, the composer says what the chord does.
+    expect(await screen.findByText(/⌘\/Ctrl\+↵ to add to this turn/)).toBeInTheDocument();
     const box = screen.getByLabelText('Add a follow-up');
     fireEvent.change(box, { target: { value: 'then run the linter' } });
     fireEvent.keyDown(box, { key: 'Enter', metaKey: true });
 
-    // The draft joins the line, then the line goes in, oldest first.
-    await waitFor(() => expect(sendPendingMessageNow).toHaveBeenCalledTimes(2));
+    // The draft goes into the turn; the older message was left for after it.
+    await waitFor(() => expect(sendPendingMessageNow).toHaveBeenCalledTimes(1));
     expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', { prompt: 'then run the linter' });
-    expect(vi.mocked(sendPendingMessageNow).mock.calls.map(([, messageId]) => messageId)).toEqual([
-      'apmsg_old',
-      'apmsg_new',
-    ]);
+    expect(sendPendingMessageNow).toHaveBeenCalledWith('ajob_1', 'apmsg_new', 1);
     expect(window.location.pathname).not.toMatch(/apmsg/);
   });
 

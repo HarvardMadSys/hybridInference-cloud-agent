@@ -320,61 +320,86 @@ describe('PendingMessageQueue', () => {
     await waitFor(() => expect(screen.queryByText('Paused: stopped')).toBeNull());
   });
 
-  it('offers to send now only while a turn that can take it is running', async () => {
+  it('offers to add to the turn only while one that can take it is live', async () => {
     queueWith([message()], { mid_turn_input_supported: false });
     const { unmount } = render(<Harness />);
     await screen.findAllByRole('listitem');
-    expect(screen.queryByRole('button', { name: 'Send into the running turn now' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Add to the turn in progress' })).toBeNull();
     unmount();
 
+    // Still waiting for a host: it is given the message when it starts.
     queueWith([message()], { mid_turn_input_supported: true, latest_job_state: 'queued' });
     const second = render(<Harness />);
-    await screen.findAllByRole('listitem');
-    expect(screen.queryByRole('button', { name: 'Send into the running turn now' })).toBeNull();
+    expect(
+      await screen.findByRole('button', { name: 'Add to the turn in progress' }),
+    ).toBeEnabled();
     second.unmount();
 
     queueWith([message()], { mid_turn_input_supported: true, latest_job_state: 'running' });
-    render(<Harness />);
+    const third = render(<Harness />);
     expect(
-      await screen.findByRole('button', { name: 'Send into the running turn now' }),
+      await screen.findByRole('button', { name: 'Add to the turn in progress' }),
     ).toBeEnabled();
+    third.unmount();
+
+    queueWith([message()], {
+      mid_turn_input_supported: true,
+      latest_job_state: 'cancelled',
+      queue_paused_reason: 'stopped',
+    });
+    render(<Harness />);
+    await screen.findAllByRole('listitem');
+    expect(screen.queryByRole('button', { name: 'Add to the turn in progress' })).toBeNull();
   });
 
-  it('sends a message into the running turn at the revision read, and the card goes', async () => {
+  it('adds a message to the live turn at the revision read, and it waits there until taken', async () => {
     queueWith([message(), message({ id: 'apmsg_b', position: 2, prompt: 'B' })], {
       mid_turn_input_supported: true,
     });
-    vi.mocked(sendPendingMessageNow).mockImplementation(async () => {
-      server = { ...server, pending_messages: server.pending_messages.slice(1) };
-      return { pending: null, job: null, delivered_to_job_id: 'ajob_1' };
-    });
+    vi.mocked(sendPendingMessageNow).mockImplementation(async () => ({
+      pending: stored(message({ state: 'sending', revision: 2 })),
+      job: null,
+    }));
     const onSent = vi.fn();
-    render(<Harness onSent={onSent} />);
+    let queue: ReturnType<typeof usePendingMessages> | undefined;
+    render(<Harness onSent={onSent} onQueue={(current) => (queue = current)} />);
     const card = (await screen.findAllByRole('listitem'))[0];
 
-    fireEvent.click(within(card).getByRole('button', { name: 'Send into the running turn now' }));
+    fireEvent.click(within(card).getByRole('button', { name: 'Add to the turn in progress' }));
 
     await waitFor(() => expect(sendPendingMessageNow).toHaveBeenCalledWith('athr_1', 'apmsg_a', 1));
-    await waitFor(() => expect(screen.getAllByRole('listitem')).toHaveLength(1));
+    // It goes in before the model's next tool call, and says so while it waits.
+    const tag = await within(card).findByText('Adding');
+    expect(tag).toHaveAttribute(
+      'title',
+      'Goes in before its next tool call; if this turn answers first, it is sent as the next turn.',
+    );
+
+    // The turn took it: the queue no longer has it.
+    server = { ...server, pending_messages: server.pending_messages.slice(1) };
+    await act(async () => {
+      await queue!.refresh();
+    });
+    expect(screen.getAllByRole('listitem')).toHaveLength(1);
     expect(screen.getByText('B')).toBeInTheDocument();
-    // It joined the running turn: no new turn to follow.
+    // It joined the turn: no new turn to follow.
     expect(onSent).not.toHaveBeenCalled();
   });
 
-  it('a message the running turn could not take stays in line and says why', async () => {
+  it('a message the live turn cannot have stays in line and says why', async () => {
     queueWith([message()], { mid_turn_input_supported: true });
     vi.mocked(sendPendingMessageNow).mockImplementation(async () => ({
       pending: stored(message({ revision: 3 })),
       job: null,
-      not_delivered_reason: 'no_boundary',
+      not_delivered_reason: 'unreachable',
     }));
     render(<Harness />);
     const card = (await screen.findAllByRole('listitem'))[0];
 
-    fireEvent.click(within(card).getByRole('button', { name: 'Send into the running turn now' }));
+    fireEvent.click(within(card).getByRole('button', { name: 'Add to the turn in progress' }));
 
     expect(await within(card).findByRole('status')).toHaveTextContent(
-      'The running turn has no point to take it right now; it will be sent when the turn ends.',
+      'Could not reach the host running this turn; it will be sent when the turn ends.',
     );
     expect(screen.getAllByRole('listitem')).toHaveLength(1);
   });
@@ -393,7 +418,7 @@ describe('PendingMessageQueue', () => {
     render(<Harness />);
     const card = (await screen.findAllByRole('listitem'))[0];
 
-    const send = within(card).getByRole('button', { name: 'Send into the running turn now' });
+    const send = within(card).getByRole('button', { name: 'Add to the turn in progress' });
 
     expect(send).toBeDisabled();
     expect(send).toHaveAttribute(
@@ -405,15 +430,15 @@ describe('PendingMessageQueue', () => {
   it("says in the owner's words why a message could not be offered to the turn", async () => {
     queueWith([message()], { mid_turn_input_supported: true });
     vi.mocked(sendPendingMessageNow).mockRejectedValue(
-      new APIError('not_running', 'The turn has not started', 409),
+      new APIError('not_running', 'The turn is being stopped', 409),
     );
     render(<Harness />);
     const card = (await screen.findAllByRole('listitem'))[0];
 
-    fireEvent.click(within(card).getByRole('button', { name: 'Send into the running turn now' }));
+    fireEvent.click(within(card).getByRole('button', { name: 'Add to the turn in progress' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'The turn has not started yet; try again in a moment.',
+      'This turn is stopping; the message stays in line.',
     );
   });
 });

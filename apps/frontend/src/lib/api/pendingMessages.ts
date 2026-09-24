@@ -62,11 +62,11 @@ export interface ThreadMessageResultApi {
   /** The turn this request started: the message just sent, or an older one that went first. */
   job: AgentJobApi | null;
   queue_paused_reason?: QueuePausedReason | null;
-  /** Send-now only: the running turn the message went into; it waits no longer. */
-  delivered_to_job_id?: string | null;
   /**
-   * Send-now only: why the running turn did not take it — `no_boundary`,
-   * `turn_ended`, `unreachable`, … It still waits, and goes when the turn ends.
+   * Send-now only: why the live turn cannot have it — `turn_ended`,
+   * `unreachable`, … It still waits, and goes when the turn ends. Without one
+   * the message is `sending`: it goes in before the model's next tool call, and
+   * leaves the queue once the turn's transcript shows it.
    */
   not_delivered_reason?: string | null;
 }

@@ -59,7 +59,7 @@ export interface PendingQueue {
   /** Messages with a write in flight, so their card can wait. */
   busyIds: ReadonlySet<string>;
   resuming: boolean;
-  /** A turn is running that can take a waiting message now. */
+  /** The live turn can take a waiting message before its next tool call. */
   canSendNow: boolean;
   /** Fold a send's answer in, so its card appears without waiting for a read. */
   apply: (result: ThreadMessageResultApi) => void;
@@ -163,8 +163,11 @@ export function usePendingMessages({
       snapshot.current = { ids, latestJobId: queue.latest_job_id };
       setMessages([...queue.pending_messages].sort((a, b) => a.position - b.position));
       setPausedReason(queue.queue_paused_reason ?? null);
+      // A turn still waiting for a host can take one too: it is given the
+      // message when it starts.
       setCanSendNow(
-        queue.mid_turn_input_supported === true && queue.latest_job_state === 'running',
+        queue.mid_turn_input_supported === true &&
+          (queue.latest_job_state === 'running' || queue.latest_job_state === 'queued'),
       );
       setLoaded(true);
       if (
@@ -293,9 +296,8 @@ export function usePendingMessages({
         const result = await send();
         if (!mounted.current) return { ok: true, result };
         appliedSeq.current = ++readSeq.current;
-        if (removing || result.delivered_to_job_id) {
-          // Out of line without becoming a turn of its own: withdrawn, or
-          // taken into the running turn, whose transcript now carries it.
+        if (removing) {
+          // Out of line without becoming a turn of its own: withdrawn.
           removedHere.current.add(message.id);
           setMessages((current) => current.filter((row) => row.id !== message.id));
         } else if (result.pending) {

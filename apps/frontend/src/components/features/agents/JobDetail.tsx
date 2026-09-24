@@ -993,31 +993,22 @@ export function JobDetail({
   }
 
   /**
-   * Cmd/Ctrl+Enter while a turn that can take it is running: the draft joins
-   * the line, then everything waiting goes into the turn, oldest first. A turn
-   * that cannot take one message now will not take the next either, so the
-   * rest stay where they are and go when it ends.
+   * Cmd/Ctrl+Enter while a turn that can take it is live: the draft goes into
+   * that turn, before the model's next tool call, instead of after it. Only the
+   * draft: what already waits was left for after the turn, and each has its
+   * own ↑ for changing that.
    */
   async function steerNow() {
     const drafted = followUp.trim() ? await sendDraft() : null;
-    // With nothing running the draft simply became the next turn.
-    if (drafted?.job) return;
-    const waiting = [...queue.messages, ...(drafted?.pending ? [drafted.pending] : [])]
-      .filter((message, index, all) => all.findIndex((other) => other.id === message.id) === index)
-      .filter((message) => message.state === 'queued' && !(message.attachments ?? []).length)
-      .sort((a, b) => a.position - b.position);
-    for (const message of waiting) {
-      const sent = await queue.sendNow(message);
-      if (!sent.ok) {
-        setActionError(sent.error);
-        return;
-      }
-      const reason = sent.result.not_delivered_reason;
-      if (reason) {
-        toast(notDeliveredText(reason, t));
-        return;
-      }
+    // Nothing to add, or nothing running: the draft simply became the next turn.
+    if (!drafted?.pending || (drafted.pending.attachments ?? []).length) return;
+    const sent = await queue.sendNow(drafted.pending);
+    if (!sent.ok) {
+      setActionError(sent.error);
+      return;
     }
+    const reason = sent.result.not_delivered_reason;
+    if (reason) toast(notDeliveredText(reason, t));
   }
 
   // Fork creates a second native session in this chat's shared workspace and
