@@ -115,7 +115,7 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('PendingMessageQueue', () => {
-  it('shows waiting messages in send order, each saying what it waits for', async () => {
+  it('lists waiting messages in send order under one header, and says why one was refused', async () => {
     queueWith([
       message({ id: 'apmsg_b', position: 2, prompt: 'second' }),
       message({ id: 'apmsg_a', position: 1, prompt: 'first' }),
@@ -136,10 +136,26 @@ describe('PendingMessageQueue', () => {
       'apmsg_b',
       'apmsg_c',
     ]);
-    expect(within(cards[0]).getByText('Waiting for this turn')).toBeInTheDocument();
-    expect(within(cards[2]).getByText('Not sent')).toBeInTheDocument();
-    expect(within(cards[2]).getByText(/is not available/)).toBeInTheDocument();
-    expect(within(region).getByText('3 messages')).toBeInTheDocument();
+    // The count is said once, in the header, for all of them.
+    expect(within(region).getByRole('button', { name: '3 pending' })).toBeInTheDocument();
+    // A waiting message is just its text; only the refused one says more.
+    expect(within(cards[0]).queryByText(/Not sent|Editing|Sending/)).toBeNull();
+    expect(
+      within(cards[2]).getByText(/^Not sent · Model 'gone' is not available/),
+    ).toBeInTheDocument();
+  });
+
+  it('folds the list away and back under its header', async () => {
+    render(<Harness />);
+    const toggle = await screen.findByRole('button', { name: '2 pending' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+
+    fireEvent.click(toggle);
+
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryAllByRole('listitem')).toHaveLength(0);
+    fireEvent.click(toggle);
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
   });
 
   it('holds a message while it is edited and saves it back into line', async () => {
@@ -295,10 +311,6 @@ describe('PendingMessageQueue', () => {
     render(<Harness onSent={onSent} />);
 
     expect(await screen.findByText('Paused: stopped')).toBeInTheDocument();
-    // The card does not promise to go when a turn ends: nothing will send it.
-    const card = screen.getAllByRole('listitem')[0];
-    expect(within(card).getByText('Paused')).toBeInTheDocument();
-    expect(within(card).queryByText('Waiting for this turn')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Continue sending queued messages' }));
 
     await waitFor(() => expect(resumeThreadQueue).toHaveBeenCalledWith('athr_1'));

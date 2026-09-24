@@ -422,14 +422,12 @@ export const en = {
 
   // ── Pending message queue ───────────────────────────────────────────────
   'queue.region': 'Queued messages',
-  'queue.heading': 'Queued · sent in order when this turn ends',
-  'queue.countOne': '1 message',
-  'queue.countMany': '{count} messages',
-  'queue.state.queued': 'Waiting for this turn',
+  'queue.countOne': '1 pending',
+  'queue.countMany': '{count} pending',
+  'queue.afterThisTurn': 'sent after this turn',
   'queue.state.editing': 'Editing',
   'queue.state.refused': 'Not sent',
   'queue.state.sending': 'Sending',
-  'queue.state.paused': 'Paused',
   'queue.paused.stopped': 'Paused: stopped',
   'queue.paused.failed': 'Paused: the last turn failed',
   'queue.paused.archived': 'Paused: archived',
@@ -442,16 +440,16 @@ export const en = {
   'queue.save': 'Save',
   'queue.saving': 'Saving…',
   'queue.cancelEdit': 'Cancel',
-  'queue.editHint': 'Held while you edit: nothing behind it is sent. ⏎ saves, Esc cancels.',
+  'queue.editHint': 'Held while you edit; nothing behind it is sent · ⏎ save · Esc cancel',
   'queue.emptyPrompt': 'A queued message cannot be empty.',
   'queue.conflict':
     'This message changed in another tab. The card shows the latest version; your text is kept here.',
   'queue.gone': 'This message was already sent or removed. Your text is kept here.',
+  'queue.latest': 'Latest:',
   'queue.dismiss': 'Dismiss',
-  'queue.removed': 'Removed from the queue',
+  'queue.removed': 'Message removed',
   'queue.attachmentsOne': '1 attachment',
   'queue.attachmentsMany': '{count} attachments',
-  'queue.queuedAfter': 'Queued after this run',
   // ── Shared ──────────────────────────────────────────────────────────────
   'common.loading': 'Loading…',
 } as const;

@@ -1572,6 +1572,10 @@ export function JobDetail({
                   active={isActive}
                   approvalsOnly
                 />
+                {/* Its own card above the composer rather than inside it: the
+                    queue is what the conversation will send next, not part of
+                    the message being written. */}
+                <PendingMessageQueue queue={queue} disabled={isArchived || contextLost} />
                 <div
                   className={
                     isArchived
@@ -1599,7 +1603,6 @@ export function JobDetail({
                       }}
                     />
                   ) : null}
-                  <PendingMessageQueue queue={queue} disabled={isArchived || contextLost} />
                   {isArchived ? (
                     <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-gray-900">
                       <div className="min-w-0 flex-1 basis-64">
@@ -1751,7 +1754,7 @@ export function JobDetail({
                             />
                             {isActive ? (
                               <span className="min-w-0 truncate text-[11px] text-gray-400 dark:text-gray-500">
-                                · queued after this run
+                                · {t('queue.afterThisTurn')}
                               </span>
                             ) : null}
                           </>
@@ -1762,7 +1765,7 @@ export function JobDetail({
                               : job.state === 'cancelled'
                                 ? `Restores any saved changes · ${job.runtime} · ${job.model}`
                                 : `Inherits ${job.runtime} · ${job.model}`}
-                            {isActive ? ' · queued after this run' : ''}
+                            {isActive ? ` · ${t('queue.afterThisTurn')}` : ''}
                           </span>
                         )}
                         <ComposerSendButton

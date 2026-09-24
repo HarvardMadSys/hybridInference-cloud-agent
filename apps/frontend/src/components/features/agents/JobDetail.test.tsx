@@ -1348,7 +1348,7 @@ describe('JobDetail', () => {
     window.history.pushState(null, '', '/ajob_1');
     render(<JobDetail job={makeJob()} />);
 
-    expect(screen.getByText(/queued after this run/i)).toBeInTheDocument();
+    expect(screen.getByText(/sent after this turn/i)).toBeInTheDocument();
     const box = screen.getByLabelText('Add a follow-up');
     fireEvent.change(box, { target: { value: 'Now add a regression test' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
@@ -1360,7 +1360,7 @@ describe('JobDetail', () => {
     );
     const queue = await screen.findByRole('region', { name: 'Queued messages' });
     expect(within(queue).getByText('Now add a regression test')).toBeInTheDocument();
-    expect(within(queue).getByText('Waiting for this turn')).toBeInTheDocument();
+    expect(within(queue).getByText('1 pending')).toBeInTheDocument();
     // The message waits; the page stays on the turn it was showing.
     expect(box).toHaveValue('');
     expect(window.location.pathname).toBe('/ajob_1');
