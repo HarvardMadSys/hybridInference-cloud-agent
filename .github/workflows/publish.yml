@@ -1,6 +1,6 @@
 name: Publish
 
-# One green push to dev becomes one release: seven images pushed by digest,
+# One green push to dev becomes one release: six images pushed by digest,
 # the deployment recipe archived, and one manifest naming all of it, published
 # as a GitHub release whose tag is the commit. Nothing here deploys. The
 # distribution that deploys pins the sha256 of the manifest's bytes
@@ -227,12 +227,6 @@ jobs:
             dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
             runner: '["self-hosted","Linux","X64","image-verify-x64"]'
             build_args: ""
-          - name: egress
-            arch: amd64
-            smoke_args: --role egress
-            dockerfile: deploy/host/Dockerfile.agent-egress-proxy
-            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
-            build_args: ""
     steps:
       - uses: actions/checkout@v6
         with:
@@ -390,7 +384,7 @@ jobs:
       # labels of the image that carries it — read from the pulled digest, so
       # the manifest describes the image that was published rather than the
       # arguments the build was given. A file rather than a job output, because
-      # seven cells of one matrix share one output namespace.
+      # six cells of one matrix share one output namespace.
       - name: Record what this cell published
         run: |
           set -euo pipefail
@@ -582,7 +576,7 @@ jobs:
 
   # ----------------------------------------------------------------- publish
   # Runs only when every cell succeeded — `needs` skips it otherwise, and it
-  # has no `if: always()` to bring it back. A release with six images is not a
+  # has no `if: always()` to bring it back. A release with five images is not a
   # smaller release; it is one that leaves a machine half updated.
   publish:
     name: Publish the release

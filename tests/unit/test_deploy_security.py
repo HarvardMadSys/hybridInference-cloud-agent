@@ -94,7 +94,6 @@ def test_ci_images_build_on_their_deployment_architecture() -> None:
         "runner": ("deploy/host/Dockerfile.agent-runner", x64),
         "sandbox": ("deploy/sandbox/Dockerfile.agent-sandbox", x64),
         "tunnel": ("deploy/host/Dockerfile.agent-gateway-tunnel", x64),
-        "egress": ("deploy/host/Dockerfile.agent-egress-proxy", x64),
     }
     assert {cell["name"] for cell in cells} == set(expected)
     for cell in cells:
@@ -183,23 +182,24 @@ def test_each_address_reaches_the_listener_it_names(
     )
 
 
-def test_nothing_on_the_closed_network_reaches_the_control_plane(compose: dict) -> None:
+def test_nothing_on_the_relay_network_reaches_the_control_plane(compose: dict) -> None:
     """What splitting the MCP listener onto 8001 actually bought.
 
-    The sandbox network exists so untrusted code reaches the gateway and the
-    MCP relay and nothing else. A second tunnel aliased onto it whose far end
-    is the control plane's 8000 would hand back everything the split removed —
-    jobs are created and cancelled there — without changing a line of the code
-    that reasons about it.
+    Group lifecycle attaches whatever it finds on the relay network to every
+    sandbox group's bridge, and the host rules then admit exactly those relays'
+    ports. A tunnel there whose far end is the control plane's 8000 would hand
+    back everything the split removed — jobs are created and cancelled there —
+    without changing a line of the code that reasons about it.
+
+    Asserted as the whole mapping, far ends included: a relay-network service
+    that is not a tunnel has no far end to read, and fails here by name.
     """
-    exposed = {
-        t["service"]: t["remote_port"]
-        for t in _tunnels(compose).values()
-        if t["network"] == "agent-egress"
+    on_relays = {
+        name: _defaults(str(svc["environment"]["TUNNEL_REMOTE_PORT"]))
+        for name, svc in compose["services"].items()
+        if "agent-relays" in (svc.get("networks") or {})
     }
-    assert "8000" not in exposed.values(), (
-        f"the control plane's main listener is on the sandbox network: {exposed}"
-    )
+    assert on_relays == {"gateway-tunnel": "8080", "mcp-tunnel": "8001"}, on_relays
 
 
 # ---------------------------------------------------------------------------
@@ -252,36 +252,3 @@ def test_the_dropped_assertions_stay_dropped_deliberately(compose: dict) -> None
     those assertions need rewriting rather than staying dropped.
     """
     assert "backend" not in compose["services"]
-
-
-# ---------------------------------------------------------------------------
-# The egress proxy's logs
-# ---------------------------------------------------------------------------
-
-
-def test_the_egress_proxy_hands_its_log_pipes_to_the_user_it_becomes() -> None:
-    """A cheap guard in front of an expensive lesson.
-
-    Squid opens its logs after dropping to `cache_effective_user`, and a
-    container's `/dev/stdout` is a `prw-------` pipe owned by root — so the
-    open fails and squid treats it as fatal. It exited on every start, 2814
-    times on staging, and took every agent job with it: the runner's isolation
-    preflight refuses to start without a reachable proxy.
-
-    **The real check is `egress-proxy-starts` in docker-build.yml**, which
-    starts the image, because nothing textual catches this — the broken config
-    parsed, and so did the first attempted fix. This only stops the `chown`
-    disappearing from the CMD in an edit that never runs CI.
-    """
-    dockerfile = (REPO / "deploy/host/Dockerfile.agent-egress-proxy").read_text()
-    config = (REPO / "apps" / "backend" / "cloud_agent_host/egress_proxy.py").read_text()
-
-    logs_to_pipes = "stdio:/dev/stdout" in config or "stdio:/dev/stderr" in config
-    if not logs_to_pipes:
-        pytest.skip("the proxy no longer logs to the container's pipes")
-
-    assert "chown proxy /dev/stdout /dev/stderr" in dockerfile, (
-        "squid drops to `proxy` before opening these pipes, and they are "
-        "root-owned — without the chown it exits on every start and the "
-        "runner's preflight takes the whole host down with it"
-    )

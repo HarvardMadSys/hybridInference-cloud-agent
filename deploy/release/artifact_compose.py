@@ -36,18 +36,17 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
 #: Which release role supplies each service, per stack.
 #:
 #: One image answers several services on purpose — the runner image runs the
-#: broker and the egress config renderer, the tunnel image runs all three
-#: tunnels — and the manifest carries one entry per role, so this table is what
-#: keeps "six artifacts" from becoming "six images and eleven questions".
+#: broker, the tunnel image runs all three tunnels — and the manifest carries
+#: one entry per role, so this table is what keeps "five roles" from becoming
+#: "six images and nine questions".
 STACKS: dict[str, dict[str, tuple[str, ...]]] = {
     "control-plane": {
         "control": ("migrate", "control-plane", "mcp-relay"),
         "web": ("web",),
     },
     "host": {
-        "runner": ("runner", "workspace-broker", "agent-egress-proxy-config"),
+        "runner": ("runner", "workspace-broker"),
         "tunnel": ("gateway-tunnel", "mcp-tunnel", "control-plane-tunnel"),
-        "egress": ("agent-egress-proxy",),
     },
 }
 

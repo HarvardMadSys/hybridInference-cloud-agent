@@ -43,15 +43,24 @@ callback allowlist from that value. An explicit
 `LOCAL_IDENTITY_ALLOWED_REDIRECTS` remains authoritative when testing a custom
 identity setup.
 
+Sandboxes use the same one network as production. Each retained sandbox
+group gets its own labelled, routable `freeinference-chat-net-*` bridge, and
+the runner and broker first install this stack's host nftables table on the
+Docker engine: public IPv4 on TCP 80/443, the resolver in
+`LOCAL_EGRESS_DNS_SERVER`, and the local inference and MCP relays; not the
+engine's own addresses, private ranges, other groups, or IPv6. The relay
+network only lets that lifecycle find the two relays; no sandbox joins it.
+`dev.sh` records the resolver the engine already hands containers (Colima's
+`192.168.5.1`, for example) the first time it writes `.env.local`.
+
 For an isolated second stack, also export a distinct `LOCAL_PROJECT_NAME`,
-`LOCAL_SANDBOX_IMAGE`, `LOCAL_AGENT_EGRESS_NETWORK`, `AGENT_NETWORK_NAME`, and
-the four published ports. New env files derive a project-scoped sandbox image
-tag automatically; an explicit value remains necessary when overriding an
-existing env file. This keeps its Docker images, volumes, service discovery,
-and sandbox egress backplane separate from another checkout's local stack.
-Each retained sandbox then gets its own labelled internal
-`freeinference-chat-net-*` bridge; the backplane is used only to discover the
-local inference and MCP relay endpoints.
+`LOCAL_SANDBOX_IMAGE`, `LOCAL_RELAY_NETWORK`, `LOCAL_CHAT_NETWORK_POOL`,
+`AGENT_NETWORK_NAME`, and the four published ports. New env files derive a
+project-scoped sandbox image tag automatically; an explicit value remains
+necessary when overriding an existing env file. This keeps its Docker images,
+volumes, service discovery, host rules and group addresses separate from
+another checkout's local stack; of two stacks whose pools overlap, the host
+rules refuse the one started later.
 `up`, `start`, and `smoke` fail before changing containers when either named
 network already belongs to a different Compose project; Compose's warning is
 not safe here because duplicate service aliases can route bootstrap or agent

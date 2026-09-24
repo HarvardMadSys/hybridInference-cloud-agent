@@ -6,15 +6,25 @@
 # whatever else the base file brings, on a box that was only ever meant to run
 # jobs. This file contains exactly what a remote runner host needs: the
 # runners, their workspace broker, three purpose-scoped tunnels, and the
-# closed/setup egress networks plus the proxy's isolated uplink.
+# network the sandbox groups discover their two relays on.
 #
 #   sandbox ──→ gateway-tunnel ──ssh──→ inference gateway
-#           └─→ mcp-tunnel ─────ssh──→ MCP-only relay
+#           ├─→ mcp-tunnel ─────ssh──→ MCP-only relay
+#           └─→ host rules and NAT ───→ public IPv4, TCP 80/443
 #   runner  ──→ control-plane-tunnel ─ssh──→ control-plane API
+#
+# Every sandbox group gets its own routable bridge, created outside Compose by
+# the runner and the broker. Before anything joins one, they install this
+# deployment's host nftables table, which admits public IPv4 on TCP 80/443,
+# the named resolver, and the two relays' service ports, and refuses the host,
+# private and special-purpose addresses, other groups, and IPv6. There is no
+# proxy and no second network for setup: preparing and running a task share
+# the group's one bridge.
 #
 # Both sides address the tunnel by the same name, because they have to: the
 # runner claims over AGENT_GATEWAY_URL and the sandbox is handed that same
-# value for its model calls. The alias resolves on both networks.
+# value for its model calls. The alias resolves on the runner's network and on
+# every group bridge the relay is attached to.
 #
 # Start it with deploy/host/sandbox_host.sh, which checks the pieces that
 # fail confusingly when missing.
@@ -46,21 +56,17 @@ services:
     networks:
       # The alias is declared on BOTH networks, and it has to be. The runner is
       # only on `internal` and is handed AGENT_GATEWAY_URL pointing at
-      # this name; chat lifecycle discovers this alias on the egress backplane
-      # and copies the relay endpoint onto each private sandbox network. An
-      # alias missing from either discovery network resolves for one side and NXDOMAINs
-      # for the other — which is what this file did until it was caught in
-      # review, while the comment above already claimed both.
+      # this name; group lifecycle discovers this alias on the relay network
+      # and attaches the tunnel, under the same name, to each group's bridge.
+      # An alias missing from either network resolves for one side and
+      # NXDOMAINs for the other — which is what this file did until it was
+      # caught in review, while the comment above already claimed both.
       internal:
         aliases:
           - ${AGENT_GATEWAY_HOSTNAME:-agent-gateway}
-      # On the closed discovery backplane too. Together with the MCP-only
-      # tunnel below, this is one of the two endpoints lifecycle code attaches
-      # to every chat-private Agent-phase bridge.
-      agent-egress:
-        aliases:
-          - ${AGENT_GATEWAY_HOSTNAME:-agent-gateway}
-      agent-egress-trusted:
+      # Together with the MCP-only tunnel below, one of the two endpoints
+      # lifecycle code attaches to every group bridge.
+      agent-relays:
         aliases:
           - ${AGENT_GATEWAY_HOSTNAME:-agent-gateway}
 
@@ -97,15 +103,13 @@ services:
       - ${AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS:?path to a known_hosts for the control-plane host}:/etc/agent-tunnel/known_hosts:ro
     networks:
       # On both, and aliased on both, for the same reason the gateway tunnel
-      # is: the runner resolves this name on `internal` and the sandbox
-      # on the egress network, and an alias declared on one NXDOMAINs on the other.
+      # is: the runner resolves this name on `internal`, lifecycle discovers it
+      # on the relay network, and an alias declared on one NXDOMAINs on the
+      # other.
       internal:
         aliases:
           - ${AGENT_MCP_HOSTNAME:-agent-mcp}
-      agent-egress:
-        aliases:
-          - ${AGENT_MCP_HOSTNAME:-agent-mcp}
-      agent-egress-trusted:
+      agent-relays:
         aliases:
           - ${AGENT_MCP_HOSTNAME:-agent-mcp}
 
@@ -113,11 +117,12 @@ services:
   # jobs, registers this host and heartbeats against the control plane's main
   # listener — the same 8000 the MCP tunnel deliberately stopped pointing at.
   #
-  # **Not on the egress network, and that is the entire point.** Splitting the MCP
-  # relay onto 8001 was worth nothing if a second alias put 8000 back on the
-  # closed network under a different name. A sandbox reaches the gateway and
-  # the MCP relay; the machine that runs it reaches the control plane; those
-  # are three permissions and three tunnels.
+  # **Not on the relay network, and that is the entire point.** Splitting the
+  # MCP relay onto 8001 was worth nothing if a second alias put 8000 on a group
+  # bridge under a different name. Its address on `internal` is a private one,
+  # which the host rules refuse from every group. A sandbox reaches the gateway
+  # and the MCP relay; the machine that runs it reaches the control plane;
+  # those are three permissions and three tunnels.
   control-plane-tunnel:
     build:
       context: ../..
@@ -159,68 +164,6 @@ services:
       internal:
         aliases:
           - ${AGENT_CONTROL_PLANE_HOSTNAME:-agent-control-plane}
-
-  # Render the Trusted-tier allowlist with the same validation the runner uses.
-  # This one-shot service has no network and no credentials; the only artifact
-  # it can produce is the Squid config in the Docker-owned volume below.
-  agent-egress-proxy-config:
-    build:
-      context: ../..
-      dockerfile: deploy/host/Dockerfile.agent-runner
-    restart: "no"
-    network_mode: none
-    environment:
-      AGENT_EGRESS_ALLOWLIST: ${AGENT_EGRESS_ALLOWLIST:-}
-      AGENT_EGRESS_PROXY_PORT: ${AGENT_EGRESS_PROXY_PORT:-3128}
-    command:
-      - python
-      - -m
-      - cloud_agent_host.egress_proxy
-      - --out
-      - /etc/squid/generated/squid.conf
-    volumes:
-      - agent-egress-proxy-config:/etc/squid/generated
-
-  # The setup network itself has no route. This is its only door, and Squid
-  # permits CONNECT only to the validated package-registry allowlist. It is
-  # deliberately absent from `internal`, the agent network, and the Docker
-  # socket; a proxy compromise must not reach the trusted runner stack.
-  agent-egress-proxy:
-    build:
-      context: ../..
-      dockerfile: deploy/host/Dockerfile.agent-egress-proxy
-    restart: unless-stopped
-    # Squid treats SIGTERM as a graceful shutdown and does not exit while it
-    # winds down, so this container is the one the Docker default applies to.
-    # Measured on two consecutive staging rollouts: 10.30s and 10.31s from
-    # `Recreate` to `Recreated`, against 0.1-0.3s for every other container in
-    # this stack, and this one sits upstream of the runners in the dependency
-    # order — so the whole rollout waited on it.
-    #
-    # A short bound is enough because there is nothing here to drain: the proxy
-    # stores no state, and the runners are already stopped before Compose
-    # replaces it. Anything still in flight loses a connection it would have
-    # lost anyway when this container was recreated.
-    #
-    # This makes SIGKILL the outcome rather than a clean exit, and that is
-    # expected: Squid's own `shutdown_lifetime` is longer than this bound, so
-    # its logs will not show a shutdown line. An operator looking for one
-    # after a rollout is looking for something this stack never had — before
-    # this bound, the ten-second default killed it just the same.
-    stop_grace_period: ${AGENT_EGRESS_STOP_GRACE:-2s}
-    environment:
-      # Squid reads only the generated file, but Compose needs the inputs on
-      # this long-running service too. Otherwise it reruns the renderer while
-      # leaving the old Squid process alive with its already-loaded ACL.
-      AGENT_EGRESS_CONFIG_FINGERPRINT: "${AGENT_EGRESS_ALLOWLIST:-}|${AGENT_EGRESS_PROXY_PORT:-3128}"
-    depends_on:
-      agent-egress-proxy-config:
-        condition: service_completed_successfully
-    volumes:
-      - agent-egress-proxy-config:/etc/squid/generated:ro
-    networks:
-      - agent-egress-trusted
-      - agent-egress-uplink
 
   workspace-broker:
     build:
@@ -266,18 +209,17 @@ services:
       AGENT_SANDBOX_MCP_URL: http://${AGENT_MCP_HOSTNAME:-agent-mcp}:${AGENT_MCP_TUNNEL_LISTEN_PORT:-8000}
       AGENT_SANDBOX_BACKEND: ${AGENT_SANDBOX_BACKEND:-kata}
       AGENT_SANDBOX_IMAGE: ${AGENT_SANDBOX_IMAGE:?name the sandbox image this deployment runs}
-      AGENT_EGRESS_NETWORK_PLATFORM_ONLY: ${AGENT_EGRESS_NETWORK_PLATFORM_ONLY:-agent-egress}
-      AGENT_EGRESS_SETUP_TIER: ${AGENT_EGRESS_SETUP_TIER:-trusted}
-      AGENT_EGRESS_AGENT_TIER: ${AGENT_EGRESS_AGENT_TIER:-platform_only}
-      AGENT_EGRESS_NETWORK_TRUSTED: ${AGENT_EGRESS_NETWORK_TRUSTED:-agent-egress-trusted}
-      AGENT_EGRESS_NETWORK_CUSTOM: ${AGENT_EGRESS_NETWORK_CUSTOM:-}
-      AGENT_EGRESS_NETWORK_FULL: ${AGENT_EGRESS_NETWORK_FULL:-}
-      AGENT_EGRESS_PROXY_URL_TRUSTED: http://agent-egress-proxy:${AGENT_EGRESS_PROXY_PORT:-3128}
-      AGENT_EGRESS_ALLOWLIST: ${AGENT_EGRESS_ALLOWLIST:-}
-      AGENT_EGRESS_CHAT_NETWORK_POOL: ${AGENT_EGRESS_CHAT_NETWORK_POOL:-10.240.0.0/16}
-      # Immutable owner label for daemon-wide retained-container discovery.
-      # Sibling staging/production Compose projects must never adopt each
-      # other's chat processes during broker startup reconciliation.
+      # The broker wakes groups on its own (Fork, files, terminals), so it
+      # builds and guards group bridges exactly as the runner does, from the
+      # same four values. See the runner below for what each one decides.
+      AGENT_RELAY_NETWORK: ${AGENT_RELAY_NETWORK:-${COMPOSE_PROJECT:?the unique host Compose project}-agent-relays}
+      AGENT_EGRESS_CHAT_NETWORK_POOL: ${AGENT_EGRESS_CHAT_NETWORK_POOL:?this deployment's own RFC1918 pool for group bridges}
+      AGENT_EGRESS_DNS_SERVER: ${AGENT_EGRESS_DNS_SERVER:?the one IPv4 resolver sandboxes may reach}
+      AGENT_EGRESS_PROTECTED_CIDRS: ${AGENT_EGRESS_PROTECTED_CIDRS:-}
+      # Immutable owner label for daemon-wide retained-container discovery, and
+      # the name of this deployment's host rules. Sibling staging/production
+      # Compose projects must never adopt each other's chat processes during
+      # broker startup reconciliation, nor rewrite each other's tables.
       AGENT_SANDBOX_NAMESPACE: ${COMPOSE_PROJECT:?the unique host Compose project}
     command:
       - python
@@ -287,9 +229,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - internal
-    depends_on:
-      agent-egress-proxy:
-        condition: service_started
 
   runner:
     # How long docker waits after SIGTERM before SIGKILL, and therefore how
@@ -327,9 +266,9 @@ services:
       AGENT_OPERATION_PROFILING_MODE: ${AGENT_OPERATION_PROFILING_MODE:-}
       # The tunnel, by the name both this container and the sandboxes resolve.
       # Overriding it with the gateway's real address is a mistake worth naming:
-      # the runner would reach it and the sandbox — on the closed network —
-      # would not, so jobs would be claimed and then die at their first model
-      # call.
+      # a sandbox reaches the gateway only through the tunnel attached to its
+      # group bridge, so the runner refuses a relay given by address, or one it
+      # cannot find on the relay network, before it claims anything.
       AGENT_GATEWAY_URL: http://${AGENT_GATEWAY_HOSTNAME:-agent-gateway}:${AGENT_TUNNEL_LISTEN_PORT:-8080}
       # The control plane the runner claims against — its own tunnel, not the
       # MCP one. They were the same relay until MCP moved to the control
@@ -392,15 +331,20 @@ services:
       AGENT_GIT_AUTHOR_NAME: ${AGENT_GIT_AUTHOR_NAME:-}
       AGENT_GIT_AUTHOR_EMAIL: ${AGENT_GIT_AUTHOR_EMAIL:-}
 
-      AGENT_EGRESS_NETWORK_PLATFORM_ONLY: ${AGENT_EGRESS_NETWORK_PLATFORM_ONLY:-agent-egress}
-      AGENT_EGRESS_SETUP_TIER: ${AGENT_EGRESS_SETUP_TIER:-trusted}
-      AGENT_EGRESS_AGENT_TIER: ${AGENT_EGRESS_AGENT_TIER:-platform_only}
-      AGENT_EGRESS_NETWORK_TRUSTED: ${AGENT_EGRESS_NETWORK_TRUSTED:-agent-egress-trusted}
-      AGENT_EGRESS_NETWORK_CUSTOM: ${AGENT_EGRESS_NETWORK_CUSTOM:-}
-      AGENT_EGRESS_NETWORK_FULL: ${AGENT_EGRESS_NETWORK_FULL:-}
-      AGENT_EGRESS_PROXY_URL_TRUSTED: http://agent-egress-proxy:${AGENT_EGRESS_PROXY_PORT:-3128}
-      AGENT_EGRESS_ALLOWLIST: ${AGENT_EGRESS_ALLOWLIST:-}
-      AGENT_EGRESS_CHAT_NETWORK_POOL: ${AGENT_EGRESS_CHAT_NETWORK_POOL:-10.240.0.0/16}
+      # --- The sandbox network (one, with nothing to select) ---
+      # Where lifecycle finds the two relays. Sandboxes never join it; each
+      # group's own bridge gets the relays attached under their aliases.
+      AGENT_RELAY_NETWORK: ${AGENT_RELAY_NETWORK:-${COMPOSE_PROJECT:?the unique host Compose project}-agent-relays}
+      # This deployment's RFC1918 pool, cut into one /29 per active group. No
+      # default: two deployments on one machine must hold disjoint pools, and
+      # the host rules refuse the later of two that overlap.
+      AGENT_EGRESS_CHAT_NETWORK_POOL: ${AGENT_EGRESS_CHAT_NETWORK_POOL:?this deployment's own RFC1918 pool for group bridges}
+      # The one IPv4 resolver a sandbox may reach, on TCP and UDP 53 — also
+      # when it sits on a private address or on this host.
+      AGENT_EGRESS_DNS_SERVER: ${AGENT_EGRESS_DNS_SERVER:?the one IPv4 resolver sandboxes may reach}
+      # Extra IPv4 blocks to refuse on top of the built-in private and
+      # special-purpose ones: an institution's public ranges, say. Only adds.
+      AGENT_EGRESS_PROTECTED_CIDRS: ${AGENT_EGRESS_PROTECTED_CIDRS:-}
       AGENT_SANDBOX_NAMESPACE: ${COMPOSE_PROJECT:?the unique host Compose project}
       # Host capacity sampling: the machine's own CPU, memory and retained
       # container count, reported on the heartbeat the runner already sends.
@@ -496,12 +440,10 @@ services:
     networks:
       - internal
     depends_on:
-      # Neither is the correctness barrier — the runner's live network probes
-      # are. These only spare an operator the first crash-loop while a narrow
+      # Not the correctness barrier — the runner's live network probes are.
+      # This only spares an operator the first crash-loop while a narrow
       # destination is still starting.
       gateway-tunnel:
-        condition: service_started
-      agent-egress-proxy:
         condition: service_started
 
 networks:
@@ -509,24 +451,10 @@ networks:
     # Local to this host. Nothing here talks to the gateway's compose network;
     # the tunnel is the only path off the machine.
     driver: bridge
-  agent-egress:
-    name: ${AGENT_EGRESS_NETWORK_PLATFORM_ONLY:-agent-egress}
-    # Route-less discovery backplane for the two fixed relays. Sandboxes are
-    # attached to derived per-chat internal bridges, not left here: Docker's
-    # `internal` flag blocks off-host routing but not peer containers.
+  agent-relays:
+    name: ${AGENT_RELAY_NETWORK:-${COMPOSE_PROJECT:?the unique host Compose project}-agent-relays}
+    # Discovery only: the two relays, and never a sandbox. Group lifecycle reads
+    # the relays' identities here and attaches them to each group's own bridge.
+    # `internal` because nothing on it needs a route, and the runner refuses to
+    # start if it has one.
     internal: true
-  agent-egress-trusted:
-    name: ${AGENT_EGRESS_NETWORK_TRUSTED:-agent-egress-trusted}
-    # Route-less discovery backplane for the proxy and fixed relays. Setup
-    # bridges copy only the proxy endpoint; an explicitly Trusted agent phase
-    # copies the proxy plus both relays so model/MCP traffic remains usable.
-    internal: true
-  agent-egress-uplink:
-    name: ${AGENT_EGRESS_NETWORK_UPLINK:-agent-egress-uplink}
-    # Intentionally routable, and structurally restricted to the proxy service.
-    driver: bridge
-
-volumes:
-  # Infrastructure config only. Chat workspace, provider state and Agent CLI
-  # sessions remain exclusively in each chat container's writable layer.
-  agent-egress-proxy-config:

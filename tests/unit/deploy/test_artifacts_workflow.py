@@ -174,16 +174,16 @@ def test_mcp_interactions_run_in_isolated_parallel_workers() -> None:
 
 
 def test_cleanup_cannot_reach_another_cell() -> None:
-    """Seven cells of one run share a run id, an attempt — and often a Docker host.
+    """Six cells of one run share a run id, an attempt — and often a Docker host.
 
     A label built from the first two is identical for all of them, so the first
     cell to finish removes the others' containers while they are still being
-    tested. That is what happened to the control and egress cells, twice, before
-    the artifact name went into the label.
+    tested. That is what happened to the control cell and the since-removed egress
+    cell, twice, before the artifact name went into the label.
     """
     naming = str(step("Name this cell")["run"])
     assert "matrix.artifact.name" in naming, (
-        "the label has to differ per cell, or cleanup reaches into the other six"
+        "the label has to differ per cell, or cleanup reaches into the other five"
     )
     labels = {f"345-1-{cell['name']}" for cell in cells()}
     assert len(labels) == len(cells())
@@ -279,7 +279,8 @@ def test_a_failed_run_leaves_nothing_behind() -> None:
     assert "docker image rm -f" not in run, (
         "not forced: two runs of the same commit build the same image id under different "
         "tags on a shared runner, and a forced removal takes their containers with it. That "
-        "is how the egress cell's container disappeared between `docker run` and its first "
+        "is how the since-removed egress cell's container disappeared between `docker run` "
+        "and its first "
         "`docker inspect`."
     )
 

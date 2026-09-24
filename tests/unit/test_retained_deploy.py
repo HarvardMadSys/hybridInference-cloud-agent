@@ -38,6 +38,7 @@ def _host(
     broker_running: bool = True,
     broker_serving: bool = True,
     candidate_exit: int = 0,
+    network_settings_exit: int = 0,
     storage_json: str | None = None,
     storage_exit: int = 0,
     storage_hang: bool = False,
@@ -103,6 +104,7 @@ def _host(
         "  'info') exit 0 ;;\n"
         '  *\' config --format json\') echo \'{"name":"test-retained","services":{"runner":{"image":"test-candidate-runner"}}}\' ;;\n'
         f"  run*'cloud_agent_host.candidate_check') exit {candidate_exit} ;;\n"
+        f"  run*'network_from_env()') exit {network_settings_exit} ;;\n"
         f"  *' ps -q runner') printf '%s\\n' '{runner_ids}' ;;\n"
         f"  *' ps -q workspace-broker') printf '%s\\n' '{broker_id}' ;;\n"
         f"  *' logs --since 2m runner') echo '{rejection_log}' ;;\n"
@@ -142,9 +144,10 @@ def _host(
         "AGENT_ENROLL_TOKEN",
         "AGENT_RETAINED_DOCKER_DATA_ROOT",
         "SIBLING_COMPOSE_PROJECTS",
-        "AGENT_EGRESS_NETWORK_PLATFORM_ONLY",
-        "AGENT_EGRESS_NETWORK_TRUSTED",
-        "AGENT_EGRESS_NETWORK_UPLINK",
+        "AGENT_RELAY_NETWORK",
+        "AGENT_EGRESS_CHAT_NETWORK_POOL",
+        "AGENT_EGRESS_DNS_SERVER",
+        "AGENT_EGRESS_PROTECTED_CIDRS",
         "AGENT_GATEWAY_HOSTNAME",
         "AGENT_MCP_HOSTNAME",
         "AGENT_CONTROL_PLANE_HOSTNAME",
@@ -192,6 +195,8 @@ def _add_required_host_paths(env: dict[str, str], tmp_path: Path) -> None:
             "AGENT_BROKER_REVERSE_BIND=172.24.0.1",
             "AGENT_BROKER_REVERSE_PORT=18092",
             "AGENT_WORKSPACE_BROKER_ADVERTISE_URL=http://172.24.0.1:18092",
+            "AGENT_EGRESS_CHAT_NETWORK_POOL=10.240.0.0/16",
+            "AGENT_EGRESS_DNS_SERVER=1.1.1.1",
         )
     )
     with (app_dir / ".env").open("a") as dotenv:
@@ -361,32 +366,45 @@ def test_shared_live_refuses_an_invalid_chat_idle_timeout(tmp_path: Path) -> Non
     assert "AGENT_CHAT_IDLE_TIMEOUT_S must be a positive number" in result.stderr
 
 
-def test_sibling_stacks_require_the_existing_closed_network_name(tmp_path: Path) -> None:
-    """An automatic rename would either cross-wire environments or strand chats."""
+def test_the_sandbox_network_settings_are_required_by_name(tmp_path: Path) -> None:
+    """A missing pool or resolver is named before anything is built or drained."""
     env = _host(tmp_path)
-    app_dir = Path(env["APP_DIR"])
-    with (app_dir / ".env").open("a") as dotenv:
-        dotenv.write("SIBLING_COMPOSE_PROJECTS=other-environment\n")
-
-    result = _run(env, "preflight")
-
-    assert result.returncode != 0
-    assert "AGENT_EGRESS_NETWORK_PLATFORM_ONLY must name" in result.stderr
-
-
-def test_egress_phase_networks_must_remain_distinct(tmp_path: Path) -> None:
-    env = _host(tmp_path)
-    app_dir = Path(env["APP_DIR"])
-    with (app_dir / ".env").open("a") as dotenv:
-        dotenv.write(
-            "AGENT_EGRESS_NETWORK_PLATFORM_ONLY=same-network\n"
-            "AGENT_EGRESS_NETWORK_TRUSTED=same-network\n"
+    _add_required_host_paths(env, tmp_path)
+    dotenv = Path(env["APP_DIR"]) / ".env"
+    dotenv.write_text(
+        "\n".join(
+            line
+            for line in dotenv.read_text().splitlines()
+            if not line.startswith(("AGENT_EGRESS_CHAT_NETWORK_POOL=", "AGENT_EGRESS_DNS_SERVER="))
         )
+        + "\n"
+    )
 
-    result = _run(env, "preflight")
+    result = _run(env, "prepare")
 
     assert result.returncode != 0
-    assert "must be three distinct names" in result.stderr
+    assert "AGENT_EGRESS_CHAT_NETWORK_POOL" in result.stderr
+    assert "AGENT_EGRESS_DNS_SERVER" in result.stderr
+
+
+def test_refused_network_settings_stop_the_rollout_before_draining(tmp_path: Path) -> None:
+    """The candidate's own parser reads the settings while the old runners serve.
+
+    A public pool or a resolver inside the pool would otherwise surface only as
+    new runners refusing to start, after the serving ones were drained.
+    """
+    env = _host(tmp_path, network_settings_exit=1)
+    _add_required_host_paths(env, tmp_path)
+    marker = tmp_path / "app/.shared-live-ready"
+    marker.write_text("previous-generation\n")
+    env["AGENT_DEPLOYMENT_SHA"] = "target-generation"
+
+    result = _run(env, "up")
+
+    assert result.returncode != 0
+    assert "sandbox network settings were refused" in result.stderr
+    assert "draining existing runners" not in result.stdout
+    assert marker.read_text() == "previous-generation\n"
 
 
 def test_scoped_relay_aliases_must_be_distinct(tmp_path: Path) -> None:
@@ -819,7 +837,7 @@ def _deploy_host_rollout(
     root = tmp_path / "deploy-root"
     protocol = root / "deploy/DEPLOY_PROTOCOL"
     protocol.parent.mkdir(parents=True)
-    protocol.write_text("shared-live-exact-sha-v3\n")
+    protocol.write_text("shared-live-exact-sha-v4\n")
     bring_up = root / "deploy/host/sandbox_host.sh"
     bring_up.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1909,7 +1927,6 @@ def test_a_shared_default_is_refused_whichever_command_reads_it(
         stream.write("STATE_BASE=/var/lib/hybridinference\n")
         stream.write("AGENT_HOST_STATE_ROOT=${STATE_BASE}/agent-host\n")
         stream.write("AGENT_ENROLL_TOKEN=synthetic-token\n")
-        stream.write("AGENT_EGRESS_NETWORK_PLATFORM_ONLY=agent-egress # shared default\n")
 
     result = _run(env, command)
 

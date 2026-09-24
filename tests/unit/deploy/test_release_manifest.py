@@ -36,7 +36,7 @@ SCHEMA = json.loads((REPO_ROOT / "deploy/release/manifest.schema.json").read_tex
 COMMIT = "4af1b771ac8f736a1be24f20cb307012af114a18"
 RUN_URL = "https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/34559400992"
 
-ROLES = ("control", "runner", "sandbox", "tunnel", "egress")
+ROLES = ("control", "runner", "sandbox", "tunnel")
 RUNTIMES = ("claude-code", "codex", "pi", "opencode", "kilo")
 
 
@@ -120,7 +120,7 @@ def test_a_complete_build_produces_a_manifest_the_schema_accepts() -> None:
     manifest = build()
     jsonschema.validate(manifest, SCHEMA)
     assert [entry["role"] for entry in manifest["artifacts"]] == sorted(
-        ["control", "web", "web", "runner", "sandbox", "tunnel", "egress"]
+        ["control", "web", "web", "runner", "sandbox", "tunnel"]
     )
     assert {entry["variant"] for entry in manifest["artifacts"] if entry["role"] == "web"} == {
         "root",

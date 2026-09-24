@@ -66,7 +66,7 @@ commit whose own CI is green. In order:
    runs `smoke.py` on the pulled image: the check is applied to the bytes the
    registry holds, and the pull is the first proof they can be pulled at all.
    It then records the digest and the image's own labels in one small file.
-3. **Assemble the manifest.** `publish_inputs.py assemble` turns the seven
+3. **Assemble the manifest.** `publish_inputs.py assemble` turns the six
    records into the generator's input (below), `build_recipe.py` packages the
    recipe, and `release_manifest.py` writes the document — only if every
    check passes.
@@ -125,10 +125,9 @@ that quietly proves less than its name is worse than no check.
 |---|---|
 | control | migrates a real database with `alembic upgrade head`, then answers `/healthz` |
 | web (both variants) | serves its sign-in page under its own mount prefix, with the identity read at runtime |
-| runner | its modules import and the Docker CLI it shells out to is present |
+| runner | its modules import, and the Docker CLI it shells out to and the `nft` its host-rule helper runs are present |
 | sandbox | every Agent CLI reports the version its own image label claims |
 | tunnel | the entrypoint runs and refuses an unreachable peer loudly |
-| egress | comes up under a rendered config and accepts connections |
 
 The same script is what CI runs on a pull request and what the publication
 workflow runs over the images it is about to push. One implementation, because
@@ -193,7 +192,7 @@ Decided, and written into `publish.yml`:
 
 | Package | Contents | Why |
 |---|---|---|
-| `ghcr.io/harvardmadsys/cloud-agent` | control, web (both variants), runner, tunnel, egress — one tag per role and commit | Access control in GHCR is per package, and none of these needs to differ. |
+| `ghcr.io/harvardmadsys/cloud-agent` | control, web (both variants), runner, tunnel — one tag per role and commit | Access control in GHCR is per package, and none of these needs to differ. |
 | `ghcr.io/harvardmadsys/cloud-agent-sandbox` | sandbox | It bundles third-party Agent CLIs whose redistribution is a separate question, so it needs a visibility switch of its own. |
 
 Each digest also gets one tag for people, `<cell>-<sha>` — `control-<sha>`,
@@ -211,20 +210,19 @@ window closes.
 The design is `docs/specs/2026-09-10-cloud-agent-release-fi-deploy-design.zh.md`,
 committed as written. Recorded here rather than edited into it:
 
-* **The deployment protocol is v3, not v2.** The design says
+* **The deployment protocol is v4, not v2.** The design says
   `shared-live-exact-sha-v2`; `deploy/DEPLOY_PROTOCOL` and both deploy scripts
-  say `shared-live-exact-sha-v3` as of this change. The schema pins what the
-  file says, and a test fails if the two ever disagree.
-* **Seven images, six Dockerfiles.** Web is one Dockerfile built twice, because
+  say `shared-live-exact-sha-v4`. v3 was the schema baseline rewrite; v4 is the
+  one sandbox network ([design](../../docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md)),
+  which removed the Squid `egress` artifact and made
+  `AGENT_EGRESS_CHAT_NETWORK_POOL` and `AGENT_EGRESS_DNS_SERVER` required on
+  every runner host. A v3 deployer cannot install a v4 release, and no
+  deployment rolls back across the boundary. The schema pins what the file
+  says, and a test fails if the two ever disagree.
+* **Six images, five Dockerfiles.** Web is one Dockerfile built twice, because
   `basePath` is resolved while the bundle is compiled. The design's "seven
-  logical artifacts" is what that adds up to; no dependency-resolution layer was
-  introduced along the way.
-* **`egress` stays an owned image.** Its startup command, its effective user and
-  the path of the config it reads are runtime behaviour this project has already
-  paid for once — the proxy crash-looped 2814 times on staging before the
-  `chown` in its `CMD` existed. Trading that for a third-party base plus a
-  recipe-level command override would add a validation path and remove no
-  component, so the image stays ours.
+  logical artifacts" counted the egress proxy, which the one sandbox network
+  retired; no dependency-resolution layer was introduced along the way.
 * **Runtime labels keep their namespace.** They are
   `org.freeinference.runtime.*` today, and the manifest reads them as they are.
   Moving them to a neutral namespace is a dual-read migration of its own (D8),

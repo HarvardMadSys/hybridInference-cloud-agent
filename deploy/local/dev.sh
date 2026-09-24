@@ -88,12 +88,32 @@ local_control_network() {
   printf '%s\n' "${network_name:-cloud-agent}"
 }
 
-local_agent_egress_network() {
-  network_name=${LOCAL_AGENT_EGRESS_NETWORK:-}
+local_relay_network() {
+  network_name=${LOCAL_RELAY_NETWORK:-}
   if [ -z "$network_name" ] && [ -f "$ENV_FILE" ]; then
-    network_name=$(sed -n 's/^LOCAL_AGENT_EGRESS_NETWORK=//p' "$ENV_FILE" | tail -n 1)
+    network_name=$(sed -n 's/^LOCAL_RELAY_NETWORK=//p' "$ENV_FILE" | tail -n 1)
   fi
-  printf '%s\n' "${network_name:-freeinference-local-agent-egress}"
+  printf '%s\n' "${network_name:-freeinference-local-agent-relays}"
+}
+
+local_default_dns_server() {
+  # The resolver this Docker engine already hands an ordinary container, which
+  # is by construction one a container can reach: Colima's VM forwarder,
+  # Docker Desktop's, or a Linux host's upstream behind systemd-resolved. A
+  # loopback or IPv6 answer is not one a sandbox can use, and no answer at all
+  # falls back to a public resolver.
+  detected=$(docker run --rm --network bridge --entrypoint awk postgres:16-alpine \
+    '/^nameserver [0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/ && $2 !~ /^127[.]/ { print $2; exit }' \
+    /etc/resolv.conf 2>/dev/null) || detected=
+  printf '%s\n' "${detected:-1.1.1.1}"
+}
+
+append_dns_server_if_missing() {
+  # Detected once and written down, so it is visible, editable, and not a
+  # container start on every invocation.
+  if ! grep -q '^LOCAL_EGRESS_DNS_SERVER=' "$ENV_FILE"; then
+    append_env_if_missing LOCAL_EGRESS_DNS_SERVER "$(local_default_dns_server)"
+  fi
 }
 
 validate_network_owner() {
@@ -109,7 +129,7 @@ validate_network_owner() {
   }
   if [ "$owner" != "$expected_project" ]; then
     echo "Docker network '$network_name' belongs to Compose project '${owner:-<unlabelled>}', not '$expected_project'." >&2
-    echo "Choose unique LOCAL_PROJECT_NAME, AGENT_NETWORK_NAME, LOCAL_AGENT_EGRESS_NETWORK, and published ports before starting this checkout." >&2
+    echo "Choose unique LOCAL_PROJECT_NAME, AGENT_NETWORK_NAME, LOCAL_RELAY_NETWORK, LOCAL_CHAT_NETWORK_POOL, and published ports before starting this checkout." >&2
     return 1
   fi
 }
@@ -117,13 +137,13 @@ validate_network_owner() {
 validate_local_network_ownership() {
   project_name=$(local_project_name)
   control_network=$(local_control_network)
-  egress_network=$(local_agent_egress_network)
-  if [ "$control_network" = "$egress_network" ]; then
-    echo "AGENT_NETWORK_NAME and LOCAL_AGENT_EGRESS_NETWORK must be different." >&2
+  relay_network=$(local_relay_network)
+  if [ "$control_network" = "$relay_network" ]; then
+    echo "AGENT_NETWORK_NAME and LOCAL_RELAY_NETWORK must be different." >&2
     return 1
   fi
   validate_network_owner "$control_network" "$project_name"
-  validate_network_owner "$egress_network" "$project_name"
+  validate_network_owner "$relay_network" "$project_name"
 }
 
 random_hex() {
@@ -172,8 +192,9 @@ upgrade_existing_env() {
   append_env_if_missing LOCAL_SANDBOX_IMAGE "$(local_sandbox_image)"
   append_env_if_missing LOCAL_HOST_SLOTS 2
   append_env_if_missing AGENT_DEPLOYMENT_SHA "local-$(local_project_name)"
-  append_env_if_missing LOCAL_AGENT_EGRESS_NETWORK freeinference-local-agent-egress
+  append_env_if_missing LOCAL_RELAY_NETWORK freeinference-local-agent-relays
   append_env_if_missing LOCAL_CHAT_NETWORK_POOL 10.240.0.0/16
+  append_dns_server_if_missing
   append_env_if_missing GATEWAY_ISSUER "freeinference-local"
   append_env_if_missing GATEWAY_AUTHORIZE_URL "http://127.0.0.1:${edge_port}/authorize"
   append_env_if_missing AGENT_SESSION_REDIRECT_URI \
@@ -232,7 +253,7 @@ ensure_env() {
       'LOCAL_SANDBOX_IMAGE=freeinference-cloud-agent-sandbox-freeinference-local:local' \
       'LOCAL_HOST_SLOTS=2' \
       'AGENT_DEPLOYMENT_SHA=local-freeinference-local' \
-      'LOCAL_AGENT_EGRESS_NETWORK=freeinference-local-agent-egress' \
+      'LOCAL_RELAY_NETWORK=freeinference-local-agent-relays' \
       'LOCAL_CHAT_NETWORK_POOL=10.240.0.0/16' \
       'GATEWAY_AUTHORIZE_URL=http://127.0.0.1:13002/authorize' \
       'AGENT_SESSION_REDIRECT_URI=http://127.0.0.1:13002/api/v1/session/callback' \
@@ -245,6 +266,7 @@ ensure_env() {
       'LOCAL_AGENT_TIMEOUT_S=600' \
       'AGENT_RETAINED_DOCKER_DATA_ROOT=/var/lib/docker'
   } >"$ENV_FILE"
+  append_dns_server_if_missing
   echo "Generated $ENV_FILE with local-only random credentials."
 }
 

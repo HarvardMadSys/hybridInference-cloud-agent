@@ -1,7 +1,7 @@
 """Static checks on the self-hosted runner deployment.
 
 A compose file cannot be unit-tested by running it, but the properties that
-matter here are structural: an egress network that is not actually internal, or
+matter here are structural: a relay network that is not actually internal, or
 a flag the runner does not implement, are silent failures — the first weakens
 the sandbox boundary without anyone noticing, the second only shows up when a
 runner container crash-loops in production.
@@ -102,8 +102,10 @@ def test_local_dev_script_upgrades_an_existing_env_without_rotating_it(tmp_path:
     assert values["AGENT_SESSION_SECRET"] == "keep-this-secret"
     assert values["AGENT_WORKSPACE_BROKER_TOKEN"] == "keep-this-broker-token"
     assert values["LOCAL_PROJECT_NAME"] == "freeinference-local"
-    assert values["LOCAL_AGENT_EGRESS_NETWORK"] == "freeinference-local-agent-egress"
+    assert values["LOCAL_RELAY_NETWORK"] == "freeinference-local-agent-relays"
     assert values["LOCAL_CHAT_NETWORK_POOL"] == "10.240.0.0/16"
+    # This docker answers nothing, so no engine resolver was found.
+    assert values["LOCAL_EGRESS_DNS_SERVER"] == "1.1.1.1"
     assert values["GATEWAY_AUTHORIZE_URL"] == "http://127.0.0.1:23002/authorize"
     assert values["AGENT_SESSION_REDIRECT_URI"] == (
         "http://127.0.0.1:23002/api/v1/session/callback"
@@ -115,6 +117,72 @@ def test_local_dev_script_upgrades_an_existing_env_without_rotating_it(tmp_path:
         "http://127.0.0.1:24002/api/v1/session/callback",
         "http://127.0.0.1:24002",
     ]
+
+
+def _local_dev_with_resolver(tmp_path: Path, resolv_answer: str) -> tuple[Path, dict]:
+    script = tmp_path / "repo/deploy/local/dev.sh"
+    script.parent.mkdir(parents=True)
+    shutil.copy2(_LOCAL_DEV_SCRIPT, script)
+    (script.parent / ".env.local").write_text(
+        "AGENT_WORKSPACE_BROKER_TOKEN=keep\nLOCAL_EDGE_PORT=13002\n"
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    runs = tmp_path / "docker-runs"
+    fake_docker = fake_bin / "docker"
+    # `compose version` fails so the standalone fallback below is used; a
+    # `run` answers as the engine's resolv.conf would, through the real awk.
+    fake_docker.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        '  run) echo run >>"$DOCKER_RUNS"; shift $(($# - 2)); '
+        'printf "%b" "$RESOLV_ANSWER" | awk "$1" ;;\n'
+        "  *) exit 1 ;;\n"
+        "esac\n"
+    )
+    fake_docker.chmod(0o755)
+    fake_compose = fake_bin / "docker-compose"
+    fake_compose.write_text("#!/bin/sh\nexit 0\n")
+    fake_compose.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "DOCKER_RUNS": str(runs),
+        "RESOLV_ANSWER": resolv_answer,
+    }
+    return script, env
+
+
+@pytest.mark.parametrize(
+    "resolv,expected",
+    [
+        ("nameserver 192.168.5.1\n", "192.168.5.1"),
+        # Loopback is this engine's, not the sandbox's; IPv6 is refused.
+        ("nameserver 127.0.0.53\nnameserver 10.0.0.2\n", "10.0.0.2"),
+        ("nameserver fd00::1\n", "1.1.1.1"),
+        ("", "1.1.1.1"),
+    ],
+)
+def test_local_dev_records_the_resolver_containers_already_use(
+    tmp_path: Path, resolv: str, expected: str
+) -> None:
+    script, env = _local_dev_with_resolver(tmp_path, resolv)
+
+    first = subprocess.run(
+        ["sh", str(script), "config"], env=env, capture_output=True, text=True, check=False
+    )
+    assert first.returncode == 0, first.stderr
+    second = subprocess.run(
+        ["sh", str(script), "config"], env=env, capture_output=True, text=True, check=False
+    )
+    assert second.returncode == 0, second.stderr
+
+    lines = (script.parent / ".env.local").read_text().splitlines()
+    assert [line for line in lines if line.startswith("LOCAL_EGRESS_DNS_SERVER=")] == [
+        f"LOCAL_EGRESS_DNS_SERVER={expected}"
+    ]
+    # Written once: an operator's edit is not overwritten by a later start.
+    assert (tmp_path / "docker-runs").read_text().splitlines() == ["run"]
 
 
 def test_local_dev_refuses_to_replace_lost_credentials_for_an_existing_database(
@@ -167,8 +235,9 @@ def test_local_up_stops_before_full_stack_when_retained_database_auth_fails(
         "AGENT_DATABASE_URL=postgresql://cloudagent:wrong-retained-password@postgres/cloudagent\n"
         "AGENT_WORKSPACE_BROKER_TOKEN=keep\n"
         "LOCAL_PROJECT_NAME=freeinference-local\n"
-        "LOCAL_AGENT_EGRESS_NETWORK=freeinference-local-agent-egress\n"
+        "LOCAL_RELAY_NETWORK=freeinference-local-agent-relays\n"
         "LOCAL_CHAT_NETWORK_POOL=10.240.0.0/16\n"
+        "LOCAL_EGRESS_DNS_SERVER=192.168.5.1\n"
         "LOCAL_EDGE_PORT=13002\n"
         "GATEWAY_AUTHORIZE_URL=http://127.0.0.1:13002/authorize\n"
         "AGENT_SESSION_REDIRECT_URI=http://127.0.0.1:13002/api/v1/session/callback\n"
@@ -263,14 +332,28 @@ def test_the_local_stack_can_switch_profiling_on_for_every_producer(local_compos
 
 
 def test_complete_local_sandbox_network_has_only_narrow_relays(local_compose: dict):
-    on_egress = {
+    on_relays = {
         name
         for name, service in local_compose["services"].items()
-        if "agent-egress" in (service.get("networks") or {})
+        if "agent-relays" in (service.get("networks") or {})
     }
 
-    assert local_compose["networks"]["agent-egress"]["internal"] is True
-    assert on_egress == {"local-gateway", "mcp-relay"}
+    assert local_compose["networks"]["agent-relays"]["internal"] is True
+    assert on_relays == {"local-gateway", "mcp-relay"}
+
+
+def test_complete_local_stack_uses_the_one_network(local_compose: dict):
+    """The local stack runs the production network, not a closed local variant."""
+    for name in ("runner", "workspace-broker"):
+        env = local_compose["services"][name]["environment"]
+        assert (
+            env["AGENT_RELAY_NETWORK"] == "${LOCAL_RELAY_NETWORK:-freeinference-local-agent-relays}"
+        )
+        assert env["AGENT_EGRESS_DNS_SERVER"].startswith("${LOCAL_EGRESS_DNS_SERVER:?")
+        assert env["AGENT_EGRESS_CHAT_NETWORK_POOL"] == "${LOCAL_CHAT_NETWORK_POOL:-10.240.0.0/16}"
+    for service in local_compose["services"].values():
+        for key in service.get("environment") or {}:
+            assert "TIER" not in key and "PROXY" not in key, key
 
 
 def test_mcp_only_listener_receives_the_connection_decryption_key() -> None:
@@ -383,14 +466,13 @@ def test_docker_build_context_excludes_local_dependency_trees():
     assert "apps/frontend/.next" in ignored
 
 
-def test_egress_network_is_internal(compose: dict):
-    """The sandbox network must have no route off the host.
+def test_the_relay_network_is_internal(compose: dict):
+    """The relay discovery network needs no route, and holds no sandbox.
 
-    This is the PlatformOnly tier expressed as infrastructure: a sandbox on an
-    internal network reaches the gateway and nothing else, whatever the agent
-    inside decides to try.
+    Group lifecycle reads the two relays' identities there and attaches them
+    to each group's own bridge; the runner refuses to start if it is routable.
     """
-    assert compose["networks"]["agent-egress"]["internal"] is True
+    assert compose["networks"]["agent-relays"]["internal"] is True
 
 
 def test_runner_mounts_the_docker_socket_read_only(compose: dict):
@@ -501,54 +583,53 @@ def _expand(value: str) -> str:
     return re.sub(r"\$\{[A-Za-z_][A-Za-z0-9_]*:-([^}]*)\}", r"\1", value)
 
 
-def test_the_egress_network_name_is_pinned(compose: dict):
+def test_the_relay_network_name_is_pinned(compose: dict):
     """Compose prefixes generated network names with the project name.
 
-    The runner passes this value straight to ``docker run --network``, so
-    without an explicit name the sandbox is asked to join `agent-egress` while
-    the network that exists is `hybridinference_agent-egress`, and every spawn
-    fails.
+    The runner looks the relays up by this exact name, so without an explicit
+    one it asks for `agent-relays` while the network that exists is
+    `<project>_agent-relays`, and every group fails to find its relays. The
+    name is derived from the project, so two stacks on one machine never
+    discover each other's relays.
     """
-    # Interpolated off the tier variable, so the network compose creates, the
-    # one the gateway joins and the one the runner spawns onto cannot diverge.
-    assert _expand(compose["networks"]["agent-egress"]["name"]) == "agent-egress"
+    name = compose["networks"]["agent-relays"]["name"]
+    assert "COMPOSE_PROJECT" in name
+    for service in ("runner", "workspace-broker"):
+        assert compose["services"][service]["environment"]["AGENT_RELAY_NETWORK"] == name
 
 
-def test_something_answers_on_the_sandbox_network(compose: dict):
-    """An internal network with only the sandbox on it is a network to nowhere.
+def test_exactly_the_two_relays_are_discoverable(compose: dict):
+    """A relay found here is attached to every group bridge, so the set is narrow.
 
-    Model calls and event reporting both go to the gateway; if nothing on this
-    network can carry them, the sandbox fails at its first request. The source
-    asserted the gateway service itself sat here; in this topology the tunnel
-    stands in for it, which is the whole point of the remote form.
+    Model calls go to the gateway tunnel and tool calls to the MCP tunnel; if
+    nothing here can carry them, the sandbox fails at its first request.
     """
-    on_egress = {
+    on_relays = {
         name
         for name, svc in compose["services"].items()
-        if "agent-egress" in (svc.get("networks") or {})
+        if "agent-relays" in (svc.get("networks") or {})
     }
-    # **Exactly these two, named.** The sandbox has two narrow destinations
-    # now — the gateway for model calls, the relay for tools — and this is the
-    # assertion that keeps "narrow" true. Loosening it to "at least one" or "a
-    # non-empty set" is the natural way to make it pass after adding a service,
-    # and it would let the next addition put anything at all on the closed
-    # network without a word.
-    assert on_egress == {"gateway-tunnel", "mcp-tunnel"}
+    # **Exactly these two, named.** Loosening it to "at least one" or "a
+    # non-empty set" is the natural way to make it pass after adding a
+    # service, and it would let the next addition be attached to every group
+    # bridge without a word.
+    assert on_relays == {"gateway-tunnel", "mcp-tunnel"}
 
 
 def test_the_gateway_name_resolves_on_every_network_that_is_given_it(compose: dict):
     """**The name is handed to two services on two different networks.**
 
-    The runner sits on `hybridinference` and the sandbox on `agent-egress`, and
-    both are handed the same `AGENT_GATEWAY_URL`. A Docker network alias is
-    per-network, so declaring it on one resolves for one of them and NXDOMAINs
-    for the other — the runner claims a job and then cannot reach the gateway
-    to report a single event.
+    The runner sits on `internal`, and group lifecycle finds the relay by the
+    same name on `agent-relays` before attaching it, under that name, to a
+    group bridge. Both are handed the same `AGENT_GATEWAY_URL`. A Docker
+    network alias is per-network, so declaring it on one resolves for one of
+    them and NXDOMAINs for the other — the runner claims a job and then cannot
+    reach the gateway to report a single event.
 
-    Caught in review: the alias was on `agent-egress` only, while the comment
-    above it already claimed both. Nothing here compared the name a service is
-    *given* against the networks it can resolve it on, so both halves looked
-    right in isolation.
+    Caught in review: the alias was on the sandbox side only, while the
+    comment above it already claimed both. Nothing here compared the name a
+    service is *given* against the networks it can resolve it on, so both
+    halves looked right in isolation.
     """
     tunnel = compose["services"]["gateway-tunnel"]
     hostname = "${AGENT_GATEWAY_HOSTNAME:-agent-gateway}"
@@ -569,20 +650,15 @@ def test_the_gateway_name_resolves_on_every_network_that_is_given_it(compose: di
         networks = svc.get("networks")
         needs_it.update(networks if isinstance(networks, list) else (networks or {}).keys())
 
-    # The sandbox is not a compose service — the runner starts it on the egress
-    # network and passes the same URL down, so that network counts too.
-    needs_it.add(
-        compose["services"]["runner"]["environment"]["AGENT_EGRESS_NETWORK_PLATFORM_ONLY"]
-        .split(":-")[-1]
-        .rstrip("}")
-    )
+    # The sandbox is not a compose service. Lifecycle discovers the relay on
+    # the relay network by this alias, so that network counts too.
+    needs_it.add("agent-relays")
 
-    unresolvable = sorted(needs_it - resolves_on - {"agent-egress"})
+    unresolvable = sorted(needs_it - resolves_on)
     assert not unresolvable, (
         f"services on {unresolvable} are given {hostname} but cannot resolve it; "
         f"the alias is declared only on {sorted(resolves_on)}"
     )
-    assert "agent-egress" in resolves_on, "the sandbox network cannot resolve the gateway name"
 
 
 def test_the_tunnel_key_is_allowed_the_one_thing_it_exists_to_do(compose: dict):
@@ -807,124 +883,72 @@ def test_agent_runtimes_are_pinned_not_floating():
         assert re.fullmatch(r"\d+\.\d+\.\d+", value), f"{name}={value} is not an exact version"
 
 
-def test_the_agent_phase_is_closed_in_the_shipped_configuration(compose: dict):
-    """The turn driven by untrusted model output reaches the gateway and nothing else.
+_RETIRED_NETWORK_SETTINGS = (
+    "AGENT_EGRESS_SETUP_TIER",
+    "AGENT_EGRESS_AGENT_TIER",
+    "AGENT_EGRESS_NETWORK_",
+    "AGENT_EGRESS_PROXY",
+    "AGENT_EGRESS_ALLOWLIST",
+    "AGENT_EGRESS_STOP_GRACE",
+    "AGENT_SANDBOX_ALLOW_OPEN_NETWORK",
+    "AGENT_SANDBOX_NETWORK",
+)
 
-    This is the differentiator, not an implementation detail: the setup phase
-    may be raised to an allowlist, but the phase that executes what a model
-    decided to do stays on a network with no route. A default that opened it
-    would be the one change here nobody would notice from the outside.
+
+@pytest.mark.parametrize("path", [_COMPOSE, _LOCAL_COMPOSE, _CONTROL_PLANE_COMPOSE])
+def test_there_is_no_network_mode_to_select(path: Path):
+    """One network, so no setting may choose another one.
+
+    Each of these once picked a tier, a proxy or an open network. A deployment
+    file that still passes one along reads as a choice that no longer exists,
+    and one that the runner would silently ignore.
+    """
+    text = path.read_text()
+    for name in _RETIRED_NETWORK_SETTINGS:
+        assert name not in text, f"{path.name} still passes {name}"
+    services = yaml.safe_load(text)["services"]
+    assert not [name for name in services if "proxy" in name], "no proxy service remains"
+
+
+def test_runner_and_broker_build_group_networks_from_the_same_settings(compose: dict):
+    """Either process may create or wake a group, so they must agree exactly.
+
+    A broker with another pool, resolver or relay network would build the
+    group bridge for a Fork that the runner then refuses, or install a host
+    table the runner's verification reports as tampered.
+    """
+    runner = compose["services"]["runner"]["environment"]
+    broker = compose["services"]["workspace-broker"]["environment"]
+    for name in (
+        "AGENT_SANDBOX_NAMESPACE",
+        "AGENT_RELAY_NETWORK",
+        "AGENT_EGRESS_CHAT_NETWORK_POOL",
+        "AGENT_EGRESS_DNS_SERVER",
+        "AGENT_EGRESS_PROTECTED_CIDRS",
+        "AGENT_GATEWAY_URL",
+        "AGENT_SANDBOX_MCP_URL",
+    ):
+        assert runner[name] == broker[name], name
+
+
+def test_the_pool_and_resolver_have_no_default(compose: dict):
+    """Both are deployment facts. A default would be a guess about this host.
+
+    Two deployments on one machine sharing a defaulted pool are refused by the
+    host rules only after the second has drained its predecessor's runners;
+    a defaulted resolver may be one this site does not let out at all.
     """
     env = compose["services"]["runner"]["environment"]
-    # And the spawn network tracks the same variable the network block names.
-    assert _expand(env["AGENT_EGRESS_NETWORK_PLATFORM_ONLY"]) == _expand(
-        compose["networks"]["agent-egress"]["name"]
-    )
-    assert "platform_only" in env["AGENT_EGRESS_AGENT_TIER"]
+    assert env["AGENT_EGRESS_CHAT_NETWORK_POOL"].startswith("${AGENT_EGRESS_CHAT_NETWORK_POOL:?")
+    assert env["AGENT_EGRESS_DNS_SERVER"].startswith("${AGENT_EGRESS_DNS_SERVER:?")
+    assert env["AGENT_EGRESS_PROTECTED_CIDRS"] == "${AGENT_EGRESS_PROTECTED_CIDRS:-}"
 
 
-def test_the_setup_tier_the_overlay_selects_is_one_it_actually_ships(compose: dict):
-    """Naming `trusted` obliges this file to ship the thing that honours it.
-
-    The failure this prevents is a config that reads as "dependencies can be
-    installed" over a network that reaches only the gateway — every setup
-    script then dies at DNS, and nothing in the compose file looks wrong. The
-    tier needs three things present together, so they are asserted together.
-    """
-    env = compose["services"]["runner"]["environment"]
-    if "trusted" not in _expand(env["AGENT_EGRESS_SETUP_TIER"]):
-        pytest.skip("this overlay does not select the trusted tier")
-
-    trusted = _expand(env["AGENT_EGRESS_NETWORK_TRUSTED"])
-    assert trusted, "the trusted tier is selected but names no network"
-    declared = {
-        _expand(network.get("name", name)): network for name, network in compose["networks"].items()
-    }
-    assert trusted in declared, f"{trusted} is selected but this file does not create it"
-
-    # Internal like the closed tier. The difference between the two is the
-    # proxy on it, not a route — a routable network here would hand the setup
-    # phase the whole internet while still being called "trusted".
-    assert declared[trusted]["internal"] is True
-
-    proxy = compose["services"]["agent-egress-proxy"]
-    assert trusted in [_expand(n) for n in proxy["networks"]], (
-        "the proxy is not on the network whose traffic it is supposed to police"
-    )
-    for relay in ("gateway-tunnel", "mcp-tunnel"):
-        assert "agent-egress-trusted" in compose["services"][relay]["networks"], (
-            f"{relay} is absent from trusted discovery, so NO_PROXY makes its "
-            "platform URL resolve to nowhere"
-        )
-    # And the runner must actually tell the sandbox to use it.
-    url = _expand(env["AGENT_EGRESS_PROXY_URL_TRUSTED"])
-    assert url.startswith("http://"), "the trusted tier is selected with no proxy URL"
-
-
-def test_the_proxy_url_names_the_port_the_generated_config_listens_on(compose: dict):
-    """Two places hold one number, so they are checked against each other.
-
-    A mismatch is invisible in review and total at run time: Squid listens on
-    one port, every sandbox dials another, and the first symptom is that no
-    dependency install has ever worked.
-    """
-    from cloud_agent_host.egress_proxy import DEFAULT_PROXY_PORT
-
-    env = compose["services"]["runner"]["environment"]
-    assert _expand(env["AGENT_EGRESS_PROXY_URL_TRUSTED"]).endswith(f":{DEFAULT_PROXY_PORT}")
-
-
-def test_the_proxy_cannot_reach_the_rest_of_the_stack(compose: dict):
-    """A Squid reachable by an untrusted sandbox must not also see the database.
-
-    The proxy is the one component here that takes input from inside the
-    sandbox and holds a route to the internet. Putting it on `hybridinference`
-    for convenience would mean a Squid compromise reaches Postgres.
-    """
-    proxy = compose["services"]["agent-egress-proxy"]
-    assert "internal" not in proxy["networks"]
-    assert not proxy.get("volumes") or all(
-        "docker.sock" not in volume for volume in proxy["volumes"]
-    )
-
-    uplink = [n for n in proxy["networks"] if "uplink" in n]
-    assert uplink, "the proxy has no routable leg, so it can police nothing"
-    declared = compose["networks"][uplink[0]]
-    assert not declared.get("internal"), "the proxy's uplink must actually route out"
-    on_uplink = [
-        name
-        for name, service in compose["services"].items()
-        if uplink[0] in (service.get("networks") or [])
-    ]
-    assert on_uplink == ["agent-egress-proxy"], (
-        f"the routable network must hold only the proxy, but also holds {on_uplink}"
-    )
-
-
-def test_the_proxy_config_is_generated_by_the_validating_renderer(compose: dict):
-    """The allowlist reaches Squid's config only through code that checks it.
-
-    A domain carrying a newline appends directives to the file that decides
-    what an untrusted sandbox may reach. The renderer refuses those; a
-    hand-written config, or a shell loop in an entrypoint, would not.
-    """
-    config_service = compose["services"]["agent-egress-proxy-config"]
-    assert "cloud_agent_host.egress_proxy" in config_service["command"]
-    assert "AGENT_EGRESS_ALLOWLIST" in config_service["environment"]
-
-    # It renders a file and must not be able to do anything else.
-    assert config_service["network_mode"] == "none"
-
-    proxy = compose["services"]["agent-egress-proxy"]
-    assert proxy["depends_on"]["agent-egress-proxy-config"]["condition"] == (
-        "service_completed_successfully"
-    ), "the proxy may start before its config exists, i.e. with no config at all"
-    fingerprint = proxy["environment"]["AGENT_EGRESS_CONFIG_FINGERPRINT"]
-    assert "AGENT_EGRESS_ALLOWLIST" in fingerprint
-    assert "AGENT_EGRESS_PROXY_PORT" in fingerprint
-    assert any(volume.endswith(":ro") for volume in proxy["volumes"]), (
-        "the proxy can rewrite the allowlist it is enforcing"
-    )
+def test_the_runner_image_carries_the_host_rule_helper():
+    """The guard runs `nft` from the runner's own image, never from the sandbox's."""
+    runner = (REPO_ROOT / "deploy/host/Dockerfile.agent-runner").read_text()
+    assert re.search(r"^\s+nftables \\$", runner, re.MULTILINE)
+    assert "nftables" not in _DOCKERFILE.read_text()
 
 
 def test_runner_and_broker_share_the_private_network_pool(compose: dict):
@@ -934,7 +958,6 @@ def test_runner_and_broker_share_the_private_network_pool(compose: dict):
     ]
 
     assert runner_pool == broker_pool
-    assert runner_pool.endswith("/16}")
     runner_namespace = compose["services"]["runner"]["environment"]["AGENT_SANDBOX_NAMESPACE"]
     broker_namespace = compose["services"]["workspace-broker"]["environment"][
         "AGENT_SANDBOX_NAMESPACE"
@@ -997,29 +1020,6 @@ def test_an_unparsable_bound_falls_back_rather_than_crash_looping(monkeypatch):
     monkeypatch.setenv("AGENT_LEASE_TTL", "two minutes")
     args = build_parser().parse_args([])
     assert args.lease_ttl > 0
-
-
-def test_every_tier_the_overlay_lets_you_select_is_passed_through(compose: dict):
-    """Selecting a tier must also deliver that tier's network to the container.
-
-    The overlay offered the tier variables while passing through only the
-    `platform_only` network, so an operator who set
-    AGENT_EGRESS_AGENT_TIER=custom *and* AGENT_EGRESS_NETWORK_CUSTOM in their
-    .env got the first and not the second — and the runner refused at preflight
-    with "names no network" for a variable they had plainly set. Found by
-    running the overlay, not by reading it.
-    """
-    env = compose["services"]["runner"]["environment"]
-    selectable = {
-        "platform_only": "PLATFORM_ONLY",
-        "trusted": "TRUSTED",
-        "custom": "CUSTOM",
-        "full": "FULL",
-    }
-    for tier, suffix in selectable.items():
-        assert f"AGENT_EGRESS_NETWORK_{suffix}" in env, (
-            f"tier {tier!r} is selectable but its network variable never reaches the runner"
-        )
 
 
 _STAGING_DEPLOY = Path(__file__).resolve().parents[2] / "ops/deploy/deploy_staging.sh"
@@ -1154,8 +1154,8 @@ def test_opencode_wrapper_writes_config_sets_offline_flags_and_execs(tmp_path):
 
     A stub ``opencode`` on PATH records argv and the environment it received.
     The offline flags are the load-bearing part: without
-    OPENCODE_DISABLE_MODELS_FETCH the CLI hard-fails fetching models.dev,
-    which in the deny-all sandbox is every single run.
+    OPENCODE_DISABLE_MODELS_FETCH the CLI fetches models.dev on every start,
+    a third-party dependency no job should have.
     """
     import json as _json
     import os as _os
@@ -1264,8 +1264,8 @@ def test_kilo_wrapper_writes_config_sets_offline_flags_and_execs(tmp_path):
     Kilo is an OpenCode fork that renamed the kill switches to ``KILO_*`` and
     added its own phone-home paths (PostHog telemetry, session ingest and
     share links to app.kilo.ai); without KILO_DISABLE_MODELS_FETCH the CLI
-    hard-fails fetching models.dev, which in the deny-all sandbox is every
-    single run.
+    fetches models.dev on every start, a third-party dependency no job should
+    have.
     """
     import json as _json
     import os as _os
@@ -1666,10 +1666,6 @@ def test_remote_compose_starts_no_gateway(remote_compose: dict):
         "gateway-tunnel",
         "mcp-tunnel",
         "control-plane-tunnel",
-        # Setup dependency traffic has its own allowlist proxy and an offline
-        # renderer; neither is a gateway or control-plane service.
-        "agent-egress-proxy-config",
-        "agent-egress-proxy",
         "workspace-broker",
         "runner",
     }
@@ -1677,26 +1673,25 @@ def test_remote_compose_starts_no_gateway(remote_compose: dict):
         assert "backend" not in (service.get("depends_on") or []), name
 
 
-def test_remote_sandbox_network_is_still_closed(remote_compose: dict):
-    """A remote host must not buy reachability by opening the sandbox up."""
-    assert remote_compose["networks"]["agent-egress"]["internal"] is True
+def test_remote_relay_network_is_still_closed(remote_compose: dict):
+    """A remote host must not buy reachability by routing the discovery network."""
+    assert remote_compose["networks"]["agent-relays"]["internal"] is True
 
 
 def test_only_the_two_relays_are_on_both_networks(remote_compose: dict):
-    """Everything else is either closed in with the sandbox or outside it.
+    """Everything else is either the runner's or nobody's.
 
-    Two now, not one: MCP moved to the cloud agent's own relay, so a sandbox
-    has two narrow destinations — the gateway for model calls, the relay for
-    tools. Named exactly, because the natural way to make this pass after
-    adding a service is to loosen it to "at least one", and that would let the
-    next addition sit on the closed network without a word.
+    Two relays: the gateway for model calls, the MCP relay for tools. Named
+    exactly, because the natural way to make this pass after adding a service
+    is to loosen it to "at least one", and that would attach the next
+    addition to every group bridge without a word.
     """
-    on_egress = {
+    on_relays = {
         name
         for name, service in remote_compose["services"].items()
-        if "agent-egress" in (service.get("networks") or {})
+        if "agent-relays" in (service.get("networks") or {})
     }
-    assert on_egress == {"gateway-tunnel", "mcp-tunnel"}
+    assert on_relays == {"gateway-tunnel", "mcp-tunnel"}
 
 
 def test_runner_and_sandbox_are_pointed_at_the_same_name(remote_compose: dict):
@@ -1706,7 +1701,7 @@ def test_runner_and_sandbox_are_pointed_at_the_same_name(remote_compose: dict):
     that only the runner can resolve means jobs are claimed and then die at
     their first model call.
     """
-    alias = remote_compose["services"]["gateway-tunnel"]["networks"]["agent-egress"]["aliases"]
+    alias = remote_compose["services"]["gateway-tunnel"]["networks"]["agent-relays"]["aliases"]
     assert alias == ["${AGENT_GATEWAY_HOSTNAME:-agent-gateway}"]
     url = remote_compose["services"]["runner"]["environment"]["AGENT_GATEWAY_URL"]
     assert "${AGENT_GATEWAY_HOSTNAME:-agent-gateway}" in url
@@ -1744,27 +1739,6 @@ def test_the_tunnel_forwards_one_fixed_destination():
     assert "-L " in script
     for proxy_flag in ("-D ", "DynamicForward", "ProxyCommand"):
         assert proxy_flag not in script, proxy_flag
-
-
-def test_the_egress_proxy_does_not_inherit_the_docker_stop_timeout(compose: dict) -> None:
-    """Squid winds down on SIGTERM, and this container is replaced every deploy.
-
-    Left unset it takes the Docker default of ten seconds: measured on two
-    consecutive staging rollouts at 10.30s and 10.31s, against 0.1-0.3s for
-    every other container in this stack — and it sits upstream of the runners
-    in the dependency order, so the whole rollout waited on it.
-    """
-    declared = str(compose["services"]["agent-egress-proxy"]["stop_grace_period"])
-    default = re.search(r":-(\d+)s\}", declared)
-
-    assert default, (
-        "the egress proxy declares no bounded stop_grace_period, so a Squid that "
-        f"does not exit on SIGTERM costs the ten-second Docker default: {declared!r}"
-    )
-    assert int(default.group(1)) <= 5, (
-        f"a stateless egress proxy does not need {default.group(1)} to drain; "
-        "the runners it serves are already stopped by then"
-    )
 
 
 def test_deployment_builds_disable_provenance_attestations() -> None:

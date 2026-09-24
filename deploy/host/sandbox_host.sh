@@ -9,8 +9,10 @@
 # compose file with no backend in it at all.
 #
 # Three narrow tunnel containers carry model, MCP, and control-plane traffic.
-# Setup dependency traffic has a separate route-less network whose only uplink
-# is the allowlist proxy. Agent turns remain on the closed relay network.
+# Sandboxes run on one routable bridge per group, created by the runner and
+# broker behind this deployment's host nftables table: public IPv4 on TCP
+# 80/443, the named resolver and the two relays, nothing else. Setup and the
+# agent share that bridge; there is no proxy and no network switch.
 #
 # Usage, from the repository root on the runner host:
 #
@@ -36,6 +38,8 @@
 #   AGENT_CONTROL_PLANE_TUNNEL_*   control API tunnel destination/key/known_hosts
 #   AGENT_BROKER_REVERSE_*         the control plane's route back to this broker
 #   AGENT_WORKSPACE_BROKER_TOKEN   broker authentication secret
+#   AGENT_EGRESS_CHAT_NETWORK_POOL this deployment's own RFC1918 pool for group bridges
+#   AGENT_EGRESS_DNS_SERVER        the one IPv4 resolver sandboxes may reach
 #
 # Restrict the tunnel key on the gateway host — it needs one forwarded port and
 # no shell:
@@ -203,22 +207,15 @@ MCP_TUNNEL_PORT="$(env_or_dotenv AGENT_MCP_TUNNEL_LISTEN_PORT)"
 MCP_TUNNEL_PORT="${MCP_TUNNEL_PORT:-8000}"
 CONTROL_PLANE_HOSTNAME="$(env_or_dotenv AGENT_CONTROL_PLANE_HOSTNAME)"
 CONTROL_PLANE_HOSTNAME="${CONTROL_PLANE_HOSTNAME:-agent-control-plane}"
-EGRESS_NETWORK="$(env_or_dotenv AGENT_EGRESS_NETWORK_PLATFORM_ONLY)"
-EGRESS_NETWORK="${EGRESS_NETWORK:-agent-egress}"
-
-# These two networks are new to the standalone stack, so unlike the historical
-# platform-only network they can safely derive collision-free names from the
-# Compose project. An explicit value still wins. The runner creates chat
-# containers through the Docker API, outside Compose, so it must receive the
-# exact daemon-side name Compose creates.
-TRUSTED_EGRESS_NETWORK="$(env_or_dotenv AGENT_EGRESS_NETWORK_TRUSTED)"
-TRUSTED_EGRESS_NETWORK="${TRUSTED_EGRESS_NETWORK:-${COMPOSE_PROJECT:+${COMPOSE_PROJECT}-}agent-egress-trusted}"
-AGENT_EGRESS_NETWORK_TRUSTED="$TRUSTED_EGRESS_NETWORK"
-export AGENT_EGRESS_NETWORK_TRUSTED
-UPLINK_EGRESS_NETWORK="$(env_or_dotenv AGENT_EGRESS_NETWORK_UPLINK)"
-UPLINK_EGRESS_NETWORK="${UPLINK_EGRESS_NETWORK:-${COMPOSE_PROJECT:+${COMPOSE_PROJECT}-}agent-egress-uplink}"
-AGENT_EGRESS_NETWORK_UPLINK="$UPLINK_EGRESS_NETWORK"
-export AGENT_EGRESS_NETWORK_UPLINK
+# Where the two relays are discovered: a route-less network no sandbox joins.
+# Derived from the Compose project, so two stacks on one machine never find
+# each other's relays; an explicit value still wins. The runner creates group
+# bridges through the Docker API, outside Compose, so it must receive the exact
+# daemon-side name Compose creates.
+RELAY_NETWORK="$(env_or_dotenv AGENT_RELAY_NETWORK)"
+RELAY_NETWORK="${RELAY_NETWORK:-${COMPOSE_PROJECT:+${COMPOSE_PROJECT}-}agent-relays}"
+AGENT_RELAY_NETWORK="$RELAY_NETWORK"
+export AGENT_RELAY_NETWORK
 
 # Extra versions the image also carries, comma-separated, so an admin can switch
 # new chats between them from the admin page without a rebuild. The image's
@@ -251,7 +248,8 @@ require_env() {
               AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY \
               AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS \
               AGENT_BROKER_REVERSE_BIND AGENT_BROKER_REVERSE_PORT \
-              AGENT_WORKSPACE_BROKER_ADVERTISE_URL; do
+              AGENT_WORKSPACE_BROKER_ADVERTISE_URL \
+              AGENT_EGRESS_CHAT_NETWORK_POOL AGENT_EGRESS_DNS_SERVER; do
     [[ -n "$(env_or_dotenv "$name")" ]] || missing+=("$name")
   done
   if [[ ${#missing[@]} -gt 0 ]]; then
@@ -271,23 +269,18 @@ require_env() {
   # enrollment default stops being safe.
   if [[ -n "$(env_or_dotenv SIBLING_COMPOSE_PROJECTS)" ]]; then
     local shared=() path unsafe
-    for name in AGENT_HOST_STATE_ROOT AGENT_EGRESS_NETWORK_PLATFORM_ONLY; do
+    for name in AGENT_HOST_STATE_ROOT; do
       path="$(env_or_dotenv "$name")"
-      case "$name" in
-        AGENT_HOST_STATE_ROOT)
-          unsafe="$(python3 -c 'import os; print(os.path.realpath("/var/lib/hybridinference/agent-host"))')"
-          if [[ -n "$path" ]]; then
-            path="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$path")"
-          fi
-          ;;
-        AGENT_EGRESS_NETWORK_PLATFORM_ONLY) unsafe="agent-egress" ;;
-      esac
+      unsafe="$(python3 -c 'import os; print(os.path.realpath("/var/lib/hybridinference/agent-host"))')"
+      if [[ -n "$path" ]]; then
+        path="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$path")"
+      fi
       if [[ -z "$path" || "$path" == "$unsafe" ]]; then
         shared+=("$name")
       fi
     done
     if [[ ${#shared[@]} -gt 0 ]]; then
-      die "this host runs another environment (SIBLING_COMPOSE_PROJECTS is set), so ${shared[*]} must be unique to this stack; unset values and legacy shared defaults mix enrollment credentials or tunnel aliases across environments."
+      die "this host runs another environment (SIBLING_COMPOSE_PROJECTS is set), so ${shared[*]} must be unique to this stack; unset values and legacy shared defaults mix enrollment credentials across environments."
     fi
   fi
 
@@ -390,15 +383,6 @@ validate_retained_config() {
      ]] && awk -v value="$chat_idle_timeout" 'BEGIN { exit !(value > 0) }' \
     || die "AGENT_CHAT_IDLE_TIMEOUT_S must be a positive number of seconds (got '$chat_idle_timeout')"
 
-  # The Trusted network is closed and the proxy alone straddles it and the
-  # routable uplink. Reusing a name here collapses that boundary and can put a
-  # chat directly on an internet-routable bridge while the config still says
-  # `trusted`.
-  if [[ "$EGRESS_NETWORK" == "$TRUSTED_EGRESS_NETWORK" \
-     || "$EGRESS_NETWORK" == "$UPLINK_EGRESS_NETWORK" \
-     || "$TRUSTED_EGRESS_NETWORK" == "$UPLINK_EGRESS_NETWORK" ]]; then
-    die "platform-only ('$EGRESS_NETWORK'), trusted ('$TRUSTED_EGRESS_NETWORK'), and proxy-uplink ('$UPLINK_EGRESS_NETWORK') networks must be three distinct names"
-  fi
   # Docker DNS returns every container that claims an alias. If two relays use
   # one name, requests are round-robined to services that listen on different
   # ports: a readiness probe can win the lottery and a real job can lose it.
@@ -409,15 +393,6 @@ validate_retained_config() {
      || "$MCP_HOSTNAME" == "$CONTROL_PLANE_HOSTNAME" ]]; then
     die "AGENT_GATEWAY_HOSTNAME ('$GATEWAY_HOSTNAME'), AGENT_MCP_HOSTNAME ('$MCP_HOSTNAME'), and AGENT_CONTROL_PLANE_HOSTNAME ('$CONTROL_PLANE_HOSTNAME') must be distinct Docker aliases"
   fi
-  # The platform-only name predates project-derived defaults and is immutable
-  # for retained containers already attached to it. Inventing a new name on
-  # upgrade would leave stopped chats on the old network while moving their
-  # relays away, so preserve an explicitly provisioned per-stack name.
-  if [[ -n "$(env_or_dotenv SIBLING_COMPOSE_PROJECTS)" \
-     && -z "$(env_or_dotenv AGENT_EGRESS_NETWORK_PLATFORM_ONLY)" ]]; then
-    die "this host runs another environment, so AGENT_EGRESS_NETWORK_PLATFORM_ONLY must name this stack's own existing closed network. Reusing 'agent-egress' lets staging and production resolve each other's relays; changing it blindly strands retained containers on the old network."
-  fi
-
   # Chat files live in Docker's writable layer. Verify the daemon whose socket
   # the broker receives is the daemon backed by the configured storage root;
   # otherwise the stack can come up green while retaining state on the wrong
@@ -1344,7 +1319,7 @@ check_shared_live_stack() {
   # turns' own processes, then attest the exact image labels, helper pins,
   # runtime drivers, broker settings and default pool size used by the claim
   # path.  Calling preflight here is intentional: a freshly started runner may
-  # still be blocked inside its own proxy/kernel/network probe while
+  # still be blocked inside its own kernel/host-rule/relay probe while
   # `docker exec` already works.  Static capability inspection during that
   # window would publish the ready marker immediately before the runner
   # crash-looped.
@@ -1632,6 +1607,22 @@ check_candidate() {
     -e "AGENT_SANDBOX_BACKEND=${backend:-kata}" \
     -e "AGENT_SANDBOX_IMAGE=$SANDBOX_IMAGE" \
     "$runner_image" python -m cloud_agent_host.candidate_check
+  # The network settings, read by the parser the new runners will use, and
+  # nothing more: no socket, no network, no rules installed. A pool that is
+  # public, a resolver inside the pool, or a relay given as an address would
+  # otherwise surface only as runners refusing to start, after the old ones
+  # were drained.
+  log "checking this deployment's sandbox network settings with the candidate's parser"
+  docker run --rm --network none \
+    -e "AGENT_SANDBOX_NAMESPACE=$COMPOSE_PROJECT" \
+    -e "AGENT_RELAY_NETWORK=$RELAY_NETWORK" \
+    -e "AGENT_EGRESS_CHAT_NETWORK_POOL=$(env_or_dotenv AGENT_EGRESS_CHAT_NETWORK_POOL)" \
+    -e "AGENT_EGRESS_DNS_SERVER=$(env_or_dotenv AGENT_EGRESS_DNS_SERVER)" \
+    -e "AGENT_EGRESS_PROTECTED_CIDRS=$(env_or_dotenv AGENT_EGRESS_PROTECTED_CIDRS)" \
+    -e "AGENT_GATEWAY_URL=http://${GATEWAY_HOSTNAME}:${TUNNEL_PORT}" \
+    -e "AGENT_SANDBOX_MCP_URL=http://${MCP_HOSTNAME}:${MCP_TUNNEL_PORT}" \
+    "$runner_image" python -c 'from cloud_agent_shared.egress import network_from_env; network_from_env()' \
+    || die "the sandbox network settings were refused (see the error above); fix AGENT_EGRESS_CHAT_NETWORK_POOL, AGENT_EGRESS_DNS_SERVER or AGENT_EGRESS_PROTECTED_CIDRS before any runner is drained"
 }
 
 # This machine's name in the admin host switch. Resolved here because the
@@ -1711,8 +1702,8 @@ cmd_prepare() {
     #
     #   * Compose sees every image it rebuilt as new and replaces every container
     #     built from it. Measured before this flag: all eight containers of the
-    #     sandbox stack replaced on every deploy, 10.3s of it the egress proxy
-    #     sitting out Docker's stop timeout.
+    #     sandbox stack replaced on every deploy, 10.3s of it the since-removed
+    #     Squid proxy sitting out Docker's stop timeout.
     #   * `sandbox_image_digest` — which the runner attests and a retained group
     #     records immutably — moves, and the previous value stops resolving.
     #     Verified on staging: the index a deploy produced at 14:07 was
@@ -1777,7 +1768,7 @@ cmd_activate() {
     compose stop runner
   fi
 
-  log "starting the three purpose-scoped tunnels, egress proxy, broker, and the runner service"
+  log "starting the three purpose-scoped tunnels, broker, and the runner service"
   # `--remove-orphans` because a renamed service leaves its old container
   # running otherwise: compose only replaces containers for services the file
   # still declares, so `agent-runner` outliving `runner` would mean two sets of
@@ -1838,19 +1829,21 @@ cmd_check() {
   local fenced=0
   if (( wait_seconds > 0 )); then fenced=1; fi
   validate_retained_config
-  # Ask from inside the closed network, which is the only vantage point whose
-  # answer means anything: reaching the gateway from this host's shell proves
-  # nothing about what a sandbox can reach.
-  local network="$EGRESS_NETWORK"
+  # Ask from the relay network, where group lifecycle finds the two relays it
+  # attaches to every group bridge: reaching the gateway from this host's shell
+  # proves nothing about the tunnel a sandbox will be handed. The group bridge
+  # itself, with this deployment's host rules around it, is proved per group by
+  # the guest check that runs before any repository code.
+  local network="$RELAY_NETWORK"
   local url="http://${GATEWAY_HOSTNAME}:${TUNNEL_PORT}/health"
   log "probing ${url} from the ${network} network"
   probe_sandbox_relay "$network" "$url" "inference gateway" "$deadline" \
     "Check 'docker logs' for the gateway-tunnel container: an SSH connection that cannot authenticate or bind its forward restarts." "gateway-tunnel"
 
-  # MCP is a second deliberately narrow destination on the same closed
+  # MCP is a second deliberately narrow destination on the same relay
   # network. A healthy model tunnel does not prove this separate SSH key,
-  # listener, alias, or forward. Probe it from the sandbox's actual network
-  # before publishing the exact-SHA readiness marker.
+  # listener, alias, or forward. Probe it before publishing the exact-SHA
+  # readiness marker.
   url="http://${MCP_HOSTNAME}:${MCP_TUNNEL_PORT}/healthz"
   log "probing ${url} from the ${network} network"
   probe_sandbox_relay "$network" "$url" "MCP-only relay" "$deadline" \
@@ -1864,7 +1857,7 @@ cmd_status() {
   printf '\n'
   compose logs --tail 20 \
     gateway-tunnel mcp-tunnel control-plane-tunnel \
-    agent-egress-proxy workspace-broker runner
+    workspace-broker runner
 }
 
 cmd_down() {
