@@ -288,7 +288,6 @@ export const en = {
   'composer.run': 'Run',
   'composer.starting': 'Starting…',
   'composer.runTitle': 'Run — ⏎ to send, ⇧⏎ for a new line',
-  'composer.network': 'Network: setup {setup} · agent {agent}',
   'composer.loadConfigFailed': 'could not load config',
   'composer.startFailed': 'could not start the job',
 
@@ -419,6 +418,9 @@ export const en = {
     'Contact your administrator to enable repository access for cloud agents.',
   'connect.action': 'Connect GitHub',
   'connect.actionUnavailable': 'View integrations',
+  'connect.titleTemporarilyUnavailable': 'GitHub is temporarily unavailable',
+  'connect.bodyTemporarilyUnavailable':
+    'Repository access will come back on its own. Try again in a minute.',
 
   // ── Pending message queue ───────────────────────────────────────────────
   'queue.region': 'Queued messages',

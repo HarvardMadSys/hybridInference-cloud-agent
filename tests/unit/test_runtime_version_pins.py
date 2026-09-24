@@ -158,6 +158,8 @@ _BASE_ENV = "\n".join(
         "AGENT_BROKER_REVERSE_PORT=18092",
         "AGENT_WORKSPACE_BROKER_ADVERTISE_URL=http://172.24.0.1:18092",
         "AGENT_WORKSPACE_BROKER_TOKEN=test-broker-token",
+        "AGENT_EGRESS_CHAT_NETWORK_POOL=10.240.0.0/16",
+        "AGENT_EGRESS_DNS_SERVER=1.1.1.1",
         # Skips the Kata preflight, which no developer machine passes. The
         # script warns loudly and continues, which is the documented behaviour
         # of this override and not something this test is asserting about.

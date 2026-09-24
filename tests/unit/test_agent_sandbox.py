@@ -9,8 +9,6 @@ from types import SimpleNamespace
 import pytest
 
 from cloud_agent_host import sandbox as sandbox_mod
-from cloud_agent_host.egress import EgressPolicyError
-from cloud_agent_host.egress_proxy import CANARY_HOST
 from cloud_agent_host.sandbox import (
     KATA_RUNTIME,
     ContainerBackend,
@@ -19,8 +17,20 @@ from cloud_agent_host.sandbox import (
     SandboxSpec,
     build_backend_from_env,
 )
+from cloud_agent_shared.egress import SandboxNetworkError, network_from_env
 
 _SPEC = SandboxSpec(argv=["claude", "-p", "hi"], workdir="/tmp/wd", env={"A": "1"})
+
+#: The one network configuration a container backend is built with.
+_NET_ENV = {
+    "AGENT_SANDBOX_NAMESPACE": "default",
+    "AGENT_EGRESS_CHAT_NETWORK_POOL": "10.240.0.0/16",
+    "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
+    "AGENT_RELAY_NETWORK": "agent-relays",
+    "AGENT_GATEWAY_URL": "http://agent-gateway:8080",
+    "AGENT_SANDBOX_MCP_URL": "http://agent-mcp:8000",
+}
+_NETWORK = network_from_env(_NET_ENV)
 
 
 def test_process_backend_refuses_to_run_unisolated_by_default():
@@ -78,7 +88,7 @@ def test_process_backend_refuses_persistent_terminals_even_when_acknowledged():
 
 def test_container_backend_rejects_removed_disposable_execution():
     """Raw container backends configure retained groups; they never run a turn."""
-    backend = ContainerBackend(image="img:1", network="agent-net")
+    backend = ContainerBackend(image="img:1", sandbox_network=_NETWORK)
 
     with pytest.raises(SandboxError, match="direct container execution was removed"):
         backend.spawn(_SPEC)
@@ -97,7 +107,7 @@ def test_kata_backend_selects_the_vm_runtime():
         {
             "AGENT_SANDBOX_BACKEND": "kata",
             "AGENT_SANDBOX_IMAGE": "img:1",
-            "AGENT_SANDBOX_NETWORK": "agent-egress",
+            **_NET_ENV,
         }
     )
     assert isinstance(backend, ContainerBackend)
@@ -117,7 +127,7 @@ def test_backend_selection_from_env():
     )
     assert isinstance(
         build_backend_from_env(
-            {"AGENT_SANDBOX_BACKEND": "container", "AGENT_SANDBOX_IMAGE": "img:1"}
+            {"AGENT_SANDBOX_BACKEND": "container", "AGENT_SANDBOX_IMAGE": "img:1", **_NET_ENV}
         ),
         ContainerBackend,
     )
@@ -131,7 +141,7 @@ def test_explicit_runtime_override_wins():
             "AGENT_SANDBOX_BACKEND": "container",
             "AGENT_SANDBOX_RUNTIME": "runsc",
             "AGENT_SANDBOX_IMAGE": "img:1",
-            "AGENT_SANDBOX_NETWORK": "agent-egress",
+            **_NET_ENV,
         }
     )
     assert isinstance(backend, ContainerBackend)
@@ -206,13 +216,20 @@ def test_container_preflight_proves_guest_kernel_with_the_exact_runtime_and_imag
             return SimpleNamespace(returncode=0, stdout="guest-kernel\n", stderr="")
         if argv[1:3] == ["network", "inspect"]:
             return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
+        if argv[1] == "version" and "{{.Client.Version}}" in argv[-1]:
+            return SimpleNamespace(returncode=0, stdout="28.4.0 1.51\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="27.0\n", stderr="")
 
     monkeypatch.setattr(sandbox_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        ContainerBackend,
+        "network_guard",
+        lambda self: SimpleNamespace(ensure=lambda **kwargs: None),
+    )
     backend = ContainerBackend(
         image="registry.example/sandbox@sha256:abc",
         runtime=KATA_RUNTIME,
-        network="agent-egress",
+        sandbox_network=_NETWORK,
     )
 
     backend.preflight()
@@ -305,214 +322,131 @@ def test_a_shared_kernel_custom_runtime_gets_no_vm_evidence(monkeypatch):
     assert backend._kernel_probe["guest_kernel"] is None
 
 
-def test_an_unset_network_is_refused_not_defaulted_to_the_internet():
+def test_a_missing_network_setting_is_refused_not_defaulted_to_the_internet():
     """A missing setting must close the boundary, not open it.
 
-    `network` used to fall back to `bridge`, so forgetting the variable gave
-    untrusted repository code unrestricted outbound internet — the opposite of
-    the rule the process backend already follows.
+    There is no fallback network: a container backend without its namespace,
+    pool, resolver or relay network refuses to be built at all.
     """
+    with pytest.raises(SandboxNetworkError):
+        build_backend_from_env(
+            {"AGENT_SANDBOX_BACKEND": "container", "AGENT_SANDBOX_IMAGE": "img:1"}
+        )
+    for missing in (
+        "AGENT_SANDBOX_NAMESPACE",
+        "AGENT_EGRESS_CHAT_NETWORK_POOL",
+        "AGENT_EGRESS_DNS_SERVER",
+        "AGENT_RELAY_NETWORK",
+    ):
+        env = {"AGENT_SANDBOX_BACKEND": "container", "AGENT_SANDBOX_IMAGE": "img:1", **_NET_ENV}
+        del env[missing]
+        with pytest.raises(SandboxNetworkError, match=missing):
+            build_backend_from_env(env)
+
+
+def test_a_backend_built_without_a_network_can_do_no_group_work():
+    """Only the candidate check builds one, and it runs no group."""
     backend = build_backend_from_env(
-        {"AGENT_SANDBOX_BACKEND": "container", "AGENT_SANDBOX_IMAGE": "img:1"}
+        {"AGENT_SANDBOX_BACKEND": "container", "AGENT_SANDBOX_IMAGE": "img:1"},
+        with_network=False,
     )
-
-    assert backend.network == "", "there must be no open-network fallback"
-    # And nothing downstream invents one: resolving the agent phase's network
-    # is an error rather than a quiet fall back to the Docker bridge.
-    with pytest.raises((SandboxError, EgressPolicyError)):
-        backend._check_networks_are_closed()
-    with pytest.raises(EgressPolicyError):
-        backend.network_for_phase("agent")
+    assert isinstance(backend, ContainerBackend)
+    with pytest.raises(SandboxError, match="no sandbox network"):
+        backend.require_sandbox_network()
+    with pytest.raises(SandboxError, match="no sandbox network"):
+        backend.network_guard()
 
 
-def test_open_egress_requires_an_explicit_acknowledgement():
-    """Same shape as the unisolated-backend opt-in: deliberate, not accidental."""
-    backend = build_backend_from_env(
-        {
-            "AGENT_SANDBOX_BACKEND": "container",
-            "AGENT_SANDBOX_IMAGE": "img:1",
-            "AGENT_SANDBOX_NETWORK": "some-open-network",
-            "AGENT_SANDBOX_ALLOW_OPEN_NETWORK": "1",
-        }
-    )
-
-    assert backend.allow_open_network is True
-    backend._check_networks_are_closed()  # acknowledged: does not raise
-
-
-def _egress_env(**extra: str) -> dict[str, str]:
-    """A container backend with a configured, proxied setup tier."""
-    return {
-        "AGENT_SANDBOX_BACKEND": "container",
-        "AGENT_SANDBOX_IMAGE": "img:1",
-        "AGENT_EGRESS_NETWORK_PLATFORM_ONLY": "agent-egress",
-        "AGENT_EGRESS_NETWORK_TRUSTED": "agent-egress-trusted",
-        "AGENT_EGRESS_PROXY_URL_TRUSTED": "http://agent-egress-proxy:3128",
-        **extra,
-    }
-
-
-def _fake_docker(
-    monkeypatch,
-    *,
-    internal: dict[str, str],
-    canary: str = "403 403",
-    gateway: str = "ok",
+def _network_preflight(
+    monkeypatch, *, internal: str = "true", exists: bool = True, docker: str = "28.4.0 1.51"
 ):
-    """Stand in for the daemon: network internality, and what the canary got.
-
-    ``canary`` is the probe's ``"<cleartext> <connect>"`` line.
-    """
+    """Run the network half of preflight against a stubbed daemon and guard."""
     calls: list[list[str]] = []
+    ensured: list[dict] = []
 
     def fake_run(argv, **kwargs):
         calls.append(argv)
         if argv[1:3] == ["network", "inspect"]:
-            return SimpleNamespace(returncode=0, stdout=internal.get(argv[3], "true"), stderr="")
-        if argv[1] == "run":
-            if any(value.endswith("/health") for value in argv if isinstance(value, str)):
-                return SimpleNamespace(returncode=0, stdout=gateway, stderr="")
-            return SimpleNamespace(returncode=0, stdout=canary, stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+            if not exists:
+                return SimpleNamespace(returncode=1, stdout="", stderr="No such network")
+            return SimpleNamespace(returncode=0, stdout=f"{internal}\n", stderr="")
+        if argv[1] == "version" and "{{.Client.Version}}" in argv[-1]:
+            return SimpleNamespace(returncode=0, stdout=f"{docker}\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="27.0\n", stderr="")
 
-    monkeypatch.setattr("cloud_agent_host.sandbox.subprocess.run", fake_run)
-    return calls
+    monkeypatch.setattr(sandbox_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        ContainerBackend,
+        "network_guard",
+        lambda self: SimpleNamespace(ensure=lambda **kwargs: ensured.append(kwargs)),
+    )
+    return calls, ensured
 
 
-def test_a_proxied_network_that_routes_out_is_refused_too(monkeypatch):
-    """The trusted tier is a closed network plus a proxy, not an open network.
+def test_preflight_installs_and_reads_back_the_host_rules_before_claiming(monkeypatch):
+    calls, ensured = _network_preflight(monkeypatch)
+    ContainerBackend(image="img:1", sandbox_network=_NETWORK).preflight()
 
-    Preflight used to exempt trusted and custom as "allowlist-fronted by
-    construction" — an assumption about a network nobody checked. Pointing
-    AGENT_EGRESS_NETWORK_TRUSTED at the default bridge then passed in silence
-    and handed the setup phase the whole internet, with every log and config
-    still reading `trusted`.
-    """
-    backend = build_backend_from_env(_egress_env())
-    _fake_docker(monkeypatch, internal={"agent-egress-trusted": "false"})
+    inspect = next(argv for argv in calls if argv[1:3] == ["network", "inspect"])
+    assert inspect[3] == "agent-relays"
+    # A fresh verification, not the cached one activations reuse.
+    assert ensured == [{"max_age_s": 0}]
 
+
+def test_a_relay_network_that_routes_out_is_refused(monkeypatch):
+    """It is where the relays are found, never a route a sandbox could use."""
+    _, ensured = _network_preflight(monkeypatch, internal="false")
     with pytest.raises(SandboxError, match="not `internal`"):
-        backend._check_networks_are_closed()
+        ContainerBackend(image="img:1", sandbox_network=_NETWORK).preflight()
+    assert ensured == []
 
 
-def test_a_proxy_that_serves_the_canary_is_a_startup_failure(monkeypatch):
-    """A proxy that answers but allows everything is the worst available outcome.
-
-    The tier reads as allowlisted in every log and config, the network is
-    internal exactly as designed, and the sandbox still reaches the internet.
-    Nothing downstream would notice — the same shape as a Kata runtime
-    degrading to a shared kernel, and checked the same way: by observing the
-    behaviour instead of trusting the configuration.
-    """
-    backend = build_backend_from_env(_egress_env())
-    _fake_docker(monkeypatch, internal={}, canary="200 200")
-
-    with pytest.raises(SandboxError, match="reach the internet"):
-        backend._check_networks_are_closed()
+def test_a_missing_relay_network_is_refused(monkeypatch):
+    _network_preflight(monkeypatch, exists=False)
+    with pytest.raises(SandboxError, match="does not exist"):
+        ContainerBackend(image="img:1", sandbox_network=_NETWORK).preflight()
 
 
-def test_a_proxy_that_denies_cleartext_but_tunnels_anywhere_is_caught(monkeypatch):
-    """The cleartext answer alone proves almost nothing, so it is not trusted alone.
-
-    Our own rendered config denies plain HTTP outright, so a proxy that
-    refused cleartext while allowing CONNECT to any host would answer 403 to
-    a one-request probe and pass — with every HTTPS destination in the world
-    still reachable, which is all a package manager, or an exfiltration
-    attempt, actually uses.
-    """
-    backend = build_backend_from_env(_egress_env())
-    _fake_docker(monkeypatch, internal={}, canary="403 200")
-
-    with pytest.raises(SandboxError, match="refuses cleartext and lets the other through"):
-        backend._check_networks_are_closed()
+@pytest.mark.parametrize("docker", ["27.5.1 1.51", "28.4.0 1.47", "", "garbage"])
+def test_a_docker_that_cannot_pin_the_relays_routes_is_refused(monkeypatch, docker):
+    """Without gateway priority a group bridge can become a relay's way out."""
+    _, ensured = _network_preflight(monkeypatch, docker=docker)
+    with pytest.raises(SandboxError, match="Docker 28 or newer"):
+        ContainerBackend(image="img:1", sandbox_network=_NETWORK).preflight()
+    assert ensured == []
 
 
-def test_an_unreachable_proxy_is_reported_as_unreachable(monkeypatch):
-    """Distinguished from "not enforcing", because the fixes are opposite.
-
-    curl reports both as a failure; conflating them would send an operator to
-    check the allowlist when the proxy is simply not running. `0` is what
-    `%{http_connect}` reports when no CONNECT was ever answered.
-    """
-    backend = build_backend_from_env(_egress_env())
-    _fake_docker(monkeypatch, internal={}, canary="000 0")
-
-    with pytest.raises(SandboxError, match="unreachable"):
-        backend._check_networks_are_closed()
-
-
-def test_a_denying_proxy_passes_and_is_probed_the_way_a_job_would_use_it(monkeypatch):
-    """The probe must exercise the mechanism a setup script actually uses.
-
-    Passing `--proxy` on the command line would prove the proxy denies while
-    saying nothing about whether the environment reaches the sandbox — which
-    is the part that carries the policy.
-    """
-    backend = build_backend_from_env(_egress_env())
-    calls = _fake_docker(monkeypatch, internal={}, canary="403 403")
-
-    backend._check_networks_are_closed()
-
-    probe = next(argv for argv in calls if argv[1] == "run")
-    assert probe[probe.index("--network") + 1] == "agent-egress-trusted"
-    assert "https_proxy=http://agent-egress-proxy:3128" in probe
-    # Both paths, because refusing one and tunnelling the other is a real
-    # proxy misconfiguration and only the CONNECT one carries real traffic.
-    assert f"http://{CANARY_HOST}/" in probe[-1]
-    assert f"https://{CANARY_HOST}/" in probe[-1]
-    # And the closed phase is never probed: it has no proxy to enforce anything.
-    assert sum(1 for argv in calls if argv[1] == "run") == 1
+def test_the_candidate_preflight_touches_no_network(monkeypatch):
+    calls, ensured = _network_preflight(monkeypatch)
+    ContainerBackend(image="img:1").preflight(check_network=False)
+    assert not [argv for argv in calls if argv[1:3] == ["network", "inspect"]]
+    assert ensured == []
 
 
 def test_every_probe_runs_under_the_runtime_jobs_will_use(monkeypatch):
     """A probe under the daemon's default validates a deployment nobody runs.
 
     The bind check learned this when it passed on a host with no Kata shim and
-    every job then died at spawn. The egress probes are the same shape — DNS
+    every job then died at spawn. The gateway probe is the same shape — DNS
     and networking are exactly what differs between a shared-kernel container
-    and a VM-isolated one — so they carry the flag too.
-    """
-    backend = build_backend_from_env(_egress_env(AGENT_SANDBOX_BACKEND="kata"))
-    monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.ChatSandboxManager.fixed_service_addresses",
-        lambda self, phase, network: {"agent-gateway": "10.2.0.2"},
-    )
-    calls = _fake_docker(monkeypatch, internal={})
-
-    backend._check_networks_are_closed()
-    backend.check_gateway_reachable("http://backend:8080")
-
-    runs = [argv for argv in calls if argv[1] == "run"]
-    assert len(runs) == 2
-    for argv in runs:
-        assert argv[argv.index("--runtime") + 1] == KATA_RUNTIME
-
-
-def test_a_custom_tier_keeps_the_operators_own_topology(monkeypatch):
-    """`custom` exists to replace our judgement, so neither check applies to it.
-
-    Both exemptions are deliberate and worth pinning, because tightening them
-    looks like an improvement. Demanding `internal` would force a transparently
-    filtered deployment to set AGENT_SANDBOX_ALLOW_OPEN_NETWORK, which silences
-    the check for the *closed* tier too; and probing for our own proxy's 403
-    would read an operator's drop-on-deny as "not enforcing" and refuse to
-    start a deployment that works.
+    and a VM-isolated one — so it carries the flag too, and gets the guest's
+    relay addresses the way a chat does.
     """
     backend = build_backend_from_env(
-        {
-            "AGENT_SANDBOX_BACKEND": "container",
-            "AGENT_SANDBOX_IMAGE": "img:1",
-            "AGENT_EGRESS_SETUP_TIER": "custom",
-            "AGENT_EGRESS_AGENT_TIER": "custom",
-            "AGENT_EGRESS_NETWORK_CUSTOM": "operator-net",
-            "AGENT_EGRESS_PROXY_URL_CUSTOM": "http://operator-proxy:8080",
-        }
+        {"AGENT_SANDBOX_BACKEND": "kata", "AGENT_SANDBOX_IMAGE": "img:1", **_NET_ENV}
     )
-    calls = _fake_docker(monkeypatch, internal={"operator-net": "false"}, canary="000")
+    monkeypatch.setattr(
+        "cloud_agent_host.chat_sandbox.ChatSandboxManager.relay_addresses",
+        lambda self, network: {"agent-gateway": "10.2.0.2"},
+    )
+    calls = _probe_returns(monkeypatch, "ok")
 
-    backend._check_networks_are_closed()  # does not raise
+    backend.check_gateway_reachable("http://agent-gateway:8080")
 
-    assert not [argv for argv in calls if argv[1] == "run"], "a custom proxy must not be probed"
+    runs = [argv for argv in calls if argv[1] == "run"]
+    assert len(runs) == 1
+    assert runs[0][runs[0].index("--runtime") + 1] == KATA_RUNTIME
+    assert "agent-gateway=10.2.0.2" in runs[0]
 
 
 def _probe_returns(monkeypatch, verdict: str) -> list[list[str]]:
@@ -529,13 +463,13 @@ def _probe_returns(monkeypatch, verdict: str) -> list[list[str]]:
 
 def test_a_reachable_gateway_passes(monkeypatch):
     calls = _probe_returns(monkeypatch, "ok")
-    backend = ContainerBackend(image="img:1", network="agent-egress")
+    backend = ContainerBackend(image="img:1", sandbox_network=_NETWORK)
 
     backend.check_gateway_reachable("http://agent-gateway:8080")
 
     argv = calls[0]
     assert argv[:2] == ["docker", "run"]
-    assert "--network" in argv and "agent-egress" in argv
+    assert argv[argv.index("--network") + 1] == "agent-relays"
     # The probe URL is passed as an argument, never interpolated into the
     # script: it comes from configuration and ends up inside a shell.
     assert "http://agent-gateway:8080/health" in argv
@@ -543,7 +477,7 @@ def test_a_reachable_gateway_passes(monkeypatch):
 
 def test_a_name_that_does_not_resolve_names_the_remote_gateway_case(monkeypatch):
     _probe_returns(monkeypatch, "unresolved")
-    backend = ContainerBackend(image="img:1", network="agent-egress")
+    backend = ContainerBackend(image="img:1", sandbox_network=_NETWORK)
 
     with pytest.raises(SandboxError) as excinfo:
         backend.check_gateway_reachable("http://backend:8080")
@@ -562,7 +496,7 @@ def test_a_relay_that_resolves_but_cannot_forward_is_caught(monkeypatch):
     topology that needed the check hardest was the one it could not see.
     """
     _probe_returns(monkeypatch, "unreachable")
-    backend = ContainerBackend(image="img:1", network="agent-egress")
+    backend = ContainerBackend(image="img:1", sandbox_network=_NETWORK)
 
     with pytest.raises(SandboxError) as excinfo:
         backend.check_gateway_reachable("http://agent-gateway:8080")
@@ -576,7 +510,7 @@ def test_an_image_without_curl_or_python_degrades_loudly(monkeypatch, caplog):
     """A deployment-owned image may have neither. Resolving is all that can be
     asked of it — but the log must not imply the stronger check ran."""
     _probe_returns(monkeypatch, "dns-only")
-    backend = ContainerBackend(image="custom:1", network="agent-egress")
+    backend = ContainerBackend(image="custom:1", sandbox_network=_NETWORK)
 
     with caplog.at_level(logging.WARNING):
         backend.check_gateway_reachable("http://agent-gateway:8080")
@@ -586,7 +520,7 @@ def test_an_image_without_curl_or_python_degrades_loudly(monkeypatch, caplog):
 
 def test_a_base_url_with_no_host_is_not_probed(monkeypatch):
     calls = _probe_returns(monkeypatch, "ok")
-    backend = ContainerBackend(image="img:1", network="agent-egress")
+    backend = ContainerBackend(image="img:1", sandbox_network=_NETWORK)
 
     backend.check_gateway_reachable("not-a-url")
 

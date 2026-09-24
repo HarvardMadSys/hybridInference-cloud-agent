@@ -278,7 +278,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'composer.run': '运行',
   'composer.starting': '启动中…',
   'composer.runTitle': '运行 —— ⏎ 发送,⇧⏎ 换行',
-  'composer.network': '网络:准备阶段 {setup} · Agent 阶段 {agent}',
   'composer.loadConfigFailed': '无法加载配置',
   'composer.startFailed': '无法启动任务',
 
@@ -397,6 +396,8 @@ export const zhCN: Record<TranslationKey, string> = {
   'connect.bodyUnavailable': '请联系管理员为 cloud agent 开通仓库访问。',
   'connect.action': '连接 GitHub',
   'connect.actionUnavailable': '查看集成',
+  'connect.titleTemporarilyUnavailable': 'GitHub 暂时不可用',
+  'connect.bodyTemporarilyUnavailable': '仓库访问会自动恢复，请稍后再试。',
 
   // ── Pending message queue ───────────────────────────────────────────────
   'queue.region': '待发送消息',

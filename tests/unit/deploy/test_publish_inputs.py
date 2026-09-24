@@ -4,7 +4,7 @@ A cell knows one thing the generator cannot: which matrix entry it was, on which
 machine, and what the image it pulled back says about itself. The refusals here
 are the ones only that point of view can make — a record from another commit, a
 cell that ran on the wrong pool, a file copied under another cell's name — and
-the one positive property that matters: seven honest records assemble into an
+the one positive property that matters: six honest records assemble into an
 input the generator turns into a valid manifest.
 """
 
@@ -88,7 +88,6 @@ def test_the_cells_are_the_roles_the_smoke_starts_once_per_variant() -> None:
         "runner",
         "sandbox",
         "tunnel",
-        "egress",
     }
     assert cells["web-agents"] == pi.Cell("web", "agents", "/agents", "linux/arm64")
     assert cells["web-root"] == pi.Cell("web", "root", "", "linux/arm64")
@@ -116,7 +115,7 @@ def test_a_record_carries_what_the_manifest_needs() -> None:
         ("control", {"labels": {pi.ROLE_LABEL: "control", pi.REVISION_LABEL: 1}}, "strings"),
         ("runner", {"labels": labels("runner", **{pi.ROLE_LABEL: "sandbox"})}, "declares role"),
         ("web-agents", {"labels": labels("web-agents", **{pi.BASE_PATH_LABEL: ""})}, "base path"),
-        ("egress", {"labels": labels("egress", **{pi.REVISION_LABEL: OTHER_COMMIT})}, "revision"),
+        ("tunnel", {"labels": labels("tunnel", **{pi.REVISION_LABEL: OTHER_COMMIT})}, "revision"),
     ],
 )
 def test_a_record_that_contradicts_its_cell_is_refused(
@@ -134,7 +133,7 @@ def test_a_record_is_checked_against_a_full_commit() -> None:
 # --------------------------------------------------------------- assemble
 
 
-def test_seven_honest_records_assemble_into_a_manifest_the_schema_accepts() -> None:
+def test_six_honest_records_assemble_into_a_manifest_the_schema_accepts() -> None:
     inputs = pi.assemble(records(), COMMIT)
 
     assert inputs["source_commit"] == COMMIT
@@ -154,11 +153,11 @@ def test_seven_honest_records_assemble_into_a_manifest_the_schema_accepts() -> N
         protocol=rm.deploy_protocol(),
         revision="0001_schema_baseline",
     )
-    assert len(manifest["artifacts"]) == 7
+    assert len(manifest["artifacts"]) == 6
     assert sorted(manifest["runtime_catalog"]) == sorted(RUNTIMES)
 
 
-@pytest.mark.parametrize("missing", ["sandbox", "web-root", "egress"])
+@pytest.mark.parametrize("missing", ["sandbox", "web-root", "tunnel"])
 def test_a_missing_cell_is_not_a_smaller_release(missing: str) -> None:
     entries = records()
     del entries[missing]

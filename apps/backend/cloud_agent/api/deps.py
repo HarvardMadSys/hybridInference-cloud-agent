@@ -3,16 +3,17 @@
 The routers moved from the gateway unchanged, so they still ask for the
 dependencies they asked for there. Three kinds arrive at this module:
 
-- **Wiring this service owns.** The job store, the GitHub App credential
-  minter, the GitLab OAuth client, the gateway client and the grant client are
-  all objects this repository builds; they are read off ``app.state``, exactly
-  as the source read them off its own services container. ``None`` is a working
-  answer for the optional ones — a deployment without a configured database or
-  App is a supported shape, and the routes already handle it. The attribute
-  names (``store``, ``gateway``, ``grants``, ``app_credentials``,
-  ``gitlab_oauth``) are the contract with ``app.py``'s lifespan; renaming one
-  there without renaming it here degrades silently to "not configured" rather
-  than failing.
+- **Wiring this service owns.** The job store, the source-control runtime
+  (GitHub App credentials and GitLab OAuth), the gateway client and the grant
+  client are all objects this repository builds; they are read off
+  ``app.state``, exactly as the source read them off its own services
+  container. ``None`` is a working answer for the optional ones — a deployment
+  without a configured database or App is a supported shape, and the routes
+  already handle it. A configured App this process could not load is *not*
+  ``None``: see :func:`get_agent_app_credentials`. The attribute names
+  (``store``, ``gateway``, ``grants``, ``source_control``) are the contract
+  with the lifespan; renaming one there without renaming it here degrades
+  silently to "not configured" rather than failing.
 
 - **Identity and admin auth, which this service answers from its own world.**
   There is no ``users`` table here and no ``api_keys`` table: the gateway kept
@@ -59,6 +60,13 @@ from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.api.errors import AgentConfigurationError
 from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.source_control_runtime import (
+    RETRY_INTERVAL_S,
+    GitHubAppState,
+    LoadStatus,
+    SourceControlRuntime,
+    SourceControlUnavailable,
+)
 
 if TYPE_CHECKING:
     from cloud_agent.gateway import GatewayClient
@@ -127,14 +135,100 @@ def get_grant_client(request: Request) -> GrantClient:
     return client
 
 
-def get_agent_app_credentials(request: Request) -> Any | None:
-    """Dependency to obtain the GitHub App credential minter (if configured)."""
-    return getattr(request.app.state, "app_credentials", None)
+def get_source_control(request: Request) -> SourceControlRuntime | None:
+    """Dependency to obtain the process's source-control runtime.
+
+    ``None`` only where nothing built one — a test application that injects
+    credentials through the dependencies below. The lifespan always does.
+    """
+    return getattr(request.app.state, "source_control", None)
 
 
-def get_agent_gitlab_oauth(request: Request) -> Any | None:
-    """Dependency to obtain the configured GitLab.com OAuth client."""
-    return getattr(request.app.state, "gitlab_oauth", None)
+def source_control_unavailable(provider: str) -> HTTPException:
+    """The answer while a configured provider cannot be loaded (issue #47).
+
+    503 with a retry hint, and nothing about why: the reason is an operator's
+    concern and is in the ERROR log. It must not read as "not configured" or
+    "no access" — both send the reader to fix something that is not broken.
+    """
+    name = {"github": "GitHub", "gitlab": "GitLab"}.get(provider, provider)
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error": {
+                "type": "source_control_unavailable",
+                "provider": provider,
+                "message": f"{name} is temporarily unavailable. Please try again shortly.",
+            }
+        },
+        headers={"Retry-After": str(int(RETRY_INTERVAL_S))},
+    )
+
+
+def get_agent_app_credentials(
+    source_control: SourceControlRuntime | None = Depends(get_source_control),
+) -> Any | None:
+    """Dependency to obtain the GitHub App credential minter (if configured).
+
+    **Strict, and the default for that reason.** A configured App this process
+    could not load answers 503 before the handler runs: with ``None`` in hand
+    every caller would take the no-App path — the allowlist-only entitlement
+    check, the anonymous checkout — which is exactly the misreading issue #47
+    was about. A route that must still answer takes
+    :func:`get_github_app_state` instead, and says why.
+    """
+    if source_control is None:
+        return None
+    try:
+        return source_control.github.get()
+    except SourceControlUnavailable as exc:
+        raise source_control_unavailable(exc.provider) from exc
+
+
+def get_github_app_state(
+    source_control: SourceControlRuntime | None = Depends(get_source_control),
+) -> GitHubAppState:
+    """Dependency to obtain the App's credentials and load status, together.
+
+    The lenient counterpart of :func:`get_agent_app_credentials`: ``None`` for
+    the credentials while the App is unavailable, never a 503. For the surfaces
+    that describe the state rather than act on it — the Integrations page, the
+    composer's config, a disconnect.
+
+    One reading, not two dependencies: read separately, a reload finishing in
+    between hands a route ``None`` beside ``ready``, and the page then says
+    GitHub is not configured. A test application with no runtime overrides
+    this, or gets an App that is not configured.
+    """
+    if source_control is None:
+        return GitHubAppState(credentials=None, load_status="unconfigured")
+    return source_control.github.state()
+
+
+def get_agent_gitlab_oauth(
+    source_control: SourceControlRuntime | None = Depends(get_source_control),
+) -> Any | None:
+    """Dependency to obtain the configured GitLab.com OAuth client.
+
+    ``None`` when GitLab is unconfigured or failed to load, as before: GitLab is
+    not offered to connect, and it is never retried (see
+    :mod:`cloud_agent.source_control_runtime`).
+    """
+    return None if source_control is None else source_control.gitlab.client
+
+
+def get_gitlab_load_status(
+    source_control: SourceControlRuntime | None = Depends(get_source_control),
+    gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
+) -> LoadStatus:
+    """Dependency to obtain GitLab's load status.
+
+    Read beside the client without a shared snapshot, and safely: GitLab is
+    loaded once, so neither can change after startup.
+    """
+    if source_control is not None:
+        return source_control.gitlab.load_status
+    return "ready" if gitlab_oauth is not None else "unconfigured"
 
 
 # ── The gateway-side contract that did not move ────────────────────────

@@ -1836,17 +1836,6 @@
       "AgentConfigResponse": {
         "description": "What this deployment will actually accept, for the task composer.\n\nThe composer used to show a repository, a branch, a runtime and a model as\nstatic labels while submitting different hardcoded values — so the UI\ndescribed a job nobody was running. These are the real answers.",
         "properties": {
-          "agent_egress_tier": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Agent Egress Tier"
-          },
           "attachment_limits": {
             "$ref": "#/components/schemas/AttachmentLimits"
           },
@@ -1865,6 +1854,15 @@
               }
             ],
             "title": "Github Install Url"
+          },
+          "github_load_status": {
+            "enum": [
+              "unconfigured",
+              "unavailable",
+              "ready"
+            ],
+            "title": "Github Load Status",
+            "type": "string"
           },
           "goal_limits": {
             "$ref": "#/components/schemas/GoalLimits"
@@ -1931,21 +1929,13 @@
             "title": "Runtimes",
             "type": "array"
           },
-          "setup_egress_tier": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Setup Egress Tier"
-          },
           "skill_limits": {
             "$ref": "#/components/schemas/SkillLimits"
           }
         },
+        "required": [
+          "github_load_status"
+        ],
         "title": "AgentConfigResponse",
         "type": "object"
       },
@@ -2721,7 +2711,7 @@
                 "type": "null"
               }
             ],
-            "description": "Shell run before the agent, under the setup egress tier. What it adds to the worktree is cached per repository, script, and sandbox image, so a retry does not reinstall.",
+            "description": "Shell run in the sandbox before the agent starts. What it adds to the worktree is cached per repository, script, and sandbox image, so a retry does not reinstall.",
             "title": "Setup Script"
           },
           "skill_ids": {
@@ -2849,17 +2839,6 @@
       "AgentJobResponse": {
         "description": "One agent job as returned to its owner.",
         "properties": {
-          "agent_egress_tier": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Agent Egress Tier"
-          },
           "archived_at": {
             "anyOf": [
               {
@@ -3322,17 +3301,6 @@
               }
             ],
             "title": "Sandbox Id"
-          },
-          "setup_egress_tier": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Setup Egress Tier"
           },
           "skills": {
             "items": {
@@ -9982,6 +9950,15 @@
             ],
             "title": "Error"
           },
+          "load_status": {
+            "enum": [
+              "unconfigured",
+              "unavailable",
+              "ready"
+            ],
+            "title": "Load Status",
+            "type": "string"
+          },
           "manage_url": {
             "anyOf": [
               {
@@ -10012,7 +9989,8 @@
         "required": [
           "provider",
           "configured",
-          "connected"
+          "connected",
+          "load_status"
         ],
         "title": "SourceControlProviderResponse",
         "type": "object"
@@ -11375,7 +11353,7 @@
                 "type": "null"
               }
             ],
-            "description": "Shell run before the agent, under the setup egress tier. What it adds to the worktree is cached per repository, script, and sandbox image, so a retry does not reinstall.",
+            "description": "Shell run in the sandbox before the agent starts. What it adds to the worktree is cached per repository, script, and sandbox image, so a retry does not reinstall.",
             "title": "Setup Script"
           },
           "state": {
@@ -15546,7 +15524,7 @@
     },
     "/v1/agent/config": {
       "get": {
-        "description": "What this deployment will actually accept.\n\nThe composer showed a repository, a branch, a runtime and a model as static\nlabels while submitting different hardcoded values, so the UI described a\njob nobody was running. A picker has to be built from the same answers the\ncreate endpoint enforces, or it is decoration.",
+        "description": "What this deployment will actually accept.\n\nThe composer showed a repository, a branch, a runtime and a model as static\nlabels while submitting different hardcoded values, so the UI described a\njob nobody was running. A picker has to be built from the same answers the\ncreate endpoint enforces, or it is decoration.\n\nAnswers while the GitHub App is unavailable — the models, runtimes and MCP\nconnections are all still true — and says so in ``github_load_status``.",
         "operationId": "get_agent_config_v1_agent_config_get",
         "parameters": [
           {
@@ -15782,7 +15760,7 @@
     },
     "/v1/agent/github/connect/{installation_id}": {
       "delete": {
-        "description": "Drop one connection. Uninstalling on GitHub is the other half.",
+        "description": "Drop one connection. Uninstalling on GitHub is the other half.\n\nWorks while the App is unavailable: the grant is this service's own row.",
         "operationId": "disconnect_github_v1_agent_github_connect__installation_id__delete",
         "parameters": [
           {
@@ -16010,7 +15988,7 @@
     },
     "/v1/agent/integrations": {
       "get": {
-        "description": "Return configured and connected state for source control and MCP.\n\nOne response for one page, deliberately: the settings screen shows both\nkinds of connection together, and two requests would let it render a\nhalf-refreshed state after a disconnect. The MCP half is a summary — adding,\ntesting and selecting a connection live under ``/v1/agent/mcp``.",
+        "description": "Return configured and connected state for source control and MCP.\n\nOne response for one page, deliberately: the settings screen shows both\nkinds of connection together, and two requests would let it render a\nhalf-refreshed state after a disconnect. The MCP half is a summary — adding,\ntesting and selecting a connection live under ``/v1/agent/mcp``.\n\nAnswers while the GitHub App is unavailable, and says so, rather than\nfailing the whole page: that is the one place a user sees the outage.",
         "operationId": "list_source_control_integrations_v1_agent_integrations_get",
         "parameters": [
           {
@@ -16114,7 +16092,7 @@
     },
     "/v1/agent/integrations/github/connections/{installation_id}": {
       "delete": {
-        "description": "Drop only the authenticated user's GitHub installation grant.",
+        "description": "Drop only the authenticated user's GitHub installation grant.\n\nWorks while the App is unavailable: the grant is this service's own row,\nand a user who wants a connection gone should not have to wait for an\noutage to end.",
         "operationId": "disconnect_github_integration_v1_agent_integrations_github_connections__installation_id__delete",
         "parameters": [
           {
@@ -16684,7 +16662,7 @@
     },
     "/v1/agent/jobs/{job_id}/cancel": {
       "post": {
-        "description": "Request cancellation of one of the caller's agent jobs.\n\nQueued jobs cancel immediately; a running job is flagged and the worker\nperforms the fenced terminal transition when it next heartbeats. Messages\nthe owner has waiting are paused by the same commit — Stop does not start\nthe next one — and stay until the owner continues.",
+        "description": "Request cancellation of one of the caller's agent jobs.\n\nQueued jobs cancel immediately; a running job is flagged and the worker\nperforms the fenced terminal transition when it next heartbeats. Messages\nthe owner has waiting are paused by the same commit — Stop does not start\nthe next one — and stay until the owner continues. Stop answers whether or\nnot the GitHub App can be loaded right now (issue #47).",
         "operationId": "cancel_agent_job_v1_agent_jobs__job_id__cancel_post",
         "parameters": [
           {
@@ -21987,7 +21965,7 @@
     },
     "/v1/agent/worker/jobs/{job_id}/finish": {
       "post": {
-        "description": "Drive the fenced terminal transition for this attempt.\n\nThen, before acknowledging, act on what the ending means for the rest of\nthe conversation: the owner's waiting messages first, then the goal.",
+        "description": "Drive the fenced terminal transition for this attempt.\n\nThen, before acknowledging, act on what the ending means for the rest of\nthe conversation: the owner's waiting messages first, then the goal.\n\nTakes the source-control runtime rather than the App's credentials: a turn\nthat finished is recorded and acknowledged whether or not the App can be\nloaded right now (issue #47). Only sending the next waiting message and the\nnext goal round wait for it.",
         "operationId": "worker_finish_v1_agent_worker_jobs__job_id__finish_post",
         "parameters": [
           {

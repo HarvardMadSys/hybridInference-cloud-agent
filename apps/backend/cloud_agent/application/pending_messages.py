@@ -23,6 +23,7 @@ from fastapi import HTTPException
 from cloud_agent.application.follow_ups import PreparedFollowUp, prepare_follow_up
 from cloud_agent.domain.pending_messages import PreparedHead, SettleOutcome
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.source_control_runtime import SourceControlUnavailable
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
         SkillRepository,
         SourceControlRepository as SourceControlPort,
     )
+    from cloud_agent.source_control_runtime import GitHubAppSource
 
 logger = get_logger(__name__)
 
@@ -39,6 +41,10 @@ logger = get_logger(__name__)
 #: it. Each round is a check and a transaction; a message edited faster than
 #: that is left for the next settlement, which every edit triggers anyway.
 _SETTLE_ROUNDS = 3
+
+#: Stands in for the credentials of a configured GitHub App this process cannot
+#: load just now — which is not the same as having no App (issue #47).
+_APP_UNAVAILABLE = object()
 
 
 class QueueStorage(Protocol):
@@ -190,25 +196,72 @@ async def settle_queue(
     return SettleOutcome()
 
 
+def _app_credentials(github_app: GitHubAppSource | None) -> Any:
+    """The App's credentials now, ``None`` without an App, or the unavailable marker."""
+    try:
+        return github_app.get() if github_app is not None else None
+    except SourceControlUnavailable:
+        return _APP_UNAVAILABLE
+
+
+async def _settle_with(
+    store: QueueStorage, *, thread_id: str, gateway: Any, app_credentials: Any
+) -> SettleOutcome:
+    if app_credentials is _APP_UNAVAILABLE:
+        # The ending is still recorded and a failed or cancelled turn still
+        # pauses the queue; only sending waits. Without the App, the first
+        # message's repository check would see just the allowlist and hold a
+        # message its owner may send. Unprepared, the store sends nothing.
+        return await store.pending_messages.settle_queue(thread_id=thread_id, prepared=None)
+    return await settle_queue(
+        store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
+    )
+
+
+async def settle_queue_when_possible(
+    store: QueueStorage,
+    *,
+    thread_id: str,
+    gateway: Any,
+    github_app: GitHubAppSource | None,
+) -> SettleOutcome:
+    """Settle one queue for a caller that holds no App credentials of its own.
+
+    The worker's finish and a cancel: they must answer whether or not the
+    GitHub App can be loaded right now, so the credentials are asked for here.
+    While the App cannot be loaded the ending is acted on but nothing is sent;
+    the periodic sweep sends it once the App is back.
+    """
+    return await _settle_with(
+        store,
+        thread_id=thread_id,
+        gateway=gateway,
+        app_credentials=_app_credentials(github_app),
+    )
+
+
 async def settle_waiting_queues(
     store: QueueStorage,
     *,
     gateway: Any,
-    app_credentials: Any | None,
+    github_app: GitHubAppSource | None,
     limit: int = 50,
 ) -> int:
     """Settle every queue a settlement could move or pause; the periodic sweep.
 
     Not the mechanism — the finish route, cancel and the owner's own actions
     settle as they happen. This is for the endings that reach no route: the
-    reaper failing an attempt whose lease ran out, or a control plane restarted
-    between a turn's end and its settlement. Each thread is settled on its own,
-    so one bad thread cannot stop the rest. Returns how many were settled.
+    reaper failing an attempt whose lease ran out, a control plane restarted
+    between a turn's end and its settlement, and a message that waited while
+    the GitHub App could not be loaded. The App is asked for once per pass.
+    Each thread is settled on its own, so one bad thread cannot stop the rest.
+    Returns how many were settled.
     """
+    app_credentials = _app_credentials(github_app)
     settled = 0
     for thread_id in await store.pending_messages.threads_to_settle(limit=limit):
         try:
-            await settle_queue(
+            await _settle_with(
                 store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
             )
         except Exception:
@@ -227,5 +280,6 @@ __all__ = [
     "prepare_message",
     "prepared_head",
     "settle_queue",
+    "settle_queue_when_possible",
     "settle_waiting_queues",
 ]

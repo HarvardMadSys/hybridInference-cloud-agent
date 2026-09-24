@@ -43,6 +43,9 @@ from cloud_agent.skills.models import (
     SelectedSkill,
     SkillLimits,
 )
+from cloud_agent.source_control_runtime import (
+    LoadStatus,  # noqa: TC001 — Pydantic resolves this at runtime.
+)
 from cloud_agent_shared.event_payloads import bound_event_payload
 from cloud_agent_shared.shared_protocol import (
     HOST_CONCURRENCY_MAX_SLOTS,
@@ -125,7 +128,7 @@ class AgentJobCreate(BaseModel):
         None,
         max_length=8000,
         description=(
-            "Shell run before the agent, under the setup egress tier. What it adds "
+            "Shell run in the sandbox before the agent starts. What it adds "
             "to the worktree is cached per repository, script, and sandbox image, "
             "so a retry does not reinstall."
         ),
@@ -716,10 +719,6 @@ class AgentJobResponse(BaseModel):
     # Only summaries are repeated in job reads; resource details are fetched
     # for the selected attempt through its own endpoint.
     attempt_telemetry: list[AgentAttemptSummary] = Field(default_factory=list)
-    # The deployment's egress posture for this job's two phases, so the owner
-    # can see what the sandbox could reach rather than take it on trust.
-    setup_egress_tier: str | None = None
-    agent_egress_tier: str | None = None
     # Source control connection state. The composer is gated on this rather
     # than offering pickers that submit something else: with no App installed
     # there is no repository to work on, and a task box that looks ready is a
@@ -1992,7 +1991,7 @@ class WorkerFinishRequest(BaseModel):
         None,
         max_length=8000,
         description=(
-            "Shell run before the agent, under the setup egress tier. What it adds "
+            "Shell run in the sandbox before the agent starts. What it adds "
             "to the worktree is cached per repository, script, and sandbox image, "
             "so a retry does not reinstall."
         ),
@@ -2158,14 +2157,17 @@ class AgentConfigResponse(BaseModel):
             "refuses a job that names any, rather than dropping them silently."
         ),
     )
-    setup_egress_tier: str | None = None
-    agent_egress_tier: str | None = None
     # Source control connection state. The composer is gated on this rather
     # than offering pickers that submit something else: with no App installed
     # there is no repository to work on, and a task box that looks ready is a
     # worse answer than one that says what is missing.
     github_connected: bool = False
     github_install_url: str | None = None
+    #: Whether this deployment's GitHub App is working in this process. While it
+    #: is ``unavailable`` — configured, but not loaded, and being retried — the
+    #: composer says so instead of asking the user to connect or an
+    #: administrator to set GitHub up, and ``github_connected`` is false.
+    github_load_status: LoadStatus
 
 
 class GitHubConnectRequest(BaseModel):
@@ -2211,6 +2213,12 @@ class SourceControlProviderResponse(BaseModel):
     accounts: list[SourceControlAccount] = Field(default_factory=list)
     repositories: list[SourceControlRepository] = Field(default_factory=list)
     error: str | None = None
+    #: The deployment's side of the provider, not the user's: ``unavailable``
+    #: means configured, but this process could not load it and is retrying.
+    #: ``connected`` and ``accounts`` still come from the user's own records, so
+    #: a connection survives the outage. Required, so that a response built
+    #: somewhere new cannot default to a state nobody checked.
+    load_status: LoadStatus
 
 
 class McpIntegrationResponse(BaseModel):

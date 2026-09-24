@@ -57,7 +57,6 @@ def manifest() -> dict[str, Any]:
             {"role": "runner", "image": reference("runner"), "platforms": ["linux/amd64"]},
             {"role": "sandbox", "image": reference("sandbox"), "platforms": ["linux/amd64"]},
             {"role": "tunnel", "image": reference("tunnel"), "platforms": ["linux/amd64"]},
-            {"role": "egress", "image": reference("egress"), "platforms": ["linux/amd64"]},
         ]
     }
 
@@ -168,7 +167,7 @@ def test_supported_services_receive_the_opt_in_profiling_descriptor() -> None:
         ),
         pytest.param(
             lambda m: m["artifacts"].remove(
-                next(a for a in m["artifacts"] if a["role"] == "egress")
+                next(a for a in m["artifacts"] if a["role"] == "tunnel")
             ),
             "host",
             None,
@@ -193,7 +192,7 @@ def test_a_manifest_that_cannot_describe_a_deployment_is_refused(
 ) -> None:
     """A role the stack runs is not optional, and a tag is not a digest.
 
-    The egress case renders the host stack on purpose: a missing role only
+    The tunnel case renders the host stack on purpose: a missing role only
     matters to the stack that runs it, and a test that asserted otherwise would
     be demanding artifacts no deployment here uses.
     """
@@ -230,7 +229,7 @@ def test_the_cli_writes_a_file_with_no_build_left(tmp_path: Path) -> None:
 
 def test_the_cli_writes_nothing_when_it_refuses(tmp_path: Path) -> None:
     broken = manifest()
-    broken["artifacts"] = [a for a in broken["artifacts"] if a["role"] != "egress"]
+    broken["artifacts"] = [a for a in broken["artifacts"] if a["role"] != "tunnel"]
     manifest_path = tmp_path / "release.json"
     manifest_path.write_text(json.dumps(broken))
     output = tmp_path / "compose.yml"

@@ -4,7 +4,9 @@
 
 **修订：** 2026-09-03，区分已接通的安全边界与尚未关闭的部署门禁
 
-**状态：** 当前安全契约；`trusted` setup allowlist proxy 尚未接入默认 host compose，Docker writable-layer quota 也未实现，二者仍是 rollout gate
+**修订：** 2026-09-23，网络部分按[统一公网出口设计](2026-09-23-agent-public-egress-design.zh-CN.md)改为唯一网络：删除两阶段网络、网络档位与白名单代理。
+
+**状态：** 当前安全契约；Docker writable-layer quota 尚未实现，仍是 rollout gate；网关的推理令牌内部入口尚未完成，完成前不用真实用户凭据运行可出网的任务（见 §8.4）
 
 **实现仓库：** `freeinference-cloud-agent`
 
@@ -23,7 +25,7 @@
 
 1. 沙盒内代码不能获得 control plane、runner host、Docker daemon 或 source-control publisher 的控制权。
 2. 沙盒只得到完成当前任务所需的短期能力；能力有 scope、subject、generation、TTL 与撤销边界。
-3. Setup 与 Agent 执行使用不同网络策略，Agent phase 不能恢复 package-registry egress。
+3. Setup、Agent 执行与 Fork 使用同一套固定网络边界：只到公网 IPv4 TCP 80/443、指定解析器和本组两个中继，不到宿主、私网与特殊用途地址或其他沙盒组；没有可选择或放宽的网络模式。
 4. Repository credential、长期模型 credential、MCP upstream credential 和发布 credential 不进入 workspace 或 Docker writable layer。
 5. 同一 shared sandbox 内的 sibling chat 可以共享文件，但不能读取彼此 credential、控制彼此进程或接收彼此事件。
 6. 安全能力无法验证时 fail closed；不得静默降级到更弱 runtime、开放网络或共享 credential 路径。
@@ -108,14 +110,16 @@ Trusted Computing Base 包括：
                                       ├── build/test tools
                                       └── child processes
 
- sandbox network destinations during agent phase:
+ sandbox network destinations (setup, agent and fork alike):
    1. fixed gateway relay  -> model inference only
    2. fixed MCP relay      -> selected MCP tools only
+   3. public IPv4, TCP 80/443 only, plus one named resolver on TCP/UDP 53
 
- sandbox cannot choose an arbitrary upstream and cannot reach the control-plane listener.
+ sandbox cannot choose a relay's upstream, and cannot reach the host, private or
+ special-purpose addresses, other groups, or the control-plane listener.
 ```
 
-Relay 是固定目的地转发器，不是让 caller 自选目标的通用 HTTP proxy。
+Relay 是固定目的地转发器，不是让 caller 自选目标的通用 HTTP proxy。公网访问也不经过任何代理，由宿主规则按实际数据包放行或拒绝（§8）。
 
 ## 5. 权限所有权
 
@@ -197,41 +201,44 @@ Source preparer 的临时目录不是 checkpoint，也不能作为恢复或 Fork
 
 后续 published base 更新使用 credential-free Git bundle 导入 object；不得 reset shared worktree、index、local commit 或 uncommitted changes。
 
-## 8. 两阶段网络策略
+## 8. 沙盒网络边界
 
-代码已经定义 phase/tier policy 和 Squid 配置 renderer，但当前 host compose 对 setup/agent 都默认 `platform_only`，也没有启动或连接 setup allowlist proxy。所以下述 `trusted` setup 路径是尚待部署接线和验收的目标，不是当前默认部署已经具备的能力。
+所有任务只使用一套网络：准备、执行与 Fork 成员共用，没有网络阶段、网络档位或代理，也没有放宽它的配置（[统一公网出口设计](2026-09-23-agent-public-egress-design.zh-CN.md)）。实现见 `cloud_agent_shared/egress.py`（配置与规则）、`cloud_agent_host/network_guard.py`（宿主 helper）与 `cloud_agent_host/chat_sandbox.py`（组网桥）。
 
-### 8.1 Setup phase
+### 8.1 拓扑
 
-目的：允许安装依赖，但不提供开放互联网。
+- 每个沙盒组一张可路由 Docker 网桥，从 `AGENT_EGRESS_CHAT_NETWORK_POOL` 分配 /29，接口名带本部署前缀。
+- 桥上只有该组容器和两个受信中继：推理中继（网关）与 MCP 中继（MCP 专用应用）。中继在 `AGENT_RELAY_NETWORK`（`internal`，沙盒组不加入）上发现，再按别名挂到各组网桥；relay address 由 host 配置，沙盒不能指定 upstream。
+- runc 容器以 `--dns AGENT_EGRESS_DNS_SERVER` 创建；Kata guest 的 `/etc/resolv.conf` 和中继的 `/etc/hosts` 条目由受信 guest-root helper 写入。
+- 如果 deployment 未配置某个 relay，相关能力为空；系统应在 job admission 或 runtime launch 时拒绝不满足的请求，不能把 MCP URL 回退到 gateway。
 
-- 启用 `trusted` setup tier 后，所有外部访问必须通过 allowlist proxy；
-- CONNECT 按 hostname 与端口策略校验；
-- 当前 renderer 可记录 allow/deny、来源、目标、状态与字节；parser、ledger 与告警尚未实现；
-- 不允许 caller 把 proxy 变成任意目标 relay；
-- repository credential 不进入 setup process；
-- setup 完成后 detach network，并验证 detach 成功。
+### 8.2 宿主规则
 
-### 8.2 Agent phase
+规则是本部署自己的 nftables 表（`inet` 与 `bridge` 两个 family，表名 `cloud_agent_<前缀>`，由 `AGENT_SANDBOX_NAMESPACE` 派生）。runner 与 broker 不持有 `NET_ADMIN`，通过短时 helper 安装：同一镜像，host 网络命名空间，runc，只加 `NET_ADMIN`，只读根文件系统。沙盒不获得 `NET_ADMIN`、Docker socket 或其他特权通道。
 
-目的：执行不可信代码，同时把可达面限制到显式能力服务。
+| 类别 | 规则 |
+|---|---|
+| 公网 | 允许公网 IPv4 单播的 TCP 80/443 |
+| DNS | 只允许 `AGENT_EGRESS_DNS_SERVER` 的 TCP/UDP 53，先于受保护网段判断 |
+| 中继 | 按（网桥、地址、端口）精确放行本组两个中继 |
+| 受保护目标 | 拒绝宿主所有地址，IANA 特殊用途 IPv4（私网、链路本地与云元数据、CGNAT、组播、保留等）及 `AGENT_EGRESS_PROTECTED_CIDRS` |
+| 其他 | 拒绝其他沙盒组、其他端口、UDP 443、全部 IPv6 与外部主动入站；回包只接受获准出站连接的，来自受保护地址的回包仍被丢弃 |
 
-- 只连接固定 gateway relay 与可选 MCP relay；
-- relay address 由 host 配置，沙盒不能指定 upstream；
-- gateway 只接受 model grant；
-- MCP listener 只暴露 MCP routes，并拒绝 model/control token；
-- control-plane、runner API、Docker socket、database 和 source-control upstream 均不可达；
-- setup proxy 不得重新连接。
+- 先安装并回读校验规则，再创建组网桥；preflight 校验失败时 runner 不接活，组网络操作复用 60 秒内的校验结果。
+- runner 进程退出不删除规则；宿主重启后，规则重新安装前不启动任何组。
+- 同一宿主上两个部署的地址池重叠时，后安装的一方拒绝运行；地址池与宿主已有路由（机房网段、VPN、私有服务，默认路由与宽于 /8 的兜底路由除外）重叠时同样拒绝，因为 Docker 对显式子网不检查宿主路由，组网桥会把宿主发往这些地址的流量引入沙盒。
+- 中继以网关优先级 -1 加入各组网桥，组网桥永远不会成为中继的默认出口；需要 Docker 28 及以上（客户端与守护进程），预检拒绝旧版本。
+- control plane、runner API、Docker socket 与 database 的宿主或私网地址不可达；平台的公网地址可能可达，见 §8.4。
 
-如果 deployment 未配置某个 relay，相关能力为空；系统应在 job admission 或 runtime launch 时拒绝不满足的请求，不能把 MCP URL 回退到 gateway 或打开普通网络。
+### 8.3 Guest 自检与失败行为
 
-### 8.3 Network transition 不变量
+每次冷启动后，以沙盒用户在 guest 内检查默认路由、解析器配置并实际查询一次（根域 NS，3 秒内应答）、两个中继的 TCP 端口，以及两个受控边界探针：宿主（UDP）与元数据地址（TCP）必须被本部署规则以 ICMP“管理禁止”立即拒绝；宿主自己回“端口不可达”或无应答，说明该 guest 的流量没有经过规则。公网可达性不作为启动条件，外部故障不等于边界失效。全部通过后才执行仓库代码或安装脚本；失败则停止沙盒、保留工作区，本 turn 失败。有组在运行时，broker 至多每分钟回读一次宿主规则并补装缺失部分；连续两次仍无法证明规则时，停止本部署所有运行中的组（保留工作区与 native session），规则恢复前不再唤醒。运行中的沙盒不会在其下改接网络。旧网络拓扑留下的容器与网桥不被采用，只报告需要一次性清理。
 
-```text
-PROVISIONING -> SETUP_EGRESS -> NETWORK_DETACHED -> AGENT_EGRESS
-```
+### 8.4 接受的限制与前置条件
 
-进入 `AGENT_EGRESS` 后，同一 container generation 不允许回到 `SETUP_EGRESS`。确需重新 setup 时必须设计新的可信 operation，而不是临时打开网络。
+- TCP 80/443 只是端口约束，不检查内容，不承诺阻止 DoH 或这些端口上的隧道；
+- 不防外发：沙盒可以把仓库内容和自己的短期令牌发往公网；
+- 平台公网地址可能可达，所以公网入口必须拒绝沙盒令牌：MCP 工具调用只由 MCP 专用应用提供（#327，已完成）；网关只在独立内部入口接受推理 grant（尚未实现，属网关仓库）。后者完成前，不用真实用户凭据运行可出网的任务。
 
 ## 9. 容器与 runtime 隔离
 
@@ -437,8 +444,8 @@ Publisher 不能信任沙盒声明的目标 repository、branch 或 base；必�
 | Runtime/image attestation 失败 | Claim shared/untrusted job | Host 不 advertise capability |
 | Gateway grant 无法验证 | Model call | 401/403/503；不得 unmetered 通过 |
 | MCP token/fence 无法验证 | Tool call | Relay 拒绝 |
-| Setup network detach 未证明 | 启动 Agent | 停止 activation |
-| Agent relay probe 失败 | 发送 prompt | 明确 provisioning failure |
+| 宿主网络规则缺失或回读校验失败 | 创建组网桥、claim job | Host 不接活，组网络操作失败 |
+| Guest 网络自检失败（路由、解析器、中继） | 执行仓库代码或发送 prompt | 停止沙盒、保留工作区，turn 失败 |
 | Native resume 不可证明 | 发送 follow-up | `lost`，不 blank-session fallback |
 | Slot cleanup 不明确 | Reuse slot | Member fail closed |
 | Snapshot writer census 不一致 | 宣称 quiescent/publish | 保持 pending/dirty |
@@ -452,8 +459,8 @@ Publisher 不能信任沙盒声明的目标 repository、branch 或 base；必�
 
 - Job/Attempt/lease/generation transition；
 - Grant mint/renew/revoke/expiry，不记录 token；
-- Network phase transition 与 relay probe；
-- Egress allow/deny verdict 与 unclassified bytes（setup proxy 接线和 parser 落地后；当前没有该 ledger）；
+- 宿主网络规则的安装与回读校验、guest 网络自检与 relay probe；
+- 不做逐连接出站审计（统一出口设计 §10）；宿主规则上的拒绝计数是本部署的总量，不归属到组或成员；
 - Slot allocation、process cleanup 与 ambiguity；
 - Native resume/Fork receipt validation；
 - Container OOM、unexpected exit、missing object；
@@ -476,12 +483,15 @@ Publisher 不能信任沙盒声明的目标 repository、branch 或 base；必�
 
 ### 17.2 Network
 
-- Setup 只可达 allowlist target；
-- Agent phase 不能访问 package registry、control plane、Docker daemon 或任意公网地址；
-- gateway/MCP relay 只能到固定 upstream；
-- 未配置 relay 时请求明确失败；
-- `trusted` setup proxy 接线后，denied CONNECT 可归属、计数与告警；当前默认部署尚未通过此项；
-- phase transition 后 setup network 不可重新出现。
+按[统一公网出口设计](2026-09-23-agent-public-egress-design.zh-CN.md) §9 的验收表执行，要点：
+
+- 实际 Kata guest 中 curl、Python HTTPS、HTTP 80、包下载与 Git HTTPS 可用；
+- 其他公网端口、UDP 443 和其他解析器被拒，指定解析器正常；
+- 宿主各地址、私网、链路本地/元数据、CGNAT、组播、保留地址、追加保护网段与其他沙盒组不可达，DNS 重绑定后的私网连接同样被拒；
+- 本组两个中继的服务端口可用，其他端口被拒；gateway/MCP relay 只能到固定 upstream；
+- IPv6 与外部主动入站被拒；
+- 规则、DNS 与 guest 自检完成前不执行仓库代码；准备到执行沿用同一网桥，没有网络阶段切换；
+- 未配置 relay 时请求明确失败。
 
 ### 17.3 Runtime isolation
 
@@ -505,7 +515,7 @@ Publisher 不能信任沙盒声明的目标 repository、branch 或 base；必�
 
 - Docker writable layer 仍是单一持久副本；host/data-root 丢失导致 `lost`。
 - 当前没有 per-container writable-layer quota；disk-pressure admission 不能替代资源隔离。
-- `trusted` setup allowlist proxy 仍未接入默认 host compose；现有 `platform_only` 默认档位不能安装需要公网 registry 的依赖。
+- 公网出口按端口放行，不检查内容，也不防外发；公网入口拒绝沙盒令牌是防止直接重放的前提，其中网关推理内部入口尚未实现（§8.4）。
 - Shared workspace 允许同一授权域内的 sibling 相互影响文件和项目级 state。
 - 普通 Docker 共享宿主内核，只适合相应信任等级。
 - Runtime-native state format 与并发行为受精确版本影响，升级必须重新 attestation。
@@ -517,7 +527,7 @@ Publisher 不能信任沙盒声明的目标 repository、branch 或 base；必�
 | 边界 | 主要路径 |
 |---|---|
 | Sandbox 与 Docker lifecycle | `cloud_agent_host/sandbox.py` |
-| Egress phase / allowlist proxy | `cloud_agent_host/egress.py`、`cloud_agent_host/egress_proxy.py` |
+| 沙盒网络：配置、宿主规则与组网桥 | `cloud_agent_shared/egress.py`、`cloud_agent_host/network_guard.py`、`cloud_agent_host/chat_sandbox.py` |
 | Source setup/import | `cloud_agent_host/setup.py` |
 | Supervisor、slot 与 process cleanup | `cloud_agent_host/shared_session_supervisor.py` |
 | Runtime credential/config | `cloud_agent_host/runtimes.py`、`cloud_agent_host/resident_transport.py` |

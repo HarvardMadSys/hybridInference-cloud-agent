@@ -36,9 +36,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urlparse
 
-from cloud_agent_host.egress import EgressTier
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_EVENTS,
@@ -66,6 +64,8 @@ if TYPE_CHECKING:
     import builtins
     from collections.abc import Iterator, Sequence
 
+    from cloud_agent_shared.egress import SandboxNetwork
+
 
 CHAT_SANDBOX_LABEL = "org.freeinference.chat-sandbox"
 CHAT_NAMESPACE_LABEL = "org.freeinference.sandbox-namespace"
@@ -83,21 +83,31 @@ CHAT_RESIDENT_CAPACITY_LABEL = "org.freeinference.chat-resident-slot-capacity"
 CHAT_NETWORK_LABEL = "org.freeinference.chat-sandbox-network"
 CHAT_NETWORK_SANDBOX_ID_LABEL = "org.freeinference.chat-sandbox-id"
 CHAT_NETWORK_GENERATION_LABEL = "org.freeinference.chat-generation"
-CHAT_NETWORK_BASE_LABEL = "org.freeinference.chat-base-network"
-CHAT_NETWORK_TIER_LABEL = "org.freeinference.chat-egress-tier"
 CHAT_NETWORK_SERVICES_LABEL = "org.freeinference.chat-service-aliases"
 CHAT_NETWORK_POOL_LABEL = "org.freeinference.chat-network-pool"
 CHAT_CONTAINER_PREFIX = "freeinference-chat"
 CHAT_NETWORK_PREFIX = "freeinference-chat-net"
 CHAT_NETWORK_PREFIX_LENGTH = 29
 CHAT_NETWORK_PRUNE_GRACE_S = 300
-CHAT_NETWORK_INHIBIT_IPV4_OPTION = "com.docker.network.bridge.inhibit_ipv4"
+#: Docker's option naming a bridge's host interface. Group bridges carry this
+#: deployment's prefix there, which is how the host's rules recognise them.
+CHAT_NETWORK_BRIDGE_OPTION = "com.docker.network.bridge.name"
+#: The gateway priority a relay joins every group bridge with. A container on
+#: several networks takes its default route from the highest priority, then by
+#: network name, and ``freeinference-chat-net-*`` sorts before a stack's own
+#: network: at Docker's default of 0 the first group bridge a relay joined would
+#: become its way out, and its SSH upstream would meet the sandbox rules — which
+#: drop it, for every group sharing that relay. Below zero, never.
+RELAY_GATEWAY_PRIORITY = -1
 CHAT_BOOTSTRAP_NETWORK = "bridge"
 #: Docker's built-in null network. A container reports it once its last real
 #: endpoint is gone, which is exactly the state a completed release leaves
-#: behind, so it means "no egress" rather than "an egress nobody claims".
+#: behind, so it means "no network" rather than "a network nobody claims".
 CHAT_NULL_NETWORK = "none"
-CHAT_DNS_UPSTREAM = "127.0.0.1"
+#: The resolver for a container created with no group network at all (the
+#: guest observer probe runs on Docker's null network): loopback, so nothing
+#: resolves. Every group sandbox is given the deployment's one resolver.
+CHAT_OFFLINE_DNS = "127.0.0.1"
 CHAT_WORKDIR = "/workspace"
 #: Where a task's uploaded files land. Outside the worktree on purpose: the
 #: publish path stages the workspace with ``git add -A -N``, so anything
@@ -163,6 +173,71 @@ _FULL_OBJECT_ID = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 # this inert process as a latency optimization; continuity does not depend on
 # it. Docker's ``--init`` owns signal forwarding/reaping, while one never-
 # respawned child avoids manufacturing a same-UID process event every hour.
+# Run inside a guest as the sandbox user after every cold start, with $1 the
+# resolver the guest should use and $2 the relays as JSON. Prints the problems
+# it found as a JSON list; an empty list is a pass. Every probe has a short
+# bound and nothing here leaves the host: the resolver answers one query for the
+# root's name servers, and the two boundary probes aim at the host itself and at
+# the metadata address, which the host rules must refuse at once with their own
+# ICMP "administratively prohibited". A host without the rules would answer
+# "port unreachable" for itself instead, and route the other onwards.
+_GUEST_NETWORK_CHECK = """
+import errno, json, socket, struct, sys
+resolver, relays = sys.argv[1], json.loads(sys.argv[2])
+problems = []
+gateway = None
+for row in [line.split() for line in open('/proc/net/route').read().splitlines()[1:]]:
+    if len(row) > 2 and row[1] == '00000000':
+        gateway = socket.inet_ntoa(struct.pack('<L', int(row[2], 16)))
+        break
+if gateway is None:
+    problems.append('no default route')
+servers = [line.split()[1] for line in open('/etc/resolv.conf')
+           if line.startswith('nameserver') and len(line.split()) > 1]
+if servers != [resolver]:
+    problems.append('resolver is %r, expected %r' % (servers, [resolver]))
+query = bytes.fromhex('4321 0100 0001 0000 0000 0000 00 0002 0001'.replace(' ', ''))
+try:
+    dns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    dns.settimeout(3)
+    dns.connect((resolver, 53))
+    dns.send(query)
+    answer = dns.recv(512)
+    if len(answer) < 12 or answer[:2] != query[:2] or not answer[2] & 0x80 or answer[3] & 0x0F:
+        problems.append('resolver %s did not answer the query usefully' % resolver)
+except OSError as exc:
+    problems.append('resolver %s did not answer: %s' % (resolver, exc))
+for host, port in relays:
+    try:
+        socket.create_connection((host, port), timeout=5).close()
+    except OSError as exc:
+        problems.append('relay %s:%d unreachable: %s' % (host, port, exc))
+def refused_by_rules(label, attempt):
+    try:
+        attempt()
+    except TimeoutError:
+        problems.append('%s was not refused within 2s' % label)
+    except OSError as exc:
+        if exc.errno != errno.EHOSTUNREACH:
+            name = errno.errorcode.get(exc.errno or 0, str(exc.errno))
+            problems.append('%s was refused by %s, not by the network rules' % (label, name))
+    else:
+        problems.append("%s answered; the network rules are not in this guest's path" % label)
+def host_udp():
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    probe.settimeout(2)
+    probe.connect((gateway, 9))
+    probe.send(b'x')
+    probe.recv(1)
+if gateway is not None:
+    refused_by_rules('the host at %s:9/udp' % gateway, host_udp)
+refused_by_rules(
+    'the metadata address 169.254.169.254:80',
+    lambda: socket.create_connection(('169.254.169.254', 80), timeout=2).close(),
+)
+print(json.dumps(problems))
+"""
+
 _INIT_COMMAND = (
     'trap \'kill "$child" 2>/dev/null; wait "$child"; exit 0\' TERM INT; '
     'sleep 2147483647 & child=$!; wait "$child"'
@@ -323,22 +398,6 @@ class ChatSandboxManager:
 
     def __init__(self, backend: ContainerBackend) -> None:
         self.backend = backend
-        try:
-            network_pool = ipaddress.ip_network(backend.chat_network_pool, strict=True)
-        except ValueError as exc:
-            raise SandboxError(
-                "AGENT_EGRESS_CHAT_NETWORK_POOL must be one canonical IPv4 CIDR"
-            ) from exc
-        if (
-            not isinstance(network_pool, ipaddress.IPv4Network)
-            or not network_pool.is_private
-            or network_pool.prefixlen > CHAT_NETWORK_PREFIX_LENGTH
-        ):
-            raise SandboxError(
-                "AGENT_EGRESS_CHAT_NETWORK_POOL must be an RFC1918 IPv4 network "
-                f"large enough to contain /{CHAT_NETWORK_PREFIX_LENGTH} chat networks"
-            )
-        self._chat_network_pool = network_pool
         self._member_reaper_lock = threading.Lock()
         # Multiple fork siblings may admit turns concurrently. Singleton
         # observer startup/rotation and its live cursors therefore need one
@@ -346,93 +405,46 @@ class ChatSandboxManager:
         self._guest_observer_lock = threading.RLock()
         self._guest_observer_active: dict[str, dict[int, int]] = {}
 
-    def network_for_phase(self, spec: ChatSandboxSpec, phase: str) -> str:
-        """Return this chat's network for one lifecycle phase.
+    # ── the group network ──────────────────────────────────────────────
+    #
+    # One routable bridge per sandbox group, used by setup, the agent and every
+    # fork member alike, named from the group's identity and guarded on the
+    # host by the deployment's rule set (cloud_agent_shared.egress). Docker
+    # routes and masquerades it; the host's rules decide what it reaches. The
+    # only other endpoints on it are the two relays, copied from the relay
+    # network, and the host holds an exact exception for each of them.
 
-        The compose-level egress networks are service-discovery backplanes, not
-        tenant boundaries: Docker's ``internal`` flag removes an off-host route
-        but still allows every container on the bridge to address every other
-        container.  PlatformOnly and Trusted therefore get a deterministic
-        per-chat internal bridge containing this one sandbox plus only the
-        fixed relay/proxy containers copied from the configured backplane.
+    def _network(self) -> SandboxNetwork:
+        """This deployment's network; only group-network work needs it."""
+        return self.backend.require_sandbox_network()
 
-        Custom and Full are operator-defined escape hatches, so their network
-        topology remains exactly what the operator supplied.  A manually
-        constructed backend with no discoverable service aliases is retained
-        as a unit-test/embedding compatibility seam; production backends built
-        from environment configuration always name the gateway/MCP relays.
+    def network_for(self, spec: ChatSandboxSpec) -> str:
+        """Return this group's one network name.
+
+        It depends on nothing but the group's identity, so setup, the agent
+        and every fork member meet on the same bridge for the life of the
+        sandbox generation, and a new generation gets a new bridge.
         """
-        base = self.backend.network_for_phase(phase)
-        aliases = self._service_aliases_for_phase(phase)
-        if not aliases:
-            return base
-        assert self.backend.egress is not None
-        tier = self.backend.egress.tier_for(phase)
         digest = hashlib.sha256(
             (
                 f"{self.backend.sandbox_namespace}\0{spec.thread_id}\0{spec.sandbox_id}\0"
-                f"{spec.generation}\0"
-                f"{base}\0{tier.value}\0" + "\0".join(aliases)
+                f"{spec.generation}"
             ).encode()
         ).hexdigest()[:24]
         return f"{CHAT_NETWORK_PREFIX}-{digest}"
 
-    def _service_aliases_for_phase(self, phase: str) -> tuple[str, ...]:
-        """Return the trusted services copied onto a chat-private bridge."""
-        policy = self.backend.egress
-        if policy is None:
-            return ()
-        tier = policy.tier_for(phase)
-        candidates: tuple[str, ...]
-        if tier is EgressTier.PLATFORM_ONLY:
-            candidates = policy.no_proxy
-        elif tier is EgressTier.TRUSTED:
-            proxy = policy.proxies.get(tier, "")
-            candidates = (
-                # Setup may reach registries only through the allowlist proxy.
-                # The gateway/MCP relays belong exclusively to the agent
-                # phase, even when an operator opts that phase into Trusted.
-                *(policy.no_proxy if phase == "agent" else ()),
-                *((urlparse(proxy).hostname or "",) if proxy else ()),
-            )
-        else:
-            return ()
+    def _relay_aliases(self) -> tuple[str, ...]:
+        """The relay names a group bridge carries, validated by the config."""
+        return self._network().relay_hosts
 
-        aliases: dict[str, None] = {}
-        for raw in candidates:
-            host = raw.strip().lower().rstrip(".")
-            if not host or host == "localhost":
-                continue
-            try:
-                address = ipaddress.ip_address(host)
-            except ValueError:
-                address = None
-            if address is not None:
-                if address.is_loopback:
-                    continue
-                raise SandboxError(
-                    f"the {tier.value} tier names fixed service {host!r} by IP. "
-                    "A per-chat Docker network gives services a different address; "
-                    "name the relay/proxy by its Docker network alias instead"
-                )
-            if "\x00" in host or len(host) > 253:
-                raise SandboxError(f"invalid Docker service alias {host!r}")
-            aliases[host] = None
-        return tuple(aliases)
-
-    def _network_labels(self, spec: ChatSandboxSpec, phase: str) -> dict[str, str]:
-        policy = self.backend.egress
-        if policy is None:
-            return {}
+    def _network_labels(self, spec: ChatSandboxSpec) -> dict[str, str]:
         return {
             CHAT_NETWORK_LABEL: "true",
             CHAT_NAMESPACE_LABEL: self.backend.sandbox_namespace,
             CHAT_NETWORK_SANDBOX_ID_LABEL: spec.sandbox_id,
             CHAT_NETWORK_GENERATION_LABEL: str(spec.generation),
-            CHAT_NETWORK_BASE_LABEL: self.backend.network_for_phase(phase),
-            CHAT_NETWORK_TIER_LABEL: policy.tier_for(phase).value,
-            CHAT_NETWORK_SERVICES_LABEL: ",".join(self._service_aliases_for_phase(phase)),
-            CHAT_NETWORK_POOL_LABEL: str(self._chat_network_pool),
+            CHAT_NETWORK_SERVICES_LABEL: ",".join(self._relay_aliases()),
+            CHAT_NETWORK_POOL_LABEL: str(self._network().pool),
         }
 
     def _inspect_network(self, network: str) -> dict[str, Any] | None:
@@ -451,14 +463,9 @@ class ChatSandboxManager:
             raise SandboxError("Docker returned an invalid network inspection")
         return raw
 
-    def _verify_phase_network(
-        self,
-        network: dict[str, Any],
-        spec: ChatSandboxSpec,
-        phase: str,
-    ) -> None:
-        expected_name = self.network_for_phase(spec, phase)
-        expected_labels = self._network_labels(spec, phase)
+    def _verify_group_network(self, network: dict[str, Any], spec: ChatSandboxSpec) -> None:
+        expected_name = self.network_for(spec)
+        expected_labels = self._network_labels(spec)
         labels = network.get("Labels") or {}
         options = network.get("Options") or {}
         mismatched = {
@@ -470,15 +477,19 @@ class ChatSandboxManager:
             network.get("Name") != expected_name
             or network.get("Driver") != "bridge"
             or network.get("Scope") not in (None, "local")
-            or network.get("Internal") is not True
+            # Routable on purpose: the host's rules, not Docker's internal flag,
+            # decide what a group reaches. An internal network carrying this
+            # name is the old per-phase topology, which is never adopted.
+            or network.get("Internal") is not False
+            or network.get("EnableIPv6") is True
             or not isinstance(options, dict)
-            or str(options.get(CHAT_NETWORK_INHIBIT_IPV4_OPTION, "")).lower() != "true"
+            or options.get(CHAT_NETWORK_BRIDGE_OPTION) != self._network().bridge_name(expected_name)
             or not self._network_uses_chat_pool(network)
             or mismatched
         ):
             raise SandboxError(
                 "Docker network name is occupied outside this chat/generation or is not "
-                "an internal host-isolated local bridge"
+                "this deployment's guarded group bridge"
             )
 
     def _network_uses_chat_pool(self, network: dict[str, Any]) -> bool:
@@ -499,7 +510,7 @@ class ChatSandboxManager:
         return bool(
             len(ipv4_subnets) == 1
             and ipv4_subnets[0].prefixlen == CHAT_NETWORK_PREFIX_LENGTH
-            and ipv4_subnets[0].subnet_of(self._chat_network_pool)
+            and ipv4_subnets[0].subnet_of(self._network().pool)
         )
 
     def _inspect_containers(self, container_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
@@ -510,7 +521,7 @@ class ChatSandboxManager:
         hundred microseconds against roughly twelve milliseconds for the
         process itself. Asking once per container — which is what the callers
         below used to do — made a reconcile's cost scale with the size of the
-        egress backplane for no reason.
+        relay network for no reason.
 
         An id that does not resolve is simply absent from the result. Docker
         exits non-zero when *any* id is missing while still answering for the
@@ -571,16 +582,18 @@ class ChatSandboxManager:
                 resolved[container_id] = aliases
         return resolved
 
-    def _service_owners(self, base: str, aliases: tuple[str, ...]) -> dict[str, list[str]]:
-        """Resolve each configured service alias to one running base-network peer."""
+    def _relay_owners(self) -> dict[str, list[str]]:
+        """Resolve each relay alias to one running container on the relay network."""
+        base = self._network().relay_network
+        aliases = self._relay_aliases()
         network = self._inspect_network(base)
         if network is None:
-            raise SandboxError(f"configured egress backplane {base!r} does not exist")
+            raise SandboxError(f"configured relay network {base!r} does not exist")
         containers = network.get("Containers") or {}
         if not isinstance(containers, dict):
-            raise SandboxError(f"configured egress backplane {base!r} is invalid")
+            raise SandboxError(f"configured relay network {base!r} is invalid")
         matches: dict[str, list[str]] = {alias: [] for alias in aliases}
-        # One inspection for the whole backplane. A container that Compose
+        # One inspection for the whole relay network. A container that Compose
         # replaced between the network inspection and this one is simply
         # absent, and the exact-one check below turns that race into a
         # retryable activation failure rather than selecting a different
@@ -615,8 +628,8 @@ class ChatSandboxManager:
             if len(unique) != 1:
                 detail = "no running container" if not unique else "multiple running containers"
                 raise SandboxError(
-                    f"fixed service alias {alias!r} has {detail} on egress backplane "
-                    f"{base!r}; refusing an ambiguous chat network"
+                    f"relay alias {alias!r} has {detail} on relay network "
+                    f"{base!r}; refusing an ambiguous group network"
                 )
             owners.setdefault(unique[0], []).append(alias)
         return owners
@@ -625,12 +638,11 @@ class ChatSandboxManager:
         """One container's names on ``network``; ``None`` if it is not on it."""
         return self._network_aliases_for([container_id], network).get(container_id)
 
-    def fixed_service_addresses(self, phase: str, network: str) -> dict[str, str]:
-        """Resolve only configured relays to their addresses on the given bridge."""
-        aliases = self._service_aliases_for_phase(phase)
-        if not aliases:
+    def relay_addresses(self, network: str) -> dict[str, str]:
+        """Resolve only the configured relays to their addresses on one bridge."""
+        if not self._relay_aliases():
             return {}
-        owners = self._service_owners(self.backend.network_for_phase(phase), aliases)
+        owners = self._relay_owners()
         raw = self._inspect_network(network)
         endpoints = (raw or {}).get("Containers") or {}
         addresses: dict[str, str] = {}
@@ -639,60 +651,81 @@ class ChatSandboxManager:
             try:
                 address = ipaddress.IPv4Interface(endpoint["IPv4Address"]).ip
             except (KeyError, ValueError, TypeError) as exc:
-                raise SandboxError(
-                    "fixed relay has no IPv4 address on the sandbox network"
-                ) from exc
+                raise SandboxError("relay has no IPv4 address on the group network") from exc
             for alias in names:
                 if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", alias):
-                    raise SandboxError("fixed relay alias is not a hostname")
+                    raise SandboxError("relay alias is not a hostname")
                 addresses[alias] = str(address)
         return addresses
 
-    def _sync_kata_service_hosts(
+    def _sync_kata_guest_network(
         self, spec: ChatSandboxSpec, current: ChatSandboxInspection
     ) -> None:
-        """Replace guest aliases after activation, relay replacement or phase change.
+        """Write the guest's relay names and its one resolver after activation.
 
         Docker's 127.0.0.11 resolver lives in a host network namespace, not in
-        the Kata guest. Keep resolution limited to the existing fixed relays;
-        no DNS listener or extra network destination is introduced.
+        the Kata guest, so neither the relay aliases nor any other name
+        resolves there by itself. A trusted guest-root helper writes both: the
+        relay block in ``/etc/hosts`` and this deployment's resolver in
+        ``/etc/resolv.conf``, the only DNS server the host's rules let a group
+        reach. Under runc the container shares Docker's resolver, which
+        forwards to the same server, and needs neither.
         """
         if self.backend.runtime != KATA_RUNTIME or not current.running:
             return
-        for phase in ("agent", "setup"):
-            network = self.network_for_phase(spec, phase)
-            if current.networks != (network,):
-                continue
-            addresses = self.fixed_service_addresses(phase, network)
-            if not addresses:
-                return
-            script = (
-                "import fcntl, json, os, stat, sys\n"
-                "entries=json.loads(sys.argv[1])\n"
-                "begin='# BEGIN FREEINFERENCE RELAYS\\n'\n"
-                "end='# END FREEINFERENCE RELAYS\\n'\n"
-                "fd=os.open('/etc/hosts', os.O_RDWR | os.O_NOFOLLOW)\n"
-                "with os.fdopen(fd, 'r+') as f:\n"
-                " fcntl.flock(f.fileno(), fcntl.LOCK_EX)\n"
-                " s=os.fstat(f.fileno())\n"
-                " if not stat.S_ISREG(s.st_mode) or s.st_uid != 0 or s.st_mode & 0o022:\n"
-                "  raise RuntimeError('guest hosts file is not root-owned and protected')\n"
-                " text=f.read(65537)\n"
-                " if len(text)>65536: raise RuntimeError('guest hosts file is too large')\n"
-                " if begin in text:\n"
-                "  before, rest=text.split(begin,1)\n"
-                "  if end not in rest: raise RuntimeError('invalid managed relay block')\n"
-                "  text=before+rest.split(end,1)[1]\n"
-                " text=text.rstrip()+'\\n'+begin\n"
-                " text+=''.join(ip+' '+host+'\\n' for host,ip in sorted(entries.items()))\n"
-                " f.seek(0); f.write(text+end); f.truncate()\n"
-            )
-            result = self._kata_privileged_exec(
-                spec, ["python3", "-c", script, json.dumps(addresses)], timeout_s=30
-            )
-            if result.returncode != 0:
-                raise SandboxError("Kata fixed relay resolution failed: " + result.stderr[:300])
+        network = self.network_for(spec)
+        if current.networks != (network,):
             return
+        addresses = self.relay_addresses(network)
+        script = (
+            "import fcntl, ipaddress, json, os, stat, sys\n"
+            "entries=json.loads(sys.argv[1])\n"
+            "resolver=str(ipaddress.IPv4Address(sys.argv[2]))\n"
+            "def protected(f, name):\n"
+            " s=os.fstat(f.fileno())\n"
+            " if not stat.S_ISREG(s.st_mode) or s.st_uid != 0 or s.st_mode & 0o022:\n"
+            "  raise RuntimeError('guest '+name+' is not root-owned and protected')\n"
+            "begin='# BEGIN FREEINFERENCE RELAYS\\n'\n"
+            "end='# END FREEINFERENCE RELAYS\\n'\n"
+            "fd=os.open('/etc/hosts', os.O_RDWR | os.O_NOFOLLOW)\n"
+            "with os.fdopen(fd, 'r+') as f:\n"
+            " fcntl.flock(f.fileno(), fcntl.LOCK_EX)\n"
+            " protected(f, 'hosts file')\n"
+            " text=f.read(65537)\n"
+            " if len(text)>65536: raise RuntimeError('guest hosts file is too large')\n"
+            " if begin in text:\n"
+            "  before, rest=text.split(begin,1)\n"
+            "  if end not in rest: raise RuntimeError('invalid managed relay block')\n"
+            "  text=before+rest.split(end,1)[1]\n"
+            " text=text.rstrip()+'\\n'+begin\n"
+            " text+=''.join(ip+' '+host+'\\n' for host,ip in sorted(entries.items()))\n"
+            " f.seek(0); f.write(text+end); f.truncate()\n"
+            "fd=os.open('/etc/resolv.conf', os.O_RDWR | os.O_NOFOLLOW)\n"
+            "with os.fdopen(fd, 'r+') as f:\n"
+            " fcntl.flock(f.fileno(), fcntl.LOCK_EX)\n"
+            " protected(f, 'resolv.conf')\n"
+            " f.seek(0); f.write('nameserver '+resolver+'\\n'); f.truncate()\n"
+        )
+        result = self._kata_privileged_exec(
+            spec,
+            ["python3", "-c", script, json.dumps(addresses), str(self._network().dns_server)],
+            timeout_s=30,
+        )
+        if result.returncode != 0:
+            raise SandboxError("Kata guest network sync failed: " + result.stderr[:300])
+
+    def _relay_endpoint(self, container_id: str, network: str) -> tuple[set[str], int] | None:
+        """A relay's names and gateway priority on ``network``; ``None`` if absent."""
+        raw = self._inspect_containers([container_id]).get(container_id)
+        names = None if raw is None else self._endpoint_aliases(raw, network)
+        if raw is None or names is None:
+            return None
+        endpoint = raw["NetworkSettings"]["Networks"][network]
+        try:
+            priority = int(endpoint.get("GwPriority") or 0)
+        except (TypeError, ValueError):
+            priority = 0
+        return names, priority
 
     def _ensure_service_connection(
         self,
@@ -701,51 +734,67 @@ class ChatSandboxManager:
         container_id: str,
         aliases: builtins.list[str],
     ) -> None:
-        existing = self._container_network_aliases(container_id, network)
+        existing = self._relay_endpoint(container_id, network)
         if existing is not None:
-            if set(aliases).issubset(existing):
+            names, priority = existing
+            if not set(aliases).issubset(names):
+                raise SandboxError(
+                    f"fixed relay {container_id[:12]} is already attached to {network!r} "
+                    "without the required aliases"
+                )
+            if priority < 0:
                 return
-            raise SandboxError(
-                f"fixed relay {container_id[:12]} is already attached to {network!r} "
-                "without the required aliases"
-            )
-        command = [self.backend.docker_binary, "network", "connect"]
+            # Attached without the priority, by hand or by an earlier build: this
+            # bridge may already be the relay's way out. Attach it again below.
+            self._disconnect_endpoint(network, container_id)
+        command = [
+            self.backend.docker_binary,
+            "network",
+            "connect",
+            "--gw-priority",
+            str(RELAY_GATEWAY_PRIORITY),
+        ]
         for alias in sorted(aliases):
             command += ["--alias", alias]
         command += [network, container_id]
         connected = self._run(command, timeout=30)
-        observed = self._container_network_aliases(container_id, network)
+        observed = self._relay_endpoint(container_id, network)
         if connected.returncode != 0 and observed is None:
             raise SandboxError(
                 "fixed relay could not join the chat network: " + connected.stderr.strip()[:300]
             )
-        if observed is None or not set(aliases).issubset(observed):
+        if observed is None or not set(aliases).issubset(observed[0]):
             raise SandboxError("fixed relay joined the chat network without its required aliases")
+        if observed[1] >= 0:
+            raise SandboxError(
+                "fixed relay joined the chat network without its gateway priority, so the "
+                "group bridge could become the relay's default route; this Docker does not "
+                "honour --gw-priority (Docker 28 or newer is required)"
+            )
 
-    def _reconcile_phase_members(
+    def _reconcile_group_members(
         self,
         *,
         network: str,
         spec: ChatSandboxSpec,
-        phase: str,
         service_ids: set[str],
         service_aliases: tuple[str, ...],
     ) -> None:
-        """Keep an owned bridge limited to this chat and its current services.
+        """Keep a group bridge limited to this chat and its current relays.
 
         Compose replaces relay containers during a rollout. Their old endpoints
-        can remain on a retained chat bridge after the discovery backplane names
-        the replacement. An old endpoint carrying one of the reviewed service
-        aliases is safe to detach; any other peer is an ownership violation and
-        fails closed rather than being silently evicted.
+        can remain on a retained group bridge after the relay network names the
+        replacement. An old endpoint carrying one of the reviewed relay aliases
+        is safe to detach; any other peer is an ownership violation and fails
+        closed rather than being silently evicted.
         """
         inspected = self._inspect_network(network)
         if inspected is None:
-            raise SandboxError("chat-private egress network disappeared during reconciliation")
-        self._verify_phase_network(inspected, spec, phase)
+            raise SandboxError("group network disappeared during reconciliation")
+        self._verify_group_network(inspected, spec)
         containers = inspected.get("Containers") or {}
         if not isinstance(containers, dict):
-            raise SandboxError("Docker returned invalid chat-network endpoints")
+            raise SandboxError("Docker returned invalid group-network endpoints")
 
         permitted = set(service_ids)
         sandbox = self.inspect(spec.container_name)
@@ -759,9 +808,7 @@ class ChatSandboxManager:
         for container_id in unexpected:
             endpoint_aliases = peer_aliases.get(container_id)
             if not endpoint_aliases or not endpoint_aliases.intersection(required_aliases):
-                raise SandboxError(
-                    f"chat-private egress network {network!r} contains an unexpected peer"
-                )
+                raise SandboxError(f"group network {network!r} contains an unexpected peer")
             disconnected = self._run(
                 [
                     self.backend.docker_binary,
@@ -777,19 +824,19 @@ class ChatSandboxManager:
                 remaining = (refreshed or {}).get("Containers") or {}
                 if container_id in remaining:
                     raise SandboxError(
-                        "stale fixed relay could not leave the chat network: "
+                        "stale relay could not leave the group network: "
                         + disconnected.stderr.strip()[:300]
                     )
 
         refreshed = self._inspect_network(network)
         if refreshed is None:
-            raise SandboxError("chat-private egress network disappeared during reconciliation")
+            raise SandboxError("group network disappeared during reconciliation")
         refreshed_containers = refreshed.get("Containers") or {}
         if not isinstance(refreshed_containers, dict):
-            raise SandboxError("Docker returned invalid chat-network endpoints")
+            raise SandboxError("Docker returned invalid group-network endpoints")
         actual = set(map(str, refreshed_containers))
         if not service_ids.issubset(actual) or actual - permitted:
-            raise SandboxError("chat-private egress network membership is not exact")
+            raise SandboxError("group network membership is not exact")
 
     def _candidate_chat_subnets(self, network_name: str) -> Iterator[ipaddress.IPv4Network]:
         """Yield every /29 once, starting from a stable per-network hash.
@@ -799,10 +846,11 @@ class ChatSandboxManager:
         loser advances through this deterministic ring instead of relying on a
         process-local lock that would not cover the broker and runner replicas.
         """
-        subnet_count = 1 << (CHAT_NETWORK_PREFIX_LENGTH - self._chat_network_pool.prefixlen)
+        pool = self._network().pool
+        subnet_count = 1 << (CHAT_NETWORK_PREFIX_LENGTH - pool.prefixlen)
         start = int.from_bytes(hashlib.sha256(network_name.encode()).digest()[:8], "big")
         start %= subnet_count
-        pool_start = int(self._chat_network_pool.network_address)
+        pool_start = int(pool.network_address)
         subnet_size = 1 << (32 - CHAT_NETWORK_PREFIX_LENGTH)
         for offset in range(subnet_count):
             index = (start + offset) % subnet_count
@@ -823,13 +871,9 @@ class ChatSandboxManager:
             )
         )
 
-    def _create_phase_network(
-        self,
-        expected: str,
-        spec: ChatSandboxSpec,
-        phase: str,
-    ) -> dict[str, Any]:
+    def _create_group_network(self, expected: str, spec: ChatSandboxSpec) -> dict[str, Any]:
         last_conflict = ""
+        bridge = self._network().bridge_name(expected)
         for subnet in self._candidate_chat_subnets(expected):
             command = [
                 self.backend.docker_binary,
@@ -837,13 +881,14 @@ class ChatSandboxManager:
                 "create",
                 "--driver",
                 "bridge",
-                "--internal",
+                # The interface name is how the host's rules recognise this
+                # deployment's groups, so it is chosen here, never by Docker.
                 "--opt",
-                f"{CHAT_NETWORK_INHIBIT_IPV4_OPTION}=true",
+                f"{CHAT_NETWORK_BRIDGE_OPTION}={bridge}",
                 "--subnet",
                 str(subnet),
             ]
-            for key, value in sorted(self._network_labels(spec, phase).items()):
+            for key, value in sorted(self._network_labels(spec).items()):
                 command += ["--label", f"{key}={value}"]
             command.append(expected)
             created = self._run(command, timeout=30)
@@ -853,28 +898,21 @@ class ChatSandboxManager:
                 # caller verifies every ownership label and the chosen subnet.
                 return network
             if created.returncode == 0:
-                raise SandboxError("Docker created the chat network but it cannot be inspected")
+                raise SandboxError("Docker created the group network but it cannot be inspected")
             if not self._is_subnet_allocation_conflict(created.stderr):
                 raise SandboxError(
-                    "chat-private egress network could not be created: "
-                    + created.stderr.strip()[:300]
+                    "group network could not be created: " + created.stderr.strip()[:300]
                 )
             last_conflict = created.stderr.strip()[:300]
         raise SandboxError(
-            f"AGENT_EGRESS_CHAT_NETWORK_POOL {self._chat_network_pool} has no free "
+            f"AGENT_EGRESS_CHAT_NETWORK_POOL {self._network().pool} has no free "
             f"/{CHAT_NETWORK_PREFIX_LENGTH} subnet"
             + (f": {last_conflict}" if last_conflict else "")
         )
 
-    def _ensure_phase_service_connections(
-        self,
-        network: str,
-        phase: str,
-        aliases: tuple[str, ...],
-    ) -> set[str]:
-        """Attach the exact currently discovered fixed endpoints for one phase."""
-        base = self.backend.network_for_phase(phase)
-        owners = self._service_owners(base, aliases)
+    def _attach_relays(self, network: str) -> set[str]:
+        """Attach the exact currently discovered relay endpoints to one bridge."""
+        owners = self._relay_owners()
         for container_id, owned_aliases in owners.items():
             self._ensure_service_connection(
                 network=network,
@@ -883,70 +921,81 @@ class ChatSandboxManager:
             )
         return set(owners)
 
-    def _ensure_phase_services(
-        self,
-        network: str,
-        spec: ChatSandboxSpec,
-        phase: str,
-        aliases: tuple[str, ...],
-    ) -> None:
-        """Attach and verify the exact fixed service endpoints for one phase."""
-        service_ids = self._ensure_phase_service_connections(network, phase, aliases)
-        self._reconcile_phase_members(
+    def _sync_relay_exceptions(self, network: str) -> None:
+        """Make the host's relay exceptions for one bridge match its relays."""
+        config = self._network()
+        ports = {relay.host: relay.port for relay in config.relays}
+        addresses = self.relay_addresses(network)
+        self.backend.network_guard().sync_relays(
+            config.bridge_name(network),
+            {(address, ports[alias]) for alias, address in addresses.items()},
+        )
+
+    def _drop_relay_exceptions(self, network_name: str) -> None:
+        """Forget a removed bridge's relay exceptions, without failing the removal.
+
+        They match nothing once the bridge is gone, and a later bridge with the
+        same name has its own set written when its relays attach. A guard that
+        cannot run here fails the next activation instead.
+        """
+        try:
+            self.backend.network_guard().sync_relays(
+                self._network().bridge_name(network_name), set()
+            )
+        except SandboxError as exc:
+            logger.warning(
+                "chat_group_relay_exceptions_left",
+                extra={"network": network_name, "detail": str(exc)[:300]},
+            )
+
+    def _ensure_group_services(self, network: str, spec: ChatSandboxSpec) -> None:
+        """Attach and verify the relays, then mirror them into the host's rules."""
+        aliases = self._relay_aliases()
+        service_ids = self._attach_relays(network) if aliases else set()
+        self._reconcile_group_members(
             network=network,
             spec=spec,
-            phase=phase,
             service_ids=service_ids,
             service_aliases=aliases,
         )
+        self._sync_relay_exceptions(network)
 
-    def _ensure_phase_network(self, spec: ChatSandboxSpec, phase: str) -> str:
-        """Create/reconcile the chat-private network and its trusted peers."""
-        expected = self.network_for_phase(spec, phase)
-        base = self.backend.network_for_phase(phase)
-        aliases = self._service_aliases_for_phase(phase)
-        if expected == base:
-            return expected
+    def _ensure_group_network(self, spec: ChatSandboxSpec) -> str:
+        """Create/reconcile the group bridge, its relays and their exceptions."""
+        # Rules first: no group bridge exists on a host that has not proved it
+        # enforces them.
+        self.backend.network_guard().ensure()
+        expected = self.network_for(spec)
         network = self._inspect_network(expected)
         if network is not None and self._network_is_stale_for_prune(network):
             sandbox = self.inspect(spec.container_name)
-            if sandbox is None or not self._phase_endpoint_is_current(sandbox, expected):
+            if sandbox is None or not self._endpoint_is_current(sandbox, expected):
                 network_id = str(network.get("Id") or "") or None
                 self._release_owned_network(
                     expected,
                     spec,
-                    phase,
                     only_if_sandbox_unattached=True,
                     expected_network_id=network_id,
                 )
                 network = self._inspect_network(expected)
         if network is None:
-            network = self._create_phase_network(expected, spec, phase)
+            network = self._create_group_network(expected, spec)
         if network is None:
-            raise SandboxError("Docker created the chat network but it cannot be inspected")
-        self._verify_phase_network(network, spec, phase)
-        self._ensure_phase_services(expected, spec, phase, aliases)
+            raise SandboxError("Docker created the group network but it cannot be inspected")
+        self._verify_group_network(network, spec)
+        self._ensure_group_services(expected, spec)
         return expected
 
-    def _owned_network_matches_phase(
-        self,
-        network_name: str,
-        spec: ChatSandboxSpec,
-        phase: str,
-    ) -> bool:
+    def _owned_network_matches(self, network_name: str, spec: ChatSandboxSpec) -> bool:
         network = self._inspect_network(network_name)
-        if network is None or network.get("Internal") is not True:
+        if network is None or network.get("Internal") is not False:
             return False
         labels = network.get("Labels") or {}
-        policy = self.backend.egress
         return bool(
-            policy is not None
-            and labels.get(CHAT_NETWORK_LABEL) == "true"
+            labels.get(CHAT_NETWORK_LABEL) == "true"
             and labels.get(CHAT_NAMESPACE_LABEL) == self.backend.sandbox_namespace
             and labels.get(CHAT_NETWORK_SANDBOX_ID_LABEL) == spec.sandbox_id
             and labels.get(CHAT_NETWORK_GENERATION_LABEL) == str(spec.generation)
-            and labels.get(CHAT_NETWORK_BASE_LABEL) == self.backend.network_for_phase(phase)
-            and labels.get(CHAT_NETWORK_TIER_LABEL) == policy.tier_for(phase).value
         )
 
     def _disconnect_endpoint(
@@ -984,7 +1033,6 @@ class ChatSandboxManager:
         self,
         network_name: str,
         spec: ChatSandboxSpec,
-        phase: str,
         *,
         only_if_sandbox_unattached: bool = False,
         expected_network_id: str | None = None,
@@ -1002,17 +1050,16 @@ class ChatSandboxManager:
         labels = network.get("Labels") or {}
         if (
             network.get("Driver") != "bridge"
-            or network.get("Internal") is not True
+            or network.get("Internal") is not False
             or labels.get(CHAT_NETWORK_LABEL) != "true"
             or labels.get(CHAT_NAMESPACE_LABEL) != self.backend.sandbox_namespace
             or labels.get(CHAT_NETWORK_SANDBOX_ID_LABEL) != spec.sandbox_id
             or labels.get(CHAT_NETWORK_GENERATION_LABEL) != str(spec.generation)
-            or labels.get(CHAT_NETWORK_BASE_LABEL) != self.backend.network_for_phase(phase)
         ):
             raise SandboxError("refusing to remove a network outside this chat/generation")
         containers = network.get("Containers") or {}
         if not isinstance(containers, dict):
-            raise SandboxError("Docker returned invalid chat-network endpoints")
+            raise SandboxError("Docker returned invalid group-network endpoints")
         sandbox = self.inspect(spec.container_name)
         if sandbox is not None:
             self._verify_identity(sandbox, spec)
@@ -1035,9 +1082,7 @@ class ChatSandboxManager:
         for container_id in peers:
             endpoint_aliases = peer_aliases.get(container_id)
             if not endpoint_aliases or not endpoint_aliases.intersection(recorded_aliases):
-                raise SandboxError(
-                    f"chat-private egress network {network_name!r} contains an unexpected peer"
-                )
+                raise SandboxError(f"group network {network_name!r} contains an unexpected peer")
         for container_id in sorted(map(str, containers)):
             self._disconnect_endpoint(
                 network_ref,
@@ -1052,26 +1097,21 @@ class ChatSandboxManager:
         if remaining is not None and only_if_sandbox_unattached:
             # A runner may attach the sandbox after the endpoint snapshot above.
             # Restore relays before deciding whether the failed opportunistic
-            # prune is now a live phase bridge.
-            self._verify_phase_network(remaining, spec, phase)
-            self._ensure_phase_services(
-                network_name,
-                spec,
-                phase,
-                self._service_aliases_for_phase(phase),
-            )
+            # prune is now a live group bridge.
+            self._verify_group_network(remaining, spec)
+            self._ensure_group_services(network_name, spec)
             refreshed_sandbox = self.inspect(spec.container_name)
-            if refreshed_sandbox is not None and self._phase_endpoint_is_current(
+            if refreshed_sandbox is not None and self._endpoint_is_current(
                 refreshed_sandbox, network_name
             ):
                 return
         if remaining is not None:
             raise SandboxError(
-                "inactive chat-private network could not be removed: "
-                + removed.stderr.strip()[:300]
+                "inactive group network could not be removed: " + removed.stderr.strip()[:300]
             )
+        self._drop_relay_exceptions(network_name)
 
-    def _release_orphan_network(self, network: dict[str, Any], phase: str) -> None:
+    def _release_orphan_network(self, network: dict[str, Any]) -> None:
         """Delete one ownerless bridge by immutable ID and repair a lost attach race."""
         network_name = str(network.get("Name") or "")
         network_id = str(network.get("Id") or "")
@@ -1085,15 +1125,15 @@ class ChatSandboxManager:
             )
         )
         if not network_name or not network_id or not recorded_aliases:
-            raise SandboxError("orphan chat-private network has invalid ownership metadata")
+            raise SandboxError("orphan group network has invalid ownership metadata")
         if not isinstance(containers, dict):
-            raise SandboxError("orphan chat-private network has invalid ownership metadata")
+            raise SandboxError("orphan group network has invalid ownership metadata")
         peers = sorted(map(str, containers))
         peer_aliases = self._network_aliases_for(peers, network_name)
         for container_id in peers:
             endpoint_aliases = peer_aliases.get(container_id)
             if not endpoint_aliases or not endpoint_aliases.intersection(recorded_aliases):
-                raise SandboxError("orphan chat-private network contains an unexpected peer")
+                raise SandboxError("orphan group network contains an unexpected peer")
         for container_id in sorted(map(str, containers)):
             self._disconnect_endpoint(
                 network_id,
@@ -1106,15 +1146,14 @@ class ChatSandboxManager:
         )
         remaining = self._inspect_network(network_id) if removed.returncode != 0 else None
         if remaining is None:
+            self._drop_relay_exceptions(network_name)
             return
 
         # A new sandbox can attach to the old ID after the endpoint snapshot.
-        # Put the fixed services back before preserving that now-live bridge.
-        service_ids = self._ensure_phase_service_connections(
-            network_name,
-            phase,
-            recorded_aliases,
-        )
+        # Put the relays back, with their host exceptions, before preserving
+        # that now-live bridge.
+        service_ids = self._attach_relays(network_name)
+        self._sync_relay_exceptions(network_name)
         refreshed = self._inspect_network(network_id)
         refreshed_containers = (refreshed or {}).get("Containers") or {}
         if (
@@ -1123,7 +1162,7 @@ class ChatSandboxManager:
         ):
             return
         raise SandboxError(
-            "orphan chat-private network could not be removed: " + removed.stderr.strip()[:300]
+            "orphan group network could not be removed: " + removed.stderr.strip()[:300]
         )
 
     def _release_sandbox_networks(
@@ -1131,7 +1170,7 @@ class ChatSandboxManager:
         spec: ChatSandboxSpec,
         current: ChatSandboxInspection,
     ) -> ChatSandboxInspection:
-        """Release private/legacy endpoints after the retained container stops."""
+        """Release the group bridge after the retained container stops."""
         if current.running:
             raise SandboxError("refusing to release networking from a running chat sandbox")
         for network_name in current.networks:
@@ -1139,7 +1178,7 @@ class ChatSandboxManager:
                 # There is no connectivity here to withdraw. Docker reports the
                 # null network for a container whose last endpoint has gone, so
                 # this is what a release that already succeeded looks like --
-                # and reading it as an egress network nobody owns made every
+                # and reading it as a network nobody owns made every
                 # later stop of an already-released sandbox raise. Because the
                 # supervisor stops every retained sandbox while reconciling, one
                 # such container was enough to keep the broker from starting.
@@ -1152,45 +1191,27 @@ class ChatSandboxManager:
                 # ran. The daemon-wide bridge itself is not owned by this chat.
                 self._disconnect_endpoint(network_name, current.container_id)
                 continue
-            handled = False
-            for phase in ("agent", "setup"):
-                base = self.backend.network_for_phase(phase)
-                expected = self.network_for_phase(spec, phase)
-                if expected == base:
-                    continue
-                if network_name == base:
-                    self._disconnect_endpoint(network_name, current.container_id)
-                    handled = True
-                    break
-                if network_name == expected or self._owned_network_matches_phase(
-                    network_name, spec, phase
-                ):
-                    self._release_owned_network(network_name, spec, phase)
-                    handled = True
-                    break
-            if handled:
-                continue
-            # Custom/Full tiers deliberately keep the operator's own network
-            # topology. Everything else is an ownership violation.
-            if any(
-                self.network_for_phase(spec, phase)
-                == network_name
-                == self.backend.network_for_phase(phase)
-                for phase in ("agent", "setup")
+            if network_name == self.network_for(spec) or self._owned_network_matches(
+                network_name, spec
             ):
+                self._release_owned_network(network_name, spec)
                 continue
             # A network that no longer exists cannot be an ownership violation:
             # there is nothing left to release and nothing left to leak. The
-            # chat-private bridge is pruned on its own grace timer, so a
-            # container that stopped before that timer can outlive its network
-            # and keep a stale endpoint record. Reading that record as an
-            # unknown network failed this sandbox's stop -- and with it the
-            # whole reconcile, and with that the broker's startup -- over a
-            # bridge the platform had already removed itself.
+            # group bridge is pruned on its own grace timer, so a container that
+            # stopped before that timer can outlive its network and keep a stale
+            # endpoint record. Reading that record as an unknown network failed
+            # this sandbox's stop -- and with it the whole reconcile, and with
+            # that the broker's startup -- over a bridge the platform had
+            # already removed itself.
             if self._inspect_network(network_name) is None:
                 self._disconnect_endpoint(network_name, current.container_id)
                 continue
-            raise SandboxError("retained chat is attached to an unknown egress network")
+            raise SandboxError(
+                f"retained chat is attached to network {network_name!r}, which is not its "
+                "group bridge; a sandbox from before the single-network change needs the "
+                "one-time cleanup"
+            )
         return self._require(spec)
 
     @staticmethod
@@ -1209,7 +1230,7 @@ class ChatSandboxManager:
         return age >= CHAT_NETWORK_PRUNE_GRACE_S
 
     def prune_orphan_networks(self, specs: builtins.list[ChatSandboxSpec]) -> None:
-        """Remove stale owned bridges without racing a create or phase transition."""
+        """Remove stale owned bridges without racing a create or activation."""
         result = self._run(
             [
                 self.backend.docker_binary,
@@ -1222,31 +1243,30 @@ class ChatSandboxManager:
             timeout=30,
         )
         if result.returncode != 0:
-            raise SandboxError(
-                "chat-private network listing failed: " + result.stderr.strip()[:300]
-            )
+            raise SandboxError("group network listing failed: " + result.stderr.strip()[:300])
         by_identity = {(spec.sandbox_id, str(spec.generation)): spec for spec in specs}
-        configured_bases = {
-            self.backend.network_for_phase(phase): phase
-            for phase in ("setup", "agent")
-            if self._service_aliases_for_phase(phase)
-        }
+        prefix = self._network().interface_prefix
         for network_id in result.stdout.split():
             network = self._inspect_network(network_id)
             if network is None:
                 continue
             labels = network.get("Labels") or {}
             namespace = labels.get(CHAT_NAMESPACE_LABEL)
-            if namespace is not None and namespace != self.backend.sandbox_namespace:
+            if namespace != self.backend.sandbox_namespace:
                 continue
-            base = str(labels.get(CHAT_NETWORK_BASE_LABEL) or "")
-            phase = configured_bases.get(base)
+            bridge = str((network.get("Options") or {}).get(CHAT_NETWORK_BRIDGE_OPTION) or "")
             if (
-                phase is None
-                or network.get("Driver") != "bridge"
-                or network.get("Internal") is not True
+                network.get("Driver") != "bridge"
+                or network.get("Internal") is not False
+                or not bridge.startswith(prefix)
                 or not str(network.get("Name") or "").startswith(f"{CHAT_NETWORK_PREFIX}-")
             ):
+                # The per-phase topology this deployment replaced. It is
+                # reported for the one-time cleanup, never adopted or repaired.
+                logger.warning(
+                    "chat_legacy_network_found",
+                    extra={"network": str(network.get("Name") or network_id)},
+                )
                 continue
             identity = (
                 str(labels.get(CHAT_NETWORK_SANDBOX_ID_LABEL) or ""),
@@ -1256,20 +1276,19 @@ class ChatSandboxManager:
             if spec is not None:
                 sandbox = self.inspect(spec.container_name)
                 if sandbox is not None and str(network["Name"]) in sandbox.networks:
-                    # This is the live phase bridge of a retained container,
-                    # not an orphan. reconcile() also runs for status polling,
-                    # so pruning it here would silently disconnect an active
-                    # turn from both fixed relays.
+                    # This is the live bridge of a retained container, not an
+                    # orphan. reconcile() also runs for status polling, so
+                    # pruning it here would silently disconnect an active turn
+                    # from both relays and the internet.
                     continue
                 if not self._network_is_stale_for_prune(network):
                     # Runner and broker use separate Docker clients. During
-                    # create, wake, or setup→agent transition the next bridge
-                    # exists briefly before the sandbox endpoint is attached.
+                    # create or wake the bridge exists briefly before the
+                    # sandbox endpoint is attached.
                     continue
                 self._release_owned_network(
                     str(network["Name"]),
                     spec,
-                    phase,
                     only_if_sandbox_unattached=True,
                     expected_network_id=str(network.get("Id") or "") or None,
                 )
@@ -1281,9 +1300,9 @@ class ChatSandboxManager:
             # proof that the bridge is orphaned.
             if not self._network_is_stale_for_prune(network):
                 continue
-            self._release_orphan_network(network, phase)
+            self._release_orphan_network(network)
 
-    def _phase_endpoint_is_current(
+    def _endpoint_is_current(
         self,
         current: ChatSandboxInspection,
         network_name: str,
@@ -1310,32 +1329,35 @@ class ChatSandboxManager:
         # old same-name bridge was deleted and must be reconnected explicitly.
         return bool(current_id and recorded_id == current_id)
 
-    def _move_container_to_phase_network(
+    def _attach_to_group_network(
         self,
         spec: ChatSandboxSpec,
         current: ChatSandboxInspection,
-        phase: str,
     ) -> ChatSandboxInspection:
+        expected = self.network_for(spec)
         sources = tuple(current.networks)
-        base = self.backend.network_for_phase(phase)
-        expected = self.network_for_phase(spec, phase)
         for source in sources:
-            if source == expected:
+            if source in (expected, CHAT_NULL_NETWORK):
                 continue
             if source == CHAT_BOOTSTRAP_NETWORK and current.status is ChatSandboxStatus.CREATED:
                 continue
-            if source != base and not self._owned_network_matches_phase(source, spec, phase):
-                raise SandboxError("retained chat is attached to a network outside this chat/phase")
-        if current.running and any(
-            source not in {expected} and source in {base, CHAT_BOOTSTRAP_NETWORK}
-            for source in sources
-        ):
+            if self._inspect_network(source) is None:
+                # A stale endpoint record for a bridge already removed.
+                continue
             raise SandboxError(
-                "a running retained chat still uses a shared/obsolete egress network; "
-                "stop it before this deployment can isolate and resume it"
+                f"retained chat is attached to network {source!r}, which is not its group "
+                "bridge; a sandbox from before the single-network change needs the "
+                "one-time cleanup"
             )
-        expected = self._ensure_phase_network(spec, phase)
-        if not self._phase_endpoint_is_current(current, expected):
+        if current.running:
+            # A running Kata guest does not see network changes until it
+            # restarts, so a running sandbox is never rewired underneath it.
+            raise SandboxError(
+                "a running retained chat is not on exactly its group bridge; stop it "
+                "before it can be resumed"
+            )
+        expected = self._ensure_group_network(spec)
+        if not self._endpoint_is_current(current, expected):
             connected = self._run(
                 [
                     self.backend.docker_binary,
@@ -1348,68 +1370,83 @@ class ChatSandboxManager:
             )
             if connected.returncode != 0:
                 refreshed = self._require(spec)
-                if not self._phase_endpoint_is_current(refreshed, expected):
+                if not self._endpoint_is_current(refreshed, expected):
                     raise SandboxError(
-                        "retained chat could not attach its private egress network: "
+                        "retained chat could not attach its group network: "
                         + connected.stderr.strip()[:300]
                     )
         for source in sources:
             if source == expected:
                 continue
             self._disconnect_endpoint(source, current.container_id)
-            if source == CHAT_BOOTSTRAP_NETWORK:
-                continue
-            if source != base:
-                self._release_owned_network(source, spec, phase)
         moved = self._require(spec)
-        if set(moved.networks) != {expected} or not self._phase_endpoint_is_current(
-            moved, expected
-        ):
-            raise SandboxError("retained chat network isolation transition was not exact")
+        if set(moved.networks) != {expected} or not self._endpoint_is_current(moved, expected):
+            raise SandboxError("retained chat did not end up on exactly its group bridge")
         return moved
 
-    def _require_phase_network(
+    def _require_group_network(
         self,
         spec: ChatSandboxSpec,
         current: ChatSandboxInspection,
-        phase: str,
     ) -> ChatSandboxInspection:
-        expected = self.network_for_phase(spec, phase)
+        expected = self.network_for(spec)
         if set(current.networks) == {expected}:
-            self._ensure_phase_network(spec, phase)
+            self._ensure_group_network(spec)
             refreshed = self._require(spec)
-            if self._phase_endpoint_is_current(refreshed, expected):
+            if self._endpoint_is_current(refreshed, expected):
                 return refreshed
-        if len(current.networks) > 1:
-            raise SandboxError("retained chat has an unexpected network set")
-        return self._move_container_to_phase_network(spec, current, phase)
+        return self._attach_to_group_network(spec, current)
 
-    def _ensure_current_phase_network(
-        self,
-        spec: ChatSandboxSpec,
-        current: ChatSandboxInspection,
-        *,
-        preferred_phase: Literal["setup", "agent"] | None = None,
-    ) -> ChatSandboxInspection:
-        if preferred_phase is not None:
-            return self._require_phase_network(spec, current, preferred_phase)
-        if not current.networks:
-            raise SandboxError("a networkless retained chat needs an explicit lifecycle phase")
-        if len(current.networks) != 1:
-            raise SandboxError("retained chat has an unexpected network set")
-        source = current.networks[0]
-        # Agent first: every settled retained chat is already past setup. A
-        # just-created chat is on its deterministic setup network and matches
-        # that branch unambiguously.
-        for phase in ("agent", "setup"):
-            expected = self.network_for_phase(spec, phase)
-            base = self.backend.network_for_phase(phase)
-            if source == expected:
-                self._ensure_phase_network(spec, phase)
-                return current
-            if source == base or self._owned_network_matches_phase(source, spec, phase):
-                return self._require_phase_network(spec, current, phase)
-        raise SandboxError("retained chat is attached to an unknown egress network")
+    def _verify_guest_network(self, spec: ChatSandboxSpec) -> None:
+        """Check, from inside the guest, that it sits behind the group's rules.
+
+        The guard proves the host's rules exist; this proves the guest is
+        behind them the way the agent will be: a default route, the one
+        resolver answering a real query, both relays accepting on their service
+        ports, and the host and the metadata address refused by the rules
+        themselves. It runs as the sandbox user, so it sees what the agent
+        sees. Reaching the public internet is deliberately not a condition: an
+        outside outage is not a broken boundary. A failure stops the sandbox,
+        which releases the bridge and keeps the workspace.
+        """
+        network = self._network()
+        expected_resolver = (
+            str(network.dns_server) if self.backend.runtime == KATA_RUNTIME else "127.0.0.11"
+        )
+        relays = [[relay.host, relay.port] for relay in network.relays]
+        result = self.exec_capture(
+            spec,
+            ["python3", "-c", _GUEST_NETWORK_CHECK, expected_resolver, json.dumps(relays)],
+            timeout_s=45,
+        )
+        try:
+            problems = json.loads(result.stdout.decode(errors="replace").strip() or "null")
+        except json.JSONDecodeError:
+            problems = None
+        if result.returncode == 0 and problems == []:
+            return
+        detail = (
+            "; ".join(map(str, problems))
+            if isinstance(problems, list)
+            else result.stderr.decode(errors="replace").strip()[:300]
+        )
+        try:
+            self.stop(spec)
+        except SandboxError as exc:
+            raise SandboxError(
+                f"group network check failed inside the sandbox ({detail}), and stopping "
+                f"it failed too: {exc}"
+            ) from exc
+        raise SandboxError(f"group network check failed inside the sandbox: {detail}")
+
+    def verify_host_rules(self) -> None:
+        """Prove the host still enforces this deployment's rules, repairing them if not.
+
+        Cheap while the guard's last verification is fresh; otherwise it
+        reinstalls and reads the tables back. A raise means the host cannot
+        show the boundary every running group was started behind.
+        """
+        self.backend.network_guard().ensure()
 
     def require_docker_data_root(self, expected: str) -> str:
         """Verify retained state is owned by the intended Docker data root.
@@ -1446,7 +1483,6 @@ class ChatSandboxManager:
         spec: ChatSandboxSpec,
         *,
         image: str | None = None,
-        network_phase: Literal["setup", "agent"] = "setup",
     ) -> builtins.list[str]:
         """Compose a no-secret, no-chat-volume ``docker create`` command."""
         self._validate_extra_args()
@@ -1476,18 +1512,21 @@ class ChatSandboxManager:
             f"{self.backend.uid}:{self.backend.gid}",
             # Docker retains the create-time network as immutable primary
             # metadata even after disconnect. Use its daemon-stable bridge as
-            # a dormant anchor, then attach the phase bridge and disconnect
+            # a dormant anchor, then attach the group bridge and disconnect
             # this one while the container is still stopped. No untrusted code
-            # runs until start() verifies the phase bridge is the sole network.
+            # runs until start() verifies the group bridge is the sole network.
             "--network",
             CHAT_BOOTSTRAP_NETWORK,
-            # Docker still resolves container aliases through 127.0.0.11, but
-            # forwards unknown names to this configured upstream from the
-            # container namespace. Loopback makes arbitrary DNS fail locally
-            # and closes CVE-2024-29018 on older daemons whose default
-            # host-loopback resolver could bypass an internal network.
+            # Docker resolves relay aliases through 127.0.0.11 and forwards
+            # every other name to this server from the container's namespace:
+            # the deployment's one resolver, the only DNS the host's rules let
+            # a group reach. A Kata guest is given the same server directly.
             "--dns",
-            CHAT_DNS_UPSTREAM,
+            (
+                str(self.backend.sandbox_network.dns_server)
+                if self.backend.sandbox_network is not None
+                else CHAT_OFFLINE_DNS
+            ),
             "--memory",
             spec.memory_limit,
             "--cpus",
@@ -1546,21 +1585,20 @@ class ChatSandboxManager:
         spec: ChatSandboxSpec,
         *,
         image: str | None = None,
-        network_phase: Literal["setup", "agent"] = "setup",
         facts: SandboxActionFacts | None = None,
         observer: StageObserver | None = None,
     ) -> ChatSandboxInspection:
         """Create one chat container idempotently, never replacing an existing one."""
         with substage(observer, "network_ensure"):
-            self._ensure_phase_network(spec, network_phase)
+            self._ensure_group_network(spec)
         existing = self.inspect(spec.container_name)
         if existing is not None:
             # Idempotent adoption, not a creation. No action is noted here:
             # the start() that follows knows whether this attempt had to run
             # `docker start`, and that is what classifies the path.
             self._verify_identity(existing, spec)
-            return self._require_phase_network(spec, existing, network_phase)
-        command = self.build_create_command(spec, image=image, network_phase=network_phase)
+            return self._require_group_network(spec, existing)
+        command = self.build_create_command(spec, image=image)
         with substage(observer, "container_create"):
             created = self._run(command, timeout=120)
         if created.returncode != 0:
@@ -1574,7 +1612,7 @@ class ChatSandboxManager:
             # The other replica paid for the creation, so this attempt did
             # not create the container. `start` reports what it did with it.
             self._verify_identity(raced, spec)
-            return self._require_phase_network(spec, raced, network_phase)
+            return self._require_group_network(spec, raced)
         if facts is not None:
             # The literal the startup-path classifier reads. Emitting anything
             # else -- "created", say -- hid every brand-new group: the guard in
@@ -1587,7 +1625,7 @@ class ChatSandboxManager:
         if inspected is None:
             raise SandboxError("Docker created the chat sandbox but it cannot be inspected")
         self._verify_identity(inspected, spec)
-        return self._require_phase_network(spec, inspected, network_phase)
+        return self._require_group_network(spec, inspected)
 
     def require_existing(
         self,
@@ -1662,30 +1700,11 @@ class ChatSandboxManager:
     def _belongs_to_namespace(self, inspection: ChatSandboxInspection) -> bool:
         """Fence daemon-wide discovery to this independently deployed stack.
 
-        New containers carry the immutable namespace label. During the first
-        rollout, old containers have no such label; they are adopted only while
-        attached to one of this stack's configured egress backplanes (or a
-        labelled private bridge derived from one). Pre-upgrade idle containers
-        retain that attachment, so no ambiguous daemon-wide fallback is needed.
+        Ownership is the immutable namespace label and nothing else. Containers
+        without one predate that label and the single-network change; they are
+        left for the one-time cleanup rather than adopted by guesswork.
         """
-        namespace = inspection.labels.get(CHAT_NAMESPACE_LABEL)
-        if namespace is not None:
-            return namespace == self.backend.sandbox_namespace
-        configured_bases = {self.backend.network_for_phase(phase) for phase in ("setup", "agent")}
-        for network_name in inspection.networks:
-            if network_name in configured_bases:
-                return True
-            network = self._inspect_network(network_name)
-            if network is None:
-                continue
-            labels = network.get("Labels") or {}
-            network_namespace = labels.get(CHAT_NAMESPACE_LABEL)
-            if labels.get(CHAT_NETWORK_BASE_LABEL) in configured_bases and network_namespace in (
-                None,
-                self.backend.sandbox_namespace,
-            ):
-                return True
-        return False
+        return inspection.labels.get(CHAT_NAMESPACE_LABEL) == self.backend.sandbox_namespace
 
     def list(self) -> builtins.list[ChatSandboxInspection]:
         """List retained containers owned by this deployment namespace."""
@@ -1717,9 +1736,8 @@ class ChatSandboxManager:
             except (KeyError, TypeError, ValueError) as exc:
                 raise SandboxError("Docker returned an invalid chat sandbox listing") from exc
             # Read ownership from ls before making a per-container RPC: a
-            # wedged foreign Kata shim can block even docker inspect. Empty
-            # labels still take the legacy network-based ownership path.
-            if namespace and namespace != self.backend.sandbox_namespace:
+            # wedged foreign Kata shim can block even docker inspect.
+            if namespace != self.backend.sandbox_namespace:
                 continue
             # A foreign namespace cannot make this broker fail startup by
             # carrying policy-invalid mounts. Apply this stack's mount fence
@@ -1734,23 +1752,23 @@ class ChatSandboxManager:
         self,
         spec: ChatSandboxSpec,
         *,
-        network_phase: Literal["setup", "agent"] | None = None,
         facts: SandboxActionFacts | None = None,
         observer: StageObserver | None = None,
     ) -> ChatSandboxInspection:
-        """Start the exact stopped container and verify it reached RUNNING."""
+        """Start the exact stopped container and verify it reached RUNNING.
+
+        A cold start is also where the network is proved from inside: nothing
+        from the repository runs in a guest that has not passed
+        :meth:`_verify_guest_network`.
+        """
         current = self._require(spec)
-        with substage(observer, "phase_network"):
-            current = self._ensure_current_phase_network(
-                spec,
-                current,
-                preferred_phase=network_phase,
-            )
+        with substage(observer, "group_network"):
+            current = self._require_group_network(spec, current)
         if current.running:
             if facts is not None:
                 facts.note("reuse")
-            with substage(observer, "service_hosts_sync"):
-                self._sync_kata_service_hosts(spec, current)
+            with substage(observer, "guest_network_sync"):
+                self._sync_kata_guest_network(spec, current)
             return current
         if current.status is ChatSandboxStatus.PAUSED:
             raise SandboxError("a paused chat sandbox is not a valid stopped activation")
@@ -1769,8 +1787,10 @@ class ChatSandboxManager:
             raise SandboxError(
                 f"chat sandbox started into unexpected state {started.status.value!r}"
             )
-        with substage(observer, "service_hosts_sync"):
-            self._sync_kata_service_hosts(spec, started)
+        with substage(observer, "guest_network_sync"):
+            self._sync_kata_guest_network(spec, started)
+        with substage(observer, "guest_network_check"):
+            self._verify_guest_network(spec)
         return started
 
     def stop(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
@@ -1802,112 +1822,25 @@ class ChatSandboxManager:
             )
         return self._release_sandbox_networks(spec, stopped)
 
-    def require_network_phase(
-        self, spec: ChatSandboxSpec, phase: str, *, observer: StageObserver | None = None
+    def require_network(
+        self, spec: ChatSandboxSpec, *, observer: StageObserver | None = None
     ) -> None:
-        """Prove this container is attached to exactly the requested network."""
+        """Prove this container is on exactly its guarded group bridge.
+
+        Called before every command and terminal, so it is cheap: the guard's
+        last verification is reused for a minute, and the relays and their
+        host exceptions are reconciled against what Docker reports now.
+        """
         with substage(observer, "network_ensure"):
-            self._ensure_phase_network(spec, phase)
-        expected = self.network_for_phase(spec, phase)
-        current = self._require(spec)
+            current = self._require_group_network(spec, self._require(spec))
+        expected = self.network_for(spec)
         if set(current.networks) != {expected}:
             raise SandboxError(
-                f"retained chat network is {list(current.networks)!r}, not "
-                f"the required {phase} network {expected!r}"
+                f"retained chat network is {list(current.networks)!r}, not its group "
+                f"bridge {expected!r}"
             )
-        with substage(observer, "service_hosts_sync"):
-            self._sync_kata_service_hosts(spec, current)
-
-    def transition_to_agent_network(
-        self,
-        spec: ChatSandboxSpec,
-        *,
-        facts: SandboxActionFacts | None = None,
-        observer: StageObserver | None = None,
-    ) -> ChatSandboxInspection:
-        """Irreversibly replace setup egress with the agent-only network."""
-        with substage(observer, "network_ensure"):
-            self._ensure_phase_network(spec, "setup")
-            self._ensure_phase_network(spec, "agent")
-        setup_network = self.network_for_phase(spec, "setup")
-        agent_network = self.network_for_phase(spec, "agent")
-        current = self._require(spec)
-        if setup_network == agent_network:
-            if set(current.networks) != {agent_network}:
-                raise SandboxError(
-                    "retained chat has an unexpected network set before agent transition"
-                )
-            with substage(observer, "service_hosts_sync"):
-                self._sync_kata_service_hosts(spec, current)
-            return current
-        if set(current.networks) == {agent_network}:
-            if setup_network != self.backend.network_for_phase("setup"):
-                self._release_owned_network(setup_network, spec, "setup")
-            with substage(observer, "service_hosts_sync"):
-                self._sync_kata_service_hosts(spec, current)
-            return current
-        if set(current.networks) not in ({setup_network}, {setup_network, agent_network}):
-            raise SandboxError(
-                "retained chat has an unexpected network set before agent transition"
-            )
-        restart_guest = self.backend.runtime == KATA_RUNTIME and current.running
-        if restart_guest:
-            # Docker network connect/disconnect changes the host namespace,
-            # but Kata 3.32 does not hotplug that change into a running guest.
-            # This is the one-time bootstrap boundary, before any resident CLI
-            # is launched. Preserve the writable layer and boot on agent egress.
-            if current.sandbox_runtime != KATA_RUNTIME:
-                raise SandboxError("Kata bootstrap transition requires an inspected Kata container")
-            with substage(observer, "bootstrap_guest_stop"):
-                stopped = self._run(
-                    [
-                        self.backend.docker_binary,
-                        "stop",
-                        "--time",
-                        str(spec.stop_timeout_s),
-                        current.container_id,
-                    ],
-                    timeout=spec.stop_timeout_s + 30,
-                )
-            current = self._require(spec)
-            if stopped.returncode != 0 or current.running:
-                raise SandboxError(
-                    "Kata guest could not stop before the bootstrap network transition"
-                )
-        if agent_network not in current.networks:
-            with substage(observer, "network_attach_detach"):
-                connected = self._run(
-                    [
-                        self.backend.docker_binary,
-                        "network",
-                        "connect",
-                        agent_network,
-                        current.container_id,
-                    ],
-                    timeout=30,
-                )
-            if connected.returncode != 0:
-                refreshed = self._require(spec)
-                if agent_network not in refreshed.networks:
-                    raise SandboxError(
-                        "retained chat could not attach agent egress: "
-                        + connected.stderr.strip()[:300]
-                    )
-        with substage(observer, "network_attach_detach"):
-            self._disconnect_endpoint(setup_network, current.container_id)
-        transitioned = self._require(spec)
-        if set(transitioned.networks) != {agent_network}:
-            raise SandboxError("retained chat agent egress transition was not exact")
-        if setup_network != self.backend.network_for_phase("setup"):
-            self._release_owned_network(setup_network, spec, "setup")
-        if restart_guest:
-            # The second start is the guest reboot the transition needs, not a
-            # cold activation: `facts` therefore keeps whatever the earlier
-            # container-level action already was.
-            return self.start(spec, network_phase="agent", facts=facts, observer=observer)
-        with substage(observer, "service_hosts_sync"):
-            self._sync_kata_service_hosts(spec, transitioned)
-        return transitioned
+        with substage(observer, "guest_network_sync"):
+            self._sync_kata_guest_network(spec, current)
 
     def build_exec_command(
         self,
@@ -3976,14 +3909,11 @@ class RetainedChatBackend(SandboxBackend):
 
     def spawn(self, spec: SandboxSpec) -> SandboxProcess:
         """Execute one Agent CLI or bounded command in the retained container."""
-        self.manager.require_network_phase(self.spec, spec.phase)
-        env = dict(spec.env)
-        if self.manager.backend.egress is not None:
-            env.update(self.manager.backend.egress.sandbox_env(spec.phase))
+        self.manager.require_network(self.spec)
         return self.manager.spawn(
             self.spec,
             spec.argv,
-            env=env,
+            env=dict(spec.env),
             workdir=CHAT_WORKDIR,
             live_input=spec.live_input,
             user_uid=self.manager.backend.uid,

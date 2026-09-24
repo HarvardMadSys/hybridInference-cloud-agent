@@ -412,8 +412,6 @@ export interface AgentJobApi {
   tokens_in: number | null;
   tokens_out: number | null;
   model_calls: number | null;
-  setup_egress_tier: string | null;
-  agent_egress_tier: string | null;
   /** Attempt whose continuity and resource telemetry is attached below. */
   telemetry_attempt_id?: number | null;
   /** Which continuity rung this turn ran on. Null on turns that predate it. */
@@ -650,10 +648,14 @@ export interface AgentConfigApi {
    * too old to answer these produces.
    */
   model_reasoning_efforts?: Record<string, string[]>;
-  setup_egress_tier: string | null;
-  agent_egress_tier: string | null;
   github_connected: boolean;
   github_install_url: string | null;
+  /**
+   * Whether this deployment's GitHub App is working right now. `unavailable`
+   * means configured but not loaded, and the service is retrying on its own.
+   * Absent on a control plane that predates it, which then reads as before.
+   */
+  github_load_status?: SourceControlLoadStatus;
 }
 
 export interface AgentMcpServerApi {
@@ -671,6 +673,9 @@ export async function getAgentConfig(): Promise<AgentConfigApi> {
 }
 
 export type AgentIntegrationProvider = 'github' | 'gitlab';
+
+/** The deployment's side of a provider, not the user's connection to it. */
+export type SourceControlLoadStatus = 'unconfigured' | 'unavailable' | 'ready';
 
 export interface AgentIntegrationAccountApi {
   id: string;
@@ -694,6 +699,11 @@ export interface AgentIntegrationProviderApi {
   accounts: AgentIntegrationAccountApi[];
   repositories: AgentIntegrationRepositoryApi[];
   error?: string | null;
+  /**
+   * `unavailable`: configured, not loaded, retrying. The user's own
+   * connection (`connected`, `accounts`) is still reported as it is.
+   */
+  load_status?: SourceControlLoadStatus;
 }
 
 export interface AgentIntegrationsApi {

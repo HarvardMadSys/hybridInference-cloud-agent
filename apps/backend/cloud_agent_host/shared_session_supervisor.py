@@ -672,7 +672,6 @@ class SharedChatSessionSupervisor:
                 raise RetainedChatLost("shared sandbox container identity changed")
             group.inspection = self._manager.start(
                 group.spec,
-                network_phase="agent" if has_settled_context else "setup",
                 facts=facts,
                 observer=recorder,
             )
@@ -1910,7 +1909,7 @@ class SharedChatSessionSupervisor:
         result: dict[str, Any] | None = None
         try:
             if not current.running:
-                started = self._manager.start(group.spec, network_phase="agent")
+                started = self._manager.start(group.spec)
                 with self._lock:
                     if group.stopping or group.lifecycle_generation != lifecycle_generation:
                         raise SessionLeaseLost(
@@ -2043,7 +2042,7 @@ class SharedChatSessionSupervisor:
         thread_id: str,
         *,
         generation: int,
-        reason: Literal["idle", "orphaned_attempt", "lost"] = "idle",
+        reason: Literal["idle", "orphaned_attempt", "lost", "unguarded"] = "idle",
     ) -> SharedSessionDescriptor:
         """Close all member transports, then stop the group exactly once.
 
@@ -2261,15 +2260,7 @@ class SharedChatSessionSupervisor:
         current = self._manager.inspect(group.spec.container_name)
         if current is None:
             raise RetainedChatLost("shared sandbox container is missing")
-        network_phase: Literal["setup", "agent"] = (
-            "agent"
-            if any(member.native_session_id for member in group.members.values())
-            else "setup"
-        )
-        group.inspection = self._manager.start(
-            group.spec,
-            network_phase=network_phase,
-        )
+        group.inspection = self._manager.start(group.spec)
 
     def _arm_idle_if_quiescent(self, group: _Group) -> None:
         if self._is_quiescent(group) and group.inspection.running:
@@ -2428,8 +2419,56 @@ class SharedChatSessionSupervisor:
                 f"shared container {inspection.name!r} has incomplete identity labels"
             ) from exc
 
+    def guard_network(self) -> builtins.list[SharedSessionDescriptor]:
+        """Stop every running group when the host can no longer show its rules.
+
+        The guard re-reads the host at most once a minute and reinstalls what
+        it finds missing, so this only acts when that repair fails twice: a
+        running group would otherwise go on without the boundary it was
+        started behind, and anything a repository left running in it with
+        it. Fail closed — stop them all, which releases their bridges and
+        keeps their workspaces. Waking one reinstalls and verifies the rules
+        before it runs again, and refuses while they cannot be.
+        """
+        with self._lock:
+            running = [
+                (next(iter(group.members)), group.spec.generation)
+                for group in self._groups.values()
+                if group.inspection.running and not group.stopping and group.members
+            ]
+        if not running:
+            return []
+        try:
+            self._manager.verify_host_rules()
+            return []
+        except SandboxError:
+            pass
+        try:
+            # A failed check is never cached, so this is a full second attempt:
+            # one Docker hiccup is not reason enough to stop every group.
+            self._manager.verify_host_rules()
+            return []
+        except SandboxError as exc:
+            logger.error(
+                "shared_chat_network_unguarded",
+                extra={
+                    "event": "shared_chat_network_unguarded",
+                    "groups": len(running),
+                    "detail": str(exc)[:300],
+                },
+            )
+        stopped: builtins.list[SharedSessionDescriptor] = []
+        for thread_id, generation in running:
+            with contextlib.suppress(SessionBusy, SessionLeaseLost, SandboxError):
+                stopped.append(
+                    self.stop_if_idle(thread_id, generation=generation, reason="unguarded")
+                )
+        return stopped
+
     def _sweep_loop(self) -> None:
         while not self._stop.wait(self._sweep_interval_s):
+            with contextlib.suppress(Exception):
+                self.guard_network()
             with contextlib.suppress(Exception):
                 self.sweep()
 

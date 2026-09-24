@@ -30,7 +30,6 @@ def manifest() -> dict:
         ("runner", None),
         ("sandbox", None),
         ("tunnel", None),
-        ("egress", None),
     ):
         digest = hashlib.sha256(f"{role}:{variant}".encode()).hexdigest()
         entry = {
@@ -45,7 +44,7 @@ def manifest() -> dict:
         "schema_version": 1,
         "source_repository": "HarvardMadSys/hybridInference-cloud-agent",
         "source_commit": COMMIT,
-        "deploy_protocol": "shared-live-exact-sha-v3",
+        "deploy_protocol": "shared-live-exact-sha-v4",
         "artifacts": artifacts,
         "runtime_catalog": {"codex": {"default": "0.145.0", "versions": ["0.145.0"]}},
         "recipe": {
@@ -55,7 +54,7 @@ def manifest() -> dict:
         },
         "database_revision": "0004_residency_on_membership",
         "compatibility": {
-            "minimum_deployer": "shared-live-exact-sha-v3",
+            "minimum_deployer": "shared-live-exact-sha-v4",
             "verified_upgrade_from": [],
             "verified_rollback_to": [],
         },
@@ -114,7 +113,7 @@ elif a[:1] == ["info"]:
     if "--format" in a: print("/var/lib/docker")
 elif a[:1] == ["inspect"]:
     print(json.dumps([{"NetworkSettings": {"Networks": {
-        "agent-egress": {"IPAddress": "172.24.0.2"}}}}]))
+        "artifact-test-agent-relays": {"IPAddress": "172.24.0.2"}}}}]))
 elif a[:1] == ["exec"]:
     command = " ".join(a)
     if "_shared_live_host_capabilities" in command:
@@ -168,6 +167,8 @@ def deployment(tmp_path: Path, stack: str, *, real_compose: bool = False) -> tup
         "AGENT_BROKER_REVERSE_BIND": "172.24.0.1",
         "AGENT_BROKER_REVERSE_PORT": "18092",
         "AGENT_WORKSPACE_BROKER_ADVERTISE_URL": "http://172.24.0.1:18092",
+        "AGENT_EGRESS_CHAT_NETWORK_POOL": "10.240.0.0/16",
+        "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
     }
     for compose in recipe.rglob("docker-compose*.yml"):
         for key in re.findall(r"\$\{([A-Z_]+):\?", compose.read_text()):

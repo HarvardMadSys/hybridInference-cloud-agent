@@ -30,11 +30,12 @@ from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
     get_log_store,
+    get_source_control,
     get_storage,
     require_store,
 )
 from cloud_agent.application.job_admission import _create_job_as
-from cloud_agent.application.pending_messages import settle_queue
+from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.goals.models import GoalConflict
@@ -54,6 +55,9 @@ from cloud_agent.schemas import (
     GoalResponse,
     GoalRevisionRequest,
 )
+from cloud_agent.source_control_runtime import (
+    SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
+)
 from cloud_agent.terminal_coordination import resume_settled_terminal
 
 if TYPE_CHECKING:
@@ -71,6 +75,7 @@ if TYPE_CHECKING:
         SkillRepository,
         SourceControlRepository as SourceControlPort,
     )
+    from cloud_agent.source_control_runtime import GitHubAppSource
 
 
 router = APIRouter(prefix="/v1/agent")
@@ -246,7 +251,7 @@ async def cancel_agent_job(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _JobsStorage | None = Depends(get_storage),
-    app_credentials: Any | None = Depends(get_agent_app_credentials),
+    source_control: SourceControlRuntime | None = Depends(get_source_control),
     gateway: Any = Depends(get_gateway_client),
 ) -> AgentJobCancelResponse:
     """Request cancellation of one of the caller's agent jobs.
@@ -254,12 +259,18 @@ async def cancel_agent_job(
     Queued jobs cancel immediately; a running job is flagged and the worker
     performs the fenced terminal transition when it next heartbeats. Messages
     the owner has waiting are paused by the same commit — Stop does not start
-    the next one — and stay until the owner continues.
+    the next one — and stay until the owner continues. Stop answers whether or
+    not the GitHub App can be loaded right now (issue #47).
     """
     job_store = _require_store(store)
     owned = await _owned_job(job_store.conversation_queries, job_id, user)
     state = await job_store.attempt_commands.request_cancel(job_id=job_id, user_id=user["user_id"])
-    await _settle_after_cancel(job_store, owned, gateway=gateway, app_credentials=app_credentials)
+    await _settle_after_cancel(
+        job_store,
+        owned,
+        gateway=gateway,
+        github_app=None if source_control is None else source_control.github,
+    )
     if state in TERMINAL_STATES:
         resumed = True
         if owned.get("thread_sandbox") is not None:
@@ -284,7 +295,7 @@ async def _settle_after_cancel(
     job: dict[str, Any],
     *,
     gateway: Any,
-    app_credentials: Any | None,
+    github_app: GitHubAppSource | None,
 ) -> None:
     """Act on a cancel that may already have ended a turn.
 
@@ -297,11 +308,11 @@ async def _settle_after_cancel(
     if thread_id is None:
         return
     try:
-        await settle_queue(
+        await settle_queue_when_possible(
             job_store,
             thread_id=str(thread_id),
             gateway=gateway,
-            app_credentials=app_credentials,
+            github_app=github_app,
         )
     except Exception:
         logger.warning(

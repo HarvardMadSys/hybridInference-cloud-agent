@@ -49,8 +49,11 @@ class _Manager:
         )
         self.items: dict[str, ChatSandboxInspection] = {}
         self.events: list[object] = []
-        self.start_phases: list[str | None] = []
+        self.starts: list[str] = []
         self.stop_count = 0
+        # The host-rule check: how many of the next checks fail, and how many ran.
+        self.host_rule_failures = 0
+        self.host_rule_checks = 0
         self.pruned_specs: list[ChatSandboxSpec] = []
         self.process_baseline: tuple[tuple[int, int], ...] = ((41, 400),)
 
@@ -102,11 +105,10 @@ class _Manager:
         self,
         spec: ChatSandboxSpec,
         *,
-        network_phase: str | None = None,
         facts: Any = None,
         observer: Any = None,
     ) -> ChatSandboxInspection:
-        self.start_phases.append(network_phase)
+        self.starts.append(spec.container_name)
         current = self.items[spec.container_name]
         if not current.running:
             with operation_profiling.substage(observer, "container_start"):
@@ -136,6 +138,12 @@ class _Manager:
 
     def prune_orphan_networks(self, specs: list[ChatSandboxSpec]) -> None:
         self.pruned_specs = specs
+
+    def verify_host_rules(self) -> None:
+        self.host_rule_checks += 1
+        if self.host_rule_failures:
+            self.host_rule_failures -= 1
+            raise SandboxError("inet cloud_agent_x is missing chain 'from_group'")
 
     def freeze_shared_writers(
         self, spec: ChatSandboxSpec, *, slot_ids: list[int], token: str
@@ -350,7 +358,7 @@ def test_status_retries_network_cleanup_for_an_externally_stopped_group():
     assert all(item.running is False for item in descriptors)
 
 
-def test_acquire_recreates_agent_network_for_settled_context():
+def test_acquire_starts_a_settled_context_on_its_group():
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
     supervisor.register_manifest(_spec(), _members())
@@ -365,7 +373,55 @@ def test_acquire_recreates_agent_network_for_settled_context():
         expected_container_id="container-shared",
     )
 
-    assert manager.start_phases[-1] == "agent"
+    assert manager.starts == [_spec().container_name]
+
+
+def _running_group() -> tuple[_Manager, SharedChatSessionSupervisor]:
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+    return manager, supervisor
+
+
+def test_a_host_that_cannot_show_its_rules_stops_every_running_group():
+    """Fail closed: a group may not go on without the boundary it started behind."""
+    manager, supervisor = _running_group()
+    manager.host_rule_failures = 2
+
+    stopped = supervisor.guard_network()
+
+    assert manager.host_rule_checks == 2
+    assert manager.stop_count == 1
+    assert manager.items[_spec().container_name].running is False
+    # Stopped, not lost: the native session wakes once the rules are back.
+    assert [descriptor.resident_state for descriptor in stopped] == ["stopped"]
+    assert supervisor.status("athr_source").context_status != "lost"
+
+
+def test_one_failed_check_is_retried_before_anything_is_stopped():
+    manager, supervisor = _running_group()
+    manager.host_rule_failures = 1
+
+    assert supervisor.guard_network() == []
+    assert manager.host_rule_checks == 2
+    assert manager.stop_count == 0
+
+
+def test_the_rules_are_not_checked_while_nothing_runs():
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+
+    assert supervisor.guard_network() == []
+    assert manager.host_rule_checks == 0
 
 
 def test_stale_activation_does_not_wake_a_stopped_shared_container():
@@ -390,7 +446,7 @@ def test_stale_activation_does_not_wake_a_stopped_shared_container():
             expected_container_id="container-shared",
         )
 
-    assert manager.start_phases == []
+    assert manager.starts == []
     assert manager.items[spec.container_name].running is False
 
 
@@ -2155,7 +2211,7 @@ def test_a_container_created_then_started_is_still_reported_as_created():
     )
 
     # The fake manager, like the real one, starts what it just created.
-    assert manager.start_phases == ["agent"]
+    assert manager.starts == [_spec().container_name]
     assert lease.container_action == "create"
 
 

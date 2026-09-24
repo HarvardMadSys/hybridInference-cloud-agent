@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from types import SimpleNamespace
 from typing import Any
 
 import asyncpg
@@ -39,6 +40,7 @@ from cloud_agent.api.deps import (
 )
 from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.application.pending_messages import settle_queue, settle_waiting_queues
+from cloud_agent.source_control_runtime import SourceControlUnavailable
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.workers.attempts import reap_expired_attempts
 from cloud_agent_host.shared_protocol import (
@@ -150,11 +152,14 @@ async def pool():
 class Api:
     """The app, its store, and the host that runs its turns."""
 
-    def __init__(self, client: AsyncClient, store: Storage, pool: Any, gateway: _Gateway) -> None:
+    def __init__(
+        self, client: AsyncClient, store: Storage, pool: Any, gateway: _Gateway, app: FastAPI
+    ) -> None:
         self.client = client
         self.store = store
         self.pool = pool
         self.gateway = gateway
+        self.app = app
         #: The retained sandbox of each conversation, once its first turn made it.
         self._sandboxes: dict[str, dict[str, Any]] = {}
 
@@ -340,7 +345,7 @@ async def api(pool, monkeypatch):
         "credential_hash": _HOST_CREDENTIAL,
     }
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        yield Api(client, store, pool, gateway)
+        yield Api(client, store, pool, gateway, app)
 
 
 # -- 10.1: a held message holds the line, FIFO resumes after save --------------
@@ -593,7 +598,7 @@ async def test_a_turn_the_reaper_fails_is_paused_by_the_periodic_sweep(api: Api)
     assert [action["action"] for action in actions] == ["failed"]
     assert (await api.queue(thread_id))["queue_paused_reason"] is None
 
-    settled = await settle_waiting_queues(api.store, gateway=api.gateway, app_credentials=None)
+    settled = await settle_waiting_queues(api.store, gateway=api.gateway, github_app=None)
 
     assert settled == 1
     queue = await api.queue(thread_id)
@@ -635,6 +640,46 @@ async def test_the_reaper_loop_runs_the_queue_sweep(api: Api):
 
     assert (await api.queue(thread_id))["queue_paused_reason"] == "failed"
     assert [turn["state"] for turn in await api.turns(thread_id)] == ["failed"]
+
+
+async def test_a_github_app_that_cannot_load_holds_a_message_back_without_refusing_it(api: Api):
+    """Issue #47 on the queue: an outage is not a verdict on the owner's message.
+
+    Without the App the repository check would see only the allowlist, so the
+    finish records the ending but sends nothing, and holds nothing either. The
+    sweep sends the message once the App loads.
+    """
+
+    class RecoveringApp:
+        loaded = False
+
+        def get(self) -> object:
+            if not self.loaded:
+                raise SourceControlUnavailable("github")
+            return object()  # the repository is allowlisted; the minter is not asked
+
+    app = RecoveringApp()
+    api.app.state.source_control = SimpleNamespace(github=app)
+    job = await api.create()
+    thread_id = job["thread_id"]
+    running = await api.start(job)
+    await api.send(thread_id, "next step")
+
+    await api.finish(running)
+
+    assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it"]
+    queue = await api.queue(thread_id)
+    assert [(row["state"], row["last_error"]) for row in queue["messages"]] == [("queued", None)]
+    assert (queue["queue_paused_reason"], queue["queue_settled_job_id"]) == (None, job["id"])
+    assert thread_id in await api.store.pending_messages.threads_to_settle()
+    await settle_waiting_queues(api.store, gateway=api.gateway, github_app=app)
+    assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it"]
+
+    app.loaded = True
+    await settle_waiting_queues(api.store, gateway=api.gateway, github_app=app)
+
+    assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it", "next step"]
+    assert (await api.queue(thread_id))["messages"] == []
 
 
 # -- 10.1: idle send, idempotent resends ------------------------------------------

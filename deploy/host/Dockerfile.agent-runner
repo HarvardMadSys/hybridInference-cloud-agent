@@ -52,12 +52,20 @@ RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.
     && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update && apt-get install -y --no-install-recommends \
         git \
         ca-certificates \
+        iproute2 \
+        nftables \
     && rm -rf /var/lib/apt/lists/*
+
+# nft and ip are not run in this container. The sandbox network guard starts
+# this same image as a short-lived helper in the host's network namespace — with
+# NET_ADMIN and nothing else for nft, to install and read back the host's
+# sandbox rules, and with no capability at all for ip, to read the host's routes
+# (cloud_agent_host/network_guard.py). The runner itself holds no NET_ADMIN.
 
 # The client only — no daemon. The runner talks to the host's daemon over the
 # bind-mounted socket; a second daemon in here would be both wrong and
 # considerably more privilege than this needs.
-COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker:28-cli /usr/local/bin/docker /usr/local/bin/docker
 
 WORKDIR /app
 COPY --from=builder /app/.venv .venv

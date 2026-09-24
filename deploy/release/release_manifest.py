@@ -84,7 +84,6 @@ EXPECTED_PLATFORMS: dict[str, tuple[str, ...]] = {
     "runner": ("linux/amd64",),
     "sandbox": ("linux/amd64",),
     "tunnel": ("linux/amd64",),
-    "egress": ("linux/amd64",),
 }
 
 #: Web is built per mount shape, because `basePath` is resolved while the

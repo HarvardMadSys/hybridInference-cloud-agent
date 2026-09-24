@@ -243,7 +243,7 @@ class AgentRuntime:
         The agent is told this service's fixed MCP-only relay URL, and nothing
         else: not an upstream address, not the user's credential that reaches
         them. All of that stays in the control plane, which is what lets a
-        sandbox with no general egress use these servers at all.
+        sandbox use these servers without ever holding their credentials.
 
         **The merged host, which is what makes a connection generic.** The
         relay's per-connection route forwards one connection's protocol
@@ -484,9 +484,9 @@ class ClaudeCodeRuntime(AgentRuntime):
             # subagent definition. `inherit` skips that override, allowing
             # Explore to pick an ungranted default (e.g. opus for DeepSeek).
             "CLAUDE_CODE_SUBAGENT_MODEL": model,
-            # Telemetry and auto-update are refused explicitly rather than left
-            # to the egress allowlist: defence in depth, and it keeps the
-            # allowlist free of vendor endpoints.
+            # Telemetry and auto-update are switched off explicitly. The
+            # sandbox reaches the public web, so nothing else stops the CLI
+            # phoning home or replacing itself in the middle of a job.
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             "DISABLE_TELEMETRY": "1",
             "DISABLE_AUTOUPDATER": "1",
@@ -1324,9 +1324,8 @@ class PiRuntime(GenericRuntime):
                 {
                     "tool_use_id": message.get("toolCallId"),
                     "name": message.get("toolName"),
-                    # The runner reads both of these to spot a blocked egress
-                    # host and to count failed calls, so a Tier 2 pi job had
-                    # neither. `isError` appears here and nowhere else in the
+                    # The runner reads this to count failed calls, so a Tier 2
+                    # pi job had none. `isError` appears here and nowhere else in the
                     # stream, which is why this is the authoritative copy.
                     "is_error": bool(message.get("isError")),
                     "content": _truncate(message.get("content")),
@@ -1571,9 +1570,8 @@ class KiloRuntime(GenericRuntime):
 
     What the fork adds is more phone-home: PostHog telemetry, session ingest
     and share links to app.kilo.ai, presence, LSP downloads. Each has a
-    supported kill switch, and the wrapper sets them all — the egress
-    allowlist blocks the traffic anyway, but a disabled path never becomes a
-    mid-job timeout. Smoke-verified end to end against the pinned CLI: config
+    supported kill switch, and the wrapper sets them all: the sandbox reaches
+    the public web, so a path left enabled would simply phone home. Smoke-verified end to end against the pinned CLI: config
     injection, tool calls through the gateway, and JSON events on stdout.
     """
 

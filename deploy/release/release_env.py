@@ -61,7 +61,6 @@ STACK_ROLES: dict[str, dict[str, str]] = {
     "host": {
         "runner": "AGENT_RUNNER_IMAGE",
         "tunnel": "AGENT_TUNNEL_IMAGE",
-        "egress": "AGENT_EGRESS_IMAGE",
         "sandbox": "AGENT_SANDBOX_IMAGE",
     },
 }

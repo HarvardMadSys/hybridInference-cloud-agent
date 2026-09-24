@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IntegrationsView } from './IntegrationsView';
-import type { AgentIntegrationsApi } from '@/lib/api/agents';
+import type { AgentIntegrationProviderApi, AgentIntegrationsApi } from '@/lib/api/agents';
 
 import { listSkills } from '@/lib/api/skills';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
@@ -55,6 +55,23 @@ const integrations: AgentIntegrationsApi = {
   ],
 };
 
+/** GitHub as the service reports it while its App cannot be loaded. */
+function unloadedGithub(
+  overrides: Partial<AgentIntegrationProviderApi> = {},
+): AgentIntegrationProviderApi {
+  return {
+    provider: 'github',
+    configured: false,
+    connected: false,
+    connect_url: null,
+    capabilities: [],
+    accounts: [],
+    repositories: [],
+    load_status: 'unavailable',
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   vi.mocked(listSkills).mockResolvedValue([]);
   mockedListMcpConnections.mockResolvedValue({ connections: [], templates: [] });
@@ -97,6 +114,141 @@ describe('IntegrationsView', () => {
     // go and ask an admin for it.
     expect(await screen.findAllByText('Admin setup required')).toHaveLength(1);
     expect(screen.getAllByText('Coming soon')).toHaveLength(1);
+  });
+
+  // Issue #47: a GitHub App the service could not load reads as "temporarily
+  // unavailable". "Admin setup required" sent operators to check configuration
+  // that was already correct, when the service only had to read its key again.
+  it('says an App the service could not load is temporarily unavailable', async () => {
+    mockedGetIntegrations.mockResolvedValue({
+      providers: [unloadedGithub(), integrations.providers[1]],
+    });
+
+    render(<IntegrationsView />);
+
+    expect(await screen.findByText('Temporarily unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('Admin setup required')).not.toBeInTheDocument();
+  });
+
+  it('keeps a connected account on screen, and removable, while the App is unavailable', async () => {
+    mockedGetIntegrations.mockResolvedValue({
+      providers: [
+        unloadedGithub({ connected: true, accounts: integrations.providers[0].accounts }),
+        integrations.providers[1],
+      ],
+    });
+
+    render(<IntegrationsView />);
+
+    expect(await screen.findByText('HarvardMadSys · Temporarily unavailable')).toBeInTheDocument();
+    expect(screen.queryByText(/Connected as/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Reauthorize GitHub')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Disconnect HarvardMadSys' })).toBeInTheDocument();
+  });
+
+  it('looks again while GitHub is unavailable, and stops once it is back', async () => {
+    vi.useFakeTimers();
+    try {
+      mockedGetIntegrations
+        .mockResolvedValueOnce({ providers: [unloadedGithub(), integrations.providers[1]] })
+        .mockResolvedValue(integrations);
+      await act(async () => {
+        render(<IntegrationsView />);
+      });
+      expect(screen.getByText('Temporarily unavailable')).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+
+      expect(screen.getByText('Connected as HarvardMadSys · 2 repositories')).toBeInTheDocument();
+      const calls = mockedGetIntegrations.mock.calls.length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(90_000);
+      });
+      expect(mockedGetIntegrations).toHaveBeenCalledTimes(calls);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never lets an older re-check undo a disconnect made after it was sent', async () => {
+    // A background re-check sent before a disconnect can be answered after the
+    // reload that followed it. Applied in arrival order, it put the removed
+    // account back on the page.
+    vi.useFakeTimers();
+    try {
+      const connectedWhileDown: AgentIntegrationsApi = {
+        providers: [
+          unloadedGithub({ connected: true, accounts: integrations.providers[0].accounts }),
+          integrations.providers[1],
+        ],
+      };
+      let answerStaleCheck: (value: AgentIntegrationsApi) => void = () => undefined;
+      mockedGetIntegrations
+        .mockResolvedValueOnce(connectedWhileDown)
+        .mockImplementationOnce(
+          () =>
+            new Promise<AgentIntegrationsApi>((resolve) => {
+              answerStaleCheck = resolve;
+            }),
+        )
+        .mockResolvedValue({ providers: [unloadedGithub(), integrations.providers[1]] });
+      mockedDisconnect.mockResolvedValue(undefined);
+      await act(async () => {
+        render(<IntegrationsView />);
+      });
+      expect(screen.getByText('HarvardMadSys · Temporarily unavailable')).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000); // the re-check goes out, unanswered
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Disconnect HarvardMadSys' }));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.queryByText('HarvardMadSys · Temporarily unavailable')).not.toBeInTheDocument();
+
+      await act(async () => {
+        answerStaleCheck(connectedWhileDown);
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(screen.queryByText('HarvardMadSys · Temporarily unavailable')).not.toBeInTheDocument();
+      expect(screen.getByText('Temporarily unavailable')).toBeInTheDocument();
+      expect(screen.queryByLabelText('Loading GitHub')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not keep asking about a GitLab that failed to load', async () => {
+    // The service never retries GitLab: its configuration is environment only.
+    vi.useFakeTimers();
+    try {
+      mockedGetIntegrations.mockResolvedValue({
+        providers: [
+          integrations.providers[0],
+          {
+            ...integrations.providers[1],
+            configured: false,
+            connect_url: null,
+            load_status: 'unavailable',
+          },
+        ],
+      });
+      await act(async () => {
+        render(<IntegrationsView />);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(90_000);
+      });
+
+      expect(mockedGetIntegrations).toHaveBeenCalledTimes(1);
+      expect(screen.getByText('Coming soon')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not trust the callback query string as connection status', async () => {

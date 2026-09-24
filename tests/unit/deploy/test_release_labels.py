@@ -30,7 +30,6 @@ IMAGES = {
     "deploy/control-plane/Dockerfile.web": "web",
     "deploy/host/Dockerfile.agent-runner": "runner",
     "deploy/sandbox/Dockerfile.agent-sandbox": "sandbox",
-    "deploy/host/Dockerfile.agent-egress-proxy": "egress",
     "deploy/host/Dockerfile.agent-gateway-tunnel": "tunnel",
 }
 

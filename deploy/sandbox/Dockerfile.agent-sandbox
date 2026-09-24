@@ -240,8 +240,8 @@ LABEL org.opencontainers.image.source="https://github.com/HarvardMadSys/hybridIn
 # reviewed wrappers write that file from the environment and exec the real
 # CLI — the runner invokes the wrapper, never the bare binary. The OpenCode
 # and Kilo wrappers additionally disable the models.dev catalog fetch and
-# default-plugin install, both of which hard-fail in the deny-all sandbox
-# (Kilo's wrapper also kills the fork's extra phone-home paths).
+# default-plugin install, so startup fetches neither a catalog nor packages at
+# run time (Kilo's wrapper also kills the fork's extra phone-home paths).
 COPY deploy/sandbox/pi-freeinference /usr/local/bin/pi-freeinference
 COPY deploy/sandbox/opencode-freeinference /usr/local/bin/opencode-freeinference
 COPY deploy/sandbox/kilo-freeinference /usr/local/bin/kilo-freeinference
@@ -310,9 +310,9 @@ RUN groupadd --gid 10001 agent \
 USER agent
 WORKDIR /workspace
 
-# Turn off every phone-home an agent CLI does by default. The egress allowlist
-# blocks these anyway; setting them here means a blocked request never becomes
-# a confusing timeout in the middle of a job.
+# Turn off every phone-home an agent CLI does by default. The sandbox reaches
+# the public web, so nothing else stops a CLI reporting telemetry or updating
+# itself in the middle of a job.
 ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
     DISABLE_TELEMETRY=1 \
     DISABLE_AUTOUPDATER=1 \

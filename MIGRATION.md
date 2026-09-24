@@ -566,6 +566,8 @@ proxy alone straddles an internal Trusted network and a routable uplink, and
 setup defaults to that tier while agent turns stay `platform_only`. The three
 previously skipped source assertions now run normally. This is infrastructure
 state only; no chat workspace, provider state, or Agent CLI session is mounted.
+(Since replaced by the one sandbox network, see
+docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md.)
 
 **Isolation gap found during the retained-deployment audit; resolved
 2026-09-02.** A Docker network marked `internal` has no off-host route, but its
@@ -576,7 +578,9 @@ networks are now discovery backplanes only. Lifecycle code creates a labelled,
 deterministic internal bridge per sandbox group, attaches only that group's
 container and the phase's fixed relay/proxy endpoints, and migrates a stopped
 pre-upgrade container off the old shared bridge before restart. Fork siblings
-remain in one container/network by design; unrelated groups do not.
+remain in one container/network by design; unrelated groups do not. (Since
+replaced by the one sandbox network, see
+docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md.)
 
 ### Which machine runs the connection migration (found in H1)
 

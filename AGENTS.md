@@ -28,7 +28,7 @@ apps/
 │   ├── cloud_agent_profiling/ neutral opt-in measurement vocabulary the control
 │   │                          plane and host both import without either owning it
 │   └── cloud_agent_shared/    vocabulary both images ship: capability strings,
-│       │                      protocol versions, pins, egress policy, shared errors
+│       │                      protocol versions, pins, sandbox network, shared errors
 │       └── git/               the patch gate and the source-archive builders
 └── frontend/                  Next.js user UI + admin dashboard
 gateway_contracts/             OpenAPI mirrors of the gateway contracts we consume
@@ -62,7 +62,7 @@ database stamped with the chain that predates it.
 | `apps/backend/cloud_agent_host/enrollment.py` | Host registration and the persisted host credential |
 | `apps/backend/cloud_agent_host/runner.py` | Claims, executes one turn, heartbeats, drains on SIGTERM |
 | `apps/backend/cloud_agent_host/chat_sandbox.py`, `sandbox.py` | Retained group lifecycle and the Docker/Kata boundary |
-| `apps/backend/cloud_agent_shared/egress.py`, `apps/backend/cloud_agent_host/egress_proxy.py` | The two egress phases and the setup allowlist proxy |
+| `apps/backend/cloud_agent_shared/egress.py`, `apps/backend/cloud_agent_host/network_guard.py` | The one sandbox network: its configuration and host rules, and the helper that installs and verifies them |
 | `apps/backend/cloud_agent_host/runtimes.py`, `shared_protocol.py` | The five Agent CLI adapters and the version pins they attest |
 
 ## 3. Quality gates
@@ -133,30 +133,35 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   same group and workspace. Native resume stays in that container. There is no
   transcript-replay or platform-checkpoint recovery path. See the implemented
   [session design](docs/specs/2026-08-31-native-session-fork-shared-workspace-design.md).
-  The group has **two egress phases**, enforced by the
-  code in `cloud_agent_shared/egress.py` and
-  `cloud_agent_host/egress_proxy.py`:
-  - *Setup phase* — dependency installation may reach package registries, but
-    only through the Squid allowlist proxy, which permits CONNECT to an
-    allowlisted host by name and refuses everything else.
-  - *Agent phase* — untrusted repository code runs, and the sandbox reaches
-    only two fixed-address relays: the gateway for inference and the MCP-only
-    listener for tools. Each sandbox group gets its own internal Docker
-    network; the compose network is only the discovery backplane from which
-    those two trusted relay endpoints are attached. Neither relay is a
-    caller-selected forward proxy, and unrelated sandbox groups never share
-    a bridge.
+  The group has **one network**, the same for setup and for the agent, with
+  nothing to select
+  ([design](docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md)).
+  Each group gets its own routable bridge, and before anything joins one the
+  host installs this deployment's nftables table (`cloud_agent_shared/egress.py`
+  renders it, `cloud_agent_host/network_guard.py` installs and verifies it):
+  - public IPv4 on TCP 80/443, so curl, pip, npm and Git over HTTPS work;
+  - the one named resolver on TCP/UDP 53;
+  - the two relays' service ports on the group's own bridge — the gateway for
+    inference and the MCP-only listener for tools;
+  - and nothing else: not the host, private or special-purpose addresses,
+    other groups, other ports, UDP 443, or IPv6. Neither relay is a
+    caller-selected forward proxy, and there is no proxy at all.
 
 ## 7. Security boundaries — do not relax without review
 
-- During the agent phase the sandbox reaches exactly two network destinations:
-  the inference gateway relay and the structurally isolated MCP-only relay.
-  Per-group internal networks enforce both the off-host boundary and cross-group
-  isolation; `internal: true` on one shared bridge is not sufficient. The
-  setup-phase allowlist proxy is the only sanctioned widening, and the
-  escape hatches (`AGENT_SANDBOX_ALLOW_OPEN_NETWORK`,
-  `AGENT_EGRESS_AGENT_TIER=custom`) must stay unset anywhere untrusted
-  repositories run.
+- A sandbox group reaches public IPv4 on TCP 80/443, the one named resolver,
+  and its own two relays — and nothing else: none of the host's addresses, no
+  private, link-local/metadata, CGNAT, multicast or reserved range, nothing in
+  `AGENT_EGRESS_PROTECTED_CIDRS`, no other group, and no IPv6. Per-group
+  bridges and this deployment's host nftables table enforce it on the actual
+  packets; the table is installed and read back before any group joins its
+  bridge, and a failed check stops the group rather than falling back to
+  anything. There is no mode, flag or proxy that widens it, and adding one is
+  a design change, not a configuration.
+- Because sandboxes reach the public internet, the platform's public entry
+  points must refuse sandbox credentials: MCP tool calls are served only on
+  the MCP-only listener, and inference grants must be accepted only on the
+  gateway's internal entry. Neither may rest on a header or on loopback.
 - Long-lived account and service credentials never enter the sandbox. Each
   member receives its own scoped inference and MCP credentials; sibling
   members cannot read or reuse them. Spend remains governed by the gateway's

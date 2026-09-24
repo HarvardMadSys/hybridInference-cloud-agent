@@ -752,11 +752,11 @@ jobs:
   # is not there for the next one, and passing it between jobs would mean a
   # registry, which would put a publishing credential in the pull-request path.
   #
-  # Starting it is the half that catches what building cannot. The egress proxy
-  # is the standing example: it built, its config parsed, and it exited on every
-  # start for two days because squid opens its logs after dropping to an
-  # unprivileged user — and the runner's isolation preflight, correctly refusing
-  # to run without a proxy, took three runners down behind it.
+  # Starting it is the half that catches what building cannot. The since-removed
+  # egress proxy was the standing example: it built, its config parsed, and it
+  # exited on every start for two days because squid opened its logs after
+  # dropping to an unprivileged user — and the runner's isolation preflight,
+  # correctly refusing to run without it, took three runners down behind it.
   #
   # The checks live in `deploy/release/smoke.py` rather than here, because the
   # publication workflow runs the same script against the images it is about to
@@ -837,12 +837,6 @@ jobs:
             dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
             runner: '["self-hosted","Linux","X64","image-verify-x64"]'
             build_args: ""
-          - name: egress
-            arch: amd64
-            smoke_args: --role egress
-            dockerfile: deploy/host/Dockerfile.agent-egress-proxy
-            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
-            build_args: ""
     steps:
       - uses: actions/checkout@v6
         with:
@@ -857,8 +851,8 @@ jobs:
           # first two, several of them land on the same Docker host, and the
           # cleanup below removes containers by this label. Without the artifact
           # name, the first cell to finish deletes the others' containers while
-          # they are still being tested — which is exactly what the control and
-          # egress cells did, twice, before this.
+          # they are still being tested — which is exactly what the control
+          # cell and the since-removed egress cell did, twice, before this.
           suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.artifact.name }}"
           echo "IMAGE_TAG=${{ matrix.artifact.name }}:ci-${suffix}" >> "${GITHUB_ENV}"
           echo "SUFFIX=${suffix}" >> "${GITHUB_ENV}"
@@ -1119,6 +1113,10 @@ jobs:
           AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION=ci@control-plane.invalid
           AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY=/dev/null
           AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS=/dev/null
+          # The one sandbox network's two deployment facts. Neither has a
+          # default, so both are part of what this render proves.
+          AGENT_EGRESS_CHAT_NETWORK_POOL=10.240.0.0/16
+          AGENT_EGRESS_DNS_SERVER=192.0.2.53
           ENVFILE
           docker compose \
             -f deploy/host/docker-compose.sandbox.yml \
@@ -1192,7 +1190,7 @@ jobs:
           for required in AGENT_SESSION_SECRET AGENT_WORKSPACE_BROKER_TOKEN AGENT_DEPLOYMENT_SHA GATEWAY_ISSUER; do
             check "$CP" .env.control-plane "$required"
           done
-          for required in AGENT_WORKSPACE_BROKER_TOKEN; do
+          for required in AGENT_WORKSPACE_BROKER_TOKEN AGENT_EGRESS_CHAT_NETWORK_POOL AGENT_EGRESS_DNS_SERVER; do
             check "$HOST" .env "$required"
           done
 
@@ -1208,21 +1206,43 @@ jobs:
           stack = yaml.safe_load(open(os.environ["RUNNER_TEMP"] + "/rendered.yml"))
           failures = []
 
-          egress = stack["networks"].get("agent-egress", {})
-          if not egress.get("internal"):
-              failures.append("agent-egress is not internal — the sandbox would have a route out")
+          relays = stack["networks"].get("agent-relays", {})
+          if not relays.get("internal"):
+              failures.append("agent-relays is not internal — the discovery network would have a route out")
 
-          # Named, not counted. The sandbox's whole permission is "these two
-          # destinations and nothing else"; a check that only counted them
-          # would pass on a stack where one had been swapped for something
-          # broader.
-          on_egress = {
+          # Named, not counted. Lifecycle attaches every relay it finds here to
+          # each sandbox group's bridge; a check that only counted them would
+          # pass on a stack where one had been swapped for something broader.
+          on_relays = {
               name
               for name, svc in stack["services"].items()
-              if "agent-egress" in (svc.get("networks") or {})
+              if "agent-relays" in (svc.get("networks") or {})
           }
-          if on_egress != {"gateway-tunnel", "mcp-tunnel"}:
-              failures.append(f"unexpected services on the closed network: {sorted(on_egress)}")
+          if on_relays != {"gateway-tunnel", "mcp-tunnel"}:
+              failures.append(f"unexpected services on the relay network: {sorted(on_relays)}")
+
+          # Either process may build or wake a group, so both must build the
+          # same network, and find the relays where Compose put them.
+          runner = stack["services"]["runner"]["environment"]
+          broker = stack["services"]["workspace-broker"]["environment"]
+          for key in ("AGENT_SANDBOX_NAMESPACE", "AGENT_RELAY_NETWORK",
+                      "AGENT_EGRESS_CHAT_NETWORK_POOL", "AGENT_EGRESS_DNS_SERVER",
+                      "AGENT_EGRESS_PROTECTED_CIDRS"):
+              if runner.get(key) != broker.get(key):
+                  failures.append(f"runner and broker disagree on {key}")
+          if runner.get("AGENT_RELAY_NETWORK") != relays.get("name"):
+              failures.append("the runner looks for its relays on a network Compose does not create")
+
+          # One network: nothing may select another, and no proxy remains.
+          retired = ("AGENT_EGRESS_SETUP_TIER", "AGENT_EGRESS_AGENT_TIER",
+                     "AGENT_EGRESS_NETWORK_", "AGENT_EGRESS_PROXY", "AGENT_EGRESS_ALLOWLIST",
+                     "AGENT_SANDBOX_ALLOW_OPEN_NETWORK", "AGENT_SANDBOX_NETWORK")
+          for name, svc in stack["services"].items():
+              if "proxy" in name:
+                  failures.append(f"a proxy service remains: {name}")
+              for key in svc.get("environment") or {}:
+                  if key.startswith(retired):
+                      failures.append(f"{name} still passes the retired {key}")
 
           for name, svc in stack["services"].items():
               for mount in svc.get("volumes") or []:
@@ -1233,7 +1253,7 @@ jobs:
 
           if failures:
               print("\n".join(failures)); sys.exit(1)
-          print("rendered stack: egress internal, docker socket read-only")
+          print("rendered stack: one sandbox network, relays discoverable only, docker socket read-only")
           PY
 
   # -------------------------------------------------------------------- gate

@@ -39,6 +39,7 @@ if TYPE_CHECKING:
         SnapshotRepository,
         SourceControlRepository,
     )
+    from cloud_agent.source_control_runtime import GitHubAppSource
 
 #: The moved loop keeps logging under the module it came from: the deployment's
 #: log selection is on ``cloud_agent.app``, and a relocation must not move these
@@ -532,7 +533,7 @@ async def reap_expired_attempts(
     interval_seconds: float = REAP_INTERVAL_S,
     max_attempts: int = MAX_ATTEMPTS,
     grants: Any | None = None,
-    app_credentials: Any | None = None,
+    github_app: GitHubAppSource | None = None,
     gateway: Any | None = None,
 ) -> None:
     """Periodically close attempts whose lease expired.
@@ -544,11 +545,14 @@ async def reap_expired_attempts(
         grants: The grant client, when this deployment mints grants. ``None``
             skips both grant passes entirely — the capabilities then expire at
             their own TTL, which is the same backstop revocation accelerates.
-        app_credentials: The GitHub App credential minter. A goal decision
-            checks the repository's entitlement before it schedules, and with no
-            minter that check can only see the deployment's allowlist — so a
-            repository the owner installed the App on would be reported as
-            access denied.
+        github_app: Where to ask for the GitHub App's credentials, once per
+            pass. A goal decision checks the repository's entitlement before it
+            schedules, and with no minter that check can only see the
+            deployment's allowlist — so a repository the owner installed the App
+            on would be reported as access denied. Asked rather than held: the
+            credentials this process has at startup are not necessarily the
+            ones it has now (issue #47). Sending an owner's waiting message
+            checks the same entitlement, and waits for the App the same way.
         gateway: The gateway client. Sending an owner's waiting message checks
             the model and effort it names, exactly as sending it by hand does;
             without one, a message naming either waits for a settlement that
@@ -603,7 +607,7 @@ async def reap_expired_attempts(
         # goal: every ordinary way an active goal stops being able to continue
         # says so where and when it happens.
         try:
-            await run_goal_wakeups(store=store, app_credentials=app_credentials, gateway=gateway)
+            await run_goal_wakeups(store=store, github_app=github_app, gateway=gateway)
         except Exception:
             logger.warning("Goal wakeup consumer pass failed", exc_info=True)
         try:
@@ -691,7 +695,7 @@ async def reap_expired_attempts(
         # its settlement included. The backstop, not the mechanism; in its own
         # try so a queue cannot stop attempts being recovered.
         try:
-            await settle_waiting_queues(store, gateway=gateway, app_credentials=app_credentials)
+            await settle_waiting_queues(store, gateway=gateway, github_app=github_app)
         except Exception:
             logger.warning("Pending message queue sweep failed", exc_info=True)
         # After the reaper, so an attempt superseded in this very pass has its

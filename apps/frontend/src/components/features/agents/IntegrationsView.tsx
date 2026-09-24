@@ -5,6 +5,7 @@ import { disconnectAgentIntegration, getAgentIntegrations } from '@/lib/api/agen
 import type { AgentIntegrationProvider, AgentIntegrationProviderApi } from '@/lib/api/agents';
 import { SkillsSection } from './skills/SkillsSection';
 import { McpConnectionsSection, type McpAuthorizationResult } from './mcp/McpConnectionsSection';
+import { SOURCE_CONTROL_RECHECK_MS } from './sourceControlRecovery';
 
 const PROVIDERS: AgentIntegrationProvider[] = ['github', 'gitlab'];
 
@@ -61,6 +62,17 @@ function connectedDescription(provider: AgentIntegrationProviderApi): React.Reac
   const accountLabels = provider.accounts.map((account) => account.label).filter(Boolean);
   const repositoryCount = provider.repositories.length;
 
+  // The connection is intact; the deployment cannot use it right now. Not
+  // "Connected" with no repositories, which reads as access that was lost.
+  if (provider.load_status === 'unavailable') {
+    return (
+      <>
+        {accountLabels.length > 0 ? `${accountLabels.join(', ')} · ` : ''}
+        Temporarily unavailable
+      </>
+    );
+  }
+
   return (
     <>
       Connected
@@ -95,6 +107,14 @@ function ProviderActions({
         <span className="rounded-full bg-gray-100 dark:bg-white/5 px-2.5 py-1 text-xs font-medium text-gray-500 dark:text-gray-400">
           Coming soon
         </span>
+      );
+    }
+    // Before the `configured` check, which is also false while the App is
+    // unavailable: that one means nobody set the provider up, and sends an
+    // operator to check configuration that is already correct.
+    if (integration.load_status === 'unavailable') {
+      return (
+        <span className="text-sm text-gray-400 dark:text-gray-500">Temporarily unavailable</span>
       );
     }
     if (!integration.configured) {
@@ -188,30 +208,60 @@ export function IntegrationsView({
   const [notice, setNotice] = useState<string | null>(null);
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
   const connectedNoticeChecked = useRef(false);
+  // Which request the page is waiting for. Only the most recently *sent*
+  // answer may land: a re-check sent before a disconnect can arrive after the
+  // reload that followed it, and would put the removed account back.
+  const latestLoad = useRef(0);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await getAgentIntegrations();
-      setProviders(response.providers);
-      if (!connectedNoticeChecked.current && connectedProvider) {
-        connectedNoticeChecked.current = true;
-        const verified = response.providers.find(
-          (provider) => provider.provider === connectedProvider && provider.connected,
-        );
-        if (verified) setNotice(`${PROVIDER_COPY[connectedProvider].name} connected.`);
+  // `quiet` is the background re-check below: it replaces the rows when the
+  // answer arrives and otherwise leaves the page as it is — no skeleton, and
+  // no error banner for a check the user did not ask for.
+  const load = useCallback(
+    async ({ quiet = false }: { quiet?: boolean } = {}) => {
+      const request = ++latestLoad.current;
+      if (!quiet) {
+        setLoading(true);
+        setError(null);
       }
-    } catch (cause: unknown) {
-      setError(cause instanceof Error ? cause.message : 'Could not load integrations.');
-    } finally {
-      setLoading(false);
-    }
-  }, [connectedProvider]);
+      try {
+        const response = await getAgentIntegrations();
+        if (request !== latestLoad.current) return;
+        setProviders(response.providers);
+        if (!connectedNoticeChecked.current && connectedProvider) {
+          connectedNoticeChecked.current = true;
+          const verified = response.providers.find(
+            (provider) => provider.provider === connectedProvider && provider.connected,
+          );
+          if (verified) setNotice(`${PROVIDER_COPY[connectedProvider].name} connected.`);
+        }
+      } catch (cause: unknown) {
+        if (!quiet && request === latestLoad.current) {
+          setError(cause instanceof Error ? cause.message : 'Could not load integrations.');
+        }
+      } finally {
+        // The latest request ends the loading state, quiet or not: a load it
+        // superseded must not clear the skeleton early, nor leave it on.
+        if (request === latestLoad.current) setLoading(false);
+      }
+    },
+    [connectedProvider],
+  );
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // The service reloads a GitHub App that failed to load, so a page showing
+  // "Temporarily unavailable" looks again until it is back. GitLab is not
+  // retried by the service, so looking again could not change its answer.
+  const githubUnavailable = providers.some(
+    (provider) => provider.provider === 'github' && provider.load_status === 'unavailable',
+  );
+  useEffect(() => {
+    if (!githubUnavailable) return undefined;
+    const timer = window.setInterval(() => void load({ quiet: true }), SOURCE_CONTROL_RECHECK_MS);
+    return () => window.clearInterval(timer);
+  }, [githubUnavailable, load]);
 
   async function disconnect(
     provider: AgentIntegrationProvider,

@@ -255,25 +255,21 @@ not strand ordinary follow-ups on the old writable layer.
 
 Public multi-tenant deployments still require the documented Kata/gVisor,
 non-root, capability, seccomp, and resource boundaries. The shared workspace
-does not relax the reviewed production egress defaults: setup reaches only the
-allowlisted setup proxy, and the `platform_only` agent phase reaches only the
-fixed inference-gateway and MCP-only relays. Explicit `trusted`, `custom`, or
-`full` operator overrides have their separately documented wider semantics and
-are not part of this acceptance shape. Each sandbox group gets its own internal
-Docker bridge populated with only that group container and the phase's trusted
-relay/proxy endpoints. The compose networks are service-discovery backplanes;
-Docker's `internal: true` alone does not isolate two containers that share one
-bridge, and an ordinary internal bridge still gives the host a gateway address
-that a sandbox could call. Every chat bridge additionally sets
-`com.docker.network.bridge.inhibit_ipv4=true`; network inspection must prove it,
-so the host has no IPv4 address on that bridge. The sandbox's configured DNS
-upstream is its own `127.0.0.1`: Docker embedded DNS still answers the fixed
-container aliases, while unknown names cannot become an off-bridge DNS channel.
-Docker atomically allocates each sandbox-generation/phase bridge as a `/29` from configurable
-`AGENT_EGRESS_CHAT_NETWORK_POOL`; setup→agent and stop remove the old bridge,
-wake recreates the required phase, and broker reconciliation prunes labelled
-orphans after a five-minute grace period so it cannot race an in-flight bridge
-attachment.
+does not change the sandbox network, which is one network with nothing to
+select ([design](2026-09-23-agent-public-egress-design.zh-CN.md)): setup, the
+agent and every Fork member share the group's one routable Docker bridge,
+populated with only that group container and the two fixed inference-gateway
+and MCP-only relays. This deployment's host nftables tables, installed and read
+back before the bridge exists, let the group reach public IPv4 on TCP 80/443,
+the one resolver in `AGENT_EGRESS_DNS_SERVER` and those two relays, and refuse
+the host, private and special-purpose addresses, other groups, other ports and
+IPv6. Docker's own network flags are not the boundary. The relay network the
+two relays are discovered on is never joined by a sandbox. Docker atomically
+allocates each sandbox generation's bridge as a `/29` from
+`AGENT_EGRESS_CHAT_NETWORK_POOL`; stop removes it, wake recreates it, and broker
+reconciliation prunes labelled orphans after a five-minute grace period so it
+cannot race an in-flight bridge attachment. Setup and the agent never switch
+networks, so there is no bridge swap and no Kata guest restart between them.
 
 ## 7. Lifecycle and inactivity
 
@@ -291,20 +287,20 @@ At the inactivity deadline (1800 seconds by default):
    turn, terminal, or broker operation is active;
 2. it flushes native state, closes all resident processes, suspends protected
    terminal activity, and performs `docker stop` on the exact fenced container;
-3. it disconnects the stopped container from its private phase bridge and
-   removes that bridge, while retaining the same container writable layer;
+3. it disconnects the stopped container from its group bridge and removes
+   that bridge, while retaining the same container writable layer;
 4. the next authenticated host heartbeat records the group as stopped without
    deleting it;
 5. after a broker restart, when the in-memory deadline is unavailable, the
    control plane applies the same durable activity/admission fences and a
    bounded recovery window before issuing the exact-generation stop command.
 
-Any later interaction with any member recreates the correct agent bridge for a
-settled native context (or setup bridge for a never-settled member), starts the
-same container, restores only the member transport(s) needed for that
-interaction, and refreshes the common group deadline. A stopped sibling need
-not be eagerly restored. Broker startup stops running containers whose resident
-process ownership cannot be reconstructed before allowing a fenced wake.
+Any later interaction with any member recreates the group's one bridge, host
+rules first, starts the same container, restores only the member transport(s)
+needed for that interaction, and refreshes the common group deadline. A stopped
+sibling need not be eagerly restored. Broker startup stops running containers
+whose resident process ownership cannot be reconstructed before allowing a
+fenced wake.
 
 Container lifecycle is group-scoped: activity from either parent or child
 keeps their shared container running. A fatal container loss is group-scoped;
@@ -407,7 +403,8 @@ host must provide:
 - at least two host slots and enough runner replicas to execute fork siblings
   concurrently (staging currently defaults both to three);
 - an immutable resident-slot capacity for each group;
-- the required isolation and egress configuration.
+- the required isolation configuration, and the sandbox network's host rules
+  installed and read back.
 
 The host and control-plane GitHub Actions jobs start in parallel during a
 rolling deployment. The control job may build images, start/health-check its
@@ -506,11 +503,11 @@ The implementation is ready only when these properties hold:
    shared group.
 10. Docker inspection shows no chat-state bind or volume mount and the
     configured Docker data root is the one the broker actually controls. Two
-    unrelated sandbox groups do not share a Docker network; under the required
-    `platform_only` production tier, a group's agent network contains only its
-    container and the fixed inference/MCP relays. Stop and setup→agent release
-    obsolete bridges, wake recreates one from the configured pool, and startup
-    removes abandoned labelled allocations.
+    unrelated sandbox groups do not share a Docker network; a group's one
+    bridge, used by setup and the agent alike, contains only its container and
+    the fixed inference/MCP relays. Stop releases the bridge, wake recreates
+    one from the configured pool, and startup removes abandoned labelled
+    allocations.
 11. Staging deployment requires broker credentials, enrolled host identity,
     exact attestation, and matching executor/slot capacity before a claim.
 12. `NEW`, `LIVE`, `RESTORED`, and `LOST` match native context truth; no replay

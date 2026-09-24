@@ -5114,15 +5114,20 @@ async def test_a_deployment_without_a_ledger_reports_absent_not_zero(client: Asy
     assert body["tokens_in"] is None
 
 
-async def test_the_owner_can_see_what_the_sandbox_could_reach(client: AsyncClient, monkeypatch):
-    """The egress posture is reported, not left to trust."""
-    monkeypatch.setenv("AGENT_SANDBOX_NETWORK", "agent-egress")
-    monkeypatch.setenv("AGENT_EGRESS_AGENT_TIER", "platform_only")
+async def test_a_job_reports_no_network_mode(client: AsyncClient):
+    """Every task runs on the same sandbox network, so there is no mode to show.
+
+    A per-job egress field would imply a choice that no longer exists; the
+    response and the deployment config both leave it out.
+    """
     job_id = await _create_job(client)
 
     body = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
+    config = (await client.get("/v1/agent/config")).json()
 
-    assert body["agent_egress_tier"] == "platform_only"
+    for payload in (body, config):
+        assert "setup_egress_tier" not in payload
+        assert "agent_egress_tier" not in payload
 
 
 async def test_a_worker_cannot_write_the_publish_record(client: AsyncClient):
@@ -5213,7 +5218,8 @@ async def test_connecting_records_only_what_github_attests(store: FakeStorage, m
     path exists to prevent.
     """
     monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    from cloud_agent.api.deps import get_agent_app_credentials
+    from cloud_agent.api.deps import get_agent_app_credentials, get_github_app_state
+    from cloud_agent.source_control_runtime import GitHubAppState
 
     app_creds = _FakeGitHubApp(
         installations=[{"installation_id": 77, "account_login": "acme"}],
@@ -5221,6 +5227,11 @@ async def test_connecting_records_only_what_github_attests(store: FakeStorage, m
     )
     app = _build_app(_store_with_grants(store))
     app.dependency_overrides[get_agent_app_credentials] = lambda: app_creds
+    # The config and disconnect routes answer while the App is unavailable,
+    # so they read it through the lenient dependency.
+    app.dependency_overrides[get_github_app_state] = lambda: GitHubAppState(
+        credentials=app_creds, load_status="ready"
+    )
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         connected = await client.post(
@@ -5271,7 +5282,8 @@ async def test_a_connected_user_may_run_only_their_own_repos(store: FakeStorage,
 async def test_a_failed_exchange_grants_nothing(store: FakeStorage, monkeypatch):
     """A code that does not verify must leave the user with no entitlement."""
     monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    from cloud_agent.api.deps import get_agent_app_credentials
+    from cloud_agent.api.deps import get_agent_app_credentials, get_github_app_state
+    from cloud_agent.source_control_runtime import GitHubAppState
 
     app_creds = _FakeGitHubApp(
         installations=[{"installation_id": 77, "account_login": "acme"}],
@@ -5280,6 +5292,11 @@ async def test_a_failed_exchange_grants_nothing(store: FakeStorage, monkeypatch)
     )
     app = _build_app(_store_with_grants(store))
     app.dependency_overrides[get_agent_app_credentials] = lambda: app_creds
+    # The config and disconnect routes answer while the App is unavailable,
+    # so they read it through the lenient dependency.
+    app.dependency_overrides[get_github_app_state] = lambda: GitHubAppState(
+        credentials=app_creds, load_status="ready"
+    )
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         connected = await client.post(
@@ -5295,7 +5312,8 @@ async def test_a_failed_exchange_grants_nothing(store: FakeStorage, monkeypatch)
 async def test_disconnecting_removes_the_entitlement(store: FakeStorage, monkeypatch):
     """Revoking here is half of it; uninstalling on GitHub is the other half."""
     monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    from cloud_agent.api.deps import get_agent_app_credentials
+    from cloud_agent.api.deps import get_agent_app_credentials, get_github_app_state
+    from cloud_agent.source_control_runtime import GitHubAppState
 
     app_creds = _FakeGitHubApp(
         installations=[{"installation_id": 77, "account_login": "acme"}],
@@ -5303,6 +5321,11 @@ async def test_disconnecting_removes_the_entitlement(store: FakeStorage, monkeyp
     )
     app = _build_app(_store_with_grants(store))
     app.dependency_overrides[get_agent_app_credentials] = lambda: app_creds
+    # The config and disconnect routes answer while the App is unavailable,
+    # so they read it through the lenient dependency.
+    app.dependency_overrides[get_github_app_state] = lambda: GitHubAppState(
+        credentials=app_creds, load_status="ready"
+    )
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         await client.post(
@@ -5316,6 +5339,214 @@ async def test_disconnecting_removes_the_entitlement(store: FakeStorage, monkeyp
         )
 
     assert after.status_code == 403
+
+
+# ── Issue #47: a GitHub App this process could not load ────────────────────
+
+
+@pytest.fixture(scope="module")
+def app_private_pem() -> str:
+    """A real key: recovery signs with it, as the running service would."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+
+
+class _StepClock:
+    """The runtime's monotonic clock, moved by the test instead of waited for."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _app_with_unloaded_github(
+    store: FakeStorage, key_path: Any, clock: _StepClock, minter: Any
+) -> FastAPI:
+    """An app whose GitHub App is configured but whose key is not there yet.
+
+    The real dependencies over a real runtime. ``_build_app`` answers ``None``
+    for the credentials, which is exactly the misreading issue #47 was about,
+    so that override is removed rather than kept beside the runtime. Once the
+    key can be read the runtime signs with it for real and then hands back
+    ``minter``, so recovery needs no network.
+    """
+    from cloud_agent.api.deps import get_agent_app_credentials
+    from cloud_agent.source_control_runtime import (
+        GitHubAppProvider,
+        GitLabOAuthLoad,
+        SourceControlRuntime,
+    )
+
+    app = _build_app(store)
+    del app.dependency_overrides[get_agent_app_credentials]
+    provider = GitHubAppProvider(
+        {"AGENT_GITHUB_APP_ID": "12345", "AGENT_GITHUB_APP_PRIVATE_KEY_PATH": str(key_path)},
+        clock=clock,
+        credentials_factory=lambda config: minter,
+    )
+    app.state.source_control = SourceControlRuntime(github=provider, gitlab=GitLabOAuthLoad({}))
+    return app
+
+
+async def test_an_unloaded_github_app_is_temporarily_unavailable_until_its_key_loads(
+    store: FakeStorage, tmp_path, app_private_pem: str
+):
+    """What a user meets during the outage, and after it, in one process.
+
+    Not "admin setup required" and not "no access": the App is configured and
+    this process has not read its key yet. The pages that describe state keep
+    answering, with the user's connection intact; the ones that act on GitHub
+    answer 503 with a retry hint. Once the key can be read, the same process
+    serves all of it again — no restart.
+    """
+    grants_store = _store_with_grants(store)
+    await grants_store.record_repo_grant(user_id=_OWNER, installation_id=77, account_login="acme")
+    key = tmp_path / "github-app.pem"
+    clock = _StepClock()
+    minter = _FakeGitHubApp(installations=[], repos_by_installation={77: ["acme/service"]})
+    app = _app_with_unloaded_github(grants_store, key, clock, minter)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await _create_job_raw(client)
+        branches = await client.get("/v1/agent/branches", params={"repo": "owner/name"})
+        integrations = await client.get("/v1/agent/integrations")
+        config = await client.get("/v1/agent/config")
+
+        key.write_text(app_private_pem)
+        clock.now += 30
+        recreated = await _create_job_raw(client)
+        integrations_after = await client.get("/v1/agent/integrations")
+        config_after = await client.get("/v1/agent/config")
+
+    for refused in (created, branches):
+        assert refused.status_code == 503
+        assert refused.headers["retry-after"] == "30"
+        assert refused.json()["detail"]["error"]["type"] == "source_control_unavailable"
+        assert refused.json()["detail"]["error"]["provider"] == "github"
+
+    assert integrations.status_code == 200
+    github_row, gitlab_row = integrations.json()["providers"]
+    assert github_row["load_status"] == "unavailable"
+    assert (github_row["configured"], github_row["connect_url"]) == (False, None)
+    assert github_row["connected"] is True, "an outage is not a lost connection"
+    assert [account["label"] for account in github_row["accounts"]] == ["acme"]
+    assert github_row["repositories"] == []
+    assert gitlab_row["load_status"] == "unconfigured"
+
+    assert config.status_code == 200
+    assert config.json()["github_load_status"] == "unavailable"
+    assert config.json()["github_connected"] is False
+    assert config.json()["runtimes"], "the rest of the composer's answers still hold"
+
+    assert recreated.status_code == 201
+    github_after = integrations_after.json()["providers"][0]
+    assert github_after["load_status"] == "ready"
+    assert [repo["name"] for repo in github_after["repositories"]] == ["acme/service"]
+    assert config_after.json()["github_load_status"] == "ready"
+    assert config_after.json()["github_connected"] is True
+
+
+async def test_a_connection_can_be_removed_while_the_app_is_unloaded(store: FakeStorage, tmp_path):
+    """The grant is this service's own row; removing it never needed GitHub."""
+    grants_store = _store_with_grants(store)
+    await grants_store.record_repo_grant(user_id=_OWNER, installation_id=77, account_login="acme")
+    minter = _FakeGitHubApp(installations=[], repos_by_installation={})
+    app = _app_with_unloaded_github(grants_store, tmp_path / "github-app.pem", _StepClock(), minter)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        removed = await client.delete("/v1/agent/integrations/github/connections/77")
+
+    assert removed.status_code == 200
+    assert removed.json()["connections"] == []
+    assert grants_store.grants[_OWNER] == {}
+
+
+async def test_a_claim_while_the_app_is_unloaded_leaves_the_job_queued(
+    store: FakeStorage, tmp_path, app_private_pem: str
+):
+    """The runner is told to come back: no attempt spent, nothing minted.
+
+    With ``None`` for credentials the claim checked only the allowlist and
+    handed the job over without a clone token, so a private repository failed
+    for good at checkout. The refusal comes before the claim itself.
+    """
+    async with AsyncClient(
+        transport=ASGITransport(app=_build_app(store)), base_url="http://test"
+    ) as client:
+        job_id = await _create_job(client)
+    key = tmp_path / "github-app.pem"
+    clock = _StepClock()
+    minter = _FakeGitHubApp(installations=[], repos_by_installation={})
+    app = _app_with_unloaded_github(store, key, clock, minter)
+    grants = _FakeGrants()
+    from cloud_agent.api.deps import get_grant_client
+
+    app.dependency_overrides[get_grant_client] = lambda: grants
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        refused = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        while_down = dict(store.jobs[job_id])
+        minted_while_down = list(grants.minted)
+
+        key.write_text(app_private_pem)
+        clock.now += 30
+        claimed = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+
+    assert refused.status_code == 503
+    assert refused.json()["detail"]["error"]["type"] == "source_control_unavailable"
+    assert (while_down["state"], while_down["current_attempt_id"]) == ("queued", None)
+    assert minted_while_down == []
+    assert claimed.status_code == 200
+    assert claimed.json()["job_id"] == job_id
+    assert claimed.json()["clone_token"] == "ghs_x"
+
+
+async def test_a_turn_finishes_while_the_app_is_unloaded_and_its_wakeup_waits(
+    store: FakeStorage, tmp_path
+):
+    """The finish is recorded and acknowledged; only the next goal round waits.
+
+    A finish the runner could not get acknowledged would be retried and then
+    lost with the lease, so it must not depend on the App. The goal consumer it
+    drains stops before claiming anything, which is what leaves a wakeup's
+    attempts unspent (see ``test_goal_controller``).
+    """
+    async with AsyncClient(
+        transport=ASGITransport(app=_build_app(store)), base_url="http://test"
+    ) as client:
+        job_id = await _create_job(client)
+        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
+    claimed_wakeups: list[int] = []
+    original_claim = store.goal_wakeups.claim_wakeups
+
+    async def counting_claim(*, limit: int = 1) -> list[dict[str, Any]]:
+        claimed_wakeups.append(limit)
+        return await original_claim(limit=limit)
+
+    store.goal_wakeups.claim_wakeups = counting_claim
+    minter = _FakeGitHubApp(installations=[], repos_by_installation={})
+    app = _app_with_unloaded_github(store, tmp_path / "github-app.pem", _StepClock(), minter)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        finish = await client.post(
+            f"/v1/agent/worker/jobs/{job_id}/finish",
+            json={"state": "succeeded"},
+            headers=auth,
+        )
+
+    assert finish.status_code == 200
+    assert store.jobs[job_id]["state"] == "succeeded"
+    assert claimed_wakeups == [], "no wakeup may be claimed while the App is unloaded"
 
 
 async def test_a_branch_is_pinned_to_a_commit_at_creation(store: FakeStorage, monkeypatch):

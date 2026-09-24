@@ -47,7 +47,6 @@ def manifest() -> dict[str, Any]:
             {"role": "runner", "image": image("runner")},
             {"role": "sandbox", "image": image("sandbox")},
             {"role": "tunnel", "image": image("tunnel")},
-            {"role": "egress", "image": image("egress")},
         ],
     }
 
@@ -78,14 +77,14 @@ def full_manifest() -> dict[str, Any]:
             "platforms": ["linux/arm64"],
         },
     ]
-    for role in ("runner", "sandbox", "tunnel", "egress"):
+    for role in ("runner", "sandbox", "tunnel"):
         artifacts.append({"role": role, "image": image(role), "platforms": ["linux/amd64"]})
     del platforms
     return {
         "schema_version": 1,
         "source_repository": "HarvardMadSys/hybridInference-cloud-agent",
         "source_commit": COMMIT,
-        "deploy_protocol": "shared-live-exact-sha-v3",
+        "deploy_protocol": "shared-live-exact-sha-v4",
         "artifacts": artifacts,
         "runtime_catalog": {"codex": {"default": "0.145.0", "versions": ["0.145.0"]}},
         "recipe": {
@@ -95,7 +94,7 @@ def full_manifest() -> dict[str, Any]:
         },
         "database_revision": "0004_residency_on_membership",
         "compatibility": {
-            "minimum_deployer": "shared-live-exact-sha-v3",
+            "minimum_deployer": "shared-live-exact-sha-v4",
             "verified_upgrade_from": [],
             "verified_rollback_to": [],
         },
@@ -195,8 +194,9 @@ def test_the_host_stack_takes_the_sandbox_image_too() -> None:
     environment = re_.environment_for(manifest(), "host", ambient={})
     assert environment["AGENT_RUNNER_IMAGE"] == image("runner")
     assert environment["AGENT_TUNNEL_IMAGE"] == image("tunnel")
-    assert environment["AGENT_EGRESS_IMAGE"] == image("egress")
     assert environment["AGENT_SANDBOX_IMAGE"] == image("sandbox")
+    # One sandbox network: there is no proxy image left to deploy.
+    assert "AGENT_EGRESS_IMAGE" not in environment
     assert "AGENT_WEB_IMAGE" not in environment, "a host stack runs no console"
 
 

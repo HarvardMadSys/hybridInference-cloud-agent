@@ -19,8 +19,6 @@ export const AGENT_JOBS: AgentJob[] = [
     spentUsd: 0.41,
     elapsedLabel: '6m 12s',
     timeoutLabel: '30m',
-    networkSetup: 'Trusted',
-    networkAgent: 'PlatformOnly',
     sandbox: 'actions-dogfood',
     attempts: [
       {
@@ -55,7 +53,6 @@ export const AGENT_JOBS: AgentJob[] = [
           '1 failed, 2 passed in 4.21s',
         ],
       },
-      { kind: 'egress_denied', host: 'api.segment.io:443', attempts: 3 },
       {
         kind: 'tool_use',
         tool: 'Edit',
@@ -74,7 +71,6 @@ export const AGENT_JOBS: AgentJob[] = [
       { label: 'format-patch check', state: 'pending', detail: 'at publish' },
     ],
     usage: { tokensIn: '184k', tokensOut: '12k', cachePct: 71, turns: 14 },
-    egressDenials: 3,
   },
   {
     id: 'job-9b21',
@@ -89,8 +85,6 @@ export const AGENT_JOBS: AgentJob[] = [
     spentUsd: 0.63,
     elapsedLabel: '9m 40s',
     timeoutLabel: '30m',
-    networkSetup: 'Trusted',
-    networkAgent: 'PlatformOnly',
     sandbox: 'actions-dogfood',
     attempts: [{ no: 1, status: 'finished' }],
     events: [
@@ -109,7 +103,6 @@ export const AGENT_JOBS: AgentJob[] = [
       { label: 'Patch 4 KB', state: 'pass', detail: '/ 1 MB' },
     ],
     usage: { tokensIn: '96k', tokensOut: '7k', cachePct: 58, turns: 9 },
-    egressDenials: 0,
   },
   {
     id: 'job-4c8d',
@@ -123,8 +116,6 @@ export const AGENT_JOBS: AgentJob[] = [
     spentUsd: 0.87,
     elapsedLabel: '18m',
     timeoutLabel: '30m',
-    networkSetup: 'Trusted',
-    networkAgent: 'PlatformOnly',
     sandbox: 'actions-dogfood',
     attempts: [{ no: 1, status: 'finished' }],
     events: [
@@ -140,7 +131,6 @@ export const AGENT_JOBS: AgentJob[] = [
       { label: 'format-patch check', state: 'pass' },
     ],
     usage: { tokensIn: '412k', tokensOut: '31k', cachePct: 77, turns: 26 },
-    egressDenials: 0,
     prLabel: 'draft PR #1044',
   },
   {
@@ -157,8 +147,6 @@ export const AGENT_JOBS: AgentJob[] = [
     spentUsd: 0.09,
     elapsedLabel: '24m',
     timeoutLabel: '30m',
-    networkSetup: 'Trusted',
-    networkAgent: 'PlatformOnly',
     sandbox: 'actions-dogfood',
     attempts: [{ no: 1, status: 'finished' }],
     events: [
@@ -174,7 +162,6 @@ export const AGENT_JOBS: AgentJob[] = [
       { label: 'format-patch check', state: 'pass' },
     ],
     usage: { tokensIn: '388k', tokensOut: '29k', cachePct: 74, turns: 31 },
-    egressDenials: 0,
     prLabel: 'draft PR #1045',
   },
   {
@@ -190,8 +177,6 @@ export const AGENT_JOBS: AgentJob[] = [
     spentUsd: 2.0,
     elapsedLabel: '27m',
     timeoutLabel: '30m',
-    networkSetup: 'Trusted',
-    networkAgent: 'PlatformOnly',
     sandbox: 'actions-dogfood',
     attempts: [{ no: 1, status: 'finished' }],
     events: [
@@ -204,7 +189,6 @@ export const AGENT_JOBS: AgentJob[] = [
     diffFiles: [],
     gates: [],
     usage: { tokensIn: '740k', tokensOut: '52k', cachePct: 49, turns: 41 },
-    egressDenials: 1,
   },
   {
     id: 'job-a0c2',
@@ -217,15 +201,12 @@ export const AGENT_JOBS: AgentJob[] = [
     model: 'glm-5',
     spentUsd: 0,
     timeoutLabel: '30m',
-    networkSetup: 'Trusted',
-    networkAgent: 'PlatformOnly',
     sandbox: 'actions-dogfood',
     attempts: [],
     events: [{ kind: 'lifecycle', text: 'Queued · waiting for a runner slot' }],
     diffFiles: [],
     gates: [],
     usage: { tokensIn: '0', tokensOut: '0', cachePct: 0, turns: 0 },
-    egressDenials: 0,
   },
 ];
 

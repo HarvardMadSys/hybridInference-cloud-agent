@@ -250,14 +250,18 @@ RUN_BUDGET_SLACK = 1000
 RUN_LIFETIME = timedelta(minutes=30)
 
 #: Docker plumbing for ``--startup``: the same shape the file-open benchmark
-#: uses, because the manager requires both egress networks to exist.
+#: uses. The manager builds a real group bridge behind real host rules, so it
+#: needs a relay network with two listening relays, a pool of its own, and an
+#: image carrying ``nft`` for the host-rule helper (the guest image doubles as
+#: it). The resolver is never queried; override it where 1.1.1.1 is wrong.
 BENCH_IMAGE = "cae-bench-guest:bookworm"
 BENCH_NAMESPACE = "cae-overhead-bench"
-BENCH_SETUP_NET = "cae-overhead-setup"
-BENCH_AGENT_NET = "cae-overhead-agent"
-BENCH_PROXY = "cae-overhead-proxy"
+BENCH_RELAY_NET = "cae-overhead-relays"
+BENCH_POOL = "10.251.0.0/16"
 BENCH_GATEWAY = "cae-overhead-gateway"
+BENCH_GATEWAY_PORT = 8080
 BENCH_MCP = "cae-overhead-mcp"
+BENCH_MCP_PORT = 8000
 BENCH_STARTUP_THREAD = "athr_overhead_bench"
 
 
@@ -1546,7 +1550,7 @@ def _build_bench_image() -> None:
         Path(directory, "Dockerfile").write_text(
             "FROM debian:bookworm-slim\n"
             "RUN apt-get update && apt-get install -y --no-install-recommends python3 \\\n"
-            " && rm -rf /var/lib/apt/lists/*\n",
+            "    nftables && rm -rf /var/lib/apt/lists/*\n",
             encoding="utf-8",
         )
         _docker("build", "-q", "-t", BENCH_IMAGE, directory)
@@ -1561,24 +1565,25 @@ class StartupSandbox:
             ChatSandboxSpec,
             RetainedChatBackend,
         )
-        from cloud_agent_host.egress import EgressPolicy, EgressTier
         from cloud_agent_host.sandbox import ContainerBackend
+        from cloud_agent_shared.egress import network_from_env
 
-        policy = EgressPolicy(
-            tiers={"setup": EgressTier.TRUSTED, "agent": EgressTier.PLATFORM_ONLY},
-            networks={
-                EgressTier.TRUSTED: BENCH_SETUP_NET,
-                EgressTier.PLATFORM_ONLY: BENCH_AGENT_NET,
-            },
-            proxies={EgressTier.TRUSTED: f"http://{BENCH_PROXY}:3128"},
-            no_proxy=(BENCH_GATEWAY, BENCH_MCP),
+        self.network = network_from_env(
+            {
+                "AGENT_SANDBOX_NAMESPACE": BENCH_NAMESPACE,
+                "AGENT_EGRESS_CHAT_NETWORK_POOL": BENCH_POOL,
+                "AGENT_EGRESS_DNS_SERVER": os.environ.get("CAE_BENCH_DNS_SERVER", "1.1.1.1"),
+                "AGENT_RELAY_NETWORK": BENCH_RELAY_NET,
+                "AGENT_GATEWAY_URL": f"http://{BENCH_GATEWAY}:{BENCH_GATEWAY_PORT}",
+                "AGENT_SANDBOX_MCP_URL": f"http://{BENCH_MCP}:{BENCH_MCP_PORT}",
+            }
         )
         self.manager = ChatSandboxManager(
             ContainerBackend(
                 image=BENCH_IMAGE,
-                egress=policy,
+                sandbox_network=self.network,
                 sandbox_namespace=BENCH_NAMESPACE,
-                chat_network_pool="10.251.0.0/16",
+                network_helper_image=BENCH_IMAGE,
             )
         )
         self.spec = ChatSandboxSpec(
@@ -1599,7 +1604,9 @@ class StartupSandbox:
         """Return the container this sandbox owns, named by the spec's own rule."""
         return self.spec.container_name
 
-    def _relay(self, name: str, network: str, alias: str) -> None:
+    def _relay(self, name: str, port: int) -> None:
+        # Listening, because the guest check dials both relays before the
+        # sandbox counts as started.
         _docker("rm", "-f", name, check=False)
         _docker(
             "run",
@@ -1607,34 +1614,34 @@ class StartupSandbox:
             "--name",
             name,
             "--hostname",
-            alias,
+            name,
             "--network",
-            network,
+            BENCH_RELAY_NET,
             "--network-alias",
-            alias,
+            name,
             BENCH_IMAGE,
-            "sleep",
-            "infinity",
+            "python3",
+            "-m",
+            "http.server",
+            str(port),
         )
 
     def up(self) -> None:
-        """Create the two backplanes and their relay stand-ins."""
-        _docker("network", "create", BENCH_SETUP_NET, check=False)
-        _docker("network", "create", BENCH_AGENT_NET, check=False)
-        self._relay(BENCH_PROXY, BENCH_SETUP_NET, BENCH_PROXY)
-        self._relay(BENCH_GATEWAY, BENCH_AGENT_NET, BENCH_GATEWAY)
-        self._relay(BENCH_MCP, BENCH_AGENT_NET, BENCH_MCP)
+        """Create the relay network and its two listening relay stand-ins."""
+        _docker("network", "create", "--internal", BENCH_RELAY_NET, check=False)
+        self._relay(BENCH_GATEWAY, BENCH_GATEWAY_PORT)
+        self._relay(BENCH_MCP, BENCH_MCP_PORT)
 
     def remove_container(self) -> None:
         """Remove the chat container so the next activation must create one."""
         _docker("rm", "-f", self.container_name, check=False)
 
     def down(self) -> None:
-        """Remove the container, the relays and every network this run made."""
+        """Remove the container, the relays, every network and the host rules."""
         from cloud_agent_host.chat_sandbox import CHAT_NAMESPACE_LABEL
 
         _docker("rm", "-f", self.container_name, check=False)
-        for name in (BENCH_PROXY, BENCH_GATEWAY, BENCH_MCP):
+        for name in (BENCH_GATEWAY, BENCH_MCP):
             _docker("rm", "-f", name, check=False)
         listed = _docker(
             "network",
@@ -1647,8 +1654,27 @@ class StartupSandbox:
         )
         for name in listed.stdout.split():
             _docker("network", "rm", name, check=False)
-        for name in (BENCH_SETUP_NET, BENCH_AGENT_NET):
-            _docker("network", "rm", name, check=False)
+        _docker("network", "rm", BENCH_RELAY_NET, check=False)
+        # The run installed this namespace's own tables; nothing else uses them.
+        for family in ("inet", "bridge"):
+            _docker(
+                "run",
+                "--rm",
+                "--network",
+                "host",
+                "--cap-drop",
+                "ALL",
+                "--cap-add",
+                "NET_ADMIN",
+                "--entrypoint",
+                "nft",
+                BENCH_IMAGE,
+                "delete",
+                "table",
+                family,
+                self.network.table,
+                check=False,
+            )
 
 
 class BenchTransport:
@@ -1979,13 +2005,12 @@ def _activate_path(
             supervisor.close()
 
     if path == "resume_stopped":
-        # The container exists, settled on the agent network, and is stopped --
+        # The container exists, has run on its group bridge, and is stopped --
         # the state an idle group is left in. The preparation is untimed and
         # uses the platform's own calls; only the activation below is measured.
         sandbox.remove_container()
         sandbox.manager.create(sandbox.spec)
-        sandbox.manager.transition_to_agent_network(sandbox.spec)
-        sandbox.manager.start(sandbox.spec, network_phase="agent")
+        sandbox.manager.start(sandbox.spec)
         sandbox.manager.stop(sandbox.spec)
         stopped = sandbox.manager.inspect(sandbox.container_name)
         if stopped is None or stopped.running:  # pragma: no cover - preparation failure
@@ -2064,17 +2089,16 @@ def _activate_path(
 
 
 def _ensure_running_container(sandbox: StartupSandbox) -> Any:
-    """Return a running container on the agent network, creating it if needed.
+    """Return a running container on its group bridge, creating it if needed.
 
     This is the untimed preparation for the two paths whose container is already
-    running: the platform's own ``create`` -> ``transition_to_agent_network`` ->
-    ``start`` sequence, exactly as a settlement leaves a group.
+    running: the platform's own ``create`` -> ``start`` sequence, exactly as a
+    settlement leaves a group.
     """
     inspection = sandbox.manager.inspect(sandbox.container_name)
     if inspection is None:
         sandbox.manager.create(sandbox.spec)
-        sandbox.manager.transition_to_agent_network(sandbox.spec)
-    return sandbox.manager.start(sandbox.spec, network_phase="agent")
+    return sandbox.manager.start(sandbox.spec)
 
 
 async def _run_startup_section(session: BenchSession, args: argparse.Namespace) -> dict[str, Any]:

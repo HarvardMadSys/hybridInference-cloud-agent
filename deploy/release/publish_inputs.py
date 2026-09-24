@@ -1,6 +1,6 @@
 """Between the cells that push images and the manifest that names them.
 
-Seven jobs each push one image and come back with a digest and a label map. The
+Six jobs each push one image and come back with a digest and a label map. The
 manifest generator (`release_manifest.py`) wants one document — the commit,
 every artifact, the sandbox's labels — and refuses an incomplete one. This
 module is the seam between the two, in three pieces the workflow calls in turn:
@@ -16,7 +16,7 @@ module is the seam between the two, in three pieces the workflow calls in turn:
 * `notes` renders the manifest for the release page, with the one number a
   distribution pins — the sha256 of the manifest's bytes — at the top.
 
-Records are files rather than job outputs because seven cells of one matrix
+Records are files rather than job outputs because six cells of one matrix
 share one output namespace, and the last writer wins silently.
 """
 
@@ -189,7 +189,7 @@ def assemble(records: Mapping[str, Mapping[str, Any]], source_commit: str) -> di
     if missing or stray:
         raise PublishError(
             f"the records are not this release: missing {missing}, stray {stray}. A release "
-            "with six images is not a smaller release; it is one that leaves a machine half "
+            "with five images is not a smaller release; it is one that leaves a machine half "
             "updated."
         )
 

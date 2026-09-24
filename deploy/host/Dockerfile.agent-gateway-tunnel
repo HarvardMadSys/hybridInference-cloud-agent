@@ -1,10 +1,11 @@
 # One fixed-destination hop used by the remote-host topology. Separate image
-# instances expose the inference and MCP-only listeners on the closed
-# agent-phase network; another exposes the control API only to runners.
+# instances expose the inference and MCP-only listeners to sandbox groups,
+# attached to each group's bridge; another exposes the control API only to
+# runners.
 #
-# Small on purpose: it sits on the closed agent network, so everything
-# installed here is something a sandbox can reach. openssh-client and a shell,
-# nothing else.
+# Small on purpose: it sits on every group bridge. The host rules open only its
+# service port to a sandbox there, but the less installed here, the less to
+# reason about. openssh-client and a shell, nothing else.
 FROM alpine:3.21
 
 RUN apk add --no-cache openssh-client

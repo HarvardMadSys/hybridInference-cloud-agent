@@ -49,19 +49,23 @@ from cloud_agent.api._owner_auth import _owned_job
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
+    get_source_control,
     get_storage,
     require_agent_access,
     require_store,
     verify_admin_access,
 )
 from cloud_agent.application.job_admission import _create_job_as
-from cloud_agent.application.pending_messages import settle_queue
+from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
     AgentJobCancelResponse,
     AgentJobCreate,
     AgentJobEventsResponse,
     AgentJobResponse,
+)
+from cloud_agent.source_control_runtime import (
+    SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
 
 if TYPE_CHECKING:
@@ -249,7 +253,7 @@ async def cancel_oncall_job(
     job_id: str,
     _caller: str = Depends(verify_oncall_dispatch),
     store: _ServiceJobsStorage | None = Depends(get_storage),
-    app_credentials: Any | None = Depends(get_agent_app_credentials),
+    source_control: SourceControlRuntime | None = Depends(get_source_control),
     gateway: Any = Depends(get_gateway_client),
 ) -> AgentJobCancelResponse:
     """Request cancellation of one on-call job.
@@ -274,11 +278,11 @@ async def cancel_oncall_job(
     # the cancel has committed, and the sweep repeats a settlement that fails.
     if owned.get("thread_id") is not None:
         try:
-            await settle_queue(
+            await settle_queue_when_possible(
                 job_store,
                 thread_id=str(owned["thread_id"]),
                 gateway=gateway,
-                app_credentials=app_credentials,
+                github_app=None if source_control is None else source_control.github,
             )
         except Exception:
             logger.warning(

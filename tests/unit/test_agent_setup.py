@@ -43,14 +43,13 @@ class _Backend:
         return self.process
 
 
-def test_setup_runs_in_the_retained_workspace_under_setup_egress():
+def test_setup_runs_in_the_retained_workspace():
     backend = _Backend(_Process(lines=["installing\n"]))
 
     result = run_setup(script="pip install -e .", workdir="/workspace", backend=backend)
 
     assert result.ran is True
     assert result.exit_code == 0
-    assert backend.specs[0].phase == "setup"
     assert backend.specs[0].workdir == "/workspace"
     assert backend.specs[0].argv == ["/bin/sh", "-c", "pip install -e ."]
 
