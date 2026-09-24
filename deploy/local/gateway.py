@@ -52,7 +52,8 @@ LOCAL_HOLD_MAX_S = 120.0
 LOCAL_TOOL_PREFIX = "[local-tool:"
 LOCAL_TOOL_MAX_S = 60.0
 #: How Claude Code words a message the owner sent while a tool ran, in the
-#: request after that tool (the pinned 2.1.220).
+#: request after that tool (the pinned 2.1.220). It arrives as a ``system``
+#: entry after the tool's result, not inside the latest ``user`` message.
 MID_TURN_MESSAGE_LEAD = "The user sent a new message while you were working:"
 
 app = FastAPI(title="Local development gateway", docs_url=None, redoc_url=None)
@@ -503,10 +504,23 @@ def _tool_seconds(body: dict[str, Any]) -> float:
     return _marker_seconds(body, LOCAL_TOOL_PREFIX, LOCAL_TOOL_MAX_S)
 
 
+def _since_last_reply(body: dict[str, Any]) -> str:
+    """Everything a request adds after the model's last reply, whatever its role."""
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return ""
+    added: list[str] = []
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") == "assistant":
+            break
+        added.append(_content_text(message.get("content")))
+    return "\n".join(reversed(added))
+
+
 def _messages_sent_mid_turn(body: dict[str, Any]) -> list[str]:
     """What the owner sent into the turn while its tool ran, as the CLI relays it."""
     sent: list[str] = []
-    text = _current_user_text(body)
+    text = _since_last_reply(body)
     start = text.find(MID_TURN_MESSAGE_LEAD)
     while start >= 0:
         start += len(MID_TURN_MESSAGE_LEAD)

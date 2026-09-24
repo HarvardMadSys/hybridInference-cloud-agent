@@ -314,19 +314,26 @@ async def test_a_tool_marker_runs_a_tool_first_and_the_answer_quotes_a_mid_turn_
             json={
                 "model": gateway.MODEL_ID,
                 "stream": True,
+                # The shape the pinned Claude Code sends: the message is a
+                # ``system`` entry after the tool's result.
                 "messages": [
                     {"role": "user", "content": "take a while [local-tool:12]"},
+                    {"role": "system", "content": [{"type": "text", "text": "context"}]},
                     {"role": "assistant", "content": [{"type": "tool_use", "id": "t1"}]},
                     {
                         "role": "user",
+                        "content": [{"type": "tool_result", "tool_use_id": "t1", "content": ""}],
+                    },
+                    {
+                        "role": "system",
                         "content": [
-                            {"type": "tool_result", "tool_use_id": "t1", "content": ""},
                             {
                                 "type": "text",
                                 "text": f"{gateway.MID_TURN_MESSAGE_LEAD}\nalso check the docs"
                                 "\n\nThis is how Claude Code surfaces messages the user sends "
                                 "mid-turn.",
-                            },
+                                "cache_control": {"type": "ephemeral"},
+                            }
                         ],
                     },
                 ],
