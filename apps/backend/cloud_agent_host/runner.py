@@ -129,6 +129,7 @@ from cloud_agent_profiling.measurement_delivery import (
     classify_response,
 )
 from cloud_agent_shared.git.source_archive import build_upload_archive
+from cloud_agent_shared.shared_protocol import mid_turn_input_capability
 
 DEFAULT_LEASE_TTL_S = 120.0
 HEARTBEAT_INTERVAL_S = 30.0
@@ -1198,6 +1199,7 @@ def _shared_live_host_capabilities(
         for helper_id, version in SHARED_SANDBOX_HELPER_PINS.items()
     ):
         return []
+    steerable: list[str] = []
     for runtime_id in registered_runtimes():
         try:
             runtime_capabilities = driver_for(get_runtime(runtime_id)).capabilities()
@@ -1209,6 +1211,8 @@ def _shared_live_host_capabilities(
             or not runtime_capabilities.concurrent_shared_workspace
         ):
             return []
+        if runtime_capabilities.steering == "mid_turn":
+            steerable.append(mid_turn_input_capability(runtime_id))
     capabilities = [
         SHARED_SANDBOX_CAPABILITY,
         NATIVE_FORK_AT_ANCHOR_CAPABILITY,
@@ -1217,6 +1221,9 @@ def _shared_live_host_capabilities(
         # it whole, before anything bounds it. This host therefore never
         # advertises the goal report without the contract it rides on.
         GOAL_REPORT_CAPABILITY,
+        # Named per runtime: the broker of this same deployment takes a
+        # message into a running turn only through a driver that wires it.
+        *steerable,
     ]
     deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
     ready_file = _shared_live_ready_file()

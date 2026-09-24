@@ -28,6 +28,7 @@ from cloud_agent_host.drivers import (
     DriverError,
     HarnessEvent,
     HarnessTurn,
+    InputOutcome,
     LaunchContext,
     TurnInput,
     TurnResult,
@@ -115,6 +116,10 @@ class ResidentTurn(Generic[_RuntimeT_co]):
     def interrupt(self) -> None:
         """Interrupt only this activation through the driver's native seam."""
         self._turn.cancel()
+
+    def inject(self, text: str) -> InputOutcome:
+        """Hand ``text`` to this activation mid-turn through the driver's seam."""
+        return self._turn.inject(text)
 
     def stderr_text(self) -> str:
         """Return bounded diagnostic stderr from the resident process."""

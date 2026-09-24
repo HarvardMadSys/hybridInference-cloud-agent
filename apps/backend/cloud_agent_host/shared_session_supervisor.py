@@ -33,7 +33,7 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatLost,
     SandboxActionFacts,
 )
-from cloud_agent_host.drivers import DialectRuntime
+from cloud_agent_host.drivers import DialectRuntime, InputOutcome
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_SOURCE,
     GuestObservation,
@@ -67,6 +67,7 @@ from cloud_agent_profiling.operation_profiling import (
     start_stage_recording,
     substage,
 )
+from cloud_agent_shared.shared_protocol import INPUT_TURN_ENDED
 from cloud_agent_shared.turn_resources import parse_cpu_capacity
 
 if TYPE_CHECKING:
@@ -1385,6 +1386,22 @@ class SharedChatSessionSupervisor:
             turn = member.current_turn
         if turn is not None:
             turn.interrupt()
+
+    def inject_input(self, thread_id: str, *, owner: str, text: str) -> InputOutcome:
+        """Hand the owner's message to this member's running turn, if it has one.
+
+        ``owner`` is the lease owner the control plane expects to be running —
+        ``attempt:<id>`` — so a message meant for one attempt never reaches a
+        later one that re-leased the member. The runner's lease token is not
+        needed: this is the control plane's request, authenticated by the
+        broker, and the owner string is its fence. Siblings are untouched.
+        """
+        with self._lock:
+            _, member = self._member(thread_id)
+            turn = member.current_turn if member.lease_owner == owner else None
+        if turn is None:
+            return InputOutcome(False, INPUT_TURN_ENDED)
+        return turn.inject(text)
 
     def abort_turn(
         self,
