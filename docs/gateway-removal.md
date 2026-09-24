@@ -251,7 +251,7 @@ admin router.
 | ~~`.github/workflows/agent-job-runner.yml`~~ | ~~this repo, `.github/workflows/`~~ **Removed 2026-09-02:** the manually dispatched disposable/process runner contradicted the retained-only topology; enrolled sandbox hosts are the sole execution substrate. |
 | `deploy/docker/Dockerfile.agent-runner` | `deploy/host/` |
 | `deploy/docker/Dockerfile.agent-sandbox` | `deploy/sandbox/` |
-| `deploy/docker/Dockerfile.agent-egress-proxy` | `deploy/host/` |
+| `deploy/docker/Dockerfile.agent-egress-proxy` | `deploy/host/` (since replaced by the one sandbox network, see docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md) |
 | `deploy/docker/Dockerfile.agent-gateway-tunnel` | `deploy/host/` |
 | `deploy/docker/agent-gateway-tunnel.sh` | `deploy/host/` |
 | `deploy/docker/docker-compose.sandbox.yml` | `deploy/host/` |
@@ -288,7 +288,8 @@ socket, non-root sandbox, Kata preflight) are covered here by
 `tests/unit/test_deploy_config.py`, `test_deploy_security.py` and
 `test_setup_kata_runtime.py` — ported whole, with three assertions skipped for
 the Trusted-tier gap the decision came with. Read that register entry before
-deleting, so the skips are not a surprise later.
+deleting, so the skips are not a surprise later. (Since replaced by the one
+sandbox network, see docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md.)
 
 ### 2.7 Tests
 

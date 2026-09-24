@@ -151,7 +151,7 @@ Fork 不创建第二个 container、第二份 workspace 或第二条 Git publica
 2. Scheduler 选择具有所需 runtime、镜像与隔离能力的 host。
 3. Host 创建 sandbox group 与 credential-free container。
 4. Trusted source preparer 在沙盒外拉取仓库、去除 credential，并通过 Docker archive API 导入 `/workspace`。
-5. Setup 在 setup egress phase 中执行；完成后撤销 setup network，并切到 agent egress phase。
+5. Setup 在该组唯一的网桥上执行，与之后的 Agent 共用同一网络，不切换网络（[统一公网出口设计](2026-09-23-agent-public-egress-design.zh-CN.md)）。
 6. Supervisor 创建 membership slot，注入临时能力，启动 Agent CLI native session。
 7. Prompt admission 先持久化，再只发送一次。
 8. Turn 结算后写入 native locator、`last_settled_job_id` 与 `context_status=new`。

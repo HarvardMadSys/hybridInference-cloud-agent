@@ -58,7 +58,8 @@ browser ──▶ apps/frontend/ (Next.js + BFF)
          claude-code · codex · pi · opencode · kilo
                  │ scoped credentials over fixed relays
                  ├──▶ inference gateway
-                 └──▶ control plane's MCP-only listener
+                 ├──▶ control plane's MCP-only listener
+                 └──▶ public IPv4 on TCP 80/443 only, under host rules
 ```
 
 The deployment defaults to `kata`, which provides a separate guest kernel per
@@ -99,7 +100,7 @@ Three deployment units, one repository:
 |---|---|---|
 | Web + BFF | `apps/frontend/` | alongside the control plane |
 | Control plane | `apps/backend/cloud_agent/` | one service, owns the Postgres database |
-| Host agent | `apps/backend/cloud_agent_host/` | every enrolled host; runner, workspace broker, egress proxy, and gateway/control-plane/MCP tunnels deploy together |
+| Host agent | `apps/backend/cloud_agent_host/` | every enrolled host; runner, workspace broker, and gateway/control-plane/MCP tunnels deploy together |
 
 ## Repository layout
 

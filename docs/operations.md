@@ -113,7 +113,7 @@ Against real components on a developer machine:
 | **A real job on a real model**                                               | live Claude Code CLI × `deepseek-v4-flash` through the production gateway: docstring landed on disk, patch produced, 3 calls / 74,523 tokens / $0.0075 attributed to the job in `api_logs`                                                                                                                                                                                                                                                                                                                             |
 | Retained Docker lifecycle                                                    | real mount-free (`Mounts=[]`) chat containers keep one writable layer and container id across group idle `docker stop` and later `docker start`; the phase bridge is released while stopped and recreated on wake, and publication capture replaces neither                                                                                                                                                                                                                                                            |
 | Source import → edit → snapshot                                              | the trusted runner imports a credential-scrubbed source archive into `/workspace`; real Git status/diff and the quiescent group publication snapshot complete without a host worktree or snapshot bind mount                                                                                                                                                                                                                                                                                                           |
-| Sandbox process boundary                                                     | real Docker: non-root Agent CLI member UIDs, dropped capabilities, and closed agent egress; production multi-tenant Kata/gVisor remains a deployment gate below                                                                                                                                                                                                                                                                                                                                                        |
+| Sandbox process boundary                                                     | real Docker: non-root Agent CLI member UIDs, dropped capabilities, and the closed agent egress of the time (since replaced by [one network](#the-sandbox-network)); production multi-tenant Kata/gVisor remains a deployment gate below                                                                                                                                                                                                                                                                                |
 | The control plane on staging                                                 | `/v1/agent/*` live: job create/get/list/cancel, SSE stream, and an unauthenticated host refused at `/worker/claim`                                                                                                                                                                                                                                                                                                                                                                                                     |
 | MCP: per-user resolution, relay authorization, tool filtering                | unit + API tests against a mocked upstream: one user's credential never resolves for another, a job cannot reach a server it was not granted, a dead fence loses tools, and a blocked tool never leaves the relay                                                                                                                                                                                                                                                                                                      |
 | **MCP: what `--strict-mcp-config` (hybridInference#1129) actually prevents** | the flag was added on the strength of the CLI's documented behaviour; this is the measurement. Real Claude Code 2.1.220 in a job's exact configuration (headless, `bypassPermissions`, cwd = a checkout carrying a `.mcp.json`): without the flag the CLI reports the repository's server alongside the platform's, with it only the platform's. No approval step was involved either way                                                                                                                              |
@@ -135,9 +135,9 @@ Be precise about these when reporting status:
 - **No real _job_ has used MCP.** The proxy is verified against a live server
   (see above), but through a harness: the shipping router and filters, with a
   faked job store, and an agent CLI running outside a sandbox. What has not run
-  is the whole chain — a queued job, a runner, a real sandbox on the
-  `platform_only` network reaching `/v1/agent/mcp/...`. That last hop is the
-  same host and network as the model calls the sandbox already makes, so it
+  is the whole chain — a queued job, a runner, a real sandbox on its group
+  bridge reaching `/v1/agent/mcp/...` through the MCP tunnel. That last hop
+  crosses the same bridge as the model calls the sandbox already makes, so it
   follows rather than being hoped for, but it has not been observed.
 - **No credentialed MCP server has been exercised live.** `deepwiki` takes no
   credential, so the registry's header attachment — the part that matters most
@@ -164,6 +164,14 @@ Be precise about these when reporting status:
   both land on `qwen3.6-35b`. Everything else answers `404 Model not found`, so
   a job that names one fails at its first turn. Pick a model that resolves
   before concluding anything about the chain.
+- **The one sandbox network, on real traffic.** Unit tests pin the rendered
+  host rules, their read-back and the group-bridge lifecycle. The acceptance
+  in §9 of [the design](specs/2026-09-23-agent-public-egress-design.zh-CN.md)
+  — a real Kata guest reaching the public web, and every refused kind of
+  destination tried against a target that is listening — has not been run.
+  Nor has the gateway's half of the
+  [prerequisites](#two-prerequisites-before-real-users): until it lands, do
+  not run tasks that can reach the internet with real users' credentials.
 - **Kata.** No job has run under an actual Kata kernel, so every run so far
   shared the host's. Isolation was verified on a shared-kernel container.
 
@@ -255,8 +263,8 @@ reason to improve the tooling, not a reason to go around the audit.
 
 ## MCP servers
 
-An agent with no egress can still use the MCP ecosystem, because it never
-reaches a server directly:
+An agent uses the MCP ecosystem without holding a single upstream credential,
+because the platform's servers are never reached directly:
 
 ```text
 sandbox ──[attempt-fenced mcp token]──▶ MCP-only relay ──[owner credential]──▶ MCP server
@@ -264,16 +272,17 @@ sandbox ──[attempt-fenced mcp token]──▶ MCP-only relay ──[owner cr
 
 The MCP listener is a separate FastAPI app on port 8001; it does not expose the
 job, host, session, admin, or inference APIs. The sandbox authenticates to
-`/v1/agent/mcp` over its second fixed relay, so **`platform_only` stays
-closed**: inference and MCP are the only agent-phase destinations. The upstream
-address and the owner's credential stay in the control plane.
+`/v1/agent/mcp` over its second fixed relay, the MCP tunnel attached to its
+group bridge. The upstream address and the owner's credential stay in the
+control plane.
 
-The converse holds too: the main API on 8000, which the public edge forwards
-`/api/*` to, serves no tool route, so an `mcp` token carried out of a sandbox
-cannot be replayed from the internet. Connection management, OAuth callbacks
-and approvals share the `/v1/agent/mcp` prefix but stay on 8000, because they
-are the browser's. Block tool calls by leaving the relay off 8000, never by
-blocking the prefix at the edge.
+**The public entry must refuse the token, because a sandbox reaches the public
+internet.** The main API on 8000, which the public edge forwards `/api/*` to,
+serves no tool route, so an `mcp` token carried out of a sandbox cannot be
+replayed from the internet. Connection management, OAuth callbacks and
+approvals share the `/v1/agent/mcp` prefix but stay on 8000, because they are
+the browser's. Block tool calls by leaving the relay off 8000, never by
+blocking the prefix at the edge — and point the MCP tunnel at 8001.
 
 There is no deployment registry and no in-code catalogue of servers. A person
 adds a connection through `/v1/agent/mcp` — a remote URL, an imported
@@ -506,63 +515,64 @@ participates in is not a boundary.
 
 Two things are outside the code and must be done by a human.
 
-### 0. A closed agent network needs both narrow relays on its backplane
+### 0. The sandbox network needs its host rules, a resolver and both relays
 
-`platform_only` means the inference gateway and MCP-only listener, with no
-caller-selected destination and no internet route. A remote deployment must
-put both fixed tunnel aliases on the configured discovery backplane. The host
-then creates one internal bridge per sandbox group and attaches only those two
-relay containers plus that group's chat container. Docker's `internal: true`
-blocks routing off a bridge but does **not** block containers on the same bridge
-from reaching each other, and by itself still leaves the bridge gateway
-reachable as a host address. Each chat bridge therefore also sets
-`com.docker.network.bridge.inhibit_ipv4=true`, so Docker assigns no host-side
-IPv4 address to it. The sandbox also sets `--dns 127.0.0.1`: Docker's embedded
-DNS still resolves the relay aliases, while unknown queries are forwarded from
-the sandbox namespace to its own loopback and fail instead of becoming a DNS
-egress path (including on daemons affected by CVE-2024-29018). Using the compose
-backplane directly for every chat, or an internal bridge without these guards,
-would violate the isolation contract. If either relay alias is missing,
-private-network creation fails before the Agent CLI starts.
+Every sandbox group runs on one routable bridge of its own — setup, the agent
+and each Fork sibling alike — and this deployment's host nftables tables
+decide what it reaches: public IPv4 on TCP 80/443, the one resolver in
+`AGENT_EGRESS_DNS_SERVER`, and the group's two relays — the gateway tunnel for
+inference and the MCP tunnel for tools — and nothing else. There is no mode to
+choose and no setting that opens it further; changing what a sandbox can reach
+is a design change. [The sandbox network](#the-sandbox-network) below has the
+whole rule set, how to read it on a host, and what each refusal means.
 
-The host deployment check probes both relays: it starts containers on the
-agent discovery backplane and **makes requests**, requiring HTTP 200 from the
-inference `/health` and MCP `/healthz` endpoints before it publishes the
-exact-SHA ready marker. The runner's lower-level inference connectivity probe
+A host therefore needs, before it can run a job:
+
+- `AGENT_EGRESS_CHAT_NETWORK_POOL` and `AGENT_EGRESS_DNS_SERVER`. Neither has
+  a default: the pool must be this deployment's own, and the resolver is the
+  only DNS a sandbox can use.
+- Both relays running on the relay network, `AGENT_RELAY_NETWORK`, which the
+  host compose derives as `<COMPOSE_PROJECT>-agent-relays`. It is declared
+  `internal: true` and no sandbox group ever joins it: lifecycle code finds the
+  two tunnels there by alias and attaches them, under the same aliases, to each
+  group's bridge. If either alias has no running container there, or more than
+  one, the group network is refused before the Agent CLI starts.
+- A kernel with nftables, bridge family included. Every runner's preflight
+  installs this deployment's tables and reads them back before it claims
+  anything.
+
+Four checks prove it, each from where its answer means something.
+`sandbox_host.sh prepare` reads the network settings with the candidate runner
+image's own parser before any runner is drained. `sandbox_host.sh check`
+starts containers on the relay network and **makes requests**, requiring HTTP
+200 from the inference `/health` and MCP `/healthz` endpoints before it
+publishes the exact-SHA ready marker; the runner's lower-level inference probe
 still treats any HTTP response as reachability, but that weaker signal cannot
-release a deployment. Every real chat additionally reconciles its own labelled
-internal bridge and the exact relay owners before create/start. DNS alone is
-never enough: a relay can own the expected name while its upstream is down,
-which is exactly the cross-machine false positive the deployment check must
-catch.
+release a deployment. Each runner's preflight installs and verifies the host
+tables. And every cold start of a group ends with a check inside the guest,
+run as the sandbox user: a default route, the one resolver, and both relays
+answering on their TCP ports. A failure there stops the sandbox, keeps its
+workspace and fails the turn. DNS alone is never enough: a relay can own the
+expected name while its upstream is down, which is exactly the cross-machine
+false positive the deployment check must catch.
 
 For a runner host that is not the gateway's, see
-[Running runners on another machine](#running-runners-on-another-machine) — the
-supported answer is a tunnel on the closed network, not a routable one. Opening
-the sandbox's network instead is possible and is a real cost:
+[Running runners on another machine](#running-runners-on-another-machine): the
+two relays are SSH tunnels to the gateway and to the MCP-only listener.
 
-```bash
-AGENT_EGRESS_AGENT_TIER=custom
-AGENT_EGRESS_NETWORK_CUSTOM=agent-routable
-```
-
-That gives the agent phase general egress — untrusted repository code included
-— which is the property `platform_only` exists to hold.
-
-One more compose detail worth knowing: the overlay _declares_ `agent-egress` as
-the relay-discovery backplane, so compose insists on creating it. A network of
-that name created by hand beforehand is refused with a label mismatch — let
-compose own it, or point the tier variables at names compose does not declare.
-The `freeinference-chat-net-*` networks are different: Docker lifecycle code
-derives their names and labels from the sandbox generation. It allocates one `/29` from
-`AGENT_EGRESS_CHAT_NETWORK_POOL` (default `10.240.0.0/16`) and lets Docker
-arbitrate concurrent claims. The setup bridge is deleted at setup→agent; the
-current bridge is disconnected and deleted on idle/lost stop while Docker keeps
-the container writable layer. Wake creates the correct setup or agent bridge
-again. Broker reconciliation also removes labelled networks left by an
-interrupted create or transition after a five-minute grace period. The grace
-prevents status reconciliation from deleting a bridge between creation and
-sandbox attachment while still reclaiming bridge interfaces and IPAM.
+One more compose detail worth knowing: the host compose _declares_ the relay
+network, so compose insists on creating it. A network of that name created by
+hand beforehand is refused with a label mismatch — let compose own it. The
+`freeinference-chat-net-*` networks are different: lifecycle code creates them
+through the Docker API, deriving their names and labels from the sandbox group
+and generation and their host interface names from this deployment's prefix.
+It allocates one `/29` from `AGENT_EGRESS_CHAT_NETWORK_POOL` and lets Docker
+arbitrate concurrent claims. A group's bridge is disconnected and deleted on
+idle or lost stop while Docker keeps the container writable layer, and wake
+creates it again. Broker reconciliation also removes labelled bridges left by an
+interrupted create after a five-minute grace period. The grace prevents status
+reconciliation from deleting a bridge between creation and sandbox attachment
+while still reclaiming bridge interfaces and IPAM.
 
 ### 1. Only enrolled sandbox hosts run jobs
 
@@ -578,12 +588,12 @@ container image/runtime pins, broker configuration, execution profile, and
 host capacity.
 
 Standalone, the host stack needs more than an enrolment credential. Start from
-`deploy/host/.env.example`: `COMPOSE_PROJECT` and `AGENT_SANDBOX_IMAGE` are
-required (`docker-compose.sandbox.yml:249,359` and `:236,345` interpolate both
-with `:?`, so an unset value stops the render), alongside
-`AGENT_WORKSPACE_BROKER_TOKEN`, the three tunnel destinations with their own
-keys and known-hosts files, and the broker reverse-forward trio when the
-control plane is on another machine.
+`deploy/host/.env.example`: `COMPOSE_PROJECT`, `AGENT_SANDBOX_IMAGE`,
+`AGENT_EGRESS_CHAT_NETWORK_POOL` and `AGENT_EGRESS_DNS_SERVER` are required
+(`docker-compose.sandbox.yml` interpolates each with `:?`, so an unset value
+stops the render), alongside `AGENT_WORKSPACE_BROKER_TOKEN`, the three tunnel
+destinations with their own keys and known-hosts files, and the broker
+reverse-forward trio when the control plane is on another machine.
 
 ### 2. Credentials
 
@@ -820,14 +830,17 @@ The per-turn table is therefore a member-UID lifecycle census of process starts 
 after that turn's cursor, not a point-in-time snapshot of resident processes
 that were already running before the turn and not a whole-container total.
 
-Docker's embedded DNS resolver (`127.0.0.11`) is outside the guest. Kata
-activation and phase checks therefore refresh `/etc/hosts` with only the
-configured relays' addresses on that chat's current private bridge. Unknown
-names gain no resolver or additional egress path. The first setup-to-agent
-transition stops and restarts the Kata guest after changing networks, before
-launching a resident CLI: Docker's live network changes alone do not update
-Kata 3.32's guest interfaces. The writable layer and container identity remain.
-An already settled agent-phase activation does not restart a live guest.
+Docker's embedded DNS resolver (`127.0.0.11`) is outside the guest. After each
+Kata activation a trusted guest-root helper therefore writes two files: a relay
+block in `/etc/hosts` with the relays' addresses on that group's bridge, and
+`/etc/resolv.conf` naming `AGENT_EGRESS_DNS_SERVER`, the only resolver the host
+rules let a group reach. Under runc neither is touched: the container was
+created with `--dns` set to that same server, and Docker's resolver forwards
+to it. There is no network switch and no guest restart for networking — setup
+and the agent share the group's bridge. A running guest is never rewired
+underneath it either, because Docker's live network changes alone do not update
+Kata 3.32's guest interfaces: a running sandbox that is not on exactly its
+group bridge is refused until it has been stopped.
 
 When switching a host from runc, keep its retained runc groups on a compatible
 broker or migrate them separately. A backend setting does not change the
@@ -849,12 +862,14 @@ AGENT_SANDBOX_BACKEND=kata deploy/host/sandbox_host.sh check
 ```
 
 `preflight` verifies the configured image and guest kernel. `check` starts relay
-probes under Kata on `AGENT_EGRESS_NETWORK_PLATFORM_ONLY` and requires HTTP 200
-from inference `/health` and MCP `/healthz`. It also checks the live runner's
-full sandbox preflight, broker, and control-plane paths. That compose-owned
-closed network is the relay discovery backplane; retained groups get their
-own private bridges during activation. The compose `..._internal` network is
-the host services' network and cannot substitute for either check.
+probes under Kata on the relay network (`AGENT_RELAY_NETWORK`) and requires
+HTTP 200 from inference `/health` and MCP `/healthz`. It also checks the live
+runner's full sandbox preflight — which installs and reads back the host
+tables — broker, and control-plane paths. The relay network is only where
+lifecycle finds the two relays; retained groups get their own bridges during
+activation, and the in-guest check at each cold start covers the path from
+there. The compose `..._internal` network is the host services' network and
+cannot substitute for either check.
 
 The Kata relay probes resolve only the configured relay endpoints through
 Docker inspection and pass their addresses into the guest, matching the
@@ -950,11 +965,11 @@ earlier turn. There is no separate promotion step or `waiting` job state.
 `AGENT_CHAT_IDLE_TIMEOUT_S` is the sandbox group's sole lifecycle timeout and
 defaults to **1800 seconds (30 minutes)**. Once the latest activity across all
 members is durably settled and no member/broker operation is active, the host
-Shared Session Supervisor issues `docker stop`, disconnects and deletes the phase
+Shared Session Supervisor issues `docker stop`, disconnects and deletes the group
 bridge, but never issues
-`docker rm`. A later acquire rebuilds the correct bridge, starts, and re-inspects
-the same labelled container. Supervisor shutdown itself leaves all chat
-containers untouched. At broker startup, reconciliation stops a still-running
+`docker rm`. A later acquire rebuilds the group's bridge, host rules first,
+starts, and re-inspects the same labelled container. Supervisor shutdown itself
+leaves all chat containers untouched. At broker startup, reconciliation stops a still-running
 orphan before admitting it again; resident member processes from an unproven
 in-memory lease are therefore never silently adopted. The supervisor does not
 infer an active turn from an empty in-memory lease table. Docker observations
@@ -1083,10 +1098,14 @@ Both Actions jobs use the workflow commit's deployment orchestrator against a
 separate target checkout. Online rollback therefore cannot execute a
 pre-fence target's old scripts; commits without the current
 `deploy/DEPLOY_PROTOCOL`, or with an incompatible protocol value, are refused
-before changing Docker state. The current protocol deliberately excludes
-ancestors that predate the rewritten schema baseline (`0001_schema_baseline`,
-2026-09-10): their Alembic chain is one the database no longer records, so
-they are not schema-compatible rollback targets.
+before changing Docker state. The current protocol,
+`shared-live-exact-sha-v4`, marks the one sandbox network: a v3 deployer cannot
+install it, and no deployment rolls back across it (a host that ran the
+previous network needs the
+[one-time cleanup](#one-time-cleanup-when-upgrading-to-the-one-network)). It
+also excludes ancestors that predate the rewritten schema baseline
+(`0001_schema_baseline`, 2026-09-10): their Alembic chain is one the database
+no longer records, so they are not schema-compatible rollback targets.
 Database changes are expand-first. Never downgrade columns underneath a
 still-running new API; roll code back to a schema-compatible commit first and
 treat any later contract migration as a separate reviewed operation.
@@ -1517,8 +1536,9 @@ P1 work.
 
 The script validates the required environment before starting and surfaces
 the runner's own preflight verdict (gateway reachable, retained image/runtime
-usable, Docker data-root correct, egress network resolvable) instead of
-leaving it in a detached log. Equivalent by hand:
+usable, Docker data-root correct, relay network present and route-less, host
+network rules installed and read back) instead of leaving it in a detached
+log. Equivalent by hand:
 
 ```bash
 # Put a tested alternate version in the corresponding *_EXTRA_VERSIONS build
@@ -1547,11 +1567,11 @@ with no leader and no sharding.
 | `AGENT_SANDBOX_BACKEND`                           | `kata`                      | `process` (no isolation) refuses to start unless `AGENT_SANDBOX_ALLOW_UNISOLATED=1`. On the default `kata`, deploy refuses until the host has the shim and one real container proves it gets its own kernel; `container` is an explicit, and loudly restated, shared-kernel downgrade                                                                                                                                                                                                                                                                    |
 | `AGENT_SANDBOX_IMAGE`                             | required                    | Image built from `Dockerfile.agent-sandbox` or an equivalent deployment-owned image                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `*_EXTRA_VERSIONS`                                | blank                       | Comma-separated tested versions to bake beside each source-reviewed default. Select one for new chats in Admin; retained chats keep the version they started with. The five defaults are not host settings because runner/control-plane capability admission attests them as one protocol unit                                                                                                                                                                                                                                                           |
-| `AGENT_SANDBOX_NETWORK`                           | _no default_                | Legacy alias for the `platform_only` discovery backplane, honoured so an existing deployment keeps working. It deliberately has no default (`sandbox.py`: "AGENT_SANDBOX_NETWORK is not set. There is deliberately no default"), and a tier with no network is a preflight failure rather than a fall back to a more open one. Current setting: `AGENT_EGRESS_NETWORK_PLATFORM_ONLY`, which compose defaults to `agent-egress`. A chat is attached to its own derived `freeinference-chat-net-*` bridge, not directly to this shared network             |
-| `AGENT_EGRESS_SETUP_TIER` / `_AGENT_TIER`         | `trusted` / `platform_only` | One of `platform_only` / `trusted` / `custom` / `full`, **per phase**. Dependency setup reaches the checked-in allowlist proxy; the model-driven Agent CLI phase stays on the closed relay-only network                                                                                                                                                                                                                                                                                                                                                  |
-| `AGENT_EGRESS_NETWORK_*`                          | —                           | Network per tier. A tier with no network is an error when a phase selects it, never a fall back to a more open one                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `AGENT_EGRESS_CHAT_NETWORK_POOL`                  | `10.240.0.0/16`             | Non-overlapping private IPv4 pool split into daemon-arbitrated `/29` chat/phase bridges. Bridges are removed at phase transition or stop and rebuilt on wake                                                                                                                                                                                                                                                                                                                                                                                             |
-| `AGENT_EGRESS_ALLOWLIST`                          | —                           | Checked at startup: it may not contain an agent vendor's telemetry domain, which would let a "closed" sandbox report on the repository it was given                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `AGENT_EGRESS_CHAT_NETWORK_POOL`                  | required                    | This deployment's RFC1918 IPv4 pool, one daemon-arbitrated `/29` per active group bridge. No default: it must be disjoint from every other deployment's pool on the machine — of two that overlap, the host rules refuse the one installed later — and from the host's Docker, VPN and private-service routes. A group's bridge is removed on stop and rebuilt on wake                                                                                                                                                                                   |
+| `AGENT_EGRESS_DNS_SERVER`                         | required                    | The one IPv4 resolver sandboxes may use, on TCP and UDP 53. It is the only exception to the protected ranges, so a site resolver on a private address or on this host works. Not loopback, and not inside the pool; see _Choosing the resolver_ below                                                                                                                                                                                                                                                                                                    |
+| `AGENT_EGRESS_PROTECTED_CIDRS`                    | —                           | Comma-separated IPv4 blocks to refuse on top of the built-in host, private, link-local/metadata, CGNAT, multicast and reserved ranges — an institution's services on public addresses, for example. It can only add protection                                                                                                                                                                                                                                                                                                                           |
+| `AGENT_RELAY_NETWORK`                             | derived                     | Where lifecycle finds the two relays; the host stack derives `<COMPOSE_PROJECT>-agent-relays`. It must exist and be `internal`, or preflight refuses, and no sandbox group ever joins it. Set it only to name an existing network                                                                                                                                                                                                                                                                                                                        |
+| `AGENT_EGRESS_SETUP_TIER`, `_AGENT_TIER`          | removed                     | Retired with the network tiers and the Squid proxy, together with `AGENT_EGRESS_ALLOWLIST`, `AGENT_EGRESS_NETWORK_*`, `AGENT_EGRESS_PROXY_*`, `AGENT_EGRESS_STOP_GRACE`, `AGENT_SANDBOX_NETWORK` and `AGENT_SANDBOX_ALLOW_OPEN_NETWORK`. Nothing reads them, so setting one changes nothing; delete them from `.env`                                                                                                                                                                                                                                     |
 | `AGENT_RUNNER_HOST`                               | host name                   | Enrolled execution environment, shared by every turn it runs — the unit the admin placement switch picks between. `deploy/host/sandbox_host.sh` fills it from the host's own name. Never derived inside the container, where the hostname is a container id. After enrolment the persisted credential is authoritative, so editing this renames nothing. Unset keeps the environment out of the pool and changes nothing else. Distinct from `AGENT_PHYSICAL_HOST`, which is the display-only inventory name grouping environments that share one server |
 | `AGENT_PHYSICAL_HOST`                             | host name                   | Physical server this environment runs on, reported at enrolment as the `physical_host` label and used to group the admin inventory. `sandbox_host.sh` defaults it to `hostname -s`; set it explicitly when invoking Compose directly. Never a container hostname or a runtime suffix                                                                                                                                                                                                                                                                     |
 | `AGENT_HOST_SLOTS`                                | `3`                         | Turns at once until an admin sets a number on the Servers page; at least two, at most 128. `AGENT_RUNNER_REPLICAS` is no longer read                                                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -1563,7 +1583,6 @@ with no leader and no sharding.
 | `AGENT_GITHUB_APP_INSTALL_URL`                    | —                           | GitHub App installation URL, `https://github.com/apps/<slug>/installations/new`. Used when OAuth finds no accessible installation, and behind _Configure repositories_ for a connected user. The control plane adds a short-lived, user-bound `state`; set the App callback to `<frontend>/agents/connected?provider=github`                                                                                                                                                                                                                             |
 | `AGENT_GITLAB_OAUTH_CLIENT_ID` / `_CLIENT_SECRET` | —                           | GitLab.com OAuth application credentials, kept on the control plane. Configure only `read_user` and `read_api` scopes                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `AGENT_GITLAB_OAUTH_REDIRECT_URI`                 | —                           | Exact registered callback, normally `<frontend>/agents/connected?provider=gitlab`. HTTPS is required except for localhost development                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `AGENT_SANDBOX_ALLOW_OPEN_NETWORK`                | —                           | Accepts a non-`internal` sandbox network. Preflight refuses one otherwise, so a missing setting cannot quietly mean full egress                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `AGENT_SANDBOX_MCP_URL`                           | —                           | MCP-only relay URL as a sandbox sees it. The standalone host compose derives it from the MCP tunnel alias; never point it at inference or the full control API                                                                                                                                                                                                                                                                                                                                                                                           |
 | `AGENT_MCP_TUNNEL_*`                              | —                           | Remote MCP-only listener destination and independent restricted SSH key/known-hosts; see `ENVIRONMENT.md` for the complete set                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `AGENT_GITHUB_TOKEN`                              | —                           | Control-plane fallback publisher credential; unset means the publisher idles                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
@@ -1736,43 +1755,44 @@ before using it:
   heartbeat and broker probe, not whether one runner happened to claim recently.
 
 Adding a _second_ machine is not only this switch. A sandbox reaches the
-gateway over a per-chat network declared `internal: true`, which routes nowhere
-off its own host — so a runner box that is not the gateway's host needs the
-routable-network configuration from
-[§0 above](#0-a-closed-agent-network-needs-both-narrow-relays-on-its-backplane) (or local
-instances of both relays). Preflight refuses at startup rather than failing
-jobs at their first model or MCP call, but it refuses _there_, on that machine,
-not here.
+gateway and the MCP listener only through the two relays on its group bridge —
+the host rules refuse private addresses, and the public entry points must
+refuse sandbox credentials — so a runner box that is not the gateway's host
+needs the two tunnels described next, and everything in
+[§0 above](#0-the-sandbox-network-needs-its-host-rules-a-resolver-and-both-relays).
+Preflight refuses at startup rather than failing jobs at their first model or
+MCP call, but it refuses _there_, on that machine, not here.
 
 ### Running runners on another machine
 
 A second machine is worth adding for capacity, or because it is the one with
-the hardware. What makes it more than "run the script over there" is that a
-sandbox's agent phase uses its own network declared `internal: true` — no route
-off the host at all. A remote host therefore supplies two fixed-destination
-relays on a discovery backplane; lifecycle code attaches those relays to each
-chat-private network. A separate control-plane relay remains visible only to
+the hardware. What makes it more than "run the script over there" is how a
+sandbox reaches the platform. Its group bridge routes to the public internet,
+but only on TCP 80/443, and the host rules refuse every private address — so
+the gateway and the MCP listener are reached only through two fixed-destination
+relays, SSH tunnels that lifecycle code finds on the relay network and attaches
+to each group's bridge. A separate control-plane relay remains visible only to
 the runner:
 
 ```text
 runner host                                      service host(s)
 ┌──────────────────────────────────────┐
-│ [sandbox, per-chat agent network]    │
+│ [sandbox, its own group bridge]      │
 │   ├→ gateway-tunnel ─────────────────┼──ssh──→ inference :8080
-│   └→ mcp-tunnel ─────────────────────┼──ssh──→ MCP-only :8001
+│   ├→ mcp-tunnel ─────────────────────┼──ssh──→ MCP-only :8001
+│   └→ host rules and NAT ─────────────┼────────→ public IPv4, TCP 80/443 only
 │                                      │
 │ [runner, internal network]           │
 │   └→ control-plane-tunnel ───────────┼──ssh──→ control API :8000
-│                                      │
-│ [sandbox, setup network] → proxy ────┼────────→ allowlisted registries
 └──────────────────────────────────────┘
 ```
 
-The sandbox's agent-phase world is exactly the inference and MCP relays. Each
-tunnel is a relay, not a proxy — no CONNECT and no caller-chosen destination —
-so nothing the agent sends can widen either route. Setup is a distinct phase
-and reaches package registries only through the allowlist proxy described
-below; the control-plane tunnel never joins either sandbox network.
+Each tunnel is a relay, not a proxy — no CONNECT and no caller-chosen
+destination — so nothing a sandbox sends can widen either route. Setup and the
+agent share the group's bridge, so setup reaches package registries over the
+same public TCP 80/443 as everything else. The control-plane tunnel never joins
+a group bridge, and its address on the runner's network is a private one the
+host rules refuse from every group.
 
 **Why ssh rather than exposing the gateway's port.** Sandboxes carry scoped
 inference grants and runners carry enrolled-host credentials. Binding either
@@ -1780,16 +1800,17 @@ service to the lab network puts those capabilities in cleartext on a shared
 segment. The tunnel keeps each service listening on loopback.
 
 ```bash
-deploy/host/sandbox_host.sh up 4     # relays, broker, proxy + 4 runners
+deploy/host/sandbox_host.sh up       # relays, broker and the runner
 deploy/host/sandbox_host.sh check    # probe relays and runner/broker paths
 deploy/host/sandbox_host.sh status
 deploy/host/sandbox_host.sh down
 ```
 
 `deploy/host/docker-compose.sandbox.yml` is standalone and contains
-only the runners, their workspace broker, three purpose-scoped tunnels, the
-setup allowlist proxy/config renderer, and their private networks — no
-`backend` service. That was the point of it in the source repository, where the
+only the runner, its workspace broker, three purpose-scoped tunnels, and two
+networks — the stack's own and the route-less relay network; group bridges are
+created by the runner and broker, not by Compose. There is no `backend`
+service. That was the point of it in the source repository, where the
 alternative overlay declared `depends_on: backend` and, pointed at a machine
 with no gateway, did not fail but started one there. It is the only topology
 this repository ships.
@@ -1801,7 +1822,7 @@ this repository ships.
 | `AGENT_CONTROL_PLANE_TUNNEL_*`                  | Runner-only control API relay; remote default `127.0.0.1:8000`. It is deliberately absent from sandbox networks                                                                                                                  |
 | `AGENT_*_TUNNEL_SSH_KEY`                        | Private key, mounted read-only. Use a separate restricted key per relay with `command="",restrict,port-forwarding,permitopen="127.0.0.1:<that relay's port>"`; no relay needs a shell or permission to open another relay's port |
 | `AGENT_*_TUNNEL_SSH_KNOWN_HOSTS`                | Required host-key file for each relay. Host checking is not disableable: an unverified hop would hand scoped tokens and tunnel traffic to whatever answers there                                                                 |
-| `AGENT_GATEWAY_HOSTNAME` / `AGENT_MCP_HOSTNAME` | The two names a sandbox resolves on the closed network, `agent-gateway` and `agent-mcp` by default. Do not replace them with routable service addresses                                                                          |
+| `AGENT_GATEWAY_HOSTNAME` / `AGENT_MCP_HOSTNAME` | The two names a sandbox resolves on its group bridge, `agent-gateway` and `agent-mcp` by default. Do not replace them with service addresses: a relay named by IP is refused at startup                                          |
 | `AGENT_CONTROL_PLANE_HOSTNAME`                  | Runner-only control relay name, `agent-control-plane` by default                                                                                                                                                                 |
 
 Generate the known_hosts entry deliberately, and look at it:
@@ -1812,9 +1833,9 @@ ssh-keyscan -p 22 <gateway-host> > /etc/agent-tunnel/known_hosts
 
 Then `sandbox_host.sh check` answers the only question that matters, from
 the vantage points whose answers mean anything: sandbox-runtime containers on
-the closed network must receive HTTP 200 from inference `/health` and MCP
-`/healthz`; a live runner must also pass its full sandbox preflight and reach
-the broker and control plane. Reaching those services from the host's own shell
+the relay network must receive HTTP 200 from inference `/health` and MCP
+`/healthz`; a live runner must also pass its full sandbox preflight — host
+tables installed and read back — and reach the broker and control plane. Reaching those services from the host's own shell
 proves nothing about the paths the deployed containers use.
 
 Once it is up, the machine appears in **Admin → Servers** and can be selected
@@ -1905,96 +1926,379 @@ the retained sandbox (Kata for untrusted multi-tenant work; plain Docker only
 for trusted repositories), not a host bind mount or a second per-turn
 container.
 
-### Dependency installation, and the proxy that allows it
+### The sandbox network
 
 A chat may carry a `setup_script`. It runs inside the retained container before
-the first Agent CLI turn, under its own egress tier. Its files persist in that
-container's Docker writable layer across follow-ups, idle stop/start, and host
-service restarts; there is no host-side setup cache or portable setup archive.
+the first Agent CLI turn, on the same network the agent gets afterwards. Its
+files persist in that container's Docker writable layer across follow-ups, idle
+stop/start, and host service restarts; there is no host-side setup cache or
+portable setup archive. Package managers reach their public registries directly
+over HTTPS — there is no proxy to configure — and anything that needs another
+port, Git over SSH for one, is refused. No secrets reach the sandbox (there is
+still no secrets store, by design), and the sandbox runs unprivileged, so
+`apt install` does not work — use `pip --user`, a virtualenv, `npm ci`.
 
-The tier is where the work is. `setup` defaults to `trusted` and `agent` stays
-`platform_only`, which in this deployment means three compose-level networks
-plus one derived internal bridge per chat and selected phase:
+There is one network, the same for every task and every phase, and nothing
+selects it ([design](specs/2026-09-23-agent-public-egress-design.zh-CN.md)).
+Each sandbox group — setup, the agent and every Fork sibling — gets one
+routable Docker bridge, a `/29` from `AGENT_EGRESS_CHAT_NETWORK_POOL`. Its host
+interface is named with this deployment's prefix, `ca` and five hex digits
+derived from `AGENT_SANDBOX_NAMESPACE`, followed by eight derived from the
+group. Docker routes and masquerades the bridge; this deployment's host
+nftables tables decide what it reaches.
 
-| Network                    | Internal | Who is on it                                                                             |
-| -------------------------- | -------- | ---------------------------------------------------------------------------------------- |
-| `agent-egress`             | yes      | discovery backplane for inference and MCP relay containers; sandboxes are not left on it |
-| `agent-egress-trusted`     | yes      | discovery backplane for the setup proxy; sandboxes are not left on it                    |
-| `agent-egress-uplink`      | **no**   | the proxy, alone                                                                         |
-| `freeinference-chat-net-*` | yes      | one sandbox group plus only the relay(s) or proxy required by that phase                 |
+#### What it allows and refuses
 
-The supported host script derives project-specific names for the two new
-Trusted/proxy networks, so staging and production on one Docker daemon do not
-share them. The historical PlatformOnly backplane name is never renamed
-automatically; a host with `SIBLING_COMPOSE_PROJECTS` must set its existing
-unique `AGENT_EGRESS_NETWORK_PLATFORM_ONLY` explicitly. On first activation
-after this upgrade, a stopped retained chat still attached to that old shared
-backplane is moved onto its deterministic private bridge before it starts. A
-running legacy attachment fails closed until the chat is stopped; it is never
-hot-detached.
+Allowed:
 
-Both backplanes and every derived sandbox network have no route of their own.
-The difference is that `agent-egress-proxy` sits on the Trusted backplane with
-a second uplink leg; it is also attached, under the same alias, to a chat's
-private setup network. The sandbox is handed `http_proxy`/`https_proxy`
-pointing at it. The environment variables are a convenience for package
-managers, not the boundary: a setup script that ignored them finds a network
-that cannot route anywhere.
+- public IPv4 on TCP 80 and 443 — curl, Python HTTP clients, pip, npm, Git
+  over HTTPS;
+- the one resolver in `AGENT_EGRESS_DNS_SERVER`, on TCP and UDP 53. It is
+  checked before the protected ranges, so a resolver on a private address or
+  on this host works — on port 53 only;
+- the group's own two relays, by exact bridge, address and port: the gateway
+  tunnel for inference and the MCP tunnel for tools.
 
-With the supported `platform_only` agent tier, the agent turn — the part driven
-by untrusted model output — still reaches only the fixed inference and MCP
-relays. Opening the separate setup phase does not change that. Selecting an
-agent-phase `trusted`, `custom`, or `full` tier is an explicit wider operator
-policy, not a side effect of setup access.
+Refused:
 
-The renderer's named volume contains only generated Squid configuration. It is
-host infrastructure, not chat state: Docker inspection of every chat container
-still reports no bind or volume mounts.
+- every address of this host, the bridge's own gateway included, except the
+  resolver above when it runs here;
+- every IPv4 address that is not ordinary public unicast — IANA's
+  special-purpose blocks `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`,
+  `127.0.0.0/8`, `169.254.0.0/16` (cloud metadata among them), `172.16.0.0/12`,
+  `192.0.0.0/24`, `192.0.2.0/24`, `192.88.99.0/24`, `192.168.0.0/16`,
+  `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`, `224.0.0.0/4` and
+  `240.0.0.0/4` — and whatever `AGENT_EGRESS_PROTECTED_CIDRS` adds, on any
+  port;
+- other groups, this deployment's or another's;
+- every other port and protocol: UDP 443 (QUIC), ping, all IPv6;
+- connections started from outside. A reply is accepted only for a connection
+  the group opened, and one from a protected address is dropped even then;
+  there is no blanket "established" accept.
 
-**Adding a domain.** `AGENT_EGRESS_ALLOWLIST` is _added to_ the built-in
-registry list (PyPI, npm, crates, Go, RubyGems, Maven, github.com), never a
-replacement for it. `*.example.com` covers subdomains. An agent vendor's
-telemetry domain is refused outright — a sandbox that can phone home about a
-private repository is not closed, whatever the tier is called. The list is
-rendered into the proxy's config by `agent-egress-proxy-config`, a one-shot
-service that runs before the proxy and fails the deploy if the list is
-unusable. Editing that config by hand skips the validation that keeps a
-hostile value out of it.
+The rules judge the address a packet is actually sent to, so a name that
+resolves — or is rebound — to a private address is refused like the address
+itself. Most refusals are answered at once, with a TCP reset or an ICMP
+"administratively prohibited", so a blocked request fails immediately instead
+of timing out; IPv6 is dropped silently.
 
-The allowlist and proxy port are part of the proxy service's Compose
-configuration fingerprint. Changing either recreates the renderer/proxy instead
-of leaving a running Squid on stale ACLs. The renderer fsyncs a temporary file
-and atomically replaces `squid.conf`, so a restart can observe either the old
-complete policy or the new complete policy, never a partially rewritten ACL.
+**What it does not promise** (design §2). TCP 80/443 is a port rule: nothing
+inspects what travels inside, so DNS over HTTPS or a tunnel on those ports is
+not prevented. Nothing stops a sandbox sending the repository, or its own
+short-lived tokens, to a public host. And the platform's own public addresses
+may be reachable — which is why its public entry points must refuse sandbox
+credentials.
 
-**Three preflight failures and what each means.** The runner refuses to claim
-jobs unless the setup tier is genuinely enforcing:
+#### Two prerequisites before real users
 
-- _"the sandbox network … is not `internal`"_ — a tier variable points at a
-  routable network. The setup phase would have the whole internet while the
-  config still said `trusted`.
-- _"egress proxy is unreachable"_ — the proxy is not running, or not on that
-  network. Check `docker compose logs agent-egress-proxy`; a config Squid
-  rejects shows up there as a parse error on the first line. This one stops the
-  runner claiming **any** job, including jobs that install nothing — deliberate,
-  because it means the deploy is broken, but if this host genuinely does not
-  need dependency installation, `AGENT_EGRESS_SETUP_TIER=platform_only` skips
-  the tier and its probe entirely.
-- _"egress proxy answered … it is not enforcing an allowlist"_ — the proxy
-  served a host that does not exist and is on no list. Treat this as an open
-  proxy on the sandbox's network.
+Both come from design §3, and both must hold before real users' tasks run with
+this network:
 
-**Where a denied request is visible.** Only in the proxy's log — an internal
-network refuses a connection silently, so before this there was nowhere to
-observe a blocked attempt from. `deploy/host/sandbox_host.sh status`
-tails it;
-a denial is the line with `verdict=TCP_DENIED/403`.
+1. **MCP tool calls are served only by the MCP-only listener.** Done in #327:
+   the main API no longer mounts the tool-call router, so the MCP tunnel must
+   point at 8001 (see [MCP servers](#mcp-servers)).
+2. **The gateway accepts inference grants only on a separate internal
+   entry**, with the inference tunnel pointed at it, and the public entry
+   refuses them. Telling the two apart may not rest on a header or on
+   loopback. This is gateway work and **not done yet**. Until it is, do not
+   run tasks that can reach the internet with real users' credentials.
 
-**What this does not give you.** No secrets reach the sandbox (there is still
-no secrets store, by design), the sandbox runs unprivileged so `apt install`
-does not work — use `pip --user`, a virtualenv, `npm ci` — and a tool that
-ignores the proxy environment (bun, at the time of writing) cannot reach a
-registry at all.
+#### The host tables
+
+The rules are two nftables tables of this deployment's: an `inet` table for
+routed traffic — to the internet, the host, another bridge — and a `bridge`
+table for frames between a sandbox and its relays on the same bridge. Both are
+named `cloud_agent_ca` plus the first five hex digits of the SHA-256 of
+`AGENT_SANDBOX_NAMESPACE`, which on a host stack is the Compose project, so
+with `COMPOSE_PROJECT` set:
+
+```bash
+digits="$(printf '%s' "$COMPOSE_PROJECT" | sha256sum | cut -c1-5)"
+table="cloud_agent_ca$digits"
+```
+
+The runner and the broker hold no `NET_ADMIN` and are not in the host's network
+namespace. They change host rules through a short-lived helper: their own
+image, run with `nft` as its entrypoint in the host's network namespace, with
+`NET_ADMIN` and no other capability and a read-only root filesystem — the
+`host_nft` function below has the same shape. It runs under runc whatever the
+daemon's default runtime is, because a Kata VM would change its own kernel's
+rules, not the host's.
+
+- **Installed before anything joins a bridge.** The runner's and the broker's
+  startup preflight install the tables and read them back — every chain, its
+  hook and its rule count, the protected set, the registered pool — and any
+  difference stops the runner claiming and the broker starting. Group network
+  work repeats the check and trusts a pass for 60 seconds.
+- **Scoped to this deployment.** The tables recognise traffic by the bridge
+  interface prefix. They never flush or edit another deployment's rules, so
+  several deployments can share a host.
+- **Relays by exact endpoint.** When a group's relays are attached, their
+  bridge, address and port are written to a `relays` set in both tables, and
+  removed with the bridge.
+- **Watched while groups run.** While any group of this deployment is
+  running, the broker re-reads the tables at most once a minute and reinstalls
+  whatever is missing. If that fails twice in a row, it logs
+  `shared_chat_network_unguarded` and stops every running group — workspaces
+  and native sessions kept — rather than let one go on without the boundary it
+  was started behind. Waking a group reinstalls and verifies the rules first,
+  and fails while they cannot be.
+- **Kept by the kernel.** A runner exiting leaves the tables in place; a
+  reboot clears them, and no group starts until they have been installed
+  again.
+
+To look at them, read-only, use the same shape of helper:
+
+```bash
+image="$(docker inspect --format '{{.Image}}' "${COMPOSE_PROJECT}-runner-1")"
+host_nft() {
+  docker run --rm --network host --runtime runc --cap-drop ALL \
+    --cap-add NET_ADMIN --read-only --entrypoint nft "$image" "$@"
+}
+host_nft list table inet "$table"      # chains; each refusal has a counter
+host_nft list table bridge "$table"
+host_nft list set inet "$table" relays # relay endpoints, per live bridge
+host_nft list tables                   # every deployment's tables here
+```
+
+Keep `--runtime runc`: on a host whose Docker default runtime is Kata the
+listing would otherwise come from a VM. The counters are totals across all of
+this deployment's groups. No per-connection log is kept (design §10).
+
+#### Overlapping pools
+
+Each deployment registers its pool in its own `inet` table, and after
+installing it compares its pool with those of the `cloud_agent_*` tables the
+kernel created before its own. Of two whose pools overlap, the later one
+refuses, with `this deployment's pool … overlaps …, registered earlier by …`
+and a request to give each deployment its own `AGENT_EGRESS_CHAT_NETWORK_POOL`.
+The earlier one keeps running, so a neighbour started with a copied pool cannot
+take a working deployment down, and because each checks after installing, two
+starting together cannot both miss each other. Keep the pools clear of the
+host's Docker, VPN and private-service routes as well.
+
+A retired deployment's tables stay until the host reboots, and keep its pool
+registered. Once that deployment is gone for good, delete its two tables — its
+own and no one else's — with the helper above:
+`host_nft delete table inet cloud_agent_ca<its digits>`, then the same for
+`bridge`. Never delete or flush a table a running deployment uses: Docker
+routes and masquerades every group bridge, and the table is what limits it.
+Anything that flushes the host's whole ruleset removes these tables too; they
+are reinstalled at the next check, so do not run such a reload on a host with
+active groups.
+
+#### Choosing the resolver
+
+`AGENT_EGRESS_DNS_SERVER` is one IPv4 address, and the only DNS a sandbox can
+use. A public resolver works anywhere. A site resolver on a private address, or
+on this host, works too, and becomes the one private address a sandbox can
+reach — on port 53 only. It cannot be loopback (a sandbox cannot reach the
+host's `127.0.0.53`), unspecified, or inside the pool.
+
+Under runc, a sandbox is created with `--dns` set to it: Docker's embedded
+resolver at `127.0.0.11` answers the relay aliases and forwards every other
+name there. That setting is fixed when the container is created. A Kata guest
+cannot see Docker's resolver, so after every activation the trusted guest-root
+helper writes the address into the guest's `/etc/resolv.conf`, beside the
+relay block in `/etc/hosts`. The in-guest check confirms which resolver the
+guest is configured with, not that it answers: a resolver that stops answering
+shows up as failed lookups inside the sandbox.
+
+#### Protecting more addresses
+
+`AGENT_EGRESS_PROTECTED_CIDRS` takes comma-separated IPv4 blocks to refuse on
+top of the built-in ones — an institution's services on public addresses, for
+example. It can only add protection. The resolver stays reachable on port 53
+even inside an added block, because DNS is checked first. A change reaches the
+host when the runner and broker are redeployed with it: every install replaces
+the protected set, and the read-back compares it with the configuration.
+
+#### When something is refused
+
+Settings first. `sandbox_host.sh prepare` reads them with the candidate
+image's own parser before any runner is drained, and a refusal prints
+`the sandbox network settings were refused (see the error above)` under one of
+these:
+
+- `AGENT_EGRESS_CHAT_NETWORK_POOL must name this deployment's group address pool`
+  or `… must be RFC1918 space holding at least one /29` — unset, not private,
+  or smaller than a `/29`;
+- `AGENT_EGRESS_DNS_SERVER='…' must be one IPv4 resolver address` or
+  `… must be reachable from a group bridge` — unset, not IPv4, loopback,
+  unspecified, or inside the pool;
+- `AGENT_GATEWAY_URL='…' names a relay by IP; use its network alias`, and the
+  same for `AGENT_SANDBOX_MCP_URL` — each group bridge gives a relay a fresh
+  address, so only its name carries over.
+
+Preflight — until it passes, the runner claims nothing and the broker does not
+start:
+
+- `the relay network '…' does not exist` — the stack is not up, or
+  `AGENT_RELAY_NETWORK` names something else;
+- `` the relay network '…' is not `internal` `` — it must not route anywhere;
+  let Compose recreate it as declared;
+- `nft -f - failed: …` or `network guard helper could not run: …` — the
+  helper could not install the rules: the host kernel lacks nftables support,
+  or Docker refused the helper container;
+- `the network guard runs its helper from this container's own image` — the
+  runner finds its image by inspecting its own container, named by `HOSTNAME`;
+  a custom `hostname:` breaks that;
+- `… is missing chain …`, `… holds N rules, expected M`,
+  `… is not hooked on …`, `… protects …, not the configured set` or
+  `… registers pool …, not …`, each naming the table — the tables changed
+  after they were installed, or a runner and a broker with different settings
+  are overwriting each other. Redeploy both from one `.env`;
+- `this deployment's pool … overlaps …` — see
+  [Overlapping pools](#overlapping-pools).
+
+Group lifecycle. These fail the turn or operation that needed the group's
+network; the workspace is kept:
+
+- `relay alias '…' has no running container on relay network '…'` (or
+  `multiple running containers`) — a tunnel is down or restarting, or two
+  stacks share one relay network;
+- `AGENT_EGRESS_CHAT_NETWORK_POOL … has no free /29 subnet` — every `/29` in
+  the pool is taken, by this deployment's groups or by other Docker networks
+  inside the same range;
+- `group network check failed inside the sandbox: …` — the in-guest check
+  after a cold start found `no default route`, `resolver is […], expected […]`
+  or `relay host:port unreachable: …`. The sandbox is stopped, not deleted;
+- `Kata guest network sync failed: …` — the guest-root helper could not write
+  `/etc/hosts` or `/etc/resolv.conf`;
+- `retained chat is attached to network '…', which is not its group bridge`,
+  ending `needs the one-time cleanup` — a chat from the previous network; at
+  broker startup it keeps the broker from starting. See the next section;
+- `a running retained chat is not on exactly its group bridge` — a running
+  guest is never rewired underneath it; stop it first.
+
+In the broker's log, `chat_legacy_network_found` names a bridge of this
+deployment from the previous per-phase topology; it is reported, never adopted
+or repaired. `chat_group_relay_exceptions_left` means a removed bridge's relay
+entries could not be withdrawn from the tables. They match nothing once the
+bridge is gone, and if the helper still cannot run, the next activation fails.
+
+### One-time cleanup when upgrading to the one network
+
+Only for a host that ran the previous network — per-phase bridges and the
+Squid proxy. A host that never did needs none of this. The new version adopts
+nothing the old one left. It refuses a retained chat still attached to an old
+network, with the message above, and because the broker stops every retained
+chat of its deployment when it starts, one such container keeps the new broker
+from starting at all; old bridges are only logged. The design treats the switch
+as a step for development and test hosts with no users to carry over (§8), so
+these steps discard the old retained chats. **Export any workspace you need
+before step 4.**
+
+**Remove only this deployment's resources.** Every listing below filters by
+this deployment's own labels: the Compose project for the stack's own
+containers, networks and volumes, and `org.freeinference.sandbox-namespace` —
+the same Compose project, on a host stack — for chat containers and group
+bridges. Read each listing before removing anything. A resource carrying
+another project or namespace belongs to another deployment on this machine;
+leave it, and leave anything you cannot attribute.
+
+1. Drain the host (**Admin → Servers**) and wait until it runs nothing, then
+   stop this stack:
+
+   ```bash
+   COMPOSE_PROJECT=<this stack's Compose project>
+   deploy/host/sandbox_host.sh down
+   ```
+
+   If the checkout already holds the new release, add the two settings from
+   step 7 to `.env` first: the new compose file does not render without them.
+
+2. List this deployment's chat containers:
+
+   ```bash
+   docker ps -a \
+     --filter label=org.freeinference.chat-sandbox=true \
+     --filter "label=org.freeinference.sandbox-namespace=$COMPOSE_PROJECT" \
+     --format '{{.ID}}  {{.Names}}  {{.Status}}  {{.Networks}}'
+   ```
+
+   Stopping the stack leaves chat containers as they were, so some may still
+   be running. Every one of them predates the upgrade. The new version refuses
+   any that is still attached to an old network, and none of them was created
+   with `AGENT_EGRESS_DNS_SERVER` — under runc a container's resolver is fixed
+   when it is created. So all of them go.
+
+3. Export what you want to keep. A chat's workspace exists only in its
+   container's writable layer, and `docker cp` reads a stopped container:
+
+   ```bash
+   docker cp <container>:/workspace ./<container>-workspace
+   ```
+
+4. Remove the containers from step 2, by ID:
+
+   ```bash
+   docker rm -f <id> …
+   ```
+
+   This is the one sanctioned `docker rm` of chat containers; everywhere else
+   [Retained Docker storage on a host](#retained-docker-storage-on-a-host)
+   forbids it. Their chats cannot continue (their context reads `LOST`); new
+   tasks get new containers.
+
+5. List this deployment's chat networks, and remove the old ones:
+
+   ```bash
+   docker network ls -q \
+     --filter label=org.freeinference.chat-sandbox-network=true \
+     --filter "label=org.freeinference.sandbox-namespace=$COMPOSE_PROJECT" |
+     xargs -r docker network inspect --format \
+       '{{.Name}} {{.Internal}} {{index .Options "com.docker.network.bridge.name"}}'
+   docker network rm <name> …
+   ```
+
+   Each line is a name, whether the network is internal, and its bridge
+   interface name. An old `freeinference-chat-net-*` network is internal
+   (`true`) and has no interface name; a group bridge of the new version is not
+   internal and has a `ca…` one. Before the new version has run, every one
+   listed is old.
+
+6. Remove the proxy and the old Compose networks and volume. List what Compose
+   created for this project:
+
+   ```bash
+   docker ps -a --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
+     --format '{{.ID}}  {{.Names}}  {{.Label "com.docker.compose.service"}}'
+   docker network ls --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
+     --format '{{.Name}}  {{.Label "com.docker.compose.network"}}'
+   docker volume ls --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
+     --format '{{.Name}}  {{.Label "com.docker.compose.volume"}}'
+   ```
+
+   Remove, with `docker rm -f`, `docker network rm` and `docker volume rm`:
+   the containers of the services `agent-egress-proxy` and
+   `agent-egress-proxy-config`; the networks whose Compose key is
+   `agent-egress`, `agent-egress-trusted` or `agent-egress-uplink` (named
+   `agent-egress` or the old `AGENT_EGRESS_NETWORK_PLATFORM_ONLY`, and
+   `<COMPOSE_PROJECT>-agent-egress-trusted` and `-uplink` unless `.env` named
+   them); and the `agent-egress-proxy-config` volume, which held only the
+   generated Squid configuration. Nothing else in these listings is part of
+   the cleanup. A `down` run from the previous release will already have
+   removed some of them.
+
+7. Update `.env` from the new `deploy/host/.env.example`. Set
+   `AGENT_EGRESS_CHAT_NETWORK_POOL`, which no longer has a default, and
+   `AGENT_EGRESS_DNS_SERVER`. The old default pool was `10.240.0.0/16`: if two
+   deployments on this machine both kept it, give one of them another, or the
+   later one refuses to start. Delete the retired settings —
+   `AGENT_EGRESS_SETUP_TIER`, `AGENT_EGRESS_AGENT_TIER`,
+   `AGENT_EGRESS_ALLOWLIST`, `AGENT_EGRESS_NETWORK_*`, `AGENT_EGRESS_PROXY_*`,
+   `AGENT_EGRESS_STOP_GRACE`, `AGENT_SANDBOX_NETWORK` and
+   `AGENT_SANDBOX_ALLOW_OPEN_NETWORK`. Nothing reads them.
+
+8. Undrain the host (**Admin → Servers**, or
+   `POST /admin/agent/runner-hosts/<host>/undrain`) — with its runners stopped
+   it claims nothing yet, and a drain is never cleared by a heartbeat — then
+   deploy the new release as usual, with a deployer at
+   `shared-live-exact-sha-v4`. Every runner's preflight installs and reads back
+   the host tables before it claims. Confirm that `host_nft list tables` (from
+   [The host tables](#the-host-tables)) shows this deployment's `inet` and
+   `bridge` tables, then run a new task whose setup installs a package.
 
 ## Runtime verification
 

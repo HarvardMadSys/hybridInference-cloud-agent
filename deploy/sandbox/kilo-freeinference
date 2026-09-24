@@ -3,7 +3,8 @@
 
 Kilo's CLI is an OpenCode fork and inherits its two gaps: it does not honour
 ``OPENAI_BASE_URL``, and its startup normally fetches the models.dev catalog —
-which in the deny-all sandbox fails every time. This wrapper closes both the
+a download no job needs, and one that makes every start depend on a third
+party. This wrapper closes both the
 same way the ``opencode-freeinference`` wrapper does: it writes a ``KILO_CONFIG``
 file declaring a ``freeinference`` provider over the **bundled**
 ``@ai-sdk/openai-compatible`` package (compiled into the CLI binary — nothing is
