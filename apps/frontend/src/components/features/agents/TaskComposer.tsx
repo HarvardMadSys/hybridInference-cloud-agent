@@ -1,11 +1,12 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createAgentJob, getAgentConfig, listRepoBranches } from '@/lib/api/agents';
 import type { AgentConfigApi, CreateAgentJobRequest, GoalInputApi } from '@/lib/api/agents';
 import { isComposerSubmit } from './composerKeys';
 import { ConnectSourceControl } from './ConnectSourceControl';
+import { SOURCE_CONTROL_RECHECK_MS } from './sourceControlRecovery';
 import { highestEffort, offeredEfforts } from './effort';
 import { useT } from '@/components/providers';
 import { Picker } from './Picker';
@@ -82,22 +83,26 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   const tRef = useRef(t);
   tRef.current = t;
 
+  const applyConfig = useCallback(
+    (cfg: AgentConfigApi) => {
+      // The config's model list is the create endpoint's own predicate;
+      // /v1/models answers for the browsing user and offered models whose
+      // first agent call then 404ed.
+      const modelIds = cfg.models ?? [];
+      setConfig(cfg);
+      setModels(modelIds);
+      setRepo(initialRepo && cfg.repos.includes(initialRepo) ? initialRepo : (cfg.repos[0] ?? ''));
+      setRuntime(cfg.runtimes[0] ?? '');
+      setModel(modelIds[0] ?? '');
+    },
+    [initialRepo],
+  );
+
   useEffect(() => {
     let cancelled = false;
     getAgentConfig()
       .then((cfg) => {
-        if (cancelled) return;
-        // The config's model list is the create endpoint's own predicate;
-        // /v1/models answers for the browsing user and offered models whose
-        // first agent call then 404ed.
-        const modelIds = cfg.models ?? [];
-        setConfig(cfg);
-        setModels(modelIds);
-        setRepo(
-          initialRepo && cfg.repos.includes(initialRepo) ? initialRepo : (cfg.repos[0] ?? ''),
-        );
-        setRuntime(cfg.runtimes[0] ?? '');
-        setModel(modelIds[0] ?? '');
+        if (!cancelled) applyConfig(cfg);
       })
       .catch((cause: unknown) => {
         if (!cancelled)
@@ -111,7 +116,29 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     return () => {
       cancelled = true;
     };
-  }, [initialRepo]);
+  }, [applyConfig]);
+
+  // While the deployment's GitHub App is temporarily unavailable nothing can
+  // run, and the service is retrying on its own. Look again at its interval so
+  // the composer comes back by itself; the pickers are hidden meanwhile, so
+  // re-reading the config overwrites no choice the user made.
+  const githubUnavailable = config?.github_load_status === 'unavailable';
+  useEffect(() => {
+    if (!githubUnavailable) return undefined;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      getAgentConfig()
+        .then((cfg) => {
+          if (!cancelled) applyConfig(cfg);
+        })
+        // The next tick asks again; the notice already says why nothing runs.
+        .catch(() => undefined);
+    }, SOURCE_CONTROL_RECHECK_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [githubUnavailable, applyConfig]);
 
   // The offered efforts follow the (runtime, model) pair, so switching either
   // can empty the set or drop the current choice out of it.
@@ -284,7 +311,10 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
 
       {disconnected ? (
         <div className="mt-8">
-          <ConnectSourceControl installUrl={config.github_install_url} />
+          <ConnectSourceControl
+            installUrl={config.github_install_url}
+            unavailable={githubUnavailable}
+          />
         </div>
       ) : null}
 

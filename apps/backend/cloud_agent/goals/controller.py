@@ -21,7 +21,7 @@ appears in the conversation like any other message — marked as automatic.
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.goals.decision import GoalAction, GoalContext, decide
@@ -33,6 +33,10 @@ from cloud_agent.goals.models import (
 )
 from cloud_agent.goals.prompts import render_repair_prompt, render_round_prompt
 from cloud_agent.goals.report import GoalReport, GoalReportParse
+from cloud_agent.source_control_runtime import SourceControlUnavailable
+
+if TYPE_CHECKING:
+    from cloud_agent.source_control_runtime import GitHubAppSource
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +95,7 @@ def finish_trigger_ref(job_id: str) -> str:
 async def run_goal_wakeups(
     *,
     store: _GoalStore,
-    app_credentials: Any | None = None,
+    github_app: GitHubAppSource | None = None,
     limit: int = 8,
 ) -> int:
     """Consume what is due, and return how many wakeups were handled.
@@ -99,7 +103,19 @@ async def run_goal_wakeups(
     One pass is bounded, because it runs both inside the finish request and on
     the reaper's loop: a deployment with hundreds of pending obligations must
     not hold a request open, and the next tick takes the rest.
+
+    **A GitHub App this process cannot load stops the pass before it claims
+    anything** (issue #47). Claiming spends one of a wakeup's five attempts, and
+    with no credentials the entitlement check sees only the allowlist and pauses
+    the goal as ``access_denied``; either way a deployment fault would end the
+    owner's goal. Unclaimed, the wakeup waits — the goal stays active, and the
+    stall sweep leaves a goal with a pending wakeup alone — until a pass finds
+    the App loaded.
     """
+    try:
+        app_credentials = github_app.get() if github_app is not None else None
+    except SourceControlUnavailable:
+        return 0
     handled = 0
     for wakeup in await store.goal_wakeups.claim_wakeups(limit=limit):
         try:
@@ -123,7 +139,7 @@ async def continue_after_finish(
     *,
     store: _GoalStore,
     job_id: str,
-    app_credentials: Any | None = None,
+    github_app: GitHubAppSource | None = None,
 ) -> int:
     """Drain what a finished turn made due, before the runner is acknowledged.
 
@@ -141,7 +157,7 @@ async def continue_after_finish(
         "agent_goal_finish_drain",
         extra={"event": "agent_goal_finish_drain", "job_id": job_id},
     )
-    return await run_goal_wakeups(store=store, app_credentials=app_credentials, limit=8)
+    return await run_goal_wakeups(store=store, github_app=github_app, limit=8)
 
 
 async def consume_wakeup(

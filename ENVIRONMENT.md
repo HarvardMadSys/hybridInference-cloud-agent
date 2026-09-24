@@ -105,7 +105,7 @@ it before deployment; it needs no model API key or deployed-service setting.
 
 | Variable | New? | Value / who provisions |
 |---|---|---|
-| `AGENT_GITHUB_APP_ID` | existing | The GitHub App backing repository access. Whether to reuse an existing App or register a new one is decision DR2, recorded in the operator's overlay. Either way its callback and setup URLs must list the agent domains before F5. |
+| `AGENT_GITHUB_APP_ID` | existing | The GitHub App backing repository access. Whether to reuse an existing App or register a new one is decision DR2, recorded in the operator's overlay. Either way its callback and setup URLs must list the agent domains before F5. **Setting it is what turns the App on**: with it set, a key that cannot be loaded makes GitHub temporarily unavailable and is read again every 30 seconds; without it, the key variables are ignored. See `docs/operations.md` § Credentials. |
 | `AGENT_GITHUB_APP_CLIENT_ID` | existing | |
 | `AGENT_GITHUB_APP_CLIENT_SECRET` | existing | Rotate when the App's audience changes — moving to a new domain is a good moment to retire whatever the old value was exposed to. |
 | `AGENT_GITHUB_APP_PRIVATE_KEY_PATH` | existing | **Preferred.** Path to a read-only mounted key file. A private key in an environment variable is readable by anything that can list the process environment, and lands in `docker inspect`, crash dumps, and most log shippers. |

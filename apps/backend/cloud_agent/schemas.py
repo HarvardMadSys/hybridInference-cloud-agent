@@ -43,6 +43,9 @@ from cloud_agent.skills.models import (
     SelectedSkill,
     SkillLimits,
 )
+from cloud_agent.source_control_runtime import (
+    LoadStatus,  # noqa: TC001 — Pydantic resolves this at runtime.
+)
 from cloud_agent_shared.event_payloads import bound_event_payload
 from cloud_agent_shared.shared_protocol import (
     HOST_CONCURRENCY_MAX_SLOTS,
@@ -2032,6 +2035,11 @@ class AgentConfigResponse(BaseModel):
     # worse answer than one that says what is missing.
     github_connected: bool = False
     github_install_url: str | None = None
+    #: Whether this deployment's GitHub App is working in this process. While it
+    #: is ``unavailable`` — configured, but not loaded, and being retried — the
+    #: composer says so instead of asking the user to connect or an
+    #: administrator to set GitHub up, and ``github_connected`` is false.
+    github_load_status: LoadStatus
 
 
 class GitHubConnectRequest(BaseModel):
@@ -2077,6 +2085,12 @@ class SourceControlProviderResponse(BaseModel):
     accounts: list[SourceControlAccount] = Field(default_factory=list)
     repositories: list[SourceControlRepository] = Field(default_factory=list)
     error: str | None = None
+    #: The deployment's side of the provider, not the user's: ``unavailable``
+    #: means configured, but this process could not load it and is retrying.
+    #: ``connected`` and ``accounts`` still come from the user's own records, so
+    #: a connection survives the outage. Required, so that a response built
+    #: somewhere new cannot default to a state nobody checked.
+    load_status: LoadStatus
 
 
 class McpIntegrationResponse(BaseModel):

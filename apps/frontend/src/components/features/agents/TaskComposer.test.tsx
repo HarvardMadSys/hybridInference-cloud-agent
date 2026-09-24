@@ -204,6 +204,61 @@ describe('TaskComposer source-control onboarding', () => {
     expect(screen.getByRole('button', { name: /Run/ })).toBeDisabled();
   });
 
+  // Issue #47: the deployment's App failed to load and the service is retrying.
+  // Nobody has anything to connect or configure, so the notice says to wait.
+  it('says GitHub is temporarily unavailable instead of sending anyone to set it up', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({
+        github_connected: false,
+        github_install_url: null,
+        github_load_status: 'unavailable',
+      }),
+    );
+
+    render(<TaskComposer />);
+
+    expect(await screen.findByText('GitHub is temporarily unavailable')).toBeInTheDocument();
+    expect(screen.getByText(/come back on its own/)).toBeInTheDocument();
+    expect(screen.queryByText('GitHub setup is not available yet')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Contact your administrator/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /View integrations/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox')).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Run/ })).toBeDisabled();
+  });
+
+  it('comes back by itself once the GitHub App loads again', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(getAgentConfig)
+        .mockResolvedValueOnce(
+          config({
+            github_connected: false,
+            github_install_url: null,
+            github_load_status: 'unavailable',
+          }),
+        )
+        .mockResolvedValue(config({ github_load_status: 'ready' }));
+      await act(async () => {
+        render(<TaskComposer />);
+      });
+      expect(screen.getByText('GitHub is temporarily unavailable')).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+
+      expect(screen.queryByText('GitHub is temporarily unavailable')).not.toBeInTheDocument();
+      expect(screen.getByRole('textbox')).toBeEnabled();
+      const calls = vi.mocked(getAgentConfig).mock.calls.length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(90_000);
+      });
+      expect(getAgentConfig).toHaveBeenCalledTimes(calls);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps the connected composer interactive and submits its selected values', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(config());
     vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);

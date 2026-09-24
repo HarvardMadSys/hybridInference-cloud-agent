@@ -1114,6 +1114,80 @@ async def test_a_goal_created_with_the_first_message_queues_its_first_round(
     assert GOAL_REPORT_PROTOCOL in (rounds[0]["metadata"] or {}).get("requires", [])
 
 
+async def test_an_unloaded_github_app_leaves_the_goal_waiting_on_its_rows(
+    store, pool, monkeypatch: pytest.MonkeyPatch
+):
+    """Issue #47 on real rows: an outage spends nothing and pauses nothing.
+
+    The finish that armed the wakeup drains it through the consumer, and the
+    reaper asks again every pass. While the GitHub App cannot be loaded, both
+    stop before the claim — more times than a real failure is allowed — so the
+    wakeup keeps its five attempts, the goal stays active, and the stall sweep
+    leaves it alone because the obligation is still pending. The same wakeup
+    becomes the next round once the App loads.
+    """
+    from cloud_agent.goals.controller import consume_wakeup, continue_after_finish, run_goal_wakeups
+    from cloud_agent.goals.models import MAX_WAKEUP_ATTEMPTS
+    from cloud_agent.source_control_runtime import SourceControlUnavailable
+
+    class RecoveringApp:
+        loaded = False
+
+        def get(self) -> object:
+            if not self.loaded:
+                raise SourceControlUnavailable("github")
+            return object()  # the repository is allowlisted; the minter is not asked
+
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "example-org/example-repo")
+    job = await _create_job_with_goal(store, objective="ship it")
+    thread_id = str(job["thread_id"])
+    armed = await store.goal_wakeups.pending_wakeup(thread_id=thread_id)
+    claim = await _claim_round(store)
+    claimed = await store.goal_wakeups.claim_wakeups(limit=1)
+    assert claimed and claimed[0]["id"] == armed["id"]
+    assert await consume_wakeup(store=store, wakeup=claimed[0]) == "wait"
+    assert await store.attempt_commands.transition(
+        job_id=str(job["id"]),
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="cancelled",
+    )
+    due = await store.goal_wakeups.pending_wakeup(thread_id=thread_id)
+    attempts_before = due["attempts"]
+
+    app = RecoveringApp()
+    assert await continue_after_finish(store=store, job_id=str(job["id"]), github_app=app) == 0
+    for _ in range(MAX_WAKEUP_ATTEMPTS + 1):
+        assert await run_goal_wakeups(store=store, github_app=app) == 0
+    # Old enough to be stalled, were it not for the obligation still pending.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_threads SET goal_updated_at = NOW() - INTERVAL '1 day' WHERE id = $1",
+            thread_id,
+        )
+    swept = await store.goals.sweep_goal_scheduling()
+
+    waiting = await store.goal_wakeups.pending_wakeup(thread_id=thread_id)
+    assert waiting is not None and waiting["id"] == due["id"]
+    assert waiting["attempts"] == attempts_before
+    assert waiting["lease_expires_at"] is None
+    assert thread_id not in swept["stalled"]
+    goal = await store.goals.get_goal(thread_id=thread_id)
+    assert goal["state"] == "active"
+    assert [
+        row for row in await _thread_turns(store, pool, thread_id) if row["turn_source"] == "goal"
+    ] == []
+
+    app.loaded = True
+    assert await run_goal_wakeups(store=store, github_app=app) == 1
+    assert await store.goal_wakeups.pending_wakeup(thread_id=thread_id) is None
+    rounds = [
+        row for row in await _thread_turns(store, pool, thread_id) if row["turn_source"] == "goal"
+    ]
+    assert len(rounds) == 1
+
+
 async def _thread_turns(store, pool, thread_id: str) -> list[dict[str, Any]]:
     """Every turn of one conversation, oldest first."""
     async with pool.acquire() as conn:

@@ -726,6 +726,44 @@ async def test_a_failing_consumer_backs_off_and_then_pauses_with_scheduling_fail
     assert store.rounds() == []
 
 
+async def test_an_unloaded_github_app_leaves_the_wakeup_unclaimed_until_it_loads():
+    """Issue #47: a deployment fault must not spend the goal's attempts.
+
+    Claiming charges the wakeup an attempt, and without credentials the
+    entitlement check sees only the allowlist and pauses the goal as
+    ``access_denied``. So a GitHub App this process cannot load stops the pass
+    before the claim — for more passes than a real failure is allowed — and the
+    same wakeup is consumed once the App loads.
+    """
+    from cloud_agent.source_control_runtime import SourceControlUnavailable
+
+    store = FakeStore(goal=goal_row(), turns=[turn(id="job-1", input_seq_at_create=1)], input_seq=1)
+    wakeup = store.goal_wakeups.arm(trigger="owner", trigger_ref="set:1")
+
+    class RecoveringApp:
+        loaded = False
+
+        def get(self) -> object:
+            if not self.loaded:
+                raise SourceControlUnavailable("github")
+            return object()  # the repository is allowlisted; the minter is not asked
+
+    app = RecoveringApp()
+    for _ in range(MAX_WAKEUP_ATTEMPTS + 3):
+        store.clock += 3_600.0
+        assert await run_goal_wakeups(store=store, github_app=app) == 0
+
+    row = store.wakeup(wakeup["id"])
+    assert (row["state"], row["attempts"], row["lease_expires_at"]) == ("pending", 0, None)
+    assert store.goal["state"] == "active"
+    assert store.rounds() == []
+
+    app.loaded = True
+    assert await run_goal_wakeups(store=store, github_app=app) == 1
+    assert store.wakeup(wakeup["id"])["state"] == "processed"
+    assert len(store.rounds()) == 1
+
+
 async def test_an_owner_wakeup_does_not_re_judge_the_turn_that_paused_the_goal():
     """The Resume button has to start work, not read the round that stopped it.
 

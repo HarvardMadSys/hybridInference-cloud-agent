@@ -397,6 +397,8 @@ export const zhCN: Record<TranslationKey, string> = {
   'connect.bodyUnavailable': '请联系管理员为 cloud agent 开通仓库访问。',
   'connect.action': '连接 GitHub',
   'connect.actionUnavailable': '查看集成',
+  'connect.titleTemporarilyUnavailable': 'GitHub 暂时不可用',
+  'connect.bodyTemporarilyUnavailable': '仓库访问会自动恢复，请稍后再试。',
 
   // ── Shared ──────────────────────────────────────────────────────────────
   'common.loading': '加载中…',

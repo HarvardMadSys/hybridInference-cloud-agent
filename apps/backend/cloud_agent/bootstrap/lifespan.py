@@ -48,36 +48,17 @@ _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 
 def _build_source_control(app: FastAPI) -> None:
-    """Attach GitHub App and GitLab OAuth clients, where configured.
+    """Attach the source-control runtime: GitHub App and GitLab OAuth.
 
     Each is optional and each failure is contained: a partial config disables
     that provider rather than booting with a credential path that cannot be
-    secured.
+    secured. Disabled is not the same as absent, though, and a GitHub App that
+    failed to load is loaded again (issue #47) — so what is attached is the
+    runtime, never a client captured at startup.
     """
-    app.state.app_credentials = None
-    app.state.gitlab_oauth = None
+    from cloud_agent.source_control_runtime import SourceControlRuntime
 
-    try:
-        from cloud_agent.github_app import AppConfig, GitHubAppCredentials
-
-        app_config = AppConfig.from_env(dict(os.environ))
-        if app_config is not None:
-            app.state.app_credentials = GitHubAppCredentials(app_config)
-    except Exception:
-        logger.warning("GitHub App config present but unusable", exc_info=True)
-
-    try:
-        from cloud_agent.source_control import (
-            GitLabOAuthClient,
-            GitLabOAuthConfig,
-            SourceControlCipher,
-        )
-
-        gitlab_config = GitLabOAuthConfig.from_env(dict(os.environ))
-        if gitlab_config is not None:
-            app.state.gitlab_oauth = GitLabOAuthClient(gitlab_config, cipher=SourceControlCipher())
-    except Exception:
-        logger.warning("GitLab OAuth config present but unusable", exc_info=True)
+    app.state.source_control = SourceControlRuntime.from_env(dict(os.environ))
 
 
 def _start_publisher(app: FastAPI, store: PublishStorage) -> None:
@@ -99,7 +80,7 @@ def _start_publisher(app: FastAPI, store: PublishStorage) -> None:
         publish_loop(
             store,
             credential_provider=credential_provider,
-            app_credentials=app.state.app_credentials,
+            github_app=app.state.source_control.github,
             base_branch=os.getenv(ENV_PUBLISH_BASE_BRANCH, "dev"),
         )
     )
@@ -193,7 +174,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             reap_expired_attempts(
                 storage,
                 grants=app.state.grants,
-                app_credentials=app.state.app_credentials,
+                github_app=app.state.source_control.github,
             )
         )
         snapshot_coordinator = asyncio.create_task(coordinate_shared_snapshots(storage))
@@ -297,9 +278,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # Close what was opened, innermost first: the per-broker pools, the
         # GitHub App's own client, then the shared gateway pool.
         await close_broker_clients()
-        credentials = getattr(app.state, "app_credentials", None)
-        if credentials is not None:
-            await credentials.aclose()
+        await app.state.source_control.aclose()
         await http.aclose()
         await pool.close()
         logger.info("cloud agent control plane stopped")

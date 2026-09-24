@@ -419,6 +419,9 @@ export const en = {
     'Contact your administrator to enable repository access for cloud agents.',
   'connect.action': 'Connect GitHub',
   'connect.actionUnavailable': 'View integrations',
+  'connect.titleTemporarilyUnavailable': 'GitHub is temporarily unavailable',
+  'connect.bodyTemporarilyUnavailable':
+    'Repository access will come back on its own. Try again in a minute.',
 
   // ── Shared ──────────────────────────────────────────────────────────────
   'common.loading': 'Loading…',

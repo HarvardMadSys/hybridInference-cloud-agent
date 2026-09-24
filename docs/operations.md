@@ -627,12 +627,30 @@ AGENT_GITHUB_APP_PRIVATE_KEY_FILE=/etc/cloud-agent/github-app.pem
 container and already defaults to that mounted path
 (`docker-compose.yml:142`), so the Compose deployment sets only
 `AGENT_GITHUB_APP_PRIVATE_KEY_FILE`. Overriding the path variable without
-mounting anything there produces a service that starts, offers Integrations,
-and fails at the first publish — which is exactly what
-`tests/unit/test_control_plane_deploy.py` now pins. Put the file on the host,
-owned by the service user and `chmod 600`. The control plane mounts nothing
-else: there is no `config/`, `distributions/` or `var/data/` inside that
-container (`Dockerfile:31,41-52`).
+mounting anything there produces a service that starts with GitHub
+unavailable — see below. Put the file on the host, owned by the service user
+and `chmod 600`. The control plane mounts nothing else: there is no `config/`,
+`distributions/` or `var/data/` inside that container (`Dockerfile:31,41-52`).
+
+**Whether GitHub is configured is decided by `AGENT_GITHUB_APP_ID` alone.** The
+key path always has a default in this stack, and `/dev/null` is mounted there
+when no App exists, so the path says nothing. With the App ID set, a key that
+cannot be loaded — missing, empty, unreadable by the service user, or not a
+valid key — does not stop the control plane (issue #47):
+
+- Integrations and the task composer say GitHub is temporarily unavailable.
+  Creating a job, a runner's claim, or a branch lookup answers `503
+  source_control_unavailable` with `Retry-After: 30`; queued jobs, pending
+  publishes and goal wakeups wait without spending any retries.
+- The log carries one `ERROR` event, `source_control_load_failed`, with a
+  `reason` (`key_file_unreadable`, `key_missing`, `key_invalid`, `unexpected`)
+  and, for a file, its path and the OS error. It repeats only if the reason
+  changes. If jobs are queued and none can start, the existing
+  `queue_not_starting` alert fires as well.
+- The service reads the key again every 30 seconds. Fixing the file in place —
+  its owner, mode or content — recovers the same process within a minute and
+  logs `source_control_load_recovered`. Changing an environment variable, or
+  the host path the bind mount points at, still needs the container recreated.
 
 Alternatively `AGENT_GITHUB_APP_PRIVATE_KEY` takes the PEM inline (escaped
 `\n` are accepted and unescaped) and skips the mount — at the cost of putting

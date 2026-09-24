@@ -440,11 +440,17 @@ async def test_app_only_deployment_actually_publishes(monkeypatch):
 
     app = FakeApp()
 
+    class LoadedApp:
+        """The runtime's answer once the App has loaded, asked once per pass."""
+
+        def get(self) -> FakeApp:
+            return app
+
     task = asyncio.create_task(
         publish_loop(
             store,
             credential_provider=lambda: None,  # no static token configured
-            app_credentials=app,
+            github_app=LoadedApp(),
             interval_seconds=0.01,
         )
     )
@@ -460,6 +466,74 @@ async def test_app_only_deployment_actually_publishes(monkeypatch):
     # And the token it published with is scoped to this repository, not to
     # everything the App happens to be installed on.
     assert app.scoped is True
+
+
+async def test_the_running_loop_waits_out_an_unloaded_app_and_then_publishes_once(monkeypatch):
+    """Issue #47: an App that failed to load is waited for, by the same loop.
+
+    The loop used to be handed the credentials the lifespan had at startup, so
+    one failed load meant no PR for the rest of the process. It asks each pass
+    now. While the App is unavailable nothing is claimed — the snapshot stays
+    queued, not failed — and the static token is not used in its place: a
+    deployment that chose an App publishes as the App or not at all.
+    """
+    import asyncio
+
+    from cloud_agent.source_control_runtime import SourceControlUnavailable
+
+    store = FakeStore(dict(_JOB))
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
+    )
+    opened: list[dict[str, Any]] = []
+
+    async def fake_pr(**kwargs: Any) -> str:
+        opened.append(kwargs)
+        return "https://github.com/o/n/pull/7"
+
+    monkeypatch.setattr(publish_worker, "create_draft_pull_request", fake_pr)
+
+    class LoadedApp:
+        async def token_for(self, repo: str, **kwargs: Any) -> str:
+            return "ghs_from_app"
+
+    class RecoveringApp:
+        """Unavailable for five passes, then loaded — the key fixed in place."""
+
+        def __init__(self) -> None:
+            self.asked = 0
+            self.claims_while_unavailable: int | None = None
+
+        def get(self) -> LoadedApp:
+            self.asked += 1
+            if self.asked <= 5:
+                raise SourceControlUnavailable("github")
+            if self.claims_while_unavailable is None:
+                self.claims_while_unavailable = store.claims
+            return LoadedApp()
+
+    app = RecoveringApp()
+    task = asyncio.create_task(
+        publish_loop(
+            store,
+            credential_provider=lambda: GitHubCredential("static-token"),
+            github_app=app,
+            interval_seconds=0.01,
+        )
+    )
+    for _ in range(300):
+        await asyncio.sleep(0.01)
+        if store.snapshot_recorded and app.asked > 10:
+            break
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert app.claims_while_unavailable == 0, "nothing may be claimed while the App is down"
+    assert store.snapshot_failed is None
+    assert store.snapshot_recorded == (9, "https://github.com/o/n/pull/7", "s")
+    assert len(opened) == 1, "one PR, however many passes it waited"
+    assert opened[0]["credential"].token == "ghs_from_app"
 
 
 async def test_no_credential_at_all_fails_the_job_rather_than_hanging(monkeypatch):

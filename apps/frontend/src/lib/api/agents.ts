@@ -639,6 +639,12 @@ export interface AgentConfigApi {
   agent_egress_tier: string | null;
   github_connected: boolean;
   github_install_url: string | null;
+  /**
+   * Whether this deployment's GitHub App is working right now. `unavailable`
+   * means configured but not loaded, and the service is retrying on its own.
+   * Absent on a control plane that predates it, which then reads as before.
+   */
+  github_load_status?: SourceControlLoadStatus;
 }
 
 export interface AgentMcpServerApi {
@@ -656,6 +662,9 @@ export async function getAgentConfig(): Promise<AgentConfigApi> {
 }
 
 export type AgentIntegrationProvider = 'github' | 'gitlab';
+
+/** The deployment's side of a provider, not the user's connection to it. */
+export type SourceControlLoadStatus = 'unconfigured' | 'unavailable' | 'ready';
 
 export interface AgentIntegrationAccountApi {
   id: string;
@@ -679,6 +688,11 @@ export interface AgentIntegrationProviderApi {
   accounts: AgentIntegrationAccountApi[];
   repositories: AgentIntegrationRepositoryApi[];
   error?: string | null;
+  /**
+   * `unavailable`: configured, not loaded, retrying. The user's own
+   * connection (`connected`, `accounts`) is still reported as it is.
+   */
+  load_status?: SourceControlLoadStatus;
 }
 
 export interface AgentIntegrationsApi {

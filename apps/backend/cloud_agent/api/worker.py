@@ -29,6 +29,7 @@ from cloud_agent.api._workspace_access import (
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_grant_client,
+    get_source_control,
     get_storage,
     require_store,
 )
@@ -84,6 +85,9 @@ from cloud_agent.schemas import (
     WorkerTurnResourcesRequest,
 )
 from cloud_agent.skills.selection import prompt_with_skills
+from cloud_agent.source_control_runtime import (
+    SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
+)
 from cloud_agent.task_titles import generate_thread_title
 from cloud_agent.tokens import (
     SCOPE_FULL,
@@ -1592,9 +1596,14 @@ async def worker_finish(
     body: WorkerFinishRequest,
     authorization: str | None = Header(None),
     store: _WorkerStorage | None = Depends(get_storage),
-    app_credentials: Any | None = Depends(get_agent_app_credentials),
+    source_control: SourceControlRuntime | None = Depends(get_source_control),
 ) -> WorkerAckResponse:
-    """Drive the fenced terminal transition for this attempt."""
+    """Drive the fenced terminal transition for this attempt.
+
+    Takes the source-control runtime rather than the App's credentials: a turn
+    that finished is recorded and acknowledged whether or not the App can be
+    loaded right now (issue #47). Only the next goal round waits for it.
+    """
     job_store = _require_store(store)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
@@ -1687,11 +1696,15 @@ async def worker_finish(
     # error while *starting the next* turn must not turn a successful finish
     # into a 500 the runner will retry. Retrying would not help, and the retry
     # would find no transition left to make.
+    #
+    # While the GitHub App is unavailable this drains nothing: the wakeup stays
+    # pending, unclaimed, for the reaper to consume once the App is back. The
+    # page keeps polling an active goal, so the round still appears there.
     try:
         await continue_after_finish(
             store=job_store,
             job_id=job_id,
-            app_credentials=app_credentials,
+            github_app=None if source_control is None else source_control.github,
         )
     except Exception:
         logger.warning(
