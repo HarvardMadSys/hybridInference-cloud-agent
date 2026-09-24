@@ -545,3 +545,18 @@ def test_admin_observation_routes_are_registered_only_on_the_control_plane():
     paths = {path for path in control if path.startswith(PREFIX)}
     assert len(paths) == 7
     assert not paths.intersection(relay)
+
+
+async def test_resource_read_preserves_the_measured_cpu_quota_and_nested_window(setup):
+    """The frontend denominator is the recorded window and its captured quota."""
+    app, queries, _, _ = setup
+    stored = _turn_summary_snapshot(state="final", observed_through_ms=130_000)
+    stored["cpu"]["capacity_cores"] = 2.0
+    queries.resources.return_value.update({"attempt_terminal": True, "turn_summary": stored})
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(PREFIX + "/ajob_other/attempts/10/resources", headers=ADMIN)
+    assert response.status_code == 200
+    summary = response.json()["resources"]["turn_summary"]
+    assert summary["cpu"]["capacity_cores"] == 2.0
+    assert summary["window"]["duration_ms"] == 130_000
+    assert "duration_ms" not in summary

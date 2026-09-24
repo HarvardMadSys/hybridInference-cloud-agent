@@ -341,6 +341,12 @@ class TurnCpuResources(BaseModel):
     status: ResourceMetricStatus
     method: Literal["live_and_exit_task_counters"]
     usec: int | None = Field(None, ge=0)
+    #: Sandbox CPU quota captured at window open, shared by all its members.
+    #: Older snapshots omit it; current host configuration cannot fill it in.
+    # Omitting unknown capacity preserves identical retries of pre-upgrade snapshots.
+    capacity_cores: float | None = Field(
+        None, gt=0, allow_inf_nan=False, strict=True, exclude_if=lambda value: value is None
+    )
     reason_codes: list[TurnResourceReasonCode] = Field(default_factory=list)
 
     @model_validator(mode="after")

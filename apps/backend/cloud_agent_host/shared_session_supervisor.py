@@ -67,6 +67,7 @@ from cloud_agent_profiling.operation_profiling import (
     start_stage_recording,
     substage,
 )
+from cloud_agent_shared.turn_resources import parse_cpu_capacity
 
 if TYPE_CHECKING:
     import builtins
@@ -794,6 +795,10 @@ class SharedChatSessionSupervisor:
                             measurement_id=measurement_id,
                             cursor=observer_cursor,
                         )
+                        window = replace(
+                            window,
+                            cpu_capacity_cores=parse_cpu_capacity(group.spec.cpu_limit),
+                        )
             with self._lock:
                 current_group = self._members.get(thread_id)
                 current_member = (
@@ -1073,7 +1078,7 @@ class SharedChatSessionSupervisor:
         cursor = window.cursor
         duration_ms = max(0, int((time.monotonic() - window.opened_host_mono) * 1000))
         try:
-            return reduce_window(
+            snapshot = reduce_window(
                 uid=window.uid,
                 measurement_id=window.measurement_id,
                 boot_id=getattr(cursor, "guest_boot_id", "") or "",
@@ -1087,6 +1092,8 @@ class SharedChatSessionSupervisor:
                 open_scan_ms=window.open_scan_ms,
                 close_scan_ms=close_scan_ms,
             )
+            snapshot["cpu"]["capacity_cores"] = window.cpu_capacity_cores
+            return snapshot
         except Exception:
             logger.warning(
                 "member window reduction failed for %s",
@@ -1353,6 +1360,7 @@ class SharedChatSessionSupervisor:
                     report_seq=report_seq,
                     open_scan_ms=window.open_scan_ms,
                 )
+            snapshot["cpu"]["capacity_cores"] = window.cpu_capacity_cores
             with self._lock:
                 group = self._members.get(thread_id)
                 if group is not None and thread_id in group.members:

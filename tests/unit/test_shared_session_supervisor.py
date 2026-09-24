@@ -1990,6 +1990,7 @@ def test_a_checkpoint_is_produced_without_any_turn_event():
     assert reported[0][1]["state"] == "collecting"
     pending = supervisor.take_reported_checkpoint("athr_source")
     assert pending is not None and pending["state"] == "collecting"
+    assert pending["cpu"]["capacity_cores"] == 2.0
     # Taking it is what makes forwarding happen once rather than repeatedly.
     assert supervisor.take_reported_checkpoint("athr_source") is None
 
@@ -2060,7 +2061,7 @@ def test_the_final_report_sequence_stays_above_every_checkpoint():
         checkpoint_interval_s=0.0,
     )
     lease = supervisor.acquire(
-        _spec(),
+        replace(_spec(), cpu_limit="0.5"),
         thread_id="athr_source",
         owner="attempt:1",
         activation_generation=1,
@@ -2083,17 +2084,23 @@ def test_the_final_report_sequence_stays_above_every_checkpoint():
         model="glm-5.1",
         reasoning_effort=None,
     )
+    # A later configuration must never relabel an already-open measurement.
+    group = supervisor._members["athr_source"]
+    group.spec = replace(group.spec, cpu_limit="4")
     sequences: list[int] = []
     for _ in range(3):
         supervisor.sample_open_windows()
         checkpoint = supervisor.take_reported_checkpoint("athr_source")
         if checkpoint is not None:
             sequences.append(checkpoint["report_seq"])
+            assert checkpoint["cpu"]["capacity_cores"] == 0.5
     telemetry = supervisor.complete_turn("athr_source", lease.token, turn)
 
     assert sequences, "checkpoints should have been produced"
     assert telemetry.turn_resources is not None
     assert telemetry.turn_resources["report_seq"] > max(sequences)
+
+    assert telemetry.turn_resources["cpu"]["capacity_cores"] == 0.5
 
 
 @pytest.mark.parametrize(
