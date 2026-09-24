@@ -187,8 +187,7 @@ def _parse_network(stats: dict[str, Any]) -> tuple[int | None, int | None]:
     """Cumulative bytes across the container's interfaces.
 
     Absent when the container has no network of its own to report — which is
-    a real state for a sandbox on a closed network, and not the same as
-    having sent nothing.
+    a real state, and not the same as having sent nothing.
     """
     networks = stats.get("networks")
     if not isinstance(networks, dict) or not networks:

@@ -1,9 +1,11 @@
 """Run a repository setup script inside its retained chat container.
 
-The container begins in the restricted setup-network phase. Dependencies and
-other filesystem changes therefore land directly in the same Docker writable
-layer that the live Agent CLI will use. There is no host worktree, portable
-setup archive, or second throwaway container to restore into.
+Setup runs on the group's own network, the same guarded bridge the Agent CLI
+uses afterwards, so installs reach public registries exactly as the agent
+would. Dependencies and other filesystem changes land directly in the same
+Docker writable layer that the live Agent CLI will use. There is no host
+worktree, portable setup archive, or second throwaway container to restore
+into.
 """
 
 from __future__ import annotations
@@ -35,9 +37,8 @@ def run_setup(
 ) -> SetupResult:
     """Run one bounded setup command in the retained container.
 
-    The caller transitions the container from setup egress to agent egress
-    only after this returns successfully. Output is retained only as a bounded
-    diagnostic tail; the durable result is already in the container layer.
+    Output is retained only as a bounded diagnostic tail; the durable result is
+    already in the container layer.
     """
     if not script.strip():
         return SetupResult(ran=False)
@@ -46,7 +47,6 @@ def run_setup(
         SandboxSpec(
             argv=["/bin/sh", "-c", script],
             workdir=workdir,
-            phase="setup",
             env={},
         )
     )

@@ -80,7 +80,7 @@ class _WorkspaceBackend(RetainedChatBackend):
     def __init__(self) -> None:
         self.spec = SimpleNamespace(thread_id="athr_source", shared_live=True)
         self.manager = SimpleNamespace(
-            require_network_phase=lambda _spec, phase: phase == "agent",
+            require_network=lambda _spec: None,
             import_base_bundle=self._import_base_bundle,
         )
         self.processes: list[_TerminalProcess] = []

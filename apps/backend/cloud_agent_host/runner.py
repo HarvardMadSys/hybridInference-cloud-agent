@@ -270,8 +270,9 @@ class ClaimedJob:
     # Defaulted rather than required, because absent and Auto are the same
     # state — there is nothing a caller could pass to mean "unknown".
     reasoning_effort: str | None = None
-    # Shell run before the agent, under the setup egress tier. Optional, so it
-    # carries a default rather than forcing every caller to pass one.
+    # Shell run in the sandbox before the agent, on the group's one network.
+    # Optional, so it carries a default rather than forcing every caller to
+    # pass one.
     setup_script: str | None = None
     # Read-only, single-repo, short-lived: what the runner clones with. Stays
     # in the runner — it is never put in .git/config and never enters the
@@ -2082,14 +2083,11 @@ def _run_shared_live_attempt(
 
         stage = _stage(measurement, "agent_network")
         # This manager runs in the runner's own process, so its sub-stages are
-        # timed directly onto the measurement. On the warm path the Kata guest
-        # restart never happens, and a timeline without those stages is the
-        # answer rather than a gap.
+        # timed directly onto the measurement. Setup ran on this same group
+        # bridge; nothing is switched here, only proved still in place before
+        # the CLI starts.
         network_observer = operation_profiling.stage_observer(measurement)
-        if has_context:
-            manager.require_network_phase(spec, "agent", observer=network_observer)
-        else:
-            manager.transition_to_agent_network(spec, observer=network_observer)
+        manager.require_network(spec, observer=network_observer)
         stage = _stage(measurement, "terminal_resume")
         control.resume_terminals()
         terminals_suspended = False

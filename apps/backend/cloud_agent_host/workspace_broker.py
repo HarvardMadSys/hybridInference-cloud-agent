@@ -807,7 +807,6 @@ class _TerminalManager:
                     "GIT_CONFIG_NOSYSTEM": "1",
                     "TERM": "xterm-256color",
                 },
-                phase="agent",
             )
             try:
                 process = backend.spawn_terminal(spec, rows=rows, cols=cols)
@@ -1049,7 +1048,6 @@ def _run_sandbox(
             argv=["/bin/sh", "-lc", script],
             workdir=str(workdir),
             env={**backend.base_env(), "GIT_CONFIG_NOSYSTEM": "1", **env},
-            phase="agent",
         )
     )
     lines: queue.Queue[str | None] = queue.Queue()
@@ -1385,8 +1383,8 @@ def create_app(
             with active.stage("admission"):
                 token, _ = owner.operation_opened(workspace_id)
             retained = owner.backend(workspace_id)
-            with active.stage("network_phase"):
-                retained.manager.require_network_phase(retained.spec, "agent")
+            with active.stage("network"):
+                retained.manager.require_network(retained.spec)
             return active.answer(operation(retained, active))
         except RetainedWorkspaceError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
@@ -2020,8 +2018,8 @@ def create_app(
                 token, descriptor = await asyncio.to_thread(owner.terminal_opened, workspace_id)
             terminal_token = token
             retained = owner.backend(workspace_id)
-            with call.stage("network_phase"):
-                retained.manager.require_network_phase(retained.spec, "agent")
+            with call.stage("network"):
+                retained.manager.require_network(retained.spec)
 
             def on_terminal_closed(last_activity: float) -> None:
                 owner.terminal_closed(

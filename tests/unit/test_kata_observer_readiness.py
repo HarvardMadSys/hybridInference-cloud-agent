@@ -21,11 +21,31 @@ from cloud_agent_host.chat_sandbox import (
 )
 from cloud_agent_host.guest_observer import GUEST_OBSERVER_BINARY
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
+from cloud_agent_shared.egress import network_from_env
 
 
 def _manager():
+    return ChatSandboxManager(ContainerBackend(image="test-image", runtime=KATA_RUNTIME))
+
+
+def _network_manager():
+    network = network_from_env(
+        {
+            "AGENT_SANDBOX_NAMESPACE": "kata-test",
+            "AGENT_EGRESS_CHAT_NETWORK_POOL": "10.240.0.0/16",
+            "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
+            "AGENT_RELAY_NETWORK": "agent-relays",
+            "AGENT_GATEWAY_URL": "http://agent-gateway:8080",
+            "AGENT_SANDBOX_MCP_URL": "http://agent-mcp:8000",
+        }
+    )
     return ChatSandboxManager(
-        ContainerBackend(image="test-image", runtime=KATA_RUNTIME, network="none")
+        ContainerBackend(
+            image="test-image",
+            runtime=KATA_RUNTIME,
+            sandbox_network=network,
+            sandbox_namespace=network.namespace,
+        )
     )
 
 
@@ -261,10 +281,10 @@ def test_backend_refuses_claim_readiness_when_observer_probe_fails(monkeypatch):
         ("10.240.0.2/29", "agent-gateway\nforged", False),
     ],
 )
-def test_fixed_aliases_use_the_current_bridge_endpoint(monkeypatch, address, alias, valid):
-    manager = _manager()
-    monkeypatch.setattr(manager, "_service_aliases_for_phase", lambda phase: (alias,))
-    monkeypatch.setattr(manager, "_service_owners", lambda base, aliases: {"relay-id": [alias]})
+def test_relay_names_use_the_current_bridge_endpoint(monkeypatch, address, alias, valid):
+    manager = _network_manager()
+    monkeypatch.setattr(manager, "_relay_aliases", lambda: (alias,))
+    monkeypatch.setattr(manager, "_relay_owners", lambda: {"relay-id": [alias]})
     monkeypatch.setattr(
         manager,
         "_inspect_network",
@@ -276,16 +296,14 @@ def test_fixed_aliases_use_the_current_bridge_endpoint(monkeypatch, address, ali
         },
     )
     if valid:
-        assert manager.fixed_service_addresses("agent", "private-bridge") == {
-            "agent-gateway": "10.240.0.2"
-        }
+        assert manager.relay_addresses("group-bridge") == {"agent-gateway": "10.240.0.2"}
     else:
         with pytest.raises(SandboxError):
-            manager.fixed_service_addresses("agent", "private-bridge")
+            manager.relay_addresses("group-bridge")
 
 
-def test_hosts_refresh_replaces_setup_aliases_and_is_idempotent(monkeypatch, tmp_path):
-    manager = _manager()
+def test_guest_network_sync_replaces_relays_and_resolver_and_is_idempotent(monkeypatch, tmp_path):
+    manager = _network_manager()
     spec = ChatSandboxSpec(
         thread_id="thread", sandbox_id="sandbox", generation=1, runtime_id="claude-code"
     )
@@ -297,42 +315,93 @@ def test_hosts_refresh_replaces_setup_aliases_and_is_idempotent(monkeypatch, tmp
         image="image",
         labels=spec.docker_labels(),
         mounts=(),
-        networks=("agent-net",),
+        networks=("group-net",),
         sandbox_runtime=KATA_RUNTIME,
     )
-    monkeypatch.setattr(manager, "network_for_phase", lambda spec, phase: phase + "-net")
+    monkeypatch.setattr(manager, "network_for", lambda spec: "group-net")
     hosts = tmp_path / "hosts"
     hosts.write_text(
-        "127.0.0.1 localhost\n# BEGIN FREEINFERENCE RELAYS\n10.1.0.2 old-proxy\n# END FREEINFERENCE RELAYS\n"
+        "127.0.0.1 localhost\n# BEGIN FREEINFERENCE RELAYS\n10.1.0.2 old-proxy\n"
+        "# END FREEINFERENCE RELAYS\n"
     )
-    hosts.chmod(0o644)
+    resolv = tmp_path / "resolv.conf"
+    resolv.write_text("nameserver 10.0.0.2\nsearch corp.example\n")
+    for path in (hosts, resolv):
+        path.chmod(0o644)
+    guest = {"/etc/hosts": hosts, "/etc/resolv.conf": resolv}
     addresses = {"agent-gateway": "10.2.0.2", "agent-mcp": "10.2.0.3"}
-    monkeypatch.setattr(manager, "fixed_service_addresses", lambda phase, network: addresses)
+    monkeypatch.setattr(manager, "relay_addresses", lambda network: addresses)
     actual_open, actual_stat = os.open, os.fstat
-    monkeypatch.setattr(
-        os, "open", lambda path, flags: actual_open(hosts if path == "/etc/hosts" else path, flags)
-    )
+    monkeypatch.setattr(os, "open", lambda path, flags: actual_open(guest.get(path, path), flags))
     monkeypatch.setattr(
         os, "fstat", lambda fd: SimpleNamespace(st_uid=0, st_mode=actual_stat(fd).st_mode)
     )
 
     def run(spec, argv, **kwargs):
-        monkeypatch.setattr("sys.argv", ["-c", argv[3]])
-        exec(compile(argv[2], "<fixed-service-hosts>", "exec"), {})
+        monkeypatch.setattr("sys.argv", ["-c", *argv[3:]])
+        exec(compile(argv[2], "<guest-network>", "exec"), {})
         return SimpleNamespace(returncode=0, stderr="")
 
     monkeypatch.setattr(manager, "_kata_privileged_exec", run)
-    manager._sync_kata_service_hosts(spec, current)
+    manager._sync_kata_guest_network(spec, current)
     first = hosts.read_text()
     assert "127.0.0.1 localhost" in first
     assert "old-proxy" not in first
     assert "10.2.0.2 agent-gateway" in first
-    manager._sync_kata_service_hosts(spec, current)
+    # The deployment's one resolver, and nothing the image or a previous
+    # generation left behind.
+    assert resolv.read_text() == "nameserver 1.1.1.1\n"
+    manager._sync_kata_guest_network(spec, current)
     assert hosts.read_text() == first
     addresses["agent-gateway"] = "10.3.0.2"
-    manager._sync_kata_service_hosts(spec, current)
+    manager._sync_kata_guest_network(spec, current)
     assert "10.2.0.2" not in hosts.read_text()
     assert "10.3.0.2 agent-gateway" in hosts.read_text()
+
+
+def test_guest_network_sync_refuses_a_file_the_guest_user_could_rewrite(monkeypatch, tmp_path):
+    manager = _network_manager()
+    spec = ChatSandboxSpec(
+        thread_id="thread", sandbox_id="sandbox", generation=1, runtime_id="claude-code"
+    )
+    current = ChatSandboxInspection(
+        container_id="container-id",
+        name=spec.container_name,
+        status=ChatSandboxStatus.RUNNING,
+        running=True,
+        image="image",
+        labels=spec.docker_labels(),
+        mounts=(),
+        networks=("group-net",),
+        sandbox_runtime=KATA_RUNTIME,
+    )
+    monkeypatch.setattr(manager, "network_for", lambda spec: "group-net")
+    monkeypatch.setattr(manager, "relay_addresses", lambda network: {})
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 localhost\n")
+    hosts.chmod(0o644)
+    resolv = tmp_path / "resolv.conf"
+    resolv.write_text("nameserver 10.0.0.2\n")
+    resolv.chmod(0o666)
+    guest = {"/etc/hosts": hosts, "/etc/resolv.conf": resolv}
+    actual_open, actual_stat = os.open, os.fstat
+    monkeypatch.setattr(os, "open", lambda path, flags: actual_open(guest.get(path, path), flags))
+    monkeypatch.setattr(
+        os, "fstat", lambda fd: SimpleNamespace(st_uid=0, st_mode=actual_stat(fd).st_mode)
+    )
+
+    def run(spec, argv, **kwargs):
+        monkeypatch.setattr("sys.argv", ["-c", *argv[3:]])
+        try:
+            exec(compile(argv[2], "<guest-network>", "exec"), {})
+        except RuntimeError as exc:
+            return SimpleNamespace(returncode=1, stderr=str(exc))
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(manager, "_kata_privileged_exec", run)
+    with pytest.raises(SandboxError, match=r"resolv\.conf"):
+        manager._sync_kata_guest_network(spec, current)
+    assert resolv.read_text() == "nameserver 10.0.0.2\n"
 
 
 def _self_test_manager(monkeypatch):
