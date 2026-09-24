@@ -709,7 +709,7 @@ def _run_descriptor(monkeypatch, **overrides: Any) -> dict[str, Any]:
     """Turn profiling on in this process with one usable run."""
     import json
 
-    from cloud_agent_profiling import operation_profiling
+    from cloud_agent_shared import operation_profiling
 
     descriptor = {**_descriptor(), **overrides}
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
@@ -726,7 +726,7 @@ def test_the_host_hands_its_selection_to_the_child(monkeypatch):
     the whole feature is silent on the path production actually uses.
     """
     from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult
-    from cloud_agent_profiling import operation_profiling
+    from cloud_agent_shared import operation_profiling
 
     _run_descriptor(monkeypatch)
     payload = {
@@ -798,7 +798,7 @@ def test_the_spawn_payload_keeps_only_the_profiling_handoff():
 @pytest.mark.parametrize("outcome", [LAUNCH_NOT_STARTED, LAUNCH_UNCERTAIN])
 def test_a_parent_side_handover_failure_delivers_its_measurement(monkeypatch, outcome):
     """Failures before a child owns the sample still reach persistence."""
-    from cloud_agent_profiling import operation_profiling
+    from cloud_agent_shared import operation_profiling
 
     _run_descriptor(monkeypatch)
     payload = {
@@ -847,7 +847,7 @@ def test_an_expired_selection_is_delivered_by_the_parent_before_handoff(monkeypa
     """The child runs unmeasured, while the partial claim sample is retained."""
     import time
 
-    from cloud_agent_profiling import operation_profiling
+    from cloud_agent_shared import operation_profiling
 
     _run_descriptor(monkeypatch)
     payload = {
@@ -902,7 +902,7 @@ def test_a_turn_process_reattaches_the_selection_it_was_handed(monkeypatch):
     import os
 
     from cloud_agent_host.host_runtime import encode_turn
-    from cloud_agent_profiling import operation_profiling
+    from cloud_agent_shared import operation_profiling
 
     _run_descriptor(monkeypatch)
     read_fd, write_fd = os.pipe()
@@ -1012,7 +1012,7 @@ def test_a_child_never_refuses_a_turn_over_an_unusable_selection(monkeypatch):
 
 def test_a_poll_that_claimed_nothing_spends_no_slot(monkeypatch):
     """An idle poll is not a startup, so it must not consume the experiment."""
-    from cloud_agent_profiling import operation_profiling
+    from cloud_agent_shared import operation_profiling
 
     _run_descriptor(monkeypatch, max_operations=1)
 
@@ -1047,7 +1047,7 @@ def _sink_with(monkeypatch: Any, tmp_path: Any, records: list[dict[str, Any]]) -
     """Point profiling at a sink holding these frozen records."""
     import json
 
-    from cloud_agent_profiling import operation_profiling
+    from cloud_agent_shared import operation_profiling
 
     sink = tmp_path / "records.jsonl"
     sink.write_text("".join(json.dumps(record) + "\n" for record in records))
@@ -1174,7 +1174,7 @@ def test_a_turn_with_no_measurement_delivers_nothing(monkeypatch, tmp_path):
     """Profiling off means no sink, no request and no cost."""
     import os
 
-    from cloud_agent_profiling import operation_profiling
+    from cloud_agent_shared import operation_profiling
 
     monkeypatch.delenv(operation_profiling.ENV_PROFILING_SINK, raising=False)
     control = _StubControl([])
@@ -1188,7 +1188,7 @@ def test_a_turn_with_no_measurement_delivers_nothing(monkeypatch, tmp_path):
 
 def test_runtime_delivery_does_not_require_the_optional_jsonl_sink(monkeypatch):
     """Admin persistence is independent of the operator's baseline file."""
-    from cloud_agent_profiling import operation_profiling
+    from cloud_agent_shared import operation_profiling
 
     _run_descriptor(monkeypatch)
     monkeypatch.delenv(operation_profiling.ENV_PROFILING_SINK, raising=False)
@@ -1251,7 +1251,7 @@ def _claimed(job_id: str = "ajob_1") -> Any:
 @pytest.fixture
 def startup_measurement(monkeypatch) -> Any:
     """A selected, frozen startup measurement, under a live experiment."""
-    from cloud_agent_profiling import operation_profiling
+    from cloud_agent_shared import operation_profiling
 
     _run_descriptor(monkeypatch)
     measurement = operation_profiling.start_operation(
@@ -1569,7 +1569,7 @@ def test_a_sink_that_does_not_exist_yet_is_not_a_completed_send(
     """
     import json as _json
 
-    from cloud_agent_profiling import operation_profiling
+    from cloud_agent_shared import operation_profiling
 
     class _Recorder:
         """Records what a delivery would have sent, without a network."""
@@ -1620,7 +1620,7 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
     """
     import threading
 
-    from cloud_agent_profiling import operation_profiling
+    from cloud_agent_shared import operation_profiling
 
     _run_descriptor(monkeypatch)
     sink = tmp_path / "records.jsonl"
@@ -1720,7 +1720,7 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
 
 def test_profiling_off_sends_nothing_at_all(monkeypatch, tmp_path):
     """The switch is the promise: off means no request, no sink, no record."""
-    from cloud_agent_profiling import operation_profiling
+    from cloud_agent_shared import operation_profiling
 
     monkeypatch.delenv(operation_profiling.ENV_PROFILING_ENABLED, raising=False)
     monkeypatch.delenv(operation_profiling.ENV_PROFILING_RUN, raising=False)

@@ -38,7 +38,8 @@ from cloud_agent.operation_measurement import (
     INTERACTION_HEADER,
     reset as reset_selections,
 )
-from cloud_agent_profiling import operation_call, operation_profiling
+from cloud_agent_host import operation_call
+from cloud_agent_shared import operation_profiling
 
 ADMIN = {"Authorization": "Bearer admin-e2e-test"}
 RUN_ID = "e2e-run-1"

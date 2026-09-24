@@ -158,7 +158,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from cloud_agent import broker_routing, measurement_writer
 from cloud_agent.operation_measurement import reset as reset_selections
-from cloud_agent_profiling import operation_call, operation_profiling
+from cloud_agent_host import operation_call
+from cloud_agent_shared import operation_profiling
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -717,7 +718,8 @@ def _quiet_logging() -> None:
     # The application configures logging for ``cloud_agent`` at INFO; the
     # benchmark's report is the output, so its lifecycle lines are silenced.
     logging.getLogger("cloud_agent").setLevel(logging.WARNING)
-    logging.getLogger("cloud_agent_profiling").setLevel(logging.WARNING)
+    for module in (operation_profiling, operation_call):
+        logging.getLogger(module.__name__).setLevel(logging.WARNING)
 
 
 def _open_session_environment(config: dict[str, Any], args: argparse.Namespace) -> None:

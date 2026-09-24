@@ -40,7 +40,7 @@ from cloud_agent.measurement_writer import MeasurementWriter
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
 from cloud_agent_host.runner import ClaimedJob, ControlPlane, deliver_measurements
-from cloud_agent_profiling import operation_profiling
+from cloud_agent_shared import operation_profiling
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

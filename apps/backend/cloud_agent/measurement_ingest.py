@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Final
 
-from cloud_agent_profiling.operation_profiling import (
+from cloud_agent_shared.operation_profiling import (
     BOUNDARIES_BY_OPERATION,
     COVERAGE_HOST_STARTUP,
     COVERAGE_SERVER_REQUEST,

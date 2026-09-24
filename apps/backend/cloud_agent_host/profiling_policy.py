@@ -46,7 +46,7 @@ from typing import Any
 
 import httpx
 
-from cloud_agent_profiling.operation_profiling import (
+from cloud_agent_shared.operation_profiling import (
     MODE_ADMIN,
     ControlState,
     ProfilingRun,

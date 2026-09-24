@@ -82,6 +82,17 @@ from cloud_agent_host.host_runtime import (
     write_handover,
 )
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
+from cloud_agent_host.measurement_delivery import (
+    DELIVERY_ATTEMPTS_MAX,
+    DELIVERY_BYTES_MAX,
+    DELIVERY_DRAIN_S,
+    DELIVERY_HANDOFF_DRAIN_S,
+    DELIVERY_QUEUE_MAX,
+    DELIVERY_TIMEOUT_S,
+    attempts_exhausted,
+    classify_exception,
+    classify_response,
+)
 from cloud_agent_host.patch_gate import branch_name_for
 from cloud_agent_host.profiling_policy import ProfilingPolicySync
 from cloud_agent_host.resident_transport import ResidentLaunch
@@ -116,18 +127,7 @@ from cloud_agent_host.shared_protocol import (
     shared_deployment_capability,
 )
 from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
-from cloud_agent_profiling import operation_profiling
-from cloud_agent_profiling.measurement_delivery import (
-    DELIVERY_ATTEMPTS_MAX,
-    DELIVERY_BYTES_MAX,
-    DELIVERY_DRAIN_S,
-    DELIVERY_HANDOFF_DRAIN_S,
-    DELIVERY_QUEUE_MAX,
-    DELIVERY_TIMEOUT_S,
-    attempts_exhausted,
-    classify_exception,
-    classify_response,
-)
+from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.git.source_archive import build_upload_archive
 
 DEFAULT_LEASE_TTL_S = 120.0

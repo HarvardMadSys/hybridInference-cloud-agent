@@ -36,7 +36,7 @@ from cloud_agent_host.shared_session_supervisor import (
     SharedMemberManifest,
 )
 from cloud_agent_host.workspace_broker import SharedSandboxIdentityRequest, create_app
-from cloud_agent_profiling import operation_profiling
+from cloud_agent_shared import operation_profiling
 
 
 class _Manager:

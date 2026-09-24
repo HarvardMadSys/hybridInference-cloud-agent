@@ -61,7 +61,7 @@ from cloud_agent_host.session_lifecycle import (
     SessionBusy,
     SessionLeaseLost,
 )
-from cloud_agent_profiling.operation_profiling import (
+from cloud_agent_shared.operation_profiling import (
     StageRecorder,
     context_call_id,
     start_stage_recording,

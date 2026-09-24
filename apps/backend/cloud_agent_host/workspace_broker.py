@@ -49,6 +49,7 @@ from cloud_agent_host.guest_observer import (
     attribute_processes,
 )
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
+from cloud_agent_host.operation_call import BrokerCall, closed, open_call
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
 from cloud_agent_host.retained_workspace import (
@@ -84,8 +85,7 @@ from cloud_agent_host.workspace_browser import (
     WorkspacePathError,
     normalize_workspace_path,
 )
-from cloud_agent_profiling.operation_call import BrokerCall, closed, open_call
-from cloud_agent_profiling.operation_profiling import PROFILING_CONTEXT_HEADER
+from cloud_agent_shared.operation_profiling import PROFILING_CONTEXT_HEADER
 
 logger = get_logger(__name__)
 

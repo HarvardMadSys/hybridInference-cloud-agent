@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.logging_utils import get_logger
-from cloud_agent_profiling.operation_profiling import (
+from cloud_agent_shared.operation_profiling import (
     MODE_ADMIN,
     SOURCE_ADMIN,
     ControlState,

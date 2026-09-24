@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from cloud_agent_profiling import operation_profiling as profiling
+from cloud_agent_shared import operation_profiling as profiling
 
 
 class _FakeClock:

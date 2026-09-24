@@ -66,7 +66,7 @@ from cloud_agent.profiling_control_config import profiling_control_deployment
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import mint_host_token
 from cloud_agent.workers.profiling_control import ProfilingPolicyWorker
-from cloud_agent_profiling import operation_profiling
+from cloud_agent_shared import operation_profiling
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

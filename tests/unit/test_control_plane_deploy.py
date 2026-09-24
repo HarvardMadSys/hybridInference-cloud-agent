@@ -156,11 +156,11 @@ def test_the_compose_only_sets_variables_the_code_reads(control_plane_env: dict)
     """
     sources = "\n".join(
         path.read_text()
-        for root in (
-            REPO_ROOT / "apps" / "backend" / "cloud_agent",
-            REPO_ROOT / "apps" / "backend" / "cloud_agent_profiling",
+        for root, pattern in (
+            (REPO_ROOT / "apps" / "backend" / "cloud_agent", "*.py"),
+            (REPO_ROOT / "apps" / "backend" / "cloud_agent_shared", "operation_profiling.py"),
         )
-        for path in root.rglob("*.py")
+        for path in root.rglob(pattern)
         if "__pycache__" not in str(path)
     )
     unread = [name for name in control_plane_env if f'"{name}"' not in sources]

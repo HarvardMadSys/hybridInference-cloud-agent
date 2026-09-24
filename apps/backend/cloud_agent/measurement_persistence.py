@@ -25,7 +25,7 @@ from cloud_agent.measurement_ingest import (
     validate_measurement,
     validate_run,
 )
-from cloud_agent_profiling.operation_profiling import manifest_for_run as _manifest_for_run
+from cloud_agent_shared.operation_profiling import manifest_for_run as _manifest_for_run
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
