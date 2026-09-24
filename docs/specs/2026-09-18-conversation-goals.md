@@ -251,8 +251,10 @@ reported.
 | `POST /v1/agent/threads/{thread_id}/goal/resume` | `paused → active`, recording the obligation to schedule |
 | `DELETE /v1/agent/threads/{thread_id}/goal` | Remove the goal and its queued rounds |
 
-`POST /v1/agent/jobs` and `POST /v1/agent/jobs/{job_id}/follow-ups` accept a
-`goal` alongside the message, and `/config` advertises `goal_limits` — which
+`POST /v1/agent/jobs` accepts a `goal` alongside the first message; a later
+message (`POST /v1/agent/threads/{thread_id}/messages`, which replaced the
+per-job follow-up route) carries none, and a goal set mid-conversation goes
+through `PUT …/goal` above. `/config` advertises `goal_limits` — which
 names the objective's bound and nothing else, because a deployment that
 advertised a round ceiling was telling every client that "unlimited" meant
 "fifty". `goal.max_rounds` is optional and absent in every request this UI

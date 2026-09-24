@@ -137,6 +137,25 @@ def wait_job(client: Client, job_id: str) -> dict[str, Any]:
     raise RuntimeError(f"job {job_id} did not settle within {JOB_TIMEOUT_S}s")
 
 
+def send_message(client: Client, turn: dict[str, Any], prompt: str) -> dict[str, Any]:
+    """Send the next message of a finished turn's conversation; return its turn.
+
+    The turn before it has ended, so the conversation is idle and the message
+    becomes the next turn in the same request. A message that was queued
+    instead would mean the control plane still counts a turn as running.
+    """
+    result = client.request(
+        f"/api/v1/agent/threads/{urllib.parse.quote(str(turn['thread_id']))}/messages",
+        method="POST",
+        body={"prompt": prompt},
+        headers={"Idempotency-Key": f"local-smoke-message-{secrets.token_hex(8)}"},
+    )
+    job = result.get("job")
+    if not isinstance(job, dict):
+        raise RuntimeError(f"a message to an idle conversation did not start a turn: {result}")
+    return job
+
+
 def require_assistant_reply(client: Client, job_id: str) -> None:
     """A successful confirmation task must have its own nonempty reply."""
     thread = client.request(f"/api/v1/agent/jobs/{urllib.parse.quote(job_id)}/thread")
@@ -339,10 +358,8 @@ def main() -> int:
         private_networks.add(private_network)
 
         print(f"  {runtime}: follow-up", flush=True)
-        follow_up = client.request(
-            f"/api/v1/agent/jobs/{urllib.parse.quote(str(first['id']))}/follow-ups",
-            method="POST",
-            body={"prompt": "Confirm that the same native session received this follow-up."},
+        follow_up = send_message(
+            client, first, "Confirm that the same native session received this follow-up."
         )
         live = wait_job(client, str(follow_up["id"]))
         if live.get("context_status") != "live":
@@ -364,10 +381,8 @@ def main() -> int:
     restored_sessions: dict[str, tuple[dict[str, Any], dict[str, Any], str, str]] = {}
     for runtime, (live, sandbox_id, original_id) in sessions.items():
         print(f"  {runtime}: stopped-container follow-up", flush=True)
-        restored_turn = client.request(
-            f"/api/v1/agent/jobs/{urllib.parse.quote(str(live['id']))}/follow-ups",
-            method="POST",
-            body={"prompt": f"Confirm that the stopped {runtime} sandbox restored this session."},
+        restored_turn = send_message(
+            client, live, f"Confirm that the stopped {runtime} sandbox restored this session."
         )
         restored = wait_job(client, str(restored_turn["id"]))
         if restored.get("context_status") != "restored":
@@ -453,25 +468,15 @@ def main() -> int:
         # attempts, grants, resident processes, and native session ids.
         concurrency_probe_key = f"{runtime}-{secrets.token_hex(8)}"
         concurrency_probe = f"[local-concurrency-probe:{concurrency_probe_key}]"
-        source_follow_up = client.request(
-            f"/api/v1/agent/jobs/{urllib.parse.quote(str(source['id']))}/follow-ups",
-            method="POST",
-            body={
-                "prompt": (
-                    f"Continue the source {runtime} session after its native fork. "
-                    f"{concurrency_probe}"
-                )
-            },
+        source_follow_up = send_message(
+            client,
+            source,
+            f"Continue the source {runtime} session after its native fork. {concurrency_probe}",
         )
-        child_follow_up = client.request(
-            f"/api/v1/agent/jobs/{urllib.parse.quote(str(forked['id']))}/follow-ups",
-            method="POST",
-            body={
-                "prompt": (
-                    f"Continue the child {runtime} session after its native fork. "
-                    f"{concurrency_probe}"
-                )
-            },
+        child_follow_up = send_message(
+            client,
+            forked,
+            f"Continue the child {runtime} session after its native fork. {concurrency_probe}",
         )
         wait_concurrently_running(
             client,
@@ -501,10 +506,8 @@ def main() -> int:
         "[7/7] Group idle stops once; waking either child restores that exact container", flush=True
     )
     for runtime, (child_live, sandbox_id, original_id) in forked_sessions.items():
-        restored_turn = client.request(
-            f"/api/v1/agent/jobs/{urllib.parse.quote(str(child_live['id']))}/follow-ups",
-            method="POST",
-            body={"prompt": f"Restore the stopped shared {runtime} fork group from this child."},
+        restored_turn = send_message(
+            client, child_live, f"Restore the stopped shared {runtime} fork group from this child."
         )
         restored_child = wait_job(client, str(restored_turn["id"]))
         if restored_child.get("context_status") != "restored":
