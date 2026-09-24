@@ -141,6 +141,16 @@ async def test_a_message_sent_now_joins_the_running_turn_and_is_not_sent_again(a
         ("fix it", False),
         ("also check the docs", True),
     ]
+    # Recording the same delivery again finds nothing left to record.
+    again = await api.store.pending_messages.finish_send_now(
+        message_id=waiting["id"],
+        revision=waiting["revision"] + 1,
+        job_id=job["id"],
+        attempt_id=running["attempt_id"],
+        delivered=True,
+    )
+    assert again == {"stale": True}
+    assert await _mid_turn_rows(api, job["id"]) == (events, rows)
 
     # The turn ends: the message was delivered, so it is not a turn of its own.
     await api.finish(running)
