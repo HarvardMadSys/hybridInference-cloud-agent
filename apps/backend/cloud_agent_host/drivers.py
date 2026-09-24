@@ -24,10 +24,13 @@ provide the same lifecycle guarantees to the threaded host runner.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import queue
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
 
@@ -54,12 +57,11 @@ from cloud_agent_host.runtimes import (
 from cloud_agent_host.sandbox import STATE_MOUNT_TARGET
 from cloud_agent_host.tool_windows import TOOL_MARK_FILE, hook_settings
 from cloud_agent_shared.shared_protocol import (
-    INPUT_NO_BOUNDARY,
-    INPUT_NO_REPLY,
     INPUT_PROCESS_GONE,
     INPUT_REFUSED,
     INPUT_TURN_ENDED,
     INPUT_UNSUPPORTED,
+    USER_MESSAGE_EVENT,
 )
 
 if TYPE_CHECKING:
@@ -163,10 +165,55 @@ class HarnessCapabilities:
 
 @dataclass(frozen=True)
 class InputOutcome:
-    """Whether a running turn took a message, and if not, which shared word says why."""
+    """Whether a running turn has a message, and if not, which shared word says why.
+
+    Accepted means the turn holds it: it will be put in front of the model at
+    the runtime's next chance, and the turn's stream says so with a
+    ``USER_MESSAGE_EVENT`` when it is. A turn that ends first never took it.
+    """
 
     accepted: bool
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class PendingInput:
+    """A message the owner chose to send into a running turn."""
+
+    message_id: str
+    text: str
+
+
+def _json_object(line: str) -> dict[str, Any] | None:
+    try:
+        value = json.loads(line)
+    except (ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _record_text(record: dict[str, Any]) -> str:
+    """The text blocks of one stream-json message record, joined."""
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        str(block.get("text") or "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+
+def user_message_event(pending: PendingInput, *, raw_line: str | None = None) -> HarnessEvent:
+    """The stream event saying the turn took ``pending`` at this point."""
+    return HarnessEvent(
+        USER_MESSAGE_EVENT,
+        {"text": pending.text, "pending_message_id": pending.message_id},
+        raw_line=raw_line,
+    )
 
 
 #: Prefix of the request id a Codex steer is sent under. A reply that arrives
@@ -176,6 +223,11 @@ STEER_REQUEST_PREFIX = "steer"
 #: How long a steer waits for the CLI to say it took the message. The reply is
 #: read by the turn's own stream, which never pauses while a turn is live.
 STEER_REPLY_TIMEOUT_S = 10.0
+#: Claude answers a message it had not read by its result as a new turn of its
+#: own, at once (the pinned 2.1.220). How long to wait for that turn to start,
+#: and then for it to end once interrupted, before giving up on it.
+CLAUDE_UNANSWERED_START_S = 5.0
+CLAUDE_UNANSWERED_END_S = 60.0
 
 
 @dataclass(frozen=True)
@@ -290,8 +342,12 @@ class HarnessTurn(Generic[_RuntimeT]):
         """
         yield HarnessEvent(TURN_STARTED)
         for line in self._process.lines():
-            yield self.event_for_line(line)
+            yield from self.events_for_line(line)
         yield self.finish_event()
+
+    def events_for_line(self, line: str) -> list[HarnessEvent]:
+        """Every event one stdout line stands for; usually exactly one."""
+        return [self.event_for_line(line)]
 
     def event_for_line(self, line: str) -> HarnessEvent:
         """Map one stdout line to its event; :data:`LINE` when there is none."""
@@ -323,7 +379,7 @@ class HarnessTurn(Generic[_RuntimeT]):
         self._cancelled = True
         self._process.kill()
 
-    def inject(self, text: str) -> InputOutcome:
+    def inject(self, text: str, *, message_id: str) -> InputOutcome:
         """Hand ``text`` to this running turn, as the owner's next message in it.
 
         A driver that declares ``steering="mid_turn"`` overrides this. Called
@@ -557,6 +613,9 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
         # Answers to requests sent while the turn runs. Only the stream reads
         # stdout, so it hands each one over instead of the sender reading it.
         self._replies: dict[str, _ProtocolReply] = {}
+        # The message each steer carries, kept after its sender stops waiting:
+        # the stream reports the message taken whenever its answer arrives.
+        self._steers: dict[str, PendingInput] = {}
         self._replies_lock = threading.Lock()
 
     def raw_lines(self) -> Iterator[str]:
@@ -573,12 +632,13 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
     def iter_events(self) -> Iterator[HarnessEvent]:
         yield HarnessEvent(TURN_STARTED)
         for line in self.raw_lines():
-            yield self.event_for_line(line)
+            yield from self.events_for_line(line)
         yield self.finish_event()
 
     def event_for_line(self, line: str) -> HarnessEvent:
-        if self._took_reply(line):
-            return HarnessEvent(LINE, raw_line=line)
+        reply = self._reply_event(line)
+        if reply is not None:
+            return reply
         event = self._session.event_for_protocol_line(line, self)
         if event.event_type == MESSAGE:
             text = str(event.payload.get("text", ""))
@@ -593,33 +653,51 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
             self._replies[request_id] = reply
         return reply
 
+    def expect_steer(self, request_id: str, pending: PendingInput) -> _ProtocolReply:
+        """Register a steer: its sender waits, and the stream reports it taken."""
+        with self._replies_lock:
+            self._steers[request_id] = pending
+        return self.expect_reply(request_id)
+
     def forget_reply(self, request_id: str) -> None:
         """Stop waiting; a late answer is then dropped by its prefix."""
         with self._replies_lock:
             self._replies.pop(request_id, None)
 
-    def _took_reply(self, line: str) -> bool:
-        """Whether ``line`` answers a request sent mid-turn, which is not an event."""
+    def _reply_event(self, line: str) -> HarnessEvent | None:
+        """What ``line`` is if it answers a request sent mid-turn, else ``None``.
+
+        An answer is not an event of its own, except the one that accepts a
+        steer: that is where the turn took the owner's message.
+        """
         value = self._session._object(line)
         if value is None or "method" in value or ("result" not in value and "error" not in value):
-            return False
+            return None
         request_id = value.get("id")
         if not isinstance(request_id, str):
-            return False
+            return None
         with self._replies_lock:
             reply = self._replies.pop(request_id, None)
-        if reply is None:
-            # Answered after its turn settled, or after the sender gave up: not
-            # this turn's error, and not something anyone is waiting for.
-            return request_id.startswith(f"{STEER_REQUEST_PREFIX}-")
-        reply.settle(value)
-        return True
+            steer = self._steers.pop(request_id, None)
+        if reply is not None:
+            reply.settle(value)
+        if steer is not None and value.get("error") is None:
+            return user_message_event(steer, raw_line=line)
+        if (
+            reply is None
+            and steer is None
+            and not request_id.startswith(f"{STEER_REQUEST_PREFIX}-")
+        ):
+            return None
+        # Answered after its turn settled, or a refusal: not this turn's error,
+        # and not something anyone is still waiting for.
+        return HarnessEvent(LINE, raw_line=line)
 
-    def inject(self, text: str) -> InputOutcome:
+    def inject(self, text: str, *, message_id: str) -> InputOutcome:
         """Hand ``text`` to the running turn through the session's native seam."""
         if self._cancelled or self._saw_result or self._result is not None:
             return InputOutcome(False, INPUT_TURN_ENDED)
-        return self._session.inject_input(self, text)
+        return self._session.inject_input(self, PendingInput(message_id, text))
 
     def cancel(self) -> None:
         """Use the exact native interrupt; preserve the resident transport."""
@@ -686,8 +764,10 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
         except OSError as exc:
             raise DriverError(f"resident process is gone: {exc}") from exc
 
-    def inject_input(self, turn: _JsonResidentTurn[_LiveRuntimeT], text: str) -> InputOutcome:
-        """Hand ``text`` to ``turn`` mid-turn; a protocol without a seam declines."""
+    def inject_input(
+        self, turn: _JsonResidentTurn[_LiveRuntimeT], pending: PendingInput
+    ) -> InputOutcome:
+        """Hand ``pending`` to ``turn`` mid-turn; a protocol without a seam declines."""
         return InputOutcome(False, INPUT_UNSUPPORTED)
 
     def _next_line(self) -> str:
@@ -1035,19 +1115,22 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
             )
         return raw_notification
 
-    def inject_input(self, turn: _JsonResidentTurn[CodexRuntime], text: str) -> InputOutcome:
-        """Steer the running Codex turn: its next model request carries ``text``.
+    def inject_input(
+        self, turn: _JsonResidentTurn[CodexRuntime], pending: PendingInput
+    ) -> InputOutcome:
+        """Steer the running Codex turn: its next model request carries the text.
 
         ``turn/steer`` names the turn it expects, so a message can never land in
-        a different turn than the one the owner saw running. The answer only
-        says the app-server accepted it; delivery is the next model request of
-        the same turn, which is also where Codex puts it (verified against the
-        pinned 0.145.0). A missing answer is reported as such, not as success.
+        a different turn than the one the owner saw running. Codex puts it in
+        the same turn's next model request (verified against the pinned
+        0.145.0); the turn's stream reports it taken where the acceptance
+        arrives. An answer that is slow to come is still reported by the
+        stream if it accepts, so waiting too long is not a refusal.
         """
         if not turn.protocol_turn_id:
             return InputOutcome(False, INPUT_TURN_ENDED)
         request_id = self._request_id(STEER_REQUEST_PREFIX)
-        reply = turn.expect_reply(request_id)
+        reply = turn.expect_steer(request_id, pending)
         try:
             self._write_json(
                 {
@@ -1056,7 +1139,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                     "params": {
                         "threadId": self.runtime.session_id,
                         "expectedTurnId": turn.protocol_turn_id,
-                        "input": [{"type": "text", "text": text}],
+                        "input": [{"type": "text", "text": pending.text}],
                     },
                 }
             )
@@ -1066,7 +1149,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
         answer = reply.wait(STEER_REPLY_TIMEOUT_S)
         if answer is None:
             turn.forget_reply(request_id)
-            return InputOutcome(False, INPUT_NO_REPLY)
+            return InputOutcome(True)
         error = answer.get("error")
         if error is None:
             return InputOutcome(True)
@@ -1575,7 +1658,13 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         # message written while one is running into this turn's next model
         # request; written at any other moment it opens a turn of its own.
         self._open_tool_uses: set[str] = set()
-        self._tools_lock = threading.Lock()
+        # Messages the owner sent into this turn: held until the model next
+        # calls a tool, then written, then taken once the CLI echoes them.
+        self._held: list[PendingInput] = []
+        self._written: list[PendingInput] = []
+        # Set when the stream reaches the result: nothing is taken after it.
+        self._input_closed = False
+        self._input_lock = threading.Lock()
 
     def event_for_line(self, line: str) -> HarnessEvent:
         """Preserve terminal failure independently of the resident process exit."""
@@ -1592,6 +1681,10 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
                 # Check before the normalizer can overwrite its saved id or
                 # expose another session's answer as a successful follow-up.
                 raise DriverError("Claude reported a different native session")
+        if isinstance(record, dict) and record.get("type") == "user" and record.get("isReplay"):
+            # The CLI echoing a user message it just read: the prompt, or one
+            # the owner sent into the turn. Never an event of its own.
+            return HarnessEvent(LINE, raw_line=line)
         if isinstance(record, dict):
             self._track_tool_calls(record)
         event = super().event_for_line(line)
@@ -1611,6 +1704,15 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
             yield line
             if self._runtime.turn_settled(line):
                 self._saw_result = True
+                with self._input_lock:
+                    self._input_closed = True
+                    self._held.clear()
+                    unread, self._written = self._written, []
+                if unread:
+                    # Written, but the CLI had not read them by its result: it
+                    # is about to answer them as a turn of its own. They are
+                    # the next turn's, so that one is stopped and discarded.
+                    self._session.discard_unanswered_turn()
                 # Opportunistic reap: a process that died right after its
                 # result must not linger as a zombie until the session closes.
                 self._process.poll()
@@ -1620,8 +1722,26 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         """Floor + dialect events for this turn only."""
         yield HarnessEvent(TURN_STARTED)
         for line in self.raw_lines():
-            yield self.event_for_line(line)
+            yield from self.events_for_line(line)
         yield self.finish_event()
+
+    def events_for_line(self, line: str) -> list[HarnessEvent]:
+        """The line's event, or the owner's messages the CLI just took.
+
+        With ``--replay-user-messages`` the CLI echoes a message on stdout at
+        the moment it reads it into the conversation: after the tool it was
+        written during, before the model's next request (the pinned 2.1.220).
+        That echo is where the turn took the message.
+        """
+        record = _json_object(line)
+        if record is not None and record.get("type") == "user" and record.get("isReplay"):
+            echoed = _record_text(record)
+            with self._input_lock:
+                taken = [pending for pending in self._written if pending.text in echoed]
+                self._written = [pending for pending in self._written if pending not in taken]
+            if taken:
+                return [user_message_event(pending, raw_line=line) for pending in taken]
+        return [self.event_for_line(line)]
 
     def wait(self) -> TurnResult:
         """Settle this turn without waiting for the resident process to die."""
@@ -1630,7 +1750,7 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
                 # Settling without having drained the slice: consume it now —
                 # the boundary and the final message both live in the stream.
                 for line in self.raw_lines():
-                    self.event_for_line(line)
+                    self.events_for_line(line)
             # The process is deliberately still alive after a result. A stream
             # ending without one is a mid-turn death even if its code was zero.
             exit_code = int(self._error_result) if self._saw_result else self._process.wait() or 1
@@ -1656,14 +1776,19 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         """
         kind = record.get("type")
         if kind == "result":
-            with self._tools_lock:
+            with self._input_lock:
                 self._open_tool_uses.clear()
+                self._input_closed = True
+                # Held messages were never written: the turn answered without
+                # another tool call, so they wait and go as the next turn.
+                self._held.clear()
             return
         message = record.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         if kind not in {"assistant", "user"} or not isinstance(content, list):
             return
-        with self._tools_lock:
+        release: list[PendingInput] = []
+        with self._input_lock:
             for block in content:
                 if not isinstance(block, dict):
                     continue
@@ -1671,26 +1796,48 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
                     self._open_tool_uses.add(str(block["id"]))
                 elif kind == "user" and block.get("type") == "tool_result":
                     self._open_tool_uses.discard(str(block.get("tool_use_id") or ""))
+            if self._open_tool_uses and self._held:
+                # The model just called a tool: the CLI reads what is written
+                # now while it runs, and puts it before the model's next step.
+                release, self._held = self._held, []
+                self._written.extend(release)
+        for pending in release:
+            self._write_input(pending)
 
-    def inject(self, text: str) -> InputOutcome:
-        """Write ``text`` as a user message while a tool call is running.
-
-        Claude reads it after that tool finishes and puts it in the same turn's
-        next model request, where the model sees it as a message sent while it
-        was working (verified against the pinned 2.1.220). With no tool running
-        there is no such request coming: the CLI would answer it as a new turn
-        of its own after this one's result, which the platform never created.
-        So that is declined, and the message waits for the turn instead.
-        """
-        if self._cancelled or self._saw_result or self._result is not None:
-            return InputOutcome(False, INPUT_TURN_ENDED)
-        with self._tools_lock:
-            running_tool = bool(self._open_tool_uses)
-        if not running_tool:
-            return InputOutcome(False, INPUT_NO_BOUNDARY)
+    def _write_input(self, pending: PendingInput) -> bool:
+        """Write one held message; one the CLI cannot take goes as the next turn."""
         try:
-            self._session.send_to_turn(text)
+            self._session.send_to_turn(pending.text)
         except (OSError, DriverError):
+            with self._input_lock:
+                if pending in self._written:
+                    self._written.remove(pending)
+            return False
+        return True
+
+    def inject(self, text: str, *, message_id: str) -> InputOutcome:
+        """Take the owner's message for the model's next step before a tool call.
+
+        Written while a tool call is running, Claude reads it after that tool
+        and puts it in the same turn's next model request, where the model sees
+        it as a message sent while it was working (verified against the pinned
+        2.1.220). So it is written now if a tool is running, and otherwise held
+        until the model calls one. Written at any other moment the CLI would
+        answer it as a turn of its own after this one's result, which the
+        platform never created: a turn that answers without another tool call
+        never writes it, and it goes as the next turn.
+        """
+        pending = PendingInput(message_id, text)
+        with self._input_lock:
+            if self._cancelled or self._input_closed or self._result is not None:
+                return InputOutcome(False, INPUT_TURN_ENDED)
+            if any(held.message_id == message_id for held in (*self._held, *self._written)):
+                return InputOutcome(True)
+            if not self._open_tool_uses:
+                self._held.append(pending)
+                return InputOutcome(True)
+            self._written.append(pending)
+        if not self._write_input(pending):
             return InputOutcome(False, INPUT_PROCESS_GONE)
         return InputOutcome(True)
 
@@ -1746,6 +1893,11 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         self._extra_env = extra_env
         self._process: SandboxProcess | None = None
         self._lines: Iterator[str] | None = None
+        # Reading with a deadline takes a thread that reads stdout into this
+        # queue from then on; ``None`` in it is the end of the stream. Started
+        # only when a turn needs one, which is rare.
+        self._stdout: queue.Queue[str | None] | None = None
+        self._pushed_back: deque[str] = deque()
         self._model: str | None = None
         #: Pinned by the first turn alongside the model, and compared against
         #: every later one. ``None`` is a real value here (Auto), so this is
@@ -1767,10 +1919,79 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
             raise DriverError("Claude resident process is not alive")
         self._write_line(self.runtime.user_message_line(text))
 
-    def shared_lines(self) -> Iterator[str]:
-        """The session's single stdout reader, borrowed by the current turn."""
+    @staticmethod
+    def _pump(lines: Iterator[str], into: queue.Queue[str | None]) -> None:
+        try:
+            for line in lines:
+                into.put(line)
+        finally:
+            into.put(None)
+
+    def next_line(self, timeout: float | None) -> str | None:
+        """The next stdout line, ``None`` at its end; ``queue.Empty`` on timeout."""
+        if self._pushed_back:
+            return self._pushed_back.popleft()
         assert self._lines is not None
-        return self._lines
+        if self._stdout is None:
+            if timeout is None:
+                return next(self._lines, None)
+            self._stdout = queue.Queue()
+            threading.Thread(
+                target=self._pump, args=(self._lines, self._stdout), daemon=True
+            ).start()
+        line = self._stdout.get(timeout=timeout)
+        if line is None:
+            # Stay at the end for whoever reads next.
+            self._stdout.put(None)
+        return line
+
+    def shared_lines(self) -> Iterator[str]:
+        """The session's single stdout stream, borrowed by the current turn."""
+        while True:
+            line = self.next_line(None)
+            if line is None:
+                return
+            yield line
+
+    def discard_unanswered_turn(self) -> None:
+        """Stop the turn Claude opens by itself for messages it read too late.
+
+        Claude answers a message still unread at its result as a new turn of
+        its own, starting at once with a ``system``/``init`` line (verified
+        against the pinned 2.1.220). That turn belongs to nobody: it is
+        interrupted as soon as it starts and read to its end, so the platform's
+        next turn begins on a clean stream. The message it carried goes as that
+        next turn, so the native history holds it twice, once unanswered.
+        """
+        try:
+            line = self.next_line(CLAUDE_UNANSWERED_START_S)
+        except queue.Empty:
+            return
+        deadline = time.monotonic() + CLAUDE_UNANSWERED_END_S
+        interrupted = acknowledged = False
+        while line is not None:
+            record = _json_object(line) or {}
+            kind = record.get("type")
+            if not interrupted and kind == "system" and record.get("subtype") == "init":
+                with contextlib.suppress(DriverError, OSError):
+                    self.interrupt_turn()
+                interrupted = True
+            elif kind == "control_response":
+                acknowledged = True
+            elif kind == "result":
+                break
+            try:
+                line = self.next_line(max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                return
+        if interrupted and not acknowledged:
+            # The interrupt's acknowledgement may follow the result.
+            try:
+                line = self.next_line(1.0)
+            except queue.Empty:
+                return
+            if line is not None and (_json_object(line) or {}).get("type") != "control_response":
+                self._pushed_back.append(line)
 
     def start_turn(self, turn_input: TurnInput) -> HarnessTurn[ClaudeCodeRuntime]:
         """Feed one user turn to the resident process, spawning it lazily.

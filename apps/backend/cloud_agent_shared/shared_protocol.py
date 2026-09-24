@@ -39,31 +39,31 @@ def mid_turn_input_capability(runtime_id: str) -> str:
     return f"{MID_TURN_INPUT_CAPABILITY_PREFIX}{runtime_id}"
 
 
-#: Why a running turn did not take a message: the broker answers with one of
+#: The event a host puts in a turn's stream at the point the turn took a
+#: message its owner sent into it. The payload carries the text and names the
+#: waiting message (``pending_message_id``); the control plane moves that
+#: message into the transcript when it stores the event. A message the turn
+#: never took has no such event, and goes as the next turn instead.
+USER_MESSAGE_EVENT = "user_message"
+
+#: Why a running turn cannot take a message: the broker answers with one of
 #: these words and the owner's page says what each means. The message itself is
 #: never lost — it stays waiting and is sent when the turn ends.
-#: Nothing is in flight that the message could join (Claude takes one only
-#: while a tool runs; otherwise it would open a turn of its own).
-INPUT_NO_BOUNDARY = "no_boundary"
 #: The turn is over, or was never this one.
 INPUT_TURN_ENDED = "turn_ended"
 #: This runtime's driver cannot take mid-turn input.
 INPUT_UNSUPPORTED = "unsupported"
 #: The CLI process could not be written to.
 INPUT_PROCESS_GONE = "process_gone"
-#: The CLI did not answer in time, so it may or may not have taken it.
-INPUT_NO_REPLY = "no_reply"
 #: The CLI answered with a refusal the platform has no better word for.
 INPUT_REFUSED = "refused"
 #: The host that runs the turn could not be reached.
 INPUT_UNREACHABLE = "unreachable"
 INPUT_REFUSALS = frozenset(
     {
-        INPUT_NO_BOUNDARY,
         INPUT_TURN_ENDED,
         INPUT_UNSUPPORTED,
         INPUT_PROCESS_GONE,
-        INPUT_NO_REPLY,
         INPUT_REFUSED,
         INPUT_UNREACHABLE,
     }

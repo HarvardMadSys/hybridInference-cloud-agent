@@ -33,7 +33,7 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatLost,
     SandboxActionFacts,
 )
-from cloud_agent_host.drivers import DialectRuntime, InputOutcome
+from cloud_agent_host.drivers import DialectRuntime, InputOutcome, PendingInput
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_SOURCE,
     GuestObservation,
@@ -67,7 +67,6 @@ from cloud_agent_profiling.operation_profiling import (
     start_stage_recording,
     substage,
 )
-from cloud_agent_shared.shared_protocol import INPUT_TURN_ENDED
 from cloud_agent_shared.turn_resources import parse_cpu_capacity
 
 if TYPE_CHECKING:
@@ -321,6 +320,20 @@ NativeForker = Callable[
     str,
 ]
 
+#: How long a message sent into a turn that has not started here is kept for
+#: it. Long past any sandbox preparation; a turn that never starts leaves its
+#: message to the control plane, which sends it as the next turn instead.
+HELD_INPUT_TTL_S = 15 * 60.0
+
+
+@dataclass(frozen=True)
+class _HeldInput:
+    """A message for an owner's turn that has not started on this broker yet."""
+
+    owner: str
+    pending: PendingInput
+    held_at: float
+
 
 class SharedChatSessionSupervisor:
     """Own one live process per member and one Docker lifecycle per group."""
@@ -358,6 +371,7 @@ class SharedChatSessionSupervisor:
         self._native_forker = native_forker or self._transport_factory.fork_native
         self._groups: dict[str, _Group] = {}
         self._members: dict[str, _Group] = {}
+        self._held_inputs: dict[str, list[_HeldInput]] = {}
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._stop = threading.Event()
@@ -828,6 +842,7 @@ class SharedChatSessionSupervisor:
             member.turn_lock.release()
             raise
         admitted = False
+        held_inputs: list[PendingInput] = []
         with self._lock:
             current_group = self._members.get(thread_id)
             current_member = (
@@ -843,6 +858,7 @@ class SharedChatSessionSupervisor:
             )
             if admitted:
                 member.current_turn = turn
+                held_inputs = self._take_held_inputs(thread_id, member.lease_owner)
                 member.activation_processes = activation_processes
                 member.observer_cursor = observer_cursor
                 member.tool_mark_reader = tool_mark_reader
@@ -881,7 +897,18 @@ class SharedChatSessionSupervisor:
                 )
             member.turn_lock.release()
             raise SessionLeaseLost("shared sandbox lifecycle changed during turn admission")
+        for pending in held_inputs:
+            turn.inject(pending.text, message_id=pending.message_id)
         return turn
+
+    def _take_held_inputs(self, thread_id: str, owner: str | None) -> list[PendingInput]:
+        """Remove and return what was held for ``owner``'s turn; drop the rest."""
+        now = self._clock()
+        return [
+            held.pending
+            for held in self._held_inputs.pop(thread_id, [])
+            if held.owner == owner and now - held.held_at < HELD_INPUT_TTL_S
+        ]
 
     def complete_turn(
         self,
@@ -1386,21 +1413,38 @@ class SharedChatSessionSupervisor:
         if turn is not None:
             turn.interrupt()
 
-    def inject_input(self, thread_id: str, *, owner: str, text: str) -> InputOutcome:
-        """Hand the owner's message to this member's running turn, if it has one.
+    def inject_input(
+        self, thread_id: str, *, owner: str, message_id: str, text: str
+    ) -> InputOutcome:
+        """Hand the owner's message to this member's turn, running or about to.
 
-        ``owner`` is the lease owner the control plane expects to be running —
-        ``attempt:<id>`` — so a message meant for one attempt never reaches a
-        later one that re-leased the member. The runner's lease token is not
-        needed: this is the control plane's request, authenticated by the
-        broker, and the owner string is its fence. Siblings are untouched.
+        ``owner`` is the lease owner the control plane expects — ``attempt:<id>``
+        — so a message meant for one attempt never reaches a later one that
+        re-leased the member. The runner's lease token is not needed: this is
+        the control plane's request, authenticated by the broker, and the owner
+        string is its fence. Siblings are untouched. A turn that has not
+        started here yet (its sandbox is still being prepared) is given the
+        message when it starts; one that never does leaves it to the control
+        plane, which sends it as the next turn.
         """
         with self._lock:
-            _, member = self._member(thread_id)
-            turn = member.current_turn if member.lease_owner == owner else None
-        if turn is None:
-            return InputOutcome(False, INPUT_TURN_ENDED)
-        return turn.inject(text)
+            group = self._members.get(thread_id)
+            member = group.members.get(thread_id) if group is not None else None
+            turn = (
+                member.current_turn if member is not None and member.lease_owner == owner else None
+            )
+            if turn is None:
+                now = self._clock()
+                held = [
+                    entry
+                    for entry in self._held_inputs.get(thread_id, [])
+                    if now - entry.held_at < HELD_INPUT_TTL_S
+                ]
+                if all(entry.pending.message_id != message_id for entry in held):
+                    held.append(_HeldInput(owner, PendingInput(message_id, text), now))
+                self._held_inputs[thread_id] = held
+                return InputOutcome(True)
+        return turn.inject(text, message_id=message_id)
 
     def abort_turn(
         self,

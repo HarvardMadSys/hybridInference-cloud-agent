@@ -514,8 +514,11 @@ class ClaudeCodeRuntime(AgentRuntime):
 
         ``--input-format stream-json`` keeps the process alive between turns,
         reading user messages from stdin — the terminal-never-closed shape the
-        design's HOT tier is. The common argv/env builder stays shared with
-        runtime conformance tests so auth, model, and MCP flags cannot drift.
+        design's HOT tier is. ``--replay-user-messages`` echoes each one back
+        on stdout at the moment the CLI reads it into the conversation, which
+        is how a message sent into a running turn is known to have landed in
+        it. The common argv/env builder stays shared with runtime conformance
+        tests so auth, model, and MCP flags cannot drift.
         """
         argv, env = self.prepare(
             workdir=workdir,
@@ -532,7 +535,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         # Drop the empty positional prompt (`-p ""`), add the input format.
         prompt_at = argv.index("-p")
         del argv[prompt_at : prompt_at + 2]
-        argv[1:1] = ["-p", "--input-format", "stream-json"]
+        argv[1:1] = ["-p", "--input-format", "stream-json", "--replay-user-messages"]
         return argv, env
 
     @staticmethod
@@ -641,8 +644,12 @@ class ClaudeCodeRuntime(AgentRuntime):
         )
         return NormalizedEvent(MESSAGE, {"text": text, **usage_fields})
 
-    def _from_user(self, event: dict[str, Any]) -> NormalizedEvent:
+    def _from_user(self, event: dict[str, Any]) -> NormalizedEvent | None:
         """Map a tool result echoed back into the conversation."""
+        if event.get("isReplay"):
+            # A user message the CLI read from stdin, echoed back: the driver
+            # accounts for it, and it is nothing new to report.
+            return None
         blocks = (event.get("message") or {}).get("content") or []
         for block in blocks:
             if isinstance(block, dict) and block.get("type") == "tool_result":

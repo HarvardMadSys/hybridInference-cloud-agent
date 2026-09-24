@@ -176,9 +176,12 @@ class SharedInputRequest(BaseModel):
 
     ``owner`` names the activation the control plane saw running
     (``attempt:<id>``); a member now leased to anyone else does not take it.
+    ``message_id`` names the waiting message, so the turn's stream can say
+    which one it took.
     """
 
     owner: str = Field(..., min_length=1, max_length=128)
+    message_id: str = Field(..., min_length=1, max_length=128)
     text: str = Field(..., min_length=1, max_length=100_000)
 
 
@@ -1704,15 +1707,20 @@ def create_app(
         body: SharedInputRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        """Hand a message to the member's running turn and say whether it took it.
+        """Give the member's turn a message for the model's next step, or say why not.
 
-        A refusal is an answer, not an error: the message stays waiting on the
-        control plane and goes when the turn ends.
+        Accepted means the turn has it; the turn's own stream reports where the
+        model got it. A refusal is an answer, not an error: the message stays
+        waiting on the control plane and goes when the turn ends.
         """
         supervisor = require_shared_supervisor()
         try:
             outcome = await asyncio.to_thread(
-                supervisor.inject_input, thread_id, owner=body.owner, text=body.text
+                supervisor.inject_input,
+                thread_id,
+                owner=body.owner,
+                message_id=body.message_id,
+                text=body.text,
             )
         except SandboxError as exc:
             raise supervisor_error(exc) from exc
