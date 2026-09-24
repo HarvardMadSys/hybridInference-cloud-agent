@@ -692,6 +692,14 @@ class AgentJobResponse(BaseModel):
     native_state: Literal["new", "ready", "fork_preparing", "lost"] | None = None
     fork_anchor_job_id: str | None = None
     native_fork_available: bool = False
+    mid_turn_input_supported: bool = Field(
+        False,
+        description=(
+            "Whether a waiting message can be sent into this job's turn while it "
+            "runs (POST /threads/{thread_id}/messages/{message_id}/send-now): the "
+            "host that holds the conversation can steer its runtime."
+        ),
+    )
     workspace_publication_state: (
         Literal["pending", "capturing", "captured", "publishing", "published", "failed"] | None
     ) = None
@@ -965,6 +973,14 @@ class AgentThreadMessageResponse(BaseModel):
     content: str
     job_id: str
     created_at: str | None = None
+    mid_turn: bool = Field(
+        False,
+        description=(
+            "A user message sent into this job's turn while it ran, rather than "
+            "the prompt that started it. It is ordered among the turn's replies "
+            "at the point it was sent; a turn has one prompt and any number of these."
+        ),
+    )
 
 
 PendingMessageState = Literal["queued", "held", "sending"]
@@ -1100,6 +1116,16 @@ class AgentThreadQueueResponse(BaseModel):
     latest_job_id: str | None = None
     latest_turn_no: int | None = None
     latest_job_state: str | None = None
+    #: Whether a waiting message can be sent into the newest turn while it runs.
+    mid_turn_input_supported: bool = False
+
+
+class AgentPendingMessageSendNow(BaseModel):
+    """Send one waiting message into the running turn, at the revision read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(..., ge=1)
 
 
 class AgentThreadMessageResult(BaseModel):
@@ -1114,6 +1140,12 @@ class AgentThreadMessageResult(BaseModel):
     pending: AgentPendingMessageResponse | None = None
     job: AgentJobResponse | None = None
     queue_paused_reason: QueuePausedReason | None = None
+    #: Send-now only: the running turn the message went into. It is part of
+    #: that turn's transcript now, and no longer waits.
+    delivered_to_job_id: str | None = None
+    #: Send-now only: why the running turn did not take it. It still waits, and
+    #: goes when the turn ends.
+    not_delivered_reason: str | None = None
 
 
 class AgentThreadResponse(BaseModel):

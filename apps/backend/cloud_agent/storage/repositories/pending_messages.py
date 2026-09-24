@@ -15,6 +15,7 @@ from typing import Any
 import asyncpg
 
 from cloud_agent.attachments.models import AttachmentError
+from cloud_agent.domain.execution import RUNNING
 from cloud_agent.domain.ids import new_pending_message_id
 from cloud_agent.domain.pending_messages import (
     MAX_PENDING_ERROR_CHARS,
@@ -23,10 +24,13 @@ from cloud_agent.domain.pending_messages import (
     PENDING_SENDING,
     QUEUE_PAUSED_FAILED,
     QUEUE_PAUSED_STOPPED,
+    SEND_NOW_IN_FLIGHT_S,
+    USER_MESSAGE_EVENT,
     PreparedHead,
     SettleOutcome,
 )
 from cloud_agent.domain.requests import check_client_request
+from cloud_agent.storage._sql.events import insert_event
 from cloud_agent.storage._sql.pending_messages import (
     LIVE_TURN_SQL,
     PAUSE_QUEUE_SQL,
@@ -38,6 +42,7 @@ from cloud_agent.storage._sql.pending_messages import (
 )
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage.repositories.conversation_commands import insert_follow_up
+from cloud_agent_shared.event_payloads import bound_event_payload
 
 _CLIENT_REQUEST_CONSTRAINT = "uq_agent_pending_messages_client_request"
 
@@ -405,6 +410,167 @@ class PostgresPendingMessageRepository:
                 )
         return {"queue_paused_reason": None}
 
+    async def begin_send_now(
+        self, *, thread_id: str, user_id: str, message_id: str, revision: int
+    ) -> dict[str, Any]:
+        """Take one waiting message out of line to hand to the running turn.
+
+        Under the thread's lock the message must be ``queued`` at the revision
+        the owner read and carry no uploads — a turn's uploads arrive with its
+        prompt, not in the middle. Then, by what the conversation is doing:
+
+        - nothing is live: this is an ordinary send, so a paused queue
+          continues and ``{"idle": True}`` asks the caller to settle it;
+        - its newest turn has not started, or is being stopped:
+          ``{"error": "not_running"}``;
+        - a turn is running: the message becomes ``sending``, tied to that
+          turn, and ``{"message", "job_id", "attempt_id"}`` names what to hand
+          it to.
+
+        Other refusals read like an edit's — ``not_found``, and
+        ``revision_conflict`` or ``not_editable`` with ``current`` — plus
+        ``has_attachments`` and ``session_archived``.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            locked = await self._lock_for_change(
+                conn,
+                thread_id=thread_id,
+                user_id=user_id,
+                message_id=message_id,
+                revision=revision,
+            )
+            if isinstance(locked, dict):
+                return locked
+            if locked["state"] != PENDING_QUEUED:
+                # Held: being edited, or refused and waiting for the owner.
+                return {
+                    "error": "not_editable",
+                    "current": await read_pending_message(conn, message_id),
+                }
+            if load_json(locked["attachment_ids"]):
+                return {"error": "has_attachments"}
+            archived = await conn.fetchval(
+                "SELECT archived_at FROM agent_threads WHERE id = $1", thread_id
+            )
+            if archived is not None:
+                return {"error": "session_archived"}
+            live = await conn.fetchrow(
+                f"SELECT id, state, cancel_requested, current_attempt_id FROM agent_jobs "
+                f"WHERE thread_id = $1 AND {LIVE_TURN_SQL} ORDER BY turn_no DESC LIMIT 1",
+                thread_id,
+            )
+            if live is None:
+                # "Now" with nothing running is simply "next": the owner asked
+                # for it to go, so a pause they would otherwise lift goes too.
+                await _continue_if_idle(conn, thread_id=thread_id)
+                return {"idle": True}
+            if (
+                live["state"] != RUNNING
+                or live["cancel_requested"]
+                or live["current_attempt_id"] is None
+            ):
+                return {"error": "not_running"}
+            await conn.execute(
+                """
+                UPDATE agent_pending_messages
+                SET state = $2, send_now_job_id = $3, send_now_requested_at = NOW(),
+                    revision = revision + 1, updated_at = NOW()
+                WHERE id = $1
+                """,
+                message_id,
+                PENDING_SENDING,
+                live["id"],
+            )
+            return {
+                "message": await read_pending_message(conn, message_id),
+                "job_id": str(live["id"]),
+                "attempt_id": int(live["current_attempt_id"]),
+            }
+
+    async def finish_send_now(
+        self,
+        *,
+        message_id: str,
+        revision: int,
+        job_id: str,
+        attempt_id: int,
+        delivered: bool,
+    ) -> dict[str, Any]:
+        """Record what the running turn did with a message being sent now.
+
+        ``revision`` is the one the message took when it began sending.
+        Delivered, it joins that turn: a ``user_message`` event in the
+        attempt's stream, where it arrived, and a mid-turn transcript row; it
+        waits no longer. That holds even if a settlement put it back in line
+        meanwhile — it was delivered, and must not be sent twice. Not
+        delivered, a message still ``sending`` at ``revision`` waits again, as
+        it was. Locks the attempt before the thread, the order a turn's own
+        ending takes them in.
+
+        Answers ``{"delivered": True, "event_id": id}``,
+        ``{"delivered": False, "message": row}``, or ``{"stale": True}`` when
+        the message is gone.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute("SELECT id FROM agent_attempts WHERE id = $1 FOR UPDATE", attempt_id)
+            thread_id = await conn.fetchval(
+                "SELECT thread_id FROM agent_pending_messages WHERE id = $1", message_id
+            )
+            if thread_id is None:
+                return {"stale": True}
+            await conn.execute("SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE", thread_id)
+            row = await conn.fetchrow(
+                "SELECT state, revision, prompt FROM agent_pending_messages "
+                "WHERE id = $1 FOR UPDATE",
+                message_id,
+            )
+            if row is None:
+                return {"stale": True}
+            if not delivered:
+                if row["state"] == PENDING_SENDING and int(row["revision"]) == revision:
+                    await conn.execute(
+                        """
+                        UPDATE agent_pending_messages
+                        SET state = $2, send_now_job_id = NULL, send_now_requested_at = NULL,
+                            revision = revision + 1, updated_at = NOW()
+                        WHERE id = $1
+                        """,
+                        message_id,
+                        PENDING_QUEUED,
+                    )
+                return {
+                    "delivered": False,
+                    "message": await read_pending_message(conn, message_id),
+                }
+            text = str(row["prompt"])
+            # Seq is the attempt's next, under the attempt's lock: the message
+            # sits in the stream after everything the turn said before it.
+            event_id = await insert_event(
+                conn,
+                job_id=job_id,
+                attempt_id=attempt_id,
+                event_type=USER_MESSAGE_EVENT,
+                payload=bound_event_payload({"text": text, "pending_message_id": message_id}),
+            )
+            # Not a new input to the goal: the turn it joined reads it before
+            # its own final answer, so that answer is not stale for want of it.
+            await conn.execute(
+                """
+                INSERT INTO agent_thread_messages
+                    (thread_id, job_id, role, content, source_event_id, mid_turn)
+                VALUES ($1, $2, 'user', $3, $4, TRUE)
+                """,
+                thread_id,
+                job_id,
+                text,
+                event_id,
+            )
+            await conn.execute("DELETE FROM agent_pending_messages WHERE id = $1", message_id)
+            await conn.execute(
+                "UPDATE agent_threads SET updated_at = NOW() WHERE id = $1", thread_id
+            )
+            return {"delivered": True, "event_id": event_id}
+
     async def settle_queue(
         self, *, thread_id: str, prepared: PreparedHead | None = None
     ) -> SettleOutcome:
@@ -442,16 +608,21 @@ class PostgresPendingMessageRepository:
             if latest is None:  # Defensive: every thread is created with turn one.
                 return SettleOutcome()
             # Nothing is running, so a message still marked as being handed to
-            # a running turn was never taken by it. It goes back in line.
+            # a running turn was never taken by it — unless that hand-over is
+            # still in flight, in which case its own request says how it went
+            # and the line waits behind it. A stranded one goes back in line.
             await conn.execute(
                 """
                 UPDATE agent_pending_messages
                 SET state = 'queued', send_now_job_id = NULL, send_now_requested_at = NULL,
                     revision = revision + 1, updated_at = NOW()
                 WHERE thread_id = $1 AND state = $2
+                  AND (send_now_requested_at IS NULL
+                       OR send_now_requested_at < NOW() - make_interval(secs => $3))
                 """,
                 thread_id,
                 PENDING_SENDING,
+                SEND_NOW_IN_FLIGHT_S,
             )
             if latest["id"] != thread["queue_settled_job_id"]:
                 # Each ending is acted on once. Continuing moves this marker
@@ -559,6 +730,9 @@ class PostgresPendingMessageRepository:
                         OR EXISTS (
                             SELECT 1 FROM agent_pending_messages stranded
                             WHERE stranded.thread_id = t.id AND stranded.state = 'sending'
+                              AND (stranded.send_now_requested_at IS NULL
+                                   OR stranded.send_now_requested_at
+                                      < NOW() - make_interval(secs => $2))
                         )
                         OR (
                             t.queue_paused_reason IS NULL AND t.archived_at IS NULL
@@ -573,6 +747,7 @@ class PostgresPendingMessageRepository:
                 LIMIT $1
                 """,
                 limit,
+                SEND_NOW_IN_FLIGHT_S,
             )
         return [str(row["id"]) for row in rows]
 

@@ -428,6 +428,21 @@ class WorkspaceBrokerClient:
             },
         )
 
+    async def inject_shared_input(self, thread_id: str, *, owner: str, text: str) -> dict[str, Any]:
+        """Hand the owner's message to one member's running turn.
+
+        Answers ``{"accepted": bool, "reason": str | None}``: a turn that did not
+        take it is an answer, not an error. ``owner`` names the activation the
+        caller saw running, ``attempt:<id>``, so a later one never receives it.
+        """
+        return await self._shared_sandbox_request(
+            "POST",
+            thread_id,
+            "input",
+            json={"owner": owner, "text": text},
+            timeout=30,
+        )
+
     async def shared_residency_lost(self, thread_id: str, *, generation: int) -> dict[str, Any]:
         """Close one exact shared member process generation."""
         return await self._shared_sandbox_request(

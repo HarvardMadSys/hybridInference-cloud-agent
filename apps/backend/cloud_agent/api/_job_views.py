@@ -126,6 +126,17 @@ def _goal_view(goal: dict[str, Any] | None) -> GoalView | None:
     return GoalView.model_validate(goal)
 
 
+def mid_turn_input_supported(job: dict[str, Any]) -> bool:
+    """Whether a message can be sent into ``job``'s turn while it runs.
+
+    The host that holds the conversation says so, per runtime, in the
+    capabilities it enrolls with. Whether the turn is running *now* is the
+    caller's question; this one is only whether it could ever take one.
+    """
+    sandbox = job.get("thread_sandbox") or {}
+    return sandbox.get("shared_live") is True and sandbox.get("mid_turn_input_capable") is True
+
+
 def _job_response(
     job: dict[str, Any],
     usage: dict[str, Any] | None = None,
@@ -214,6 +225,7 @@ def _job_response(
         native_state=sandbox.get("native_state"),
         fork_anchor_job_id=sandbox.get("fork_anchor_job_id"),
         native_fork_available=native_fork_available,
+        mid_turn_input_supported=mid_turn_input_supported(job),
         workspace_publication_state=sandbox.get("workspace_publication_state"),
         workspace_epoch=sandbox.get("workspace_epoch"),
         started_at=_iso((telemetry or {}).get("started_at")),

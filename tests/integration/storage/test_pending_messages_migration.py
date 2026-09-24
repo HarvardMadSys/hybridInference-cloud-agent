@@ -29,6 +29,7 @@ async def test_upgrade_adds_the_queue_without_touching_existing_rows(store):
     try:
         threads = await _rows(conn, "agent_threads")
         uploads = await _rows(conn, "agent_job_attachments")
+        transcript = await _rows(conn, "agent_thread_messages")
     finally:
         await conn.close()
 
@@ -42,6 +43,11 @@ async def test_upgrade_adds_the_queue_without_touching_existing_rows(store):
         ]
         assert await _rows(conn, "agent_job_attachments") == [
             {**row, "pending_message_id": None} for row in uploads
+        ]
+        # Every existing transcript row is what it was: a prompt or a reply.
+        assert transcript
+        assert await _rows(conn, "agent_thread_messages") == [
+            {**row, "mid_turn": False} for row in transcript
         ]
         # Positions come from one sequence, in insertion order.
         first = await conn.fetchval(
@@ -92,6 +98,31 @@ async def test_the_schema_refuses_what_the_queue_cannot_represent(store):
         for statement in refused:
             with pytest.raises(asyncpg.CheckViolationError):
                 await conn.execute(statement, job["thread_id"], job["user_id"])
+        # A reply is never a message the owner sent into the turn.
+        with pytest.raises(asyncpg.CheckViolationError):
+            await conn.execute(
+                "INSERT INTO agent_thread_messages (thread_id, job_id, role, content, mid_turn) "
+                "VALUES ($1, $2, 'assistant', 'x', TRUE)",
+                job["thread_id"],
+                job["id"],
+            )
+        # One prompt per turn, as before; a message sent into the running turn
+        # is another user row of the same job, and there may be several.
+        with pytest.raises(asyncpg.UniqueViolationError):
+            await conn.execute(
+                "INSERT INTO agent_thread_messages (thread_id, job_id, role, content) "
+                "VALUES ($1, $2, 'user', 'a second prompt')",
+                job["thread_id"],
+                job["id"],
+            )
+        for text in ("also check the docs", "and the changelog"):
+            await conn.execute(
+                "INSERT INTO agent_thread_messages (thread_id, job_id, role, content, mid_turn) "
+                "VALUES ($1, $2, 'user', $3, TRUE)",
+                job["thread_id"],
+                job["id"],
+                text,
+            )
         # One key per owner, across every conversation they have.
         await conn.execute(
             "INSERT INTO agent_pending_messages "
@@ -172,6 +203,53 @@ async def test_downgrade_refuses_to_drop_a_waiting_message_then_restores_the_sch
         assert (
             await conn.fetchval("SELECT to_regclass('agent_pending_message_position_seq')") is None
         )
+    finally:
+        await conn.close()
+    apply_migrations(config)
+
+
+async def test_downgrade_refuses_while_a_transcript_holds_a_message_sent_into_a_turn(store):
+    job = await _create_job(store)
+    config = _db_config()
+    conn = await asyncpg.connect(**config)
+    try:
+        await conn.execute(
+            "INSERT INTO agent_thread_messages (thread_id, job_id, role, content, mid_turn) "
+            "VALUES ($1, $2, 'user', 'also check the docs', TRUE)",
+            job["thread_id"],
+            job["id"],
+        )
+    finally:
+        await conn.close()
+
+    # The older schema allows one user row per job; this job has two, and
+    # dropping one would rewrite a conversation the owner already had.
+    with pytest.raises(Exception, match="messages sent into running turns"):
+        downgrade_to(config, _BEFORE)
+
+    conn = await asyncpg.connect(**config)
+    try:
+        await conn.execute("DELETE FROM agent_thread_messages WHERE mid_turn")
+    finally:
+        await conn.close()
+    downgrade_to(config, _BEFORE)
+    conn = await asyncpg.connect(**config)
+    try:
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_name = 'agent_thread_messages' AND column_name = 'mid_turn'"
+            )
+            == 0
+        )
+        # The index is the one-user-row-per-job index again.
+        with pytest.raises(asyncpg.UniqueViolationError):
+            await conn.execute(
+                "INSERT INTO agent_thread_messages (thread_id, job_id, role, content) "
+                "VALUES ($1, $2, 'user', 'a second user row')",
+                job["thread_id"],
+                job["id"],
+            )
     finally:
         await conn.close()
     apply_migrations(config)

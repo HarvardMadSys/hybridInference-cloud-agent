@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import json
 
-from cloud_agent_shared.shared_protocol import NATIVE_FORK_AT_ANCHOR_CAPABILITY
+from cloud_agent_shared.shared_protocol import (
+    MID_TURN_INPUT_CAPABILITY_PREFIX,
+    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+)
 
 # Every runnable chat is a member of a retained shared-live group: one
 # ``agent_sandboxes`` row per container, one membership row per chat. This is
@@ -49,6 +52,17 @@ THREAD_SANDBOX_SOURCE = f"""
               AND h.capabilities @> '{NATIVE_FORK_CAPABILITY_JSON}'::jsonb
               AND h.sandbox_image_digest = g.sandbox_image_digest
         ) AS native_fork_capable,
+        -- The host holding this group can hand a message to a running turn of
+        -- the group's runtime: its broker and driver say so, per runtime.
+        EXISTS (
+            SELECT 1 FROM agent_runner_hosts h
+            WHERE h.host = g.host
+              AND h.status = 'online'
+              AND h.capabilities @> jsonb_build_array(
+                  '{MID_TURN_INPUT_CAPABILITY_PREFIX}' || g.runtime_id
+              )
+              AND h.sandbox_image_digest = g.sandbox_image_digest
+        ) AS mid_turn_input_capable,
         COALESCE((
             SELECT jsonb_agg(
                 jsonb_build_object(

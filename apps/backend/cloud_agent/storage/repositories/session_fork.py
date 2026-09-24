@@ -690,12 +690,13 @@ class PostgresSessionForkRepository:
                 )
                 messages = await conn.fetch(
                     """
-                    SELECT m.job_id, m.role, m.content, m.created_at
+                    SELECT m.job_id, m.role, m.content, m.created_at, m.mid_turn
                     FROM agent_thread_messages m
                     JOIN agent_jobs j ON j.id = m.job_id
                     WHERE m.thread_id = $1 AND j.turn_no <= $2
                     ORDER BY j.turn_no,
-                             CASE WHEN m.role = 'user' THEN 0 ELSE 1 END, m.id
+                             CASE WHEN m.role = 'user' AND NOT m.mid_turn THEN 0 ELSE 1 END,
+                             m.id
                     """,
                     operation["source_thread_id"],
                     source["turn_no"],
@@ -745,8 +746,8 @@ class PostgresSessionForkRepository:
                 await conn.executemany(
                     """
                     INSERT INTO agent_thread_messages
-                        (thread_id, job_id, role, content, created_at)
-                    VALUES ($1, $2, $3, $4, $5)
+                        (thread_id, job_id, role, content, created_at, mid_turn)
+                    VALUES ($1, $2, $3, $4, $5, $6)
                     """,
                     [
                         (
@@ -755,6 +756,9 @@ class PostgresSessionForkRepository:
                             message["role"],
                             message["content"],
                             message["created_at"],
+                            # A copy keeps what each row was: a turn with a
+                            # message sent into it has two user rows here too.
+                            message["mid_turn"],
                         )
                         for message in messages
                     ],

@@ -21,10 +21,20 @@ PENDING_QUEUED = "queued"
 #: Being edited, or refused by the checks a turn has to pass. Nothing is sent
 #: past a held message; the queue waits for it.
 PENDING_HELD = "held"
-#: Being handed to the running turn. No path in this release writes it; a
-#: settlement puts any such row back in line once its turn has ended.
+#: Being handed to the running turn ("send now"), for as long as that takes.
+#: A settlement puts any such row back in line once its turn has ended.
 PENDING_SENDING = "sending"
 PENDING_STATES = (PENDING_QUEUED, PENDING_HELD, PENDING_SENDING)
+
+#: How long a message may be ``sending`` before a settlement treats it as
+#: stranded. Handing one to a running turn is one request that waits at most
+#: 30 s for the host; while it is in flight the turn may end, and the settlement
+#: that ending runs must not send the same message again as the next turn.
+SEND_NOW_IN_FLIGHT_S = 120.0
+
+#: The job event a message sent into a running turn is recorded as, at the
+#: point in that turn's stream where it arrived.
+USER_MESSAGE_EVENT = "user_message"
 
 #: The owner stopped the turn this queue was waiting behind.
 QUEUE_PAUSED_STOPPED = "stopped"

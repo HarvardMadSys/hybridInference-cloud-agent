@@ -24,7 +24,11 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
-from cloud_agent.api._job_views import _job_response, _pending_response
+from cloud_agent.api._job_views import (
+    _job_response,
+    _pending_response,
+    mid_turn_input_supported,
+)
 from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
@@ -40,16 +44,24 @@ from cloud_agent.application.follow_ups import (
 from cloud_agent.application.job_admission import _idempotency_conflict
 from cloud_agent.application.pending_messages import prepared_head, settle_queue
 from cloud_agent.application.session_fork import materialize_session_fork
-from cloud_agent.domain.execution import SUCCEEDED, TERMINAL_STATES
+from cloud_agent.broker_routing import broker_for_attempt
+from cloud_agent.domain.execution import RUNNING, SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.pending_messages import PreparedHead, SettleOutcome
 from cloud_agent.domain.requests import request_fingerprint
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
     AgentJobResponse,
+    AgentPendingMessageSendNow,
     AgentPendingMessageUpdate,
     AgentThreadMessageCreate,
     AgentThreadMessageResult,
     AgentThreadQueueResponse,
+)
+from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+from cloud_agent_shared.shared_protocol import (
+    INPUT_REFUSALS,
+    INPUT_REFUSED,
+    INPUT_UNREACHABLE,
 )
 
 if TYPE_CHECKING:
@@ -399,6 +411,7 @@ async def get_thread_queue(
         latest_job_id=str(latest["id"]),
         latest_turn_no=latest.get("turn_no"),
         latest_job_state=latest.get("state"),
+        mid_turn_input_supported=mid_turn_input_supported(latest),
     )
 
 
@@ -489,6 +502,145 @@ async def delete_thread_message(
         job_store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
     )
     return await _queue_result(job_store, thread_id=thread_id, user=user, outcome=outcome)
+
+
+def _send_now_refused(result: dict[str, Any]) -> HTTPException:
+    """The owner-facing refusal for a message that cannot be sent into the turn now."""
+    error = result.get("error")
+    if error == "not_running":
+        return HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "not_running",
+                    "message": "The turn has not started, or is stopping; the message "
+                    "stays in line and goes when it can.",
+                }
+            },
+        )
+    if error == "has_attachments":
+        return HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "send_now_has_attachments",
+                    "message": "A message with uploads starts a turn of its own; it "
+                    "cannot join the running one.",
+                }
+            },
+        )
+    if error == "not_editable":
+        current = result.get("current") or {}
+        if current.get("state") != "sending":
+            return HTTPException(
+                status_code=409,
+                detail={
+                    "error": {
+                        "type": "not_editable",
+                        "message": "This message is being edited or was refused; save it first.",
+                        "current": _pending_response(current).model_dump(mode="json")
+                        if current
+                        else None,
+                    }
+                },
+            )
+    return _message_refused(result)
+
+
+def _mid_turn_input_unsupported() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": {
+                "type": "mid_turn_input_unsupported",
+                "message": "This conversation's turn cannot take a message while it "
+                "runs; the message stays in line and goes when the turn ends.",
+            }
+        },
+    )
+
+
+@router.post(
+    "/threads/{thread_id}/messages/{message_id}/send-now",
+    response_model=AgentThreadMessageResult,
+)
+async def send_pending_message_now(
+    thread_id: str,
+    message_id: str,
+    body: AgentPendingMessageSendNow,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _TurnsStorage | None = Depends(get_storage),
+    gateway: Any = Depends(get_gateway_client),
+    app_credentials: Any | None = Depends(get_agent_app_credentials),
+) -> AgentThreadMessageResult:
+    """Send one waiting message into the running turn, now.
+
+    With a turn running on a host that can steer it, the message is handed to
+    that turn and joins its transcript where it arrived: ``delivered_to_job_id``
+    names the turn, and the message no longer waits. A turn that does not take
+    it — Claude with no tool running has no point to fold it in at, or the turn
+    just ended — leaves it waiting where it was, and ``not_delivered_reason``
+    says why. With nothing running, this is an ordinary send.
+    """
+    job_store = _require_store(store)
+    latest = await _owned_latest_turn(job_store, thread_id, user)
+    if latest.get("state") == RUNNING and not mid_turn_input_supported(latest):
+        raise _mid_turn_input_unsupported()
+    began = await job_store.pending_messages.begin_send_now(
+        thread_id=thread_id,
+        user_id=user["user_id"],
+        message_id=message_id,
+        revision=body.revision,
+    )
+    if began.get("idle"):
+        outcome = await _settle(
+            job_store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
+        )
+        return await _queue_result(
+            job_store, thread_id=thread_id, user=user, outcome=outcome, message_id=message_id
+        )
+    if "error" in began:
+        raise _send_now_refused(began)
+    message = began["message"]
+    attempt_id = int(began["attempt_id"])
+    delivered = False
+    reason: str | None = INPUT_UNREACHABLE
+    broker = await broker_for_attempt(job_store.host_pool, attempt_id)
+    if broker is not None:
+        try:
+            answer = await broker.inject_shared_input(
+                thread_id, owner=f"attempt:{attempt_id}", text=str(message["prompt"])
+            )
+        except WorkspaceBrokerError:
+            logger.warning(
+                "agent_send_now_unreachable",
+                extra={"event": "agent_send_now_unreachable", "thread_id": thread_id},
+                exc_info=True,
+            )
+        else:
+            delivered = answer.get("accepted") is True
+            refused = answer.get("reason")
+            reason = None if delivered else refused if refused in INPUT_REFUSALS else INPUT_REFUSED
+    finished = await job_store.pending_messages.finish_send_now(
+        message_id=message_id,
+        revision=int(message["revision"]),
+        job_id=str(began["job_id"]),
+        attempt_id=attempt_id,
+        delivered=delivered,
+    )
+    # The turn may have ended while the message was in flight; the settlement
+    # its ending ran left this message's place alone, so settle here.
+    outcome = await _settle(
+        job_store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
+    )
+    result = await _queue_result(
+        job_store, thread_id=thread_id, user=user, outcome=outcome, message_id=message_id
+    )
+    if finished.get("delivered"):
+        result.delivered_to_job_id = str(began["job_id"])
+    else:
+        result.not_delivered_reason = reason or INPUT_REFUSED
+    return result
 
 
 @router.post("/threads/{thread_id}/queue/resume", response_model=AgentThreadMessageResult)

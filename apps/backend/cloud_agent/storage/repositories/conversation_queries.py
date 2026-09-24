@@ -65,11 +65,15 @@ class PostgresConversationQueries:
                 return None
             messages = await conn.fetch(
                 """
-                SELECT m.id, m.role, m.content, m.job_id, m.created_at
+                SELECT m.id, m.role, m.content, m.job_id, m.created_at, m.mid_turn
                 FROM agent_thread_messages m
                 JOIN agent_jobs j ON j.id = m.job_id
                 WHERE m.thread_id = $1
-                ORDER BY j.turn_no, CASE WHEN m.role = 'user' THEN 0 ELSE 1 END, m.id
+                -- A turn opens with its prompt; a message the owner sent into
+                -- the running turn reads where it was sent, among the replies.
+                ORDER BY j.turn_no,
+                         CASE WHEN m.role = 'user' AND NOT m.mid_turn THEN 0 ELSE 1 END,
+                         m.id
                 """,
                 thread["id"],
             )

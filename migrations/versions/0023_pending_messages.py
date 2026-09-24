@@ -12,9 +12,15 @@ turn in front of it has ended and the queue is allowed to move.
 
 Three states and no history. ``queued`` waits its turn; ``held`` is a message
 the owner is editing, or one the platform could not send (``last_error`` says
-why), and nothing is sent past it; ``sending`` is reserved for handing a message
-to a running turn. A message that is sent is *deleted*: the job and transcript
-row it became are the record, and a second record here would be a second truth.
+why), and nothing is sent past it; ``sending`` is a message being handed to the
+running turn right now ("send now"). A message that is sent is *deleted*: the job
+and transcript row it became are the record, and a second record here would be a
+second truth.
+
+A message handed to a running turn becomes a second user row of *that* turn's
+job rather than a job of its own. ``agent_thread_messages.mid_turn`` marks such
+a row: the one-user-row-per-job index now covers only the turn's prompt, and a
+mid-turn row reads in order with the turn's replies instead of at its top.
 
 ``position`` comes from a sequence, not from a per-thread counter, and editing
 never changes it — rewriting a message does not move it in line.
@@ -42,7 +48,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    """Create the pending-message table and the thread's two queue columns."""
+    """Create the pending-message table, the thread's queue columns, mid-turn rows."""
     op.execute("CREATE SEQUENCE agent_pending_message_position_seq")
     op.execute("""
         CREATE TABLE agent_pending_messages (
@@ -103,6 +109,17 @@ def upgrade() -> None:
         "CREATE INDEX ix_agent_job_attachments_pending "
         "ON agent_job_attachments (pending_message_id) WHERE pending_message_id IS NOT NULL"
     )
+    op.execute(
+        "ALTER TABLE agent_thread_messages ADD COLUMN mid_turn BOOLEAN NOT NULL DEFAULT FALSE "
+        "CONSTRAINT ck_agent_thread_messages_mid_turn_user CHECK (NOT mid_turn OR role = 'user')"
+    )
+    # Still one prompt per turn; a message handed to the running turn is another
+    # user row of the same job and is not the prompt.
+    op.execute("DROP INDEX idx_agent_thread_messages_user_job")
+    op.execute(
+        "CREATE UNIQUE INDEX idx_agent_thread_messages_user_job "
+        "ON agent_thread_messages (job_id) WHERE role = 'user' AND NOT mid_turn"
+    )
 
 
 def downgrade() -> None:
@@ -120,6 +137,23 @@ def downgrade() -> None:
             END IF;
         END $$
     """)
+    # A message handed to a running turn is a second user row of its job, which
+    # the older one-user-row index cannot hold. Keeping it means not going back.
+    op.execute("LOCK TABLE agent_thread_messages IN ACCESS EXCLUSIVE MODE")
+    op.execute("""
+        DO $$ BEGIN
+            IF EXISTS (SELECT 1 FROM agent_thread_messages WHERE mid_turn) THEN
+                RAISE EXCEPTION 'Transcripts hold messages sent into running turns; '
+                    'the previous schema cannot represent them';
+            END IF;
+        END $$
+    """)
+    op.execute("DROP INDEX idx_agent_thread_messages_user_job")
+    op.execute(
+        "CREATE UNIQUE INDEX idx_agent_thread_messages_user_job "
+        "ON agent_thread_messages (job_id) WHERE role = 'user'"
+    )
+    op.execute("ALTER TABLE agent_thread_messages DROP COLUMN mid_turn")
     op.execute("DROP INDEX ix_agent_job_attachments_pending")
     op.execute("ALTER TABLE agent_job_attachments DROP COLUMN pending_message_id")
     op.execute(

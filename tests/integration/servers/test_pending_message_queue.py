@@ -54,6 +54,8 @@ pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 _OWNER = "user-owner"
 _HOST = "runner-test"
+#: The sandbox image the test host runs and attests to on every claim.
+_IMAGE_DIGEST = "sha256:queue-test-image"
 _HOST_CREDENTIAL = "test-credential-hash"
 _REPO = "owner/name"
 
@@ -113,7 +115,7 @@ def _claim_body(worker_id: str) -> dict[str, Any]:
     return {
         "worker_id": worker_id,
         "attestation": {
-            "sandbox_image_digest": "sha256:queue-test-image",
+            "sandbox_image_digest": _IMAGE_DIGEST,
             "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
             "runner_capabilities": [
                 SHARED_SANDBOX_CAPABILITY,
@@ -253,7 +255,8 @@ class Api:
             container_name=known["container_name"] if known else f"chat-{thread_id}",
             runtime_id="claude-code",
             runtime_version=claim.get("runtime_version"),
-            sandbox_image_digest=claim.get("sandbox_image_digest"),
+            # The runner reserves with its own image, the one it attested.
+            sandbox_image_digest=_IMAGE_DIGEST,
             execution_profile=claim["execution_profile"],
         )
         assert reserved is not None

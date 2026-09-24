@@ -123,6 +123,7 @@ async def get_agent_thread(
                 content=message["content"],
                 job_id=message["job_id"],
                 created_at=_iso(message["created_at"]),
+                mid_turn=bool(message.get("mid_turn")),
             )
             for message in thread["messages"]
         ],
