@@ -311,14 +311,17 @@ function turnSummary(overrides: Partial<TurnResourceSummaryApi> = {}): TurnResou
     state: 'final',
     source: 'kata-guest-member-window-v1',
     received_at: '2026-09-10T08:02:00Z',
-    duration_ms: 130_000,
-    observed_through_ms: 130_000,
-    open_scan_ms: 12,
-    close_scan_ms: 15,
+    window: {
+      duration_ms: 130_000,
+      observed_through_ms: 130_000,
+      open_scan_ms: 12,
+      close_scan_ms: 15,
+    },
     cpu: {
       status: 'available',
       method: 'live_and_exit_task_counters',
       usec: 80_000_000,
+      capacity_cores: 2,
       reason_codes: [],
     },
     memory: {
@@ -1060,26 +1063,26 @@ describe('admin run observation', () => {
     expect(screen.getByText(/largest single process peak/)).toBeInTheDocument();
   });
 
-  it('shows the whole-turn window at the contract\u2019s scope and length', async () => {
+  it('shows a concise per-execution resource summary with independent missing values', async () => {
     render(<AdminRunPage />);
-    expect(await screen.findByText('Turn resource summary')).toBeInTheDocument();
-    expect(screen.getByText('80 CPU-s')).toBeInTheDocument();
-    expect(screen.getByText('1.2 GiB \u00b7 sampled')).toBeInTheDocument();
-    // The panel must never imply the number is the platform's whole cost.
-    expect(
-      screen.getByText('Sandbox member execution, including the agent and its tools'),
-    ).toBeInTheDocument();
-    expect(screen.getByText('sampled every 1s')).toBeInTheDocument();
-    expect(
-      screen.getByText(/CPU complete\. memory sampling complete\. I\/O unavailable\./),
-    ).toBeInTheDocument();
-    // Said wherever the metric appears, never only in one place.
-    expect(
-      screen.getAllByText(/do not prove which filesystem this I\/O reached/).length,
-    ).toBeGreaterThan(1);
+    const panel = await screen.findByRole('group', { name: 'Execution resource summary' });
+    expect(within(panel).getByText('This execution · Agent and tools')).toBeVisible();
+    expect(within(panel).getByText('CPU usage (avg)').parentElement).toHaveTextContent('30.8%');
+    expect(within(panel).getByText('Peak memory (sampled)').parentElement).toHaveTextContent(
+      '1.2 GiB',
+    );
+    expect(within(panel).getByText('Storage read').parentElement).toHaveTextContent('Unavailable');
+    expect(within(panel).getByText('Storage write').parentElement).toHaveTextContent('Unavailable');
+    expect(within(panel).getByText('Storage read').nextElementSibling).toHaveAttribute(
+      'title',
+      expect.stringContaining('do not prove which filesystem this I/O reached'),
+    );
+    expect(screen.queryByText('Turn resource summary')).not.toBeInTheDocument();
+    expect(screen.queryByText('Method and reasons')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Refresh resources' })).not.toBeInTheDocument();
   });
 
-  it('says the scope and the run-level coverage when the numbers are not the run\u2019s total', async () => {
+  it('continues to label the values as one execution when the run has partial coverage', async () => {
     vi.mocked(getAdminRun).mockResolvedValue(
       detail({
         run: run({
@@ -1088,31 +1091,34 @@ describe('admin run observation', () => {
       }),
     );
     render(<AdminRunPage />);
-    await screen.findByText('Turn resource summary');
-    expect(
-      screen.getByText('3 of 5 executions measured; this is not the run\u2019s total.'),
-    ).toBeInTheDocument();
+    const panel = await screen.findByRole('group', { name: 'Execution resource summary' });
+    expect(within(panel).getByText('This execution · Agent and tools')).toBeVisible();
   });
 
   it('keeps an interrupted collection out of the finalised form and names its cut-off', async () => {
     vi.mocked(getAdminAttemptResources).mockResolvedValue({
       ...resources({
-        turn_summary: turnSummary({ state: 'interrupted', observed_through_ms: 130_000 }),
+        turn_summary: turnSummary({
+          state: 'interrupted',
+          window: { ...turnSummary().window, observed_through_ms: 130_000 },
+        }),
       }),
     });
     render(<AdminRunPage />);
-    await screen.findByText('Turn resource summary');
-    expect(
-      screen.getAllByText(/Collection interrupted: data reached 2m 10s/).length,
-    ).toBeGreaterThan(1);
-    // The turn panel must not add a claim of its own that collection
-    // finished. The gateway ledger's "not finalized" sentence lives in the
-    // owner-facing RunDetails tree, which this admin page does not render, so
-    // there is nothing here to cross-check against.
-    expect(screen.queryByText(/Collection finished with the turn/)).not.toBeInTheDocument();
+    const panel = await screen.findByRole('group', { name: 'Execution resource summary' });
+    expect(within(panel).getByText(/Collection interrupted/)).toBeVisible();
+    expect(within(panel).getByText('CPU usage (avg)').parentElement).toHaveTextContent('—');
+    expect(within(panel).getByText('Peak memory (sampled)').parentElement).toHaveTextContent(
+      'observed',
+    );
+    expect(within(panel).getByText('Storage read').parentElement).toHaveTextContent('Unavailable');
+    expect(within(panel).getByText('CPU usage (avg)').nextElementSibling).toHaveAttribute(
+      'title',
+      expect.stringContaining('data reached 2m 10s'),
+    );
   });
 
-  it('keeps the lower bound off a partial memory peak and on a partial CPU one', async () => {
+  it('withholds partial CPU utilisation while preserving the observed memory peak', async () => {
     vi.mocked(getAdminAttemptResources).mockResolvedValue({
       ...resources({
         turn_summary: turnSummary({
@@ -1136,11 +1142,15 @@ describe('admin run observation', () => {
       }),
     });
     render(<AdminRunPage />);
-    await screen.findByText('Turn resource summary');
-    expect(screen.getByText('\u2265 80 CPU-s')).toBeInTheDocument();
-    expect(screen.getByText('1.2 GiB \u00b7 sampled \u00b7 observed')).toBeInTheDocument();
+    const panel = await screen.findByRole('group', { name: 'Execution resource summary' });
+    expect(screen.queryByText(/CPU-s/)).not.toBeInTheDocument();
+    expect(within(panel).getByText('CPU usage (avg)').nextElementSibling).toHaveTextContent('—');
+    expect(within(panel).getByText('1.2 GiB · observed')).toBeInTheDocument();
     expect(screen.queryByText(/\u2265 1\.2 GiB/)).not.toBeInTheDocument();
-    expect(screen.getAllByText(/This value is a lower bound/).length).toBeGreaterThan(1);
+    expect(within(panel).getByText('CPU usage (avg)').nextElementSibling).toHaveAttribute(
+      'title',
+      expect.stringContaining('requires a complete execution measurement'),
+    );
   });
 
   it('says a missing window was not collected rather than showing a zero', async () => {
@@ -1148,28 +1158,38 @@ describe('admin run observation', () => {
       ...resources({ turn_summary: null }),
     });
     render(<AdminRunPage />);
-    await screen.findByText('Turn resource summary');
-    expect(screen.getByText(/Not collected for this execution/)).toBeInTheDocument();
-    expect(screen.getByText(/This is not a measured zero/)).toBeInTheDocument();
+    expect(
+      await screen.findByText('No resource measurements were recorded for this execution.'),
+    ).toBeVisible();
     expect(screen.queryByText('0 CPU-s')).not.toBeInTheDocument();
   });
 
-  it.each(['Refresh run', 'Refresh resources'])(
-    'removes all retained metadata after %s receives 403, even with cached admin permission',
-    async (button) => {
-      render(<AdminRunPage />);
-      await screen.findByText('Inspect parser');
-      const denied = new APIError('FORBIDDEN', 'Admin permission revoked', 403);
-      if (button === 'Refresh run') vi.mocked(getAdminRun).mockRejectedValueOnce(denied);
-      if (button === 'Refresh resources')
-        vi.mocked(getAdminAttemptResources).mockRejectedValueOnce(denied);
-      fireEvent.click(screen.getByRole('button', { name: button }));
-      await screen.findByText('Admin access required');
-      expect(auth.access?.permissions).toContain('agent.admin');
-      expect(screen.queryByText('Inspect parser')).not.toBeInTheDocument();
-      expect(screen.queryByText('$0.00978569')).not.toBeInTheDocument();
-    },
-  );
+  it('removes retained metadata when a run refresh receives 403', async () => {
+    render(<AdminRunPage />);
+    await screen.findByText('Inspect parser');
+    vi.mocked(getAdminRun).mockRejectedValueOnce(
+      new APIError('FORBIDDEN', 'Admin permission revoked', 403),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh run' }));
+    await screen.findByText('Admin access required');
+    expect(auth.access?.permissions).toContain('agent.admin');
+    expect(screen.queryByText('Inspect parser')).not.toBeInTheDocument();
+    expect(screen.queryByText('$0.00978569')).not.toBeInTheDocument();
+  });
+
+  it('allows a failed resource read to retry and revokes access if that read receives 403', async () => {
+    vi.mocked(getAdminAttemptResources).mockRejectedValueOnce(new Error('Resource read failed'));
+    render(<AdminRunPage />);
+    await screen.findByText('Inspect parser');
+    await screen.findByText('Resource read failed');
+    vi.mocked(getAdminAttemptResources).mockRejectedValueOnce(
+      new APIError('FORBIDDEN', 'Admin permission revoked', 403),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('Admin access required');
+    expect(screen.queryByText('Inspect parser')).not.toBeInTheDocument();
+    expect(screen.queryByText('$0.00978569')).not.toBeInTheDocument();
+  });
 
   it('keeps run summaries whole while viewing history and aborts an in-flight panel read when admin permission is lost', async () => {
     vi.mocked(getAdminRun).mockResolvedValue(attemptsDetail());

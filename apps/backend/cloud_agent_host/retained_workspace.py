@@ -14,7 +14,7 @@ from cloud_agent_host.chat_sandbox import CHAT_WORKDIR, RetainedChatBackend
 from cloud_agent_host.sandbox import SandboxError
 
 if TYPE_CHECKING:
-    from cloud_agent_profiling.operation_profiling import StageObserver
+    from cloud_agent_shared.operation_profiling import StageObserver
 
 
 class RetainedWorkspaceError(SandboxError):

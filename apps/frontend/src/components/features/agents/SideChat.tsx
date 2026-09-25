@@ -2,12 +2,8 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
-import {
-  cancelAgentJob,
-  followUpAgentJob,
-  type AgentConfigApi,
-  type AgentJobApi,
-} from '@/lib/api/agents';
+import { cancelAgentJob, type AgentConfigApi, type AgentJobApi } from '@/lib/api/agents';
+import { submitThreadMessage } from '@/lib/api/pendingMessages';
 import { useT } from '@/components/providers/LocaleProvider';
 import { hasLostContext, latestAttempt, latestJob, ownerRunNote } from './conversationJob';
 import { sideChatKeys } from './sideChatStorage';
@@ -22,12 +18,14 @@ import { describeConversationTurns } from './conversationTurnNavigation';
 import { highestEffort, offeredEfforts } from './effort';
 import { McpApprovalNotice } from './mcp/McpApprovalNotice';
 import { McpSessionPanel } from './mcp/McpSessionPanel';
+import { PendingMessageQueue } from './PendingMessageQueue';
 import { Picker } from './Picker';
 import { BackToBottom } from './TurnNavigator';
 import type { AgentJob } from './types';
 import { useAgentJob } from './useAgentJobs';
 import { markConversationRead } from './useConversationReadState';
 import { useConversationScroll } from './useConversationScroll';
+import { usePendingMessages } from './usePendingMessages';
 import { useSideChatSession } from './useSideChatSession';
 import type { SideChatTab } from './useWorkspaceTabs';
 
@@ -143,6 +141,15 @@ function SideChatContent({
   const ready = Boolean(status === 'ready' && current && !loading && !loadError);
   const running = current?.state === 'running' || current?.state === 'queued';
   const unavailable = Boolean(current?.archivedAt || (current && hasLostContext(current)));
+  // Messages sent while the side chat's turn runs wait here. A turn one of
+  // them became — sent by the server when the turn in front ended, or by a
+  // save or continue here — is found by reloading, which the effect below
+  // then follows to the side chat's newest turn.
+  const queue = usePendingMessages({
+    threadId: session?.threadId,
+    active: active && running,
+    onSent: () => reload(),
+  });
 
   useEffect(() => {
     if (!current || modelInitialized.current) return;
@@ -238,22 +245,28 @@ function SideChatContent({
       setActionError(t('sideChat.preparing'));
       return;
     }
-    if (!current || !prompt || unavailable || submission.current) return;
+    const threadId = current?.threadId ?? session?.threadId;
+    if (!current || !threadId || !prompt || unavailable || submission.current) return;
     submission.current = true;
     setSubmitting(true);
     setActionError(null);
     try {
-      const next = await followUpAgentJob(current.id, {
+      const result = await submitThreadMessage(threadId, {
         prompt,
         ...composerOverrides(current, model, effort),
       });
       if (!mounted.current) return;
       setDraft('');
-      if (!advance(next)) {
-        setActionError(t('sideChat.sentRestoreFailed'));
-        reload();
+      queue.apply(result);
+      // Idle, the message is the side chat's next turn now and the pane moves
+      // to it; busy, it waits above the composer and nothing moves.
+      if (result.job) {
+        if (!advance(result.job)) {
+          setActionError(t('sideChat.sentRestoreFailed'));
+          reload();
+        }
+        scroll.followLatest();
       }
-      scroll.followLatest();
     } catch (cause) {
       if (mounted.current) {
         setActionError(cause instanceof Error ? cause.message : t('sideChat.sendFailed'));
@@ -377,6 +390,7 @@ function SideChatContent({
                 onReview={() => setToolsJobId(current.id)}
               />
             ) : null}
+            <PendingMessageQueue queue={queue} disabled={unavailable} />
             <form
               onSubmit={(event) => void send(event)}
               className="rounded-xl border border-gray-200 bg-white focus-within:border-crimson/30 dark:border-white/10 dark:bg-gray-900"

@@ -21,7 +21,13 @@ class AttachmentRepository(Protocol):
         ...
 
     async def delete_attachment(self, *, user_id: str, attachment_id: int) -> bool:
-        """Drop a staged upload the owner removed before running."""
+        """Drop a staged upload the owner removed before running.
+
+        Not one a waiting message holds: that message names the file and will
+        be sent with it, so removing the bytes here would send a turn that
+        mentions a file its sandbox never receives. Editing or deleting the
+        message is what lets go of it.
+        """
         ...
 
     async def count_thread_attachments(self, *, thread_id: str) -> int:
@@ -39,5 +45,10 @@ class AttachmentRepository(Protocol):
         ...
 
     async def purge_stale_staged(self, *, older_than_hours: int) -> int:
-        """Collect uploads no job ever claimed."""
+        """Collect uploads no job ever claimed and no waiting message holds.
+
+        A message can wait behind a long turn for longer than a staged upload
+        is kept. Its files are not abandoned while it waits; they are released
+        back to this sweep when the message is edited to drop them or deleted.
+        """
         ...

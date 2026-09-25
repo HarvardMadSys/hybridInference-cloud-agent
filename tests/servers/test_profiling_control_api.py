@@ -35,7 +35,7 @@ from cloud_agent.storage.repositories.profiling_control import (
     LIFECYCLE_PENDING,
     LIFECYCLE_STOPPED,
 )
-from cloud_agent_profiling import operation_profiling
+from cloud_agent_shared import operation_profiling
 
 ADMIN = {"Authorization": "Bearer test-admin-token"}
 HOST = "gpu-1"

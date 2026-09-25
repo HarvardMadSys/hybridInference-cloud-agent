@@ -28,6 +28,7 @@ from cloud_agent_host.drivers import (
     DriverError,
     HarnessEvent,
     HarnessTurn,
+    InputOutcome,
     LaunchContext,
     TurnInput,
     TurnResult,
@@ -106,7 +107,7 @@ class ResidentTurn(Generic[_RuntimeT_co]):
     def lines(self) -> Iterator[HarnessEvent]:
         """Yield normalized driver events through the exact turn boundary."""
         for line in self._turn.raw_lines():
-            yield self._turn.event_for_line(line)
+            yield from self._turn.events_for_line(line)
 
     def wait(self) -> TurnResult:
         """Return the settled result while leaving a healthy transport alive."""
@@ -115,6 +116,10 @@ class ResidentTurn(Generic[_RuntimeT_co]):
     def interrupt(self) -> None:
         """Interrupt only this activation through the driver's native seam."""
         self._turn.cancel()
+
+    def inject(self, text: str, *, message_id: str) -> InputOutcome:
+        """Hand ``text`` to this activation mid-turn through the driver's seam."""
+        return self._turn.inject(text, message_id=message_id)
 
     def stderr_text(self) -> str:
         """Return bounded diagnostic stderr from the resident process."""

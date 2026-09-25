@@ -30,10 +30,12 @@ from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
     get_log_store,
+    get_source_control,
     get_storage,
     require_store,
 )
 from cloud_agent.application.job_admission import _create_job_as
+from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.goals.models import GoalConflict
@@ -53,6 +55,9 @@ from cloud_agent.schemas import (
     GoalResponse,
     GoalRevisionRequest,
 )
+from cloud_agent.source_control_runtime import (
+    SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
+)
 from cloud_agent.terminal_coordination import resume_settled_terminal
 
 if TYPE_CHECKING:
@@ -65,10 +70,12 @@ if TYPE_CHECKING:
         GoalRepository,
         HostPoolRepository,
         McpConnectionRepository,
+        PendingMessageRepository,
         SandboxRepository,
         SkillRepository,
         SourceControlRepository as SourceControlPort,
     )
+    from cloud_agent.source_control_runtime import GitHubAppSource
 
 
 router = APIRouter(prefix="/v1/agent")
@@ -103,6 +110,7 @@ class _JobsStorage(Protocol):
     goals: GoalRepository
     host_pool: HostPoolRepository
     mcp: McpConnectionRepository
+    pending_messages: PendingMessageRepository
     sandbox: SandboxRepository
     skills: SkillRepository
     source_control: SourceControlPort
@@ -243,15 +251,26 @@ async def cancel_agent_job(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _JobsStorage | None = Depends(get_storage),
+    source_control: SourceControlRuntime | None = Depends(get_source_control),
+    gateway: Any = Depends(get_gateway_client),
 ) -> AgentJobCancelResponse:
     """Request cancellation of one of the caller's agent jobs.
 
     Queued jobs cancel immediately; a running job is flagged and the worker
-    performs the fenced terminal transition when it next heartbeats.
+    performs the fenced terminal transition when it next heartbeats. Messages
+    the owner has waiting are paused by the same commit — Stop does not start
+    the next one — and stay until the owner continues. Stop answers whether or
+    not the GitHub App can be loaded right now (issue #47).
     """
     job_store = _require_store(store)
     owned = await _owned_job(job_store.conversation_queries, job_id, user)
     state = await job_store.attempt_commands.request_cancel(job_id=job_id, user_id=user["user_id"])
+    await _settle_after_cancel(
+        job_store,
+        owned,
+        gateway=gateway,
+        github_app=None if source_control is None else source_control.github,
+    )
     if state in TERMINAL_STATES:
         resumed = True
         if owned.get("thread_sandbox") is not None:
@@ -269,6 +288,42 @@ async def cancel_agent_job(
         state=state or (job or {}).get("state", "unknown"),
         cancel_requested=bool((job or {}).get("cancel_requested")),
     )
+
+
+async def _settle_after_cancel(
+    job_store: _JobsStorage,
+    job: dict[str, Any],
+    *,
+    gateway: Any,
+    github_app: GitHubAppSource | None,
+) -> None:
+    """Act on a cancel that may already have ended a turn.
+
+    A queued turn is cancelled in the request itself, and its ending is the
+    queue's to record now rather than at the next sweep. The pause the cancel
+    wrote means nothing is sent from here. Best effort: the cancel has
+    committed, and a settlement that fails is repeated by the sweep.
+    """
+    thread_id = job.get("thread_id")
+    if thread_id is None:
+        return
+    try:
+        await settle_queue_when_possible(
+            job_store,
+            thread_id=str(thread_id),
+            gateway=gateway,
+            github_app=github_app,
+        )
+    except Exception:
+        logger.warning(
+            "agent_pending_queue_settle_failed",
+            extra={
+                "event": "agent_pending_queue_settle_failed",
+                "job_id": job.get("id"),
+                "thread_id": thread_id,
+            },
+            exc_info=True,
+        )
 
 
 async def _set_agent_thread_archived(

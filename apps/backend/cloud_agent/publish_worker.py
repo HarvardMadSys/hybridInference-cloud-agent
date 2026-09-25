@@ -38,6 +38,7 @@ from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.publisher import PublishError, fetch_base_bundle, publish_patch
 from cloud_agent.schemas import BASE_REF_METADATA_KEY
+from cloud_agent.source_control_runtime import SourceControlUnavailable
 from cloud_agent_shared.git.patch_gate import branch_name_for
 
 if TYPE_CHECKING:
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
         SnapshotRepository,
         SourceControlRepository,
     )
+    from cloud_agent.source_control_runtime import GitHubAppSource
 
 
 class PublishStorage(Protocol):
@@ -428,7 +430,7 @@ async def publish_loop(
     store: PublishStorage,
     *,
     credential_provider: Any = None,
-    app_credentials: Any | None = None,
+    github_app: GitHubAppSource | None = None,
     base_branch: str = "dev",
     interval_seconds: float = POLL_INTERVAL_S,
 ) -> None:
@@ -438,10 +440,22 @@ async def publish_loop(
     token is minted fresh rather than held for the lifetime of the process.
     A provider that returns ``None`` (GitHub not configured) makes this a
     no-op, which is what a deployment without the GitHub App should do.
+
+    ``github_app`` is asked for the App's credentials once per pass, for the
+    same reason: a loop that captured them at startup published nothing for
+    the rest of the process after one failed load (issue #47).
     """
     while True:
         await asyncio.sleep(interval_seconds)
         try:
+            try:
+                app_credentials = github_app.get() if github_app is not None else None
+            except SourceControlUnavailable:
+                # Configured, and not loaded yet. Waiting is the whole answer:
+                # the queue keeps every snapshot and its retry record, and the
+                # static token is not a stand-in for an App the deployment
+                # chose — it would publish under a different identity.
+                continue
             credential = credential_provider() if credential_provider else None
             # Either source is enough. Skipping when only the App is
             # configured is what made an App-only deployment — the one this

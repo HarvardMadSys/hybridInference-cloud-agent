@@ -57,7 +57,7 @@
 | `profiling` | 仅对本次实验选中的目标和操作计时；到截止时间或样本上限后结束 |
 
 部署级主开关为 `AGENT_OPERATION_PROFILING_ENABLED`，缺省为 `false`。
-**2026-09-14 已实现**（`apps/backend/cloud_agent_profiling/operation_profiling.py`，目前接入 runner 的
+**2026-09-14 已实现**（`apps/backend/cloud_agent_shared/operation_profiling.py`，目前接入 runner 的
 `attempt.startup`；变量说明见 [ENVIRONMENT.md](../../ENVIRONMENT.md)）。仅设为 `true`
 不代表所有请求自动被采集；还需配置有明确范围和截止时间的 profiling run
 （`AGENT_OPERATION_PROFILING_RUN`，未配置或不合法时开关不生效并只记一条 warning）。

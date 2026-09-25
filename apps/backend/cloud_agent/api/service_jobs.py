@@ -49,18 +49,23 @@ from cloud_agent.api._owner_auth import _owned_job
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
+    get_source_control,
     get_storage,
     require_agent_access,
     require_store,
     verify_admin_access,
 )
 from cloud_agent.application.job_admission import _create_job_as
+from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
     AgentJobCancelResponse,
     AgentJobCreate,
     AgentJobEventsResponse,
     AgentJobResponse,
+)
+from cloud_agent.source_control_runtime import (
+    SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
 
 if TYPE_CHECKING:
@@ -71,6 +76,7 @@ if TYPE_CHECKING:
         ConversationQueries,
         ExecutionQueries,
         McpConnectionRepository,
+        PendingMessageRepository,
         SkillRepository,
         SourceControlRepository,
     )
@@ -96,6 +102,7 @@ class _ServiceJobsStorage(Protocol):
     conversation_queries: ConversationQueries
     execution_queries: ExecutionQueries
     mcp: McpConnectionRepository
+    pending_messages: PendingMessageRepository
     skills: SkillRepository
     source_control: SourceControlRepository
 
@@ -246,6 +253,8 @@ async def cancel_oncall_job(
     job_id: str,
     _caller: str = Depends(verify_oncall_dispatch),
     store: _ServiceJobsStorage | None = Depends(get_storage),
+    source_control: SourceControlRuntime | None = Depends(get_source_control),
+    gateway: Any = Depends(get_gateway_client),
 ) -> AgentJobCancelResponse:
     """Request cancellation of one on-call job.
 
@@ -262,8 +271,25 @@ async def cancel_oncall_job(
     """
     job_store = _require_store(store)
     user = _oncall_owner()
-    await _owned_job(job_store.conversation_queries, job_id, user)
+    owned = await _owned_job(job_store.conversation_queries, job_id, user)
     state = await job_store.attempt_commands.request_cancel(job_id=job_id, user_id=user["user_id"])
+    # The same settlement the owner's cancel runs, so a cancelled turn's
+    # ending is acted on the same way whichever door stopped it. Best effort:
+    # the cancel has committed, and the sweep repeats a settlement that fails.
+    if owned.get("thread_id") is not None:
+        try:
+            await settle_queue_when_possible(
+                job_store,
+                thread_id=str(owned["thread_id"]),
+                gateway=gateway,
+                github_app=None if source_control is None else source_control.github,
+            )
+        except Exception:
+            logger.warning(
+                "agent_pending_queue_settle_failed",
+                extra={"event": "agent_pending_queue_settle_failed", "job_id": job_id},
+                exc_info=True,
+            )
     job = await job_store.conversation_queries.get_job(job_id)
     return AgentJobCancelResponse(
         id=job_id,

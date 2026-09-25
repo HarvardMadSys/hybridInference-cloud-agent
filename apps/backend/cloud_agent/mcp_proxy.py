@@ -1,8 +1,8 @@
 """The JSON-RPC half of the MCP proxy: what may be called, and what is listed.
 
-The proxy exists so that a sandbox with no general egress can still use the MCP
-ecosystem. It sits in this service's control plane on the trusted side, behind
-a structurally separate MCP-only listener. The shape mirrors the publisher:
+The proxy exists so that a sandbox can use the MCP ecosystem without holding
+a single upstream credential. It sits in this service's control plane on the
+trusted side, behind a structurally separate MCP-only listener. The shape mirrors the publisher:
 the sandbox holds an attempt-fenced ``mcp`` capability and nothing upstream,
 while the component outside the boundary holds the user's real credential and
 decides what the request is allowed to be.

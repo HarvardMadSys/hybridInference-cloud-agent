@@ -20,6 +20,8 @@ from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_agent_gitlab_oauth,
+    get_github_app_state,
+    get_gitlab_load_status,
     get_storage,
     require_store,
 )
@@ -44,6 +46,10 @@ from cloud_agent.source_control import (
     consume_oauth_state,
     github_authorization_url,
     issue_oauth_state,
+)
+from cloud_agent.source_control_runtime import (  # noqa: TC001 — FastAPI resolves them.
+    GitHubAppState,
+    LoadStatus,
 )
 
 if TYPE_CHECKING:
@@ -135,8 +141,16 @@ async def _source_control_providers(
     store: _SourceControlStorage,
     app_credentials: Any | None,
     gitlab_oauth: Any | None,
+    github_load_status: LoadStatus,
+    gitlab_load_status: LoadStatus,
 ) -> list[SourceControlProviderResponse]:
-    """Build user-scoped provider status with no credential material."""
+    """Build user-scoped provider status with no credential material.
+
+    A provider that is ``unavailable`` arrives here with no client, so it
+    reads as unconfigured in every field but ``load_status`` — no connect link,
+    no repository list — while the user's own connections still come from
+    their records: an outage must not look like a lost connection.
+    """
     github_install_url = (os.getenv("AGENT_GITHUB_APP_INSTALL_URL") or "").strip()
     github_configured = (
         app_credentials is not None
@@ -210,6 +224,7 @@ async def _source_control_providers(
                 for repo in github_repos
             ],
             error=github_error,
+            load_status=github_load_status,
         )
     ]
 
@@ -249,6 +264,7 @@ async def _source_control_providers(
             ),
             repositories=[SourceControlRepository(**project) for project in gitlab_projects],
             error=gitlab_error,
+            load_status=gitlab_load_status,
         )
     )
     return providers
@@ -292,8 +308,9 @@ async def _mcp_integrations(
 async def list_source_control_integrations(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _SourceControlStorage | None = Depends(get_storage),
-    app_credentials: Any | None = Depends(get_agent_app_credentials),
+    github: GitHubAppState = Depends(get_github_app_state),
     gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
+    gitlab_load_status: LoadStatus = Depends(get_gitlab_load_status),
 ) -> SourceControlIntegrationsResponse:
     """Return configured and connected state for source control and MCP.
 
@@ -301,14 +318,19 @@ async def list_source_control_integrations(
     kinds of connection together, and two requests would let it render a
     half-refreshed state after a disconnect. The MCP half is a summary — adding,
     testing and selecting a connection live under ``/v1/agent/mcp``.
+
+    Answers while the GitHub App is unavailable, and says so, rather than
+    failing the whole page: that is the one place a user sees the outage.
     """
     job_store = _require_store(store)
     return SourceControlIntegrationsResponse(
         providers=await _source_control_providers(
             user_id=user["user_id"],
             store=job_store,
-            app_credentials=app_credentials,
+            app_credentials=github.credentials,
             gitlab_oauth=gitlab_oauth,
+            github_load_status=github.load_status,
+            gitlab_load_status=gitlab_load_status,
         ),
         mcp=await _mcp_integrations(user_id=user["user_id"], store=job_store),
     )
@@ -389,6 +411,7 @@ async def connect_gitlab_integration(
     logger.info("agent_gitlab_connected", extra={"event": "agent_gitlab_connected"})
     return SourceControlProviderResponse(
         provider="gitlab",
+        load_status="ready",
         configured=True,
         connected=True,
         capabilities=["project discovery"],
@@ -409,8 +432,9 @@ async def disconnect_gitlab_integration(
     connection_id: int,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _SourceControlStorage | None = Depends(get_storage),
-    app_credentials: Any | None = Depends(get_agent_app_credentials),
+    github: GitHubAppState = Depends(get_github_app_state),
     gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
+    gitlab_load_status: LoadStatus = Depends(get_gitlab_load_status),
 ) -> SourceControlIntegrationsResponse:
     """Revoke GitLab best-effort, then always remove the local credential."""
     job_store = _require_store(store)
@@ -430,8 +454,10 @@ async def disconnect_gitlab_integration(
         providers=await _source_control_providers(
             user_id=user["user_id"],
             store=job_store,
-            app_credentials=app_credentials,
+            app_credentials=github.credentials,
             gitlab_oauth=gitlab_oauth,
+            github_load_status=github.load_status,
+            gitlab_load_status=gitlab_load_status,
         ),
         # This response replaces the page's whole state, so it has to carry the
         # part this endpoint did not touch. Omitted, it would default to an
@@ -448,9 +474,14 @@ async def disconnect_github_integration(
     installation_id: int,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _SourceControlStorage | None = Depends(get_storage),
-    app_credentials: Any | None = Depends(get_agent_app_credentials),
+    github: GitHubAppState = Depends(get_github_app_state),
 ) -> GitHubConnectionResponse:
-    """Drop only the authenticated user's GitHub installation grant."""
+    """Drop only the authenticated user's GitHub installation grant.
+
+    Works while the App is unavailable: the grant is this service's own row,
+    and a user who wants a connection gone should not have to wait for an
+    outage to end.
+    """
     job_store = _require_store(store)
     await job_store.source_control.revoke_repo_grant(
         user_id=user["user_id"], installation_id=installation_id
@@ -458,7 +489,7 @@ async def disconnect_github_integration(
     return GitHubConnectionResponse(
         connections=await job_store.source_control.list_repo_grants(user_id=user["user_id"]),
         repos=await repos_for_user(
-            user["user_id"], store=job_store.source_control, app_credentials=app_credentials
+            user["user_id"], store=job_store.source_control, app_credentials=github.credentials
         ),
     )
 
@@ -507,9 +538,12 @@ async def disconnect_github(
     installation_id: int,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _SourceControlStorage | None = Depends(get_storage),
-    app_credentials: Any | None = Depends(get_agent_app_credentials),
+    github: GitHubAppState = Depends(get_github_app_state),
 ) -> GitHubConnectionResponse:
-    """Drop one connection. Uninstalling on GitHub is the other half."""
+    """Drop one connection. Uninstalling on GitHub is the other half.
+
+    Works while the App is unavailable: the grant is this service's own row.
+    """
     job_store = _require_store(store)
     await job_store.source_control.revoke_repo_grant(
         user_id=user["user_id"], installation_id=installation_id
@@ -517,7 +551,7 @@ async def disconnect_github(
     return GitHubConnectionResponse(
         connections=await job_store.source_control.list_repo_grants(user_id=user["user_id"]),
         repos=await repos_for_user(
-            user["user_id"], store=job_store.source_control, app_credentials=app_credentials
+            user["user_id"], store=job_store.source_control, app_credentials=github.credentials
         ),
     )
 

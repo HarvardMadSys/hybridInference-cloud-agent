@@ -27,3 +27,8 @@ def new_sandbox_id() -> str:
 def new_session_fork_id() -> str:
     """Generate one shared native-session fork operation id."""
     return f"asfork_{secrets.token_hex(16)}"
+
+
+def new_pending_message_id() -> str:
+    """Generate the id of one message waiting in a conversation's queue."""
+    return f"apmsg_{secrets.token_hex(12)}"

@@ -21,7 +21,6 @@ import type {
   ResourceMetricBriefApi,
   ResourceMetricStatus,
   RunResourceSummaryApi,
-  TurnCpuResourcesApi,
   TurnMemoryResourcesApi,
   TurnResourceReasonCode,
   TurnResourceState,
@@ -45,30 +44,22 @@ export interface ResourceCell {
   title?: string;
 }
 
-//: A value shown in the detail panel, with the method that produced it.
+//: Measurement context for the detail panel's concise rows.
 export interface ResourceReading {
   value: string;
-  /** How the number was measured, named beside it rather than left implied. */
+  /** How the number was measured, retained in the value's accessible description. */
   method: string | null;
   /** Why the number is short or missing, as fixed sentences. */
   notes: string[];
 }
 
-//: One row of the detail panel's summary grid.
+//: One concise row of the detail panel's resource summary.
 export interface TurnSummaryRow {
   label: string;
   value: string;
-  /** A second line carrying the sentences that do not fit in the value. */
+  /** Measurement context available on hover and to assistive technology. */
   detail: string | null;
 }
-
-/**
- * The scope sentence every view of these numbers must carry.
- *
- * The measurement covers the member's own execution inside a shared sandbox.
- * It is not the platform's cost of the task, and nothing here may imply it is.
- */
-export const TURN_SCOPE_SENTENCE = 'Sandbox member execution, including the agent and its tools';
 
 //: Said when a run has no summary at all, and for a metric with no number.
 export const NOT_COLLECTED = 'Not collected';
@@ -484,10 +475,6 @@ export const CPU_BASIS =
 export const MEMORY_BASIS =
   'Proportional resident memory, shared between users of the same pages; it is not machine memory and not a sum over executions';
 
-function cpuBasis(metric: TurnCpuResourcesApi): string {
-  return isLowerBound(metric) ? `${CPU_BASIS}. This value is a lower bound.` : `${CPU_BASIS}.`;
-}
-
 function memoryBasis(metric: TurnMemoryResourcesApi): string {
   return isLowerBound(metric)
     ? `${MEMORY_BASIS}. This peak was observed, so the true peak may be higher.`
@@ -502,19 +489,52 @@ function ioValue(storage: TurnStorageIoResourcesApi): string | null {
   return `${read ?? UNAVAILABLE} read / ${write ?? UNAVAILABLE} written`;
 }
 
+/** Average share of this sandbox's CPU quota, only for a complete execution. */
+export function averageCpuUsage(summary: TurnResourceSummaryApi): number | null {
+  const { cpu, window } = summary;
+  const cores = cpu.capacity_cores;
+  const duration = window?.duration_ms;
+  if (
+    summary.state !== 'final' ||
+    cpu.status !== 'available' ||
+    cpu.usec === null ||
+    !Number.isFinite(cpu.usec) ||
+    cpu.usec < 0 ||
+    typeof cores !== 'number' ||
+    !Number.isFinite(cores) ||
+    cores <= 0 ||
+    typeof duration !== 'number' ||
+    !Number.isFinite(duration) ||
+    duration <= 0 ||
+    window.observed_through_ms !== duration
+  )
+    return null;
+  const percent = (cpu.usec / 1000 / duration / cores) * 100;
+  // A contradictory counter or quota must not be clamped into a plausible reading.
+  return Number.isFinite(percent) && percent <= 100 ? percent : null;
+}
+
 function cpuReading(summary: TurnResourceSummaryApi): ResourceReading {
-  const notes: string[] = [];
-  if (summary.state === 'interrupted') notes.push(interruptedSentence(summary.observed_through_ms));
-  else if (summary.state === 'collecting') {
-    notes.push(collectingSentence(summary.observed_through_ms));
+  const percent = averageCpuUsage(summary);
+  const notes = reasonSentences(summary.cpu.reason_codes);
+  if (summary.state === 'interrupted')
+    notes.unshift(interruptedSentence(summary.window?.observed_through_ms));
+  else if (summary.state === 'collecting')
+    notes.unshift(collectingSentence(summary.window?.observed_through_ms));
+  if (percent === null) {
+    notes.unshift(
+      'Average CPU usage requires a complete execution measurement and its recorded CPU quota.',
+    );
+  } else {
+    notes.unshift(
+      'Average share of the sandbox CPU quota used by this execution, including the agent and its tools.',
+    );
   }
-  notes.push(...reasonSentences(summary.cpu.reason_codes));
-  const shown = summary.cpu.status === 'unavailable' ? null : formatCpuSeconds(summary.cpu.usec);
-  if (shown === null) return { value: UNAVAILABLE, method: summary.cpu.method, notes };
   return {
-    value: withLowerBound(shown, isLowerBound(summary.cpu)),
-    method: summary.cpu.method,
-    notes: [cpuBasis(summary.cpu), ...notes],
+    value:
+      percent === null ? '—' : percent > 0 && percent < 0.1 ? '<0.1%' : `${percent.toFixed(1)}%`,
+    method: 'CPU time / (execution duration × sandbox CPU quota)',
+    notes,
   };
 }
 
@@ -536,9 +556,10 @@ function memoryReading(summary: TurnResourceSummaryApi): ResourceReading {
 
 function storageReading(summary: TurnResourceSummaryApi): ResourceReading {
   const notes: string[] = [];
-  if (summary.state === 'interrupted') notes.push(interruptedSentence(summary.observed_through_ms));
+  if (summary.state === 'interrupted')
+    notes.push(interruptedSentence(summary.window?.observed_through_ms));
   else if (summary.state === 'collecting') {
-    notes.push(collectingSentence(summary.observed_through_ms));
+    notes.push(collectingSentence(summary.window?.observed_through_ms));
   }
   notes.push(...reasonSentences(summary.storage_io.reason_codes));
   const shown = summary.storage_io.status === 'unavailable' ? null : ioValue(summary.storage_io);
@@ -552,40 +573,44 @@ function storageReading(summary: TurnResourceSummaryApi): ResourceReading {
   };
 }
 
-/**
- * The full turn-level readings for the detail panel, in the contract's order.
- *
- * These are the same numbers the Runs list shows, at the length the detail view
- * can afford: each carries its method, and each carries the state of its own
- * collection rather than a single verdict for the turn.
- */
+/** Turn-level measurement context, in the contract's order. */
 export function turnSummaryReadings(summary: TurnResourceSummaryApi): ResourceReading[] {
   return [cpuReading(summary), memoryReading(summary), storageReading(summary)];
 }
 
-/**
- * The rows of the detail panel's summary grid, for one attempt's summary.
- *
- * The attempt counts are read from the summary when the run's compact
- * projection has been merged into it, and are otherwise absent: whether the
- * total covers the whole run is a run-level fact the attempt endpoint does not
- * carry.
- */
+/** Four scannable values for one execution; reasons stay attached to their metric. */
 export function turnSummaryRows(summary: TurnResourceSummaryApi): TurnSummaryRow[] {
   const [cpu, memory, storage] = turnSummaryReadings(summary);
+  const memoryValue =
+    summary.memory.status === 'unavailable' ? null : formatMemoryBytes(summary.memory.peak_bytes);
+  const memoryObserved = summary.memory.status === 'partial' || summary.state !== 'final';
+  const storagePartial = summary.storage_io.status === 'partial' || summary.state !== 'final';
+  const storageValue = (bytes: number | null) => {
+    const shown = summary.storage_io.status === 'unavailable' ? null : formatMemoryBytes(bytes);
+    return shown === null ? UNAVAILABLE : withLowerBound(shown, storagePartial);
+  };
+  const context = (reading: ResourceReading) => {
+    const method =
+      reading.method === 'task_io_accounting' ? 'Process I/O accounting' : reading.method;
+    return [method ? `${method}.` : null, ...reading.notes].filter(Boolean).join(' ');
+  };
   return [
-    { label: 'CPU usage', value: cpu.value, detail: cpu.notes.join(' ') || null },
-    { label: 'Memory peak', value: memory.value, detail: memory.notes.join(' ') || null },
+    { label: 'CPU usage (avg)', value: cpu.value, detail: context(cpu) },
     {
-      label: 'Process storage I/O',
-      value: storage.value,
-      detail: storage.notes.join(' ') || null,
+      label: 'Peak memory (sampled)',
+      value:
+        memoryValue === null ? UNAVAILABLE : `${memoryValue}${memoryObserved ? ' · observed' : ''}`,
+      detail: context(memory),
     },
-    { label: 'Scope', value: TURN_SCOPE_SENTENCE, detail: null },
     {
-      label: 'Completeness',
-      value: completenessSentence(summary),
-      detail: attemptCoverageNote(summary.attempts_measured, summary.attempts_total),
+      label: 'Storage read',
+      value: storageValue(summary.storage_io.read_bytes),
+      detail: context(storage),
+    },
+    {
+      label: 'Storage write',
+      value: storageValue(summary.storage_io.write_bytes),
+      detail: context(storage),
     },
   ];
 }

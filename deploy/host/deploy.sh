@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Deploy the runner host — runners, workspace broker, egress proxy, tunnels.
+# Deploy the runner host — runners, workspace broker, tunnels.
 #
 # The other half of `deploy/control-plane/deploy.sh`. They are separate because
 # they are separate machines: the control plane holds the queue and the web app,
@@ -9,10 +9,10 @@
 # **Thin on purpose.** `sandbox_host.sh up` already is the bring-up: it
 # checks the daemon, requires the environment, runs the isolation preflight
 # fail-closed, builds the sandbox image, starts the stack, and then probes the
-# gateway *from inside the closed network* — the only vantage point whose answer
-# means anything. Re-implementing any of that here would give the deploy a
-# second opinion about whether the host is fit to run untrusted code, and the
-# two would drift.
+# gateway *from the relay network* the sandbox groups are handed their relays
+# from, and has every runner install and verify this deployment's host rules.
+# Re-implementing any of that here would give the deploy a second opinion about
+# whether the host is fit to run untrusted code, and the two would drift.
 #
 # Usage:  deploy.sh [--phase prepare|activate] <sha>
 #
@@ -61,7 +61,7 @@ runs_phase() { [ "${PHASE}" = all ] || [ "${PHASE}" = "$1" ]; }
 SHA="${1:-${DEPLOY_SHA:-}}"
 SOURCE_REPO="${SOURCE_REPO:-${GITHUB_WORKSPACE:-}}"
 DEPLOY_ROOT="${DEPLOY_ROOT:-}"
-DEPLOY_PROTOCOL="shared-live-exact-sha-v3"
+DEPLOY_PROTOCOL="shared-live-exact-sha-v4"
 
 log() { printf '[deploy-host] %s\n' "$*"; }
 die() { printf '[deploy-host] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -193,7 +193,7 @@ KNOWN="${EXPECTED_PROJECT},${SIBLING_COMPOSE_PROJECTS}"
 STRAY="$(docker ps --format '{{.Label "com.docker.compose.project"}} {{.Names}}' 2>/dev/null \
   | awk -v known="${KNOWN}" '
       BEGIN { n = split(known, k, ","); for (i = 1; i <= n; i++) if (k[i] != "") ok[k[i]] = 1 }
-      !($1 in ok) && $2 ~ /-(runner|workspace-broker|gateway-tunnel|mcp-tunnel|control-plane-tunnel|agent-egress-proxy)-[0-9]+$/ {
+      !($1 in ok) && $2 ~ /-(runner|workspace-broker|gateway-tunnel|mcp-tunnel|control-plane-tunnel)-[0-9]+$/ {
         print "  " $2 "  (project: " $1 ")"
       }')"
 if [ -n "${STRAY}" ]; then

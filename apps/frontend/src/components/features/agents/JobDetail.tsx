@@ -18,7 +18,6 @@ import { basePath } from '@/config/env';
 import { useT } from '@/components/providers';
 import {
   cancelAgentJob,
-  followUpAgentJob,
   forkAgentJob,
   getAgentConfig,
   getAgentJobGit,
@@ -26,6 +25,7 @@ import {
   type AgentConfigApi,
   type AgentGitWorkspaceApi,
 } from '@/lib/api/agents';
+import { submitThreadMessage, type ThreadMessageResultApi } from '@/lib/api/pendingMessages';
 
 import { ownerFailureMessage, toDiffFileDetails } from './adapt';
 import {
@@ -44,6 +44,7 @@ import { PaneResizer } from './PaneResizer';
 import { Picker } from './Picker';
 import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
+import { composerCommandMatches } from './composerCommands';
 import { GoalBar } from './goal/GoalBar';
 import { isGoalRevisionConflict, writeGoal } from './goal/goalApi';
 import { GOAL_COMMAND_PREFIX, useGoalCommand } from './goal/useGoalCommand';
@@ -72,6 +73,9 @@ import {
 } from './TrajectoryInspector';
 import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
 import { shouldHoldReading, useConversationScroll } from './useConversationScroll';
+import { notDeliveredText, PendingMessageQueue } from './PendingMessageQueue';
+import { isSteerChord } from './composerKeys';
+import { usePendingMessages } from './usePendingMessages';
 import { useResizablePane } from './useResizablePane';
 import { WorkspaceFiles } from './WorkspaceFiles';
 import {
@@ -194,7 +198,7 @@ function RunActions({
   );
 }
 
-function RunNotices({ job, showNetworkWarning }: { job: AgentJob; showNetworkWarning: boolean }) {
+function RunNotices({ job }: { job: AgentJob }) {
   const publicationNote =
     job.workspacePublicationState === 'failed'
       ? 'Could not publish changes'
@@ -205,16 +209,6 @@ function RunNotices({ job, showNetworkWarning }: { job: AgentJob; showNetworkWar
     <>
       {!job.prUrl && publicationNote ? (
         <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">{publicationNote}</p>
-      ) : null}
-      {showNetworkWarning && job.egressDenials > 0 ? (
-        <p
-          role="note"
-          className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-500/10 dark:text-amber-300"
-        >
-          {job.egressDenials} network request{job.egressDenials === 1 ? ' was' : 's were'} blocked
-          by this workspace’s network settings. This may have prevented part of your task from
-          completing.
-        </p>
       ) : null}
     </>
   );
@@ -910,6 +904,10 @@ export function JobDetail({
   function insertGoalCommand() {
     setGoalHint(null);
     setFollowUp((current) => {
+      // Switching menus while typing a command completes its partial token.
+      if (composerCommandMatches(current).some((entry) => entry.name === 'goal')) {
+        return GOAL_COMMAND_PREFIX;
+      }
       // Already the command: nothing to add, and prefixing again would make
       // `/goal /goal …` an objective nobody wrote.
       if (/^\s*\/goal(\s|$)/i.test(current)) return current;
@@ -952,6 +950,11 @@ export function JobDetail({
 
   async function submitFollowUp(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    await sendDraft();
+  }
+
+  /** Send what the composer holds; the result, or `null` if nothing went. */
+  async function sendDraft(): Promise<ThreadMessageResultApi | null> {
     if (
       submitting ||
       contextLost ||
@@ -960,40 +963,57 @@ export function JobDetail({
       readingFiles ||
       mcp.saving
     )
-      return;
+      return null;
     // A command is not a message. It runs the thing it names and leaves
     // nothing behind for the model to read as a prompt.
-    if (await goalCommand.submit()) return;
+    if (await goalCommand.submit()) return null;
     const prompt = followUp.trim();
-    if (!prompt) return;
+    if (!prompt) return null;
     setSubmitting(true);
     setActionError(null);
     try {
-      const child = await followUpAgentJob(job.id, {
+      // One request whatever the conversation is doing: idle, the message is
+      // the next turn when this returns; busy, it waits in the queue above the
+      // composer. ``queue.apply`` shows the card or, for a turn, moves to it.
+      const result = await submitThreadMessage(threadId, {
         prompt,
         ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
         ...(attachments.ids.length ? { attachment_ids: attachments.ids } : {}),
         // Omitted controls inherit the parent's validated model and effort.
         ...composerOverrides(job, model, effort),
       });
-      // A router.push remounts the dynamic [jobId] segment even with
-      // scroll:false and a stable JobDetail key. Native history updates Next's
-      // usePathname without replacing the page, preserving the conversation
-      // while useAgentJob loads the next turn. Reload and Back keep real URLs.
-      window.history.pushState(null, '', `${basePath}/${encodeURIComponent(child.id)}`);
-      // The reader asked for this turn, so following its output is what they
-      // asked for — the one place besides "back to bottom" that resumes it.
-      scroll.followLatest();
-      // Also what the remount used to do. Without it the composer stayed
-      // disabled with the sent text still in it, because nothing else ever
-      // cleared either.
+      queue.apply(result);
+      // Without this the composer stayed disabled with the sent text still in
+      // it, because nothing else ever cleared either. A queued message keeps
+      // its uploads: they are pinned to it, not discarded with the draft.
       setFollowUp('');
       attachments.reset();
       setSubmitting(false);
+      return result;
     } catch (cause: unknown) {
-      setActionError(cause instanceof Error ? cause.message : 'Could not queue the follow-up');
+      setActionError(cause instanceof Error ? cause.message : 'Could not send the message');
       setSubmitting(false);
+      return null;
     }
+  }
+
+  /**
+   * Cmd/Ctrl+Enter while a turn that can take it is live: the draft goes into
+   * that turn, before the model's next tool call, instead of after it. Only the
+   * draft: what already waits was left for after the turn, and each has its
+   * own ↑ for changing that.
+   */
+  async function steerNow() {
+    const drafted = followUp.trim() ? await sendDraft() : null;
+    // Nothing to add, or nothing running: the draft simply became the next turn.
+    if (!drafted?.pending || (drafted.pending.attachments ?? []).length) return;
+    const sent = await queue.sendNow(drafted.pending);
+    if (!sent.ok) {
+      setActionError(sent.error);
+      return;
+    }
+    const reason = sent.result.not_delivered_reason;
+    if (reason) toast(notDeliveredText(reason, t));
   }
 
   // Fork creates a second native session in this chat's shared workspace and
@@ -1092,6 +1112,32 @@ export function JobDetail({
     turnKeys,
     conversationKey,
     active: tab === 'chat',
+  });
+  // The conversation's waiting messages. A message becomes a turn on the
+  // server, when the turn in front of it ends; the page follows it there when
+  // it asked for it, or when it was showing the turn the new one follows.
+  const followTurn = useCallback(
+    (jobId: string) => {
+      // A router.push remounts the dynamic [jobId] segment even with
+      // scroll:false and a stable JobDetail key. Native history updates Next's
+      // usePathname without replacing the page, preserving the conversation
+      // while useAgentJob loads the next turn. Reload and Back keep real URLs.
+      window.history.pushState(null, '', `${basePath}/${encodeURIComponent(jobId)}`);
+      // The reader asked for this turn, so following its output is what they
+      // asked for — the one place besides "back to bottom" that resumes it.
+      scroll.followLatest();
+    },
+    [scroll],
+  );
+  const viewedJobId = job.id;
+  const queue = usePendingMessages({
+    // The queue this page writes to is the one it reads.
+    threadId,
+    active: hasLiveWork(job),
+    onSent: (jobId, how) => {
+      if (jobId === viewedJobId) return;
+      if (how.requested || how.after === viewedJobId) followTurn(jobId);
+    },
   });
   // Announced only for a jump the reader asked for, never for a streamed
   // event: a transcript that talks on every token is one nobody can listen to.
@@ -1352,8 +1398,11 @@ export function JobDetail({
                     data-turn-key={currentTurn.key}
                   >
                     {threadMessages.map((message) => {
+                      // Only a prompt starts a turn a rewind could replace.
                       const rewindAnchor =
-                        message.role === 'user' && currentRewindAnchor !== message.jobId
+                        message.role === 'user' &&
+                        !message.midTurn &&
+                        currentRewindAnchor !== message.jobId
                           ? currentRewindAnchor
                           : undefined;
                       return (
@@ -1515,14 +1564,7 @@ export function JobDetail({
                     </div>
 
                     <OutcomeCard job={job} onOpenDiff={() => openWorkspace('git')} />
-                    {selectedAttemptIsCurrent ? (
-                      <RunNotices
-                        job={job}
-                        showNetworkWarning={
-                          !visibleEvents.some((event) => event.kind === 'egress_denied')
-                        }
-                      />
-                    ) : null}
+                    {selectedAttemptIsCurrent ? <RunNotices job={job} /> : null}
                     {usageFooter && lastVisibleMessageIndex < 0 && currentReplyId === undefined ? (
                       <div className="mt-4">{usageFooter}</div>
                     ) : null}
@@ -1549,6 +1591,10 @@ export function JobDetail({
                   active={isActive}
                   approvalsOnly
                 />
+                {/* Its own card above the composer rather than inside it: the
+                    queue is what the conversation will send next, not part of
+                    the message being written. */}
+                <PendingMessageQueue queue={queue} disabled={isArchived || contextLost} />
                 <div
                   className={
                     isArchived
@@ -1641,7 +1687,6 @@ export function JobDetail({
                           })
                           .finally(() => setReadingFiles(false));
                       }}
-                      className="relative"
                     >
                       <ComposerCommandMenu
                         id={goalCommand.menuId}
@@ -1663,6 +1708,11 @@ export function JobDetail({
                         // half of one to the model.
                         onKeyDown={(event) => {
                           goalCommand.onKeyDown(event);
+                          if (event.defaultPrevented) return;
+                          if (queue.canSendNow && isSteerChord(event)) {
+                            event.preventDefault();
+                            void steerNow();
+                          }
                         }}
                         // The list is this box's own popup, and the highlighted
                         // row is named to it — the caret never leaves here.
@@ -1687,15 +1737,18 @@ export function JobDetail({
                         onRemove={attachments.remove}
                         disabled={contextLost || submitting}
                       />
-                      <div className="relative flex flex-wrap items-center gap-1.5 border-t border-gray-100/90 dark:border-white/5 px-3 py-2.5">
+                      <div className="flex flex-wrap items-center gap-1.5 border-t border-gray-100/90 dark:border-white/5 px-3 py-2.5">
                         <ComposerPlusMenu
                           onFiles={attachments.add}
                           onOpenSkills={() => setSkillsOpen(true)}
                           skillSummary={String(selectedSkills.length)}
-                          goalSummary={t('attach.goalNone')}
+                          goalSummary={t('commands.goalHint')}
                           onOpenGoal={insertGoalCommand}
                           mcp={mcp}
-                          onOpen={mcp.reload}
+                          onOpen={() => {
+                            goalCommand.dismiss();
+                            mcp.reload();
+                          }}
                           mcpBlockedReason={mcpBlockedReason}
                           disabled={contextLost || submitting}
                         />
@@ -1727,7 +1780,8 @@ export function JobDetail({
                             />
                             {isActive ? (
                               <span className="min-w-0 truncate text-[11px] text-gray-400 dark:text-gray-500">
-                                · queued after this run
+                                · {t('queue.afterThisTurn')}
+                                {queue.canSendNow ? ` · ${t('queue.steerHint')}` : ''}
                               </span>
                             ) : null}
                           </>
@@ -1738,7 +1792,8 @@ export function JobDetail({
                               : job.state === 'cancelled'
                                 ? `Restores any saved changes · ${job.runtime} · ${job.model}`
                                 : `Inherits ${job.runtime} · ${job.model}`}
-                            {isActive ? ' · queued after this run' : ''}
+                            {isActive ? ` · ${t('queue.afterThisTurn')}` : ''}
+                            {queue.canSendNow ? ` · ${t('queue.steerHint')}` : ''}
                           </span>
                         )}
                         <ComposerSendButton

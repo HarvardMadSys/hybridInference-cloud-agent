@@ -56,7 +56,7 @@ def prompt_with_skills(prompt: str, skills: list[dict[str, Any]] | None) -> str:
 
     All five runtimes receive the same user-level context through their normal
     prompt path, including HOT and native-resumed turns. No account credentials,
-    executable bundles, shared-workspace files, or new egress are involved.
+    executable bundles, shared-workspace files, or new network access are involved.
     An explicit empty list supersedes instructions selected in earlier turns.
     """
     if skills is None:

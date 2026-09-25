@@ -235,3 +235,132 @@ async def test_concurrent_fork_probe_fails_a_serialized_single_arrival(monkeypat
     assert captured.value.kind == "concurrency_probe_timeout"
     assert gateway._concurrency_probes == {}
     assert not gateway._completed_concurrency_probes
+
+
+def test_a_hold_marker_keeps_only_the_current_turn_open(monkeypatch) -> None:
+    """A marked message holds its answer; history, junk and huge values do not."""
+    assert gateway._hold_seconds({"input": "queue behind me [local-hold:20]"}) == 20.0
+    assert gateway._hold_seconds({"input": "ordinary turn"}) == 0.0
+    assert gateway._hold_seconds({"input": "[local-hold:soon]"}) == 0.0
+    assert gateway._hold_seconds({"input": "[local-hold:-5]"}) == 0.0
+    assert gateway._hold_seconds({"input": "[local-hold:9999]"}) == gateway.LOCAL_HOLD_MAX_S
+    assert (
+        gateway._hold_seconds(
+            {
+                "messages": [
+                    {"role": "user", "content": "old [local-hold:30]"},
+                    {"role": "assistant", "content": "done"},
+                    {"role": "user", "content": "ordinary new turn"},
+                ]
+            }
+        )
+        == 0.0
+    )
+
+
+async def test_a_held_turn_waits_before_the_model_answers(monkeypatch) -> None:
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(gateway.asyncio, "sleep", fake_sleep)
+    await gateway._hold_marked_turn({"input": "ordinary"})
+    await gateway._hold_marked_turn({"input": "wait [local-hold:3.5]"})
+
+    assert slept == [3.5]
+
+
+async def _grant_token(client: AsyncClient) -> str:
+    minted = await client.post(
+        "/internal/agent-grants",
+        headers={"Authorization": "Bearer local-dispatch"},
+        json={
+            "user_id": gateway.USER_ID,
+            "external_job_id": "job-tool",
+            "external_attempt_id": "1",
+            "allowed_models": [gateway.MODEL_ID],
+        },
+    )
+    return minted.json()["token"]
+
+
+def _sse_data(text: str) -> list[dict]:
+    return [
+        json.loads(line.removeprefix("data: "))
+        for line in text.splitlines()
+        if line.startswith("data: ")
+    ]
+
+
+async def test_a_tool_marker_runs_a_tool_first_and_the_answer_quotes_a_mid_turn_message() -> None:
+    """[local-tool:N] gives a turn a running tool, the moment it can take a message."""
+    async with AsyncClient(
+        transport=ASGITransport(app=gateway.app), base_url="http://gateway"
+    ) as client:
+        headers = {"x-api-key": await _grant_token(client)}
+        first = await client.post(
+            "/v1/messages",
+            headers=headers,
+            json={
+                "model": gateway.MODEL_ID,
+                "stream": True,
+                "messages": [{"role": "user", "content": "take a while [local-tool:12]"}],
+            },
+        )
+        after_tool = await client.post(
+            "/v1/messages",
+            headers=headers,
+            json={
+                "model": gateway.MODEL_ID,
+                "stream": True,
+                # The shape the pinned Claude Code sends: the message is a
+                # ``system`` entry after the tool's result.
+                "messages": [
+                    {"role": "user", "content": "take a while [local-tool:12]"},
+                    {"role": "system", "content": [{"type": "text", "text": "context"}]},
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": "t1"}]},
+                    {
+                        "role": "user",
+                        "content": [{"type": "tool_result", "tool_use_id": "t1", "content": ""}],
+                    },
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"{gateway.MID_TURN_MESSAGE_LEAD}\nalso check the docs"
+                                "\n\nThis is how Claude Code surfaces messages the user sends "
+                                "mid-turn.",
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    },
+                ],
+            },
+        )
+
+    events = _sse_data(first.text)
+    started = next(event for event in events if event["type"] == "content_block_start")
+    assert started["content_block"]["type"] == "tool_use"
+    assert started["content_block"]["name"] == "Bash"
+    delta = next(event for event in events if event["type"] == "content_block_delta")
+    assert json.loads(delta["delta"]["partial_json"])["command"] == "sleep 12"
+    stopped = next(event for event in events if event["type"] == "message_delta")
+    assert stopped["delta"]["stop_reason"] == "tool_use"
+    # The marker lives in the prompt, not in the tool's result: this one answers.
+    answer = "".join(
+        event["delta"]["text"]
+        for event in _sse_data(after_tool.text)
+        if event["type"] == "content_block_delta"
+    )
+    assert answer == (
+        'Local gateway response: the tool finished, and I also got "also check the docs".'
+    )
+
+
+def test_a_tool_marker_is_bounded_and_ignores_junk() -> None:
+    assert gateway._tool_seconds({"input": "[local-tool:8]"}) == 8.0
+    assert gateway._tool_seconds({"input": "[local-tool:600]"}) == gateway.LOCAL_TOOL_MAX_S
+    assert gateway._tool_seconds({"input": "[local-tool:later]"}) == 0.0
+    assert gateway._tool_seconds({"input": "ordinary"}) == 0.0

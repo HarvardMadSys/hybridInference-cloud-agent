@@ -49,6 +49,7 @@ from cloud_agent_host.guest_observer import (
     attribute_processes,
 )
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
+from cloud_agent_host.operation_call import BrokerCall, closed, open_call
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
 from cloud_agent_host.retained_workspace import (
@@ -84,8 +85,7 @@ from cloud_agent_host.workspace_browser import (
     WorkspacePathError,
     normalize_workspace_path,
 )
-from cloud_agent_profiling.operation_call import BrokerCall, closed, open_call
-from cloud_agent_profiling.operation_profiling import PROFILING_CONTEXT_HEADER
+from cloud_agent_shared.operation_profiling import PROFILING_CONTEXT_HEADER
 
 logger = get_logger(__name__)
 
@@ -169,6 +169,20 @@ class SharedLeaseRequest(BaseModel):
     """Receipt for one shared member activation mutation."""
 
     token: str = Field(..., min_length=1, max_length=512)
+
+
+class SharedInputRequest(BaseModel):
+    """The control plane's message for one member's running turn.
+
+    ``owner`` names the activation the control plane saw running
+    (``attempt:<id>``); a member now leased to anyone else does not take it.
+    ``message_id`` names the waiting message, so the turn's stream can say
+    which one it took.
+    """
+
+    owner: str = Field(..., min_length=1, max_length=128)
+    message_id: str = Field(..., min_length=1, max_length=128)
+    text: str = Field(..., min_length=1, max_length=100_000)
 
 
 class SharedResidencyLostRequest(BaseModel):
@@ -812,7 +826,6 @@ class _TerminalManager:
                     "GIT_CONFIG_NOSYSTEM": "1",
                     "TERM": "xterm-256color",
                 },
-                phase="agent",
             )
             try:
                 process = backend.spawn_terminal(spec, rows=rows, cols=cols)
@@ -1054,7 +1067,6 @@ def _run_sandbox(
             argv=["/bin/sh", "-lc", script],
             workdir=str(workdir),
             env={**backend.base_env(), "GIT_CONFIG_NOSYSTEM": "1", **env},
-            phase="agent",
         )
     )
     lines: queue.Queue[str | None] = queue.Queue()
@@ -1390,8 +1402,8 @@ def create_app(
             with active.stage("admission"):
                 token, _ = owner.operation_opened(workspace_id)
             retained = owner.backend(workspace_id)
-            with active.stage("network_phase"):
-                retained.manager.require_network_phase(retained.spec, "agent")
+            with active.stage("network"):
+                retained.manager.require_network(retained.spec)
             return active.answer(operation(retained, active))
         except RetainedWorkspaceError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
@@ -1693,6 +1705,31 @@ def create_app(
         except SandboxError as exc:
             raise supervisor_error(exc) from exc
         return {"ok": True}
+
+    @app.post("/shared-sandboxes/{thread_id}/input")
+    async def inject_shared_input(
+        thread_id: str,
+        body: SharedInputRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        """Give the member's turn a message for the model's next step, or say why not.
+
+        Accepted means the turn has it; the turn's own stream reports where the
+        model got it. A refusal is an answer, not an error: the message stays
+        waiting on the control plane and goes when the turn ends.
+        """
+        supervisor = require_shared_supervisor()
+        try:
+            outcome = await asyncio.to_thread(
+                supervisor.inject_input,
+                thread_id,
+                owner=body.owner,
+                message_id=body.message_id,
+                text=body.text,
+            )
+        except SandboxError as exc:
+            raise supervisor_error(exc) from exc
+        return {"accepted": outcome.accepted, "reason": outcome.reason}
 
     @app.post("/shared-sandboxes/{thread_id}/residency-lost")
     async def shared_residency_lost(
@@ -2025,8 +2062,8 @@ def create_app(
                 token, descriptor = await asyncio.to_thread(owner.terminal_opened, workspace_id)
             terminal_token = token
             retained = owner.backend(workspace_id)
-            with call.stage("network_phase"):
-                retained.manager.require_network_phase(retained.spec, "agent")
+            with call.stage("network"):
+                retained.manager.require_network(retained.spec)
 
             def on_terminal_closed(last_activity: float) -> None:
                 owner.terminal_closed(

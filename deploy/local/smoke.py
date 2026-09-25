@@ -137,6 +137,25 @@ def wait_job(client: Client, job_id: str) -> dict[str, Any]:
     raise RuntimeError(f"job {job_id} did not settle within {JOB_TIMEOUT_S}s")
 
 
+def send_message(client: Client, turn: dict[str, Any], prompt: str) -> dict[str, Any]:
+    """Send the next message of a finished turn's conversation; return its turn.
+
+    The turn before it has ended, so the conversation is idle and the message
+    becomes the next turn in the same request. A message that was queued
+    instead would mean the control plane still counts a turn as running.
+    """
+    result = client.request(
+        f"/api/v1/agent/threads/{urllib.parse.quote(str(turn['thread_id']))}/messages",
+        method="POST",
+        body={"prompt": prompt},
+        headers={"Idempotency-Key": f"local-smoke-message-{secrets.token_hex(8)}"},
+    )
+    job = result.get("job")
+    if not isinstance(job, dict):
+        raise RuntimeError(f"a message to an idle conversation did not start a turn: {result}")
+    return job
+
+
 def require_assistant_reply(client: Client, job_id: str) -> None:
     """A successful confirmation task must have its own nonempty reply."""
     thread = client.request(f"/api/v1/agent/jobs/{urllib.parse.quote(job_id)}/thread")
@@ -204,47 +223,103 @@ def chat_container(sandbox_id: str) -> tuple[str, str, str]:
     return container_id, status, mounts
 
 
+def _docker_json(*argv: str) -> Any:
+    return json.loads(
+        subprocess.run(["docker", *argv], check=True, capture_output=True, text=True).stdout
+    )
+
+
 def chat_private_network(container_id: str) -> str:
-    """Require one chat-private bridge containing only this chat and two relays."""
-    inspected = subprocess.run(
-        [
-            "docker",
-            "inspect",
-            "--format",
-            "{{json .NetworkSettings.Networks}}",
-            container_id,
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    networks = json.loads(inspected)
+    """Require one guarded group bridge containing only this chat and two relays."""
+    networks = _docker_json(
+        "inspect", "--format", "{{json .NetworkSettings.Networks}}", container_id
+    )
     if len(networks) != 1:
         raise RuntimeError(f"chat {container_id[:12]} has non-exclusive networks: {networks}")
     network_name = next(iter(networks))
     if not network_name.startswith("freeinference-chat-net-"):
         raise RuntimeError(f"chat {container_id[:12]} remained on shared network {network_name!r}")
-    raw = json.loads(
-        subprocess.run(
-            ["docker", "network", "inspect", network_name],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-    )[0]
+    raw = _docker_json("network", "inspect", network_name)[0]
     labels = raw.get("Labels") or {}
     members = raw.get("Containers") or {}
     options = raw.get("Options") or {}
     if labels.get("org.freeinference.chat-sandbox-network") != "true":
         raise RuntimeError(f"chat network {network_name!r} has no ownership label")
-    if str(options.get("com.docker.network.bridge.inhibit_ipv4", "")).lower() != "true":
-        raise RuntimeError(f"chat network {network_name!r} still exposes a host IPv4 gateway")
+    # Routable on purpose: the host rules, not the absence of a route, are the
+    # boundary. They match the group by this interface name.
+    if raw.get("Internal") or raw.get("EnableIPv6"):
+        raise RuntimeError(f"chat network {network_name!r} is not the one routable IPv4 bridge")
+    if not options.get("com.docker.network.bridge.name"):
+        raise RuntimeError(f"chat network {network_name!r} has no guarded interface name")
     if len(members) != 3 or not any(str(member).startswith(container_id) for member in members):
         raise RuntimeError(
             f"chat network {network_name!r} must contain one sandbox and two relays, "
             f"found {[item.get('Name') for item in members.values()]}"
         )
     return network_name
+
+
+# Run inside the chat as its own user. A refusal must be a refusal: a timeout
+# says nothing about which rule, if any, stopped the packet.
+_BOUNDARY_PROBE = """
+import socket, sys
+for target in sys.argv[1:]:
+    host, port = target.rsplit(":", 1)
+    try:
+        socket.create_connection((host, int(port)), timeout=8).close()
+        print(target, "open")
+    except TimeoutError:
+        print(target, "timeout")
+    except OSError as exc:
+        print(target, "refused", exc.errno)
+"""
+
+
+def chat_network_boundary(container_id: str, network_name: str) -> None:
+    """The one network from inside: the relays and the public web, not the stack.
+
+    The negative target is a real listener: the local gateway itself, at its
+    private address on the control network. The same service answers through
+    the group bridge, so only the host rules can make this one fail.
+    """
+    relay_ids = [
+        member
+        for member in _docker_json("network", "inspect", network_name)[0]["Containers"]
+        if not member.startswith(container_id)
+    ]
+    private = None
+    for relay_id in relay_ids:
+        relay = _docker_json("inspect", relay_id)[0]
+        attached = relay["NetworkSettings"]["Networks"]
+        if "local-gateway" not in {
+            alias for settings in attached.values() for alias in settings.get("Aliases") or []
+        }:
+            continue
+        private = next(
+            settings["IPAddress"]
+            for name, settings in attached.items()
+            if name != network_name and "relays" not in name and settings.get("IPAddress")
+        )
+    if private is None:
+        raise RuntimeError(f"no local gateway endpoint found beside chat {container_id[:12]}")
+    expected = {
+        "local-gateway:8080": "open",
+        "mcp-relay:8001": "open",
+        "example.com:443": "open",
+        f"{private}:8080": "refused",
+    }
+    probed = subprocess.run(
+        ["docker", "exec", container_id, "python3", "-c", _BOUNDARY_PROBE, *expected],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    ).stdout.split("\n")
+    observed = {line.split()[0]: line.split()[1] for line in probed if line.strip()}
+    if observed != expected:
+        raise RuntimeError(
+            f"chat {container_id[:12]} network boundary: {observed}, want {expected}"
+        )
 
 
 def wait_stopped(sandbox_id: str) -> str:
@@ -332,6 +407,7 @@ def main() -> int:
         if status != "running" or mounts != "[]":
             raise RuntimeError(f"{runtime} new chat container is {status} with mounts {mounts}")
         private_network = chat_private_network(original_id)
+        chat_network_boundary(original_id, private_network)
         if private_network in private_networks:
             raise RuntimeError(
                 f"{runtime} shares chat network {private_network!r} with another group"
@@ -339,10 +415,8 @@ def main() -> int:
         private_networks.add(private_network)
 
         print(f"  {runtime}: follow-up", flush=True)
-        follow_up = client.request(
-            f"/api/v1/agent/jobs/{urllib.parse.quote(str(first['id']))}/follow-ups",
-            method="POST",
-            body={"prompt": "Confirm that the same native session received this follow-up."},
+        follow_up = send_message(
+            client, first, "Confirm that the same native session received this follow-up."
         )
         live = wait_job(client, str(follow_up["id"]))
         if live.get("context_status") != "live":
@@ -364,10 +438,8 @@ def main() -> int:
     restored_sessions: dict[str, tuple[dict[str, Any], dict[str, Any], str, str]] = {}
     for runtime, (live, sandbox_id, original_id) in sessions.items():
         print(f"  {runtime}: stopped-container follow-up", flush=True)
-        restored_turn = client.request(
-            f"/api/v1/agent/jobs/{urllib.parse.quote(str(live['id']))}/follow-ups",
-            method="POST",
-            body={"prompt": f"Confirm that the stopped {runtime} sandbox restored this session."},
+        restored_turn = send_message(
+            client, live, f"Confirm that the stopped {runtime} sandbox restored this session."
         )
         restored = wait_job(client, str(restored_turn["id"]))
         if restored.get("context_status") != "restored":
@@ -453,25 +525,15 @@ def main() -> int:
         # attempts, grants, resident processes, and native session ids.
         concurrency_probe_key = f"{runtime}-{secrets.token_hex(8)}"
         concurrency_probe = f"[local-concurrency-probe:{concurrency_probe_key}]"
-        source_follow_up = client.request(
-            f"/api/v1/agent/jobs/{urllib.parse.quote(str(source['id']))}/follow-ups",
-            method="POST",
-            body={
-                "prompt": (
-                    f"Continue the source {runtime} session after its native fork. "
-                    f"{concurrency_probe}"
-                )
-            },
+        source_follow_up = send_message(
+            client,
+            source,
+            f"Continue the source {runtime} session after its native fork. {concurrency_probe}",
         )
-        child_follow_up = client.request(
-            f"/api/v1/agent/jobs/{urllib.parse.quote(str(forked['id']))}/follow-ups",
-            method="POST",
-            body={
-                "prompt": (
-                    f"Continue the child {runtime} session after its native fork. "
-                    f"{concurrency_probe}"
-                )
-            },
+        child_follow_up = send_message(
+            client,
+            forked,
+            f"Continue the child {runtime} session after its native fork. {concurrency_probe}",
         )
         wait_concurrently_running(
             client,
@@ -501,10 +563,8 @@ def main() -> int:
         "[7/7] Group idle stops once; waking either child restores that exact container", flush=True
     )
     for runtime, (child_live, sandbox_id, original_id) in forked_sessions.items():
-        restored_turn = client.request(
-            f"/api/v1/agent/jobs/{urllib.parse.quote(str(child_live['id']))}/follow-ups",
-            method="POST",
-            body={"prompt": f"Restore the stopped shared {runtime} fork group from this child."},
+        restored_turn = send_message(
+            client, child_live, f"Restore the stopped shared {runtime} fork group from this child."
         )
         restored_child = wait_job(client, str(restored_turn["id"]))
         if restored_child.get("context_status") != "restored":
@@ -529,7 +589,8 @@ def main() -> int:
         "PASS: OAuth + all five CLIs NEW → LIVE → docker stop → RESTORED; "
         "all five native-fork source/child sessions stay LIVE in one workspace; "
         "group stop → child RESTORED; snapshots publish; all containers keep mounts=[] "
-        "and unrelated groups use distinct relay-only networks",
+        "and unrelated groups use distinct guarded bridges that reach the relays and "
+        "the public web but not the stack",
         flush=True,
     )
     return 0

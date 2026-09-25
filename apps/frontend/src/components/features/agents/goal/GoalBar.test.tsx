@@ -58,7 +58,7 @@ afterEach(cleanup);
 describe('GoalBar', () => {
   it('names the band, so it is not one of two anonymous status regions', () => {
     render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
-    expect(screen.getByRole('status', { name: 'Completion condition' })).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'Goal' })).toBeInTheDocument();
   });
 
   it('counts the rounds that ran, and names no total for a goal without one', () => {

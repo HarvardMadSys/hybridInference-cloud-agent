@@ -33,7 +33,7 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatLost,
     SandboxActionFacts,
 )
-from cloud_agent_host.drivers import DialectRuntime
+from cloud_agent_host.drivers import DialectRuntime, InputOutcome, PendingInput
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_SOURCE,
     GuestObservation,
@@ -61,12 +61,13 @@ from cloud_agent_host.session_lifecycle import (
     SessionBusy,
     SessionLeaseLost,
 )
-from cloud_agent_profiling.operation_profiling import (
+from cloud_agent_shared.operation_profiling import (
     StageRecorder,
     context_call_id,
     start_stage_recording,
     substage,
 )
+from cloud_agent_shared.turn_resources import parse_cpu_capacity
 
 if TYPE_CHECKING:
     import builtins
@@ -319,6 +320,20 @@ NativeForker = Callable[
     str,
 ]
 
+#: How long a message sent into a turn that has not started here is kept for
+#: it. Long past any sandbox preparation; a turn that never starts leaves its
+#: message to the control plane, which sends it as the next turn instead.
+HELD_INPUT_TTL_S = 15 * 60.0
+
+
+@dataclass(frozen=True)
+class _HeldInput:
+    """A message for an owner's turn that has not started on this broker yet."""
+
+    owner: str
+    pending: PendingInput
+    held_at: float
+
 
 class SharedChatSessionSupervisor:
     """Own one live process per member and one Docker lifecycle per group."""
@@ -356,6 +371,7 @@ class SharedChatSessionSupervisor:
         self._native_forker = native_forker or self._transport_factory.fork_native
         self._groups: dict[str, _Group] = {}
         self._members: dict[str, _Group] = {}
+        self._held_inputs: dict[str, list[_HeldInput]] = {}
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._stop = threading.Event()
@@ -670,7 +686,6 @@ class SharedChatSessionSupervisor:
                 raise RetainedChatLost("shared sandbox container identity changed")
             group.inspection = self._manager.start(
                 group.spec,
-                network_phase="agent" if has_settled_context else "setup",
                 facts=facts,
                 observer=recorder,
             )
@@ -794,6 +809,10 @@ class SharedChatSessionSupervisor:
                             measurement_id=measurement_id,
                             cursor=observer_cursor,
                         )
+                        window = replace(
+                            window,
+                            cpu_capacity_cores=parse_cpu_capacity(group.spec.cpu_limit),
+                        )
             with self._lock:
                 current_group = self._members.get(thread_id)
                 current_member = (
@@ -823,6 +842,7 @@ class SharedChatSessionSupervisor:
             member.turn_lock.release()
             raise
         admitted = False
+        held_inputs: list[PendingInput] = []
         with self._lock:
             current_group = self._members.get(thread_id)
             current_member = (
@@ -838,6 +858,7 @@ class SharedChatSessionSupervisor:
             )
             if admitted:
                 member.current_turn = turn
+                held_inputs = self._take_held_inputs(thread_id, member.lease_owner)
                 member.activation_processes = activation_processes
                 member.observer_cursor = observer_cursor
                 member.tool_mark_reader = tool_mark_reader
@@ -876,7 +897,18 @@ class SharedChatSessionSupervisor:
                 )
             member.turn_lock.release()
             raise SessionLeaseLost("shared sandbox lifecycle changed during turn admission")
+        for pending in held_inputs:
+            turn.inject(pending.text, message_id=pending.message_id)
         return turn
+
+    def _take_held_inputs(self, thread_id: str, owner: str | None) -> list[PendingInput]:
+        """Remove and return what was held for ``owner``'s turn; drop the rest."""
+        now = self._clock()
+        return [
+            held.pending
+            for held in self._held_inputs.pop(thread_id, [])
+            if held.owner == owner and now - held.held_at < HELD_INPUT_TTL_S
+        ]
 
     def complete_turn(
         self,
@@ -1073,7 +1105,7 @@ class SharedChatSessionSupervisor:
         cursor = window.cursor
         duration_ms = max(0, int((time.monotonic() - window.opened_host_mono) * 1000))
         try:
-            return reduce_window(
+            snapshot = reduce_window(
                 uid=window.uid,
                 measurement_id=window.measurement_id,
                 boot_id=getattr(cursor, "guest_boot_id", "") or "",
@@ -1087,6 +1119,8 @@ class SharedChatSessionSupervisor:
                 open_scan_ms=window.open_scan_ms,
                 close_scan_ms=close_scan_ms,
             )
+            snapshot["cpu"]["capacity_cores"] = window.cpu_capacity_cores
+            return snapshot
         except Exception:
             logger.warning(
                 "member window reduction failed for %s",
@@ -1353,6 +1387,7 @@ class SharedChatSessionSupervisor:
                     report_seq=report_seq,
                     open_scan_ms=window.open_scan_ms,
                 )
+            snapshot["cpu"]["capacity_cores"] = window.cpu_capacity_cores
             with self._lock:
                 group = self._members.get(thread_id)
                 if group is not None and thread_id in group.members:
@@ -1377,6 +1412,39 @@ class SharedChatSessionSupervisor:
             turn = member.current_turn
         if turn is not None:
             turn.interrupt()
+
+    def inject_input(
+        self, thread_id: str, *, owner: str, message_id: str, text: str
+    ) -> InputOutcome:
+        """Hand the owner's message to this member's turn, running or about to.
+
+        ``owner`` is the lease owner the control plane expects — ``attempt:<id>``
+        — so a message meant for one attempt never reaches a later one that
+        re-leased the member. The runner's lease token is not needed: this is
+        the control plane's request, authenticated by the broker, and the owner
+        string is its fence. Siblings are untouched. A turn that has not
+        started here yet (its sandbox is still being prepared) is given the
+        message when it starts; one that never does leaves it to the control
+        plane, which sends it as the next turn.
+        """
+        with self._lock:
+            group = self._members.get(thread_id)
+            member = group.members.get(thread_id) if group is not None else None
+            turn = (
+                member.current_turn if member is not None and member.lease_owner == owner else None
+            )
+            if turn is None:
+                now = self._clock()
+                held = [
+                    entry
+                    for entry in self._held_inputs.get(thread_id, [])
+                    if now - entry.held_at < HELD_INPUT_TTL_S
+                ]
+                if all(entry.pending.message_id != message_id for entry in held):
+                    held.append(_HeldInput(owner, PendingInput(message_id, text), now))
+                self._held_inputs[thread_id] = held
+                return InputOutcome(True)
+        return turn.inject(text, message_id=message_id)
 
     def abort_turn(
         self,
@@ -1885,7 +1953,7 @@ class SharedChatSessionSupervisor:
         result: dict[str, Any] | None = None
         try:
             if not current.running:
-                started = self._manager.start(group.spec, network_phase="agent")
+                started = self._manager.start(group.spec)
                 with self._lock:
                     if group.stopping or group.lifecycle_generation != lifecycle_generation:
                         raise SessionLeaseLost(
@@ -2018,7 +2086,7 @@ class SharedChatSessionSupervisor:
         thread_id: str,
         *,
         generation: int,
-        reason: Literal["idle", "orphaned_attempt", "lost"] = "idle",
+        reason: Literal["idle", "orphaned_attempt", "lost", "unguarded"] = "idle",
     ) -> SharedSessionDescriptor:
         """Close all member transports, then stop the group exactly once.
 
@@ -2236,15 +2304,7 @@ class SharedChatSessionSupervisor:
         current = self._manager.inspect(group.spec.container_name)
         if current is None:
             raise RetainedChatLost("shared sandbox container is missing")
-        network_phase: Literal["setup", "agent"] = (
-            "agent"
-            if any(member.native_session_id for member in group.members.values())
-            else "setup"
-        )
-        group.inspection = self._manager.start(
-            group.spec,
-            network_phase=network_phase,
-        )
+        group.inspection = self._manager.start(group.spec)
 
     def _arm_idle_if_quiescent(self, group: _Group) -> None:
         if self._is_quiescent(group) and group.inspection.running:
@@ -2403,8 +2463,56 @@ class SharedChatSessionSupervisor:
                 f"shared container {inspection.name!r} has incomplete identity labels"
             ) from exc
 
+    def guard_network(self) -> builtins.list[SharedSessionDescriptor]:
+        """Stop every running group when the host can no longer show its rules.
+
+        The guard re-reads the host at most once a minute and reinstalls what
+        it finds missing, so this only acts when that repair fails twice: a
+        running group would otherwise go on without the boundary it was
+        started behind, and anything a repository left running in it with
+        it. Fail closed — stop them all, which releases their bridges and
+        keeps their workspaces. Waking one reinstalls and verifies the rules
+        before it runs again, and refuses while they cannot be.
+        """
+        with self._lock:
+            running = [
+                (next(iter(group.members)), group.spec.generation)
+                for group in self._groups.values()
+                if group.inspection.running and not group.stopping and group.members
+            ]
+        if not running:
+            return []
+        try:
+            self._manager.verify_host_rules()
+            return []
+        except SandboxError:
+            pass
+        try:
+            # A failed check is never cached, so this is a full second attempt:
+            # one Docker hiccup is not reason enough to stop every group.
+            self._manager.verify_host_rules()
+            return []
+        except SandboxError as exc:
+            logger.error(
+                "shared_chat_network_unguarded",
+                extra={
+                    "event": "shared_chat_network_unguarded",
+                    "groups": len(running),
+                    "detail": str(exc)[:300],
+                },
+            )
+        stopped: builtins.list[SharedSessionDescriptor] = []
+        for thread_id, generation in running:
+            with contextlib.suppress(SessionBusy, SessionLeaseLost, SandboxError):
+                stopped.append(
+                    self.stop_if_idle(thread_id, generation=generation, reason="unguarded")
+                )
+        return stopped
+
     def _sweep_loop(self) -> None:
         while not self._stop.wait(self._sweep_interval_s):
+            with contextlib.suppress(Exception):
+                self.guard_network()
             with contextlib.suppress(Exception):
                 self.sweep()
 

@@ -452,6 +452,7 @@ export function EventRow({
       />
     );
   }
+  if (event.kind === 'user_message') return <UserMessage text={event.text} blockKey={blockKey} />;
   if (event.kind === 'tool_use') return <ToolActivity event={event} blockKey={blockKey} />;
   if (event.kind === 'tool_result') {
     return (
@@ -476,18 +477,6 @@ export function EventRow({
       >
         {event.text}
       </pre>
-    );
-  }
-  if (event.kind === 'egress_denied') {
-    return (
-      <div
-        data-block-key={blockKey}
-        className="my-2 flex items-center gap-2 rounded-lg bg-red-50 dark:bg-red-500/10 px-3 py-2 text-[13px] text-red-700 dark:text-red-400"
-      >
-        <span className="font-medium">Network request blocked</span>
-        <span className="font-mono text-xs">{event.host}</span>
-        <span className="text-red-500 dark:text-red-400">× {event.attempts}</span>
-      </div>
     );
   }
   return (
@@ -526,8 +515,9 @@ export function HistoryTurn({
       {turn.promptCard !== null ? (
         <UserMessage text={turn.promptCard} blockKey={`${jobId}:prompt`} />
       ) : null}
+      {/* The prompt opens the turn; a message sent into it reads where it arrived. */}
       {turn.messages
-        .filter((message) => message.role === 'user')
+        .filter((message) => message.role === 'user' && !message.midTurn)
         .map((message) => (
           <ThreadTurn
             key={message.id}

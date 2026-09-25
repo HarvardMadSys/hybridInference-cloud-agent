@@ -2,8 +2,6 @@ services:
   control-plane:
     environment:
       AGENT_DEFAULT_EXECUTION_PROFILE: trusted-v1
-      AGENT_EGRESS_SETUP_TIER: platform_only
-      AGENT_EGRESS_AGENT_TIER: platform_only
       # The production compose has an optional host-file mount for a GitHub
       # App key. Local development configures no App and replaces that target
       # with an unused Docker volume, keeping this topology free of host data
@@ -13,8 +11,9 @@ services:
       - local-empty-github-key:/etc/cloud-agent/github-app.pem:ro
 
   # Local implementation of the gateway's HTTP contracts. It is reachable by
-  # the control plane on its private network and by sandboxes on the closed
-  # egress network; no port is published directly to the host.
+  # the control plane on its private network and, once group lifecycle has
+  # attached it, by the sandboxes on each group's bridge; no port is published
+  # directly to the host.
   local-gateway:
     build:
       context: ../..
@@ -37,7 +36,7 @@ services:
     networks:
       control-plane:
         aliases: [local-gateway]
-      agent-egress:
+      agent-relays:
         aliases: [local-gateway]
 
   # One same-origin browser entrypoint: web, API, OAuth, SSE, and terminal
@@ -124,10 +123,14 @@ services:
       AGENT_SANDBOX_NAMESPACE: ${LOCAL_PROJECT_NAME:-freeinference-local}
       AGENT_DEPLOYMENT_SHA: ${AGENT_DEPLOYMENT_SHA:?derived by deploy/local/dev.sh}
       AGENT_SHARED_LIVE_READY_FILE: /var/lib/freeinference/agent-host/shared-live-ready
-      AGENT_EGRESS_NETWORK_PLATFORM_ONLY: ${LOCAL_AGENT_EGRESS_NETWORK:-freeinference-local-agent-egress}
+      # The same one network as production: a guarded bridge per group, public
+      # IPv4 on TCP 80/443, this resolver, and the two relays below. A second
+      # local stack on the same Docker engine needs its own pool; the host
+      # rules refuse the later of two that overlap.
+      AGENT_RELAY_NETWORK: ${LOCAL_RELAY_NETWORK:-freeinference-local-agent-relays}
       AGENT_EGRESS_CHAT_NETWORK_POOL: ${LOCAL_CHAT_NETWORK_POOL:-10.240.0.0/16}
-      AGENT_EGRESS_SETUP_TIER: platform_only
-      AGENT_EGRESS_AGENT_TIER: platform_only
+      AGENT_EGRESS_DNS_SERVER: ${LOCAL_EGRESS_DNS_SERVER:?detected by deploy/local/dev.sh}
+      AGENT_EGRESS_PROTECTED_CIDRS: ${LOCAL_EGRESS_PROTECTED_CIDRS:-}
       # The runner, the broker and the control plane are separate processes and
       # each reads the profiling switch itself. Without these three the local
       # stack would measure only the control plane's own file and terminal
@@ -192,18 +195,18 @@ services:
       context: ../..
       dockerfile: deploy/sandbox/Dockerfile.agent-sandbox
 
-  # The second fixed relay on the discovery backplane. Chat lifecycle copies
-  # this endpoint and local-gateway onto each sandbox-private internal bridge.
+  # The second fixed relay on the discovery network. Group lifecycle attaches
+  # this endpoint and local-gateway to each sandbox group's own bridge.
   mcp-relay:
     networks:
       - control-plane
-      - agent-egress
+      - agent-relays
 
 networks:
-  agent-egress:
-    name: ${LOCAL_AGENT_EGRESS_NETWORK:-freeinference-local-agent-egress}
-    # Discovery only. `internal` removes an internet route but does not isolate
-    # peers, so chat containers are never left together on this bridge.
+  agent-relays:
+    name: ${LOCAL_RELAY_NETWORK:-freeinference-local-agent-relays}
+    # Discovery only: the two relays, never a sandbox. It needs no route, and
+    # the runner refuses to start if it has one.
     internal: true
 
 volumes:

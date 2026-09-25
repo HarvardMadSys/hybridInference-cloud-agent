@@ -6,9 +6,9 @@ Opening a file in the chat's Files panel walks this path::
     browser -> CP GET /v1/agent/jobs/{job}/files
             -> broker GET /workspaces/{workspace}/files   (httpx, host network)
             -> Supervisor.operation_opened()               (in-memory lock)
-            -> ChatSandboxManager.require_network_phase()   (docker CLI: network
+            -> ChatSandboxManager.require_network()         (docker CLI: network
                                                             + container inspect,
-                                                            Kata guest hosts sync)
+                                                            Kata guest network sync)
             -> retained_workspace.read_retained_file()
             -> ChatSandboxManager.exec_capture()            (docker exec into the
                                                             retained container)
@@ -36,9 +36,9 @@ Three modes, in increasing fidelity:
 
 ``docker``
     Builds a real retained container with the platform's own
-    :class:`ChatSandboxManager` — two backplane networks, the proxy/gateway/MCP
-    relay aliases and a per-chat internal bridge — then times the two steps one
-    open actually costs on the broker: ``require_network_phase()`` and
+    :class:`ChatSandboxManager` — the relay network, listening gateway/MCP relay
+    stand-ins, this run's host rules and a group bridge — then times the two
+    steps one open actually costs on the broker: ``require_network()`` and
     ``read_retained_file()``.  This is the only mode that measures the Docker
     boundary, and it reports how many ``docker`` CLI invocations one open made.
     It needs a working Docker daemon and ``--image`` (see ``--build-image``).
@@ -63,6 +63,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import statistics
 import subprocess
 import sys
@@ -265,11 +266,12 @@ async def _stack_samples(client, iterations: int, warmup: int, cases=CASES) -> l
 
 BENCH_IMAGE = "cae-bench-guest:bookworm"
 BENCH_NAMESPACE = "cae-file-open-bench"
-BENCH_SETUP_NET = "cae-bench-setup"
-BENCH_AGENT_NET = "cae-bench-agent"
-BENCH_PROXY = "cae-bench-proxy"
+BENCH_RELAY_NET = "cae-bench-relays"
+BENCH_POOL = "10.250.0.0/16"
 BENCH_GATEWAY = "cae-bench-gateway"
+BENCH_GATEWAY_PORT = 8080
 BENCH_MCP = "cae-bench-mcp"
+BENCH_MCP_PORT = 8000
 
 _SEED_SCRIPT = """
 set -e
@@ -291,12 +293,16 @@ def _docker(*argv: str, check: bool = True) -> subprocess.CompletedProcess[str]:
 
 
 def build_bench_image() -> None:
-    """Build a bookworm guest carrying ``/usr/bin/python3`` (3.11), like the sandbox."""
+    """Build a bookworm guest carrying ``/usr/bin/python3`` (3.11), like the sandbox.
+
+    It carries ``nft`` too, so the same image serves as the host-rule helper a
+    process outside a container has to name.
+    """
     with tempfile.TemporaryDirectory(prefix="cae-bench-image-") as directory:
         (Path(directory) / "Dockerfile").write_text(
             "FROM debian:bookworm-slim\n"
             "RUN apt-get update && apt-get install -y --no-install-recommends python3 \\\n"
-            " && rm -rf /var/lib/apt/lists/*\n",
+            "    nftables && rm -rf /var/lib/apt/lists/*\n",
             encoding="utf-8",
         )
         _docker("build", "-q", "-t", BENCH_IMAGE, directory)
@@ -311,25 +317,27 @@ class DockerSandbox:
             ChatSandboxSpec,
             RetainedChatBackend,
         )
-        from cloud_agent_host.egress import EgressPolicy, EgressTier
         from cloud_agent_host.sandbox import ContainerBackend
+        from cloud_agent_shared.egress import network_from_env
 
         self.image = image
-        policy = EgressPolicy(
-            tiers={"setup": EgressTier.TRUSTED, "agent": EgressTier.PLATFORM_ONLY},
-            networks={
-                EgressTier.TRUSTED: BENCH_SETUP_NET,
-                EgressTier.PLATFORM_ONLY: BENCH_AGENT_NET,
-            },
-            proxies={EgressTier.TRUSTED: f"http://{BENCH_PROXY}:3128"},
-            no_proxy=(BENCH_GATEWAY, BENCH_MCP),
+        # The resolver is never queried here; override it where 1.1.1.1 is wrong.
+        self.network = network_from_env(
+            {
+                "AGENT_SANDBOX_NAMESPACE": BENCH_NAMESPACE,
+                "AGENT_EGRESS_CHAT_NETWORK_POOL": BENCH_POOL,
+                "AGENT_EGRESS_DNS_SERVER": os.environ.get("CAE_BENCH_DNS_SERVER", "1.1.1.1"),
+                "AGENT_RELAY_NETWORK": BENCH_RELAY_NET,
+                "AGENT_GATEWAY_URL": f"http://{BENCH_GATEWAY}:{BENCH_GATEWAY_PORT}",
+                "AGENT_SANDBOX_MCP_URL": f"http://{BENCH_MCP}:{BENCH_MCP_PORT}",
+            }
         )
         self.manager = ChatSandboxManager(
             ContainerBackend(
                 image=image,
-                egress=policy,
+                sandbox_network=self.network,
                 sandbox_namespace=BENCH_NAMESPACE,
-                chat_network_pool="10.250.0.0/16",
+                network_helper_image=image,
             )
         )
         self.spec = ChatSandboxSpec(
@@ -343,7 +351,9 @@ class DockerSandbox:
         )
         self.backend = RetainedChatBackend(self.manager, self.spec)
 
-    def _relay(self, name: str, network: str, alias: str) -> None:
+    def _relay(self, name: str, port: int) -> None:
+        # Listening, because the guest check dials both relays before the
+        # sandbox counts as started.
         _docker("rm", "-f", name, check=False)
         _docker(
             "run",
@@ -351,26 +361,25 @@ class DockerSandbox:
             "--name",
             name,
             "--hostname",
-            alias,
+            name,
             "--network",
-            network,
+            BENCH_RELAY_NET,
             "--network-alias",
-            alias,
+            name,
             self.image,
-            "sleep",
-            "infinity",
+            "python3",
+            "-m",
+            "http.server",
+            str(port),
         )
 
     def up(self) -> None:
-        """Reproduce the two backplanes, their relays, and one chat bridge."""
-        _docker("network", "create", BENCH_SETUP_NET, check=False)
-        _docker("network", "create", BENCH_AGENT_NET, check=False)
-        self._relay(BENCH_PROXY, BENCH_SETUP_NET, BENCH_PROXY)
-        self._relay(BENCH_GATEWAY, BENCH_AGENT_NET, BENCH_GATEWAY)
-        self._relay(BENCH_MCP, BENCH_AGENT_NET, BENCH_MCP)
+        """Reproduce the relay network, its relays, and one group bridge."""
+        _docker("network", "create", "--internal", BENCH_RELAY_NET, check=False)
+        self._relay(BENCH_GATEWAY, BENCH_GATEWAY_PORT)
+        self._relay(BENCH_MCP, BENCH_MCP_PORT)
         _docker("rm", "-f", self.spec.container_name, check=False)
         self.manager.create(self.spec)
-        self.manager.transition_to_agent_network(self.spec)
         self.manager.start(self.spec)
         self.manager.exec_capture(
             self.spec,
@@ -385,7 +394,7 @@ class DockerSandbox:
         from cloud_agent_host.chat_sandbox import CHAT_NAMESPACE_LABEL
 
         _docker("rm", "-f", self.spec.container_name, check=False)
-        for name in (BENCH_PROXY, BENCH_GATEWAY, BENCH_MCP):
+        for name in (BENCH_GATEWAY, BENCH_MCP):
             _docker("rm", "-f", name, check=False)
         listed = _docker(
             "network",
@@ -398,15 +407,34 @@ class DockerSandbox:
         )
         for name in listed.stdout.split():
             _docker("network", "rm", name, check=False)
-        for name in (BENCH_SETUP_NET, BENCH_AGENT_NET):
-            _docker("network", "rm", name, check=False)
+        _docker("network", "rm", BENCH_RELAY_NET, check=False)
+        # The run installed this namespace's own tables; nothing else uses them.
+        for family in ("inet", "bridge"):
+            _docker(
+                "run",
+                "--rm",
+                "--network",
+                "host",
+                "--cap-drop",
+                "ALL",
+                "--cap-add",
+                "NET_ADMIN",
+                "--entrypoint",
+                "nft",
+                self.image,
+                "delete",
+                "table",
+                family,
+                self.network.table,
+                check=False,
+            )
 
     def verify_and_read(self, relative: str) -> dict[str, float]:
         """One open, split into the broker's two steps."""
         from cloud_agent_host.retained_workspace import read_retained_file
 
         started = time.perf_counter()
-        self.manager.require_network_phase(self.spec, "agent")
+        self.manager.require_network(self.spec)
         verified = time.perf_counter()
         payload = read_retained_file(
             self.backend,
@@ -429,7 +457,7 @@ class DockerSandbox:
 
         return self._census(
             lambda: (
-                self.manager.require_network_phase(self.spec, "agent"),
+                self.manager.require_network(self.spec),
                 read_retained_file(
                     self.backend,
                     "small.txt",
@@ -450,9 +478,9 @@ class DockerSandbox:
 
         started = time.perf_counter()
         self.manager.inspect(self.spec.container_name)
-        self.manager.start(self.spec, network_phase="agent")
+        self.manager.start(self.spec)
         woke = time.perf_counter()
-        self.manager.require_network_phase(self.spec, "agent")
+        self.manager.require_network(self.spec)
         verified = time.perf_counter()
         payload = read_retained_file(
             self.backend,
@@ -482,8 +510,8 @@ class DockerSandbox:
             lambda: (
                 self.manager.stop(self.spec),
                 self.manager.inspect(self.spec.container_name),
-                self.manager.start(self.spec, network_phase="agent"),
-                self.manager.require_network_phase(self.spec, "agent"),
+                self.manager.start(self.spec),
+                self.manager.require_network(self.spec),
                 read_retained_file(
                     self.backend,
                     "small.txt",
@@ -612,7 +640,7 @@ def _docker_http_samples(
             expected_token, x_agent_workspace_token
         ):
             raise HTTPException(status_code=401, detail="invalid workspace broker credential")
-        sandbox.manager.require_network_phase(sandbox.spec, "agent")
+        sandbox.manager.require_network(sandbox.spec)
         return read_retained_file(
             sandbox.backend,
             path,

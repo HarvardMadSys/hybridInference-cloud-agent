@@ -2,10 +2,10 @@
 """Start an artifact the way its deployment does, and assert what only starting shows.
 
 Building an image proves the Dockerfile parses. It does not prove the thing runs,
-and this repository has already paid for that difference once: the egress proxy
-built fine, passed `squid -k parse`, and then exited on every start — 2814 times
-on staging — because squid opens its logs after dropping to an unprivileged user.
-No agent job ran for two days.
+and this repository has already paid for that difference once: the since-removed
+egress proxy built fine, passed `squid -k parse`, and then exited on every start —
+2814 times on staging — because squid opened its logs after dropping to an
+unprivileged user. No agent job ran for two days.
 
 So every artifact a release carries has an entry here, and a release is not
 consumable until each one has been started *by the workflow that will push it*.
@@ -23,15 +23,14 @@ check:
 * **web** (both variants) — serves its sign-in page and renders the identity it
   was configured with at *runtime*. Does not prove sign-in; that needs the
   control plane and the gateway.
-* **runner** — imports its modules and finds the Docker CLI it shells out to.
-  Does not prove it can claim work: that needs a host, a socket and an enrolled
-  credential.
+* **runner** — imports its modules and finds the Docker CLI it shells out to,
+  and the `nft` its host-rule helper runs. Does not prove it can claim work, or
+  that the rules hold: those need a host, a socket, an enrolled credential and
+  a real kernel.
 * **sandbox** — every Agent CLI reports the version its own label claims. Does
   not prove isolation: that needs Kata and a real job.
 * **tunnel** — the entrypoint runs and fails loudly on an unreachable peer. Does
   not prove a hop: that needs the far end.
-* **egress** — comes up and accepts connections under a rendered config. Does
-  not prove the allowlist is right for a given deployment; that is its config.
 
 Run it on a machine with a Docker daemon and this repository checked out:
 
@@ -43,7 +42,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import subprocess
 import sys
 import time
@@ -128,12 +126,6 @@ ROLES: dict[str, Role] = {
         arch="linux/amd64",
         proves="the entrypoint runs and refuses an unreachable peer loudly",
         does_not_prove="a working hop; that needs the far end",
-    ),
-    "egress": Role(
-        name="egress",
-        arch="linux/amd64",
-        proves="it comes up under a rendered config and accepts connections",
-        does_not_prove="that the allowlist suits a deployment; that is its config",
     ),
 }
 
@@ -245,9 +237,9 @@ class Container:
 
         `docker logs` sends the container's stderr to *this* process's stderr, so
         a plain capture loses half of what a container says — and the half it
-        loses is where postgres announces that it is ready and where squid
-        announces that it is accepting connections. Both were read as silence
-        on this check's first real run.
+        loses is where postgres announces that it is ready (and where the
+        since-removed squid announced it was accepting connections). Both were
+        read as silence on this check's first real run.
         """
         result = subprocess.run(
             ["docker", "logs", self.name],
@@ -533,12 +525,13 @@ def _fernet_key() -> str:
 
 
 def verify_runner(image: str, *, suffix: str, keep: bool) -> list[str]:
-    """Its modules import, and the Docker CLI it drives is there.
+    """Its modules import, and the Docker CLI and `nft` it drives are there.
 
     A runner that claims work needs a host, a socket and an enrolled credential,
     so this stops short of that on purpose: what it catches is the class of
-    failure a build cannot see — a wheel that installs but does not import, and
-    the `COPY --from=docker` line going missing from the image.
+    failure a build cannot see — a wheel that installs but does not import, the
+    `COPY --from=docker` line going missing from the image, and the `nftables`
+    package the host-rule helper runs from this same image.
     """
     container = Container.for_run("runner", suffix)
     try:
@@ -548,7 +541,7 @@ def verify_runner(image: str, *, suffix: str, keep: bool) -> list[str]:
             command=(
                 "-c",
                 "import cloud_agent_host.runner, cloud_agent_host.workspace_broker, "
-                "cloud_agent_host.sandbox, cloud_agent_host.egress_proxy; print('imports ok')",
+                "cloud_agent_host.sandbox, cloud_agent_host.network_guard; print('imports ok')",
             ),
         )
         container.wait()
@@ -567,7 +560,24 @@ def verify_runner(image: str, *, suffix: str, keep: bool) -> list[str]:
             version = cli.logs().strip().splitlines()[-1] if cli.logs().strip() else ""
         finally:
             cli.stop()
-        return ["the runner's modules import in the image", f"docker CLI present: {version}"]
+
+        nft = Container.for_run("runner-nft", suffix)
+        try:
+            nft.start(image, entrypoint="nft", command=("--version",))
+            nft.wait()
+            if nft.exit_code() != 0:
+                raise SmokeFailure(
+                    "nft is missing from the runner image, so no host could install its "
+                    f"sandbox rules and every runner would refuse to start\n{nft.logs()}"
+                )
+            nft_version = nft.logs().strip().splitlines()[-1] if nft.logs().strip() else ""
+        finally:
+            nft.stop()
+        return [
+            "the runner's modules import in the image",
+            f"docker CLI present: {version}",
+            f"nft present: {nft_version}",
+        ]
     finally:
         container.stop()
         if not keep:
@@ -683,46 +693,6 @@ def verify_tunnel(image: str, *, suffix: str, keep: bool) -> list[str]:
             _drop_image(image)
 
 
-def verify_egress(image: str, *, suffix: str, keep: bool, workdir: Path) -> list[str]:
-    """Render a config the way the runner does, then stay up under it.
-
-    This is the check the repository learned the hard way: squid opens its log
-    destinations *after* switching to `cache_effective_user`, and in a container
-    `/dev/stdout` belongs to root. The image built, the config parsed, and it
-    exited on every start.
-    """
-    from cloud_agent_host.egress_proxy import build_config_from_env
-
-    config = workdir / f"squid-{suffix}.conf"
-    config.write_text(build_config_from_env({"AGENT_EGRESS_ALLOWLIST": "registry.npmjs.org"}))
-
-    container = Container.for_run("egress", suffix)
-    try:
-        container.start(image, volumes={config: "/etc/squid/generated/squid.conf"})
-        time.sleep(10)
-        state = container.state()
-        logs = container.logs()
-        if state != "running":
-            raise SmokeFailure(
-                f"the egress proxy exited (state={state}) — the sandbox has no door, and every "
-                f"agent job fails its isolation preflight\n{logs}"
-            )
-        if "Accepting HTTP Socket connections" not in logs:
-            raise SmokeFailure(
-                f"the proxy is up but never accepted connections, so it is not serving\n{logs}"
-            )
-        return [
-            "rendered a config with the same code the runner uses",
-            "it is still running after 10s",
-            "it logged that it is accepting connections",
-        ]
-    finally:
-        container.stop()
-        config.unlink(missing_ok=True)
-        if not keep:
-            _drop_image(image)
-
-
 def verify_identity(image: str, role: str, variant: str | None, revision: str | None) -> list[str]:
     """The labels a release manifest will be checked against, inside the image.
 
@@ -779,28 +749,22 @@ def verify(
     if role not in ROLES:
         raise SmokeFailure(f"unknown role {role!r}; this check knows {sorted(ROLES)}")
 
-    workdir = Path(subprocess.run(["mktemp", "-d"], capture_output=True, text=True).stdout.strip())
-    try:
-        identity = verify_identity(image, role, variant, revision)
-        if role == "web":
-            if variant not in ROLES["web"].variants:
-                raise SmokeFailure(f"web needs --variant, one of {list(ROLES['web'].variants)}")
-            started = verify_web(image, variant=variant or "", suffix=suffix, keep=keep)
-        elif role == "control":
-            started = verify_control(image, suffix=suffix, keep=keep)
-        elif role == "runner":
-            started = verify_runner(image, suffix=suffix, keep=keep)
-        elif role == "sandbox":
-            started = verify_sandbox(image, suffix=suffix, keep=keep)
-        elif role == "tunnel":
-            started = verify_tunnel(image, suffix=suffix, keep=keep)
-        elif role == "egress":
-            started = verify_egress(image, suffix=suffix, keep=keep, workdir=workdir)
-        else:
-            raise SmokeFailure(f"role {role!r} is declared but has no check")
-        return [*identity, *started]
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+    identity = verify_identity(image, role, variant, revision)
+    if role == "web":
+        if variant not in ROLES["web"].variants:
+            raise SmokeFailure(f"web needs --variant, one of {list(ROLES['web'].variants)}")
+        started = verify_web(image, variant=variant or "", suffix=suffix, keep=keep)
+    elif role == "control":
+        started = verify_control(image, suffix=suffix, keep=keep)
+    elif role == "runner":
+        started = verify_runner(image, suffix=suffix, keep=keep)
+    elif role == "sandbox":
+        started = verify_sandbox(image, suffix=suffix, keep=keep)
+    elif role == "tunnel":
+        started = verify_tunnel(image, suffix=suffix, keep=keep)
+    else:
+        raise SmokeFailure(f"role {role!r} is declared but has no check")
+    return [*identity, *started]
 
 
 def main(argv: Sequence[str] | None = None) -> int:

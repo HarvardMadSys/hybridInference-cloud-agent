@@ -92,7 +92,6 @@ export function preview(value: unknown, limit = 160): string {
 function labelOf(eventType: string, payload: Record<string, unknown>): string {
   if (eventType === 'tool_use') return asText(payload.name || payload.tool) || 'tool';
   if (eventType === 'lifecycle') return asText(payload.phase) || 'lifecycle';
-  if (eventType === 'error') return asText(payload.host) ? 'egress denied' : 'error';
   return eventType;
 }
 

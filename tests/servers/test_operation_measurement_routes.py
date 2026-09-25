@@ -49,7 +49,8 @@ from cloud_agent.workspace_broker_client import (
     WorkspaceBrokerError,
     WorkspaceBrokerStream,
 )
-from cloud_agent_profiling import operation_call, operation_profiling
+from cloud_agent_host import operation_call
+from cloud_agent_shared import operation_profiling
 
 
 class _UnusedClient:

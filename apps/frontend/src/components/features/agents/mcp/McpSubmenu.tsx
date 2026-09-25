@@ -30,7 +30,9 @@ export function McpSubmenu({
   error,
   onToggle,
   onRetry,
+  embedded = false,
 }: {
+  embedded?: boolean;
   choices: McpChoice[];
   loading: boolean;
   error: string | null;
@@ -46,7 +48,9 @@ export function McpSubmenu({
   }, [choices, query]);
 
   return (
-    <div className="flex max-h-[320px] w-[280px] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-lg dark:border-white/10 dark:bg-gray-900">
+    <div
+      className={`flex max-h-[320px] flex-col overflow-hidden ${embedded ? 'w-full' : 'w-[280px] rounded-xl border border-gray-200 bg-white shadow-lg dark:border-white/10 dark:bg-gray-900'}`}
+    >
       <div className="border-b border-gray-100 p-2 dark:border-white/5">
         <input
           type="search"

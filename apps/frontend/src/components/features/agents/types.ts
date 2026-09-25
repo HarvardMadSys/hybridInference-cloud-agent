@@ -75,14 +75,9 @@ export type AgentEvent =
       attemptNo?: number;
       sourceEventId?: number;
     }
-  | {
-      kind: 'egress_denied';
-      host: string;
-      attempts: number;
-      attemptNo?: number;
-      sourceEventId?: number;
-    }
-  | { kind: 'usage'; text: string; attemptNo?: number; sourceEventId?: number };
+  | { kind: 'usage'; text: string; attemptNo?: number; sourceEventId?: number }
+  /** A message the owner sent into the running turn, where it arrived. */
+  | { kind: 'user_message'; text: string; attemptNo?: number; sourceEventId?: number };
 
 export interface AgentThreadMessage {
   id: number;
@@ -90,6 +85,8 @@ export interface AgentThreadMessage {
   content: string;
   jobId: string;
   createdAt: string | null;
+  /** Sent into the turn while it ran; not the turn's prompt. */
+  midTurn?: boolean;
 }
 
 /** One completed turn reconstructed in the same order the agent produced it. */
@@ -310,8 +307,6 @@ export interface AgentJob {
   hasLedger?: boolean;
   elapsedLabel?: string;
   timeoutLabel: string;
-  networkSetup: string;
-  networkAgent: string;
   sandbox: string;
   attempts: AgentAttempt[];
   /** Server supports fetching a single attempt's resource detail. */
@@ -354,7 +349,6 @@ export interface AgentJob {
   durationMs?: number;
   /** Host-measured consumption for the newest attempt (legacy/default view). */
   resources?: TurnResources;
-  egressDenials: number;
   /** e.g. "draft PR #1044" once published. */
   prLabel?: string;
   prUrl?: string;

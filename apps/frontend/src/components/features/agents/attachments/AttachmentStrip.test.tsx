@@ -59,17 +59,19 @@ describe('AttachmentStrip', () => {
     expect(screen.getByText('over 5 MB')).toBeInTheDocument();
   });
 
-  it('warns about credentials once something is actually attached', () => {
+  it('shows upload progress and the ready file size without a credential warning', () => {
     const warning = /Do not upload credentials/;
     const { rerender } = render(
-      <AttachmentStrip
-        entries={[entry({ key: '1', status: 'rejected', error: 'over 5 MB' })]}
-        onRemove={vi.fn()}
-      />,
+      <AttachmentStrip entries={[entry({ key: '1', status: 'uploading' })]} onRemove={vi.fn()} />,
     );
+    expect(screen.getByText('a.txt')).toBeInTheDocument();
+    expect(screen.getByText('uploading…')).toBeInTheDocument();
     expect(screen.queryByText(warning)).not.toBeInTheDocument();
     rerender(<AttachmentStrip entries={[entry({ key: '1' })]} onRemove={vi.fn()} />);
-    expect(screen.getByText(warning)).toBeInTheDocument();
+    expect(screen.getByText('a.txt')).toBeInTheDocument();
+    expect(screen.getByText('10 B')).toBeInTheDocument();
+    expect(screen.queryByText('uploading…')).not.toBeInTheDocument();
+    expect(screen.queryByText(warning)).not.toBeInTheDocument();
   });
 
   it('removes every file of a folder when its chip is dismissed', () => {

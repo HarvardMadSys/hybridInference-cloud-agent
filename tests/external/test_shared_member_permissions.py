@@ -95,7 +95,7 @@ def test_claude_process_registry_does_not_break_member_settlement(
     image = os.environ.get("AGENT_PERMISSION_TEST_IMAGE")
     if not image:
         pytest.skip("set AGENT_PERMISSION_TEST_IMAGE to enable the Linux UID regression")
-    manager = ChatSandboxManager(ContainerBackend(image="unused", network="unused"))
+    manager = ChatSandboxManager(ContainerBackend(image="unused"))
     spec = ChatSandboxSpec(
         thread_id="athr_permissions",
         sandbox_id="asbx_permissions",

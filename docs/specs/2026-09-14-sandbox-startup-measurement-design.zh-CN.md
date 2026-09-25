@@ -8,7 +8,7 @@
 不代表线上耗时或已经部署。
 
 实现现状见 [§9 实施顺序与验收](#9-实施顺序与验收)：本文的字段语义、时钟与失败处理
-仍是后续切片的目标形态，已实现的子集以 `apps/backend/cloud_agent_profiling/operation_profiling.py` 为准。
+仍是后续切片的目标形态，已实现的子集以 `apps/backend/cloud_agent_shared/operation_profiling.py` 为准。
 
 **2026-09-18 整合结果**：#218 的持久化/API/Admin 能力已接入 #258 的唯一采集链路。
 [存储/Admin 整合设计](2026-09-16-operation-measurement-storage-admin-integration-design.zh-CN.md)
@@ -376,7 +376,7 @@ benchmark 报告至少包含：环境 manifest、实验顺序、全部 attempt I
 
 ### 9.1 已交付的切片
 
-`apps/backend/cloud_agent_profiling/operation_profiling.py` 实现开关、run descriptor 和纯计时 collector；
+`apps/backend/cloud_agent_shared/operation_profiling.py` 实现开关、run descriptor 和纯计时 collector；
 `runner.run_once()` 在 claim 前开始一次 `attempt.startup` 测量，`_run_shared_live_attempt()`
 用现有的 `stage` 变量逐阶段打点，`_stream_shared_agent_turn()` 在 prompt 交给 supervisor
 时关闭测量。已落地：
@@ -560,8 +560,8 @@ CPython 3.12.13 / macOS arm64：
 
 文件/终端的**服务端**接入已实现，前端终点尚未接入。交付内容是：
 `cloud_agent/operation_measurement.py` 做 CP 侧根操作选择，
-`apps/backend/cloud_agent_profiling/operation_call.py` 做 broker 侧片段校验与应答，
-`apps/backend/cloud_agent_profiling/operation_profiling.py` 通用化后可被不同 producer 调用。
+`apps/backend/cloud_agent_host/operation_call.py` 做 broker 侧片段校验与应答，
+`apps/backend/cloud_agent_shared/operation_profiling.py` 通用化后可被不同 producer 调用。
 
 | 能力 | 落地位置 |
 | --- | --- |
@@ -589,8 +589,8 @@ CPython 3.12.13 / macOS arm64：
 - [shared supervisor](../../apps/backend/cloud_agent_host/shared_session_supervisor.py)：group/member、锁和 turn 边界。
 - [resident transport](../../apps/backend/cloud_agent_host/resident_transport.py) / [drivers](../../apps/backend/cloud_agent_host/drivers.py)：实际 CLI readiness 与 prompt 协议。
 - [workspace broker](../../apps/backend/cloud_agent_host/workspace_broker.py)：RPC 和流式 frame。
-- [operation profiling](../../apps/backend/cloud_agent_profiling/operation_profiling.py)：开关、run、collector、片段协议。
-- [operation call](../../apps/backend/cloud_agent_profiling/operation_call.py)：broker 侧一次调用的片段校验与应答。
+- [operation profiling](../../apps/backend/cloud_agent_shared/operation_profiling.py)：开关、run、collector、片段协议。
+- [operation call](../../apps/backend/cloud_agent_host/operation_call.py)：broker 侧一次调用的片段校验与应答。
 - [operation measurement](../../cloud_agent/operation_measurement.py)：CP 侧根操作选择、名额与选择缓存。
 - [worker API](../../cloud_agent/api/worker.py) / [workspace API](../../cloud_agent/api/workspace.py)：启动入库与文件/终端根操作。
 - [measurement writer](../../cloud_agent/measurement_writer.py)：CP 有界异步持久化。

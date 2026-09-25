@@ -54,7 +54,7 @@ from cloud_agent.profiling_control_config import (
     ENV_PROFILING_CONTROL_DEPLOYMENT,
     profiling_control_deployment,
 )
-from cloud_agent_profiling.operation_profiling import (
+from cloud_agent_shared.operation_profiling import (
     ENV_PROFILING_MODE,
     MODE_ADMIN,
     MODE_DISABLED,

@@ -33,15 +33,12 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     model: 'qwen-test',
     spentUsd: 0,
     timeoutLabel: '',
-    networkSetup: '',
-    networkAgent: '',
     sandbox: '',
     attempts: [{ no: 1, status: 'live' }],
     events: [],
     diffFiles: [],
     gates: [],
     usage: { tokensIn: '', tokensOut: '', cachePct: 0, turns: null },
-    egressDenials: 0,
     ...overrides,
   };
 }
@@ -271,6 +268,41 @@ describe('describeConversationTurns', () => {
     const turn = describeConversationTurns(makeJob({ historyTurns: [copied] }))[0];
     expect(turn.fallbackResponses.map((row) => row.id)).toEqual([2]);
     expect(turn.lastResponse).toBe('Old answer');
+  });
+
+  it('opens a turn with its prompt and reads a message sent into it where it arrived', () => {
+    const sentInto = { ...message(3, 'user', 'also check the docs', 'ajob_0'), midTurn: true };
+    const withEvents = historyTurn(
+      'ajob_0',
+      1,
+      [message(1, 'user', 'Old question', 'ajob_0'), sentInto],
+      [
+        { kind: 'message', text: 'Looking', sourceEventId: 4 },
+        { kind: 'user_message', text: 'also check the docs', sourceEventId: 5 },
+        { kind: 'message', text: 'Checked the docs too', sourceEventId: 6 },
+      ],
+    );
+    const inline = describeConversationTurns(makeJob({ historyTurns: [withEvents] }))[0];
+    // The event log shows it in place; the durable row is not drawn again.
+    expect(inline.fallbackResponses).toEqual([]);
+    expect(inline.prompt).toBe('Old question');
+
+    const copied = historyTurn(
+      'ajob_0',
+      1,
+      [
+        message(1, 'user', 'Old question', 'ajob_0'),
+        message(2, 'assistant', 'Looking', 'ajob_0'),
+        sentInto,
+        message(4, 'assistant', 'Checked the docs too', 'ajob_0'),
+      ],
+      [],
+    );
+    const fallback = describeConversationTurns(makeJob({ historyTurns: [copied] }))[0];
+    // Without a log, the durable rows after the prompt keep their order.
+    expect(fallback.fallbackResponses.map((row) => row.id)).toEqual([2, 3, 4]);
+    expect(fallback.prompt).toBe('Old question');
+    expect(fallback.lastResponse).toBe('Checked the docs too');
   });
 
   it('prefers the stored reply over the durable copy when both exist', () => {

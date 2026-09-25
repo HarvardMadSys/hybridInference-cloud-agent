@@ -111,7 +111,6 @@ def create_app() -> FastAPI:
         host_profiling,
         hosts,
         mcp_connections,
-        mcp_relay,
         routes,
         service_jobs,
         session,
@@ -128,15 +127,14 @@ def create_app() -> FastAPI:
     )
     app.include_router(routes.router)
     app.include_router(usage.router)
-    # Registered before the relay, and never on the relay's own listener. The
-    # order matters: the relay's ``/{server_name}`` catch-all would otherwise
-    # match a connection-management path and answer it as an MCP request. The
-    # listener separation matters more: adding a connection or approving a call
-    # is owner-facing work, and a sandbox must not be able to reach it at all.
+    # Owner-facing, and never on the relay's own listener: adding a connection
+    # or approving a call is not sandbox work. The relay itself is the reverse
+    # — only ``create_mcp_app`` serves it. This application sits behind the
+    # public edge, so a sandbox's ``mcp`` token carried out and replayed there
+    # must find no tool route at all, not one that merely refuses it.
     app.include_router(skills.router)
     app.include_router(uploads.router)
     app.include_router(mcp_connections.router)
-    app.include_router(mcp_relay.router)
     app.include_router(hosts.router)
     # Host policy exchange. A sibling of the host routes rather than part of
     # them: it is the profiling feature's own channel, it shares the same
@@ -183,19 +181,25 @@ def create_mcp_app() -> FastAPI:
 
     **A sandbox is the least trusted thing in this system, and this listener is
     one of only two fixed agent-phase endpoints it may reach.** Pointed at the
-    main application, its tunnel also reaches jobs, sessions, host registration
+    main application, its tunnel would reach jobs, sessions, host registration
     and admin — every route the control plane has. Those refuse an
-    ``mcp``-scoped token, so
-    nothing was exploitable through them today; but the entire trusted control
-    plane sat one authorization bug away from code nobody in this repository
-    wrote, and that is a reachability decision rather than an authorization
-    one.
+    ``mcp``-scoped token, so nothing was exploitable through them; but the
+    entire trusted control plane sat one authorization bug away from code
+    nobody in this repository wrote, and that is a reachability decision rather
+    than an authorization one.
 
     So the separation is structural. This application does not *contain* the
     other routes, which is a stronger statement than any of them refusing:
     there is no path prefix to get wrong in a proxy, no rule to leave off a new
     router, and a route added to ``create_app`` tomorrow is not silently
     exposed here.
+
+    **It runs the other way too: this is the only application that serves the
+    relay.** ``create_app`` sits behind the public edge, where a tool route
+    would answer an ``mcp`` token carried out of a sandbox and replayed from
+    anywhere. Keeping tool calls here narrows replay to hosts that already
+    reach a relay tunnel. It does not bind a token to one sandbox, so the
+    relay's scope, approval and fence checks still carry that weight.
 
     Same process image, same database, same lifespan — it is a second
     listener, not a second service. The cost is one more port; the alternative

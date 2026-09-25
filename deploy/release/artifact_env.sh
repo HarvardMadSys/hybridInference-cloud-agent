@@ -23,8 +23,8 @@ prepare_artifact_deployment() {
     || die "artifact mode requires AGENT_RELEASE_MANIFEST"
   [[ -f "$AGENT_RELEASE_MANIFEST" ]] \
     || die "release manifest does not exist: $AGENT_RELEASE_MANIFEST"
-  [[ "$(cat "$ARTIFACT_RECIPE_ROOT/deploy/DEPLOY_PROTOCOL")" == "shared-live-exact-sha-v3" ]] \
-    || die "this recipe does not implement shared-live-exact-sha-v3"
+  [[ "$(cat "$ARTIFACT_RECIPE_ROOT/deploy/DEPLOY_PROTOCOL")" == "shared-live-exact-sha-v4" ]] \
+    || die "this recipe does not implement shared-live-exact-sha-v4"
   AGENT_RELEASE_MANIFEST="$(cd "$(dirname "$AGENT_RELEASE_MANIFEST")" && pwd)/$(basename "$AGENT_RELEASE_MANIFEST")"
   export AGENT_RELEASE_MANIFEST
 
@@ -56,7 +56,7 @@ prepare_artifact_deployment() {
   while IFS= read -r line; do
     key="${line%%=*}"
     case "$key" in
-      AGENT_DEPLOYMENT_SHA|AGENT_CONTROL_IMAGE|AGENT_WEB_IMAGE|AGENT_WEB_VARIANT|AGENT_WEB_BASE_PATH|AGENT_RUNNER_IMAGE|AGENT_TUNNEL_IMAGE|AGENT_EGRESS_IMAGE|AGENT_SANDBOX_IMAGE)
+      AGENT_DEPLOYMENT_SHA|AGENT_CONTROL_IMAGE|AGENT_WEB_IMAGE|AGENT_WEB_VARIANT|AGENT_WEB_BASE_PATH|AGENT_RUNNER_IMAGE|AGENT_TUNNEL_IMAGE|AGENT_SANDBOX_IMAGE)
         arguments+=(--ambient "$line") ;;
     esac
   done <<< "$_ARTIFACT_COMPOSE_ENVIRONMENT"

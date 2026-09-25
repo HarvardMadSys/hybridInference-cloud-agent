@@ -428,12 +428,9 @@ class FakeStore(AllCapabilities):
 def _client(store: FakeStore, *, user_id: str = _OWNER) -> TestClient:
     """Build a client whose owner guard is satisfied by ``user_id``."""
     app = FastAPI()
+    # Management alone, as ``create_app`` mounts it: the relay's tool routes
+    # are served by the MCP-only listener and nowhere else.
     app.include_router(mcp_connections.router)
-    # The real relay router too, so route precedence is exercised rather than
-    # assumed: it is registered second here exactly as it is in ``create_app``.
-    from cloud_agent.api import mcp_relay
-
-    app.include_router(mcp_relay.router)
     app.dependency_overrides[get_storage] = lambda: OneFake(store)
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": user_id}
     return TestClient(app)
@@ -487,13 +484,11 @@ def _seed(store: FakeStore, **overrides: Any) -> int:
 class TestRouting:
     """Which router answers a path under the shared prefix."""
 
-    def test_management_is_not_answered_as_an_mcp_proxy_call(self) -> None:
-        """The relay's catch-all must not swallow connection management.
+    def test_management_is_answered_by_management(self) -> None:
+        """Connection management keeps working under the relay's prefix.
 
-        Both are under ``/v1/agent/mcp``; the relay's route is one path
-        parameter. Registration order is the only thing separating them, and a
-        connector-management request answered by the relay would be an
-        authorization decision made by the wrong component.
+        Both surfaces are under ``/v1/agent/mcp``, but they are never mounted
+        on the same application any more, so neither can shadow the other.
         """
         store = FakeStore()
         with _client(store) as client:
@@ -501,14 +496,17 @@ class TestRouting:
         assert response.status_code == 200
         assert "connections" in response.json()
 
-    def test_a_binding_alias_still_reaches_the_relay(self) -> None:
-        """The narrow route did not shadow the general one."""
+    def test_a_binding_alias_is_not_a_route_here(self) -> None:
+        """A tool call finds nothing on the owner-facing application.
+
+        Not a 401: a refusal would mean the relay is mounted and deciding. The
+        tool surface lives on the MCP-only listener, and
+        ``test_mcp_listener_isolation`` checks the real applications.
+        """
         store = FakeStore()
         with _client(store) as client:
             response = client.post("/v1/agent/mcp/docs", json={})
-        # The relay answers an unauthenticated call with 401, which is what
-        # proves the request reached it rather than 404-ing as an unknown path.
-        assert response.status_code == 401
+        assert response.status_code == 404
 
 
 class TestConnectionManagement:

@@ -82,6 +82,17 @@ from cloud_agent_host.host_runtime import (
     write_handover,
 )
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
+from cloud_agent_host.measurement_delivery import (
+    DELIVERY_ATTEMPTS_MAX,
+    DELIVERY_BYTES_MAX,
+    DELIVERY_DRAIN_S,
+    DELIVERY_HANDOFF_DRAIN_S,
+    DELIVERY_QUEUE_MAX,
+    DELIVERY_TIMEOUT_S,
+    attempts_exhausted,
+    classify_exception,
+    classify_response,
+)
 from cloud_agent_host.patch_gate import branch_name_for
 from cloud_agent_host.profiling_policy import ProfilingPolicySync
 from cloud_agent_host.resident_transport import ResidentLaunch
@@ -116,19 +127,9 @@ from cloud_agent_host.shared_protocol import (
     shared_deployment_capability,
 )
 from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
-from cloud_agent_profiling import operation_profiling
-from cloud_agent_profiling.measurement_delivery import (
-    DELIVERY_ATTEMPTS_MAX,
-    DELIVERY_BYTES_MAX,
-    DELIVERY_DRAIN_S,
-    DELIVERY_HANDOFF_DRAIN_S,
-    DELIVERY_QUEUE_MAX,
-    DELIVERY_TIMEOUT_S,
-    attempts_exhausted,
-    classify_exception,
-    classify_response,
-)
+from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.git.source_archive import build_upload_archive
+from cloud_agent_shared.shared_protocol import mid_turn_input_capability
 
 DEFAULT_LEASE_TTL_S = 120.0
 HEARTBEAT_INTERVAL_S = 30.0
@@ -224,44 +225,6 @@ _SAFE_DIRECTORY_ENV = {
 }
 
 
-# A blocked egress attempt looks like a connection failure in the agent's own
-# tool output, because that is where it surfaces: on a deny-all network the
-# kernel drops the packet and the tool reports the failure. Recording these is
-# what the design asks for here — the evidence for what an external
-# default should allow. Deliberately narrow: a name-resolution or connection
-# error carrying a host, not every failing command.
-_EGRESS_FAILURE = re.compile(
-    r"(?:"
-    r"Could not resolve host|Name or service not known|Temporary failure in name resolution"
-    r"|Connection refused|Network is unreachable|No route to host|Connection timed out"
-    r"|getaddrinfo (?:failed|ENOTFOUND)|ENOTFOUND|EAI_AGAIN"
-    r")",
-    re.IGNORECASE,
-)
-# Hosts as they appear in those messages, or in any URL alongside them.
-_HOST_IN_TEXT = re.compile(
-    r"https?://([A-Za-z0-9.-]+\.[A-Za-z]{2,})|"
-    r"(?:host|ENOTFOUND|resolve)[:\s]+'?([A-Za-z0-9.-]+\.[A-Za-z]{2,})'?",
-    re.IGNORECASE,
-)
-
-
-def detect_blocked_egress(text: str) -> str | None:
-    """Return the host an agent failed to reach, if this reads as a denial.
-
-    Returns ``None`` for anything that is merely a failed command: a false
-    "the sandbox tried to phone home" is worse than a missed one, because the
-    whole point of the record is to be evidence.
-    """
-    if not text or not _EGRESS_FAILURE.search(text):
-        return None
-    match = _HOST_IN_TEXT.search(text)
-    if match is None:
-        return None
-    host = match.group(1) or match.group(2)
-    return host.strip("'\"").lower() or None
-
-
 class LeaseLost(Exception):
     """Raised when this attempt no longer owns the job and must stop."""
 
@@ -308,8 +271,9 @@ class ClaimedJob:
     # Defaulted rather than required, because absent and Auto are the same
     # state — there is nothing a caller could pass to mean "unknown".
     reasoning_effort: str | None = None
-    # Shell run before the agent, under the setup egress tier. Optional, so it
-    # carries a default rather than forcing every caller to pass one.
+    # Shell run in the sandbox before the agent, on the group's one network.
+    # Optional, so it carries a default rather than forcing every caller to
+    # pass one.
     setup_script: str | None = None
     # Read-only, single-repo, short-lived: what the runner clones with. Stays
     # in the runner — it is never put in .git/config and never enters the
@@ -1198,6 +1162,7 @@ def _shared_live_host_capabilities(
         for helper_id, version in SHARED_SANDBOX_HELPER_PINS.items()
     ):
         return []
+    steerable: list[str] = []
     for runtime_id in registered_runtimes():
         try:
             runtime_capabilities = driver_for(get_runtime(runtime_id)).capabilities()
@@ -1209,6 +1174,8 @@ def _shared_live_host_capabilities(
             or not runtime_capabilities.concurrent_shared_workspace
         ):
             return []
+        if runtime_capabilities.steering == "mid_turn":
+            steerable.append(mid_turn_input_capability(runtime_id))
     capabilities = [
         SHARED_SANDBOX_CAPABILITY,
         NATIVE_FORK_AT_ANCHOR_CAPABILITY,
@@ -1217,6 +1184,9 @@ def _shared_live_host_capabilities(
         # it whole, before anything bounds it. This host therefore never
         # advertises the goal report without the contract it rides on.
         GOAL_REPORT_CAPABILITY,
+        # Named per runtime: the broker of this same deployment takes a
+        # message into a running turn only through a driver that wires it.
+        *steerable,
     ]
     deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
     ready_file = _shared_live_ready_file()
@@ -1649,7 +1619,6 @@ def _stream_shared_agent_turn(
     deadline = time.monotonic() + timeout_s
     tail: list[str] = []
     tool_errors: list[str] = []
-    denied_hosts: set[str] = set()
     result_frame: dict[str, Any] | None = None
     forced_exit_code: int | None = None
     interrupt_deadline: float | None = None
@@ -1695,10 +1664,6 @@ def _stream_shared_agent_turn(
                 if event_type == "tool_result" and payload.get("is_error"):
                     content = str(payload.get("content") or "")
                     tool_errors.append(content[:200])
-                    blocked = detect_blocked_egress(content)
-                    if blocked and blocked not in denied_hosts:
-                        denied_hosts.add(blocked)
-                        control.append_event(NormalizedEvent("error", {"host": blocked}))
                 if event_type and event_type != LINE:
                     control.append_event(NormalizedEvent(event_type, payload))
                 continue
@@ -2125,14 +2090,11 @@ def _run_shared_live_attempt(
 
         stage = _stage(measurement, "agent_network")
         # This manager runs in the runner's own process, so its sub-stages are
-        # timed directly onto the measurement. On the warm path the Kata guest
-        # restart never happens, and a timeline without those stages is the
-        # answer rather than a gap.
+        # timed directly onto the measurement. Setup ran on this same group
+        # bridge; nothing is switched here, only proved still in place before
+        # the CLI starts.
         network_observer = operation_profiling.stage_observer(measurement)
-        if has_context:
-            manager.require_network_phase(spec, "agent", observer=network_observer)
-        else:
-            manager.transition_to_agent_network(spec, observer=network_observer)
+        manager.require_network(spec, observer=network_observer)
         stage = _stage(measurement, "terminal_resume")
         control.resume_terminals()
         terminals_suspended = False

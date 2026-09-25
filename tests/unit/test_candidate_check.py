@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 from tests.unit.test_retained_deploy import _add_required_host_paths, _host, _run
 
+from cloud_agent_host import candidate_check
 from cloud_agent_host.candidate_check import check_candidate
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.shared_protocol import (
@@ -59,9 +60,31 @@ def test_real_preflight_failure_is_not_replaced_by_static_success():
     backend.version_stamp.assert_not_called()
 
 
-def test_docker_null_network_is_accepted_without_allowing_a_bridge(monkeypatch):
-    backend = ContainerBackend(image="candidate", network="none")
-    backend._check_one_network("none")
-    monkeypatch.setattr("subprocess.run", lambda *a, **kw: Mock(returncode=0, stdout="false"))
-    with pytest.raises(SandboxError, match="not `internal`"):
-        backend._check_one_network("bridge")
+def test_the_candidate_installs_no_host_rules():
+    """It runs no group, so the live stack's table is not its to touch."""
+    backend = _backend()
+    check_candidate(backend)
+    backend.preflight.assert_called_once_with(check_network=False)
+
+
+def test_the_candidate_is_built_without_a_deployment_network(monkeypatch):
+    """No pool, resolver or relay network exists where a candidate is proved."""
+    built = {}
+
+    def build(env, *, with_network):
+        built.update(env=env, with_network=with_network)
+        return _backend()
+
+    monkeypatch.setattr(candidate_check, "build_backend_from_env", build)
+    monkeypatch.setattr(candidate_check, "ContainerBackend", Mock)
+    monkeypatch.setenv("AGENT_SANDBOX_NAMESPACE", "freeinference-cloud-agent-sandbox-prod")
+    candidate_check.main()
+    assert built["with_network"] is False
+    # Never the live stack's namespace, so nothing it labels is the stack's.
+    assert built["env"]["AGENT_SANDBOX_NAMESPACE"] == "deploy-candidate"
+
+
+def test_a_candidate_backend_has_no_network_to_guard():
+    backend = ContainerBackend(image="candidate")
+    with pytest.raises(SandboxError, match="network"):
+        backend.require_sandbox_network()

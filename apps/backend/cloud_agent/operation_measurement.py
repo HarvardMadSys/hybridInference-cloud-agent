@@ -56,12 +56,12 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_profiling import operation_profiling
+from cloud_agent_shared import operation_profiling
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from cloud_agent_profiling.operation_profiling import Measurement
+    from cloud_agent_shared.operation_profiling import Measurement
 
 logger = logging.getLogger(__name__)
 

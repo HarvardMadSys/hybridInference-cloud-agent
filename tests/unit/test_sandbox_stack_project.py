@@ -38,6 +38,7 @@ def _host(
     docker.write_text(
         """#!/bin/sh
 printf "%s\\n" "$*" >> "$DOCKER_LOG"
+printf "relay-network=%s\\n" "${AGENT_RELAY_NETWORK:-}" >> "$DOCKER_LOG"
 case " $* " in
   *" config --environment "*)
     cat >/dev/null
@@ -182,6 +183,8 @@ _SHARED_HOST_ENV = "\n".join(
         "AGENT_BROKER_REVERSE_PORT=18092",
         "AGENT_WORKSPACE_BROKER_ADVERTISE_URL=http://172.24.0.1:18092",
         "AGENT_WORKSPACE_BROKER_TOKEN=test-broker-token",
+        "AGENT_EGRESS_CHAT_NETWORK_POOL=10.241.0.0/16",
+        "AGENT_EGRESS_DNS_SERVER=1.1.1.1",
         "",
     ]
 )
@@ -211,7 +214,9 @@ def test_the_host_template_assigns_each_setting_once() -> None:
     assert not duplicates, f"dotenv uses the final duplicate assignment: {duplicates}"
     for name in (
         "AGENT_HOST_STATE_ROOT",
-        "AGENT_EGRESS_NETWORK_PLATFORM_ONLY",
+        # Deployment facts: a template default would be a guess about the host.
+        "AGENT_EGRESS_CHAT_NETWORK_POOL",
+        "AGENT_EGRESS_DNS_SERVER",
     ):
         assert assignments[name] == [""], f"{name} must stay explicit in the template"
 
@@ -223,7 +228,6 @@ def test_a_shared_machine_refuses_the_legacy_shared_state_roots(tmp_path: Path) 
             "AGENT_HOST_STATE_ROOT=/var/lib/hybridinference/agent-host",
             "AGENT_WORKDIR_ROOT=/var/lib/hybridinference/agent-jobs",
             "AGENT_SNAPSHOT_ROOT=/var/lib/hybridinference/agent-snapshots",
-            "AGENT_EGRESS_NETWORK_PLATFORM_ONLY=freeinference-cloud-agent-egress-prod",
             "",
         ]
     )
@@ -234,22 +238,35 @@ def test_a_shared_machine_refuses_the_legacy_shared_state_roots(tmp_path: Path) 
     assert "AGENT_HOST_STATE_ROOT" in result.stderr
 
 
-def test_a_shared_machine_refuses_the_legacy_shared_egress_network(tmp_path: Path) -> None:
-    """Duplicate tunnel aliases on one Docker network cross the environment boundary."""
-    dotenv = _SHARED_HOST_ENV + "\n".join(
-        [
-            "AGENT_HOST_STATE_ROOT=/var/lib/freeinference-cloud-agent-prod/host",
-            "AGENT_WORKDIR_ROOT=/var/lib/freeinference-cloud-agent-prod/jobs",
-            "AGENT_SNAPSHOT_ROOT=/var/lib/freeinference-cloud-agent-prod/snapshots",
-            "AGENT_EGRESS_NETWORK_PLATFORM_ONLY=agent-egress",
-            "",
-        ]
+def test_each_stack_discovers_only_its_own_relays(tmp_path: Path) -> None:
+    """The relay network is named after the project, so siblings never share one.
+
+    Docker DNS answers an alias with every container that claims it on a
+    network; two stacks on one relay network would hand each other's sandboxes
+    the other environment's gateway and MCP tunnels.
+    """
+    (tmp_path / "staging").mkdir()
+    (tmp_path / "prod").mkdir()
+    staging = _host(tmp_path / "staging", dotenv="COMPOSE_PROJECT=cloud-agent-staging\n")
+    prod = _host(tmp_path / "prod", dotenv="COMPOSE_PROJECT=cloud-agent-prod\n")
+
+    for env in (staging, prod):
+        assert _run(env, "down").returncode == 0
+
+    assert (
+        "relay-network=cloud-agent-staging-agent-relays" in Path(staging["DOCKER_LOG"]).read_text()
+    )
+    assert "relay-network=cloud-agent-prod-agent-relays" in Path(prod["DOCKER_LOG"]).read_text()
+
+
+def test_an_explicit_relay_network_is_passed_through(tmp_path: Path) -> None:
+    env = _host(
+        tmp_path,
+        dotenv="COMPOSE_PROJECT=cloud-agent-prod\nAGENT_RELAY_NETWORK=prod-relays\n",
     )
 
-    result = _run(_host(tmp_path, dotenv=dotenv), "up")
-
-    assert result.returncode != 0
-    assert "AGENT_EGRESS_NETWORK_PLATFORM_ONLY" in result.stderr
+    assert _run(env, "down").returncode == 0
+    assert "relay-network=prod-relays" in Path(env["DOCKER_LOG"]).read_text()
 
 
 def test_the_shared_guard_uses_compose_resolved_values(tmp_path: Path) -> None:
@@ -260,23 +277,18 @@ def test_the_shared_guard_uses_compose_resolved_values(tmp_path: Path) -> None:
             "AGENT_HOST_STATE_ROOT=${STATE_BASE}/agent-host",
             "AGENT_WORKDIR_ROOT=/var/lib/freeinference-cloud-agent-prod/jobs",
             "AGENT_SNAPSHOT_ROOT=/var/lib/freeinference-cloud-agent-prod/snapshots",
-            "AGENT_EGRESS_NETWORK_PLATFORM_ONLY=agent-egress # legacy shared name",
             "",
         ]
     )
     resolved = dotenv.replace(
         "AGENT_HOST_STATE_ROOT=${STATE_BASE}/agent-host",
         "AGENT_HOST_STATE_ROOT=/var/lib/hybridinference/agent-host",
-    ).replace(
-        "AGENT_EGRESS_NETWORK_PLATFORM_ONLY=agent-egress # legacy shared name",
-        "AGENT_EGRESS_NETWORK_PLATFORM_ONLY=agent-egress",
     )
 
     result = _run(_host(tmp_path, dotenv=dotenv, compose_environment=resolved), "up")
 
     assert result.returncode != 0
     assert "AGENT_HOST_STATE_ROOT" in result.stderr
-    assert "AGENT_EGRESS_NETWORK_PLATFORM_ONLY" in result.stderr
 
 
 def test_the_shared_guard_canonicalizes_state_roots(tmp_path: Path) -> None:
@@ -286,7 +298,6 @@ def test_the_shared_guard_canonicalizes_state_roots(tmp_path: Path) -> None:
             "AGENT_HOST_STATE_ROOT=/var/lib/hybridinference/agent-host/../agent-host///",
             "AGENT_WORKDIR_ROOT=/var/lib/freeinference-cloud-agent-prod/jobs",
             "AGENT_SNAPSHOT_ROOT=/var/lib/freeinference-cloud-agent-prod/snapshots",
-            "AGENT_EGRESS_NETWORK_PLATFORM_ONLY=freeinference-cloud-agent-egress-prod",
             "",
         ]
     )

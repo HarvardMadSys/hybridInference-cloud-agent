@@ -5810,20 +5810,22 @@ async def test_side_chat_follow_up_http_receipt_matches_retained_owner_read(
 ):
     """Pin the browser's receipt contract through the real SQL command and HTTP route.
 
-    The INSERT command deliberately returns JOB_SELECT without membership
-    columns. Serializing it directly used to commit a turn but leave every
-    side-chat send looking like a rejected workspace identity on the client.
+    The turn a message becomes is written by SQL that returns JOB_SELECT
+    without membership columns. Serializing that row directly used to commit a
+    turn but leave every side-chat send looking like a rejected workspace
+    identity on the client; the receipt has to be the owner read.
     """
     from unittest.mock import AsyncMock
 
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
 
-    from cloud_agent.api import routes, turns
+    from cloud_agent.api import routes
     from cloud_agent.api._owner_auth import require_agent_owner
     from cloud_agent.api.deps import get_agent_app_credentials, get_gateway_client, get_storage
+    from cloud_agent.application import follow_ups
 
-    job, _claim_row, sandbox = await _reserve_shared_chat(store)
+    job, claim, sandbox = await _reserve_shared_chat(store)
     origin = await _create_job(store)
     async with pool.acquire() as conn:
         await conn.execute(
@@ -5832,34 +5834,64 @@ async def test_side_chat_follow_up_http_receipt_matches_retained_owner_read(
             job["thread_id"],
             origin["thread_id"],
         )
+    # The side chat's turn has ended, so a message becomes its next turn in the
+    # same request rather than waiting in the queue.
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence, container_id="container-side-receipt", context_status="new"
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.settle_thread_sandbox(
+        **fence,
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="native-side-receipt",
+        idle_timeout_seconds=1800,
+        base_sha=job["base_sha"],
+    )
+    assert await store.attempt_commands.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
     command_rows = []
-    create_follow_up = store.conversation_commands.create_follow_up
+    settle_queue = store.pending_messages.settle_queue
 
     async def capture_command_row(**kwargs):
-        row = await create_follow_up(**kwargs)
-        command_rows.append(row)
-        return row
+        outcome = await settle_queue(**kwargs)
+        if outcome.job is not None:
+            command_rows.append(outcome.job)
+        return outcome
 
-    monkeypatch.setattr(store.conversation_commands, "create_follow_up", capture_command_row)
+    monkeypatch.setattr(store.pending_messages, "settle_queue", capture_command_row)
     app = FastAPI()
     app.include_router(routes.router)
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": job["user_id"]}
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     app.dependency_overrides[get_gateway_client] = lambda: None
-    monkeypatch.setattr(turns, "require_entitled_repo", AsyncMock())
+    monkeypatch.setattr(follow_ups, "require_entitled_repo", AsyncMock())
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        path = f"/v1/agent/jobs/{job['id']}/follow-ups"
+        path = f"/v1/agent/threads/{job['thread_id']}/messages"
         headers = {"Idempotency-Key": "side-receipt-contract"}
         response = await client.post(path, json={"prompt": "side question"}, headers=headers)
         assert response.status_code == 201, response.text
-        receipt = response.json()
+        assert response.json()["pending"] is None
+        receipt = response.json()["job"]
         assert len(command_rows) == 1
         assert command_rows[0]["thread_sandbox"] is None
         replay = await client.post(path, json={"prompt": "side question"}, headers=headers)
         assert replay.status_code == 201, replay.text
-        assert replay.json()["id"] == receipt["id"]
-        for body in (receipt, replay.json()):
+        assert replay.json()["job"]["id"] == receipt["id"]
+        for body in (receipt, replay.json()["job"]):
             assert body["sandbox_id"] == sandbox["sandbox_id"]
             assert body["fork_anchor_job_id"] == origin["id"]
             assert body["thread_id"] == job["thread_id"]

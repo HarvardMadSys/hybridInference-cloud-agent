@@ -13,6 +13,7 @@ import type { SelectedSkillApi } from './skills';
 //    UI stays complete across that.
 
 import { fetchWithAuth, jsonOrThrow } from './client';
+import type { PendingMessageApi, QueuePausedReason } from './pendingMessages';
 import { announceAgentSessionsChanged } from './agentSessionEvents';
 import { config } from '@/config/env';
 
@@ -165,6 +166,8 @@ export interface TurnCpuResourcesApi {
   status: ResourceMetricStatus;
   method: 'live_and_exit_task_counters';
   usec: number | null;
+  /** Sandbox CPU quota in cores captured for this window; absent in older records. */
+  capacity_cores?: number | null;
   reason_codes: TurnResourceReasonCode[];
 }
 
@@ -212,7 +215,8 @@ export interface TurnStorageIoResourcesApi {
  * the UI can say how far it actually got instead of rounding it up to the end
  * of the task.
  */
-export interface TurnResourceSummaryApi extends TurnResourceWindowApi {
+export interface TurnResourceSummaryApi {
+  window: TurnResourceWindowApi;
   measurement_id: string;
   state: TurnResourceState | 'interrupted';
   /** The capability string that produced the summary; never added across sources. */
@@ -408,8 +412,6 @@ export interface AgentJobApi {
   tokens_in: number | null;
   tokens_out: number | null;
   model_calls: number | null;
-  setup_egress_tier: string | null;
-  agent_egress_tier: string | null;
   /** Attempt whose continuity and resource telemetry is attached below. */
   telemetry_attempt_id?: number | null;
   /** Which continuity rung this turn ran on. Null on turns that predate it. */
@@ -423,6 +425,8 @@ export interface AgentJobApi {
   native_state?: 'new' | 'ready' | 'fork_preparing' | 'lost' | null;
   fork_anchor_job_id?: string | null;
   native_fork_available?: boolean;
+  /** Whether a waiting message can be sent into this job's turn while it runs. */
+  mid_turn_input_supported?: boolean;
   workspace_publication_state?:
     | 'pending'
     | 'capturing'
@@ -455,6 +459,11 @@ export interface AgentThreadMessageApi {
   content: string;
   job_id: string;
   created_at: string | null;
+  /**
+   * A message the owner sent into this job's turn while it ran, not the prompt
+   * that started it. It reads among the turn's replies, where it was sent.
+   */
+  mid_turn?: boolean;
 }
 
 export interface AgentThreadApi {
@@ -466,6 +475,10 @@ export interface AgentThreadApi {
   jobs: AgentJobApi[];
   created_at?: string | null;
   updated_at?: string | null;
+  /** Messages written while a turn ran, in the order they will be sent. */
+  pending_messages?: PendingMessageApi[];
+  /** Why the queue is not moving by itself, until the owner continues it. */
+  queue_paused_reason?: QueuePausedReason | null;
 }
 
 /**
@@ -635,10 +648,14 @@ export interface AgentConfigApi {
    * too old to answer these produces.
    */
   model_reasoning_efforts?: Record<string, string[]>;
-  setup_egress_tier: string | null;
-  agent_egress_tier: string | null;
   github_connected: boolean;
   github_install_url: string | null;
+  /**
+   * Whether this deployment's GitHub App is working right now. `unavailable`
+   * means configured but not loaded, and the service is retrying on its own.
+   * Absent on a control plane that predates it, which then reads as before.
+   */
+  github_load_status?: SourceControlLoadStatus;
 }
 
 export interface AgentMcpServerApi {
@@ -656,6 +673,9 @@ export async function getAgentConfig(): Promise<AgentConfigApi> {
 }
 
 export type AgentIntegrationProvider = 'github' | 'gitlab';
+
+/** The deployment's side of a provider, not the user's connection to it. */
+export type SourceControlLoadStatus = 'unconfigured' | 'unavailable' | 'ready';
 
 export interface AgentIntegrationAccountApi {
   id: string;
@@ -679,6 +699,11 @@ export interface AgentIntegrationProviderApi {
   accounts: AgentIntegrationAccountApi[];
   repositories: AgentIntegrationRepositoryApi[];
   error?: string | null;
+  /**
+   * `unavailable`: configured, not loaded, retrying. The user's own
+   * connection (`connected`, `accounts`) is still reported as it is.
+   */
+  load_status?: SourceControlLoadStatus;
 }
 
 export interface AgentIntegrationsApi {
@@ -1189,49 +1214,15 @@ export async function cancelAgentJob(
   return jsonOrThrow(resp);
 }
 
-export interface FollowUpAgentJobRequest {
-  /** Staged uploads to deliver with this turn. */
-  attachment_ids?: number[];
-  /** Omitted inherits saved content; explicit ids snapshot the current library. */
-  skill_ids?: number[];
-  /** Set or replace the conversation's goal along with this message. */
-  goal?: GoalInputApi;
-  prompt: string;
-  /** Omitted values inherit the parent run's harness and model. */
-  runtime?: string;
-  model?: string;
-  /**
-   * Omitted inherits the previous turn's effort. The literal `'auto'` clears
-   * it back to unset — null cannot mean "clear", it is already what "inherit"
-   * sends. No composer sends the sentinel (they always show a real level and
-   * send it); it stays because it is the only way an API caller can undo an
-   * inherited choice.
-   */
-  reasoning_effort?: string;
-}
-
-/** Queue another turn in the same thread, after its currently active run. */
-export async function followUpAgentJob(
-  jobId: string,
-  body: FollowUpAgentJobRequest,
-): Promise<AgentJobApi> {
-  return submitOnce(`follow-up:${jobId}`, (requestId) =>
-    fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/follow-ups`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': requestId },
-      body: JSON.stringify(body),
-    }),
-  );
-}
-
 /**
  * A submission is one user action, however many times its request is sent.
  *
- * The control plane recognises a resent create or follow-up by its
- * `Idempotency-Key` and answers with the job the first send made instead of
- * queueing a second task. So the key must outlive a lost response: it is
- * minted per pending submission scope (the composer, or one thread's next
- * turn), kept in session storage across a reload, and dropped only once a
+ * The control plane recognises a resent create by its `Idempotency-Key` and
+ * answers with the job the first send made instead of queueing a second task.
+ * (A message to an existing conversation carries its own key the same way; see
+ * `submitThreadMessage`.) So the key must outlive a lost response: it is
+ * minted per pending submission scope, kept in session storage across a
+ * reload, and dropped only once a
  * definitive answer arrives. A `409 idempotency_conflict` means the key was
  * reused for different content — an edited resubmit after a failure — and
  * that is a new action, so the key rotates and the request is sent once more.

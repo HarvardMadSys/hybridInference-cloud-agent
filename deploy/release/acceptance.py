@@ -600,7 +600,7 @@ def refuses_a_host_chosen_image(
     set against a value the deployment set.
     """
     manifest = json.loads(manifest_path.read_text())
-    other = next(a["image"] for a in manifest["artifacts"] if a["role"] == "egress")
+    other = next(a["image"] for a in manifest["artifacts"] if a["role"] == "tunnel")
 
     root = workdir / "refusal"
     root.mkdir(parents=True, exist_ok=True)

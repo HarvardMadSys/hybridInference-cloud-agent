@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   cancelAgentJob,
-  followUpAgentJob,
   forkAgentJob,
   getAgentJob,
   getAgentJobGit,
@@ -18,6 +17,11 @@ import {
   type AgentJobApi,
   type AgentThreadEventApi,
 } from '@/lib/api/agents';
+import {
+  getThreadQueue,
+  submitThreadMessage,
+  type PendingMessageApi,
+} from '@/lib/api/pendingMessages';
 import { toDisplayJob } from './adapt';
 import { SideChat } from './SideChat';
 import { conversationReadStorageKey } from './useConversationReadState';
@@ -25,13 +29,17 @@ import { sideChatStorageKey } from './useSideChatSession';
 
 vi.mock('@/lib/api/agents', () => ({
   cancelAgentJob: vi.fn(),
-  followUpAgentJob: vi.fn(),
   forkAgentJob: vi.fn(),
   getAgentJob: vi.fn(),
   getAgentJobGit: vi.fn(),
   getAgentJobThread: vi.fn(),
   listAllAgentThreadEvents: vi.fn(),
   streamAgentJob: vi.fn(),
+}));
+vi.mock('@/lib/api/pendingMessages', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/pendingMessages')>()),
+  submitThreadMessage: vi.fn(),
+  getThreadQueue: vi.fn(),
 }));
 vi.mock('./mcp/McpApprovalNotice', () => ({
   McpApprovalNotice: ({
@@ -75,8 +83,6 @@ const anchor = {
   tokens_in: null,
   tokens_out: null,
   model_calls: null,
-  agent_egress_tier: 'platform_only',
-  setup_egress_tier: 'trusted',
 } as AgentJobApi;
 const copied: AgentJobApi = {
   ...anchor,
@@ -97,6 +103,7 @@ const next: AgentJobApi = {
 const config = { models: ['model-a', 'model-b'] } as AgentConfigApi;
 let jobs: AgentJobApi[];
 let events: AgentThreadEventApi[];
+let waiting: PendingMessageApi[];
 const userId = 'side-test-user';
 
 beforeEach(() => {
@@ -106,6 +113,7 @@ beforeEach(() => {
   installSideChatLocks();
   jobs = [copied];
   events = [];
+  waiting = [];
   vi.mocked(forkAgentJob).mockResolvedValue(copied);
   vi.mocked(getAgentJob).mockImplementation(async (id) => {
     const job = id === anchor.id ? anchor : jobs.find((job) => job.id === id);
@@ -131,11 +139,36 @@ beforeEach(() => {
     ReturnType<typeof getAgentJobGit>
   >);
   vi.mocked(streamAgentJob).mockResolvedValue(undefined);
-  vi.mocked(followUpAgentJob).mockImplementation(async (_id, body) => {
+  // A message to an idle side chat is its next turn at once; one sent while a
+  // side turn runs waits in the queue, as the control plane answers.
+  vi.mocked(submitThreadMessage).mockImplementation(async (threadId, body) => {
+    const live = jobs.some(
+      (job) => job.thread_id === threadId && (job.state === 'running' || job.state === 'queued'),
+    );
+    if (live) {
+      const pending: PendingMessageApi = {
+        id: `apmsg-${waiting.length + 1}`,
+        thread_id: threadId,
+        position: waiting.length + 1,
+        state: 'queued',
+        revision: 1,
+        prompt: body.prompt,
+      };
+      waiting.push(pending);
+      return { pending, job: null };
+    }
     const created = { ...next, task_prompt: body.prompt, model: body.model ?? next.model };
     jobs.push(created);
-    return created;
+    return { pending: null, job: created };
   });
+  vi.mocked(getThreadQueue).mockImplementation(async (threadId) => ({
+    thread_id: threadId,
+    pending_messages: waiting.filter((row) => row.thread_id === threadId),
+    queue_paused_reason: null,
+    latest_job_id: jobs.at(-1)?.id ?? null,
+    latest_turn_no: jobs.at(-1)?.turn_no ?? null,
+    latest_job_state: jobs.at(-1)?.state ?? null,
+  }));
   vi.mocked(cancelAgentJob).mockImplementation(async (id) => {
     jobs = jobs.map((job) =>
       job.id === id
@@ -186,7 +219,7 @@ describe('Side Chat', () => {
     fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
     expect(await screen.findByRole('alert')).toHaveTextContent('Preparing side chat…');
     expect(screen.getByRole('textbox')).toHaveValue('Still preparing');
-    expect(followUpAgentJob).not.toHaveBeenCalled();
+    expect(submitThreadMessage).not.toHaveBeenCalled();
   });
 
   it('stays lazy and initially hides the inherited transcript without an empty-state explanation', async () => {
@@ -234,7 +267,8 @@ describe('Side Chat', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
     await screen.findByRole('button', { name: 'Stop side chat' });
-    expect(followUpAgentJob).toHaveBeenCalledExactlyOnceWith('side-copy', {
+    // Addressed to the side chat's own conversation, never to the main one.
+    expect(submitThreadMessage).toHaveBeenCalledExactlyOnceWith('side', {
       prompt: 'Why keep the files?',
       model: 'model-b',
     });
@@ -336,7 +370,7 @@ describe('Side Chat review regressions', () => {
     await ready();
     fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
     await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenCalledWith(copied.id, {
+      expect(submitThreadMessage).toHaveBeenCalledWith(copied.thread_id, {
         prompt: 'Why keep the files?',
         model: 'model-b',
         reasoning_effort: 'low',
@@ -346,12 +380,22 @@ describe('Side Chat review regressions', () => {
   it('queues an Enter submission behind the active side turn', async () => {
     render(<SideChat {...props()} />);
     await send();
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Next side question' } });
-    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message side chat' }), {
+      target: { value: 'Next side question' },
+    });
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Message side chat' }), {
+      key: 'Enter',
+    });
     await waitFor(() =>
-      expect(followUpAgentJob).toHaveBeenLastCalledWith('side-3', { prompt: 'Next side question' }),
+      expect(submitThreadMessage).toHaveBeenLastCalledWith('side', {
+        prompt: 'Next side question',
+      }),
     );
     expect(screen.getByText('Queued after this run')).toBeVisible();
+    // It waits above the side chat's composer, editable, while the turn runs.
+    const queue = await screen.findByRole('region', { name: 'Queued messages' });
+    expect(queue).toHaveTextContent('Next side question');
+    expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue('');
   });
   it('adopts a newer side turn found in the thread snapshot', async () => {
     jobs.push({ ...next, id: 'side-external', task_prompt: 'From another window' });
@@ -359,13 +403,13 @@ describe('Side Chat review regressions', () => {
     expect(await screen.findByText('From another window')).toBeVisible();
     expect(screen.getByRole('region', { name: 'Turn 1' })).toBeVisible();
     expect(screen.queryByRole('region', { name: 'Turn 3' })).not.toBeInTheDocument();
-    expect(followUpAgentJob).not.toHaveBeenCalled();
+    expect(submitThreadMessage).not.toHaveBeenCalled();
   });
   it('reports invalid external turns without sending to them', async () => {
     jobs.push({ ...next, sandbox_id: 'foreign', id: 'invalid-external' });
     render(<SideChat {...props()} />);
     expect(await screen.findByRole('alert')).toHaveTextContent('does not belong');
-    expect(followUpAgentJob).not.toHaveBeenCalled();
+    expect(submitThreadMessage).not.toHaveBeenCalled();
   });
   it('closes tool review when a new job arrives instead of silently repointing it', async () => {
     const { announceAgentSessionsChanged } = await import('@/lib/api/agentSessionEvents');

@@ -52,6 +52,7 @@ deltas. Re-sending the same or an older `report_seq` must not accumulate.
     "status": "available",
     "method": "live_and_exit_task_counters",
     "usec": 80000000,
+    "capacity_cores": 2,
     "reason_codes": []
   },
   "memory": {
@@ -89,6 +90,7 @@ deltas. Re-sending the same or an older `report_seq` must not accumulate.
 | `window.open_scan_ms` / `close_scan_ms` | int >= 0 | Cost of the boundary scans |
 | `report_seq` | int >= 1 | Cumulative-snapshot counter, assigned by the collector and stored with the snapshot. Strictly increasing per `measurement_id` |
 | `cpu.usec` | int >= 0 or null | Threads' own scheduler time. Per thread instance, the difference between consecutive trusted readings of `se.sum_exec_runtime`, closed by that instance's settled exit. May exceed wall-clock duration |
+| `cpu.capacity_cores` | positive finite number or absent | Sandbox CPU quota in cores captured at window open. Shared by the sandbox members; older snapshots omit it. Never filled from current host configuration |
 | `memory.peak_bytes` | int >= 0 or null | `max` over complete PSS census cycles of the per-member address-space sum |
 | `memory.sample_interval_ms` | int > 0 | Planned period |
 | `memory.valid_samples` | int >= 0 | Cycles where every member address space read succeeded |
@@ -107,6 +109,27 @@ Every metric carries `status` and `reason_codes`. `status` is one of:
 
 `NULL` and `0` are different states everywhere: a metric is `0` only when a
 complete window proved a true zero, and `unavailable` otherwise.
+
+### Average CPU usage in the admin execution summary
+
+The admin execution summary displays average CPU usage as a share of the
+sandbox CPU quota: `cpu.usec / (window.duration_ms * 1000 * cpu.capacity_cores)
+* 100`. A 2-core sandbox with a member averaging one core displays 50%. The
+numerator covers only that member and its tools, not sibling members or VM
+and platform overhead. Waiting for a model remains part of the elapsed window.
+
+Show a percentage only for a final window whose CPU status is `available`,
+whose observation spans its duration, and whose positive duration and captured
+capacity are known. Partial, interrupted, collecting, legacy, and contradictory
+readings show `—`, never a guessed percentage or a zero. Values above 100% are
+unavailable rather than clamped. No peak utilisation can be inferred from a
+cumulative CPU counter. Cumulative CPU accounting remains available to other
+consumers and the compact Runs list.
+
+The optional capacity field is omitted during serialization when unknown, so
+retries of legacy reports keep the same stored payload. Existing collectors
+and stored records require no backfill or database migration. Detail responses
+keep the timing fields under `window`; only the run-level aggregate is flat.
 
 ### 2.2 Reason codes
 

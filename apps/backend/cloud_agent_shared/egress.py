@@ -1,425 +1,389 @@
-"""Egress policy for the sandbox: four tiers, two phases (issue #1041).
+"""The sandbox network: one boundary for every task.
 
-The design puts egress control at the network layer rather than inside the
-agent process, and names the reason: Copilot's firewall covers the agent's Bash
-process but not its MCP servers or setup steps, which its own documentation
-concedes. A boundary the agent participates in is not a boundary.
+Every sandbox group gets a routable bridge of its own, carved from this
+deployment's address pool, and the host enforces one fixed rule set on it:
 
-Four tiers, from closed to open:
+- public IPv4 unicast on TCP 80 and 443;
+- the one named DNS resolver, TCP/UDP 53;
+- the group's own two relays (inference and MCP), by exact address and port;
+- nothing else: not the host, not private, link-local (cloud metadata), CGNAT,
+  multicast or reserved space, not another group, not other ports, not UDP 443,
+  not IPv6, and no connection started from outside.
 
-``platform_only``
-    Two fixed platform relays — the inference gateway and this service's
-    MCP-only listener — and nothing else. This is the tier the design calls
-    our distinctive shape: an agent that can think and use approved tools but
-    cannot choose an internet destination. The configured Docker network is a
-    discovery backplane; retained execution creates a separate internal bridge
-    per chat and copies only those relay endpoints onto it.
-``trusted``
-    Package registries and similar, through an allowlist. Enough to install
-    dependencies, which is the one thing ``platform_only`` cannot do.
-``custom``
-    An operator-supplied network, for a deployment with its own proxy.
-``full``
-    Unrestricted. Never a default, and refused unless acknowledged.
+Setup and the agent share it. There is no second mode to select, per phase,
+per task or per deployment, and a host that cannot prove the rules are in
+place runs nothing.
 
-**The phases get separate tiers.** Setup installs dependencies and needs a
-registry; the agent afterwards does not. Codex cloud makes the same split (net
-during setup, none during the agent turn), and it is strictly better than one
-tier for a whole session — the phase that runs untrusted model output is the
-phase that gets the least reach. The defaults here follow the design:
-``setup=trusted``, ``agent=platform_only``.
+**The rules live on the host, not in the sandbox.** They are one table of this
+deployment's in the host's nftables, installed by a trusted helper before any
+group network exists (:mod:`cloud_agent_host.network_guard`). A drop in any
+base chain on a hook is final, so Docker's own accept rules cannot undo it, and
+the table never flushes or edits anyone else's. Traffic is recognised by the
+bridge interface it arrives on: every group bridge is named with this
+deployment's prefix, so the rules cover each new group without being rewritten.
 
-An allowlist must never carry an agent vendor's telemetry domain: it would let
-the sandbox phone home about a customer's private repository, past a boundary
-the operator believes is closed. That is checked here rather than left to
-review.
+**Two layers, because Linux has two paths.** Routed traffic (to the internet,
+the host, another bridge) crosses the ``inet`` table's forward and input hooks.
+Frames between the sandbox and a relay on the same bridge reach those hooks
+only when the kernel's bridge netfilter is loaded, so a ``bridge`` table polices
+them directly; when bridge netfilter is loaded, the ``inet`` table applies the
+same relay exceptions and lets nothing else through.
 
-**How the allowlist is enforced.** The tiers above the closed one are networks
-with no route of their own; the only thing on them with a second leg is an
-allowlist proxy (see :mod:`cloud_agent_host.egress_proxy`). The sandbox is
-pointed at it with the conventional ``http_proxy``/``https_proxy`` environment,
-which every package manager already honours. That is a convenience, not the
-boundary: a phase that ignored the variables would find a network that cannot
-route anywhere, so "bypass the proxy" is not a thing the sandbox can decide to
-do. It also means we never terminate TLS — a CONNECT request names its target
-host in the clear, which is all an allowlist needs.
+**Ports, not protocols.** TCP 80/443 is a port rule. Nothing inspects what
+travels inside, so this is not a promise that only HTTP leaves, and it does not
+stop a sandbox sending the repository or its own short-lived tokens to a public
+host. Those tokens are refused at the public entrances of the gateway and the
+control plane; that, not this module, is what stops their direct replay.
 """
 
 from __future__ import annotations
 
+import hashlib
+import ipaddress
 import os
 import re
-from dataclasses import dataclass, field
-from enum import Enum
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from cloud_agent_shared.errors import SandboxError
 
-class EgressTier(str, Enum):
-    """How far the sandbox may reach in one phase."""
+PUBLIC_TCP_PORTS: tuple[int, ...] = (80, 443)
+DNS_PORT = 53
 
-    PLATFORM_ONLY = "platform_only"
-    TRUSTED = "trusted"
-    CUSTOM = "custom"
-    FULL = "full"
-
-
-class EgressPolicyError(Exception):
-    """Raised when the configured egress policy is unusable or unsafe."""
-
-
-# Telemetry endpoints belonging to agent vendors. An allowlist that reaches any
-# of these turns a closed sandbox into one that reports on the repository it was
-# given. Substring match, so subdomains are covered.
-VENDOR_TELEMETRY_DOMAINS = (
-    "statsig.com",
-    "sentry.io",
-    "segment.io",
-    "segment.com",
-    "amplitude.com",
-    "posthog.com",
-    "datadoghq.com",
-    "bugsnag.com",
-    "mixpanel.com",
-    "google-analytics.com",
+#: Every IPv4 block that is not ordinary global unicast (IANA's special-purpose
+#: registry): "this network", private and CGNAT space, loopback, link-local and
+#: with it cloud metadata, IETF protocol assignments, documentation and
+#: benchmarking ranges, deprecated 6to4 relays, multicast, and reserved space up
+#: to broadcast. A block here is refused whatever port is asked for.
+PROTECTED_IPV4: tuple[str, ...] = (
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.0.2.0/24",
+    "192.88.99.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "198.51.100.0/24",
+    "203.0.113.0/24",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
 )
 
-# What the Trusted tier reaches unless an operator adds to it: the package
-# registries a dependency install actually needs, and the hosts git fetches a
-# dependency from. Curated rather than borrowed wholesale — a vendor's own list
-# includes its telemetry, which `check_allowlist` refuses on principle.
-#
-# The selection rule is exfiltration, not download safety. The sandbox is
-# retained and unprivileged, so "it could fetch something malicious" is
-# already priced in; what matters is whether a host can *receive* a private
-# repository in a form the sender can read back. `api.github.com` is
-# deliberately absent for exactly that reason: an issue body is durable,
-# attacker-retrievable storage that one authenticated POST reaches.
-#
-# This narrows the channel; it does not close it. An allowed CONNECT is a
-# tunnel, so a listed host can be sent arbitrary methods, paths and bodies —
-# what makes these entries defensible is that an *unauthenticated* client
-# cannot store anything at them and read it back, not that they are read-only
-# services. Anything added here should be judged the same way.
-DEFAULT_TRUSTED_DOMAINS: tuple[str, ...] = (
-    # Python
-    "pypi.org",
-    "files.pythonhosted.org",
-    # JavaScript
-    "registry.npmjs.org",
-    "registry.yarnpkg.com",
-    # Rust
-    "crates.io",
-    "static.crates.io",
-    "index.crates.io",
-    # Go
-    "proxy.golang.org",
-    "sum.golang.org",
-    # Ruby
-    "rubygems.org",
-    "index.rubygems.org",
-    # JVM
-    "repo.maven.apache.org",
-    "repo1.maven.org",
-    # Dependencies fetched as source, and release tarballs.
-    "github.com",
-    "codeload.github.com",
-    "objects.githubusercontent.com",
-    "raw.githubusercontent.com",
-)
+#: A group bridge is a /29: its gateway, the sandbox and the two relays.
+GROUP_PREFIX_LENGTH = 29
 
-_TIER_PROXY_VARS = {
-    EgressTier.TRUSTED: "AGENT_EGRESS_PROXY_URL_TRUSTED",
-    EgressTier.CUSTOM: "AGENT_EGRESS_PROXY_URL_CUSTOM",
-}
+#: Every table this code installs starts with this, so a deployment can find
+#: its neighbours' address pools without being told about them.
+TABLE_PREFIX = "cloud_agent_"
 
-# A domain is interpolated verbatim into the proxy's configuration file, so its
-# syntax is a security boundary rather than a nicety: a value carrying a newline
-# would append directives of the attacker's choosing to the config that decides
-# what the sandbox may reach. Anything outside this alphabet is refused here,
-# before it can reach a renderer.
-_DOMAIN_PATTERN = re.compile(r"\.?[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?")
-
-_PHASE_SETUP = "setup"
-_PHASE_AGENT = "agent"
-PHASES = (_PHASE_SETUP, _PHASE_AGENT)
-
-# The design's external-beta defaults: install dependencies during setup, then
-# take the network away before untrusted model output starts driving tools.
-_DEFAULT_TIERS = {_PHASE_SETUP: EgressTier.TRUSTED, _PHASE_AGENT: EgressTier.PLATFORM_ONLY}
-
-_TIER_NETWORK_VARS = {
-    EgressTier.PLATFORM_ONLY: "AGENT_EGRESS_NETWORK_PLATFORM_ONLY",
-    EgressTier.TRUSTED: "AGENT_EGRESS_NETWORK_TRUSTED",
-    EgressTier.CUSTOM: "AGENT_EGRESS_NETWORK_CUSTOM",
-    EgressTier.FULL: "AGENT_EGRESS_NETWORK_FULL",
-}
+_INTERFACE_NAME_MAX = 15  # IFNAMSIZ less the terminating NUL.
+_NAMESPACE_DIGITS = 5
+_BRIDGE_PREFIX = "ca"
+_GROUP_DIGITS = _INTERFACE_NAME_MAX - len(_BRIDGE_PREFIX) - _NAMESPACE_DIGITS
+_HOSTNAME = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?")
 
 
-def normalize_domains(raw: str | list[str]) -> tuple[str, ...]:
-    """Parse an allowlist into validated, deduplicated domains.
-
-    ``*.example.com`` and ``.example.com`` both mean "this domain and its
-    subdomains" and normalize to the leading-dot form the proxy understands;
-    a bare ``example.com`` matches that host alone. Order is preserved so a
-    rendered config reads the way the operator wrote it.
-    """
-    entries = raw.split(",") if isinstance(raw, str) else list(raw)
-    seen: dict[str, None] = {}
-    for entry in entries:
-        domain = entry.strip().lower()
-        if not domain:
-            continue
-        if domain.startswith("*."):
-            domain = domain[1:]
-        if not _DOMAIN_PATTERN.fullmatch(domain):
-            raise EgressPolicyError(
-                f"{entry.strip()!r} is not a domain. The allowlist is rendered into the "
-                "proxy's configuration, so only letters, digits, dots and hyphens are "
-                "accepted (optionally led by '*.' or '.' for subdomains)."
-            )
-        seen[domain] = None
-    return tuple(seen)
-
-
-def trusted_domains(allowlist: tuple[str, ...] | list[str] = ()) -> tuple[str, ...]:
-    """The Trusted tier's domains: the built-in registries plus the operator's.
-
-    One function because two things need this answer and they run in different
-    containers: the runner (through :meth:`EgressPolicy.domains_for`) and the
-    renderer that writes the proxy's config. Computing it twice is how the
-    proxy ends up enforcing a list the platform does not think it configured.
-    """
-    return normalize_domains([*DEFAULT_TRUSTED_DOMAINS, *allowlist])
+class SandboxNetworkError(SandboxError):
+    """The sandbox network cannot be configured safely."""
 
 
 @dataclass(frozen=True)
-class EgressPolicy:
-    """The tier each phase runs under, and the network each tier maps to."""
+class RelayEndpoint:
+    """A fixed platform service the sandbox reaches on its own bridge."""
 
-    tiers: dict[str, EgressTier]
-    networks: dict[EgressTier, str]
-    # Where the sandbox is told to send traffic for tiers that are fronted by
-    # an allowlist proxy. Empty for PlatformOnly, which reaches no proxy, and
-    # for Full, which needs none.
-    proxies: dict[EgressTier, str] = field(default_factory=dict)
-    # Operator additions to the Trusted tier's built-in domains, and the whole
-    # of a Custom tier's list.
-    allowlist: tuple[str, ...] = ()
-    # Hosts the sandbox must reach *directly* rather than through the proxy:
-    # the fixed inference/MCP relays, which are on the sandbox's network
-    # already and would otherwise need proxy rules to talk to themselves.
-    no_proxy: tuple[str, ...] = ()
+    host: str
+    port: int
 
-    def tier_for(self, phase: str) -> EgressTier:
-        """Return the tier configured for ``phase``."""
-        if phase not in PHASES:
-            raise EgressPolicyError(f"unknown phase {phase!r}; expected one of {PHASES}")
-        return self.tiers[phase]
 
-    def network_for(self, phase: str) -> str:
-        """Return the docker network the given phase runs on."""
-        tier = self.tier_for(phase)
-        network = self.networks.get(tier, "")
-        if not network:
-            raise EgressPolicyError(
-                f"the {tier.value!r} tier is selected for the {phase} phase but "
-                f"{_TIER_NETWORK_VARS[tier]} names no network. Configure it, or choose "
-                "a tier this deployment has a network for."
-            )
-        return network
+@dataclass(frozen=True)
+class SandboxNetwork:
+    """This deployment's one network configuration."""
 
-    def domains_for(self, tier: EgressTier) -> tuple[str, ...]:
-        """Return the domains a tier may reach.
-
-        Trusted is the built-in registry list *plus* whatever the operator
-        added; Custom is only what they configured, because a custom tier
-        exists precisely to replace our judgement with theirs.
-        """
-        if tier is EgressTier.TRUSTED:
-            return trusted_domains(self.allowlist)
-        if tier is EgressTier.CUSTOM:
-            return self.allowlist
-        return ()
-
-    def sandbox_env(self, phase: str) -> dict[str, str]:
-        """The proxy environment to hand a sandbox running this phase.
-
-        Both cases are set on purpose. curl deliberately ignores uppercase
-        ``HTTP_PROXY`` (it is attacker-settable in a CGI context), while other
-        toolchains read only the uppercase form — setting one case installs a
-        proxy for some of a repository's tooling and not the rest, which
-        presents as "the install half worked".
-        """
-        tier = self.tier_for(phase)
-        proxy = self.proxies.get(tier, "")
-        if not proxy:
-            # Trusted *is* an allowlist proxy. Selecting it without naming one
-            # leaves the sandbox on a network with no route and nothing to ask,
-            # so every install dies at DNS — fail-closed, but for a reason
-            # nothing in the operator's configuration points at. Raised here
-            # rather than when the policy is built, for the same reason
-            # `network_for` does: a deployment that never runs this phase must
-            # not be refused a startup over a capability it does not use.
-            if tier is EgressTier.TRUSTED:
-                raise EgressPolicyError(
-                    f"the {phase} phase runs under the 'trusted' tier but "
-                    f"{_TIER_PROXY_VARS[tier]} names no proxy. That tier is an allowlist "
-                    "proxy; without one the sandbox has no route out at all."
-                )
-            return {}
-        no_proxy = ",".join(self.no_proxy)
-        env = {
-            "HTTP_PROXY": proxy,
-            "HTTPS_PROXY": proxy,
-            "http_proxy": proxy,
-            "https_proxy": proxy,
-        }
-        if no_proxy:
-            env["NO_PROXY"] = no_proxy
-            env["no_proxy"] = no_proxy
-        return env
+    namespace: str
+    pool: ipaddress.IPv4Network
+    dns_server: ipaddress.IPv4Address
+    relay_network: str
+    relays: tuple[RelayEndpoint, ...] = ()
+    extra_protected: tuple[ipaddress.IPv4Network, ...] = ()
 
     @property
-    def agent_phase_is_closed(self) -> bool:
-        """Whether the agent phase is the design's PlatformOnly shape."""
-        return self.tiers[_PHASE_AGENT] is EgressTier.PLATFORM_ONLY
+    def interface_prefix(self) -> str:
+        """The bridge-name prefix that marks this deployment's groups."""
+        digest = hashlib.sha256(self.namespace.encode()).hexdigest()
+        return _BRIDGE_PREFIX + digest[:_NAMESPACE_DIGITS]
+
+    def bridge_name(self, network_name: str) -> str:
+        """The host interface name for one group network, at most 15 bytes."""
+        digest = hashlib.sha256(network_name.encode()).hexdigest()
+        return self.interface_prefix + digest[:_GROUP_DIGITS]
+
+    @property
+    def table(self) -> str:
+        """The nftables table name, one per deployment on a host."""
+        return TABLE_PREFIX + self.interface_prefix
+
+    @property
+    def relay_hosts(self) -> tuple[str, ...]:
+        """The relay aliases a group bridge carries, in configuration order."""
+        return tuple(dict.fromkeys(relay.host for relay in self.relays))
+
+    @property
+    def protected(self) -> tuple[ipaddress.IPv4Network, ...]:
+        """Built-in non-public space plus the deployment's own additions."""
+        built_in = tuple(ipaddress.IPv4Network(block) for block in PROTECTED_IPV4)
+        return tuple(ipaddress.collapse_addresses((*built_in, *self.extra_protected)))
 
 
-def check_allowlist(domains: list[str]) -> None:
-    """Reject an allowlist that would let the sandbox phone home.
-
-    Called on the configured Trusted-tier allowlist. A vendor telemetry domain
-    here is not a policy nuance: it reopens the boundary for exactly the traffic
-    the sandbox exists to prevent, and it does so invisibly, because the
-    operator reads the tier name and believes the sandbox is closed.
-    """
-    offenders = sorted(
-        {
-            domain
-            for domain in domains
-            for vendor in VENDOR_TELEMETRY_DOMAINS
-            if vendor in domain.lower()
-        }
-    )
-    if offenders:
-        raise EgressPolicyError(
-            "the egress allowlist contains agent-vendor telemetry domains, which "
-            "would let the sandbox report on the repository it was given: "
-            f"{', '.join(offenders)}"
-        )
-
-
-def _tier_from(raw: str, *, phase: str) -> EgressTier:
-    """Parse a configured tier name."""
+def _ipv4_network(raw: str, *, var: str) -> ipaddress.IPv4Network:
     try:
-        return EgressTier(raw.strip().lower())
+        network = ipaddress.ip_network(raw.strip(), strict=True)
     except ValueError as exc:
-        allowed = ", ".join(tier.value for tier in EgressTier)
-        raise EgressPolicyError(
-            f"unknown egress tier {raw!r} for the {phase} phase; expected one of {allowed}"
-        ) from exc
+        raise SandboxNetworkError(f"{var}={raw!r} is not an IPv4 network: {exc}") from exc
+    if not isinstance(network, ipaddress.IPv4Network):
+        raise SandboxNetworkError(f"{var}={raw!r} is not IPv4; sandbox networks are IPv4 only")
+    return network
 
 
-def build_policy_from_env(env: dict[str, str] | None = None) -> EgressPolicy:
-    """Read the egress policy from configuration.
+def _relay(raw: str, *, var: str) -> RelayEndpoint | None:
+    if not raw.strip():
+        return None
+    parsed = urlparse(raw.strip())
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if parsed.scheme not in ("http", "https") or not host:
+        raise SandboxNetworkError(f"{var}={raw!r} does not name a relay host")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        # A group bridge gives each relay a fresh address; only a name the
+        # sandbox resolves on its own bridge survives that.
+        raise SandboxNetworkError(f"{var}={raw!r} names a relay by IP; use its network alias")
+    if not _HOSTNAME.fullmatch(host):
+        raise SandboxNetworkError(f"{var}={raw!r} does not name a relay host")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return RelayEndpoint(host=host, port=port)
 
-    ``AGENT_EGRESS_SETUP_TIER`` / ``AGENT_EGRESS_AGENT_TIER`` choose the tiers;
-    ``AGENT_EGRESS_NETWORK_*`` map each tier to a docker network.
-    ``AGENT_SANDBOX_NETWORK`` remains honoured as the PlatformOnly network so an
-    existing deployment keeps working without being reconfigured.
-    """
+
+def network_from_env(env: dict[str, str] | None = None) -> SandboxNetwork:
+    """Read and validate the deployment's network configuration."""
     source = env if env is not None else dict(os.environ)
 
-    tiers = dict(_DEFAULT_TIERS)
-    for phase, var in (
-        (_PHASE_SETUP, "AGENT_EGRESS_SETUP_TIER"),
-        (_PHASE_AGENT, "AGENT_EGRESS_AGENT_TIER"),
-    ):
-        if raw := source.get(var):
-            tiers[phase] = _tier_from(raw, phase=phase)
+    namespace = (source.get("AGENT_SANDBOX_NAMESPACE") or "").strip()
+    if not namespace:
+        raise SandboxNetworkError("AGENT_SANDBOX_NAMESPACE must name this deployment")
 
-    networks: dict[EgressTier, str] = {}
-    for tier, var in _TIER_NETWORK_VARS.items():
-        if value := source.get(var):
-            networks[tier] = value.strip()
-    # The pre-tier setting named the closed network; keep it meaning that.
-    networks.setdefault(
-        EgressTier.PLATFORM_ONLY, (source.get("AGENT_SANDBOX_NETWORK") or "").strip()
+    pool_raw = (source.get("AGENT_EGRESS_CHAT_NETWORK_POOL") or "").strip()
+    if not pool_raw:
+        raise SandboxNetworkError(
+            "AGENT_EGRESS_CHAT_NETWORK_POOL must name this deployment's group address pool"
+        )
+    pool = _ipv4_network(pool_raw, var="AGENT_EGRESS_CHAT_NETWORK_POOL")
+    if not pool.is_private or pool.prefixlen > GROUP_PREFIX_LENGTH:
+        raise SandboxNetworkError(
+            f"AGENT_EGRESS_CHAT_NETWORK_POOL={pool} must be RFC1918 space holding at "
+            f"least one /{GROUP_PREFIX_LENGTH}"
+        )
+
+    dns_raw = (source.get("AGENT_EGRESS_DNS_SERVER") or "").strip()
+    try:
+        dns_server = ipaddress.IPv4Address(dns_raw)
+    except ValueError as exc:
+        raise SandboxNetworkError(
+            f"AGENT_EGRESS_DNS_SERVER={dns_raw!r} must be one IPv4 resolver address"
+        ) from exc
+    if dns_server in pool or dns_server.is_loopback or dns_server.is_unspecified:
+        raise SandboxNetworkError(
+            f"AGENT_EGRESS_DNS_SERVER={dns_server} must be reachable from a group bridge"
+        )
+
+    relay_network = (source.get("AGENT_RELAY_NETWORK") or "").strip()
+    if not relay_network:
+        raise SandboxNetworkError(
+            "AGENT_RELAY_NETWORK must name the network the two relays are discovered on"
+        )
+
+    extra = tuple(
+        _ipv4_network(item, var="AGENT_EGRESS_PROTECTED_CIDRS")
+        for item in re.split(r"[\s,]+", source.get("AGENT_EGRESS_PROTECTED_CIDRS") or "")
+        if item
     )
 
-    allowlist = normalize_domains(source.get("AGENT_EGRESS_ALLOWLIST") or "")
-    check_allowlist(list(allowlist))
-
-    proxies: dict[EgressTier, str] = {}
-    for tier, var in _TIER_PROXY_VARS.items():
-        if value := (source.get(var) or "").strip():
-            proxies[tier] = _validated_proxy_url(value, var=var)
-
-    if EgressTier.FULL in tiers.values() and source.get("AGENT_SANDBOX_ALLOW_OPEN_NETWORK", "") in (
-        "",
-        "0",
-    ):
-        selected = [phase for phase, tier in tiers.items() if tier is EgressTier.FULL]
-        raise EgressPolicyError(
-            f"the {', '.join(selected)} phase is configured for unrestricted egress. "
-            "Set AGENT_SANDBOX_ALLOW_OPEN_NETWORK=1 to accept that deliberately, or "
-            "choose a narrower tier."
-        )
-
-    return EgressPolicy(
-        tiers=tiers,
-        networks={k: v for k, v in networks.items() if v},
-        proxies=proxies,
-        allowlist=allowlist,
-        no_proxy=_no_proxy_hosts(source),
+    relays: list[RelayEndpoint] = []
+    for var in ("AGENT_GATEWAY_URL", "AGENT_SANDBOX_MCP_URL"):
+        if relay := _relay(source.get(var) or "", var=var):
+            relays.append(relay)
+    return SandboxNetwork(
+        namespace=namespace,
+        pool=pool,
+        dns_server=dns_server,
+        relay_network=relay_network,
+        relays=tuple(dict.fromkeys(relays)),
+        extra_protected=extra,
     )
 
 
-def _validated_proxy_url(value: str, *, var: str) -> str:
-    """Reject a proxy URL the sandbox could not use, or that is not a proxy."""
-    parsed = urlparse(value)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise EgressPolicyError(
-            f"{var}={value!r} is not a proxy URL; expected something like "
-            "http://agent-egress-proxy:3128"
-        )
-    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
-        raise EgressPolicyError(
-            f"{var}={value!r} carries a path or query. A proxy is named by host and port "
-            "only, and the extra part would be silently ignored by every client."
-        )
-    return value
+def render_ruleset(network: SandboxNetwork) -> str:
+    """The whole rule set as one atomic ``nft -f`` transaction.
 
-
-def _no_proxy_hosts(source: dict[str, str]) -> tuple[str, ...]:
-    """Hosts a proxied phase must still reach directly.
-
-    Both platform relays sit on the sandbox's own network. Routing either
-    through the proxy would demand an allowlist entry for our own service and
-    put model/tool calls through a hop that exists to police the *internet*.
-    This matters when an operator selects a proxied Custom tier for the agent
-    phase; the default PlatformOnly tier has no proxy environment at all.
+    Safe to re-run while groups are live: tables, sets and chains are declared
+    with ``add``; the chains, the protected set and the pool registration are
+    replaced wholesale; the relay sets, which change as relays attach to and
+    leave group bridges, are left as they are.
     """
-    hosts = ["localhost", "127.0.0.1"]
-    base_urls = (
-        source.get("AGENT_GATEWAY_URL") or source.get("FREEINFERENCE_BASE_URL") or "",
-        source.get("AGENT_SANDBOX_MCP_URL") or "",
-    )
-    for base_url in reversed(base_urls):
-        if host := (urlparse(base_url).hostname or "").strip():
-            hosts.insert(0, host)
-    return tuple(dict.fromkeys(hosts))
+    table = network.table
+    bridges = f'"{network.interface_prefix}*"'
+    pool = str(network.pool)
+    dns = str(network.dns_server)
+    protected = ", ".join(str(block) for block in network.protected)
+    ports = ", ".join(str(port) for port in PUBLIC_TCP_PORTS)
+    dns_accept = [
+        f"ip daddr {dns} udp dport {DNS_PORT} accept",
+        f"ip daddr {dns} tcp dport {DNS_PORT} accept",
+    ]
+    chains: dict[str, tuple[str, list[str]]] = {
+        "forward": (
+            "type filter hook forward priority filter - 10; policy accept;",
+            [
+                f"iifname {bridges} oifname {bridges} jump within_groups",
+                f"iifname {bridges} jump from_group",
+                f"oifname {bridges} jump to_group",
+            ],
+        ),
+        "within_groups": (
+            "",
+            [
+                # Seen only when bridge netfilter is loaded; the bridge table
+                # enforces the same pairs when it is not.
+                "iifname . ip daddr . tcp dport @relays accept",
+                "iifname . ip saddr . tcp sport @relays accept",
+                "counter drop",
+            ],
+        ),
+        "from_group": (
+            "",
+            [
+                "meta nfproto ipv6 counter drop",
+                f"ip saddr != {pool} counter drop",
+                *dns_accept,
+                "ip daddr @protected4 counter reject with icmp type admin-prohibited",
+                f"tcp dport {{ {ports} }} accept",
+                "meta l4proto tcp counter reject with tcp reset",
+                "counter reject with icmp type admin-prohibited",
+            ],
+        ),
+        "to_group": (
+            "",
+            [
+                "meta nfproto ipv6 counter drop",
+                f"ip daddr != {pool} counter drop",
+                # Path-MTU and unreachable errors for a live connection. They
+                # carry no stream of their own and may come from any router.
+                "ct state related meta l4proto icmp accept",
+                f"ip saddr {dns} ct state established accept",
+                "ip saddr @protected4 counter drop",
+                "ct state established accept",
+                "counter drop",
+            ],
+        ),
+        "input": (
+            "type filter hook input priority filter - 10; policy accept;",
+            [f"iifname {bridges} jump to_host"],
+        ),
+        "to_host": (
+            "",
+            [
+                "meta nfproto ipv6 counter drop",
+                # Replies to connections the host itself opened into a group.
+                "ct state established,related accept",
+                # Only reachable when the resolver listens on the host itself:
+                # input sees nothing but traffic addressed to a local address.
+                *dns_accept,
+                "meta l4proto tcp counter reject with tcp reset",
+                "counter reject with icmp type admin-prohibited",
+            ],
+        ),
+    }
+    lines = [
+        f"add table inet {table}",
+        f"add set inet {table} pool4 {{ type ipv4_addr; flags interval; }}",
+        f"add set inet {table} protected4 {{ type ipv4_addr; flags interval; auto-merge; }}",
+        f"add set inet {table} relays {{ type ifname . ipv4_addr . inet_service; }}",
+    ]
+    for name, (header, _) in chains.items():
+        lines.append(
+            f"add chain inet {table} {name} {{ {header} }}"
+            if header
+            else f"add chain inet {table} {name}"
+        )
+    for name, (_, rules) in chains.items():
+        lines.append(f"flush chain inet {table} {name}")
+        lines.extend(f"add rule inet {table} {name} {rule}" for rule in rules)
+    lines += [
+        f"flush set inet {table} pool4",
+        f"add element inet {table} pool4 {{ {pool} }}",
+        f"flush set inet {table} protected4",
+        f"add element inet {table} protected4 {{ {protected} }}",
+        f"add table bridge {table}",
+        f"add set bridge {table} relays {{ type ifname . ipv4_addr . inet_service; }}",
+        f"add chain bridge {table} forward "
+        "{ type filter hook forward priority filter - 10; policy accept; }",
+        f"add chain bridge {table} within_group",
+        f"flush chain bridge {table} forward",
+        f"add rule bridge {table} forward meta ibrname {bridges} jump within_group",
+        f"flush chain bridge {table} within_group",
+        f"add rule bridge {table} within_group ether type arp accept",
+        f"add rule bridge {table} within_group meta ibrname . ip daddr . tcp dport @relays accept",
+        f"add rule bridge {table} within_group meta ibrname . ip saddr . tcp sport @relays accept",
+        f"add rule bridge {table} within_group counter drop",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+RELAY_FAMILIES = ("inet", "bridge")
+
+
+def render_relay_update(
+    network: SandboxNetwork,
+    *,
+    remove: dict[str, list[tuple[str, str, int]]],
+    add: list[tuple[str, str, int]],
+) -> str:
+    """One transaction that swaps relay exceptions in both relay sets.
+
+    ``remove`` is per family because each set is read back separately: an
+    element one of them has already lost must not be deleted from it, or the
+    whole transaction fails.
+    """
+
+    def render(elements: list[tuple[str, str, int]]) -> str:
+        return ", ".join(f'"{bridge}" . {address} . {port}' for bridge, address, port in elements)
+
+    lines: list[str] = []
+    for family in RELAY_FAMILIES:
+        if doomed := remove.get(family):
+            lines.append(f"delete element {family} {network.table} relays {{ {render(doomed)} }}")
+    if add:
+        for family in RELAY_FAMILIES:
+            lines.append(f"add element {family} {network.table} relays {{ {render(add)} }}")
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 __all__ = [
-    "DEFAULT_TRUSTED_DOMAINS",
-    "PHASES",
-    "VENDOR_TELEMETRY_DOMAINS",
-    "EgressPolicy",
-    "EgressPolicyError",
-    "EgressTier",
-    "build_policy_from_env",
-    "check_allowlist",
-    "normalize_domains",
-    "trusted_domains",
+    "DNS_PORT",
+    "GROUP_PREFIX_LENGTH",
+    "PROTECTED_IPV4",
+    "PUBLIC_TCP_PORTS",
+    "RELAY_FAMILIES",
+    "TABLE_PREFIX",
+    "RelayEndpoint",
+    "SandboxNetwork",
+    "SandboxNetworkError",
+    "network_from_env",
+    "render_relay_update",
+    "render_ruleset",
 ]

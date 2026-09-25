@@ -6,8 +6,28 @@ import { useT } from '@/components/providers';
 // Inline onboarding shown above the disabled composer. Keeping the task shape
 // visible gives the user context for why GitHub is needed without pretending
 // a repository can already be selected.
-export function ConnectSourceControl({ installUrl }: { installUrl: string | null }) {
+//
+// `unavailable` is the deployment's GitHub App failing to load, which the
+// service retries on its own (issue #47). There is nothing for the user to
+// connect or ask an administrator for, so it says so and offers no action.
+export function ConnectSourceControl({
+  installUrl,
+  unavailable = false,
+}: {
+  installUrl: string | null;
+  unavailable?: boolean;
+}) {
   const t = useT();
+  const title = unavailable
+    ? t('connect.titleTemporarilyUnavailable')
+    : installUrl
+      ? t('connect.title')
+      : t('connect.titleUnavailable');
+  const body = unavailable
+    ? t('connect.bodyTemporarilyUnavailable')
+    : installUrl
+      ? t('connect.body')
+      : t('connect.bodyUnavailable');
   return (
     <div
       role="status"
@@ -19,29 +39,29 @@ export function ConnectSourceControl({ installUrl }: { installUrl: string | null
         </svg>
       </span>
       <div className="min-w-0 flex-1">
-        <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-50">
-          {installUrl ? t('connect.title') : t('connect.titleUnavailable')}
-        </h2>
+        <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-50">{title}</h2>
         <p className="mt-0.5 text-[13px] leading-relaxed text-gray-500 dark:text-gray-400">
-          {installUrl ? t('connect.body') : t('connect.bodyUnavailable')}
+          {body}
         </p>
       </div>
-      <Link
-        href="/integrations"
-        className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-gray-900 dark:bg-gray-100 px-3.5 py-2 text-[13px] font-medium text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white"
-      >
-        {installUrl ? t('connect.action') : t('connect.actionUnavailable')}
-        <svg
-          className="h-3.5 w-3.5"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={2}
-          aria-hidden="true"
+      {unavailable ? null : (
+        <Link
+          href="/integrations"
+          className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-gray-900 dark:bg-gray-100 px-3.5 py-2 text-[13px] font-medium text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white"
         >
-          <path strokeLinecap="round" strokeLinejoin="round" d="M7 17 17 7m0 0H8m9 0v9" />
-        </svg>
-      </Link>
+          {installUrl ? t('connect.action') : t('connect.actionUnavailable')}
+          <svg
+            className="h-3.5 w-3.5"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            aria-hidden="true"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M7 17 17 7m0 0H8m9 0v9" />
+          </svg>
+        </Link>
+      )}
     </div>
   );
 }

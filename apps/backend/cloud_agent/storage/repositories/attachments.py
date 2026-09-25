@@ -89,11 +89,18 @@ class PostgresAttachmentRepository:
         return [dict(row) for row in rows]
 
     async def delete_attachment(self, *, user_id: str, attachment_id: int) -> bool:
-        """Drop a staged upload the owner removed before running."""
+        """Drop a staged upload the owner removed before running.
+
+        Not one a waiting message holds: that message names the file and will
+        be sent with it, so removing the bytes here would send a turn that
+        mentions a file its sandbox never receives. Editing or deleting the
+        message is what lets go of it.
+        """
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM agent_job_attachments "
-                "WHERE id = $1 AND user_id = $2 AND job_id IS NULL",
+                "WHERE id = $1 AND user_id = $2 AND job_id IS NULL "
+                "AND pending_message_id IS NULL",
                 attachment_id,
                 user_id,
             )
@@ -131,10 +138,16 @@ class PostgresAttachmentRepository:
         return (bytes(row["content"]), str(row["content_type"])) if row else None
 
     async def purge_stale_staged(self, *, older_than_hours: int) -> int:
-        """Collect uploads no job ever claimed."""
+        """Collect uploads no job ever claimed and no waiting message holds.
+
+        A message can wait behind a long turn for longer than a staged upload
+        is kept. Its files are not abandoned while it waits; they are released
+        back to this sweep when the message is edited to drop them or deleted.
+        """
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM agent_job_attachments WHERE job_id IS NULL "
+                "AND pending_message_id IS NULL "
                 f"AND created_at < NOW() - INTERVAL '{int(older_than_hours)} hours'",
             )
         return int(result.rsplit(" ", 1)[-1] or 0)

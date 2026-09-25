@@ -12,7 +12,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from cloud_agent_profiling import measurement_delivery as delivery
+from cloud_agent_host import measurement_delivery as delivery
 
 
 @pytest.mark.parametrize("status", sorted(delivery.RETRYABLE_STATUS))

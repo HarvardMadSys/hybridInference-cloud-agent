@@ -27,6 +27,47 @@ HOST_CONCURRENCY_CAPABILITY = "host-concurrency-v1"
 #: not answered yet, because the two need different fixes: a redeploy and a
 #: network, respectively.
 PROFILING_CONTROL_CAPABILITY = "operation-profiling-control-v1"
+#: Advertised once per runtime by a host whose broker can hand a message to a
+#: running turn of that runtime (``POST /shared-sandboxes/{thread}/input``).
+#: Per runtime because each CLI takes mid-turn input through its own channel,
+#: and a host is only asked to steer a turn whose runtime it names here.
+MID_TURN_INPUT_CAPABILITY_PREFIX = "mid-turn-input-v1:"
+
+
+def mid_turn_input_capability(runtime_id: str) -> str:
+    """The capability a host advertises when it can steer ``runtime_id``."""
+    return f"{MID_TURN_INPUT_CAPABILITY_PREFIX}{runtime_id}"
+
+
+#: The event a host puts in a turn's stream at the point the turn took a
+#: message its owner sent into it. The payload carries the text and names the
+#: waiting message (``pending_message_id``); the control plane moves that
+#: message into the transcript when it stores the event. A message the turn
+#: never took has no such event, and goes as the next turn instead.
+USER_MESSAGE_EVENT = "user_message"
+
+#: Why a running turn cannot take a message: the broker answers with one of
+#: these words and the owner's page says what each means. The message itself is
+#: never lost — it stays waiting and is sent when the turn ends.
+#: The turn is over, or was never this one.
+INPUT_TURN_ENDED = "turn_ended"
+#: This runtime's driver cannot take mid-turn input.
+INPUT_UNSUPPORTED = "unsupported"
+#: The CLI process could not be written to.
+INPUT_PROCESS_GONE = "process_gone"
+#: The CLI answered with a refusal the platform has no better word for.
+INPUT_REFUSED = "refused"
+#: The host that runs the turn could not be reached.
+INPUT_UNREACHABLE = "unreachable"
+INPUT_REFUSALS = frozenset(
+    {
+        INPUT_TURN_ENDED,
+        INPUT_UNSUPPORTED,
+        INPUT_PROCESS_GONE,
+        INPUT_REFUSED,
+        INPUT_UNREACHABLE,
+    }
+)
 #: Header the runner uses when it hands its workspace broker the profiling policy
 #: a control plane sent it. The broker has no host credential and never will --
 #: the design forbids widening that -- so the policy travels over the existing

@@ -30,7 +30,7 @@ from typing import Any
 
 import pytest
 
-from cloud_agent_profiling import operation_profiling as profiling
+from cloud_agent_shared import operation_profiling as profiling
 
 RUN_A = "admin-20260921T120000Z-aaaa1111"
 RUN_B = "admin-20260921T121000Z-bbbb2222"
@@ -709,7 +709,7 @@ def test_a_disabled_deployment_refuses_a_continuation(monkeypatch):
     assert profiling.attach_selection(context) is None
     assert profiling.start_stage_recording(context, producer="broker") is None
     # And through the real parser a broker route uses, not just the helpers.
-    from cloud_agent_profiling.operation_call import open_call
+    from cloud_agent_host.operation_call import open_call
 
     assert open_call(json.dumps(context), operations=("attempt.startup",)).recording is False
 
@@ -765,7 +765,7 @@ def test_an_inherited_manifest_that_has_expired_is_refused(monkeypatch):
 
     assert profiling.attach_selection(stale) is None
     assert profiling.start_stage_recording(stale, producer="broker") is None
-    from cloud_agent_profiling.operation_call import open_call
+    from cloud_agent_host.operation_call import open_call
 
     assert open_call(json.dumps(stale), operations=("attempt.startup",)).recording is False
 
@@ -1004,7 +1004,7 @@ def test_a_child_continues_the_experiment_its_parent_selected(monkeypatch):
 
 _CHILD_SCRIPT = r"""
 import json, os, sys
-from cloud_agent_profiling import operation_profiling
+from cloud_agent_shared import operation_profiling
 
 payload = json.loads(sys.stdin.read())
 context = payload.get("_profiling")

@@ -38,7 +38,7 @@ def manifest() -> dict[str, Any]:
         artifacts.append(
             {"role": "web", "variant": variant, "base_path": base, "image": ref(f"web{variant}")}
         )
-    for role in ("runner", "sandbox", "tunnel", "egress"):
+    for role in ("runner", "sandbox", "tunnel"):
         artifacts.append({"role": role, "image": ref(role)})
     return {"source_commit": "a" * 40, "artifacts": artifacts}
 

@@ -260,9 +260,26 @@ function toolCallsIn(events: readonly AgentEvent[]): number {
   return events.filter((event) => event.kind === 'tool_use').length;
 }
 
-/** The first user row's text, or empty. */
+/** The first user row's text — the turn's prompt, never a message sent into it — or empty. */
 function firstUserMessage(messages: readonly AgentThreadMessage[]): string {
-  return messages.find((message) => message.role === 'user')?.content ?? '';
+  return messages.find((message) => message.role === 'user' && !message.midTurn)?.content ?? '';
+}
+
+/**
+ * What a turn without replies in its event log shows instead: its durable
+ * rows after the prompt, in the order they were written — the replies, and
+ * any message sent into the turn while it ran, unless the log already shows
+ * those where they arrived.
+ */
+function fallbackRows(
+  messages: readonly AgentThreadMessage[],
+  events: readonly AgentEvent[],
+): AgentThreadMessage[] {
+  if (events.some((event) => event.kind === 'message')) return [];
+  const shownInline = events.some((event) => event.kind === 'user_message');
+  return messages.filter(
+    (message) => message.role === 'assistant' || (message.midTurn === true && !shownInline),
+  );
 }
 
 function historyTurnDescription(
@@ -272,9 +289,7 @@ function historyTurnDescription(
   // Exactly what the transcript does: a turn with stored message rows renders
   // those, and only a turn without them falls back to its durable copy.
   const hasEventMessages = turn.events.some((event) => event.kind === 'message');
-  const fallbackResponses = hasEventMessages
-    ? []
-    : turn.messages.filter((message) => message.role === 'assistant');
+  const fallbackResponses = fallbackRows(turn.messages, turn.events);
   // A stored turn is usually finished, and its reply is what it said. The one
   // that is not — the previous turn can still be running behind a queued one —
   // gets the same treatment as the newest turn: what it has produced so far is
@@ -350,9 +365,7 @@ export function describeCurrentTurn(
       ...(job.turnNo === undefined ? {} : { turnNo: job.turnNo }),
       messages,
       events,
-      fallbackResponses: events.some((event) => event.kind === 'message')
-        ? []
-        : messages.filter((message) => message.role === 'assistant'),
+      fallbackResponses: fallbackRows(messages, events),
       promptCard: job.prompt || job.title,
       forkable: false,
       ...(job.goalTurn ? { goalTurn: job.goalTurn } : {}),
@@ -387,9 +400,7 @@ export function describeCurrentTurn(
     ...(job.turnNo === undefined ? {} : { turnNo: job.turnNo }),
     messages,
     events,
-    fallbackResponses: events.some((event) => event.kind === 'message')
-      ? []
-      : messages.filter((message) => message.role === 'assistant'),
+    fallbackResponses: fallbackRows(messages, events),
     promptCard,
     forkable: false,
     ...(job.goalTurn ? { goalTurn: job.goalTurn } : {}),

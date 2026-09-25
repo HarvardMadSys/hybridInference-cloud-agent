@@ -40,6 +40,21 @@ GRANT_TTL_MAX_S = 900
 CONCURRENT_FORK_PROBE_WAIT_S = 15.0
 CONCURRENT_FORK_PROBE_HOLD_S = 1.0
 CONCURRENT_FORK_PROBE_PREFIX = "[local-concurrency-probe:"
+#: ``[local-hold:N]`` in a turn's message holds its model answer for N seconds,
+#: so a person can act while that turn is still running — queue a message
+#: behind it, edit or delete one, press Stop — without a real model's latency.
+#: Bounded so a mistyped number cannot wedge the local stack.
+LOCAL_HOLD_PREFIX = "[local-hold:"
+LOCAL_HOLD_MAX_S = 120.0
+#: ``[local-tool:N]`` makes a claude-code turn run a tool for N seconds first
+#: (``sleep N`` through Bash), then answer. While that tool runs the turn can
+#: take a message sent into it; the answer after the tool quotes any it got.
+LOCAL_TOOL_PREFIX = "[local-tool:"
+LOCAL_TOOL_MAX_S = 60.0
+#: How Claude Code words a message the owner sent while a tool ran, in the
+#: request after that tool (the pinned 2.1.220). It arrives as a ``system``
+#: entry after the tool's result, not inside the latest ``user`` message.
+MID_TURN_MESSAGE_LEAD = "The user sent a new message while you were working:"
 
 app = FastAPI(title="Local development gateway", docs_url=None, redoc_url=None)
 
@@ -455,11 +470,138 @@ async def _hold_concurrent_fork_probe(body: dict[str, Any]) -> None:
                 _concurrency_probes.pop(key, None)
 
 
-def _anthropic_sse(message_id: str) -> list[bytes]:
-    text = "Local gateway response: the agent CLI, grant, and sandbox network are working."
+def _hold_seconds(body: dict[str, Any]) -> float:
+    """How long a ``[local-hold:N]`` marker asks this answer to wait, or zero."""
+    return _marker_seconds(body, LOCAL_HOLD_PREFIX, LOCAL_HOLD_MAX_S)
 
-    def event(name: str, data: dict[str, Any]) -> bytes:
-        return f"event: {name}\ndata: {json.dumps(data)}\n\n".encode()
+
+async def _hold_marked_turn(body: dict[str, Any]) -> None:
+    """Keep a marked turn's model call open, so the turn stays running."""
+    seconds = _hold_seconds(body)
+    if seconds:
+        await asyncio.sleep(seconds)
+
+
+def _marker_seconds(body: dict[str, Any], prefix: str, ceiling: float) -> float:
+    """Seconds a ``prefix``N``]`` marker in the latest user input names, bounded, or zero."""
+    text = _current_user_text(body)
+    start = text.find(prefix)
+    if start < 0:
+        return 0.0
+    start += len(prefix)
+    end = text.find("]", start)
+    try:
+        seconds = float(text[start:end]) if end >= 0 else 0.0
+    except ValueError:
+        return 0.0
+    if seconds != seconds or seconds <= 0:  # NaN or not a duration
+        return 0.0
+    return min(seconds, ceiling)
+
+
+def _tool_seconds(body: dict[str, Any]) -> float:
+    """How long a ``[local-tool:N]`` turn's tool should run, or zero for no tool."""
+    return _marker_seconds(body, LOCAL_TOOL_PREFIX, LOCAL_TOOL_MAX_S)
+
+
+def _since_last_reply(body: dict[str, Any]) -> str:
+    """Everything a request adds after the model's last reply, whatever its role."""
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return ""
+    added: list[str] = []
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") == "assistant":
+            break
+        added.append(_content_text(message.get("content")))
+    return "\n".join(reversed(added))
+
+
+def _messages_sent_mid_turn(body: dict[str, Any]) -> list[str]:
+    """What the owner sent into the turn while its tool ran, as the CLI relays it."""
+    sent: list[str] = []
+    text = _since_last_reply(body)
+    start = text.find(MID_TURN_MESSAGE_LEAD)
+    while start >= 0:
+        start += len(MID_TURN_MESSAGE_LEAD)
+        end = text.find("\n\n", start)
+        message = (text[start:end] if end >= 0 else text[start:]).strip()
+        if message:
+            sent.append(message)
+        start = text.find(MID_TURN_MESSAGE_LEAD, start)
+    return sent
+
+
+def _anthropic_answer(body: dict[str, Any]) -> str:
+    """The reply text: the default one, or one that quotes messages sent mid-turn."""
+    sent = _messages_sent_mid_turn(body)
+    if sent:
+        quoted = "; ".join(f'"{message}"' for message in sent)
+        return f"Local gateway response: the tool finished, and I also got {quoted}."
+    return "Local gateway response: the agent CLI, grant, and sandbox network are working."
+
+
+def _sse_event(name: str, data: dict[str, Any]) -> bytes:
+    return f"event: {name}\ndata: {json.dumps(data)}\n\n".encode()
+
+
+def _anthropic_tool_sse(message_id: str, seconds: float) -> list[bytes]:
+    """A streamed answer that asks the CLI to run ``sleep`` through Bash first."""
+    arguments = json.dumps({"command": f"sleep {seconds:g}", "description": "Local tool call"})
+    return [
+        _sse_event(
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "id": message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "model": MODEL_ID,
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 8, "output_tokens": 1},
+                },
+            },
+        ),
+        _sse_event(
+            "content_block_start",
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": f"toolu_local_{secrets.token_hex(6)}",
+                    "name": "Bash",
+                    "input": {},
+                },
+            },
+        ),
+        _sse_event(
+            "content_block_delta",
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": arguments},
+            },
+        ),
+        _sse_event("content_block_stop", {"type": "content_block_stop", "index": 0}),
+        _sse_event(
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                "usage": {"output_tokens": 16},
+            },
+        ),
+        _sse_event("message_stop", {"type": "message_stop"}),
+    ]
+
+
+def _anthropic_sse(message_id: str, text: str | None = None) -> list[bytes]:
+    text = text or "Local gateway response: the agent CLI, grant, and sandbox network are working."
+    event = _sse_event
 
     return [
         event(
@@ -517,6 +659,7 @@ async def anthropic_messages(
     model = str(body.get("model") or "")
     _require_grant(x_api_key, authorization, model)
     await _hold_concurrent_fork_probe(body)
+    await _hold_marked_turn(body)
     message_id = f"msg_local_{secrets.token_hex(8)}"
     if body.get("stream") is False:
         return {
@@ -529,7 +672,14 @@ async def anthropic_messages(
             "stop_sequence": None,
             "usage": {"input_tokens": 8, "output_tokens": 4},
         }
-    return StreamingResponse(iter(_anthropic_sse(message_id)), media_type="text/event-stream")
+    seconds = _tool_seconds(body)
+    if seconds:
+        return StreamingResponse(
+            iter(_anthropic_tool_sse(message_id, seconds)), media_type="text/event-stream"
+        )
+    return StreamingResponse(
+        iter(_anthropic_sse(message_id, _anthropic_answer(body))), media_type="text/event-stream"
+    )
 
 
 @app.post("/v1/messages/count_tokens")
@@ -574,6 +724,7 @@ async def openai_chat_completions(
     model = str(body.get("model") or "")
     _require_grant(None, authorization, model)
     await _hold_concurrent_fork_probe(body)
+    await _hold_marked_turn(body)
     completion_id = f"chatcmpl-local-{secrets.token_hex(8)}"
     if body.get("stream"):
         return StreamingResponse(
@@ -601,6 +752,7 @@ async def openai_responses(request: Request, authorization: str | None = Header(
     model = str(body.get("model") or "")
     _require_grant(None, authorization, model)
     await _hold_concurrent_fork_probe(body)
+    await _hold_marked_turn(body)
     response_id = f"resp_local_{secrets.token_hex(8)}"
     text = "Local gateway response: the agent CLI and sandbox are working."
     response = {

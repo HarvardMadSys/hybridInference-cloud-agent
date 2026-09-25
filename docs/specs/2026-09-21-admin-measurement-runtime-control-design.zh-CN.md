@@ -261,7 +261,7 @@ flowchart LR
 
 ### 6.1 快照与预算
 
-为采集器提供独立的 runtime provider，持有线程安全、原子替换的配置快照。中立词汇放 `cloud_agent_profiling`，HTTP/数据库/lifespan 分别由 CP 和 host 拥有；不能让 host 导入 `cloud_agent`，也不能从中立包启动网络客户端。
+为采集器提供独立的 runtime provider，持有线程安全、原子替换的配置快照。中立词汇放 `cloud_agent_shared.operation_profiling`，HTTP/数据库/lifespan 分别由 CP 和 host 拥有；不能让 host 导入 `cloud_agent`，也不能从中立包启动网络客户端。
 
 每条 Measurement 保存不可变 manifest、target、operations、原始 `expires_at`、配置版本和
 预算归属；**没有可撤销 handle**。重复同步同一 run 的配置不会重置该 run 已用掉的名额；
@@ -363,7 +363,7 @@ manifest 校验。
 - `apps/frontend/src/lib/api/adminMeasurements.ts`：类型、Start/Stop/status 客户端与错误语义。
 - `apps/backend/cloud_agent/api/admin_measurements.py`：Admin 写入口与状态读取；复杂事务放 application/repository。
 - `apps/backend/cloud_agent/ports/`、`storage/repositories/`、bootstrap、迁移：控制 capability、事务、生命周期及清理。
-- `apps/backend/cloud_agent_profiling/operation_profiling.py`：配置 provider、run 绑定、撤销、预算隔离。
+- `apps/backend/cloud_agent_shared/operation_profiling.py`：配置 provider、run 绑定、撤销、预算隔离。
 - `apps/backend/cloud_agent/operation_measurement.py`、持久化与 ingest：动态根选择、续接、独立 manifest、宽限语义。
 - `apps/backend/cloud_agent_host/runner.py`、host 身份客户端、broker/client/supervisor：父进程预选、子进程继承、控制同步及片段截止。
 - `deploy/`、`ENVIRONMENT.md`、FI 配套配置：真实启动入口。

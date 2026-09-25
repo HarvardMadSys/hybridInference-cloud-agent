@@ -16,7 +16,12 @@ class ConversationQueries(Protocol):
     """Port: reading conversations, their jobs, and the project list."""
 
     async def get_thread_for_job(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
-        """Return the conversation containing an owned job."""
+        """Return the conversation containing an owned job.
+
+        With its turns and transcript, and with the messages still waiting to
+        become turns (``pending_messages``, in send order) and why the queue is
+        not moving by itself (``queue_paused_reason``), read together.
+        """
         ...
 
     async def get_job(self, job_id: str) -> dict[str, Any] | None:

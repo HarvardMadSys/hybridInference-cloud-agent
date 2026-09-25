@@ -1,10 +1,17 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
 import { SkillIcon } from './skills/SkillDialog';
 import { McpSubmenu } from './mcp/McpSubmenu';
+import { useComposerMenuLayout } from './useComposerMenuLayout';
 import type { McpChoice } from './mcp/useComposerMcp';
+import {
+  COMPOSER_MENU_SURFACE,
+  COMPOSER_MENU_HEADING,
+  COMPOSER_MENU_ROW,
+  COMPOSER_MENU_DETAIL,
+} from './composerMenuStyles';
 
 // The composer's one attach point.
 //
@@ -111,9 +118,6 @@ function PaperclipIcon() {
   );
 }
 
-const ITEM =
-  'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13.5px] font-medium text-gray-900 hover:bg-gray-50 focus:bg-gray-50 focus:outline-none dark:text-gray-100 dark:hover:bg-white/5 dark:focus:bg-white/5';
-
 export function ComposerPlusMenu({
   onFiles,
   onOpenSkills,
@@ -125,17 +129,11 @@ export function ComposerPlusMenu({
   onOpen,
   disabled = false,
 }: {
-  /**
-   * Absent on a composer that offers neither. Both are optional because the
-   * attach point is one menu with one job — holding what this message carries —
-   * and a caller that can only offer part of that should show the part it has
-   * rather than grow a second, differently-shaped menu beside it.
-   */
   onFiles?: (files: File[]) => void;
   onOpenSkills: () => void;
-  /** What the Skills row reports on its right: a count, or a pending note. */
+  /** The number selected, or a note while defaults load. */
   skillSummary: string;
-  /** What the completion-condition row shows under its label. */
+  /** The description beside Goal, shared with the slash-command menu. */
   goalSummary: string;
   onOpenGoal: () => void;
   mcp?: {
@@ -146,28 +144,48 @@ export function ComposerPlusMenu({
     reload: () => void;
     toggle: (connection: McpChoice['connection'], on: boolean) => void;
   };
-  /** Set when the chosen runtime cannot be given MCP connections at all. */
   mcpBlockedReason?: string;
   onOpen?: () => void;
   disabled?: boolean;
 }) {
   const t = useT();
+  const id = useId();
   const [open, setOpen] = useState(false);
   const [submenu, setSubmenu] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
+  const mcpTrigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const filePicker = useRef<HTMLInputElement>(null);
+  const wasSubmenu = useRef(false);
+  const openAtEnd = useRef(false);
+  const menuStyle = useComposerMenuLayout(open, menu);
 
   useEffect(() => {
-    if (!open) return undefined;
-    menu.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
-    function onPointerDown(event: MouseEvent) {
+    if (!open) {
+      wasSubmenu.current = false;
+      return;
+    }
+    if (submenu) {
+      menu.current?.querySelector<HTMLInputElement>('input[type="search"]')?.focus();
+    } else if (wasSubmenu.current) {
+      mcpTrigger.current?.focus();
+    } else {
+      const items = menu.current?.querySelectorAll<HTMLElement>('[role="menuitem"]');
+      items?.[openAtEnd.current ? items.length - 1 : 0]?.focus();
+    }
+    wasSubmenu.current = submenu;
+  }, [open, submenu]);
+
+  useEffect(() => {
+    if (!open) return;
+    function onPointerDown(event: PointerEvent) {
       const target = event.target as Node;
       if (menu.current?.contains(target) || trigger.current?.contains(target)) return;
       setOpen(false);
+      setSubmenu(false);
     }
-    document.addEventListener('mousedown', onPointerDown);
-    return () => document.removeEventListener('mousedown', onPointerDown);
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
   }, [open]);
 
   function close(restoreFocus = true) {
@@ -176,20 +194,23 @@ export function ComposerPlusMenu({
     if (restoreFocus) trigger.current?.focus();
   }
 
-  function moveFocus(step: 1 | -1) {
+  function moveFocus(key: string) {
     const items = Array.from(
       menu.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [],
     );
-    if (items.length === 0) return;
+    if (!items.length) return;
     const at = items.indexOf(document.activeElement as HTMLElement);
-    const next = at < 0 ? 0 : (at + step + items.length) % items.length;
+    const next =
+      key === 'Home'
+        ? 0
+        : key === 'End'
+          ? items.length - 1
+          : (at + (key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
     items[next]?.focus();
   }
 
   function take(event: React.ChangeEvent<HTMLInputElement>) {
     const picked = Array.from(event.target.files ?? []);
-    // Clearing lets the same file be picked again — without it the input's
-    // value is unchanged and no second `change` event fires.
     event.target.value = '';
     if (picked.length) onFiles?.(picked);
   }
@@ -200,23 +221,26 @@ export function ComposerPlusMenu({
         ref={trigger}
         type="button"
         disabled={disabled}
-        aria-haspopup="menu"
+        aria-haspopup={submenu ? 'dialog' : 'menu'}
         aria-expanded={open}
+        aria-controls={open ? id : undefined}
         aria-label={t('attach.open')}
         title={t('attach.open')}
         onClick={() => {
-          if (!open) onOpen?.();
-          setOpen((was) => !was);
+          if (open) close();
+          else {
+            openAtEnd.current = false;
+            onOpen?.();
+            setOpen(true);
+          }
         }}
         onKeyDown={(event) => {
           if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
           event.preventDefault();
+          openAtEnd.current = event.key === 'ArrowUp';
           if (!open) onOpen?.();
           setOpen(true);
         }}
-        // Borderless, like the pickers beside it. A boxed button here was a
-        // third visual language in a row that already has two: unbordered
-        // controls on the left and one solid button on the right.
         className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
           open
             ? 'bg-gray-100 text-gray-900 dark:bg-white/10 dark:text-gray-100'
@@ -225,7 +249,6 @@ export function ComposerPlusMenu({
       >
         <PlusIcon />
       </button>
-
       {onFiles ? (
         <input
           ref={filePicker}
@@ -240,130 +263,128 @@ export function ComposerPlusMenu({
       {open ? (
         <div
           ref={menu}
-          role="menu"
-          aria-label={t('attach.open')}
+          id={id}
+          role={submenu ? 'dialog' : 'menu'}
+          aria-label={t(submenu ? 'attach.mcp' : 'attach.open')}
+          className={COMPOSER_MENU_SURFACE}
+          style={menuStyle}
+          onBlur={(event) => {
+            if (
+              event.relatedTarget &&
+              !event.currentTarget.contains(event.relatedTarget as Node) &&
+              !trigger.current?.contains(event.relatedTarget as Node)
+            )
+              close(false);
+          }}
           onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
             if (event.key === 'Escape') {
               event.preventDefault();
-              close();
-            } else if (event.key === 'ArrowDown') {
+              event.stopPropagation();
+              if (submenu) setSubmenu(false);
+              else close();
+            } else if (!submenu && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
               event.preventDefault();
-              moveFocus(1);
-            } else if (event.key === 'ArrowUp') {
-              event.preventDefault();
-              moveFocus(-1);
+              moveFocus(event.key);
             }
           }}
-          className="absolute bottom-[calc(100%+6px)] left-0 z-50 w-[272px] rounded-xl border border-gray-200 bg-white p-1.5 shadow-lg dark:border-white/10 dark:bg-gray-900"
         >
-          {onFiles ? (
+          {submenu && mcp ? (
             <>
-              <button
-                type="button"
-                role="menuitem"
-                className={ITEM}
-                onClick={() => {
-                  close(false);
-                  filePicker.current?.click();
-                }}
-              >
-                <PaperclipIcon />
-                {t('attach.upload')}
-              </button>
-              <div className="my-1 h-px bg-gray-100 dark:bg-white/5" />
-            </>
-          ) : null}
-          <button
-            type="button"
-            role="menuitem"
-            className={ITEM}
-            onClick={() => {
-              close(false);
-              onOpenSkills();
-            }}
-          >
-            <SkillIcon className="h-[17px] w-[17px] shrink-0" />
-            <span className="flex-1">{t('attach.skills')}</span>
-            <span className="text-xs font-normal text-gray-500 dark:text-gray-400">
-              {skillSummary}
-            </span>
-            <ChevronIcon />
-          </button>
-
-          {/* Its own group. Skills and MCP connections are things this
-              message *carries*; the completion condition is what the whole
-              conversation is for, and it outlives every message after it.
-
-              No chevron, unlike its neighbours: this row opens nothing. It puts
-              `/goal ` in the message box and hands the caret back, so the
-              objective is typed where the owner was already typing and the band
-              above the messages is the only place a goal is managed. */}
-          <div className="my-1 h-px bg-gray-100 dark:bg-white/5" />
-          <button
-            type="button"
-            role="menuitem"
-            className={ITEM}
-            onClick={() => {
-              close(false);
-              onOpenGoal();
-            }}
-          >
-            <GoalIcon />
-            <span className="flex-1">
-              {t('attach.goal')}
-              <span className="mt-0.5 block truncate text-xs font-normal text-gray-500 dark:text-gray-400">
-                {goalSummary}
-              </span>
-            </span>
-          </button>
-
-          {mcp ? (
-            <>
-              <button
-                type="button"
-                role="menuitem"
-                aria-haspopup="menu"
-                aria-expanded={submenu}
-                aria-disabled={mcpBlockedReason ? true : undefined}
-                className={ITEM}
-                onClick={() => {
-                  if (mcpBlockedReason) return;
-                  setSubmenu((was) => !was);
-                }}
-              >
-                <McpIcon />
-                <span className="flex-1">
-                  {t('attach.mcp')}
-                  {mcpBlockedReason ? (
-                    // Said here rather than at job creation: the API refuses this
-                    // pairing with a 400, and learning that after pressing Run is
-                    // learning it too late.
-                    <span className="mt-0.5 block text-xs font-normal text-gray-500 dark:text-gray-400">
-                      {mcpBlockedReason}
-                    </span>
-                  ) : null}
+              <button type="button" className={COMPOSER_MENU_ROW} onClick={() => setSubmenu(false)}>
+                <span className="rotate-180">
+                  <ChevronIcon />
                 </span>
-                {!mcpBlockedReason && mcp.count ? (
-                  <span className="text-xs font-normal text-gray-500 dark:text-gray-400">
-                    {mcp.count}
-                  </span>
-                ) : null}
-                {mcpBlockedReason ? null : <ChevronIcon />}
+                {t('attach.back')}
+                <span className={COMPOSER_MENU_DETAIL}>{t('attach.mcp')}</span>
               </button>
-            </>
-          ) : null}
-
-          {mcp && submenu && !mcpBlockedReason ? (
-            <div className="absolute bottom-0 left-full ml-1.5">
               <McpSubmenu
+                embedded
                 choices={mcp.choices}
                 loading={mcp.loading}
                 error={mcp.error}
                 onRetry={mcp.reload}
                 onToggle={(choice, on) => mcp.toggle(choice.connection, on)}
               />
-            </div>
-          ) : null}
+            </>
+          ) : (
+            <>
+              <div role="group" aria-label={t('attach.add')}>
+                <p className={COMPOSER_MENU_HEADING}>{t('attach.add')}</p>
+                {onFiles ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    tabIndex={-1}
+                    aria-label={t('attach.upload')}
+                    className={COMPOSER_MENU_ROW}
+                    onClick={() => {
+                      close(false);
+                      filePicker.current?.click();
+                    }}
+                  >
+                    <PaperclipIcon />
+                    <span className="shrink-0">{t('attach.file')}</span>
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  role="menuitem"
+                  tabIndex={-1}
+                  className={COMPOSER_MENU_ROW}
+                  onClick={() => {
+                    close(false);
+                    onOpenGoal();
+                  }}
+                >
+                  <GoalIcon />
+                  <span className="shrink-0">{t('attach.goal')}</span>
+                  <span title={goalSummary} className={COMPOSER_MENU_DETAIL}>
+                    {goalSummary}
+                  </span>
+                </button>
+              </div>
+              <div role="group" aria-label={t('attach.tools')} className="mt-2">
+                <p className={COMPOSER_MENU_HEADING}>{t('attach.tools')}</p>
+                <button
+                  type="button"
+                  role="menuitem"
+                  tabIndex={-1}
+                  className={COMPOSER_MENU_ROW}
+                  onClick={() => {
+                    close(false);
+                    onOpenSkills();
+                  }}
+                >
+                  <SkillIcon className="h-[17px] w-[17px] shrink-0" />
+                  <span className="shrink-0">{t('attach.skills')}</span>
+                  <span className={COMPOSER_MENU_DETAIL}>{skillSummary}</span>
+                  <ChevronIcon />
+                </button>
+                {mcp ? (
+                  <button
+                    ref={mcpTrigger}
+                    type="button"
+                    role="menuitem"
+                    tabIndex={-1}
+                    aria-haspopup="dialog"
+                    aria-disabled={mcpBlockedReason ? true : undefined}
+                    className={COMPOSER_MENU_ROW}
+                    onClick={() => {
+                      if (!mcpBlockedReason) setSubmenu(true);
+                    }}
+                  >
+                    <McpIcon />
+                    <span className="shrink-0">{t('attach.mcp')}</span>
+                    <span className={COMPOSER_MENU_DETAIL} title={mcpBlockedReason}>
+                      {mcpBlockedReason ?? (mcp.count ? mcp.count : '')}
+                    </span>
+                    {mcpBlockedReason ? null : <ChevronIcon />}
+                  </button>
+                ) : null}
+              </div>
+            </>
+          )}
         </div>
       ) : null}
     </>

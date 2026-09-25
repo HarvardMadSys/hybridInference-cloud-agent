@@ -311,7 +311,7 @@ unknown-user branch omits.
 |---|---|
 | The control-plane image | A Docker daemon. CI's `Build control-plane` job passes, which proves the Dockerfile but not the compose wiring. |
 | Sections 3–7 | A staging gateway serving the identity, grant and agent-access contracts, a host, and a scratch repository. |
-| The two-relay egress topology | Two machines and the tunnels between them. `docker compose config` renders it and the network assertions hold, which is not the same as traffic flowing. |
+| The two-relay topology | Two machines and the tunnels between them. `docker compose config` renders it and the network assertions hold, which is not the same as traffic flowing. |
 
 **Corrections made to this runbook during the run:** none. Sections 1 and 2
 were accurate as written.

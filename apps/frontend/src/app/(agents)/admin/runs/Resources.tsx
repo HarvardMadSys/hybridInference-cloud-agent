@@ -3,15 +3,11 @@
 import { useEffect, useState } from 'react';
 
 import { formatBytes, formatCpu, formatDuration } from '@/components/features/agents/TurnFooter';
-import type {
-  AgentAttemptTelemetryApi,
-  AttemptResourcesApi,
-  RunResourceSummaryApi,
-} from '@/lib/api/agents';
+import type { AgentAttemptTelemetryApi, AttemptResourcesApi } from '@/lib/api/agents';
 import { getAdminAttemptResources } from '@/lib/api/adminRuns';
 import { getErrorMessage } from '@/lib/utils/errors';
 
-import { turnSummaryReadings, turnSummaryRows, type ResourceReading } from './presentTurnResources';
+import { turnSummaryRows } from './presentTurnResources';
 import { accessDenied, BUTTON, CARD, ErrorNotice } from './shared';
 
 function metric(value: string | null, partial = false): string {
@@ -21,13 +17,10 @@ function metric(value: string | null, partial = false): string {
 export function Resources({
   jobId,
   attemptId,
-  attemptCoverage = null,
   onAccessDenied,
 }: {
   jobId: string;
   attemptId: number;
-  /** The run's compact resource projection, or null when no attempt has one. */
-  attemptCoverage?: RunResourceSummaryApi | null;
   onAccessDenied: () => void;
 }) {
   const [telemetry, setTelemetry] = useState<AgentAttemptTelemetryApi | null>(null);
@@ -57,23 +50,21 @@ export function Resources({
 
   return (
     <section aria-labelledby="resources-heading" className="mt-8">
-      <div className="flex items-center justify-between gap-4">
-        <h2
-          id="resources-heading"
-          className="text-lg font-semibold text-gray-900 dark:text-gray-50"
-        >
-          Tools and resources
-        </h2>
-        <button
-          type="button"
-          className={BUTTON}
-          disabled={loading}
-          onClick={() => setRevision((value) => value + 1)}
-        >
-          Refresh resources
-        </button>
-      </div>
-      {error && <ErrorNotice>{error}</ErrorNotice>}
+      <h2 id="resources-heading" className="text-lg font-semibold text-gray-900 dark:text-gray-50">
+        Tools and resources
+      </h2>
+      {error && (
+        <div className="mt-4 flex items-center gap-3">
+          <ErrorNotice>{error}</ErrorNotice>
+          <button
+            type="button"
+            className={BUTTON}
+            onClick={() => setRevision((value) => value + 1)}
+          >
+            Retry
+          </button>
+        </div>
+      )}
       {loading ? (
         <p role="status" className="mt-4 text-sm text-gray-500 dark:text-gray-400">
           Loading resources…
@@ -82,7 +73,7 @@ export function Resources({
         telemetry &&
         (telemetry.resources ? (
           <>
-            <TurnResourceSummary telemetry={telemetry} attemptCoverage={attemptCoverage} />
+            <TurnResourceSummary telemetry={telemetry} />
             <ResourceReadings resources={telemetry.resources} />
           </>
         ) : (
@@ -95,98 +86,43 @@ export function Resources({
   );
 }
 
-/**
- * The whole-turn member execution window for one attempt.
- *
- * This is the member's own execution inside a shared sandbox, not the
- * platform's cost of the task, so the scope sentence is part of the panel
- * rather than a footnote to it. Every metric carries its own status and its
- * own reasons: an I/O metric no sandbox can produce must not read as if the
- * CPU number were short too. A summary with no final report never renders as a
- * finalized total.
- */
-function TurnResourceSummary({
-  telemetry,
-  attemptCoverage,
-}: {
-  telemetry: AgentAttemptTelemetryApi;
-  attemptCoverage: RunResourceSummaryApi | null;
-}) {
+/** One execution's measurements, with caveats attached to their values. */
+function TurnResourceSummary({ telemetry }: { telemetry: AgentAttemptTelemetryApi }) {
   const summary = telemetry.resources?.turn_summary ?? null;
   if (!summary) {
     return (
-      <div className={`${CARD} mt-4 p-5 text-sm text-gray-500 dark:text-gray-400`}>
-        <h3 className="text-sm font-medium text-gray-900 dark:text-gray-50">
-          Turn resource summary
-        </h3>
-        <p className="mt-2">
-          Not collected for this execution. A turn recorded before whole-turn accounting existed, or
-          one whose sandbox could not report it, has no member execution window here. This is not a
-          measured zero.
-        </p>
-      </div>
+      <p className={`${CARD} mt-4 p-5 text-sm text-gray-500 dark:text-gray-400`}>
+        No resource measurements were recorded for this execution.
+      </p>
     );
   }
-  // The attempt counts are a run-level fact; the attempt endpoint does not
-  // carry them, so they are merged from the run's compact projection.
-  const rows = turnSummaryRows({
-    ...summary,
-    attempts_measured: attemptCoverage?.attempts_measured,
-    attempts_total: attemptCoverage?.attempts_total,
-  });
-  const readings = turnSummaryReadings(summary);
+  const rows = turnSummaryRows(summary);
   return (
-    <div className={`${CARD} mt-4 overflow-hidden`}>
-      <div className="border-b border-gray-100 p-5 dark:border-white/5">
-        <h3 className="text-sm font-medium text-gray-900 dark:text-gray-50">
-          Turn resource summary
-        </h3>
-        <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-          One member execution window inside the shared sandbox. This is not the platform cost of
-          the task.
-        </p>
-        <dl className="mt-4 divide-y divide-gray-100 text-xs dark:divide-white/5">
-          {rows.map((row) => (
-            <div key={row.label} className="grid gap-1 py-3 sm:grid-cols-[10rem_1fr]">
-              <dt className="text-gray-500 dark:text-gray-400">{row.label}</dt>
-              <dd className="tabular-nums text-gray-800 dark:text-gray-200">
-                <span className="block">{row.value}</span>
-                {row.detail && (
-                  <span className="mt-1 block text-gray-500 dark:text-gray-400">{row.detail}</span>
-                )}
-              </dd>
-            </div>
-          ))}
-        </dl>
-      </div>
-      <details className="p-5">
-        <summary className="cursor-pointer text-sm font-medium">Method and reasons</summary>
-        <dl className="mt-4 space-y-3 text-xs">
-          {readings.map((reading, index) => (
-            <div key={rows[index].label}>
-              <dt className="text-gray-500 dark:text-gray-400">{rows[index].label}</dt>
-              <dd className="mt-1 text-gray-800 dark:text-gray-200">
-                <MethodLine reading={reading} />
-              </dd>
-            </div>
-          ))}
-        </dl>
-      </details>
+    <div
+      role="group"
+      aria-label="Execution resource summary"
+      className={`${CARD} mt-4 overflow-hidden`}
+    >
+      <p className="border-b border-gray-100 px-5 py-3 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
+        This execution · Agent and tools
+        {summary.state === 'interrupted' ? ' · Collection interrupted' : ''}
+        {summary.state === 'collecting' ? ' · Still collecting' : ''}
+      </p>
+      <dl className="divide-y divide-gray-100 text-sm dark:divide-white/5">
+        {rows.map((row) => (
+          <div key={row.label} className="flex items-baseline justify-between gap-4 px-5 py-3">
+            <dt className="text-gray-500 dark:text-gray-400">{row.label}</dt>
+            <dd
+              className="text-right tabular-nums text-gray-900 dark:text-gray-100"
+              title={row.detail ?? undefined}
+              aria-label={row.detail ? `${row.value}. ${row.detail}` : undefined}
+            >
+              {row.value}
+            </dd>
+          </div>
+        ))}
+      </dl>
     </div>
-  );
-}
-
-/** The method that produced one reading, with the full reasons behind it. */
-function MethodLine({ reading }: { reading: ResourceReading }) {
-  return (
-    <>
-      <span className="block font-mono text-[11px]">{reading.method ?? 'Method not reported'}</span>
-      {reading.notes.map((note) => (
-        <span key={note} className="mt-1 block text-gray-500 dark:text-gray-400">
-          {note}
-        </span>
-      ))}
-    </>
   );
 }
 

@@ -1,8 +1,8 @@
 """Owner-facing view construction for the agent surface.
 
 Store rows become API models here and nowhere else: the job response, its
-attempt summaries, the per-attempt resource rollup, the event envelope and the
-deployment's egress posture. Split out of the aggregator so the job, thread,
+attempt summaries, the per-attempt resource rollup and the event envelope.
+Split out of the aggregator so the job, thread,
 catalog, workspace and config routers share one definition of what a job looks
 like to its owner.
 
@@ -23,15 +23,13 @@ from cloud_agent.schemas import (
     AgentAttemptSummary,
     AgentJobEvent,
     AgentJobResponse,
+    AgentPendingMessageAttachment,
+    AgentPendingMessageResponse,
     AttemptResources,
     GoalView,
     McpBindingSummary,
     ProcessObservation,
     ToolCallResources,
-)
-from cloud_agent_shared.egress import (
-    EgressPolicyError,
-    build_policy_from_env as build_egress_policy,
 )
 from cloud_agent_shared.git.patch_gate import branch_name_for
 
@@ -52,17 +50,6 @@ _SAFE_EVENT_TYPE = re.compile(EVENT_TYPE_PATTERN)
 def _iso(value: Any) -> str | None:
     """Render a timestamp column as ISO-8601 (or None)."""
     return value.isoformat() if value is not None else None
-
-
-def _egress_tiers() -> tuple[str | None, str | None]:
-    """Report the deployment's per-phase egress posture, if it has one."""
-    try:
-        policy = build_egress_policy()
-    except EgressPolicyError:
-        # A misconfigured policy is the runner's problem to refuse at preflight,
-        # not a reason to fail an owner reading their own job.
-        return None, None
-    return policy.tier_for("setup").value, policy.tier_for("agent").value
 
 
 def _attempt_duration_ms(telemetry: dict[str, Any] | None) -> int | None:
@@ -124,6 +111,17 @@ def _goal_view(goal: dict[str, Any] | None) -> GoalView | None:
     return GoalView.model_validate(goal)
 
 
+def mid_turn_input_supported(job: dict[str, Any]) -> bool:
+    """Whether a message can be sent into ``job``'s turn while it runs.
+
+    The host that holds the conversation says so, per runtime, in the
+    capabilities it enrolls with. Whether the turn is running *now* is the
+    caller's question; this one is only whether it could ever take one.
+    """
+    sandbox = job.get("thread_sandbox") or {}
+    return sandbox.get("shared_live") is True and sandbox.get("mid_turn_input_capable") is True
+
+
 def _job_response(
     job: dict[str, Any],
     usage: dict[str, Any] | None = None,
@@ -132,7 +130,6 @@ def _job_response(
 ) -> AgentJobResponse:
     """Shape a store job row for the owner-facing API."""
     usage = usage or {}
-    setup_tier, agent_tier = _egress_tiers()
     metadata = dict(job.get("metadata") or {})
     base_ref = metadata.pop(BASE_REF_METADATA_KEY, None)
     if not isinstance(base_ref, str):
@@ -201,8 +198,6 @@ def _job_response(
         tokens_in=usage.get("tokens_in"),
         tokens_out=usage.get("tokens_out"),
         model_calls=usage.get("model_calls"),
-        setup_egress_tier=setup_tier,
-        agent_egress_tier=agent_tier,
         telemetry_attempt_id=(telemetry or {}).get("attempt_id"),
         continuity_mode=(telemetry or {}).get("continuity_mode"),
         context_status=(telemetry or {}).get("context_status"),
@@ -212,6 +207,7 @@ def _job_response(
         native_state=sandbox.get("native_state"),
         fork_anchor_job_id=sandbox.get("fork_anchor_job_id"),
         native_fork_available=native_fork_available,
+        mid_turn_input_supported=mid_turn_input_supported(job),
         workspace_publication_state=sandbox.get("workspace_publication_state"),
         workspace_epoch=sandbox.get("workspace_epoch"),
         started_at=_iso((telemetry or {}).get("started_at")),
@@ -233,4 +229,27 @@ def _event_response(event: dict[str, Any]) -> AgentJobEvent:
         event_type=event["event_type"],
         payload=event["payload"],
         created_at=_iso(event["created_at"]),
+    )
+
+
+def _pending_response(message: dict[str, Any]) -> AgentPendingMessageResponse:
+    """Shape a waiting message for its owner, without its idempotency key."""
+    return AgentPendingMessageResponse(
+        id=message["id"],
+        thread_id=message["thread_id"],
+        position=message["position"],
+        state=message["state"],
+        revision=message["revision"],
+        prompt=message["prompt"],
+        skill_ids=message.get("skill_ids"),
+        attachment_ids=message.get("attachment_ids"),
+        attachments=[
+            AgentPendingMessageAttachment(**attachment)
+            for attachment in message.get("attachments") or []
+        ],
+        model=message.get("model"),
+        reasoning_effort=message.get("reasoning_effort"),
+        last_error=message.get("last_error"),
+        created_at=_iso(message.get("created_at")),
+        updated_at=_iso(message.get("updated_at")),
     )

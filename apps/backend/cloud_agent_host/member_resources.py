@@ -1233,6 +1233,8 @@ class MemberWindowHandle:
     opened_host_mono: float
     open_scan_ms: int
     baseline_taken: bool = True
+    #: CPU quota of this sandbox at window open; never inferred for old records.
+    cpu_capacity_cores: float | None = None
 
 
 class MemberWindowSampler:

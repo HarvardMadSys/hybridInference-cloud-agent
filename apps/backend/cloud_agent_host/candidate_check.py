@@ -2,6 +2,8 @@
 
 This process has no enrollment or broker credentials and never polls for work.
 Its only sandbox is a temporary, network-isolated guest removed by preflight.
+It runs no group, so it builds no group network and installs no host rules:
+those belong to a live stack and are proved by that stack's own preflight.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from cloud_agent_host.shared_protocol import (
 
 def check_candidate(backend: ContainerBackend) -> None:
     """Exercise the real kernel/observer and compare the built image's pins."""
-    backend.preflight()
+    backend.preflight(check_network=False)
     stamp = backend.version_stamp()
     if not stamp.get("sandbox_image_digest"):
         raise SandboxError("candidate image has no immutable digest")
@@ -39,11 +41,8 @@ def check_candidate(backend: ContainerBackend) -> None:
 def main() -> None:
     """Validate a candidate without any live stack, credentials or user state."""
     backend = build_backend_from_env(
-        {
-            **os.environ,
-            "AGENT_SANDBOX_NETWORK": "none",
-            "AGENT_SANDBOX_NAMESPACE": "deploy-candidate",
-        }
+        {**os.environ, "AGENT_SANDBOX_NAMESPACE": "deploy-candidate"},
+        with_network=False,
     )
     if not isinstance(backend, ContainerBackend):
         raise SandboxError("candidate validation requires a container backend")

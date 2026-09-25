@@ -32,17 +32,17 @@
       "description": "Full 40-hex commit. Must equal the org.opencontainers.image.revision label of every platform image in every artifact, which is what a resolver checks against the registry rather than taking this document's word for it."
     },
     "deploy_protocol": {
-      "const": "shared-live-exact-sha-v3",
+      "const": "shared-live-exact-sha-v4",
       "description": "The deployment protocol these artifacts require, read from deploy/DEPLOY_PROTOCOL rather than typed. A deployer that does not implement it must refuse the release; an application rollback must not carry an old deployer back with it."
     },
     "artifacts": {
       "type": "array",
-      "minItems": 7,
+      "minItems": 6,
       "description": "Every image the deployment runs: exactly one entry per role, and web exactly one per build variant because basePath is resolved at build time. A release is not consumable until all of them exist: a missing artifact is not a smaller release, it is a broken one, and a list of the right length holding the wrong roles is the same failure wearing a valid-looking shape. The cardinality is enforced with contains/minContains/maxContains per role rather than by counting entries.",
       "items": {
         "$ref": "#/$defs/artifact"
       },
-      "maxItems": 7,
+      "maxItems": 6,
       "allOf": [
         {
           "contains": {
@@ -91,20 +91,6 @@
             "properties": {
               "role": {
                 "const": "tunnel"
-              }
-            },
-            "required": [
-              "role"
-            ]
-          },
-          "minContains": 1,
-          "maxContains": 1
-        },
-        {
-          "contains": {
-            "properties": {
-              "role": {
-                "const": "egress"
               }
             },
             "required": [
@@ -193,8 +179,7 @@
             "web",
             "runner",
             "sandbox",
-            "tunnel",
-            "egress"
+            "tunnel"
           ],
           "description": "What the image is for. Verified against the image's own io.hybridinference.artifact.role label, not against the registry path: which package or tag an image lives in is storage layout, and a deployment must not depend on it."
         },

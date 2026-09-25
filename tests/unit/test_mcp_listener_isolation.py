@@ -11,8 +11,14 @@ different defences, and only one of them was doing any work.
 *contain* the other routes. That is stronger than each of them refusing,
 because it cannot be undone by a router added tomorrow.
 
-Which is the property this file checks. **The comparison is against
-`create_app`'s actual route table, not a list written here** — a hardcoded
+The separation runs the other way too. `create_app` is what the public edge
+forwards `/api/*` to, so it serves no tool route: an `mcp` token carried out of
+a sandbox must not be replayable from the internet. Connection management,
+OAuth callbacks and approvals share the relay's prefix but stay there, because
+they are the browser's.
+
+Which are the properties this file checks. **The comparison is against the
+applications' actual route tables, not a list written here** — a hardcoded
 list of forbidden paths would pass forever while a new router quietly appeared
 on both.
 """
@@ -107,21 +113,51 @@ def _relay_paths(paths: set[str]) -> set[str]:
     }
 
 
-def test_the_two_applications_agree_on_the_relay(
-    mcp_paths: set[str], control_plane_paths: set[str]
-) -> None:
-    """The relay is the same router in both, not a divergent copy.
+def test_the_control_plane_serves_no_tool_route(control_plane_paths: set[str]) -> None:
+    """The relay lives on the MCP listener alone, never behind the public edge.
 
-    The main application keeps serving it — a co-located deployment has no
-    tunnel and reaches the relay on the ordinary port — so the two must not
-    drift into two implementations with one set of tests.
-
-    Only the relay is compared. The management surface is deliberately on the
-    control plane alone, which the test below states as its own property rather
-    than as an absence here.
+    A tool route here would answer an `mcp` token replayed from anywhere on the
+    internet; on the MCP listener, only hosts that already reach a relay tunnel
+    can present it. Both of the relay's shapes are checked: the aggregate
+    endpoint at the bare prefix and the per-server `/<alias>` routes.
     """
-    assert _relay_paths(mcp_paths) == _relay_paths(control_plane_paths)
-    assert _relay_paths(mcp_paths), "sanity: the relay must have routes of its own"
+    assert _MCP_PREFIX not in control_plane_paths
+    assert not _relay_paths(control_plane_paths), sorted(_relay_paths(control_plane_paths))
+
+
+@pytest.mark.parametrize("method", ["GET", "POST", "DELETE"])
+@pytest.mark.parametrize("path", [_MCP_PREFIX, _MCP_PREFIX + "/docs"])
+def test_a_tool_call_on_the_control_plane_finds_no_route(method: str, path: str) -> None:
+    """Asked over HTTP, not read from the schema.
+
+    The route-table checks see only what OpenAPI lists, and a route mounted
+    with ``include_in_schema=False`` would slip past them. A request cannot be
+    fooled that way.
+    """
+    from fastapi.testclient import TestClient
+
+    response = TestClient(create_app()).request(method, path, json={} if method == "POST" else None)
+    assert response.status_code == 404, (method, path, response.status_code)
+
+
+def test_the_owner_facing_mcp_surface_stays_on_the_control_plane(
+    control_plane_paths: set[str],
+) -> None:
+    """Moving the relay must not take connections, OAuth or approvals with it.
+
+    They share the relay's prefix, so blocking the prefix at the edge would
+    have broken them. Derived from the router itself rather than listed here.
+    """
+    from fastapi import FastAPI
+
+    from cloud_agent.api import mcp_connections
+
+    management = FastAPI()
+    management.include_router(mcp_connections.router)
+    expected = _paths(management)
+    assert expected, "sanity: the management router should have routes of its own"
+    missing = sorted(expected - control_plane_paths)
+    assert not missing, f"the control plane lost owner-facing MCP routes: {missing}"
 
 
 def test_connection_management_is_not_reachable_from_a_sandbox(mcp_paths: set[str]) -> None:
@@ -143,7 +179,7 @@ def test_the_sandbox_tunnel_lands_on_the_relay_listener() -> None:
     A listener the deployment does not use is a comment. The remote-runner
     stack forwards the sandbox's MCP address to the control-plane host, and
     the port it names decides what a sandbox can reach — 8000 serves the whole
-    control plane, 8001 serves the relay and nothing else.
+    control plane and no tool route, 8001 serves the relay and nothing else.
     """
     import re
     from pathlib import Path

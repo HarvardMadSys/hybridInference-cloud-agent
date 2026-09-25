@@ -2,8 +2,8 @@
 """Point OpenCode at this deployment's gateway, then run it.
 
 OpenCode does not honour ``OPENAI_BASE_URL``, and its startup normally fetches
-the models.dev catalog — which in the deny-all sandbox fails every time. This
-wrapper closes both gaps: it writes an ``OPENCODE_CONFIG`` file declaring a
+the models.dev catalog — a download no job needs, and one that makes every
+start depend on a third party. This wrapper closes both gaps: it writes an ``OPENCODE_CONFIG`` file declaring a
 ``freeinference`` provider over the **bundled** ``@ai-sdk/openai-compatible``
 package (compiled into the CLI binary — nothing is downloaded at run time),
 disables the catalog fetch and other phone-home paths, and ``exec``s the real

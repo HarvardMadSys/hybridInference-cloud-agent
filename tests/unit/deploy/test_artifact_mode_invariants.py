@@ -126,7 +126,7 @@ def test_artifact_mode_does_not_offer_the_stray_stack_bypass() -> None:
 def test_artifact_mode_requires_a_manifest_and_names_its_variant() -> None:
     assert "artifact mode requires AGENT_RELEASE_MANIFEST" in HELPER
     assert "AGENT_WEB_VARIANT" in HELPER
-    assert "this recipe does not implement shared-live-exact-sha-v3" in HELPER, (
+    assert "this recipe does not implement shared-live-exact-sha-v4" in HELPER, (
         "the recipe states the protocol it implements, so a mismatched pair refuses before "
         "anything is replaced"
     )
