@@ -323,8 +323,6 @@ export const en = {
   'attach.errorFileTooLarge': 'over {limit}, not attached',
   'attach.errorTotalTooLarge': 'over the {limit} total, not attached',
   'attach.errorTooMany': 'over {limit} files, not attached',
-  'attach.credentialWarning':
-    'Do not upload credentials. Everything attached is readable by the agent.',
 
   // ── Skills, for one conversation ────────────────────────────────────────
   'skills.title': 'Skills',

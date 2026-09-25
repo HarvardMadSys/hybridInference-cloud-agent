@@ -125,7 +125,6 @@ export function AttachmentStrip({
   const t = useT();
   if (entries.length === 0) return null;
   const groups = groupAttachments(entries);
-  const attached = entries.some((entry) => entry.status !== 'rejected');
   return (
     <div className="px-5 pb-3">
       <ul className="flex flex-wrap gap-1.5">
@@ -189,11 +188,6 @@ export function AttachmentStrip({
           );
         })}
       </ul>
-      {attached ? (
-        <p className="mt-2 text-[11.5px] leading-relaxed text-amber-700 dark:text-amber-400">
-          {t('attach.credentialWarning')}
-        </p>
-      ) : null}
     </div>
   );
 }

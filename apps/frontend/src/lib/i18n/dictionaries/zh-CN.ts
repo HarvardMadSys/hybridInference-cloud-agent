@@ -313,7 +313,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'attach.errorFileTooLarge': '超过 {limit}，未附加',
   'attach.errorTotalTooLarge': '超过合计 {limit}，未附加',
   'attach.errorTooMany': '超过 {limit} 个文件，未附加',
-  'attach.credentialWarning': '不要上传凭据。附上的内容 Agent 全都读得到。',
 
   // ── 用于单次对话的 Skills ───────────────────────────────────────────────
   'skills.title': 'Skills',
