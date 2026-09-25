@@ -427,11 +427,15 @@ Recorded here as *what has to be decided*, not as anyone's actual answer.
   exactly.
 - **Reaching the gateway**: the control plane needs a route to `GATEWAY_BASE_URL`.
   The sandbox reaches its two relays, the resolver in `AGENT_EGRESS_DNS_SERVER`
-  and public IPv4 on TCP 80/443 — the same during setup and the agent run. So
-  the gateway's and control plane's public entry points must refuse sandbox
-  credentials: tool calls are served only on the MCP-only listener, and
-  inference grants only on the gateway's internal entry. If a deployment fronts
-  either relay through a tunnel, the port allocation is overlay detail.
+  and public IPv4 on TCP 80/443 — the same during setup and the agent run.
+  Tool calls remain confined to the MCP-only listener. Inference keeps the
+  existing gateway endpoint (`AGENT_TUNNEL_REMOTE_PORT` defaults to 8080);
+  a separate inference listener or credential-substitution relay is not a
+  deployment prerequisite. Public replay of a leaked inference grant is an
+  [accepted risk](docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md),
+  subject to its owner's existing model permissions, quota and grant lifecycle.
+  If a deployment fronts either relay through a tunnel, the port allocation
+  is overlay detail.
 - **Sandbox image registry**: where `AGENT_SANDBOX_IMAGE` is pulled from. Decide
   before D7.
 

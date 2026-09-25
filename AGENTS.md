@@ -157,10 +157,18 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   bridge, and a failed check stops the group rather than falling back to
   anything. There is no mode, flag or proxy that widens it, and adding one is
   a design change, not a configuration.
-- Because sandboxes reach the public internet, the platform's public entry
-  points must refuse sandbox credentials: MCP tool calls are served only on
-  the MCP-only listener, and inference grants must be accepted only on the
-  gateway's internal entry. Neither may rest on a header or on loopback.
+- MCP tool calls are served only on the MCP-only listener; the public main
+  API must not expose them. The MCP tunnel continues to target that listener.
+- **Accepted inference-grant replay risk (2026-09-25).** A sandbox holds its
+  member's short-lived grant, and code or instructions it encounters may
+  cause that grant to leave the sandbox. The gateway may accept it through
+  its public inference API until expiry or revocation. Calls still use the
+  grant owner's model permissions and account quota; it grants no
+  MCP or platform-management authority. Resident grants can be renewed across
+  turns, so a short TTL is not a fixed total exposure window. This accepted
+  risk replaces the separate internal inference entry as a release prerequisite;
+  neither that entry nor a host credential-substitution relay is required.
+  See the [decision and remaining boundaries](docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md).
 - Long-lived account and service credentials never enter the sandbox. Each
   member receives its own scoped inference and MCP credentials; sibling
   members cannot read or reuse them. Spend remains governed by the gateway's

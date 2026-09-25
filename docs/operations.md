@@ -169,9 +169,9 @@ Be precise about these when reporting status:
   in §9 of [the design](specs/2026-09-23-agent-public-egress-design.zh-CN.md)
   — a real Kata guest reaching the public web, and every refused kind of
   destination tried against a target that is listening — has not been run.
-  Nor has the gateway's half of the
-  [prerequisites](#two-prerequisites-before-real-users): until it lands, do
-  not run tasks that can reach the internet with real users' credentials.
+  The separate inference entry is no longer a release prerequisite under the
+  2026-09-25 [grant replay decision](#mcp-prerequisite-and-accepted-inference-grant-risk).
+  That decision supplies no new Kata evidence and changes no other release gate.
 - **Kata.** No job has run under an actual Kata kernel, so every run so far
   shared the host's. Isolation was verified on a shared-kernel container.
 
@@ -1780,12 +1780,13 @@ before using it:
   polled recently, but the authoritative operational signals are its enrolled
   heartbeat and broker probe, not whether one runner happened to claim recently.
 
-Adding a _second_ machine is not only this switch. A sandbox reaches the
-gateway and the MCP listener only through the two relays on its group bridge —
-the host rules refuse private addresses, and the public entry points must
-refuse sandbox credentials — so a runner box that is not the gateway's host
-needs the two tunnels described next, and everything in
+Adding a _second_ machine is not only this switch. The configured model and
+MCP endpoints use the two relays on the sandbox's group bridge, with private
+addresses otherwise blocked by the host rules. A runner box that is not the
+gateway's host needs the two tunnels described next, and everything in
 [§0 above](#0-the-sandbox-network-needs-its-host-rules-a-resolver-and-both-relays).
+The gateway's public inference address may also be reachable; replay of a
+leaked grant there is an [accepted risk](#mcp-prerequisite-and-accepted-inference-grant-risk).
 Preflight refuses at startup rather than failing jobs at their first model or
 MCP call, but it refuses _there_, on that machine, not here.
 
@@ -1794,8 +1795,8 @@ MCP call, but it refuses _there_, on that machine, not here.
 A second machine is worth adding for capacity, or because it is the one with
 the hardware. What makes it more than "run the script over there" is how a
 sandbox reaches the platform. Its group bridge routes to the public internet,
-but only on TCP 80/443, and the host rules refuse every private address — so
-the gateway and the MCP listener are reached only through two fixed-destination
+but only on TCP 80/443, and the host rules refuse private addresses except for
+the group's fixed relays. The configured gateway and MCP endpoints use those
 relays, SSH tunnels that lifecycle code finds on the relay network and attaches
 to each group's bridge. A separate control-plane relay remains visible only to
 the runner:
@@ -1960,9 +1961,10 @@ files persist in that container's Docker writable layer across follow-ups, idle
 stop/start, and host service restarts; there is no host-side setup cache or
 portable setup archive. Package managers reach their public registries directly
 over HTTPS — there is no proxy to configure — and anything that needs another
-port, Git over SSH for one, is refused. No secrets reach the sandbox (there is
-still no secrets store, by design), and the sandbox runs unprivileged, so
-`apt install` does not work — use `pip --user`, a virtualenv, `npm ci`.
+port, Git over SSH for one, is refused. Long-lived platform and upstream
+credentials stay outside the sandbox; member-scoped inference and MCP tokens
+enter their CLI processes. The sandbox runs unprivileged, so `apt install`
+does not work — use `pip --user`, a virtualenv, `npm ci`.
 
 There is one network, the same for every task and every phase, and nothing
 selects it ([design](specs/2026-09-23-agent-public-egress-design.zh-CN.md)).
@@ -2012,22 +2014,36 @@ of timing out; IPv6 is dropped silently.
 inspects what travels inside, so DNS over HTTPS or a tunnel on those ports is
 not prevented. Nothing stops a sandbox sending the repository, or its own
 short-lived tokens, to a public host. And the platform's own public addresses
-may be reachable — which is why its public entry points must refuse sandbox
-credentials.
+may be reachable. MCP tool calls remain absent from the public main API;
+public replay of inference grants is accepted as described below.
 
-#### Two prerequisites before real users
+#### MCP prerequisite and accepted inference-grant risk
 
-Both come from design §3, and both must hold before real users' tasks run with
-this network:
+Design §3 records the 2026-09-25 decision to accept inference-grant leakage
+and replay for real-user deployments, replacing the separate internal
+inference entry as a release prerequisite.
 
-1. **MCP tool calls are served only by the MCP-only listener.** Done in #327:
-   the main API no longer mounts the tool-call router, so the MCP tunnel must
-   point at 8001 (see [MCP servers](#mcp-servers)).
-2. **The gateway accepts inference grants only on a separate internal
-   entry**, with the inference tunnel pointed at it, and the public entry
-   refuses them. Telling the two apart may not rest on a header or on
-   loopback. This is gateway work and **not done yet**. Until it is, do not
-   run tasks that can reach the internet with real users' credentials.
+**MCP isolation remains required.** Done in #327: the main API no longer
+mounts the tool-call router, so the MCP tunnel must point at 8001 (see
+[MCP servers](#mcp-servers)).
+
+**Inference keeps its existing path.** The CLI holds its member's grant and
+the inference tunnel keeps its current gateway target (8080 by default).
+No separate gateway listener or host credential-substitution relay is needed
+for this decision. Code or instructions encountered by a task may cause its
+grant to leave the sandbox and be replayed through a reachable gateway API.
+Those calls consume the owner's quota and platform inference resources,
+subject to the owner's model permissions, grant expiry and revocation;
+they acquire no other user's identity, MCP tools or platform-management rights.
+
+A resident grant renews while its process remains live, including between
+turns. The short TTL and default 30-minute idle stop are not absolute limits
+measured from a leak. Existing stop, replacement, takeover and release paths
+still revoke grants, with expiry as the fallback if revocation fails.
+
+The v4 deployer update and old-network cleanup still apply. This decision
+does not waive Kata/network acceptance, member isolation, long-lived
+credential restrictions, account quota checks or other release gates.
 
 #### The host tables
 
