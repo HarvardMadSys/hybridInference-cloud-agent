@@ -3,7 +3,11 @@
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useRef, useState } from 'react';
-import { takeReturnPath } from '@/components/features/agents/githubReturn';
+import {
+  callbackAlreadyUsed,
+  markCallbackUsed,
+  takeReturnPath,
+} from '@/components/features/agents/githubReturn';
 import { connectGitHub, connectGitLab } from '@/lib/api/agents';
 import type { AgentIntegrationProvider } from '@/lib/api/agents';
 
@@ -40,9 +44,17 @@ function ConnectedInner() {
       return;
     }
 
+    // Opened again after it already worked — Back from GitHub, a refresh.
+    // Sending the spent code again would only be refused; carry on instead.
+    if (callbackAlreadyUsed(state)) {
+      router.replace(takeReturnPath() ?? `/integrations?connected=${provider}`);
+      return;
+    }
+
     async function completeConnection(authCode: string, authState: string) {
       if (provider === 'github') {
         const connection = await connectGitHub(authCode, authState);
+        markCallbackUsed(authState);
         if (connection.install_url) {
           // The App is not on the owner's own account yet — perhaps on no
           // account at all. Where the owner started stays noted: installing
@@ -62,6 +74,7 @@ function ConnectedInner() {
         }
       } else {
         await connectGitLab(authCode, authState);
+        markCallbackUsed(authState);
       }
       router.replace(`/integrations?connected=${provider}`);
     }

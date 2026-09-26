@@ -91,6 +91,24 @@ export function peekComposerDraft(): ComposerDraft | null {
   };
 }
 
+const USED_KEY = 'agents.oauth.usedStates';
+
+/**
+ * A callback this tab has already completed. Its code and state work once, so
+ * the same page opened again — Back from GitHub's install page, a refresh —
+ * would send them again and be refused, showing an error for a connection that
+ * in fact succeeded.
+ */
+export function callbackAlreadyUsed(state: string): boolean {
+  return (read<string[]>(USED_KEY) ?? []).includes(state);
+}
+
+/** Remember a completed callback, keeping only the last few. */
+export function markCallbackUsed(state: string): void {
+  const used = (read<string[]>(USED_KEY) ?? []).filter((entry) => entry !== state);
+  write(USED_KEY, [...used, state].slice(-10));
+}
+
 /** The draft has been put back, or the owner came back some other way. */
 export function forgetComposerDraft(): void {
   remove(DRAFT_KEY);

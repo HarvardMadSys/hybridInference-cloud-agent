@@ -181,6 +181,48 @@ describe('AgentsConnectedPage', () => {
     expect(navigation.replace).toHaveBeenCalledWith('/integrations?connected=github');
   });
 
+  // Back from GitHub's install page, or a refresh, opens the same callback
+  // again. Its code worked once; sending it again was refused and showed an
+  // error for a connection that had succeeded.
+  it('does not send a callback this tab already completed', async () => {
+    navigation.search = 'provider=github&code=github-code&state=signed-state';
+    mockedConnectGitHub.mockResolvedValue({
+      connections: [{ installation_id: 77, account_login: 'acme' }],
+      repos: ['acme/service'],
+      install_url: 'https://github.com/apps/freeinference/installations/new?state=own',
+    });
+
+    render(<AgentsConnectedPage />);
+    expect(await screen.findByText('Use your own repositories too')).toBeInTheDocument();
+    cleanup();
+
+    render(<AgentsConnectedPage />);
+
+    await waitFor(() =>
+      expect(navigation.replace).toHaveBeenCalledWith('/integrations?connected=github'),
+    );
+    expect(mockedConnectGitHub).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/Could not connect/)).not.toBeInTheDocument();
+  });
+
+  it('sends a callback again when the first attempt failed', async () => {
+    navigation.search = 'provider=github&code=github-code&state=signed-state';
+    mockedConnectGitHub
+      .mockRejectedValueOnce(new Error('GitHub is unavailable'))
+      .mockResolvedValue({ connections: [{}], repos: [], install_url: null });
+
+    render(<AgentsConnectedPage />);
+    expect(await screen.findByText('GitHub is unavailable')).toBeInTheDocument();
+    cleanup();
+
+    render(<AgentsConnectedPage />);
+
+    await waitFor(() =>
+      expect(navigation.replace).toHaveBeenCalledWith('/integrations?connected=github'),
+    );
+    expect(mockedConnectGitHub).toHaveBeenCalledTimes(2);
+  });
+
   it('does not exchange a code without connection state', async () => {
     navigation.search = 'provider=gitlab&code=gitlab-code';
 

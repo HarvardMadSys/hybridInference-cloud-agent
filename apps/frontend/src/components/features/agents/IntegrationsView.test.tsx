@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IntegrationsView } from './IntegrationsView';
 import type { AgentIntegrationProviderApi, AgentIntegrationsApi } from '@/lib/api/agents';
@@ -148,7 +148,7 @@ describe('IntegrationsView', () => {
     expect(await screen.findByText('HarvardMadSys · Temporarily unavailable')).toBeInTheDocument();
     expect(screen.queryByText(/Connected as/)).not.toBeInTheDocument();
     expect(screen.queryByText('Reauthorize GitHub')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Disconnect HarvardMadSys' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Disconnect GitHub' })).toBeInTheDocument();
   });
 
   it('looks again while GitHub is unavailable, and stops once it is back', async () => {
@@ -199,7 +199,9 @@ describe('IntegrationsView', () => {
             }),
         )
         .mockResolvedValue({ providers: [unloadedGithub(), integrations.providers[1]] });
-      mockedDisconnect.mockResolvedValue(undefined);
+      vi.mocked(disconnectGitHubAccount).mockResolvedValue({
+        providers: [unloadedGithub(), integrations.providers[1]],
+      });
       await act(async () => {
         render(<IntegrationsView />);
       });
@@ -209,7 +211,7 @@ describe('IntegrationsView', () => {
         await vi.advanceTimersByTimeAsync(30_000); // the re-check goes out, unanswered
       });
       await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: 'Disconnect HarvardMadSys' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Disconnect GitHub' }));
         await vi.advanceTimersByTimeAsync(0);
       });
       expect(screen.queryByText('HarvardMadSys · Temporarily unavailable')).not.toBeInTheDocument();
@@ -320,23 +322,33 @@ describe('IntegrationsView', () => {
     expect(screen.queryByRole('link', { name: 'Configure repositories' })).not.toBeInTheDocument();
   });
 
-  it('disconnects an account and refreshes provider state', async () => {
-    mockedGetIntegrations.mockResolvedValueOnce(integrations).mockResolvedValueOnce({
+  // One way out for GitHub. Removing an installation lasted only until the
+  // next connection, and reauthorizing only mattered for an installation made
+  // outside this page — both covered by disconnecting and connecting again.
+  it('offers GitHub only its one way out', async () => {
+    mockedGetIntegrations.mockResolvedValue({
       providers: [
-        { ...integrations.providers[0], connected: false, accounts: [], repositories: [] },
+        {
+          ...integrations.providers[0],
+          accounts: [
+            { id: 'gh-42', label: 'HarvardMadSys' },
+            { id: 'gh-43', label: 'realtmxi' },
+          ],
+        },
         integrations.providers[1],
       ],
     });
-    mockedDisconnect.mockResolvedValue(undefined);
 
     render(<IntegrationsView />);
-    await screen.findByText('Connected as HarvardMadSys · 2 repositories');
+    await screen.findByText('Connected as HarvardMadSys, realtmxi · 2 repositories');
     fireEvent.click(screen.getByText('Manage'));
-    fireEvent.click(screen.getByRole('button', { name: 'Disconnect HarvardMadSys' }));
 
-    await waitFor(() => expect(mockedDisconnect).toHaveBeenCalledWith('github', 'gh-42'));
-    expect(await screen.findByRole('status')).toHaveTextContent('HarvardMadSys disconnected.');
-    expect(mockedGetIntegrations).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('button', { name: 'Disconnect GitHub' })).toBeInTheDocument();
+    expect(screen.queryByText('Reauthorize GitHub')).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Disconnect HarvardMadSys/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Disconnect realtmxi/ })).not.toBeInTheDocument();
   });
 
   // The user's token is kept for GitHub to be asked as them; removing

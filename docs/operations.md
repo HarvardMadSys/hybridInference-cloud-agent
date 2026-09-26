@@ -729,24 +729,33 @@ frontend:
 AGENT_GITHUB_APP_CLIENT_ID=Iv1.xxxxxxxx
 AGENT_GITHUB_APP_CLIENT_SECRET=...
 AGENT_GITHUB_APP_INSTALL_URL=https://github.com/apps/<app-slug>/installations/new
-# App setting "Callback URL": <FRONTEND_URL>/agents/connected?provider=github
+# App setting "Callback URL": <agent web origin>/connected?provider=github
+#   staging:    https://agents-staging.freeinference.org/connected?provider=github
+#   production: https://agents.freeinference.org/connected?provider=github
 ```
 
-Note `FRONTEND_URL` is read from `.env`, which is applied last and so wins
-over the distribution overlay — check the host's value rather than the
-overlay's when composing the callback.
+The callback is the **agent web's own origin**, where the callback page and the
+browser's session cookie live — not the gateway's hostname. The agent web used
+to be mounted under the gateway's `/agents`, and the Apps' callbacks were set
+to `<gateway>/agents/connected`; when the web moved to its own hostnames
+(staging 2026-09-09, production 2026-09-11) the gateway retired `/agents` to a
+404, and every GitHub connection landed on it until the callbacks were changed
+(2026-09-26). The authorize link names no `redirect_uri`, so GitHub always uses
+the App's first Callback URL: change it there, in the App's settings, whenever
+the web's origin moves. A web built with a base path adds it:
+`<origin><basePath>/connected?provider=github`.
 
-The Integrations page derives the normal Connect/Reauthorize link from
+The composer and the Integrations page derive the Connect link from
 `AGENT_GITHUB_APP_CLIENT_ID` and GitHub's web OAuth endpoint. The install URL
-is used only after OAuth confirms that the user cannot see an existing App
-installation. Keeping those two URLs separate is required for reconnects:
-GitHub sends an already-installed App's `/installations/new` link to its
-settings page without invoking the OAuth callback.
+is offered after connecting whenever the App is not on the user's own account.
+Keeping those two URLs separate is required for reconnects: GitHub sends an
+already-installed App's `/installations/new` link to its settings page without
+invoking the OAuth callback.
 
 That same redirect is what _Configure repositories_ relies on, so the install
-URL stays wired to a connected user's Manage menu: it is the only route to the
-page where the App's repository selection changes, and GitHub picks the user
-or organization settings page itself. Set `AGENT_GITHUB_APP_INSTALL_URL` to
+URL stays wired to a connected user's _Configure repositories_ button: it is
+the only route to the page where the App's repository selection changes, and
+GitHub picks the user or organization settings page itself. Set `AGENT_GITHUB_APP_INSTALL_URL` to
 the `/apps/<slug>/installations/new` form — pointing it at the OAuth endpoint
 instead leaves a user with no installation looping through authorization.
 
@@ -1648,7 +1657,7 @@ with no leader and no sharding.
 | `AGENT_SANDBOX_UID` / `_GID`                      | `10001`                     | Only for a custom sandbox image; must match its user                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `AGENT_REPO_ALLOWLIST`                            | —                           | Comma-separated `owner/name`, or `owner/*`, for the single-tenant dogfood. Users who connect the App themselves do not need it; unset simply means the only entitlement is a user's own connection                                                                                                                                                                                                                                                                                                                                                       |
 | `AGENT_GITHUB_APP_CLIENT_ID` / `_CLIENT_SECRET`   | —                           | The App's OAuth half. Only the user-facing connect flow needs it; minting installation tokens uses the private key alone                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `AGENT_GITHUB_APP_INSTALL_URL`                    | —                           | GitHub App installation URL, `https://github.com/apps/<slug>/installations/new`. Used when OAuth finds no accessible installation, and behind _Configure repositories_ for a connected user. The control plane adds a short-lived, user-bound `state`; set the App callback to `<frontend>/agents/connected?provider=github`                                                                                                                                                                                                                             |
+| `AGENT_GITHUB_APP_INSTALL_URL`                    | —                           | GitHub App installation URL, `https://github.com/apps/<slug>/installations/new`. Offered after connecting whenever the App is not on the user's own account, and behind _Configure repositories_. The control plane adds a short-lived, user-bound `state`; set the App's Callback URL to the agent web's own origin, `<origin>/connected?provider=github` (see _2. Credentials_)                                                                                                                                                                                                                             |
 | `AGENT_GITLAB_OAUTH_CLIENT_ID` / `_CLIENT_SECRET` | —                           | GitLab.com OAuth application credentials, kept on the control plane. Configure only `read_user` and `read_api` scopes                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `AGENT_GITLAB_OAUTH_REDIRECT_URI`                 | —                           | Exact registered callback, normally `<frontend>/agents/connected?provider=gitlab`. HTTPS is required except for localhost development                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `AGENT_SANDBOX_MCP_URL`                           | —                           | MCP-only relay URL as a sandbox sees it. The standalone host compose derives it from the MCP tunnel alias; never point it at inference or the full control API                                                                                                                                                                                                                                                                                                                                                                                           |

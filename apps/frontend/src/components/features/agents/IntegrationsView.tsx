@@ -183,7 +183,13 @@ function ProviderActions({
           </svg>
         </summary>
         <div className="absolute right-0 z-10 mt-1 w-56 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 p-1.5 shadow-lg">
-          {integration.connect_url ? (
+          {/* GitHub has one way out and nothing else here. Reauthorizing only
+              mattered for an installation made outside this page, which
+              disconnecting and connecting again also picks up; removing one
+              installation lasted only until the next connection, which makes
+              the grants whatever GitHub reports. Which repositories the App
+              may use is changed on GitHub, through Configure repositories. */}
+          {integration.provider !== 'github' && integration.connect_url ? (
             <a
               href={integration.connect_url}
               className="block rounded-lg px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-white/5"
@@ -191,7 +197,7 @@ function ProviderActions({
               Reauthorize {copy.name}
             </a>
           ) : null}
-          {integration.accounts.map((account) => (
+          {(integration.provider === 'github' ? [] : integration.accounts).map((account) => (
             <button
               key={account.id}
               type="button"
@@ -205,8 +211,6 @@ function ProviderActions({
             </button>
           ))}
           {integration.provider === 'github' ? (
-            // The stored token goes only with the whole connection: removing
-            // installations one by one here leaves it behind.
             <button
               type="button"
               disabled={disconnecting === GITHUB_ACCOUNT}
