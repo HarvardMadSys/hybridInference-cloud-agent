@@ -407,7 +407,7 @@ def test_retained_tool_marks_are_read_as_the_shared_state_owner(monkeypatch):
     monkeypatch.setattr(manager, "exec_capture", exec_capture)
 
     reader = manager.tool_mark_reader(_spec())
-    assert [mark[2] for mark in reader.read()] == ["toolu_1"]
+    assert [mark.tool_use_id for mark in reader.read()] == ["toolu_1"]
     assert [(call["user_uid"], call["user_gid"]) for call in calls] == [
         (manager.backend.uid, manager.backend.gid),
         (manager.backend.uid, manager.backend.gid),

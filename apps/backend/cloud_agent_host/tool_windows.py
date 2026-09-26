@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
 from cloud_agent_host.resources import Sample, _delta, _readable
 
@@ -100,6 +100,12 @@ class ToolWindow:
     #: the call from outside. ``exact`` — the sandbox's own hooks marked the
     #: boundaries, so the window is the execution itself.
     source: Literal["message", "exact"] = "message"
+    #: The exact boundaries as the guest's own monotonic clock read them, set
+    #: only when the trusted guest observer journaled the marks. The process
+    #: journal carries that same clock, so the two compare directly, without
+    #: the guest-to-host bridge and its error band.
+    opened_guest_ns: int | None = None
+    closed_guest_ns: int | None = None
 
     @property
     def duration_ms(self) -> int | None:
@@ -111,6 +117,107 @@ class ToolWindow:
         if self.closed_mono is None:
             return None
         return max(0, round((self.closed_mono - self.opened_mono) * 1000))
+
+
+@dataclass(frozen=True)
+class ToolMark:
+    """One boundary the sandbox recorded for a tool call.
+
+    ``host_mono`` places the mark on the broker's monotonic axis, where the
+    message-level windows live. ``guest_mono_ns`` is the guest's own reading
+    and is present only for a mark the trusted guest observer journaled; a
+    legacy mark read back from the agent-writable file carries a converted
+    wall clock and no guest reading.
+    """
+
+    host_mono: float
+    phase: Literal["pre", "post"]
+    tool_use_id: str
+    guest_mono_ns: int | None = None
+
+    @property
+    def from_guest(self) -> bool:
+        """Whether the guest observer, not the agent-writable file, recorded it."""
+        return self.guest_mono_ns is not None
+
+
+#: Why a call did, or did not, take the sandbox's own boundaries.
+MarkStatus = Literal[
+    "applied",
+    "no_marks",
+    "unpaired",
+    "duplicate",
+    "misordered",
+    "call_open",
+    "outside_window",
+]
+
+
+@dataclass(frozen=True)
+class MarkOutcome:
+    """One call's mark adoption, with the evidence a reviewer needs to check it."""
+
+    call_seq: int
+    tool_use_id: str
+    tool: str
+    status: MarkStatus
+    #: How far the message-level bracket lagged the sandbox's own marks, in
+    #: milliseconds: the ``tool_use`` parse time minus the pre mark, and the
+    #: ``tool_result`` parse time minus the post mark. Positive means the
+    #: event reached the broker after the boundary it announces, which is the
+    #: ordinary case for the opening: the harness runs the hook the moment it
+    #: has emitted the message, while the message is still in the pipe.
+    open_lag_ms: int | None = None
+    close_lag_ms: int | None = None
+    message_duration_ms: int | None = None
+    exact_duration_ms: int | None = None
+
+    def describe(self) -> str:
+        """The compact form the broker logs, one entry per call."""
+
+        def lag(value: int | None) -> str:
+            return "-" if value is None else f"{value:+d}"
+
+        def span(value: int | None) -> str:
+            return "-" if value is None else f"{value}ms"
+
+        return (
+            f"{self.call_seq}:{self.tool}:{self.status}"
+            f":lag={lag(self.open_lag_ms)}/{lag(self.close_lag_ms)}"
+            f":msg={span(self.message_duration_ms)}:exact={span(self.exact_duration_ms)}"
+        )
+
+
+@dataclass(frozen=True)
+class MarkReport:
+    """One turn's mark adoption: what was upgraded, and why the rest was not."""
+
+    outcomes: tuple[MarkOutcome, ...] = ()
+    #: Marks naming no retained window: a call the tracker dropped as
+    #: ambiguous, or a hook that fired for a call the event stream never
+    #: announced. Counted so a mismatch between hook and stream is visible.
+    unknown_calls: int = 0
+
+    @property
+    def upgraded(self) -> int:
+        """How many windows now carry the sandbox's own boundaries."""
+        return sum(1 for outcome in self.outcomes if outcome.status == "applied")
+
+    def counts(self) -> dict[str, int]:
+        """Outcomes tallied by status."""
+        tally: dict[str, int] = {}
+        for outcome in self.outcomes:
+            tally[outcome.status] = tally.get(outcome.status, 0) + 1
+        return tally
+
+    def describe(self) -> str:
+        """One log line: the tally, then every call with its lags."""
+        tally = " ".join(f"{status}={count}" for status, count in sorted(self.counts().items()))
+        calls = " ".join(outcome.describe() for outcome in self.outcomes)
+        return (
+            f"windows={len(self.outcomes)} applied={self.upgraded}"
+            f" unknown_calls={self.unknown_calls} {tally} calls=[{calls}]"
+        )
 
 
 def _text(value: Any) -> str:
@@ -193,49 +300,55 @@ class ToolWindowTracker:
                 closed_mono=mono,
             )
 
-    def apply_marks(self, marks: list[tuple[float, str, str]]) -> int:
-        """Narrow windows to the boundaries the sandbox's own hooks recorded.
+    def apply_marks(self, marks: Iterable[ToolMark]) -> MarkReport:
+        """Adopt the boundaries the sandbox's own hooks recorded, where they hold.
 
-        A window is upgraded only when both of its marks are present and land
-        inside the message-level window that already brackets it. That last
-        check is the one that matters: the marks come from a wall clock
-        converted onto the sampler's monotonic axis, and a clock that stepped
-        mid-turn would otherwise move a call somewhere it never ran. A mark
-        that fails it is dropped and the call stays message-level, which is
-        the outcome this whole path degrades to anyway.
+        A guest-journaled mark is already fenced by everything that matters:
+        the observer accepted it from the immutable helper under the member's
+        UID, inside this turn's journal slice, on a monotonic clock that
+        cannot step. What is checked here is the pairing — the mark names a
+        call this turn issued, exactly one pre and one post exist for it, and
+        the pre comes first. The message-level window is not a bound on those
+        marks and is not used as one: the broker timestamps an event when it
+        reads the line, and a short call can run and finish while the line
+        announcing it is still in the pipe. How far the bracket lagged is
+        reported per call for diagnosis instead.
 
-        Returns how many windows were upgraded, for the caller to log.
+        A legacy mark comes from the agent-writable file with a wall clock
+        converted onto the sampler's axis, and keeps the old rule: both marks
+        must land inside the message window that brackets the call, so a
+        clock that stepped mid-turn cannot move a call somewhere it never ran.
+
+        A window that never closed is left alone whichever marks it has. Its
+        open row is the record of a turn that ended mid-call; the pair is
+        still reported, so the log says whether the sandbox saw it finish.
         """
-        by_id: dict[str, list[tuple[float, str]]] = {}
-        for when, phase, tool_use_id in marks:
-            if phase not in {"pre", "post"}:
+        retained = {window.tool_use_id for window in self._windows if window is not None}
+        guest: dict[str, list[ToolMark]] = {}
+        legacy: dict[str, list[ToolMark]] = {}
+        unknown = 0
+        for mark in marks:
+            if mark.phase not in {"pre", "post"}:
                 continue
-            by_id.setdefault(tool_use_id, []).append((when, phase))
-        upgraded = 0
+            if mark.tool_use_id not in retained:
+                unknown += 1
+                continue
+            bucket = guest if mark.from_guest else legacy
+            bucket.setdefault(mark.tool_use_id, []).append(mark)
+        outcomes: list[MarkOutcome] = []
+        call_seq = 0
         for index, window in enumerate(self._windows):
             if window is None:
                 continue
-            if window.closed_mono is None:
-                continue
-            candidates = [
-                (when, phase)
-                for when, phase in by_id.get(window.tool_use_id, [])
-                if window.opened_mono <= when <= window.closed_mono
-            ]
-            opened = [when for when, phase in candidates if phase == "pre"]
-            closed = [when for when, phase in candidates if phase == "post"]
-            # More than one possible boundary is ambiguity, not precision.
-            # This also keeps a reused id from cross-pairing two calls.
-            if len(opened) != 1 or len(closed) != 1 or closed[0] < opened[0]:
-                continue
-            self._windows[index] = dataclasses.replace(
-                window,
-                opened_mono=opened[0],
-                closed_mono=closed[0],
-                source="exact",
-            )
-            upgraded += 1
-        return upgraded
+            call_seq += 1
+            # The guest journal is the authority wherever it spoke; the file
+            # is only read where there is no observer to speak.
+            candidates = guest.get(window.tool_use_id) or legacy.get(window.tool_use_id) or []
+            outcome, adopted = _adopt(window, call_seq, candidates)
+            outcomes.append(outcome)
+            if adopted is not None:
+                self._windows[index] = adopted
+        return MarkReport(outcomes=tuple(outcomes), unknown_calls=unknown)
 
     def windows(self) -> list[ToolWindow]:
         """Every call this attempt issued, in the order it was issued.
@@ -250,6 +363,73 @@ class ToolWindowTracker:
     def truncated(self) -> bool:
         """Whether this attempt issued more calls than are being reported."""
         return self._dropped > 0
+
+
+def _adopt(
+    window: ToolWindow,
+    call_seq: int,
+    candidates: list[ToolMark],
+) -> tuple[MarkOutcome, ToolWindow | None]:
+    """Judge one call's marks; the window comes back narrowed only on ``applied``."""
+
+    def outcome(status: MarkStatus, **evidence: int | None) -> MarkOutcome:
+        return MarkOutcome(
+            call_seq=call_seq,
+            tool_use_id=window.tool_use_id,
+            tool=window.tool,
+            status=status,
+            message_duration_ms=window.duration_ms,
+            **evidence,
+        )
+
+    if not candidates:
+        return outcome("no_marks"), None
+    pres = [mark for mark in candidates if mark.phase == "pre"]
+    posts = [mark for mark in candidates if mark.phase == "post"]
+    if len(pres) > 1 or len(posts) > 1:
+        # More than one possible boundary is ambiguity, not precision. This
+        # also keeps a reused id from cross-pairing two calls.
+        return outcome("duplicate"), None
+    if not pres or not posts:
+        return outcome("unpaired"), None
+    pre, post = pres[0], posts[0]
+    open_lag_ms = round((window.opened_mono - pre.host_mono) * 1000)
+    close_lag_ms = (
+        None if window.closed_mono is None else round((window.closed_mono - post.host_mono) * 1000)
+    )
+    guest_bounds: tuple[int, int] | None = None
+    if pre.guest_mono_ns is not None and post.guest_mono_ns is not None:
+        # Ordered on the clock the pair was taken from: the guest's own.
+        elapsed_ns = post.guest_mono_ns - pre.guest_mono_ns
+        misordered = elapsed_ns < 0
+        exact_ms = round(elapsed_ns / 1_000_000)
+        guest_bounds = (pre.guest_mono_ns, post.guest_mono_ns)
+    else:
+        elapsed_s = post.host_mono - pre.host_mono
+        misordered = elapsed_s < 0
+        exact_ms = round(elapsed_s * 1000)
+    if misordered:
+        return outcome("misordered", open_lag_ms=open_lag_ms, close_lag_ms=close_lag_ms), None
+    if window.closed_mono is None:
+        return outcome("call_open", open_lag_ms=open_lag_ms, exact_duration_ms=exact_ms), None
+    evidence = {
+        "open_lag_ms": open_lag_ms,
+        "close_lag_ms": close_lag_ms,
+        "exact_duration_ms": exact_ms,
+    }
+    if guest_bounds is None and not (
+        window.opened_mono <= pre.host_mono and post.host_mono <= window.closed_mono
+    ):
+        return outcome("outside_window", **evidence), None
+    adopted = dataclasses.replace(
+        window,
+        opened_mono=pre.host_mono,
+        closed_mono=post.host_mono,
+        source="exact",
+        opened_guest_ns=None if guest_bounds is None else guest_bounds[0],
+        closed_guest_ns=None if guest_bounds is None else guest_bounds[1],
+    )
+    return outcome("applied", **evidence), adopted
 
 
 def _row(window: ToolWindow, call_seq: int) -> dict[str, Any]:
@@ -441,8 +621,8 @@ class ToolMarkReader:
         except OSError:
             return 0
 
-    def read(self) -> list[tuple[float, str, str]]:
-        """This turn's marks, as (monotonic, phase, tool_use_id).
+    def read(self) -> list[ToolMark]:
+        """This turn's marks, placed on the sampler's monotonic axis.
 
         Every failure is empty rather than raised: the marks are an upgrade to
         a measurement that already works without them.
@@ -460,7 +640,7 @@ class ToolMarkReader:
                     lines = handle.read(MAX_TOOL_MARK_BYTES).splitlines()
         except Exception:
             return []
-        marks: list[tuple[float, str, str]] = []
+        marks: list[ToolMark] = []
         for line in lines:
             fields = line.split()
             if len(fields) != 3 or fields[1] not in ("pre", "post"):
@@ -471,7 +651,14 @@ class ToolMarkReader:
                 wall = float(fields[0])
             except ValueError:
                 continue
-            marks.append((self._mono0 + (wall - self._wall0), fields[1], fields[2]))
+            phase: Literal["pre", "post"] = "pre" if fields[1] == "pre" else "post"
+            marks.append(
+                ToolMark(
+                    host_mono=self._mono0 + (wall - self._wall0),
+                    phase=phase,
+                    tool_use_id=fields[2],
+                )
+            )
         return marks
 
 
@@ -481,6 +668,9 @@ __all__ = [
     "TOOL_MARK_FILE",
     "TOOL_MARK_HELPER",
     "TOOL_MARK_SANDBOX_PATH",
+    "MarkOutcome",
+    "MarkReport",
+    "ToolMark",
     "ToolMarkReader",
     "ToolWindow",
     "ToolWindowTracker",

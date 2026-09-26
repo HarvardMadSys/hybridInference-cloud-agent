@@ -329,6 +329,8 @@ class SharedBaseImportRequest(SharedSandboxIdentityRequest):
 def build_turn_resources(
     value: Any,
     tool_windows: ToolWindowTracker,
+    *,
+    thread_id: str | None = None,
 ) -> dict[str, Any]:
     """The resource object one finished shared turn reports.
 
@@ -349,7 +351,10 @@ def build_turn_resources(
             )
         )
     )
-    tool_windows.apply_marks(list(telemetry.tool_marks))
+    marks = tool_windows.apply_marks(telemetry.tool_marks)
+    # One line per turn: every call's pairing, lag and reason, so mark
+    # adoption can be checked from the broker log without a database read.
+    logger.info("tool marks thread=%s %s", thread_id, marks.describe())
     windows = tool_windows.windows()
     resources: dict[str, Any] = shared_member_resource_rollup()
     tool_calls = attribute(
@@ -1587,7 +1592,7 @@ def create_app(
                 nonlocal resources
                 if resources is not None:
                     return resources
-                resources = build_turn_resources(value, tool_windows)
+                resources = build_turn_resources(value, tool_windows, thread_id=thread_id)
                 return resources
 
             try:

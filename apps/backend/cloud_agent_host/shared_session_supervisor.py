@@ -72,7 +72,7 @@ from cloud_agent_shared.turn_resources import parse_cpu_capacity
 if TYPE_CHECKING:
     import builtins
 
-    from cloud_agent_host.tool_windows import ToolMarkReader
+    from cloud_agent_host.tool_windows import ToolMark, ToolMarkReader
 
 ContextStatus = Literal["new", "live", "restored", "lost"]
 ResidentState = Literal["stopped", "starting", "live", "restarting", "lost"]
@@ -212,7 +212,7 @@ class SharedTurnTelemetry:
     """Kernel process events and exact hook marks closed at one turn boundary."""
 
     observation: GuestObservation
-    tool_marks: tuple[tuple[float, str, str], ...] = ()
+    tool_marks: tuple[ToolMark, ...] = ()
     #: The whole-turn member execution window, or None when this turn opened
     #: none -- a non-Kata runtime, or a guest whose helper has no window
     #: capability. None is "not measured here", never a zero.

@@ -274,8 +274,7 @@ export const en = {
 
   // ── Composer ────────────────────────────────────────────────────────────
   'composer.heading': 'What should the agent do?',
-  'composer.subheading':
-    'Runs in an isolated sandbox. No credentials inside — the output is a draft PR.',
+  'composer.subheading': 'Runs in an isolated sandbox.',
   'composer.placeholder':
     'Describe a task… e.g. Fix the SSE total-timeout regression on /v1/messages and add a unit test',
   'composer.placeholderDisconnected': 'Connect GitHub to describe a task',

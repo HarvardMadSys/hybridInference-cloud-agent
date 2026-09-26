@@ -21,6 +21,7 @@ from cloud_agent_host.chat_sandbox import (
 )
 from cloud_agent_host.guest_observer import GUEST_OBSERVER_BINARY
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
+from cloud_agent_host.tool_windows import ToolMark
 from cloud_agent_shared.egress import network_from_env
 
 
@@ -230,7 +231,7 @@ def test_readiness_requires_events_and_member_isolation_and_cleans_up(monkeypatc
             detail=None,
             tool_marks=()
             if failure == "marker_transport"
-            else ((1.0, "pre", "preflight"), (2.0, "post", "preflight")),
+            else (ToolMark(1.0, "pre", "preflight"), ToolMark(2.0, "post", "preflight")),
         ),
     )
     if failure is None:
@@ -514,7 +515,9 @@ def _probe_stubs(monkeypatch, manager, *, cursor, observations):
     return created
 
 
-def _observation(*, complete=True, marks=((1.0, "pre", "preflight"), (2.0, "post", "preflight"))):
+def _observation(
+    *, complete=True, marks=(ToolMark(1.0, "pre", "preflight"), ToolMark(2.0, "post", "preflight"))
+):
     return SimpleNamespace(
         complete=complete, lost_events=0, truncated=False, detail=None, tool_marks=marks
     )

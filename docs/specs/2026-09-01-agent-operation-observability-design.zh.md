@@ -428,6 +428,13 @@ Census 是 **turn cursor 之后观察到的进程启动**，不是“当时已�
 4. Agent 常驻进程内部的工作不属于任何 call，UI 必须说明；
 5. 截断的 tool list 禁止 per-call 资源与 time split：被省略的 call 可能与每个保留窗口重叠。
 
+Hook 标记的采用规则（2026-09-22 起）：
+
+1. Kata 路径的标记由 guest observer 记录在 guest 单调时钟上，与进程事件同一时钟。采用只验证配对：标记指向本 turn 发出的调用、恰好一对 pre/post、pre 早于 post。
+2. 消息级窗口不再作为标记的边界。broker 在读到那一行时才打时间戳，短调用可能在这一行还在管道里时就已经跑完。窗口相对标记的偏差按调用记入 broker 日志：`tool marks thread=… calls=[seq:tool:status:lag=open/close:msg=…:exact=…]`，status 取 `applied`、`no_marks`、`unpaired`、`duplicate`、`misordered`、`call_open`、`outside_window` 之一；指向本 turn 没有保留窗口的标记计入 `unknown_calls`。
+3. 非 Kata 的墙钟标记文件保留旧规则：两个标记必须落在消息窗口内。
+4. 采用了 guest 标记的窗口在归属进程时直接比较 guest 时钟，不再加时钟桥误差；消息级窗口仍按误差放宽。
+
 这修复的是 **短进程可观测性** 和 **任意时长调用的 exit-time 计数**。它不把 Docker 1 Hz 采样伪装成亚秒测量。Sampler 仍是 turn-level total 与 runc 的来源。
 
 展示：

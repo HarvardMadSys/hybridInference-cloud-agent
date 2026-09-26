@@ -265,7 +265,7 @@ export const zhCN: Record<TranslationKey, string> = {
 
   // ── Composer ────────────────────────────────────────────────────────────
   'composer.heading': '让 Agent 做什么?',
-  'composer.subheading': '在隔离沙箱里运行,内部不含任何凭据 —— 产出是一个 draft PR。',
+  'composer.subheading': '在隔离沙箱里运行。',
   'composer.placeholder':
     '描述一个任务…… 例如:修复 /v1/messages 上的 SSE 总超时回归,并补一个单元测试',
   'composer.placeholderDisconnected': '连接 GitHub 后才能描述任务',

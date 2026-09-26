@@ -2963,7 +2963,7 @@ class ChatSandboxManager:
                 if sent.returncode != 0:
                     raise SandboxError("Kata tool marker transport helper failed")
             observation = self.finish_guest_observation(spec, cursor)
-            delivered = [(phase, tool_id) for _, phase, tool_id in observation.tool_marks]
+            delivered = [(mark.phase, mark.tool_use_id) for mark in observation.tool_marks]
             if not observation.complete or delivered != [
                 ("pre", "preflight"),
                 ("post", "preflight"),
