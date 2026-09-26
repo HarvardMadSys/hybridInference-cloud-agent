@@ -598,3 +598,200 @@ async def test_every_page_of_the_user_s_installations_is_read(config):
     assert all(request.url.params["per_page"] == "100" for request in requests)
     assert len(found) == 101
     assert found[-1] == {"installation_id": 101, "account_login": "octocat", "account_id": 583231}
+
+
+# ── The user's own token ─────────────────────────────────────────────────
+
+
+def _oauth(config: AppConfig) -> AppConfig:
+    return AppConfig(
+        app_id=config.app_id,
+        private_key=config.private_key,
+        api_base=config.api_base,
+        client_id="Iv1.client",
+        client_secret="secret",
+    )
+
+
+async def test_an_exchanged_token_keeps_how_long_it_lasts_and_how_to_renew_it(config):
+    import json
+
+    def respond(request):
+        assert parse_qs(request.content.decode())["code"] == ["the-code"]
+        return httpx.Response(
+            200,
+            content=json.dumps(
+                {
+                    "access_token": "ghu_a",
+                    "expires_in": 28800,
+                    "refresh_token": "ghr_a",
+                    "refresh_token_expires_in": 15897600,
+                }
+            ),
+        )
+
+    before = time.time()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        tokens = await GitHubAppCredentials(_oauth(config), client=client).exchange_user_code(
+            "the-code"
+        )
+
+    assert (tokens.access_token, tokens.refresh_token) == ("ghu_a", "ghr_a")
+    assert tokens.access_expires_at is not None and tokens.refresh_expires_at is not None
+    assert 28800 - 5 <= tokens.access_expires_at.timestamp() - before <= 28800 + 5
+
+
+async def test_a_token_that_does_not_expire_has_nothing_to_renew(config):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"access_token": "ghu_forever"})
+        )
+    ) as client:
+        tokens = await GitHubAppCredentials(_oauth(config), client=client).exchange_user_code("c")
+
+    assert tokens.access_token == "ghu_forever"
+    assert (tokens.access_expires_at, tokens.refresh_token) == (None, None)
+
+
+async def test_renewing_spends_the_refresh_token_with_the_app_s_own_secret(config):
+    from cloud_agent.github_app import UserAuthorizationRevoked
+
+    sent = []
+
+    def respond(request):
+        sent.append(parse_qs(request.content.decode()))
+        if sent[-1]["refresh_token"] == ["ghr_spent"]:
+            return httpx.Response(200, json={"error": "bad_refresh_token"})
+        return httpx.Response(
+            200, json={"access_token": "ghu_b", "expires_in": 28800, "refresh_token": "ghr_b"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        credentials = GitHubAppCredentials(_oauth(config), client=client)
+        tokens = await credentials.refresh_user_token("ghr_a")
+        with pytest.raises(UserAuthorizationRevoked):
+            await credentials.refresh_user_token("ghr_spent")
+
+    assert (tokens.access_token, tokens.refresh_token) == ("ghu_b", "ghr_b")
+    assert sent[0] == {
+        "client_id": ["Iv1.client"],
+        "client_secret": ["secret"],
+        "grant_type": ["refresh_token"],
+        "refresh_token": ["ghr_a"],
+    }
+
+
+async def test_github_down_while_renewing_is_not_a_revoked_authorization(config):
+    """A 502 must not make the user reconnect: the stored token stays."""
+    from cloud_agent.github_app import UserAuthorizationRevoked
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(502, text="bad gateway"))
+    ) as client:
+        with pytest.raises(GitHubAppError) as raised:
+            await GitHubAppCredentials(_oauth(config), client=client).refresh_user_token("ghr_a")
+
+    assert not isinstance(raised.value, UserAuthorizationRevoked)
+
+
+async def test_only_repositories_the_user_can_push_to_are_theirs(config):
+    """Asked as the user, every page, and push is the bar — not read."""
+    requests = []
+    pages = {
+        "1": [
+            {"full_name": f"acme/r{n}", "permissions": {"pull": True, "push": n % 2 == 0}}
+            for n in range(100)
+        ],
+        "2": [
+            {"full_name": "acme/last", "permissions": {"admin": True, "push": True}},
+            {"full_name": "acme/no-permissions"},
+        ],
+    }
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"repositories": pages[request.url.params["page"]]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        found = await GitHubAppCredentials(config, client=client).writable_repositories_for_user(
+            "ghu_user", 77
+        )
+
+    assert [request.url.path for request in requests] == [
+        "/user/installations/77/repositories",
+        "/user/installations/77/repositories",
+    ]
+    assert all(request.headers["authorization"] == "Bearer ghu_user" for request in requests)
+    assert len(found) == 51
+    assert "acme/r1" not in found and "acme/no-permissions" not in found
+    assert found[-1] == "acme/last"
+
+
+@pytest.mark.parametrize(("status", "expected"), [(404, []), (403, [])])
+async def test_an_installation_the_user_lost_contributes_nothing(config, status, expected):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(status, json={}))
+    ) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        assert await credentials.writable_repositories_for_user("ghu_user", 77) == expected
+
+
+async def test_a_refused_user_token_is_a_revoked_authorization_and_an_outage_is_not(config):
+    from cloud_agent.github_app import UserAuthorizationRevoked
+
+    statuses = iter([401, 500])
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(next(statuses), json={}))
+    ) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        with pytest.raises(UserAuthorizationRevoked):
+            await credentials.writable_repositories_for_user("ghu_user", 77)
+        with pytest.raises(GitHubAppError) as raised:
+            await credentials.writable_repositories_for_user("ghu_user", 77)
+    assert not isinstance(raised.value, UserAuthorizationRevoked)
+
+
+async def test_withdrawing_the_authorization_names_the_token_under_the_app_s_own_secret(config):
+    import base64
+    import json
+
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(204)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        await GitHubAppCredentials(_oauth(config), client=client).revoke_user_authorization(
+            "ghu_user"
+        )
+
+    [request] = requests
+    assert (request.method, request.url.path) == ("DELETE", "/applications/Iv1.client/grant")
+    assert (
+        request.headers["authorization"]
+        == "Basic " + base64.b64encode(b"Iv1.client:secret").decode()
+    )
+    assert json.loads(request.content) == {"access_token": "ghu_user"}
+
+
+def test_a_users_repositories_are_remembered_for_a_minute_and_forgotten_on_change(
+    config, monkeypatch
+):
+    import cloud_agent.github_app as github_app
+
+    now = [1000.0]
+    monkeypatch.setattr(github_app.time, "monotonic", lambda: now[0])
+    credentials = GitHubAppCredentials(config)
+    credentials.remember_user_repositories("alice", (77,), ["acme/service"])
+
+    assert credentials.cached_user_repositories("alice", (77,)) == ["acme/service"]
+    # Another set of installations is another question.
+    assert credentials.cached_user_repositories("alice", (77, 88)) is None
+    assert credentials.cached_user_repositories("bob", (77,)) is None
+    now[0] += 61
+    assert credentials.cached_user_repositories("alice", (77,)) is None
+
+    credentials.remember_user_repositories("alice", (77,), ["acme/service"])
+    credentials.forget_user("alice")
+    assert credentials.cached_user_repositories("alice", (77,)) is None

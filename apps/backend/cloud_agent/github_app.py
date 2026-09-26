@@ -24,6 +24,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlencode
 
@@ -31,6 +32,7 @@ import httpx
 import jwt
 
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.source_control import SourceControlCipher
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -46,6 +48,10 @@ _JWT_TTL_S = 540
 # Installation tokens last an hour; refresh early so a job never starts with a
 # credential that expires mid-push.
 _TOKEN_REFRESH_MARGIN_S = 300
+# How long one user's repository answer is reused. Entitlement is asked on every
+# workspace file read and terminal open; a minute keeps those off GitHub while
+# bounding how long a revoked permission still reads as granted.
+_USER_REPOSITORIES_TTL_S = 60.0
 _COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
 
@@ -56,6 +62,45 @@ class GitHubAppError(Exception):
         """Record the HTTP status when the failure came from GitHub."""
         super().__init__(message)
         self.status = status
+
+
+class UserAuthorizationRevoked(GitHubAppError):
+    """GitHub no longer honours this user's token: the user has to connect again.
+
+    Settled, like :class:`AppNotInstalled`: the user revoked the App's
+    authorization, or its refresh token expired or was spent. Retrying cannot
+    change it, and the stored token is forgotten rather than tried again.
+    """
+
+
+@dataclass(frozen=True)
+class UserTokens:
+    """What GitHub hands back for a user: a token, and how to renew it.
+
+    An App that expires user tokens returns an access token good for eight
+    hours and a single-use refresh token good for six months. One that does not
+    returns only the access token, which then has no expiry here either.
+    """
+
+    access_token: str
+    access_expires_at: datetime | None = None
+    refresh_token: str | None = None
+    refresh_expires_at: datetime | None = None
+
+
+def _user_tokens(body: dict[str, Any]) -> UserTokens:
+    """Read GitHub's token response, with its relative expiries made absolute."""
+    now = datetime.now(timezone.utc)
+
+    def at(seconds: Any) -> datetime | None:
+        return now + timedelta(seconds=int(seconds)) if isinstance(seconds, int) else None
+
+    return UserTokens(
+        access_token=str(body["access_token"]),
+        access_expires_at=at(body.get("expires_in")),
+        refresh_token=body.get("refresh_token") or None,
+        refresh_expires_at=at(body.get("refresh_token_expires_in")),
+    )
 
 
 class AppNotInstalled(GitHubAppError):
@@ -162,6 +207,10 @@ class GitHubAppCredentials:
         self._timeout_s = timeout_s
         self._tokens: dict[tuple[int, str], _CachedToken] = {}
         self._installations: dict[str, int] = {}
+        #: Per user, per set of connected installations: when the answer was
+        #: read, and the repositories it named.
+        self._user_repositories: dict[tuple[str, tuple[int, ...]], tuple[float, list[str]]] = {}
+        self._cipher: SourceControlCipher | None = None
         self._client = client
         self._owned: httpx.AsyncClient | None = None
 
@@ -171,10 +220,10 @@ class GitHubAppCredentials:
 
         A client per call meant a fresh TCP connection and a fresh TLS
         handshake to api.github.com every time — and these calls are not
-        occasional. Repository entitlement resolves through
-        :meth:`repositories_for_installation` on every workspace file read and
-        every terminal open, so a per-call handshake was on the interactive
-        path, not just the publisher's.
+        occasional. Repository entitlement asks GitHub on workspace file reads
+        and terminal opens (through :meth:`writable_repositories_for_user`,
+        whenever its minute-long answer has lapsed), so a per-call handshake
+        was on the interactive path, not just the publisher's.
 
         One client for this object's lifetime instead. It is created on first
         use rather than in ``__init__`` because a client binds to the running
@@ -195,6 +244,17 @@ class GitHubAppCredentials:
         owned, self._owned = self._owned, None
         if owned is not None:
             await owned.aclose()
+
+    @property
+    def cipher(self) -> SourceControlCipher:
+        """The key users' GitHub tokens are stored under — GitLab's, domain and all.
+
+        Built on first use, because a deployment that never lets users connect
+        publishes with the private key alone and needs no encryption key.
+        """
+        if self._cipher is None:
+            self._cipher = SourceControlCipher()
+        return self._cipher
 
     @property
     def user_authorization_configured(self) -> bool:
@@ -349,7 +409,7 @@ class GitHubAppCredentials:
         self._tokens[installation_id, scope_key] = _CachedToken(token=token, expires_at=expires_at)
         return token, True
 
-    async def exchange_user_code(self, code: str) -> str:
+    async def exchange_user_code(self, code: str) -> UserTokens:
         """Trade the callback's code for a token that speaks *as the user*.
 
         This is what makes the connection an entitlement rather than a claim:
@@ -375,11 +435,127 @@ class GitHubAppCredentials:
         if response.status_code >= 400:
             raise GitHubAppError(f"GitHub refused the code exchange ({response.status_code})")
         body = response.json()
-        token = body.get("access_token")
-        if not token:
+        if not body.get("access_token"):
             # GitHub returns 200 with an error body for a spent or wrong code.
             raise GitHubAppError(f"GitHub returned no user token: {body.get('error', 'unknown')}")
-        return token
+        return _user_tokens(body)
+
+    async def refresh_user_token(self, refresh_token: str) -> UserTokens:
+        """Spend a refresh token for a new pair. Each refresh token works once."""
+        async with self._http() as client:
+            response = await client.post(
+                "https://github.com/login/oauth/access_token",
+                headers={"Accept": "application/json"},
+                data={
+                    "client_id": self._config.client_id,
+                    "client_secret": self._config.client_secret,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                },
+            )
+        if response.status_code >= 500:
+            raise GitHubAppError(
+                f"GitHub could not refresh the user token ({response.status_code})",
+                status=response.status_code,
+            )
+        body = response.json() if response.status_code < 400 else {}
+        if not body.get("access_token"):
+            # `bad_refresh_token` and the rest: expired, spent, or revoked.
+            raise UserAuthorizationRevoked(
+                f"GitHub refused the refresh token: {body.get('error', response.status_code)}"
+            )
+        return _user_tokens(body)
+
+    async def revoke_user_authorization(self, access_token: str) -> None:
+        """Withdraw the user's authorization of the App, and every token it issued.
+
+        Best effort: a caller forgets its stored tokens whether or not GitHub
+        answers.
+        """
+        async with self._http() as client:
+            response = await client.request(
+                "DELETE",
+                f"{self._config.api_base}/applications/{self._config.client_id}/grant",
+                auth=(self._config.client_id, self._config.client_secret),
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                json={"access_token": access_token},
+            )
+        if response.status_code >= 400 and response.status_code != 404:
+            raise GitHubAppError(
+                f"GitHub did not revoke the authorization ({response.status_code})",
+                status=response.status_code,
+            )
+
+    def cached_user_repositories(
+        self, user_id: str, installation_ids: tuple[int, ...]
+    ) -> list[str] | None:
+        """This user's repositories if read within the last minute, else ``None``."""
+        cached = self._user_repositories.get((user_id, installation_ids))
+        if cached is None or time.monotonic() - cached[0] > _USER_REPOSITORIES_TTL_S:
+            return None
+        return list(cached[1])
+
+    def remember_user_repositories(
+        self, user_id: str, installation_ids: tuple[int, ...], repositories: list[str]
+    ) -> None:
+        """Keep one user's answer for the next minute's reads."""
+        self._user_repositories[user_id, installation_ids] = (time.monotonic(), list(repositories))
+
+    def forget_user(self, user_id: str) -> None:
+        """Drop a user's remembered answer, when their connection changed."""
+        for key in [key for key in self._user_repositories if key[0] == user_id]:
+            self._user_repositories.pop(key, None)
+
+    async def writable_repositories_for_user(
+        self, user_token: str, installation_id: int
+    ) -> list[str]:
+        """The repositories of one installation this user may push to.
+
+        Asked as the user, so GitHub answers with the repositories *they* can
+        access — the installation's own token lists every repository it covers,
+        which for an organization is repositories this user was never given.
+        Push, not read: the agent's work ends as a branch pushed and a pull
+        request opened, which a user who can only read could not do themselves.
+
+        An installation the user can no longer reach contributes nothing; a
+        token GitHub refuses is :class:`UserAuthorizationRevoked`.
+        """
+        repos: list[str] = []
+        page = 1
+        async with self._http() as client:
+            while page <= 10:  # bounded: 1000 repositories is plenty
+                response = await client.get(
+                    f"{self._config.api_base}/user/installations/{installation_id}/repositories",
+                    params={"per_page": 100, "page": page},
+                    headers={
+                        "Authorization": f"Bearer {user_token}",
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                )
+                if response.status_code == 401:
+                    raise UserAuthorizationRevoked("GitHub refused the user's token")
+                if response.status_code in (403, 404):
+                    return []
+                if response.status_code >= 400:
+                    raise GitHubAppError(
+                        f"could not list the user's repositories in installation "
+                        f"{installation_id} ({response.status_code})",
+                        status=response.status_code,
+                    )
+                entries = response.json().get("repositories", [])
+                repos.extend(
+                    entry["full_name"]
+                    for entry in entries
+                    if entry.get("full_name") and (entry.get("permissions") or {}).get("push")
+                )
+                if len(entries) < 100:
+                    break
+                page += 1
+        return repos
 
     async def user_profile(self, user_token: str) -> dict[str, Any]:
         """Return ``{"id", "login"}`` for the GitHub user a token speaks as.
@@ -449,6 +625,11 @@ class GitHubAppCredentials:
 
         Read with the installation's own token, so the answer is the App's
         actual reach rather than anything the caller supplied.
+
+        **Not an entitlement.** It was one, and that was the hole: an
+        organization's installation covers repositories a given member or
+        collaborator was never given. What a user may work on is asked as the
+        user — :meth:`writable_repositories_for_user`.
         """
         token = await self._installation_token(installation_id)
         repos: list[str] = []
@@ -581,11 +762,11 @@ class GitHubAppCredentials:
 
         This is byte-for-byte the request :meth:`token_for` makes when it is
         asked to narrow nothing, so it belongs in that same unnarrowed cache
-        slot — and it was not using it. Every workspace file read, file write
-        and terminal create/list/stream resolves repository entitlement
-        through :meth:`repositories_for_installation`, which starts here, so
-        the omission put a token mint on the interactive path and kept it
-        there.
+        slot — and it was not using it. When repository entitlement still
+        resolved through :meth:`repositories_for_installation`, which starts
+        here, on every workspace file read, file write and terminal
+        create/list/stream, the omission put a token mint on the interactive
+        path and kept it there.
 
         Sharing the slot is correct rather than merely convenient: the scope
         key is derived from the same values that shape the request, so an

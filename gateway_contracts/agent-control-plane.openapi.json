@@ -15517,6 +15517,18 @@
         "operationId": "get_agent_config_v1_agent_config_get",
         "parameters": [
           {
+            "description": "Ask GitHub again for this user's repositories instead of reusing the last minute's answer — for a repository just given to the App.",
+            "in": "query",
+            "name": "fresh",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Ask GitHub again for this user's repositories instead of reusing the last minute's answer — for a repository just given to the App.",
+              "title": "Fresh",
+              "type": "boolean"
+            }
+          },
+          {
             "in": "header",
             "name": "authorization",
             "required": false,
@@ -16020,6 +16032,53 @@
           }
         },
         "summary": "List Source Control Integrations"
+      }
+    },
+    "/v1/agent/integrations/github": {
+      "delete": {
+        "description": "Forget this user's GitHub connection: the account, its token, every grant.\n\nThe stored token is why this exists: removing installations one by one\nleaves it behind. GitHub is also asked to withdraw the App's authorization,\nbest effort — the local rows go whether or not it answers. Works while the\nApp is unavailable: these are this service's own rows.",
+        "operationId": "disconnect_github_account_v1_agent_integrations_github_delete",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceControlIntegrationsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Disconnect Github Account"
       }
     },
     "/v1/agent/integrations/github/connect": {

@@ -1,13 +1,20 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { disconnectAgentIntegration, getAgentIntegrations } from '@/lib/api/agents';
+import {
+  disconnectAgentIntegration,
+  disconnectGitHubAccount,
+  getAgentIntegrations,
+} from '@/lib/api/agents';
 import type { AgentIntegrationProvider, AgentIntegrationProviderApi } from '@/lib/api/agents';
 import { SkillsSection } from './skills/SkillsSection';
 import { McpConnectionsSection, type McpAuthorizationResult } from './mcp/McpConnectionsSection';
 import { SOURCE_CONTROL_RECHECK_MS } from './sourceControlRecovery';
 
 const PROVIDERS: AgentIntegrationProvider[] = ['github', 'gitlab'];
+
+/** What `disconnecting` holds while the whole GitHub connection is going. */
+const GITHUB_ACCOUNT = 'github-account';
 
 /** Providers shown, but not yet offered to connect.
  *
@@ -91,10 +98,12 @@ function ProviderActions({
   integration,
   disconnecting,
   onDisconnect,
+  onDisconnectAll,
 }: {
   integration: AgentIntegrationProviderApi;
   disconnecting: string | null;
   onDisconnect: (connectionId: string, label: string) => void;
+  onDisconnectAll: () => void;
 }) {
   const copy = PROVIDER_COPY[integration.provider];
 
@@ -195,6 +204,18 @@ function ProviderActions({
                 : `Disconnect ${account.label}`}
             </button>
           ))}
+          {integration.provider === 'github' ? (
+            // The stored token goes only with the whole connection: removing
+            // installations one by one here leaves it behind.
+            <button
+              type="button"
+              disabled={disconnecting === GITHUB_ACCOUNT}
+              onClick={onDisconnectAll}
+              className="block w-full rounded-lg px-3 py-2 text-left text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {disconnecting === GITHUB_ACCOUNT ? 'Disconnecting GitHub…' : 'Disconnect GitHub'}
+            </button>
+          ) : null}
         </div>
       </details>
     </div>
@@ -268,6 +289,24 @@ export function IntegrationsView({
     const timer = window.setInterval(() => void load({ quiet: true }), SOURCE_CONTROL_RECHECK_MS);
     return () => window.clearInterval(timer);
   }, [githubUnavailable, load]);
+
+  async function disconnectGitHub() {
+    setDisconnecting(GITHUB_ACCOUNT);
+    setError(null);
+    setNotice(null);
+    // The answer is the page's whole state; a check already on its way must
+    // not land on top of it.
+    const request = ++latestLoad.current;
+    try {
+      const response = await disconnectGitHubAccount();
+      if (request === latestLoad.current) setProviders(response.providers);
+      setNotice('GitHub disconnected.');
+    } catch (cause: unknown) {
+      setError(cause instanceof Error ? cause.message : 'Could not disconnect GitHub.');
+    } finally {
+      setDisconnecting(null);
+    }
+  }
 
   async function disconnect(
     provider: AgentIntegrationProvider,
@@ -370,6 +409,7 @@ export function IntegrationsView({
                       onDisconnect={(connectionId, label) =>
                         void disconnect(provider, connectionId, label)
                       }
+                      onDisconnectAll={() => void disconnectGitHub()}
                     />
                   )}
                 </div>

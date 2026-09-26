@@ -928,6 +928,8 @@ describe('TaskComposer source-control onboarding', () => {
     });
 
     expect(getAgentConfig).toHaveBeenCalledTimes(2);
+    // Asking GitHub again, not the service's minute-old answer.
+    expect(getAgentConfig).toHaveBeenLastCalledWith({ fresh: true });
     expect(await within(dialog).findByRole('button', { name: 'owner/new' })).toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: 'Repository: owner/repository' }),

@@ -36,12 +36,43 @@ class SourceControlRepository(Protocol):
         github_user_id: int,
         login: str,
         installations: list[dict[str, Any]],
+        access_token_ciphertext: str | None = None,
+        access_expires_at: Any = None,
+        refresh_token_ciphertext: str | None = None,
+        refresh_expires_at: Any = None,
     ) -> None:
         """Record the GitHub account and make its grants exactly ``installations``."""
         ...
 
     async def get_github_account(self, *, user_id: str) -> dict[str, Any] | None:
         """Return the GitHub account this user connected, if any."""
+        ...
+
+    async def claim_github_token_refresh(
+        self, *, user_id: str, lease_seconds: int, margin_seconds: int
+    ) -> dict[str, Any] | None:
+        """Take the lease to refresh an expiring token, or ``None`` if it is not ours."""
+        ...
+
+    async def store_github_tokens(
+        self,
+        *,
+        user_id: str,
+        refresh_generation: int,
+        access_token_ciphertext: str,
+        access_expires_at: Any,
+        refresh_token_ciphertext: str | None,
+        refresh_expires_at: Any,
+    ) -> bool:
+        """Write a refreshed token pair while the lease is still ours, and release it."""
+        ...
+
+    async def clear_github_tokens(self, *, user_id: str, access_token_ciphertext: str) -> bool:
+        """Forget a token GitHub no longer honours, unless it was replaced meanwhile."""
+        ...
+
+    async def disconnect_github_account(self, *, user_id: str) -> None:
+        """Forget the GitHub account, its tokens, and every installation grant."""
         ...
 
     async def create_oauth_state(

@@ -673,9 +673,15 @@ export interface AgentMcpServerApi {
   default: boolean;
 }
 
-/** What this deployment will actually accept — the source for the pickers. */
-export async function getAgentConfig(): Promise<AgentConfigApi> {
-  return jsonOrThrow(await fetchWithAuth(API_BASE, '/v1/agent/config'));
+/**
+ * What this deployment will actually accept — the source for the pickers.
+ *
+ * `fresh` asks GitHub again for the user's repositories instead of reusing the
+ * service's minute-old answer: for a repository just given to the App.
+ */
+export async function getAgentConfig(options: { fresh?: boolean } = {}): Promise<AgentConfigApi> {
+  const query = options.fresh ? '?fresh=true' : '';
+  return jsonOrThrow(await fetchWithAuth(API_BASE, `/v1/agent/config${query}`));
 }
 
 export type AgentIntegrationProvider = 'github' | 'gitlab';
@@ -750,6 +756,18 @@ export async function connectGitLab(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ code, state }),
+  });
+  return jsonOrThrow(resp);
+}
+
+/**
+ * Forget this user's GitHub connection — the stored token, the account, every
+ * installation — and ask GitHub to withdraw the App's authorization. Answers
+ * with the page's whole state.
+ */
+export async function disconnectGitHubAccount(): Promise<AgentIntegrationsApi> {
+  const resp = await fetchWithAuth(API_BASE, '/v1/agent/integrations/github', {
+    method: 'DELETE',
   });
   return jsonOrThrow(resp);
 }

@@ -301,7 +301,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   async function refreshRepositories() {
     setRefreshing(true);
     try {
-      const cfg = await getAgentConfig();
+      const cfg = await getAgentConfig({ fresh: true });
       applyConfig(cfg);
       // The repository the link asked for may be the one that just arrived.
       if (unavailableRepo && cfg.repos.includes(unavailableRepo)) {

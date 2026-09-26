@@ -5158,26 +5158,76 @@ async def test_a_worker_cannot_write_the_publish_record(client: AsyncClient):
 
 
 class _FakeGitHubApp:
-    """Stands in for the App: a user token maps to installations, which cover repos."""
+    """Stands in for the App: a user token maps to installations, which cover repos.
+
+    ``repos_by_installation`` is what each installation covers; ``pushable``,
+    where given, is the part of it this user may push to — what GitHub answers
+    when asked as the user. Absent, the user may push to all of it.
+    """
 
     def __init__(
-        self, installations, repos_by_installation, *, exchange_fails=False, login="octocat"
+        self,
+        installations,
+        repos_by_installation,
+        *,
+        exchange_fails=False,
+        login="octocat",
+        pushable=None,
     ):
+        from cloud_agent.source_control import SourceControlCipher
+
         self.installations = installations
         self.repos = repos_by_installation
+        self.pushable = pushable
         self.exchange_fails = exchange_fails
         self.login = login
         self.exchanged: list[str] = []
+        self.listed_with: list[str] = []
+        self.revoked: list[str] = []
+        self.refused_tokens: set[str] = set()
+        self.forgotten: list[str] = []
+        self.cipher = SourceControlCipher("test-source-control-key")
 
-    async def exchange_user_code(self, code: str) -> str:
+    async def exchange_user_code(self, code: str) -> Any:
+        from cloud_agent.github_app import UserTokens
+
         if self.exchange_fails:
             raise RuntimeError("GitHub refused the code exchange")
         self.exchanged.append(code)
-        return f"user-token-for-{code}"
+        return UserTokens(
+            access_token=f"user-token-for-{code}",
+            access_expires_at=datetime.now(timezone.utc) + timedelta(hours=8),
+            refresh_token=f"refresh-for-{code}",
+            refresh_expires_at=datetime.now(timezone.utc) + timedelta(days=180),
+        )
 
     async def user_profile(self, user_token: str) -> dict[str, Any]:
         assert user_token.startswith("user-token-for-"), "the profile is the token's own"
         return {"id": 583231, "login": self.login}
+
+    async def writable_repositories_for_user(self, user_token: str, installation_id: int):
+        from cloud_agent.github_app import UserAuthorizationRevoked
+
+        if user_token in self.refused_tokens:
+            raise UserAuthorizationRevoked("GitHub refused the user's token")
+        self.listed_with.append(user_token)
+        if self.pushable is not None:
+            return list(self.pushable.get(installation_id, []))
+        return list(self.repos.get(installation_id, []))
+
+    # The fake answers fresh every time; the minute-long memory is the real
+    # class's, and tested there.
+    def cached_user_repositories(self, user_id, installation_ids):
+        return None
+
+    def remember_user_repositories(self, user_id, installation_ids, repositories):
+        pass
+
+    def forget_user(self, user_id):
+        self.forgotten.append(user_id)
+
+    async def revoke_user_authorization(self, access_token: str) -> None:
+        self.revoked.append(access_token)
 
     user_authorization_configured = True
 
@@ -5226,14 +5276,49 @@ def _store_with_grants(store: FakeStorage) -> FakeStorage:
 
     store.github_accounts = {}
 
-    async def connect_github_account(*, user_id, github_user_id, login, installations):
-        store.github_accounts[user_id] = {"github_user_id": github_user_id, "login": login}
+    async def connect_github_account(
+        *,
+        user_id,
+        github_user_id,
+        login,
+        installations,
+        access_token_ciphertext=None,
+        access_expires_at=None,
+        refresh_token_ciphertext=None,
+        refresh_expires_at=None,
+    ):
+        store.github_accounts[user_id] = {
+            "github_user_id": github_user_id,
+            "login": login,
+            "access_token_ciphertext": access_token_ciphertext,
+            "access_expires_at": access_expires_at,
+            "refresh_token_ciphertext": refresh_token_ciphertext,
+            "refresh_expires_at": refresh_expires_at,
+        }
         store.grants[user_id] = {
             item["installation_id"]: item.get("account_login") for item in installations
         }
 
     async def get_github_account(*, user_id):
-        return store.github_accounts.get(user_id)
+        account = store.github_accounts.get(user_id)
+        return dict(account) if account else None
+
+    async def claim_github_token_refresh(*, user_id, lease_seconds, margin_seconds):
+        return None
+
+    async def store_github_tokens(**kwargs):
+        return False
+
+    async def clear_github_tokens(*, user_id, access_token_ciphertext):
+        account = store.github_accounts.get(user_id)
+        if not account or account.get("access_token_ciphertext") != access_token_ciphertext:
+            return False
+        account.update(access_token_ciphertext=None, refresh_token_ciphertext=None)
+        return True
+
+    async def disconnect_github_account(*, user_id):
+        store.github_accounts.pop(user_id, None)
+        store.grants.pop(user_id, None)
 
     store.record_repo_grant = record_repo_grant
     store.list_repo_grants = list_repo_grants
@@ -5242,6 +5327,10 @@ def _store_with_grants(store: FakeStorage) -> FakeStorage:
     store.create_oauth_state = create_oauth_state
     store.connect_github_account = connect_github_account
     store.get_github_account = get_github_account
+    store.claim_github_token_refresh = claim_github_token_refresh
+    store.store_github_tokens = store_github_tokens
+    store.clear_github_tokens = clear_github_tokens
+    store.disconnect_github_account = disconnect_github_account
     return store
 
 
@@ -5419,8 +5508,13 @@ async def test_connecting_records_the_account_even_before_any_installation(
     assert connected.status_code == 200
     assert connected.json()["connections"] == []
     assert connected.json()["install_url"].startswith(_INSTALL_URL)
-    # Who connected is GitHub's answer for the exchanged token.
-    assert grants_store.github_accounts[_OWNER] == {"github_user_id": 583231, "login": "octocat"}
+    # Who connected is GitHub's answer for the exchanged token, and the token
+    # itself is kept only encrypted.
+    account = grants_store.github_accounts[_OWNER]
+    assert (account["github_user_id"], account["login"]) == (583231, "octocat")
+    assert "user-token-for-abc123" not in str(account)
+    assert app_creds.cipher.decrypt(account["access_token_ciphertext"]) == "user-token-for-abc123"
+    assert app_creds.cipher.decrypt(account["refresh_token_ciphertext"]) == "refresh-for-abc123"
 
     assert config.json()["github_connected"] is True
     assert config.json()["repos"] == []
@@ -5472,6 +5566,134 @@ async def test_connecting_offers_the_install_page_until_the_app_is_on_the_users_
     assert org_only.json()["install_url"].startswith(_INSTALL_URL)
     assert with_own.json()["install_url"] is None
     assert with_own.json()["repos"] == ["acme/service", "octocat/dotfiles"]
+
+
+async def test_a_user_is_offered_only_the_repositories_they_can_push_to(
+    store: FakeStorage, monkeypatch
+):
+    """The installation covers more than this user was given; only theirs are offered.
+
+    Asked with the installation's token, GitHub lists every repository the
+    installation covers — for an organization, repositories an outside
+    collaborator on one of them was never given, which the platform would then
+    clone into their sandbox. Asked as the user, it lists theirs, with their
+    permission on each: the agent pushes a branch, so push is the bar.
+    """
+    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
+    monkeypatch.setenv("AGENT_GITHUB_APP_INSTALL_URL", _INSTALL_URL)
+    app_creds = _FakeGitHubApp(
+        installations=[{"installation_id": 77, "account_login": "acme", "account_id": 1001}],
+        repos_by_installation={77: ["acme/secret", "acme/service", "acme/readonly"]},
+        pushable={77: ["acme/service"]},
+    )
+    app = _connectable_app(_store_with_grants(store), app_creds)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post(
+            "/v1/agent/integrations/github/connect",
+            json={"code": "abc123", "state": "test-state-value-123456"},
+        )
+        config = await client.get("/v1/agent/config")
+        mine = await client.post(
+            "/v1/agent/jobs",
+            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
+        )
+        secret = await client.post(
+            "/v1/agent/jobs",
+            json={"repo": "acme/secret", "task_prompt": "read it", "model": "m"},
+        )
+        branches = await client.get("/v1/agent/branches", params={"repo": "acme/secret"})
+
+    assert config.json()["repos"] == ["acme/service"]
+    assert mine.status_code == 201
+    assert secret.status_code == 403
+    assert branches.status_code == 403
+    # Asked as the user, with the token the connection exchanged.
+    assert set(app_creds.listed_with) == {"user-token-for-abc123"}
+
+
+async def test_a_token_github_refuses_is_forgotten_and_the_user_connects_again(
+    store: FakeStorage, monkeypatch
+):
+    """A revoked authorization closes everything, and the composer asks to reconnect."""
+    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
+    monkeypatch.setenv("AGENT_GITHUB_APP_INSTALL_URL", _INSTALL_URL)
+    app_creds = _FakeGitHubApp(
+        installations=[{"installation_id": 77, "account_login": "acme", "account_id": 1001}],
+        repos_by_installation={77: ["acme/service"]},
+    )
+    grants_store = _store_with_grants(store)
+    app = _connectable_app(grants_store, app_creds)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post(
+            "/v1/agent/integrations/github/connect",
+            json={"code": "abc123", "state": "test-state-value-123456"},
+        )
+        app_creds.refused_tokens.add("user-token-for-abc123")
+        refused = await client.post(
+            "/v1/agent/jobs",
+            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
+        )
+        config = await client.get("/v1/agent/config")
+
+    assert refused.status_code == 403
+    assert "Reconnect GitHub" in refused.text
+    assert grants_store.github_accounts[_OWNER]["access_token_ciphertext"] is None
+    assert config.json()["github_connected"] is False
+    assert config.json()["repos"] == []
+
+
+async def test_disconnecting_github_forgets_the_token_and_withdraws_the_authorization(
+    store: FakeStorage, monkeypatch
+):
+    """The stored token is why this exists: removing installations one by one left it."""
+    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
+    monkeypatch.setenv("AGENT_GITHUB_APP_INSTALL_URL", _INSTALL_URL)
+    app_creds = _FakeGitHubApp(
+        installations=[{"installation_id": 77, "account_login": "acme", "account_id": 1001}],
+        repos_by_installation={77: ["acme/service"]},
+    )
+    grants_store = _store_with_grants(store)
+    app = _connectable_app(grants_store, app_creds)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post(
+            "/v1/agent/integrations/github/connect",
+            json={"code": "abc123", "state": "test-state-value-123456"},
+        )
+        removed = await client.delete("/v1/agent/integrations/github")
+        config = await client.get("/v1/agent/config")
+        after = await client.post(
+            "/v1/agent/jobs",
+            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
+        )
+
+    assert removed.status_code == 200
+    github_row = removed.json()["providers"][0]
+    assert (github_row["connected"], github_row["accounts"]) == (False, [])
+    assert removed.json()["providers"][1]["provider"] == "gitlab", "the page's whole state"
+    assert app_creds.revoked == ["user-token-for-abc123"]
+    assert grants_store.github_accounts == {}
+    assert config.json()["github_connected"] is False
+    assert after.status_code == 403
+
+
+async def test_refresh_asks_github_again_rather_than_reusing_the_last_answer(
+    store: FakeStorage, monkeypatch
+):
+    """The composer's Refresh is for a repository just given to the App on GitHub."""
+    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
+    app_creds = _FakeGitHubApp(installations=[], repos_by_installation={})
+    app = _connectable_app(_store_with_grants(store), app_creds)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.get("/v1/agent/config")
+        assert app_creds.forgotten == []
+        fresh = await client.get("/v1/agent/config", params={"fresh": "true"})
+
+    assert fresh.status_code == 200
+    assert app_creds.forgotten == [_OWNER]
 
 
 async def test_reconnecting_keeps_only_the_installations_github_still_reports(
@@ -5553,10 +5775,15 @@ async def test_with_nothing_to_connect_to_the_allowlist_is_the_whole_entitlement
     assert config.json()["github_connected"] is True
 
 
-async def test_a_connection_from_before_accounts_were_recorded_still_counts(
+async def test_a_connection_with_no_token_is_made_again_before_anything_runs(
     store: FakeStorage, monkeypatch
 ):
-    """Grants with no account row: still connected."""
+    """Grants from before users' tokens were kept: GitHub cannot be asked as them.
+
+    Such a connection used to be the whole entitlement, read with the
+    installation's token — every repository the installation covered. It now
+    grants nothing until the user connects again, and says so.
+    """
     monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
     monkeypatch.setenv("AGENT_GITHUB_APP_INSTALL_URL", _INSTALL_URL)
     grants_store = _store_with_grants(store)
@@ -5567,10 +5794,16 @@ async def test_a_connection_from_before_accounts_were_recorded_still_counts(
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         config = await client.get("/v1/agent/config")
         integrations = await client.get("/v1/agent/integrations")
+        refused = await client.post(
+            "/v1/agent/jobs",
+            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
+        )
 
-    assert config.json()["github_connected"] is True
-    assert config.json()["repos"] == ["acme/service"]
-    assert integrations.json()["providers"][0]["connected"] is True
+    assert config.json()["github_connected"] is False
+    assert config.json()["repos"] == []
+    assert integrations.json()["providers"][0]["connected"] is False
+    assert refused.status_code == 403
+    assert "Reconnect GitHub" in refused.text
 
 
 # ── Issue #47: a GitHub App this process could not load ────────────────────
@@ -5641,10 +5874,16 @@ async def test_an_unloaded_github_app_is_temporarily_unavailable_until_its_key_l
     serves all of it again — no restart.
     """
     grants_store = _store_with_grants(store)
-    await grants_store.record_repo_grant(user_id=_OWNER, installation_id=77, account_login="acme")
     key = tmp_path / "github-app.pem"
     clock = _StepClock()
     minter = _FakeGitHubApp(installations=[], repos_by_installation={77: ["acme/service"]})
+    await grants_store.connect_github_account(
+        user_id=_OWNER,
+        github_user_id=583231,
+        login="octocat",
+        installations=[{"installation_id": 77, "account_login": "acme"}],
+        access_token_ciphertext=minter.cipher.encrypt("user-token-for-earlier"),
+    )
     app = _app_with_unloaded_github(grants_store, key, clock, minter)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:

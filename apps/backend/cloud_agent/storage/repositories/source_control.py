@@ -70,6 +70,10 @@ class PostgresSourceControlRepository:
         github_user_id: int,
         login: str,
         installations: list[dict[str, Any]],
+        access_token_ciphertext: str | None = None,
+        access_expires_at: Any = None,
+        refresh_token_ciphertext: str | None = None,
+        refresh_expires_at: Any = None,
     ) -> None:
         """Record the GitHub account and make its grants exactly ``installations``."""
         # One transaction, because the two are one answer: GitHub said who this
@@ -80,18 +84,32 @@ class PostgresSourceControlRepository:
         # today, including when the user reconnects as another GitHub account.
         installation_ids = [int(item["installation_id"]) for item in installations]
         async with self._pool.acquire() as conn, conn.transaction():
+            # A new token pair replaces the old outright, and any refresh in
+            # flight for the old one loses its lease: the generation moves.
             await conn.execute(
                 """
-                INSERT INTO agent_github_accounts (user_id, github_user_id, login)
-                VALUES ($1, $2, $3)
+                INSERT INTO agent_github_accounts
+                    (user_id, github_user_id, login, access_token_ciphertext,
+                     access_expires_at, refresh_token_ciphertext, refresh_expires_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 ON CONFLICT (user_id) DO UPDATE SET
                     github_user_id = EXCLUDED.github_user_id,
                     login = EXCLUDED.login,
+                    access_token_ciphertext = EXCLUDED.access_token_ciphertext,
+                    access_expires_at = EXCLUDED.access_expires_at,
+                    refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
+                    refresh_expires_at = EXCLUDED.refresh_expires_at,
+                    refresh_generation = agent_github_accounts.refresh_generation + 1,
+                    refresh_lease_expires_at = NULL,
                     updated_at = NOW()
                 """,
                 user_id,
                 github_user_id,
                 login,
+                access_token_ciphertext,
+                access_expires_at,
+                refresh_token_ciphertext,
+                refresh_expires_at,
             )
             await conn.execute(
                 "DELETE FROM agent_repo_grants "
@@ -116,11 +134,103 @@ class PostgresSourceControlRepository:
         """Return the GitHub account this user connected, if any."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT github_user_id, login, connected_at, updated_at "
-                "FROM agent_github_accounts WHERE user_id = $1",
+                """
+                SELECT github_user_id, login, access_token_ciphertext, access_expires_at,
+                       refresh_token_ciphertext, refresh_expires_at, refresh_generation,
+                       refresh_lease_expires_at, connected_at, updated_at
+                FROM agent_github_accounts WHERE user_id = $1
+                """,
                 user_id,
             )
         return dict(row) if row else None
+
+    async def claim_github_token_refresh(
+        self, *, user_id: str, lease_seconds: int, margin_seconds: int
+    ) -> dict[str, Any] | None:
+        """Take the lease to refresh an expiring token, or ``None`` if it is not ours."""
+        # Only a token that still needs it, and only while nobody else holds a
+        # live lease: a caller that lost the race reads the row again and finds
+        # either the new token or one still valid for a few more minutes.
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE agent_github_accounts SET
+                    refresh_generation = refresh_generation + 1,
+                    refresh_lease_expires_at = NOW() + make_interval(secs => $2)
+                WHERE user_id = $1
+                  AND refresh_token_ciphertext IS NOT NULL
+                  AND access_expires_at IS NOT NULL
+                  AND access_expires_at <= NOW() + make_interval(secs => $3)
+                  AND (refresh_lease_expires_at IS NULL OR refresh_lease_expires_at <= NOW())
+                RETURNING refresh_generation, refresh_token_ciphertext
+                """,
+                user_id,
+                lease_seconds,
+                margin_seconds,
+            )
+        return dict(row) if row else None
+
+    async def store_github_tokens(
+        self,
+        *,
+        user_id: str,
+        refresh_generation: int,
+        access_token_ciphertext: str,
+        access_expires_at: Any,
+        refresh_token_ciphertext: str | None,
+        refresh_expires_at: Any,
+    ) -> bool:
+        """Write a refreshed token pair while the lease is still ours, and release it."""
+        async with self._pool.acquire() as conn:
+            written = await conn.fetchval(
+                """
+                UPDATE agent_github_accounts SET
+                    access_token_ciphertext = $3,
+                    access_expires_at = $4,
+                    refresh_token_ciphertext = $5,
+                    refresh_expires_at = $6,
+                    refresh_lease_expires_at = NULL,
+                    updated_at = NOW()
+                WHERE user_id = $1 AND refresh_generation = $2
+                RETURNING user_id
+                """,
+                user_id,
+                refresh_generation,
+                access_token_ciphertext,
+                access_expires_at,
+                refresh_token_ciphertext,
+                refresh_expires_at,
+            )
+        return written is not None
+
+    async def clear_github_tokens(self, *, user_id: str, access_token_ciphertext: str) -> bool:
+        """Forget a token GitHub no longer honours, unless it was replaced meanwhile."""
+        # Matched on the ciphertext that failed: a reconnect or a refresh that
+        # landed in between wrote a different one, which must survive this.
+        async with self._pool.acquire() as conn:
+            cleared = await conn.fetchval(
+                """
+                UPDATE agent_github_accounts SET
+                    access_token_ciphertext = NULL,
+                    access_expires_at = NULL,
+                    refresh_token_ciphertext = NULL,
+                    refresh_expires_at = NULL,
+                    refresh_generation = refresh_generation + 1,
+                    refresh_lease_expires_at = NULL,
+                    updated_at = NOW()
+                WHERE user_id = $1 AND access_token_ciphertext = $2
+                RETURNING user_id
+                """,
+                user_id,
+                access_token_ciphertext,
+            )
+        return cleared is not None
+
+    async def disconnect_github_account(self, *, user_id: str) -> None:
+        """Forget the GitHub account, its tokens, and every installation grant."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute("DELETE FROM agent_repo_grants WHERE user_id = $1", user_id)
+            await conn.execute("DELETE FROM agent_github_accounts WHERE user_id = $1", user_id)
 
     async def create_oauth_state(
         self,

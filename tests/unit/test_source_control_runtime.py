@@ -491,6 +491,7 @@ def test_only_the_routes_that_describe_the_state_tolerate_an_unloaded_app() -> N
 
     assert lenient == [
         "DELETE /v1/agent/github/connect/{installation_id}",
+        "DELETE /v1/agent/integrations/github",
         "DELETE /v1/agent/integrations/github/connections/{installation_id}",
         "DELETE /v1/agent/integrations/gitlab/connections/{connection_id}",
         "GET /v1/agent/config",
