@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { Suspense, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
@@ -17,6 +17,8 @@ import { conversationLink } from './filters';
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../AdminNavigation';
+import { TurnResults } from '../runs/AllRuns';
+import { StepResults } from '../runs/StepResults';
 import { presetKey } from '../usage/present';
 import {
   accessDenied,
@@ -67,6 +69,33 @@ function windowFilters(
   return windowOfLength(days * 86_400_000, keep, now);
 }
 
+/**
+ * The levels the Sessions tab lists, one selection at a time.
+ *
+ * A session is made of turns, and a turn of steps (its model requests), so
+ * each level is the same selection read at a finer grain.
+ */
+const LEVELS = [
+  {
+    key: 'sessions',
+    label: 'Sessions',
+    description: 'Sessions with turns created in the selected window, newest matching turn first.',
+  },
+  {
+    key: 'turns',
+    label: 'Turns',
+    description: 'Turns created in the selected window from every session, newest first.',
+  },
+  {
+    key: 'steps',
+    label: 'Steps',
+    description:
+      'Model requests of the turns created in the selected window, newest first, read a few turns at a time.',
+  },
+] as const;
+
+type Level = (typeof LEVELS)[number]['key'];
+
 export default function AdminConversationsPage() {
   const { state } = useAuth();
   if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) return <AdminRequired />;
@@ -77,10 +106,18 @@ export default function AdminConversationsPage() {
   );
 }
 
-/** Read the linked filters once, keyed by the query so a new link remounts. */
+/**
+ * Read the linked filters once, keyed by the query so a new link remounts.
+ *
+ * `level=turns` or `level=steps` opens that level. It chooses what is listed
+ * rather than which turns match, so it is taken off before the filters are read.
+ */
 function LinkedConversationsList() {
-  const query = useSearchParams().toString();
-  return <ConversationsList key={query} initialQuery={query} />;
+  const params = new URLSearchParams(useSearchParams().toString());
+  const level: Level = LEVELS.find((item) => item.key === params.get('level'))?.key ?? 'sessions';
+  params.delete('level');
+  const query = params.toString();
+  return <ConversationsList key={`${level}:${query}`} initialQuery={query} initialLevel={level} />;
 }
 
 function ConversationsSkeleton() {
@@ -93,7 +130,13 @@ function ConversationsSkeleton() {
   );
 }
 
-function ConversationsList({ initialQuery }: { initialQuery: string }) {
+function ConversationsList({
+  initialQuery,
+  initialLevel,
+}: {
+  initialQuery: string;
+  initialLevel: Level;
+}) {
   // A link from the usage page carries an absolute window and the identities
   // of the group it came from. It replaces the seven-day default and is kept
   // for as long as the admin stays on this selection.
@@ -108,12 +151,13 @@ function ConversationsList({ initialQuery }: { initialQuery: string }) {
   // A linked window is absolute and stays exactly as linked; a window chosen
   // here re-anchors on Refresh so the list picks up work finished meanwhile.
   const [linkedWindow, setLinkedWindow] = useState(linked.linked);
-  const [page, setPage] = useState<AdminConversationsPage | null>(null);
+  // Sessions and turns are two readings of one selection: switching level
+  // keeps every filter, the window included.
+  const [level, setLevel] = useState<Level>(initialLevel);
   const [loading, setLoading] = useState(!linked.error);
-  const [moreLoading, setMoreLoading] = useState(false);
-  const [error, setError] = useState<string | null>(linked.error);
   const [denied, setDenied] = useState(false);
-  const moreRequest = useRef<AbortController | null>(null);
+  const onDenied = useCallback(() => setDenied(true), []);
+  const active = LEVELS.find((item) => item.key === level) ?? LEVELS[0];
   // The identities a usage link arrived with. No control on this page shows
   // them, so they are stated here.
   const selection = [
@@ -126,66 +170,6 @@ function ConversationsList({ initialQuery }: { initialQuery: string }) {
     .filter(Boolean)
     .join(' · ');
 
-  useEffect(() => {
-    if (linked.error) {
-      // A link this list cannot use is reported as it is. Requesting with a
-      // substituted window would return runs the link never named.
-      setLoading(false);
-      return;
-    }
-    const controller = new AbortController();
-    moreRequest.current?.abort();
-    setMoreLoading(false);
-    setPage(null);
-    setLoading(true);
-    setError(null);
-    getAdminConversations(filters, controller.signal)
-      .then((next) => {
-        if (!controller.signal.aborted) setPage(next);
-      })
-      .catch((e: unknown) => {
-        if (!controller.signal.aborted) {
-          if (accessDenied(e)) setDenied(true);
-          else setError(getErrorMessage(e));
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => {
-      controller.abort();
-      moreRequest.current?.abort();
-    };
-  }, [filters, linked.error]);
-
-  async function loadMore() {
-    if (!page?.next_cursor || moreLoading) return;
-    moreRequest.current?.abort();
-    const controller = new AbortController();
-    moreRequest.current = controller;
-    setMoreLoading(true);
-    setError(null);
-    try {
-      const next = await getAdminConversations(
-        { ...filters, since: page.since, until: page.until, cursor: page.next_cursor },
-        controller.signal,
-      );
-      if (!controller.signal.aborted)
-        setPage((previous) =>
-          previous
-            ? { ...next, conversations: [...previous.conversations, ...next.conversations] }
-            : next,
-        );
-    } catch (e) {
-      if (!controller.signal.aborted) {
-        if (accessDenied(e)) setDenied(true);
-        else setError(getErrorMessage(e));
-      }
-    } finally {
-      if (!controller.signal.aborted) setMoreLoading(false);
-    }
-  }
-
   if (denied) return <AdminRequired />;
   return (
     <div className="min-w-0 flex-1">
@@ -196,18 +180,31 @@ function ConversationsList({ initialQuery }: { initialQuery: string }) {
         <AdminNavigation current="sessions" />
 
         <div className="mt-8">
-          <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-50">Sessions</h2>
+          <h2 className="sr-only">{active.label}</h2>
+          <div role="group" aria-label="Level" className="flex items-baseline gap-5">
+            {LEVELS.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                aria-pressed={item.key === level}
+                onClick={() => setLevel(item.key)}
+                className={`text-xl font-semibold transition-colors ${
+                  item.key === level
+                    ? 'text-gray-900 dark:text-gray-50'
+                    : 'text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-200'
+                }`}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Sessions with turns created in the selected window, newest matching turn first.
+            {active.description}
             {linked.linked && ' Filters from the linked selection are preserved.'}
           </p>
         </div>
 
-        <div
-          role="group"
-          aria-label="Session filters"
-          className="mt-5 flex flex-wrap items-center gap-2"
-        >
+        <div role="group" aria-label="Filters" className="mt-5 flex flex-wrap items-center gap-2">
           <label className="w-40 shrink-0">
             <span className="sr-only">Turn created</span>
             <select
@@ -272,56 +269,143 @@ function ConversationsList({ initialQuery }: { initialQuery: string }) {
           <p className="mt-3 break-words text-xs text-gray-500 dark:text-gray-400">{selection}</p>
         )}
 
-        {error && (
-          <ErrorNotice>
-            {error}
-            {/* A broken link has nothing to retry: the URL has to change. */}
-            {!page && !linked.error && (
-              <button
-                type="button"
-                className="ml-3 underline"
-                onClick={() => setFilters({ ...filters })}
-              >
-                Retry
-              </button>
-            )}
-          </ErrorNotice>
-        )}
-
-        {linked.error ? null : loading ? (
-          <p role="status" className="mt-8 text-sm text-gray-500 dark:text-gray-400">
-            Loading sessions…
-          </p>
+        {linked.error ? (
+          // A broken link has nothing to retry: the URL has to change.
+          <ErrorNotice>{linked.error}</ErrorNotice>
+        ) : level === 'sessions' ? (
+          <SessionResults filters={filters} onLoading={setLoading} onDenied={onDenied} />
+        ) : level === 'turns' ? (
+          <TurnResults filters={filters} onLoading={setLoading} onDenied={onDenied} />
         ) : (
-          page && (
-            <>
-              <p className="mt-6 text-xs text-gray-500 dark:text-gray-400">
-                Turns created {dateTime(page.since)} – {dateTime(page.until)}
-              </p>
-              {page.conversations.length === 0 ? (
-                <p className="mt-8 text-sm text-gray-500 dark:text-gray-400">
-                  No sessions match these filters.
-                </p>
-              ) : (
-                <ConversationsTable page={page} filters={filters} />
-              )}
-              {page.next_cursor && (
-                <div className="mt-5 flex justify-center">
-                  <button
-                    type="button"
-                    className={BUTTON}
-                    disabled={moreLoading}
-                    onClick={() => void loadMore()}
-                  >
-                    {moreLoading ? 'Loading…' : 'Load more sessions'}
-                  </button>
-                </div>
-              )}
-            </>
-          )
+          <StepResults filters={filters} onLoading={setLoading} onDenied={onDenied} />
         )}
       </section>
     </div>
+  );
+}
+
+/** The session level: each session with a matching turn, newest matching turn first. */
+function SessionResults({
+  filters,
+  onLoading,
+  onDenied,
+}: {
+  filters: AdminRunFilters;
+  onLoading: (loading: boolean) => void;
+  onDenied: () => void;
+}) {
+  const [page, setPage] = useState<AdminConversationsPage | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [moreLoading, setMoreLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [revision, setRevision] = useState(0);
+  const moreRequest = useRef<AbortController | null>(null);
+
+  useEffect(() => onLoading(loading), [loading, onLoading]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    moreRequest.current?.abort();
+    setMoreLoading(false);
+    setPage(null);
+    setLoading(true);
+    setError(null);
+    getAdminConversations(filters, controller.signal)
+      .then((next) => {
+        if (!controller.signal.aborted) setPage(next);
+      })
+      .catch((e: unknown) => {
+        if (!controller.signal.aborted) {
+          if (accessDenied(e)) onDenied();
+          else setError(getErrorMessage(e));
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => {
+      controller.abort();
+      moreRequest.current?.abort();
+    };
+  }, [filters, revision, onDenied]);
+
+  async function loadMore() {
+    if (!page?.next_cursor || moreLoading) return;
+    moreRequest.current?.abort();
+    const controller = new AbortController();
+    moreRequest.current = controller;
+    setMoreLoading(true);
+    setError(null);
+    try {
+      const next = await getAdminConversations(
+        { ...filters, since: page.since, until: page.until, cursor: page.next_cursor },
+        controller.signal,
+      );
+      if (!controller.signal.aborted)
+        setPage((previous) =>
+          previous
+            ? { ...next, conversations: [...previous.conversations, ...next.conversations] }
+            : next,
+        );
+    } catch (e) {
+      if (!controller.signal.aborted) {
+        if (accessDenied(e)) onDenied();
+        else setError(getErrorMessage(e));
+      }
+    } finally {
+      if (!controller.signal.aborted) setMoreLoading(false);
+    }
+  }
+
+  return (
+    <>
+      {error && (
+        <ErrorNotice>
+          {error}
+          {!page && (
+            <button
+              type="button"
+              className="ml-3 underline"
+              onClick={() => setRevision((value) => value + 1)}
+            >
+              Retry
+            </button>
+          )}
+        </ErrorNotice>
+      )}
+      {loading ? (
+        <p role="status" className="mt-8 text-sm text-gray-500 dark:text-gray-400">
+          Loading sessions…
+        </p>
+      ) : (
+        page && (
+          <>
+            <p className="mt-6 text-xs text-gray-500 dark:text-gray-400">
+              Turns created {dateTime(page.since)} – {dateTime(page.until)}
+            </p>
+            {page.conversations.length === 0 ? (
+              <p className="mt-8 text-sm text-gray-500 dark:text-gray-400">
+                No sessions match these filters.
+              </p>
+            ) : (
+              <ConversationsTable page={page} filters={filters} />
+            )}
+            {page.next_cursor && (
+              <div className="mt-5 flex justify-center">
+                <button
+                  type="button"
+                  className={BUTTON}
+                  disabled={moreLoading}
+                  onClick={() => void loadMore()}
+                >
+                  {moreLoading ? 'Loading…' : 'Load more sessions'}
+                </button>
+              </div>
+            )}
+          </>
+        )
+      )}
+    </>
   );
 }
 

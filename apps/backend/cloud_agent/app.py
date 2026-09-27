@@ -40,6 +40,7 @@ logger = get_logger(__name__)
 #: other users' runs, so no intermediary may store one.
 ADMIN_READ_PREFIXES = (
     "/admin/agent/runs",
+    "/admin/agent/steps",
     "/admin/agent/measurements",
     "/admin/agent/measurement-writer",
     "/admin/agent/profiling-runs",
@@ -107,6 +108,7 @@ def create_app() -> FastAPI:
         admin_measurements,
         admin_profiling_control,
         admin_runs,
+        admin_steps,
         admin_usage,
         host_profiling,
         hosts,
@@ -153,6 +155,9 @@ def create_app() -> FastAPI:
     # for the same reason it is a separate page load: the default run detail
     # must not acquire a gateway I/O path.
     app.include_router(admin_llm_requests.router)
+    # Steps read the same gateway detail across a page of turns, so they sit
+    # beside it rather than in the runs list's module.
+    app.include_router(admin_steps.router)
     install_admin_no_store(app)
     # The gateway alert relay's way in: machine-to-machine on-call jobs, pinned
     # to one configured service account. Its own module because its caller is a

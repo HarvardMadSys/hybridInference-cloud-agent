@@ -15,10 +15,33 @@ API keep `thread`, `job` and `conversations`.
 
 `/admin/sessions` is the canonical list. The previous `/admin/conversations`
 and `/admin/runs` entries render the same pages, preserving existing bookmarks
-and usage links. The UI has no separate cross-session run table; a turn is
-reached through its session. Existing `/admin/runs/{job_id}` links and APIs
-continue to work; a turn detail links back to its session with the originating
-selection.
+and usage links. The page switches between three levels of one selection:
+**Sessions** (one row per session with a matching turn), **Turns** (one row per
+matching turn, from every session, newest first) and **Steps** (one row per
+model request of those turns, newest first). All three share the same window,
+result and linked filters, so switching changes what a row stands for, not
+which turns match. `?level=turns` or `?level=steps` opens that level, and the
+former `/admin/runs/all` table redirects to Turns. Existing
+`/admin/runs/{job_id}` links and APIs continue to work; a turn detail links
+back to its session with the originating selection.
+
+## Steps
+
+The gateway lists requests one grant window at a time; there is no read
+across turns. `GET /admin/agent/steps` therefore reads a page of turns with
+the runs list's own filters, order and cursor (five turns by default, at most
+ten), then each turn's stored references, and asks the gateway for up to 50
+requests per run, four reads in flight at once. The rows are merged newest
+first; the order is exact within a page, and a long turn on a later page can
+hold requests newer than a page's last row.
+
+Every turn read is listed with its coverage. `partial`: a run had more than 50
+requests, or the turn more runs than a page reads; the turn's own page lists
+everything. `unavailable`: a run's requests could not be read, with the stored
+reference's reason or `gateway_unavailable`. A run that never started is
+skipped, as on the turn page. A page above the 256 KiB admin response ceiling
+is refused whole rather than trimmed. Like the per-turn request page, the read
+writes nothing and renews no grant.
 
 ## Selection and pagination
 

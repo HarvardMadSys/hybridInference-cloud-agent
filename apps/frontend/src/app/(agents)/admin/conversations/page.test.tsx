@@ -10,6 +10,7 @@ import type {
   AdminConversationsPage,
 } from '@/lib/api/adminConversations';
 import { getAdminConversation, getAdminConversations } from '@/lib/api/adminConversations';
+import { getAdminRuns } from '@/lib/api/adminRuns';
 import { APIError } from '@/lib/utils/errors';
 
 const context = vi.hoisted(() => ({ admin: true, user: 'admin', query: '', threadId: 'thread-1' }));
@@ -34,6 +35,10 @@ vi.mock('@/lib/api/adminConversations', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api/adminConversations')>()),
   getAdminConversations: vi.fn(),
   getAdminConversation: vi.fn(),
+}));
+vi.mock('@/lib/api/adminRuns', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/adminRuns')>()),
+  getAdminRuns: vi.fn(),
 }));
 
 import List from './page';
@@ -106,6 +111,7 @@ beforeEach(() => {
   Object.assign(context, { admin: true, user: 'admin', query: '', threadId: 'thread-1' });
   vi.mocked(getAdminConversations).mockResolvedValue(page());
   vi.mocked(getAdminConversation).mockResolvedValue(detail());
+  vi.mocked(getAdminRuns).mockResolvedValue({ runs: [], next_cursor: null, since, until });
 });
 afterEach(cleanup);
 
@@ -257,6 +263,52 @@ describe('session navigation', () => {
     expect(vi.mocked(getAdminConversations).mock.lastCall![0].model).toBe('new-model');
     await act(async () => pending.resolve(page([conversation({ title: 'Stale' })])));
     expect(screen.queryByText('Stale')).not.toBeInTheDocument();
+  });
+});
+
+describe('level switch', () => {
+  it('switches between sessions and turns without losing the selection', async () => {
+    render(<List />);
+    await screen.findByRole('link', { name: 'Fix login' });
+    expect(screen.getByRole('button', { name: 'Sessions', pressed: true })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
+    fireEvent.change(screen.getByLabelText('Turn created'), { target: { value: '30' } });
+    await waitFor(() => expect(getAdminConversations).toHaveBeenCalledTimes(3));
+    const selection = vi.mocked(getAdminConversations).mock.lastCall![0];
+    expect(getAdminRuns).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Turns' }));
+    expect(screen.getByRole('button', { name: 'Turns', pressed: true })).toBeInTheDocument();
+    expect(
+      screen.getByText('Turns created in the selected window from every session, newest first.'),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(1));
+    // The same turns, read one per row: the window and the result carry over.
+    expect(vi.mocked(getAdminRuns).mock.lastCall![0]).toEqual(selection);
+    expect(screen.getByLabelText('Turn result')).toHaveValue('failed');
+    expect(screen.getByLabelText('Turn created')).toHaveValue('30');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
+    await waitFor(() => expect(getAdminConversations).toHaveBeenCalledTimes(4));
+    expect(vi.mocked(getAdminConversations).mock.lastCall![0]).toEqual(selection);
+  });
+
+  it('opens the turn level from a link and keeps its filters', async () => {
+    context.query = new URLSearchParams({
+      level: 'turns',
+      since,
+      until,
+      model: 'model-a',
+    }).toString();
+    render(<List />);
+    await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('button', { name: 'Turns', pressed: true })).toBeInTheDocument();
+    expect(vi.mocked(getAdminRuns).mock.lastCall![0]).toMatchObject({
+      since,
+      until,
+      model: 'model-a',
+    });
+    expect(getAdminConversations).not.toHaveBeenCalled();
   });
 });
 

@@ -15,16 +15,34 @@
 //   rendered through this field.
 //
 // Separate from the components because Next type-checks a page's exports, and
-// tested directly rather than only through the rendered panel.
+// tested directly rather than only through the rendered table.
 
 import type {
   ResourceMetricBriefApi,
   ResourceMetricStatus,
+  RunResourceSummaryApi,
   TurnMemoryResourcesApi,
   TurnResourceReasonCode,
+  TurnResourceState,
   TurnResourceSummaryApi,
   TurnStorageIoResourcesApi,
 } from '@/lib/api/adminRuns';
+
+//: The display state of a turn's resource accounting. `unavailable` is a lack
+//: of measurement, which is a different statement from a measured zero.
+export type ResourceCompleteness =
+  | 'complete'
+  | 'partial'
+  | 'collecting'
+  | 'interrupted'
+  | 'unavailable';
+
+//: A value shown in the compact Runs list. `text` is the fix for "null must not
+//: read as zero"; `title` carries the sentences that do not fit in a cell.
+export interface ResourceCell {
+  text: string;
+  title?: string;
+}
 
 //: Measurement context for the detail panel's concise rows.
 export interface ResourceReading {
@@ -43,7 +61,8 @@ export interface TurnSummaryRow {
   detail: string | null;
 }
 
-//: Said for a metric with no number.
+//: Said when a run has no summary at all, and for a metric with no number.
+export const NOT_COLLECTED = 'Not collected';
 export const UNAVAILABLE = 'Unavailable';
 
 /**
@@ -105,6 +124,31 @@ export function reasonSentences(codes: readonly TurnResourceReasonCode[], max = 
   }
   if (sentences.length <= max) return sentences;
   return [...sentences.slice(0, max), `And ${sentences.length - max} more reasons.`];
+}
+
+/**
+ * The legible form of a CPU time, always in CPU-seconds.
+ *
+ * CPU time is summed scheduler time: a thread that ran on two cores for ten
+ * seconds contributes about twenty, so a value above the turn's wall-clock
+ * duration is correct and is never clamped. Sub-second values keep enough
+ * places to stay distinguishable from zero, because a small non-zero CPU time
+ * is a different statement from no measurement at all.
+ */
+export function formatCpuSeconds(usec: number | null | undefined): string | null {
+  if (typeof usec !== 'number' || !Number.isFinite(usec) || usec < 0) return null;
+  const seconds = usec / 1_000_000;
+  if (seconds >= 100) return `${Math.round(seconds)} CPU-s`;
+  // Under 100 the tenth still carries meaning — "18.2 CPU-s" is a different
+  // statement from "18 CPU-s" — and a whole number keeps no trailing zero.
+  if (seconds >= 1) return `${trim(seconds)} CPU-s`;
+  // Below one second the value must stay distinguishable from a true zero: a
+  // measured millisecond of CPU is not "0 CPU-s", and rounding it into one
+  // would render a measurement and an absence identically. Three significant
+  // places are kept instead.
+  if (seconds === 0) return '0 CPU-s';
+  const places = Math.min(9, Math.max(3, 2 - Math.floor(Math.log10(seconds))));
+  return `${seconds.toFixed(places)} CPU-s`;
 }
 
 /** Round as the reader will see it, so "1023.6 MiB" climbs to GiB rather than printing as 1024. */
@@ -176,11 +220,124 @@ function withLowerBound(value: string, partial: boolean): string {
   return partial ? `\u2265 ${value}` : value;
 }
 
+/** The suffix a still-running or interrupted window puts on every value it has. */
+function windowNote(state: TurnResourceState | 'interrupted'): string[] {
+  if (state === 'collecting') return ['still collecting'];
+  if (state === 'interrupted') return ['collection was interrupted'];
+  return [];
+}
+
+/**
+ * The compact Runs-list CPU cell.
+ *
+ * A value above the run's duration is deliberately not clamped and not
+ * explained away: it is the sum of the member's own scheduler time across
+ * every thread it ran, which is exactly what an additive CPU bill is.
+ */
+export function cpuCell(
+  usec: number | null,
+  metric: ResourceMetricBriefApi,
+  state: TurnResourceState | 'interrupted',
+): ResourceCell {
+  const title = reasonSentences(metric.reason_codes).join(' ') || undefined;
+  const shown = usec === null || metric.status === 'unavailable' ? null : formatCpuSeconds(usec);
+  if (shown === null) return { text: UNAVAILABLE, title };
+  return {
+    text: [withLowerBound(shown, isLowerBound(metric)), ...windowNote(state)].join(' \u00b7 '),
+    title,
+  };
+}
+
+/**
+ * The compact Runs-list memory cell.
+ *
+ * "sampled" is part of the value, not a footnote: the peak comes from a census
+ * that cannot see between ticks, so it is never presented as a physical total
+ * or as a simultaneous platform peak. A partial peak adds "observed" and
+ * deliberately not ">=".
+ */
+export function memoryCell(
+  bytes: number | null,
+  metric: ResourceMetricBriefApi,
+  state: TurnResourceState | 'interrupted',
+): ResourceCell {
+  const title = reasonSentences(metric.reason_codes).join(' ') || undefined;
+  const shown = bytes === null || metric.status === 'unavailable' ? null : formatMemoryBytes(bytes);
+  if (shown === null) return { text: UNAVAILABLE, title };
+  const markers = isLowerBound(metric) ? ['observed'] : [];
+  return {
+    text: [shown, 'sampled', ...markers, ...windowNote(state)].join(' \u00b7 '),
+    title,
+  };
+}
+
+/** How much of the run the numbers cover, when the run has more than one execution. */
+export function attemptScope(measured = 0, total = 0): { covered: boolean; label: string } {
+  return {
+    covered: total > 1 && measured < total,
+    label: `${measured.toLocaleString()} of ${total.toLocaleString()} executions measured`,
+  };
+}
+
+/**
+ * Whether the numbers cover every execution of the run.
+ *
+ * A run whose summary covers three of five attempts must say so wherever it is
+ * shown; otherwise it reads as the run's total. A single-execution run says
+ * nothing, because there is no gap to report.
+ */
+export function attemptCoverageNote(measured = 0, total = 0): string | null {
+  const scope = attemptScope(measured, total);
+  return scope.covered ? `${scope.label}; this is not the run\u2019s total.` : null;
+}
+
+/**
+ * The state of a turn's resource accounting, from the server's own state.
+ *
+ * Independence is the point: an I/O metric that no sandbox can produce must
+ * not turn a complete CPU measurement into a partial one, and a complete CPU
+ * measurement must not promote an unmeasured one. So the metrics are not
+ * folded in here — `runStateLabel` decides what a finished window reads as.
+ */
+export function completenessOf(state: TurnResourceState | 'interrupted'): ResourceCompleteness {
+  if (state === 'collecting') return 'collecting';
+  if (state === 'interrupted') return 'interrupted';
+  return 'complete';
+}
+
 /** The word the detail panel shows for each metric status. */
 export function metricStatusLabel(status: ResourceMetricStatus): string {
   if (status === 'available') return 'complete';
   if (status === 'partial') return 'partial';
   return 'unavailable';
+}
+
+/**
+ * The coarse state word for the Runs list.
+ *
+ * `final` is downgraded to `partial` as soon as any one metric is short or
+ * missing: "Complete" is a claim about every metric, and it is never made from
+ * a finished turn alone.
+ */
+export function runStateLabel(summary: {
+  state: TurnResourceState | 'interrupted';
+  cpu: ResourceMetricBriefApi;
+  memory: ResourceMetricBriefApi;
+  storage_io: ResourceMetricBriefApi;
+}): ResourceCompleteness {
+  const state = completenessOf(summary.state);
+  if (state !== 'complete') return state;
+  const statuses = [summary.cpu.status, summary.memory.status, summary.storage_io.status];
+  return statuses.every((status) => status === 'available') ? 'complete' : 'partial';
+}
+
+/** The capitalized form of a completeness, for a table cell. */
+export function completenessLabel(completeness: ResourceCompleteness): string {
+  if (completeness === 'complete') return 'Complete';
+  if (completeness === 'partial') return 'Partial';
+  if (completeness === 'collecting') return 'Collecting';
+  if (completeness === 'interrupted') return 'Interrupted';
+  return NOT_COLLECTED;
 }
 
 /**
@@ -205,6 +362,77 @@ export function collectingSentence(observedThroughMs: number | null): string {
     return 'Collection is still running, so these numbers are a snapshot, not the turn\u2019s total.';
   }
   return `Collection is still running: data has reached ${reached}, and this is a snapshot, not the turn\u2019s total.`;
+}
+
+/**
+ * The Runs-list state cell, which also carries how far collection actually got.
+ *
+ * An interrupted or still-collecting run says so here, in the cell a reader
+ * scans, so a short prefix can never be read as the run's final total. The
+ * text is the coarse state alone; whether the window is over and whether its
+ * metrics agree are separate questions, and both are left to the cells beside
+ * it so a settled turn with an unsupported metric is not called complete.
+ */
+export function stateCell(summary: {
+  state: TurnResourceState | 'interrupted';
+  observed_through_ms: number | null;
+  attempts_measured?: number;
+  attempts_total?: number;
+}): ResourceCell {
+  const completeness = completenessOf(summary.state);
+  const titles: string[] = [];
+  if (completeness === 'interrupted') titles.push(interruptedSentence(summary.observed_through_ms));
+  else if (completeness === 'collecting') {
+    titles.push(collectingSentence(summary.observed_through_ms));
+  } else titles.push('Collection finished with the turn.');
+  const coverage = attemptCoverageNote(summary.attempts_measured, summary.attempts_total);
+  if (coverage) titles.push(coverage);
+  return { text: completenessLabel(completeness), title: titles.join(' ') };
+}
+
+/** The cell for a run whose attempts carry no summary at all. */
+export function notCollectedStateCell(attempts_measured = 0, attempts_total = 0): ResourceCell {
+  const coverage = attemptCoverageNote(attempts_measured, attempts_total);
+  return {
+    text: NOT_COLLECTED,
+    title: coverage
+      ? `No whole-turn measurement was recorded for this run. ${coverage}`
+      : 'No whole-turn measurement was recorded for this run.',
+  };
+}
+
+export interface TurnResourceCells {
+  completeness: ResourceCompleteness;
+  cpu: ResourceCell;
+  memory: ResourceCell;
+  state: ResourceCell;
+}
+
+/**
+ * The compact cells for one run, or the not-collected cell when it has none.
+ *
+ * `title` on each cell carries the sentences that do not fit in a column, so a
+ * reader who wants the caveat does not have to leave the list to find it. The
+ * cells are derived only from the summary they are given, so a cell can never
+ * carry a previous row's value.
+ */
+export function runResourceCells(
+  summary: RunResourceSummaryApi | null | undefined,
+): TurnResourceCells {
+  if (!summary) {
+    return {
+      completeness: 'unavailable',
+      cpu: { text: NOT_COLLECTED },
+      memory: { text: NOT_COLLECTED },
+      state: notCollectedStateCell(),
+    };
+  }
+  return {
+    completeness: runStateLabel(summary),
+    cpu: cpuCell(summary.cpu_usec, summary.cpu, summary.state),
+    memory: memoryCell(summary.memory_peak_bytes, summary.memory, summary.state),
+    state: stateCell(summary),
+  };
 }
 
 /**
