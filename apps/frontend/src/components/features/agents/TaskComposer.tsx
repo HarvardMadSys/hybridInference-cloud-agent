@@ -109,7 +109,10 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     setRuntime((current) =>
       current && cfg.runtimes.includes(current) ? current : (cfg.runtimes[0] ?? ''),
     );
-    setModel((current) => (current && modelIds.includes(current) ? current : (modelIds[0] ?? '')));
+    const defaultModel = modelIds.includes('deepseek-v4-flash')
+      ? 'deepseek-v4-flash'
+      : (modelIds[0] ?? '');
+    setModel((current) => (current && modelIds.includes(current) ? current : defaultModel));
   }, []);
 
   // The one place a repository is chosen for the owner: they opened the page
