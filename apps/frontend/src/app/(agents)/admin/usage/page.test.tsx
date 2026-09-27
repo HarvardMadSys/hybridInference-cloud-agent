@@ -244,12 +244,10 @@ describe('admin usage page', () => {
     render(<AdminUsagePageComponent />);
     await screen.findAllByText('Recorded cost');
     const row = screen.getByText('owner-one').closest('tr')!;
-    const href = within(row)
-      .getByRole('link', { name: 'View conversations' })
-      .getAttribute('href')!;
+    const href = within(row).getByRole('link', { name: 'View sessions' }).getAttribute('href')!;
     const params = new URLSearchParams(href.slice(href.indexOf('?') + 1));
     const filters = vi.mocked(getAdminUsage).mock.calls[0][0];
-    expect(href.startsWith('/admin/conversations?')).toBe(true);
+    expect(href.startsWith('/admin/sessions?')).toBe(true);
     expect(params.get('since')).toBe(filters.since);
     expect(params.get('until')).toBe(filters.until);
     expect(params.get('user_id')).toBe('owner-one');
@@ -260,9 +258,7 @@ describe('admin usage page', () => {
     await screen.findAllByText('Recorded cost');
     fireEvent.click(screen.getByRole('button', { name: 'Created date' }));
     const row = screen.getByText('Sep 3, 2026').closest('tr')!;
-    const href = within(row)
-      .getByRole('link', { name: 'View conversations' })
-      .getAttribute('href')!;
+    const href = within(row).getByRole('link', { name: 'View sessions' }).getAttribute('href')!;
     const params = new URLSearchParams(href.slice(href.indexOf('?') + 1));
     // The day replaces the window with that day's intersection, and the other
     // applied filters still travel with it.
@@ -275,9 +271,7 @@ describe('admin usage page', () => {
     await screen.findAllByText('Recorded cost');
     fireEvent.click(screen.getByRole('button', { name: 'Configured models' }));
     const unknown = screen.getByText('Unknown configuration').closest('tr')!;
-    expect(
-      within(unknown).queryByRole('link', { name: 'View conversations' }),
-    ).not.toBeInTheDocument();
+    expect(within(unknown).queryByRole('link', { name: 'View sessions' })).not.toBeInTheDocument();
     expect(within(unknown).getByText('Cannot be filtered exactly')).toBeInTheDocument();
     // The remainder row is not a model anyone can filter by, so it carries no
     // link either; its label names how many groups it folds together.
@@ -286,7 +280,7 @@ describe('admin usage page', () => {
     expect(remainder.textContent).toContain('Other');
     expect(remainder.textContent).toContain('20 groups');
     expect(
-      within(remainder).queryByRole('link', { name: 'View conversations' }),
+      within(remainder).queryByRole('link', { name: 'View sessions' }),
     ).not.toBeInTheDocument();
   });
 
@@ -383,7 +377,7 @@ describe('admin usage page', () => {
     await waitFor(() => expect(getAdminUsage).toHaveBeenCalledTimes(2));
 
     expect(screen.queryByText('3 of 4 runs have a usage snapshot')).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'View conversations' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'View sessions' })).not.toBeInTheDocument();
     resolveSecond(usage({ summary: aggregate({ run_count: 2, runs_with_snapshot: 2 }) }));
     await screen.findByText('2 of 2 runs have a usage snapshot');
   });

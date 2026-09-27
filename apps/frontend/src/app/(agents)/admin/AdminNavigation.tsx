@@ -3,9 +3,9 @@ import Link from 'next/link';
 export function AdminNavigation({
   current,
 }: {
-  current: 'servers' | 'runs' | 'conversations' | 'usage' | 'measurements';
+  current: 'servers' | 'runs' | 'sessions' | 'usage' | 'measurements';
 }) {
-  const section = current === 'runs' ? 'conversations' : current;
+  const section = current === 'runs' ? 'sessions' : current;
   return (
     <nav
       aria-label="Admin sections"
@@ -13,7 +13,7 @@ export function AdminNavigation({
     >
       {[
         { key: 'servers', label: 'Servers', href: '/admin/hosts' },
-        { key: 'conversations', label: 'Conversations', href: '/admin/conversations' },
+        { key: 'sessions', label: 'Sessions', href: '/admin/sessions' },
         { key: 'usage', label: 'Usage', href: '/admin/usage' },
         { key: 'measurements', label: 'Measurements', href: '/admin/measurements' },
       ].map((item) => (

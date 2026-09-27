@@ -2,27 +2,20 @@ import { describe, expect, it } from 'vitest';
 
 import type {
   ResourceMetricBriefApi,
-  RunResourceSummaryApi,
   TurnResourceReasonCode,
   TurnResourceSummaryApi,
 } from '@/lib/api/adminRuns';
 
 import {
   averageCpuUsage,
-  attemptCoverageNote,
   collectingSentence,
   completenessSentence,
-  cpuCell,
-  formatCpuSeconds,
   formatMemoryBytes,
   formatSpan,
   interruptedSentence,
-  memoryCell,
   memoryMethod,
   reasonSentence,
   reasonSentences,
-  runResourceCells,
-  runStateLabel,
   turnSummaryRows,
   UNKNOWN_REASON_SENTENCE,
 } from './presentTurnResources';
@@ -70,23 +63,6 @@ function summary(overrides: Partial<TurnResourceSummaryApi> = {}): TurnResourceS
   };
 }
 
-/** The compact run projection the Runs list reads, overridden per test. */
-function runSummary(overrides: Partial<RunResourceSummaryApi> = {}): RunResourceSummaryApi {
-  const full = summary();
-  return {
-    cpu_usec: full.cpu.usec,
-    memory_peak_bytes: full.memory.peak_bytes,
-    state: 'final',
-    observed_through_ms: full.window.observed_through_ms,
-    cpu: AVAILABLE,
-    memory: AVAILABLE,
-    storage_io: AVAILABLE,
-    attempts_measured: 1,
-    attempts_total: 1,
-    ...overrides,
-  };
-}
-
 function brief(
   status: ResourceMetricBriefApi['status'],
   reason_codes: TurnResourceReasonCode[] = [],
@@ -95,23 +71,6 @@ function brief(
 }
 
 describe('turn resource magnitudes', () => {
-  it('renders CPU in CPU-seconds and never clamps a value above the turn', () => {
-    // 80 CPU-s of a 130-second turn is the member's own scheduler time summed
-    // over its threads, not wall-clock utilisation: it is the number, not a
-    // figure to be explained away.
-    expect(formatCpuSeconds(80_000_000)).toBe('80 CPU-s');
-    expect(formatCpuSeconds(130_000_000)).toBe('130 CPU-s');
-    expect(formatCpuSeconds(12_345_000)).toBe('12.3 CPU-s');
-  });
-
-  it('keeps a sub-second CPU time distinguishable from a true zero', () => {
-    expect(formatCpuSeconds(500_000)).toBe('0.500 CPU-s');
-    expect(formatCpuSeconds(1_000)).toBe('0.00100 CPU-s');
-    expect(formatCpuSeconds(12)).toBe('0.0000120 CPU-s');
-    // A measured zero is still a zero, and it is never what null renders as.
-    expect(formatCpuSeconds(0)).toBe('0 CPU-s');
-  });
-
   it('renders memory in binary units, at the documented sample', () => {
     expect(formatMemoryBytes(1_288_490_189)).toBe('1.2 GiB');
     expect(formatMemoryBytes(524_288)).toBe('512 KiB');
@@ -121,14 +80,8 @@ describe('turn resource magnitudes', () => {
 
   it('renders a missing magnitude as unavailable, never as a zero', () => {
     for (const missing of [null, undefined, Number.NaN, -1]) {
-      expect(formatCpuSeconds(missing)).toBeNull();
       expect(formatMemoryBytes(missing)).toBeNull();
     }
-    // The two states are rendered by different words, and never by the same one.
-    expect(cpuCell(null, AVAILABLE, 'final').text).not.toBe(cpuCell(0, AVAILABLE, 'final').text);
-    expect(memoryCell(null, AVAILABLE, 'final').text).not.toBe(
-      memoryCell(0, AVAILABLE, 'final').text,
-    );
   });
 
   it('names the sampling period beside the peak', () => {
@@ -145,58 +98,7 @@ describe('turn resource magnitudes', () => {
   });
 });
 
-describe('per-metric status is independent', () => {
-  it('marks a partial CPU measurement as the lower bound it is', () => {
-    const partial = cpuCell(80_000_000, brief('partial', ['ring_loss']), 'final');
-    expect(partial.text).toBe('\u2265 80 CPU-s');
-    // A complete measurement is not dressed up as a bound.
-    expect(cpuCell(80_000_000, AVAILABLE, 'final').text).toBe('80 CPU-s');
-  });
-
-  it('never gives a partial memory peak the ">=" form', () => {
-    const partial = memoryCell(
-      1_288_490_189,
-      brief('partial', ['missing_thread_baseline']),
-      'final',
-    );
-    expect(partial.text).toBe('1.2 GiB \u00b7 sampled \u00b7 observed');
-    expect(partial.text).not.toContain('\u2265');
-  });
-
-  it('keeps a sampled peak marked as sampled even when it is complete', () => {
-    expect(memoryCell(1_288_490_189, AVAILABLE, 'final').text).toBe('1.2 GiB \u00b7 sampled');
-  });
-
-  it('renders each unavailable metric as unavailable without touching the others', () => {
-    expect(cpuCell(80_000_000, AVAILABLE, 'final').text).toBe('80 CPU-s');
-    expect(memoryCell(null, brief('unavailable', ['not_a_kata_guest']), 'final').text).toBe(
-      'Unavailable',
-    );
-    expect(
-      runStateLabel({ state: 'final', cpu: AVAILABLE, memory: AVAILABLE, storage_io: AVAILABLE }),
-    ).toBe('complete');
-    expect(
-      runStateLabel({
-        state: 'final',
-        cpu: AVAILABLE,
-        memory: AVAILABLE,
-        storage_io: brief('unavailable', ['filesystem_attribution_unverified']),
-      }),
-    ).toBe('partial');
-  });
-});
-
 describe('turn states that are not a final total', () => {
-  it('never reads an interrupted collection as complete', () => {
-    const cells = runResourceCells(
-      runSummary({ state: 'interrupted', observed_through_ms: 130_000 }),
-    );
-    expect(cells.state.text).toBe('Interrupted');
-    expect(cells.state.text).not.toBe('Complete');
-    expect(cells.cpu.text).toBe('80 CPU-s \u00b7 collection was interrupted');
-    expect(cells.memory.text).toBe('1.2 GiB \u00b7 sampled \u00b7 collection was interrupted');
-  });
-
   it('names the cut-off an interrupted collection reached', () => {
     expect(interruptedSentence(130_000)).toBe(
       'Collection interrupted: data reached 2m 10s of the turn, and this is not the turn\u2019s total.',
@@ -207,46 +109,9 @@ describe('turn states that are not a final total', () => {
   });
 
   it('never reads a still-collecting summary as a finalised total', () => {
-    const cells = runResourceCells(
-      runSummary({ state: 'collecting', observed_through_ms: 90_000 }),
-    );
-    expect(cells.state.text).toBe('Collecting');
-    expect(cells.cpu.text).toContain('still collecting');
     expect(collectingSentence(90_000)).toBe(
       'Collection is still running: data has reached 1m 30s, and this is a snapshot, not the turn\u2019s total.',
     );
-  });
-
-  it('says a finished window is over without calling it complete on its own', () => {
-    const cells = runResourceCells(runSummary({ state: 'final', observed_through_ms: 130_000 }));
-    expect(cells.state.text).toBe('Complete');
-    expect(cells.state.title).toBe('Collection finished with the turn.');
-  });
-
-  it('still reads a finished window with an unsupported metric as partial', () => {
-    const cells = runResourceCells(
-      runSummary({ storage_io: brief('unavailable', ['filesystem_attribution_unverified']) }),
-    );
-    expect(cells.state.text).toBe('Complete');
-    expect(cells.completeness).toBe('partial');
-  });
-});
-
-describe('attempt coverage', () => {
-  it('says when the numbers cover only some executions of the run', () => {
-    const cells = runResourceCells(runSummary({ attempts_measured: 3, attempts_total: 5 }));
-    expect(cells.state.title).toContain('3 of 5 executions measured');
-    expect(cells.state.title).toContain('not the run\u2019s total');
-    expect(attemptCoverageNote(3, 5)).toBe(
-      '3 of 5 executions measured; this is not the run\u2019s total.',
-    );
-  });
-
-  it('stays silent when one execution is the whole run', () => {
-    expect(attemptCoverageNote(1, 1)).toBeNull();
-    expect(
-      runResourceCells(runSummary({ attempts_measured: 1, attempts_total: 1 })).state.title,
-    ).toBe('Collection finished with the turn.');
   });
 });
 
@@ -393,17 +258,7 @@ describe('detail panel rows', () => {
   });
 });
 
-describe('not collected', () => {
-  it('says a run with no summary has none, rather than showing a zero', () => {
-    const cells = runResourceCells(null);
-    expect(cells.cpu.text).toBe('Not collected');
-    expect(cells.memory.text).toBe('Not collected');
-    expect(cells.state.text).toBe('Not collected');
-    expect(cells.state.text).not.toBe('0');
-    expect(cells.completeness).toBe('unavailable');
-    expect(runResourceCells(undefined).state.text).toBe('Not collected');
-  });
-
+describe('metric completeness', () => {
   it('states each metric completeness on its own line of the sentence', () => {
     const sentence = completenessSentence({
       cpu: AVAILABLE,

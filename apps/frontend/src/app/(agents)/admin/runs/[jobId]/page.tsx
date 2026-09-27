@@ -98,11 +98,11 @@ function RunDetails({ jobId }: { jobId: string }) {
             href={
               detail?.run.thread_id
                 ? conversationHref(detail.run.thread_id, linked.filters ?? {})
-                : '/admin/conversations'
+                : '/admin/sessions'
             }
             className="text-sm text-crimson hover:underline dark:text-crimson-light"
           >
-            {detail?.run.thread_id ? '← Back to conversation' : '← All conversations'}
+            {detail?.run.thread_id ? '← Back to session' : '← All sessions'}
           </Link>
           <button
             className={BUTTON}
@@ -143,7 +143,7 @@ function RunDetails({ jobId }: { jobId: string }) {
                 ['Sandbox profile', detail.run.execution_profile],
                 ['Created', dateTime(detail.run.created_at)],
                 ['Turn', String(detail.run.turn_no)],
-                ['Thread', detail.run.thread_id || 'Unavailable'],
+                ['Session', detail.run.thread_id || 'Unavailable'],
               ].map(([label, value]) => (
                 <div key={label} className="min-w-0">
                   <dt className="text-xs text-gray-500 dark:text-gray-400">{label}</dt>

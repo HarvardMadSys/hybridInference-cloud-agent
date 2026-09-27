@@ -164,7 +164,7 @@ export function runsHref(filters: AdminUsageFilters, row: RunsTarget): string | 
     if (!value || value.length > MAX_FILTER_LENGTH) return null;
     params.set(row.dimension, value);
   }
-  return `/admin/conversations?${params}`;
+  return `/admin/sessions?${params}`;
 }
 
 export interface UsageMetric {

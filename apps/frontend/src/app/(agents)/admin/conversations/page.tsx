@@ -114,6 +114,17 @@ function ConversationsList({ initialQuery }: { initialQuery: string }) {
   const [error, setError] = useState<string | null>(linked.error);
   const [denied, setDenied] = useState(false);
   const moreRequest = useRef<AbortController | null>(null);
+  // The identities a usage link arrived with. No control on this page shows
+  // them, so they are stated here.
+  const selection = [
+    filters.user_id && `User: ${filters.user_id}`,
+    filters.repo && `Repository: ${filters.repo}`,
+    filters.runtime && `Agent: ${filters.runtime}`,
+    filters.model && `Model: ${filters.model}`,
+    filters.host && `Host: ${filters.host}`,
+  ]
+    .filter(Boolean)
+    .join(' · ');
 
   useEffect(() => {
     if (linked.error) {
@@ -182,19 +193,19 @@ function ConversationsList({ initialQuery }: { initialQuery: string }) {
         <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
           Admin
         </h1>
-        <AdminNavigation current="conversations" />
+        <AdminNavigation current="sessions" />
 
         <div className="mt-8">
-          <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-50">Conversations</h2>
+          <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-50">Sessions</h2>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Conversations with turns created in the selected window, newest matching turn first.
+            Sessions with turns created in the selected window, newest matching turn first.
             {linked.linked && ' Filters from the linked selection are preserved.'}
           </p>
         </div>
 
         <div
           role="group"
-          aria-label="Conversation filters"
+          aria-label="Session filters"
           className="mt-5 flex flex-wrap items-center gap-2"
         >
           <label className="w-40 shrink-0">
@@ -257,25 +268,9 @@ function ConversationsList({ initialQuery }: { initialQuery: string }) {
           </button>
         </div>
 
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-gray-500 dark:text-gray-400">
-          <span>
-            {[
-              filters.user_id && `User: ${filters.user_id}`,
-              filters.repo && `Repository: ${filters.repo}`,
-              filters.runtime && `Agent: ${filters.runtime}`,
-              filters.model && `Model: ${filters.model}`,
-              filters.host && `Host: ${filters.host}`,
-            ]
-              .filter(Boolean)
-              .join(' · ')}
-          </span>
-          <Link
-            href="/admin/runs/all"
-            className="text-crimson hover:underline dark:text-crimson-light"
-          >
-            All execution records
-          </Link>
-        </div>
+        {selection && (
+          <p className="mt-3 break-words text-xs text-gray-500 dark:text-gray-400">{selection}</p>
+        )}
 
         {error && (
           <ErrorNotice>
@@ -295,7 +290,7 @@ function ConversationsList({ initialQuery }: { initialQuery: string }) {
 
         {linked.error ? null : loading ? (
           <p role="status" className="mt-8 text-sm text-gray-500 dark:text-gray-400">
-            Loading conversations…
+            Loading sessions…
           </p>
         ) : (
           page && (
@@ -305,7 +300,7 @@ function ConversationsList({ initialQuery }: { initialQuery: string }) {
               </p>
               {page.conversations.length === 0 ? (
                 <p className="mt-8 text-sm text-gray-500 dark:text-gray-400">
-                  No conversations match these filters.
+                  No sessions match these filters.
                 </p>
               ) : (
                 <ConversationsTable page={page} filters={filters} />
@@ -318,7 +313,7 @@ function ConversationsList({ initialQuery }: { initialQuery: string }) {
                     disabled={moreLoading}
                     onClick={() => void loadMore()}
                   >
-                    {moreLoading ? 'Loading…' : 'Load more conversations'}
+                    {moreLoading ? 'Loading…' : 'Load more sessions'}
                   </button>
                 </div>
               )}
@@ -342,18 +337,13 @@ function ConversationsTable({
       <table className="w-full min-w-[900px] text-left text-sm">
         <thead className="border-b border-gray-100 bg-gray-50/70 text-xs uppercase text-gray-500 dark:border-white/5 dark:bg-white/[0.02] dark:text-gray-400">
           <tr>
-            {[
-              'Conversation',
-              'User',
-              'State',
-              'Latest agent / model',
-              'Turns',
-              'Last activity',
-            ].map((label) => (
-              <th key={label} className="px-5 py-3 font-medium">
-                {label}
-              </th>
-            ))}
+            {['Session', 'User', 'State', 'Latest agent / model', 'Turns', 'Last activity'].map(
+              (label) => (
+                <th key={label} className="px-5 py-3 font-medium">
+                  {label}
+                </th>
+              ),
+            )}
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100 dark:divide-white/5">

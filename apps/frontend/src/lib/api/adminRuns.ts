@@ -67,13 +67,6 @@ export interface AdminRunFilters {
   limit?: number;
 }
 
-export interface AdminRunsPage {
-  runs: AdminRun[];
-  next_cursor: string | null;
-  since: string;
-  until: string;
-}
-
 export interface AdminAttempt {
   attempt_id: number;
   attempt_no: number;
@@ -169,13 +162,6 @@ function runPath(jobId: string): string {
 
 async function read<T>(path: string, signal?: AbortSignal): Promise<T> {
   return jsonOrThrow<T>(await fetchWithAuth(config.apiBase, path, { signal, cache: 'no-store' }));
-}
-
-export function getAdminRuns(
-  filters: AdminRunFilters,
-  signal?: AbortSignal,
-): Promise<AdminRunsPage> {
-  return read(`${RUNS}${query({ ...filters })}`, signal);
 }
 
 export function getAdminRun(jobId: string, signal?: AbortSignal): Promise<AdminRunDetail> {

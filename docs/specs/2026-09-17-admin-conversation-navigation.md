@@ -7,11 +7,18 @@ title, thread ID, owner, repository, current conversation state, latest agent
 and model, turn counts, and last activity. CPU, memory and accounting retain
 their existing execution scope in the turn detail.
 
-`/admin/conversations` is the canonical list. The previous `/admin/runs` entry
-also renders this list, preserving existing usage bookmarks. The secondary
-“All execution records” link opens the existing run table at `/admin/runs/all`.
-Existing `/admin/runs/{job_id}` links and APIs continue to work; a turn detail
-links back to its conversation with the originating selection.
+The admin UI names the levels **session → turn → step**: a session is a
+conversation (`agent_threads`), a turn is one user message and the agent work
+it starts (`agent_jobs`), and a step is one model request, listed as LLM
+requests on the turn page. Only the UI labels changed; the database and the
+API keep `thread`, `job` and `conversations`.
+
+`/admin/sessions` is the canonical list. The previous `/admin/conversations`
+and `/admin/runs` entries render the same pages, preserving existing bookmarks
+and usage links. The UI has no separate cross-session run table; a turn is
+reached through its session. Existing `/admin/runs/{job_id}` links and APIs
+continue to work; a turn detail links back to its session with the originating
+selection.
 
 ## Selection and pagination
 

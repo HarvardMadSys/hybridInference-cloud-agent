@@ -1,8 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { useSyncExternalStore } from 'react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentAccessApi } from '@/lib/api/session';
@@ -14,8 +13,6 @@ import type {
 import type {
   AdminRun,
   AdminRunDetail,
-  AdminRunsPage,
-  ResourceMetricBriefApi,
   RunResourceSummaryApi,
   TurnResourceSummaryApi,
 } from '@/lib/api/adminRuns';
@@ -23,24 +20,6 @@ import { APIError } from '@/lib/utils/errors';
 
 const auth = vi.hoisted(() => ({ access: undefined as AgentAccessApi | undefined, id: 'admin-1' }));
 const route = vi.hoisted(() => ({ jobId: 'job-1' }));
-// The applied window comes from the URL, so a usage deep link can open this
-// list on exactly the cohort it was aggregated from. The store notifies its
-// subscribers, which is how a real URL change re-renders the mounted page.
-const search = vi.hoisted(() => {
-  const listeners = new Set<() => void>();
-  return {
-    value: '',
-    subscribe(listener: () => void) {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    read: () => search.value,
-    set(next: string) {
-      search.value = next;
-      for (const listener of listeners) listener();
-    },
-  };
-});
 vi.mock('@/components/providers', () => ({
   useAuth: () => ({ state: { user: { id: auth.id, role: 'admin', agent_access: auth.access } } }),
 }));
@@ -52,10 +31,9 @@ vi.mock('@/components/providers/AuthProvider', async () => {
 });
 vi.mock('next/navigation', () => ({
   useParams: () => route,
-  useSearchParams: () => new URLSearchParams(useSyncExternalStore(search.subscribe, search.read)),
+  useSearchParams: () => new URLSearchParams(),
 }));
 vi.mock('@/lib/api/adminRuns', () => ({
-  getAdminRuns: vi.fn(),
   getAdminRun: vi.fn(),
   getAdminAttemptResources: vi.fn(),
   getAdminLlmRequestSources: vi.fn(),
@@ -75,21 +53,13 @@ vi.mock('@/lib/api/adminMeasurements', () => ({
 }));
 
 import {
-  getAdminRuns,
   getAdminRun,
   getAdminAttemptResources,
   getAdminLlmRequestSources,
   getAdminLlmRequests,
 } from '@/lib/api/adminRuns';
 import { listMeasurements } from '@/lib/api/adminMeasurements';
-import AdminRunsPageComponent from './AllRuns';
 import AdminRunPage from './[jobId]/page';
-import {
-  collectingSentence,
-  formatCpuSeconds,
-  formatMemoryBytes,
-  UNKNOWN_REASON_SENTENCE,
-} from './presentTurnResources';
 import { RunState } from './shared';
 
 function run(overrides: Partial<AdminRun> = {}): AdminRun {
@@ -111,10 +81,6 @@ function run(overrides: Partial<AdminRun> = {}): AdminRun {
     tool_calls: 1,
     ...overrides,
   };
-}
-
-function page(runs = [run()], next: string | null = null): AdminRunsPage {
-  return { runs, next_cursor: next, since: '2026-09-03T08:00:00Z', until: '2026-09-10T08:00:00Z' };
 }
 
 function usage(): AgentJobUsageApi {
@@ -288,7 +254,7 @@ function resources(override: Partial<AttemptResourcesApi> = {}): AgentAttemptTel
   };
 }
 
-/** The compact per-run resource projection the Runs list reads. */
+/** The compact per-run resource projection a run carries. */
 function runSummary(overrides: Partial<RunResourceSummaryApi> = {}): RunResourceSummaryApi {
   return {
     cpu_usec: 80_000_000,
@@ -353,25 +319,11 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-/**
- * The list row whose accessible name starts with the run's link text.
- *
- * Queried this way because a resource cell must be asserted inside the row it
- * belongs to: "80 CPU-s appears somewhere" would also pass for a stale cell.
- */
-function row(runId: string): HTMLElement {
-  return screen.getByRole('row', {
-    name: (name: string) => name.startsWith(runId),
-  });
-}
-
 beforeEach(() => {
   vi.clearAllMocks();
-  search.value = '';
   auth.access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
   auth.id = 'admin-1';
   route.jobId = 'job-1';
-  vi.mocked(getAdminRuns).mockResolvedValue(page());
   vi.mocked(getAdminRun).mockResolvedValue(detail());
   vi.mocked(getAdminAttemptResources).mockResolvedValue(resources());
   vi.mocked(getAdminLlmRequestSources).mockResolvedValue({
@@ -394,480 +346,11 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-describe('admin runs list', () => {
-  it('displays physical hosts and counts machines instead of runner deployments', async () => {
-    vi.mocked(getAdminRuns).mockResolvedValue(
-      page([run({ hosts: ['gpu-box', 'gpu-box-kata'], physical_hosts: ['gpu-box'] })]),
-    );
-    render(<AdminRunsPageComponent />);
-    await screen.findByRole('link', { name: 'job-1' });
-    expect(screen.getByTitle('gpu-box')).toBeInTheDocument();
-    expect(screen.queryByText('gpu-box-kata')).not.toBeInTheDocument();
-    expect(screen.queryByText('+1')).not.toBeInTheDocument();
-  });
-
-  it('keeps legacy runner names when the API has no physical host field', async () => {
-    render(<AdminRunsPageComponent />);
-    await screen.findByRole('link', { name: 'job-1' });
-    expect(screen.getByTitle('host-a')).toBeInTheDocument();
-  });
-
-  it('shows the number of additional physical machines', async () => {
-    vi.mocked(getAdminRuns).mockResolvedValue(
-      page([
-        run({ hosts: ['runner-a', 'runner-b', 'runner-c'], physical_hosts: ['box-a', 'box-b'] }),
-      ]),
-    );
-    render(<AdminRunsPageComponent />);
-    await screen.findByRole('link', { name: 'job-1' });
-    expect(screen.getByTitle('box-a, box-b')).toBeInTheDocument();
-    expect(screen.getByText('+1')).toBeInTheDocument();
-  });
-
-  it.each<AgentAccessApi | undefined>([
-    undefined,
-    { allowed: false, permissions: ['agent.admin'] },
-    { allowed: true, permissions: ['agent.use'] },
-  ])('does not fetch cross-user data without a current admin permission: %j', (access) => {
-    auth.access = access;
-    render(<AdminRunsPageComponent />);
-    expect(screen.getByText('Admin access required')).toBeInTheDocument();
-    expect(getAdminRuns).not.toHaveBeenCalled();
-  });
-
-  it('defaults to an anchored seven-day window and exposes working admin sections', async () => {
-    render(<AdminRunsPageComponent />);
-    expect(await screen.findByRole('link', { name: 'job-1' })).toHaveAttribute(
-      'href',
-      '/admin/runs/job-1',
-    );
-    expect(screen.queryByText('Inspect parser')).not.toBeInTheDocument();
-    expect(screen.queryByTitle('Inspect parser')).not.toBeInTheDocument();
-    const filters = vi.mocked(getAdminRuns).mock.calls[0][0];
-    expect(Date.parse(filters.until!) - Date.parse(filters.since!)).toBe(7 * 86_400_000);
-    expect(screen.getByLabelText('Created')).toHaveValue('7');
-    expect(screen.getByLabelText('Status')).toHaveValue('');
-    expect(
-      within(screen.getByLabelText('Status'))
-        .getAllByRole('option')
-        .map((option) => option.textContent),
-    ).toEqual(['All statuses', 'queued', 'running', 'succeeded', 'failed', 'cancelled']);
-    const controls = within(screen.getByRole('group', { name: 'Run filters' }));
-    expect(controls.getAllByRole('combobox')).toHaveLength(2);
-    expect(controls.getByRole('button', { name: 'Refresh' })).toBeInTheDocument();
-    expect(controls.queryByRole('textbox')).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole('button', { name: /More filters|Apply filters|Clear filters/ }),
-    ).not.toBeInTheDocument();
-    for (const label of ['User ID', 'Repository', 'Agent', 'Model', 'Host']) {
-      expect(screen.queryByLabelText(label)).not.toBeInTheDocument();
-    }
-    const nav = screen.getByRole('navigation', { name: 'Admin sections' });
-    expect(within(nav).getByRole('link', { name: 'Conversations' })).toHaveAttribute(
-      'aria-current',
-      'page',
-    );
-    expect(within(nav).getByRole('link', { name: 'Servers' })).toHaveAttribute(
-      'href',
-      '/admin/hosts',
-    );
-    expect(within(nav).getByRole('link', { name: 'Usage' })).toHaveAttribute(
-      'href',
-      '/admin/usage',
-    );
-  });
-
-  it('honours an absolute window and identities from a usage deep link', async () => {
-    search.value =
-      'since=2026-09-01T00:00:00.000Z&until=2026-09-08T00:00:00.000Z&model=model-a&user_id=owner-one';
-    vi.mocked(getAdminRuns).mockResolvedValue(page());
-    render(<AdminRunsPageComponent />);
-    await screen.findByRole('link', { name: 'job-1' });
-    // The linked window replaces the seven-day default, and the identities the
-    // usage row was grouped by travel with it.
-    expect(vi.mocked(getAdminRuns).mock.calls[0][0]).toMatchObject({
-      since: '2026-09-01T00:00:00.000Z',
-      until: '2026-09-08T00:00:00.000Z',
-      model: 'model-a',
-      user_id: 'owner-one',
-    });
-    // The control names the window that is applied: a week that ended a month
-    // ago is Custom, not "Last 7 days".
-    expect(screen.getByLabelText('Created')).toHaveValue('custom');
-    expect(screen.getByText(/linked usage group/)).toBeInTheDocument();
-  });
-
-  it('keeps a linked window on Refresh instead of drifting with the clock', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      vi.setSystemTime(new Date('2026-09-10T08:00:00Z'));
-      search.value = 'since=2026-09-01T00:00:00.000Z&until=2026-09-08T00:00:00.000Z';
-      vi.mocked(getAdminRuns).mockResolvedValue(page());
-      render(<AdminRunsPageComponent />);
-      await screen.findByRole('link', { name: 'job-1' });
-      vi.setSystemTime(new Date('2026-09-10T09:00:00Z'));
-      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-      await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(2));
-      expect(vi.mocked(getAdminRuns).mock.lastCall![0]).toMatchObject({
-        since: '2026-09-01T00:00:00.000Z',
-        until: '2026-09-08T00:00:00.000Z',
-      });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('refreshes a window that has aged past its preset', async () => {
-    // The Created control reads Custom once the window is older than a preset
-    // tolerance, so the refresh length has to come from the window on screen.
-    // Reading it from the control's value produced an invalid date.
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      vi.setSystemTime(new Date('2026-09-10T08:00:00Z'));
-      vi.mocked(getAdminRuns).mockResolvedValue(page());
-      render(<AdminRunsPageComponent />);
-      await screen.findByRole('link', { name: 'job-1' });
-
-      vi.setSystemTime(new Date('2026-09-10T08:06:00Z'));
-      fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'failed' } });
-      await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(2));
-      expect(screen.getByLabelText('Created')).toHaveValue('custom');
-
-      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-      await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(3));
-      const filters = vi.mocked(getAdminRuns).mock.lastCall![0];
-      // The same seven-day window, re-anchored at the current time.
-      expect(Date.parse(filters.until!) - Date.parse(filters.since!)).toBe(7 * 86_400_000);
-      expect(filters.until).toBe('2026-09-10T08:06:00.000Z');
-      expect(filters.state).toBe('failed');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('follows a URL that changes while the list stays mounted', async () => {
-    render(<AdminRunsPageComponent />);
-    await screen.findByRole('link', { name: 'job-1' });
-    expect(vi.mocked(getAdminRuns).mock.calls[0][0].model).toBeUndefined();
-
-    search.set('since=2026-08-01T00:00:00.000Z&until=2026-08-08T00:00:00.000Z&model=model-a');
-    await act(async () => {});
-    await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(2));
-    expect(vi.mocked(getAdminRuns).mock.calls[1][0]).toMatchObject({
-      since: '2026-08-01T00:00:00.000Z',
-      until: '2026-08-08T00:00:00.000Z',
-      model: 'model-a',
-    });
-  });
-
-  it('reports an unusable link instead of answering for every run', async () => {
-    // An inverted window is a broken link, not an empty selection. Falling back
-    // to the default window would answer a question nobody asked.
-    search.value = 'since=2026-09-08T00:00:00.000Z&until=2026-09-01T00:00:00.000Z';
-    render(<AdminRunsPageComponent />);
-    await screen.findByRole('alert');
-    expect(screen.getByText(/empty or inverted window/)).toBeInTheDocument();
-    expect(getAdminRuns).not.toHaveBeenCalled();
-  });
-
-  it('reports a link naming a filter this list cannot express', async () => {
-    search.value = 'since=2026-09-01T00:00:00.000Z&until=2026-09-08T00:00:00.000Z&host=runner-one';
-    render(<AdminRunsPageComponent />);
-    await screen.findByRole('alert');
-    expect(screen.getByText(/Unsupported filter: host/)).toBeInTheDocument();
-    expect(getAdminRuns).not.toHaveBeenCalled();
-  });
-
-  it('keeps a one-day linked window when Status changes', async () => {
-    // The Created control names the window that is applied, so changing a
-    // non-time filter cannot re-derive seven days from a stale preset.
-    search.value = 'since=2026-09-09T00:00:00.000Z&until=2026-09-10T00:00:00.000Z';
-    vi.mocked(getAdminRuns).mockResolvedValue(page());
-    render(<AdminRunsPageComponent />);
-    await screen.findByRole('link', { name: 'job-1' });
-    expect(screen.getByLabelText('Created')).toHaveValue('custom');
-    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'failed' } });
-    await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(2));
-    expect(vi.mocked(getAdminRuns).mock.lastCall![0]).toMatchObject({
-      since: '2026-09-09T00:00:00.000Z',
-      until: '2026-09-10T00:00:00.000Z',
-      state: 'failed',
-    });
-  });
-
-  it('applies filters and paginates with the same window and filter scope', async () => {
-    render(<AdminRunsPageComponent />);
-    await screen.findByRole('link', { name: 'job-1' });
-    vi.mocked(getAdminRuns)
-      .mockResolvedValueOnce(page([run()], 'cursor-2'))
-      .mockResolvedValueOnce(page([run({ id: 'job-2', title: 'Second run' })]));
-    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'failed' } });
-    fireEvent.click(await screen.findByRole('button', { name: 'Load more runs' }));
-    await screen.findByRole('link', { name: 'job-2' });
-    expect(getAdminRuns).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        state: 'failed',
-        cursor: 'cursor-2',
-        since: page().since,
-        until: page().until,
-      }),
-      expect.any(AbortSignal),
-    );
-    expect(screen.getByRole('link', { name: 'job-1' })).toBeInTheDocument();
-    expect(screen.queryByText('Second run')).not.toBeInTheDocument();
-  });
-
-  it('keeps the queued filter and badge across pages', async () => {
-    render(<AdminRunsPageComponent />);
-    await screen.findByRole('link', { name: 'job-1' });
-    vi.mocked(getAdminRuns)
-      .mockResolvedValueOnce(page([run({ state: 'queued' })], 'group-cursor'))
-      .mockResolvedValueOnce(page([run({ id: 'job-2', state: 'queued' })]));
-    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'queued' } });
-    fireEvent.click(await screen.findByRole('button', { name: 'Load more runs' }));
-    await screen.findByRole('link', { name: 'job-2' });
-
-    expect(vi.mocked(getAdminRuns).mock.calls[1][0]).toEqual(
-      expect.objectContaining({ state: 'queued' }),
-    );
-    expect(getAdminRuns).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        state: 'queued',
-        cursor: 'group-cursor',
-        since: page().since,
-        until: page().until,
-      }),
-      expect.any(AbortSignal),
-    );
-    const table = within(screen.getByRole('table'));
-    expect(table.getAllByText('queued')).toHaveLength(2);
-  });
-
+describe('run state badge', () => {
   it('renders a legacy publishing badge as running', () => {
     render(<RunState state="publishing" />);
     expect(screen.getByText('running')).toBeInTheDocument();
     expect(screen.queryByText('publishing')).not.toBeInTheDocument();
-  });
-
-  it('applies Created and Status immediately and replaces previously paged rows', async () => {
-    vi.mocked(getAdminRuns)
-      .mockResolvedValueOnce(page([run()], 'cursor-2'))
-      .mockResolvedValueOnce(page([run({ id: 'job-2' })]))
-      .mockResolvedValueOnce(page([run({ id: 'job-30-days' })]))
-      .mockResolvedValueOnce(page([run({ id: 'job-failed', state: 'failed' })]));
-    render(<AdminRunsPageComponent />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Load more runs' }));
-    await screen.findByRole('link', { name: 'job-2' });
-
-    fireEvent.change(screen.getByLabelText('Created'), { target: { value: '30' } });
-    await screen.findByRole('link', { name: 'job-30-days' });
-    const timeFilters = vi.mocked(getAdminRuns).mock.lastCall![0];
-    expect(Date.parse(timeFilters.until!) - Date.parse(timeFilters.since!)).toBe(30 * 86_400_000);
-    expect(timeFilters.cursor).toBeUndefined();
-    expect(screen.queryByRole('link', { name: 'job-1' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'job-2' })).not.toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'failed' } });
-    await screen.findByRole('link', { name: 'job-failed' });
-    const statusFilters = vi.mocked(getAdminRuns).mock.lastCall![0];
-    expect(statusFilters.state).toBe('failed');
-    expect(Date.parse(statusFilters.until!) - Date.parse(statusFilters.since!)).toBe(
-      30 * 86_400_000,
-    );
-    expect(statusFilters.cursor).toBeUndefined();
-    expect(screen.queryByRole('link', { name: 'job-30-days' })).not.toBeInTheDocument();
-    expect(getAdminRuns).toHaveBeenCalledTimes(4);
-  });
-
-  it('refreshes the time window while preserving Status and replacing previously paged rows', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      vi.setSystemTime(new Date('2026-09-10T08:00:00Z'));
-      vi.mocked(getAdminRuns)
-        .mockResolvedValueOnce(page())
-        .mockResolvedValueOnce(page([run({ state: 'failed' })], 'cursor-2'))
-        .mockResolvedValueOnce(page([run({ id: 'job-2', state: 'failed' })]))
-        .mockResolvedValueOnce(page([run({ id: 'refreshed-run', state: 'failed' })]));
-      render(<AdminRunsPageComponent />);
-      await screen.findByRole('link', { name: 'job-1' });
-      fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'failed' } });
-      fireEvent.click(await screen.findByRole('button', { name: 'Load more runs' }));
-      await screen.findByRole('link', { name: 'job-2' });
-
-      vi.setSystemTime(new Date('2026-09-10T09:00:00Z'));
-      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-      await screen.findByRole('link', { name: 'refreshed-run' });
-      const filters = vi.mocked(getAdminRuns).mock.lastCall![0];
-      expect(filters.since).toBe('2026-09-03T09:00:00.000Z');
-      expect(filters.until).toBe('2026-09-10T09:00:00.000Z');
-      expect(filters.state).toBe('failed');
-      expect(filters.cursor).toBeUndefined();
-      expect(screen.getByLabelText('Status')).toHaveValue('failed');
-      expect(screen.queryByRole('link', { name: 'job-1' })).not.toBeInTheDocument();
-      expect(screen.queryByRole('link', { name: 'job-2' })).not.toBeInTheDocument();
-      expect(getAdminRuns).toHaveBeenCalledTimes(4);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('ignores an old response when the filters change', async () => {
-    const pending = deferred<AdminRunsPage>();
-    vi.mocked(getAdminRuns)
-      .mockReturnValueOnce(pending.promise)
-      .mockResolvedValueOnce(page([run({ id: 'current-match' })]));
-    render(<AdminRunsPageComponent />);
-    fireEvent.change(screen.getByLabelText('Created'), { target: { value: '30' } });
-    await screen.findByRole('link', { name: 'current-match' });
-    await act(async () => pending.resolve(page([run({ id: 'stale-match' })])));
-    expect(screen.queryByRole('link', { name: 'stale-match' })).not.toBeInTheDocument();
-    expect(vi.mocked(getAdminRuns).mock.calls[0][1]?.aborted).toBe(true);
-  });
-
-  it('ignores a late pagination response after Status changes the filter scope', async () => {
-    const pending = deferred<AdminRunsPage>();
-    vi.mocked(getAdminRuns)
-      .mockResolvedValueOnce(page([run()], 'old-cursor'))
-      .mockReturnValueOnce(pending.promise)
-      .mockResolvedValueOnce(page([run({ id: 'current-match', state: 'failed' })]));
-    render(<AdminRunsPageComponent />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Load more runs' }));
-    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'failed' } });
-    await screen.findByRole('link', { name: 'current-match' });
-    expect(vi.mocked(getAdminRuns).mock.calls[1][1]?.aborted).toBe(true);
-    expect(vi.mocked(getAdminRuns).mock.lastCall![0].cursor).toBeUndefined();
-
-    await act(async () =>
-      pending.resolve(page([run({ id: 'stale-match' })], 'another-old-cursor')),
-    );
-    expect(screen.queryByRole('link', { name: 'job-1' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'stale-match' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Load more runs' })).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'current-match' })).toBeInTheDocument();
-  });
-
-  it('clears retained cross-user rows when a later page rejects revoked access', async () => {
-    vi.mocked(getAdminRuns)
-      .mockResolvedValueOnce(page([run()], 'more'))
-      .mockRejectedValueOnce(new APIError('FORBIDDEN', 'Admin permission revoked', 403));
-    render(<AdminRunsPageComponent />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Load more runs' }));
-    await screen.findByText('Admin access required');
-    expect(screen.queryByRole('link', { name: 'job-1' })).not.toBeInTheDocument();
-  });
-});
-
-describe('admin runs resource cells', () => {
-  // The list asserts a cell's text belongs to the run on screen, never that
-  // some text appeared: a cell left over from the previous selection is the
-  // failure this column can actually have.
-  it('says a run with no whole-turn summary has none, rather than showing a zero', async () => {
-    vi.mocked(getAdminRuns).mockResolvedValue(page([run()]));
-    render(<AdminRunsPageComponent />);
-    await screen.findByRole('link', { name: 'job-1' });
-    expect(within(row('job-1')).getAllByText('Not collected')).toHaveLength(3);
-    expect(within(row('job-1')).queryByText('0 B')).not.toBeInTheDocument();
-    expect(within(row('job-1')).queryByText('0 CPU-s')).not.toBeInTheDocument();
-  });
-
-  it('shows CPU and the sampled memory peak for a measured run', async () => {
-    vi.mocked(getAdminRuns).mockResolvedValue(page([run({ resource_summary: runSummary() })]));
-    render(<AdminRunsPageComponent />);
-    await screen.findByRole('link', { name: 'job-1' });
-    expect(within(row('job-1')).getByText(`${formatCpuSeconds(80_000_000)}`)).toBeInTheDocument();
-    expect(
-      within(row('job-1')).getByText(`${formatMemoryBytes(1_288_490_189)} \u00b7 sampled`),
-    ).toBeInTheDocument();
-    // An unsupported I/O metric does not make the row read as a zero.
-    expect(screen.queryByText(/^0 B$/)).not.toBeInTheDocument();
-  });
-
-  it('never leaves the previous run\u2019s resource cell beside a new selection', async () => {
-    vi.mocked(getAdminRuns)
-      .mockResolvedValueOnce(page([run({ resource_summary: runSummary() })]))
-      .mockResolvedValueOnce(page([run({ resource_summary: null })]));
-    render(<AdminRunsPageComponent />);
-    await screen.findByRole('link', { name: 'job-1' });
-    expect(within(row('job-1')).getByText('80 CPU-s')).toBeInTheDocument();
-
-    // A filter change replaces the page; the old numbers must go with it.
-    fireEvent.change(screen.getByLabelText('Created'), { target: { value: '30' } });
-    await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(2));
-    await waitFor(() =>
-      expect(within(row('job-1')).queryByText('80 CPU-s')).not.toBeInTheDocument(),
-    );
-    expect(within(row('job-1')).getAllByText('Not collected')).toHaveLength(3);
-  });
-
-  it('renders a partial CPU measurement as a lower bound and a partial peak as observed', async () => {
-    vi.mocked(getAdminRuns).mockResolvedValue(
-      page([
-        run({
-          resource_summary: runSummary({
-            state: 'interrupted',
-            observed_through_ms: 130_000,
-            cpu: { status: 'partial', reason_codes: ['ring_loss'] },
-            memory: { status: 'partial', reason_codes: ['pss_unreadable'] },
-            attempts_measured: 3,
-            attempts_total: 5,
-          }),
-        }),
-      ]),
-    );
-    render(<AdminRunsPageComponent />);
-    await screen.findByRole('link', { name: 'job-1' });
-    const cpu = within(row('job-1')).getByText(/\u2265 80 CPU-s/);
-    expect(cpu).toBeInTheDocument();
-    expect(cpu.textContent).toContain('collection was interrupted');
-    const memory = within(row('job-1')).getByText(/1.2 GiB/);
-    expect(memory.textContent).toContain('observed');
-    expect(memory.textContent).not.toContain('\u2265');
-    // A total over three of five executions is not the run's total.
-    const state = within(row('job-1')).getByText('Interrupted');
-    expect(state.getAttribute('title')).toContain('3 of 5 executions measured');
-  });
-
-  it('states when collection is still running rather than showing a final total', async () => {
-    vi.mocked(getAdminRuns).mockResolvedValue(
-      page([
-        run({
-          resource_summary: runSummary({
-            state: 'collecting',
-            observed_through_ms: 90_000,
-            memory: { status: 'partial', reason_codes: ['sampling_over_budget'] },
-          }),
-        }),
-      ]),
-    );
-    render(<AdminRunsPageComponent />);
-    await screen.findByRole('link', { name: 'job-1' });
-    const state = within(row('job-1')).getByText('Collecting');
-    // The string handed to title is checked separately: jsdom renders the
-    // attribute, and the sentence must name how far the window actually got.
-    expect(state.getAttribute('title')).toBe(collectingSentence(90_000));
-    expect(state.getAttribute('title')).toContain('not the turn\u2019s total');
-  });
-
-  it('gives an unknown reason code the generic sentence, never the code', async () => {
-    vi.mocked(getAdminRuns).mockResolvedValue(
-      page([
-        run({
-          resource_summary: runSummary({
-            cpu: {
-              status: 'partial',
-              reason_codes: [
-                'uid=1001 lease_token=deadbeef',
-              ] as unknown as ResourceMetricBriefApi['reason_codes'],
-            },
-          }),
-        }),
-      ]),
-    );
-    render(<AdminRunsPageComponent />);
-    await screen.findByRole('link', { name: 'job-1' });
-    const cpu = within(row('job-1')).getByText(/\u2265 80 CPU-s/);
-    expect(cpu.getAttribute('title')).toBe(UNKNOWN_REASON_SENTENCE);
-    expect(screen.queryByText(/deadbeef|uid=1001/)).not.toBeInTheDocument();
   });
 });
 
@@ -883,6 +366,10 @@ describe('admin run observation', () => {
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Previous attempts/ })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Execution')).not.toBeInTheDocument();
+    // The turn names its session as the admin list does.
+    expect(screen.getByText('Session', { selector: 'dt' }).nextElementSibling).toHaveTextContent(
+      'thread-1',
+    );
   });
 
   it('follows the newest attempt regardless of response order and discovers new attempts on refresh', async () => {
@@ -989,9 +476,9 @@ describe('admin run observation', () => {
       expect(fn).not.toHaveBeenCalled();
   });
 
-  it('shows session statistics and one token usage summary without usage diagnostics', async () => {
+  it('shows turn statistics and one token usage summary without usage diagnostics', async () => {
     render(<AdminRunPage />);
-    expect(await screen.findByRole('heading', { name: 'Session statistics' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Turn statistics' })).toBeVisible();
     expect(screen.getByRole('heading', { name: 'Token usage' })).toBeVisible();
     expect(screen.getByText('27m 47s')).toBeVisible();
     const totals = within(screen.getByRole('table', { name: 'Token usage totals' }));
@@ -1038,7 +525,7 @@ describe('admin run observation', () => {
 
     render(<AdminRunPage />);
     await screen.findByRole('heading', { name: 'Token usage' });
-    const statistics = within(screen.getByRole('region', { name: 'Session statistics' }));
+    const statistics = within(screen.getByRole('region', { name: 'Turn statistics' }));
     expect(statistics.getAllByText('Unavailable')).toHaveLength(4);
     const totals = within(screen.getByRole('table', { name: 'Token usage totals' }));
     expect(

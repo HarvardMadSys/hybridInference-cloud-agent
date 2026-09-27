@@ -41,12 +41,12 @@ export function SessionStatistics({ statistics }: { statistics?: AdminSessionSta
   ];
 
   return (
-    <section aria-labelledby="session-statistics-heading" className="mt-8">
+    <section aria-labelledby="turn-statistics-heading" className="mt-8">
       <h2
-        id="session-statistics-heading"
+        id="turn-statistics-heading"
         className="text-lg font-semibold text-gray-900 dark:text-gray-50"
       >
-        Session statistics
+        Turn statistics
       </h2>
       <dl
         className={`${CARD} mt-4 divide-y divide-gray-100 overflow-hidden text-sm dark:divide-white/5`}

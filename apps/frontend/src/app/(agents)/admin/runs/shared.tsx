@@ -24,7 +24,7 @@ export function AdminRequired() {
         Admin access required
       </h1>
       <p className="text-sm text-gray-500 dark:text-gray-400">
-        Conversations and execution records across users are visible to admins only.
+        Sessions and turns across users are visible to admins only.
       </p>
     </div>
   );

@@ -113,13 +113,13 @@ function ConversationDetails({ threadId, query }: { threadId: string; query: str
     <div className="min-w-0 flex-1 overflow-y-auto">
       <section className="mx-auto w-full max-w-7xl px-6 py-12 lg:px-12">
         <h1 className="text-3xl font-semibold text-gray-900 dark:text-gray-50">Admin</h1>
-        <AdminNavigation current="conversations" />
+        <AdminNavigation current="sessions" />
         <div className="mt-6 flex items-center justify-between gap-4">
           <Link
-            href={`/admin/conversations${context}`}
+            href={`/admin/sessions${context}`}
             className="text-sm text-crimson hover:underline dark:text-crimson-light"
           >
-            ← All conversations
+            ← All sessions
           </Link>
           <button
             type="button"
@@ -127,13 +127,13 @@ function ConversationDetails({ threadId, query }: { threadId: string; query: str
             disabled={loading || Boolean(linked.error)}
             onClick={() => setRevision((value) => value + 1)}
           >
-            Refresh conversation
+            Refresh session
           </button>
         </div>
         {error && <ErrorNotice>{error}</ErrorNotice>}
         {loading && (
           <p role="status" className="mt-6 text-sm text-gray-500 dark:text-gray-400">
-            Loading conversation…
+            Loading session…
           </p>
         )}
         {conversation && page && (
@@ -173,9 +173,7 @@ function ConversationDetails({ threadId, query }: { threadId: string; query: str
             </p>
             {linked.linked && (
               <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">
-                <p>
-                  Showing the full conversation. Matching turns are marked for the selected filters.
-                </p>
+                <p>Showing the full session. Matching turns are marked for the selected filters.</p>
                 <p className="mt-1 break-words text-xs text-gray-500 dark:text-gray-400">
                   {[
                     linked.filters?.since &&
