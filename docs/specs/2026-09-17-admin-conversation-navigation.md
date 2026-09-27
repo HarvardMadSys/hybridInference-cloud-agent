@@ -13,6 +13,12 @@ it starts (`agent_jobs`), and a step is one model request, listed as LLM
 requests on the turn page. Only the UI labels changed; the database and the
 API keep `thread`, `job` and `conversations`.
 
+Attempts are not a level of the admin. A turn normally runs once; the
+platform starts another run only when one stops reporting or cannot start.
+The turn page shows the latest run's server, times and resource measurements,
+lists the LLM requests of every run in the order the runs happened, and says in
+one line when a turn was restarted and how each earlier run ended.
+
 `/admin/sessions` is the canonical list. The previous `/admin/conversations`
 and `/admin/runs` entries render the same pages, preserving existing bookmarks
 and usage links. The page switches between three levels of one selection:

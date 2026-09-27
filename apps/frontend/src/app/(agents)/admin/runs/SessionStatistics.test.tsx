@@ -40,7 +40,7 @@ describe('turn statistics', () => {
     );
     expect(section.getByText('Avg time to first token (TTFT)')).toHaveAttribute(
       'title',
-      expect.stringContaining('across executions with a recorded sample'),
+      expect.stringContaining('averaged over runs with a recorded sample'),
     );
     expect(section.getByText('Tokens per second (TPS)')).toHaveAttribute(
       'title',

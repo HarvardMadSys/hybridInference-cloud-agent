@@ -6,7 +6,7 @@ import { Suspense, useCallback, useEffect, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
-import { getAdminRun, type AdminRunDetail } from '@/lib/api/adminRuns';
+import { getAdminRun, type AdminAttempt, type AdminRunDetail } from '@/lib/api/adminRuns';
 import { conversationHref } from '@/lib/api/adminConversations';
 import { conversationLink } from '../../conversations/filters';
 import { getErrorMessage } from '@/lib/utils/errors';
@@ -23,10 +23,39 @@ import {
   CARD,
   dateTime,
   ErrorNotice,
-  INPUT,
   RunState,
 } from '../shared';
 import { UsageSnapshot } from '../UsageSnapshot';
+
+const TERMINAL = new Set(['succeeded', 'failed', 'cancelled']);
+
+/** How an earlier run of the turn ended, in the words an admin reads it in. */
+function earlierRun(attempt: AdminAttempt): string {
+  const host = attempt.host || 'an unknown server';
+  const at = dateTime(attempt.finished_at ?? attempt.started_at);
+  if (attempt.status === 'superseded') return `the run on ${host} stopped responding (${at})`;
+  if (attempt.status === 'aborted') return `the run on ${host} could not start (${at})`;
+  return `the run on ${host} ended (${at})`;
+}
+
+/** Which sections describe the latest run and which the whole turn. */
+const RESTART_SCOPE =
+  'Resources and startup show the latest run; turn statistics, token usage and LLM requests cover every run.';
+
+/**
+ * Said only when the turn ran more than once.
+ *
+ * A turn normally runs once. A second run exists because the platform restarted
+ * the turn after the first one stopped reporting or could not start, which is
+ * the one thing about runs an admin needs to know.
+ */
+function restartNote(attempts: AdminAttempt[]): string | null {
+  // Newest first, so every run after the first entry is an earlier one.
+  const earlier = attempts.slice(1).reverse();
+  if (!earlier.length) return null;
+  const times = earlier.length === 1 ? 'once' : `${earlier.length} times`;
+  return `Restarted ${times}: ${earlier.map(earlierRun).join('; ')}.`;
+}
 
 export default function AdminRunPage() {
   const params = useParams<{ jobId: string }>();
@@ -45,9 +74,6 @@ function RunDetails({ jobId }: { jobId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [revision, setRevision] = useState(0);
-  const [historyOpen, setHistoryOpen] = useState(false);
-  // A null selection follows the latest attempt, including newly started ones.
-  const [historicalAttemptId, setHistoricalAttemptId] = useState<number | null>(null);
   const [denied, setDenied] = useState(false);
   const onAccessDenied = useCallback(() => setDenied(true), []);
 
@@ -59,10 +85,6 @@ function RunDetails({ jobId }: { jobId: string }) {
       .then((next) => {
         if (controller.signal.aborted) return;
         setDetail(next);
-        setHistoricalAttemptId((current) =>
-          next.attempts.some((attempt) => attempt.attempt_id === current) ? current : null,
-        );
-        if (next.attempts.length <= 1) setHistoryOpen(false);
       })
       .catch((e: unknown) => {
         if (!controller.signal.aborted) {
@@ -79,12 +101,10 @@ function RunDetails({ jobId }: { jobId: string }) {
   const attempts = [...(detail?.attempts ?? [])].sort(
     (a, b) => b.attempt_no - a.attempt_no || b.attempt_id - a.attempt_id,
   );
-  const latestAttempt = attempts[0];
-  const attempt =
-    (historyOpen && attempts.find((item) => item.attempt_id === historicalAttemptId)) ||
-    latestAttempt;
-  const attemptId = attempt?.attempt_id ?? null;
-  const viewingHistory = attempt !== latestAttempt;
+  // The latest run is the one that produced, or is producing, the turn's result.
+  const latest = attempts[0];
+  const first = attempts[attempts.length - 1];
+  const restarted = restartNote(attempts);
   if (denied) return <AdminRequired />;
   return (
     <div className="flex-1 overflow-y-auto">
@@ -110,13 +130,13 @@ function RunDetails({ jobId }: { jobId: string }) {
             type="button"
             onClick={() => setRevision((value) => value + 1)}
           >
-            Refresh run
+            Refresh turn
           </button>
         </div>
         {error && <ErrorNotice>{error}</ErrorNotice>}
         {loading && !detail && (
           <p role="status" className="mt-6 text-sm text-gray-500 dark:text-gray-400">
-            Loading run…
+            Loading turn…
           </p>
         )}
         {detail && (
@@ -142,6 +162,11 @@ function RunDetails({ jobId }: { jobId: string }) {
                 ['Effort', detail.run.reasoning_effort || 'Auto'],
                 ['Sandbox profile', detail.run.execution_profile],
                 ['Created', dateTime(detail.run.created_at)],
+                ...(first ? [['Started', dateTime(first.started_at)]] : []),
+                ...(latest?.finished_at && TERMINAL.has(detail.run.state)
+                  ? [['Finished', dateTime(latest.finished_at)]]
+                  : []),
+                ...(latest ? [['Server', latest.host || 'Unknown host']] : []),
                 ['Turn', String(detail.run.turn_no)],
                 ['Session', detail.run.thread_id || 'Unavailable'],
               ].map(([label, value]) => (
@@ -151,87 +176,26 @@ function RunDetails({ jobId }: { jobId: string }) {
                 </div>
               ))}
             </dl>
-            {attempt ? (
-              <div className={`${CARD} mt-8 p-5`}>
-                <dl className="flex flex-wrap gap-x-8 gap-y-4 text-sm">
-                  {[
-                    ['Server', attempt.host || 'Unknown host'],
-                    ['Status', attempt.status],
-                    ['Started', dateTime(attempt.started_at)],
-                    ...(attempt.finished_at ? [['Finished', dateTime(attempt.finished_at)]] : []),
-                  ].map(([label, value]) => (
-                    <div key={label}>
-                      <dt className="text-xs text-gray-500 dark:text-gray-400">{label}</dt>
-                      <dd className="mt-1 text-gray-800 dark:text-gray-200">{value}</dd>
-                    </div>
-                  ))}
-                </dl>
-                {attempts.length > 1 && (
-                  <div className="mt-4 border-t border-gray-100 pt-4 dark:border-white/5">
-                    <button
-                      type="button"
-                      className="text-sm text-crimson hover:underline dark:text-crimson-light"
-                      aria-expanded={historyOpen}
-                      aria-controls="attempt-history"
-                      onClick={() => {
-                        setHistoryOpen((open) => !open);
-                        setHistoricalAttemptId(null);
-                      }}
-                    >
-                      Previous attempts ({attempts.length - 1})
-                    </button>
-                    {historyOpen && (
-                      <div id="attempt-history" className="mt-3">
-                        <label className="text-sm font-medium">
-                          View attempt
-                          <select
-                            className={`${INPUT} mt-2 sm:ml-3 sm:mt-0 sm:inline-block sm:w-auto`}
-                            value={viewingHistory ? attempt.attempt_id : ''}
-                            onChange={(event) =>
-                              setHistoricalAttemptId(
-                                event.target.value ? Number(event.target.value) : null,
-                              )
-                            }
-                          >
-                            <option value="">Latest attempt</option>
-                            {attempts.slice(1).map((item) => (
-                              <option key={item.attempt_id} value={item.attempt_id}>
-                                Attempt {item.attempt_no} · {item.status} ·{' '}
-                                {dateTime(item.started_at)}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                          {viewingHistory
-                            ? 'Viewing a previous attempt. Resources and LLM requests below show this attempt.'
-                            : 'Viewing the latest attempt. Choose a previous attempt to inspect its records.'}
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            ) : (
-              <p className="mt-8 text-sm text-gray-500 dark:text-gray-400">
-                No execution has started.
+            {restarted && (
+              <p className="mt-3 text-sm text-amber-700 dark:text-amber-400" title={RESTART_SCOPE}>
+                {restarted}
               </p>
             )}
-            {attemptId !== null && (
+            {latest && (
               <Resources
-                key={`resources:${attemptId}:${revision}`}
+                key={`resources:${latest.attempt_id}:${revision}`}
                 jobId={jobId}
-                attemptId={attemptId}
+                attemptId={latest.attempt_id}
                 onAccessDenied={onAccessDenied}
               />
             )}
-            {attemptId !== null && (
-              // Keyed by the attempt, so switching the selector above remounts
-              // it: one attempt's startup must never sit under another's row.
+            {latest && (
+              // Keyed by the run, so a restart remounts it: one run's startup
+              // must never sit under another's.
               <StartupMeasurement
-                key={`startup:${attemptId}:${revision}`}
+                key={`startup:${latest.attempt_id}:${revision}`}
                 jobId={jobId}
-                attemptId={attemptId}
+                attemptId={latest.attempt_id}
                 onAccessDenied={onAccessDenied}
               />
             )}
@@ -239,11 +203,12 @@ function RunDetails({ jobId }: { jobId: string }) {
             <UsageSnapshot usage={detail.usage} />
             {detail.capabilities.llm_requests ? (
               <LLMRequests
-                key={`requests:${attemptId}`}
                 refreshKey={revision}
                 jobId={jobId}
-                attemptId={attemptId ?? undefined}
-                running={attempt?.finished_at == null}
+                running={latest?.finished_at == null}
+                skipAttemptIds={attempts
+                  .filter((attempt) => attempt.status === 'aborted')
+                  .map((attempt) => attempt.attempt_id)}
                 onAccessDenied={onAccessDenied}
               />
             ) : (

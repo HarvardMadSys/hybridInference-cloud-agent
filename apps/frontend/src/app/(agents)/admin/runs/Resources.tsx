@@ -78,7 +78,7 @@ export function Resources({
           </>
         ) : (
           <p className={`${CARD} mt-4 p-5 text-sm text-gray-500 dark:text-gray-400`}>
-            Resource measurements are unavailable for this execution.
+            Resource measurements are unavailable for this turn.
           </p>
         ))
       )}
@@ -86,25 +86,21 @@ export function Resources({
   );
 }
 
-/** One execution's measurements, with caveats attached to their values. */
+/** The turn's measurements, with caveats attached to their values. */
 function TurnResourceSummary({ telemetry }: { telemetry: AgentAttemptTelemetryApi }) {
   const summary = telemetry.resources?.turn_summary ?? null;
   if (!summary) {
     return (
       <p className={`${CARD} mt-4 p-5 text-sm text-gray-500 dark:text-gray-400`}>
-        No resource measurements were recorded for this execution.
+        No resource measurements were recorded for this turn.
       </p>
     );
   }
   const rows = turnSummaryRows(summary);
   return (
-    <div
-      role="group"
-      aria-label="Execution resource summary"
-      className={`${CARD} mt-4 overflow-hidden`}
-    >
+    <div role="group" aria-label="Resource summary" className={`${CARD} mt-4 overflow-hidden`}>
       <p className="border-b border-gray-100 px-5 py-3 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
-        This execution · Agent and tools
+        Agent and tools
         {summary.state === 'interrupted' ? ' · Collection interrupted' : ''}
         {summary.state === 'collecting' ? ' · Still collecting' : ''}
       </p>
@@ -300,14 +296,14 @@ function ResourceReadings({ resources }: { resources: AttemptResourcesApi }) {
         )}
       </details>
       <div className="border-t border-gray-100 p-5 dark:border-white/5">
-        <h3 className="text-sm font-medium">Whole-execution samples</h3>
+        <h3 className="text-sm font-medium">Whole-turn samples</h3>
         {sampled ? (
           <>
             <p
               className={`mt-2 text-xs ${sampleIncomplete ? 'text-amber-700 dark:text-amber-400' : 'text-gray-500 dark:text-gray-400'}`}
             >
-              {Math.round(resources.coverage * 100)}% of the execution window sampled ·{' '}
-              {resources.sample_count} samples{sampleIncomplete ? ' · Incomplete' : ''}
+              {Math.round(resources.coverage * 100)}% of the turn sampled · {resources.sample_count}{' '}
+              samples{sampleIncomplete ? ' · Incomplete' : ''}
             </p>
             <dl className="mt-4 grid grid-cols-2 gap-4 text-xs sm:grid-cols-4">
               {[
@@ -325,8 +321,8 @@ function ResourceReadings({ resources }: { resources: AttemptResourcesApi }) {
           </>
         ) : (
           <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-            Unavailable — whole-sandbox totals were not collected for this execution. Tool and
-            process values cannot substitute for them.
+            Unavailable — whole-sandbox totals were not collected for this turn. Tool and process
+            values cannot substitute for them.
           </p>
         )}
       </div>

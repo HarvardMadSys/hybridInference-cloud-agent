@@ -78,15 +78,15 @@ function startTime(value: string): string {
 }
 
 const SOURCE_REASONS: Record<string, string> = {
-  attribution_unavailable: 'This execution was never attributed to a gateway ledger.',
-  binding_changed: 'This execution was attributed by a different gateway installation.',
-  invalid_window: 'This execution has no usable attribution window yet.',
+  attribution_unavailable: 'Requests were never attributed to a gateway ledger.',
+  binding_changed: 'Requests were attributed by a different gateway installation.',
+  invalid_window: 'Requests have no usable attribution window yet.',
 };
 
 export function sourceExplanation(source: AdminLlmRequestSource): string {
   return (
     (source.reason ? SOURCE_REASONS[source.reason] : undefined) ??
-    'Gateway request detail is unavailable for this execution.'
+    'Gateway request detail is unavailable.'
   );
 }
 
@@ -113,55 +113,175 @@ function isRestart(error: unknown): boolean {
   );
 }
 
-/** Per-request metrics for the selected execution, loaded when the panel mounts. */
+const NONE: readonly number[] = [];
+
+/**
+ * Every model request of a turn, loaded when the panel mounts.
+ *
+ * A turn normally runs once, and then this is one table. A turn that was
+ * restarted lists each run's requests in the order the runs happened, so the
+ * table is still the whole turn: the requests a stopped run made were real
+ * calls, and they count toward the turn's usage.
+ */
 export function LLMRequests({
   jobId,
-  attemptId,
   running,
   refreshKey = 0,
+  skipAttemptIds = NONE,
   onAccessDenied,
 }: {
   jobId: string;
-  attemptId?: number;
+  /** Whether the turn is still executing; only its latest run can be. */
   running: boolean;
   refreshKey?: number;
+  /** Runs that never started: they made no requests, so nothing is listed for them. */
+  skipAttemptIds?: readonly number[];
   onAccessDenied: () => void;
 }) {
   const [sources, setSources] = useState<AdminLlmRequestSource[] | null>(null);
   const [sourcesFor, setSourcesFor] = useState<string | null>(null);
   const [sourceReason, setSourceReason] = useState<string | null>(null);
-  const [sourceId, setSourceId] = useState<string | null>(null);
+  const [loadingSources, setLoadingSources] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [revision, setRevision] = useState(0);
+
+  // The references the turn's runs hold. Metadata only: no gateway is called
+  // until one of them is actually read. A re-read keeps the runs on screen, so
+  // a refresh never clears requests that are already listed.
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoadingSources(true);
+    setError(null);
+    getAdminLlmRequestSources(jobId, { limit: 100 }, controller.signal)
+      .then((next) => {
+        if (controller.signal.aborted) return;
+        setSources(next.sources);
+        setSourcesFor(jobId);
+        setSourceReason(next.reason);
+      })
+      .catch((caught: unknown) => {
+        if (controller.signal.aborted) return;
+        if (accessDenied(caught)) onAccessDenied();
+        else setError(getErrorMessage(caught));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingSources(false);
+      });
+    return () => controller.abort();
+  }, [jobId, revision, refreshKey, onAccessDenied]);
+
+  // A list read for another turn is never shown under this one.
+  const loaded = sources !== null && sourcesFor === jobId;
+  const runs = (loaded ? sources : [])
+    .filter((source) => !skipAttemptIds.includes(source.attempt_id))
+    .sort((a, b) => a.attempt_no - b.attempt_no || a.attempt_id - b.attempt_id);
+  const latest = runs[runs.length - 1];
+  const label = (source: AdminLlmRequestSource) => {
+    if (runs.length < 2) return null;
+    const since = source.window_since ? ` · from ${dateTime(source.window_since)}` : '';
+    return `Run ${runs.indexOf(source) + 1} of ${runs.length}${since}`;
+  };
+  const queryable = runs.filter(
+    (source): source is AdminLlmRequestSource & { source_id: string } =>
+      source.availability === 'queryable' && Boolean(source.source_id),
+  );
+  const unavailable = runs.filter((source) => source.availability !== 'queryable');
+  return (
+    <section aria-labelledby="llm-requests-heading" className="mt-8">
+      <h2
+        id="llm-requests-heading"
+        className="text-lg font-semibold text-gray-900 dark:text-gray-50"
+      >
+        LLM requests
+      </h2>
+      <div className={`${CARD} mt-4 overflow-hidden`}>
+        {loadingSources && !loaded && (
+          <p role="status" className="px-5 py-4 text-sm text-gray-500 dark:text-gray-400">
+            Loading requests…
+          </p>
+        )}
+        {error && (
+          <div className="px-5 py-4">
+            <ErrorNotice>{error}</ErrorNotice>
+            <button
+              type="button"
+              className={`${BUTTON} mt-2`}
+              disabled={loadingSources}
+              onClick={() => setRevision((value) => value + 1)}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+        {loaded && queryable.length === 0 && !loadingSources && (
+          <p className="px-5 py-4 text-sm text-gray-500 dark:text-gray-400">
+            {sourceReason === 'not_started' || runs.length === 0
+              ? 'This turn has not started.'
+              : 'No gateway source can be read for this turn.'}
+          </p>
+        )}
+        {unavailable.length > 0 && (
+          <ul className="space-y-1 px-5 py-3 text-xs text-amber-700 dark:text-amber-400">
+            {unavailable.map((source) => (
+              <li key={`${source.attempt_id}:${source.source_id ?? 'none'}`}>
+                {label(source) ? `${label(source)}: ` : ''}
+                {sourceExplanation(source)}
+              </li>
+            ))}
+          </ul>
+        )}
+        {queryable.map((source) => (
+          <RunRequests
+            key={`${jobId}:${source.source_id}`}
+            jobId={jobId}
+            sourceId={source.source_id}
+            label={label(source)}
+            running={running && source === latest}
+            refreshKey={refreshKey}
+            onAccessDenied={onAccessDenied}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/** One run's requests, with its own pages, refresh and errors. */
+function RunRequests({
+  jobId,
+  sourceId,
+  label,
+  running,
+  refreshKey,
+  onAccessDenied,
+}: {
+  jobId: string;
+  sourceId: string;
+  /** Set only when the turn ran more than once. */
+  label: string | null;
+  running: boolean;
+  refreshKey: number;
+  onAccessDenied: () => void;
+}) {
   const [page, setPage] = useState<AdminLlmRequestPage | null>(null);
   const [rows, setRows] = useState<AdminLlmRequest[]>([]);
   const [pagesLoaded, setPagesLoaded] = useState(0);
-  const [loadingSources, setLoadingSources] = useState(false);
   const [loading, setLoading] = useState(false);
   const [moreLoading, setMoreLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [restart, setRestart] = useState(false);
   const [stale, setStale] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
-  const sourcesRequest = useRef<AbortController | null>(null);
   const pageRequest = useRef<AbortController | null>(null);
   const moreRequest = useRef<AbortController | null>(null);
-  // Two counters, because a page read and the source read start for different
-  // reasons: replacing a page must not invalidate the list that is still being
-  // read, and re-reading the list must invalidate every page read.
-  const sourcesGeneration = useRef(0);
   const pageGeneration = useRef(0);
-  const pageRun = useRef(0);
-
-  const executionKey = `${jobId}:${attemptId ?? ''}`;
-  const key = `${executionKey}:${sourceId ?? ''}`;
-  const loadedKey = useRef('');
-  const loadedExecution = useRef('');
 
   /**
-   * Retire the page reads that belong to the source being replaced.
+   * Retire every read of the page set that is being replaced.
    *
    * The generation is bumped here rather than only where a read starts, so a
    * response that is already in flight cannot be mistaken for one of the new
-   * selection: it is dropped, not appended, and its cursor never replaces the
+   * read: it is dropped, not appended, and its cursor never replaces the
    * current one.
    */
   const retirePages = useCallback(() => {
@@ -176,23 +296,6 @@ export function LLMRequests({
     pageGeneration.current += 1;
     return pageGeneration.current;
   }, []);
-
-  /**
-   * Retire every read, the source list included.
-   *
-   * Used when the execution itself changes: the list has to be re-read, so the
-   * read that is doing it is the one thing that must survive. Clearing the
-   * selected source changes the panel's selection key, which is why retirement
-   * there must not reach the source request.
-   */
-  const retireAll = useCallback(() => {
-    sourcesRequest.current?.abort();
-    sourcesRequest.current = null;
-    setLoadingSources(false);
-    retirePages();
-    sourcesGeneration.current += 1;
-    return sourcesGeneration.current;
-  }, [retirePages]);
 
   const fail = useCallback(
     (caught: unknown) => {
@@ -210,79 +313,12 @@ export function LLMRequests({
     [onAccessDenied],
   );
 
-  // The references this execution holds. Metadata only: no gateway is called
-  // until one of them is actually read.
+  // The first page, on mount and again on every refresh or retry. The rows on
+  // screen stay until the new read arrives, and a failed read keeps them.
   useEffect(() => {
+    const current = retirePages();
     const controller = new AbortController();
-    const current = retireAll();
-    sourcesRequest.current = controller;
-    const executionChanged = loadedExecution.current !== executionKey;
-    loadedExecution.current = executionKey;
-    if (executionChanged) {
-      // A different execution holds different references. Its source id is not
-      // this execution's to query, and nothing read for the previous one may
-      // stay on screen while the new list is being read.
-      setSourceId(null);
-      setSourcesFor(null);
-      setRows([]);
-      setPage(null);
-      setPagesLoaded(0);
-      setStale(null);
-      loadedKey.current = '';
-    }
-    setLoadingSources(true);
-    setSources(null);
-    setSourceReason(null);
-    setError(null);
-    setRestart(false);
-    getAdminLlmRequestSources(jobId, { attempt_id: attemptId, limit: 100 }, controller.signal)
-      .then((next) => {
-        if (controller.signal.aborted || sourcesGeneration.current !== current) return;
-        setSources(next.sources);
-        setSourcesFor(executionKey);
-        setSourceReason(next.reason);
-        const queryable = next.sources.filter((source) => source.availability === 'queryable');
-        setSourceId((chosen) =>
-          chosen && queryable.some((source) => source.source_id === chosen)
-            ? chosen
-            : queryable.length === 1
-              ? queryable[0].source_id
-              : null,
-        );
-      })
-      .catch((caught: unknown) => {
-        if (!controller.signal.aborted && sourcesGeneration.current === current) fail(caught);
-      })
-      .finally(() => {
-        if (!controller.signal.aborted && sourcesGeneration.current === current)
-          setLoadingSources(false);
-      });
-    return () => {
-      controller.abort();
-      if (sourcesRequest.current === controller) sourcesRequest.current = null;
-    };
-  }, [jobId, attemptId, executionKey, revision, refreshKey, retireAll, fail]);
-
-  // One page at a time, for one reference. A refresh keeps the rows that are
-  // already on screen until the new ones arrive; switching reference clears
-  // them first so a late response cannot fill the new selection.
-  useEffect(() => {
-    // The selected source is only usable once the list in front of us was read
-    // for this execution: on the render where the execution changes, the old
-    // id is still in state and must not be queried.
-    if (!sourceId || sourcesFor !== executionKey) return;
-    const controller = new AbortController();
-    const current = pageGeneration.current;
-    const run = ++pageRun.current;
     pageRequest.current = controller;
-    const sameSelection = loadedKey.current === key;
-    loadedKey.current = key;
-    if (!sameSelection) {
-      setRows([]);
-      setPage(null);
-      setPagesLoaded(0);
-      setStale(null);
-    }
     setLoading(true);
     setError(null);
     setRestart(false);
@@ -293,7 +329,6 @@ export function LLMRequests({
     )
       .then((next) => {
         if (controller.signal.aborted || pageGeneration.current !== current) return;
-        if (pageRun.current !== run) return;
         setPage(next);
         setRows(next.requests);
         setPagesLoaded(1);
@@ -309,39 +344,36 @@ export function LLMRequests({
       controller.abort();
       if (pageRequest.current === controller) pageRequest.current = null;
     };
-  }, [jobId, executionKey, sourceId, sourcesFor, revision, refreshKey, key, fail]);
+  }, [jobId, sourceId, revision, refreshKey, retirePages, fail]);
 
-  // Changing job, execution or source retires every in-flight read first, so a
-  // page that arrives late is dropped instead of being appended to a list it
-  // does not describe. The same cleanup covers unmounting the panel.
+  // Unmounting retires a page that is still being read.
   useEffect(
     () => () => {
       retirePages();
     },
-    [key, retirePages],
+    [retirePages],
   );
 
-  // Only a visible first page of a running execution keeps re-reading itself,
-  // and never while a read is already in flight. After "load more" the page set
-  // is a deliberate read and stops moving.
+  // Only a visible first page of a running run keeps re-reading itself, and
+  // never while a read is already in flight. After "load more" the page set is
+  // a deliberate read and stops moving.
   useEffect(() => {
-    if (!sourceId || !running || pagesLoaded !== 1 || restart) return;
+    if (!running || pagesLoaded !== 1 || restart) return;
     if (loading || moreLoading) return;
     const timer = window.setInterval(() => {
       if (document.visibilityState !== 'visible') return;
       setRevision((value) => value + 1);
     }, AUTO_REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [sourceId, running, pagesLoaded, restart, loading, moreLoading]);
+  }, [running, pagesLoaded, restart, loading, moreLoading]);
 
   async function loadMore() {
     // A first-page read replaces the page this continuation came from, so a
     // page must never be fetched while one is in flight: its cursor belongs to
     // the read that is being replaced.
-    if (!page?.next_cursor || !sourceId || loading || moreLoading) return;
+    if (!page?.next_cursor || loading || moreLoading) return;
     const controller = new AbortController();
     const current = pageGeneration.current;
-    const run = pageRun.current;
     moreRequest.current = controller;
     setMoreLoading(true);
     setError(null);
@@ -352,7 +384,6 @@ export function LLMRequests({
         controller.signal,
       );
       if (controller.signal.aborted || pageGeneration.current !== current) return;
-      if (pageRun.current !== run) return;
       if (!continues(next, page)) {
         // The continuation answered a read that is no longer on screen. Its
         // rows describe a different window, and appending them would mix two
@@ -371,8 +402,8 @@ export function LLMRequests({
       if (!controller.signal.aborted && pageGeneration.current === current) fail(caught);
     } finally {
       // Cleared whenever this call is still the one the panel is waiting on,
-      // including when a refresh or a selection change cancelled it. Leaving
-      // the flag set on an aborted request disables "Load more" for good.
+      // including when a refresh cancelled it. Leaving the flag set on an
+      // aborted request disables "Load more" for good.
       if (moreRequest.current === controller) {
         moreRequest.current = null;
         setMoreLoading(false);
@@ -380,160 +411,105 @@ export function LLMRequests({
     }
   }
 
-  const queryable = (sources ?? []).filter((source) => source.availability === 'queryable');
-  const unavailable = (sources ?? []).filter((source) => source.availability !== 'queryable');
   return (
-    <section aria-labelledby="llm-requests-heading" className="mt-8">
-      <h2
-        id="llm-requests-heading"
-        className="text-lg font-semibold text-gray-900 dark:text-gray-50"
+    <div className={label ? 'border-t border-gray-100 first:border-t-0 dark:border-white/5' : ''}>
+      {label && (
+        <p className="px-5 pt-4 text-xs font-medium text-gray-600 dark:text-gray-300">{label}</p>
+      )}
+      {error && (
+        <div className="px-5 py-4">
+          <ErrorNotice>
+            {error}
+            {rows.length > 0 && ` Showing the last successful read from ${dateTime(stale)}.`}
+          </ErrorNotice>
+          <button
+            type="button"
+            className={`${BUTTON} mt-2`}
+            disabled={loading}
+            onClick={() => setRevision((value) => value + 1)}
+          >
+            {restart ? 'Start again from the first page' : 'Retry'}
+          </button>
+        </div>
+      )}
+      <div
+        className="overflow-x-auto"
+        role="region"
+        aria-label={label ? `LLM request metrics, ${label}` : 'LLM request metrics'}
+        tabIndex={0}
       >
-        LLM requests
-      </h2>
-      <div className={`${CARD} mt-4 overflow-hidden`}>
-        {loadingSources && !page && (
-          <p role="status" className="px-5 py-4 text-sm text-gray-500 dark:text-gray-400">
-            Loading requests…
-          </p>
-        )}
-        {queryable.length > 1 && (
-          <label className="block px-5 py-4 text-sm">
-            Source
-            <select
-              className="ml-3 rounded-lg border border-gray-200 bg-white px-2 py-1 text-sm dark:border-white/10 dark:bg-gray-900"
-              value={sourceId ?? ''}
-              onChange={(event) => setSourceId(event.target.value || null)}
-            >
-              <option value="">Choose an execution</option>
-              {queryable.map((source) => (
-                <option key={source.source_id} value={source.source_id ?? ''}>
-                  Execution {source.attempt_no} · {dateTime(source.window_since)}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
-        {sources !== null && queryable.length === 0 && !loadingSources && (
-          <p className="px-5 py-4 text-sm text-gray-500 dark:text-gray-400">
-            {sourceReason === 'not_started'
-              ? 'No execution has started in this run.'
-              : 'This execution has no queryable gateway source.'}
-          </p>
-        )}
-        {unavailable.length > 0 && (
-          <ul className="space-y-1 px-5 py-3 text-xs text-amber-700 dark:text-amber-400">
-            {unavailable.map((source) => (
-              <li key={`${source.attempt_id}:${source.source_id ?? 'none'}`}>
-                Execution {source.attempt_no}: {sourceExplanation(source)}
-              </li>
-            ))}
-          </ul>
-        )}
-        {error && (
-          <div className="px-5 pb-4">
-            <ErrorNotice>
-              {error}
-              {rows.length > 0 && ` Showing the last successful read from ${dateTime(stale)}.`}
-            </ErrorNotice>
-            <button
-              type="button"
-              className={`${BUTTON} mt-2`}
-              disabled={loading || loadingSources}
-              onClick={() => setRevision((value) => value + 1)}
-            >
-              {restart ? 'Start again from the first page' : 'Retry'}
-            </button>
-          </div>
-        )}
-        {sourceId && (
-          <>
-            <div
-              className="overflow-x-auto"
-              role="region"
-              aria-label="LLM request metrics"
-              tabIndex={0}
-            >
-              <table
-                aria-label="LLM requests"
-                className="w-full min-w-[64rem] text-right text-sm tabular-nums"
+        <table
+          aria-label={label ? `LLM requests, ${label}` : 'LLM requests'}
+          className="w-full min-w-[64rem] text-right text-sm tabular-nums"
+        >
+          <thead className="border-b border-gray-100 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
+            <tr className="[&>th]:px-3 [&>th]:py-4 [&>th]:font-medium [&>th]:whitespace-nowrap">
+              <th
+                scope="col"
+                className="text-left !pl-5"
+                title="Request model and start time in UTC"
               >
-                <thead className="border-b border-gray-100 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
-                  <tr className="[&>th]:px-3 [&>th]:py-4 [&>th]:font-medium [&>th]:whitespace-nowrap">
-                    <th
-                      scope="col"
-                      className="text-left !pl-5"
-                      title="Request model and start time in UTC"
-                    >
-                      Request
-                    </th>
-                    <th scope="col">HTTP</th>
-                    <th scope="col" title="Input tokens, including cache">
-                      Input
-                    </th>
-                    <th scope="col">Output</th>
-                    <th scope="col">Cache read</th>
-                    <th scope="col">Cache write</th>
-                    <th scope="col" title="Cache read tokens / input tokens (including cache)">
-                      Cache hit rate
-                    </th>
-                    <th scope="col" title="Time to first token">
-                      TTFT
-                    </th>
-                    <th
-                      scope="col"
-                      title="Estimated time per output token: (duration − TTFT) / (output tokens − 1), in ms/token"
-                    >
-                      TPOT
-                    </th>
-                    <th scope="col">Duration</th>
-                    <th scope="col" className="!pr-5">
-                      Cost
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100 dark:divide-white/5">
-                  {loading && rows.length === 0 && (
-                    <tr>
-                      <td
-                        colSpan={11}
-                        className="px-5 py-4 text-left text-gray-500 dark:text-gray-400"
-                      >
-                        Loading requests…
-                      </td>
-                    </tr>
-                  )}
-                  {rows.map((row) => (
-                    <RequestRow key={row.request_id} row={row} />
-                  ))}
-                  {!loading && rows.length === 0 && !error && (
-                    <tr>
-                      <td
-                        colSpan={11}
-                        className="px-5 py-4 text-left text-gray-500 dark:text-gray-400"
-                      >
-                        No request records are stored for this window yet.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-            {page?.next_cursor && (
-              <div className="flex justify-end border-t border-gray-100 px-5 py-3 dark:border-white/5">
-                <button
-                  type="button"
-                  className={BUTTON}
-                  disabled={moreLoading || loading || loadingSources || restart}
-                  onClick={() => void loadMore()}
-                >
-                  {moreLoading ? 'Loading…' : 'Load more'}
-                </button>
-              </div>
+                Request
+              </th>
+              <th scope="col">HTTP</th>
+              <th scope="col" title="Input tokens, including cache">
+                Input
+              </th>
+              <th scope="col">Output</th>
+              <th scope="col">Cache read</th>
+              <th scope="col">Cache write</th>
+              <th scope="col" title="Cache read tokens / input tokens (including cache)">
+                Cache hit rate
+              </th>
+              <th scope="col" title="Time to first token">
+                TTFT
+              </th>
+              <th
+                scope="col"
+                title="Estimated time per output token: (duration − TTFT) / (output tokens − 1), in ms/token"
+              >
+                TPOT
+              </th>
+              <th scope="col">Duration</th>
+              <th scope="col" className="!pr-5">
+                Cost
+              </th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100 dark:divide-white/5">
+            {loading && rows.length === 0 && (
+              <tr>
+                <td colSpan={11} className="px-5 py-4 text-left text-gray-500 dark:text-gray-400">
+                  Loading requests…
+                </td>
+              </tr>
             )}
-          </>
-        )}
+            {rows.map((row) => (
+              <RequestRow key={row.request_id} row={row} />
+            ))}
+            {!loading && rows.length === 0 && !error && (
+              <tr>
+                <td colSpan={11} className="px-5 py-4 text-left text-gray-500 dark:text-gray-400">
+                  No request records are stored for this window yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </div>
-    </section>
+      {page?.next_cursor && (
+        <div className="flex justify-end border-t border-gray-100 px-5 py-3 dark:border-white/5">
+          <button
+            type="button"
+            className={BUTTON}
+            disabled={moreLoading || loading || restart}
+            onClick={() => void loadMore()}
+          >
+            {moreLoading ? 'Loading…' : 'Load more'}
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 

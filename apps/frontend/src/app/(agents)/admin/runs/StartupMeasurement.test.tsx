@@ -112,7 +112,7 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-describe('the startup panel on an attempt detail', () => {
+describe('the startup panel on a turn detail', () => {
   it('asks for this attempt start-up and nothing wider', async () => {
     await pageOf([]);
     renderPanel();
@@ -129,7 +129,7 @@ describe('the startup panel on an attempt detail', () => {
     await pageOf([], 'the experiment may be off, unselected, undelivered');
     renderPanel();
 
-    await screen.findByText(/No saved startup measurement for this attempt/);
+    await screen.findByText(/No saved startup measurement for this turn/);
     expect(screen.getByText(/may be off, unselected, undelivered/)).toBeInTheDocument();
     // The absence has causes the response cannot distinguish, and the panel
     // says so rather than implying the startup was instantaneous. The sentence
@@ -208,7 +208,7 @@ describe('the startup panel on an attempt detail', () => {
     vi.mocked(getMeasurement).mockResolvedValue(detail());
     renderPanel();
 
-    await screen.findByText(/2 startup records are stored for this attempt/);
+    await screen.findByText(/2 startup records are stored for this turn/);
     expect(screen.getByText(/rather than\s+average them|rather than/)).toBeInTheDocument();
   });
 
@@ -254,8 +254,8 @@ describe('the startup panel on an attempt detail', () => {
     vi.mocked(getMeasurement).mockResolvedValue(detail());
     renderPanel();
 
-    await screen.findByText(/Every stored record for this attempt/);
-    const link = screen.getByRole('link', { name: /Every stored record for this attempt/ });
+    await screen.findByText(/Every stored record for this turn/);
+    const link = screen.getByRole('link', { name: /Every stored record for this turn/ });
     expect(link).toHaveAttribute('href', expect.stringContaining('attempt_id=7'));
     expect(link).toHaveAttribute('href', expect.stringContaining('job_id=job-1'));
   });
