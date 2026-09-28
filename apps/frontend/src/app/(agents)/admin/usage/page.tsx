@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { Suspense, useEffect, useState, type FormEvent } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
@@ -10,6 +10,8 @@ import {
   getAdminUsage,
   type AdminUsage,
   type AdminUsageAggregate,
+  type AdminUsageBreakdown,
+  type AdminUsageDay,
   type AdminUsageFilters,
 } from '@/lib/api/adminUsage';
 import { getErrorMessage } from '@/lib/utils/errors';
@@ -18,102 +20,145 @@ import { AdminNavigation } from '../AdminNavigation';
 import {
   accessDenied,
   AdminRequired,
-  BUTTON,
-  CARD,
   dateTime,
   ErrorNotice,
-  INPUT,
-  money,
+  ICON_BUTTON,
   number,
-  utcDate,
+  TOOLBAR_SELECT,
 } from '../runs/shared';
 import {
-  CACHE_NOTICE,
-  COVERAGE_BASIS,
+  cachedShare,
+  change,
+  costDisplay,
+  formatMetric,
+  IDENTITY_LABELS,
+  isPartialDay,
+  metricDisplay,
+  metricValue,
+  notFinal,
+  previousLabel,
+  previousWindow,
+  share,
+  shortDay,
+  tickIndexes,
+  type UsageMetric,
+} from './dashboard';
+import {
+  activityHref,
+  IDENTITY_KEYS,
+  MAX_FILTER_LENGTH,
   PRESETS,
-  WINDOW_BASIS,
-  breakdownKey,
-  coverageSummary,
-  groupLabel,
-  identityFromForm,
-  selectionFromQuery,
-  headline,
   presetKey,
   runsHref,
-  type RunsTarget,
-  statusLines,
+  selectionFromQuery,
   urlFor,
   windowFor,
 } from './present';
 
-const DIMENSIONS = [
-  { key: 'user_id', label: 'Users', column: 'User' },
-  { key: 'model', label: 'Configured models', column: 'Configured model' },
-  { key: 'day', label: 'Created date', column: 'Created (UTC)' },
-] as const;
+//: What a Usage selection is, said once as the window control's tooltip.
+const BASIS =
+  'Turns created in this window, with all the usage they recorded. Days are UTC. Usage is read from a cache, so a running turn may not be fully counted yet.';
 
-type Dimension = (typeof DIMENSIONS)[number]['key'];
+const HEADLINE: { metric: UsageMetric; label: string; hint: string }[] = [
+  {
+    metric: 'cost',
+    label: 'Cost',
+    hint: 'What the gateway recorded for the model calls of these turns.',
+  },
+  { metric: 'turns', label: 'Turns', hint: 'Turns created in this window, from every session.' },
+  { metric: 'calls', label: 'Model calls', hint: 'Model requests these turns made.' },
+  {
+    metric: 'tokens_in',
+    label: 'Input tokens',
+    hint: 'Input tokens of those requests, cache reads included.',
+  },
+  { metric: 'tokens_out', label: 'Output tokens', hint: 'Output tokens of those requests.' },
+];
 
-const SKELETON_CARDS = 4;
+const CHART_METRICS: { metric: UsageMetric; label: string }[] = [
+  { metric: 'cost', label: 'Cost' },
+  { metric: 'turns', label: 'Turns' },
+  { metric: 'calls', label: 'Model calls' },
+  { metric: 'tokens_in', label: 'Input tokens' },
+];
+
+type IdentityKey = (typeof IDENTITY_KEYS)[number];
+type RankedDimension = 'user_id' | 'model';
 
 export default function AdminUsagePage() {
   const { state } = useAuth();
   // Subscribed here, one level above the panel, so a URL change re-renders
   // this page rather than only the component that happens to read it.
   const query = useSearchParams().toString();
+  // The panel writes its selection into the address bar, and the router hands
+  // that write back here as a new query. It is the selection already on
+  // screen, so only a query the panel did not write starts a new panel.
+  const written = useRef<string | null>(null);
+  const seen = useRef(query);
+  const [panel, setPanel] = useState({ query, version: 0 });
+  useEffect(() => {
+    if (query === seen.current) return;
+    seen.current = query;
+    if (query !== written.current) {
+      setPanel((current) => ({ query, version: current.version + 1 }));
+    }
+  }, [query]);
+  const onWrite = useCallback((next: string) => {
+    written.current = next;
+  }, []);
   if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) return <AdminRequired />;
   return (
     <Suspense fallback={<UsageSkeleton />}>
-      <UsageView key={`${state.user?.id ?? 'admin'}:${query}`} initialQuery={query} />
+      <UsageView
+        key={`${state.user?.id ?? 'admin'}:${panel.version}`}
+        initialQuery={panel.query}
+        onWrite={onWrite}
+      />
     </Suspense>
   );
 }
 
-function UsageView({ initialQuery }: { initialQuery: string }) {
+function UsageView({
+  initialQuery,
+  onWrite,
+}: {
+  initialQuery: string;
+  onWrite: (query: string) => void;
+}) {
   const linked = selectionFromQuery(initialQuery);
   // The absolute window this page reads. A link supplies it; otherwise the
-  // default is resolved once and then reused, so a reload of the same URL
-  // selects the same runs.
+  // default is resolved once, so a reload of the same URL selects the same turns.
   const [filters, setFilters] = useState<AdminUsageFilters>(() => linked.filters ?? windowFor(7));
-  const [preset, setPreset] = useState(() => {
-    const applied = linked.filters ?? windowFor(7);
-    return presetKey(applied);
-  });
-  // Only an explicit preset choice re-anchors the window. Applying a changed
-  // identity filter keeps the absolute window the page already shows.
-  const [presetChosen, setPresetChosen] = useState(false);
-  // Each result carries the selection that produced it. A result from a
-  // different selection is never shown beside a link built from the current
-  // one, which would point at runs the numbers do not describe.
-  const [result, setResult] = useState<{
-    selection: string;
-    usage: AdminUsage;
-  } | null>(null);
-  const [loading, setLoading] = useState(true);
-  // A link this page cannot serve, as a state rather than a constant: an
-  // explicit Apply is the admin saying which selection they want instead, and
-  // that has to be able to clear it.
+  // The preset the window is. A link's window is one only while it still ends
+  // now; a preset chosen here stays chosen as the clock moves on.
+  const [windowKey, setWindowKey] = useState(() =>
+    linked.filters ? presetKey(linked.filters) : '7',
+  );
+  // A linked window stays exactly as linked. One chosen here re-anchors at now
+  // on Refresh, which is what refreshing "the last 7 days" means.
+  const [linkedWindow, setLinkedWindow] = useState(linked.linked);
+  // A link this page cannot serve. Choosing a window replaces it.
   const [linkError, setLinkError] = useState<string | null>(linked.error);
-  const [error, setError] = useState<string | null>(linked.error);
+  // Each result carries the selection that produced it. A result from another
+  // selection is never shown beside links built from the current one.
+  const [result, setResult] = useState<{ selection: string; usage: AdminUsage } | null>(null);
+  const [previous, setPrevious] = useState<{ selection: string; usage: AdminUsage } | null>(null);
+  const [loading, setLoading] = useState(!linked.error);
+  const [error, setError] = useState<string | null>(null);
   const [denied, setDenied] = useState(false);
-  const [dimension, setDimension] = useState<Dimension>('user_id');
-  const [showDetails, setShowDetails] = useState(false);
 
   const selectionKey = JSON.stringify(filters);
   const current = result?.selection === selectionKey ? result.usage : null;
+  const before = previous?.selection === selectionKey ? previous.usage : null;
 
   useEffect(() => {
-    if (linkError) {
-      // A link this page cannot serve is shown as it is. Writing a selection
-      // back would replace the link being reported, and the remount that
-      // follows would clear the error and query every owner. Only an explicit
-      // Apply clears this, and it writes the selection it applies.
-      return;
-    }
-    // Native history keeps the app router out of this: the panel already holds
-    // the applied selection, so a reactive navigation would only re-render it.
-    window.history.replaceState(null, '', urlFor(window.location.pathname, filters));
-  }, [filters, linkError]);
+    // A link this page cannot serve stays in the address bar as it is:
+    // replacing it would hide the link being reported.
+    if (linkError) return;
+    const next = urlFor(window.location.pathname, filters);
+    onWrite(next.slice(next.indexOf('?') + 1));
+    window.history.replaceState(null, '', next);
+  }, [filters, linkError, onWrite]);
 
   useEffect(() => {
     if (linkError) {
@@ -140,39 +185,53 @@ function UsageView({ initialQuery }: { initialQuery: string }) {
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
       });
+    // The same selection one window earlier, for the change beside each
+    // number. It is only a comparison: when it cannot be read, the numbers
+    // are shown without one.
+    const earlier = previousWindow(filters);
+    if (earlier) {
+      getAdminUsage(earlier, controller.signal)
+        .then((next) => {
+          if (!controller.signal.aborted) setPrevious({ selection: selectionKey, usage: next });
+        })
+        .catch(() => {});
+    }
     return () => controller.abort();
-    // The key carries the selection: this panel is remounted rather than
-    // re-fetched when the URL names a different one.
   }, [filters, selectionKey, linkError]);
 
-  function apply(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = event.currentTarget.elements;
-    const days = presetChosen && preset !== 'custom' ? Number(preset) : null;
-    // The identity filters come only from the form: a field the admin cleared
-    // must disappear from the request rather than keep its previous value.
-    const next: AdminUsageFilters = {
-      ...(days === null ? { since: filters.since, until: filters.until } : windowFor(days)),
-      ...identityFromForm((key) => {
-        const field = form.namedItem(key);
-        return field instanceof HTMLInputElement ? field.value : '';
-      }),
-    };
-    // Applying is the admin choosing a selection, which is exactly what an
-    // unusable link could not provide. Clearing this first lets the write-back
-    // and the request proceed with the selection just applied.
+  function chooseWindow(key: string) {
+    const days = PRESETS.find((preset) => preset.key === key)?.days;
+    if (!days) return;
+    setWindowKey(key);
+    setLinkedWindow(false);
+    // Choosing a window is the selection a broken link could not provide.
     setLinkError(null);
-    setFilters(next);
-    setPresetChosen(false);
+    setFilters((selected) => ({ ...identities(selected), ...windowFor(days) }));
   }
 
   function refresh() {
-    // Re-reading the cache is not a new window: the applied one is unchanged.
-    setFilters({ ...filters });
+    const days = PRESETS.find((preset) => preset.key === windowKey)?.days;
+    setFilters((selected) =>
+      linkedWindow || !days ? { ...selected } : { ...selected, ...windowFor(days) },
+    );
+  }
+
+  // Narrowing keeps the window on screen: only choosing a window moves it.
+  const narrow = useCallback((dimension: RankedDimension, key: string) => {
+    setFilters((selected) => ({ ...selected, [dimension]: key }));
+  }, []);
+
+  function widen(key: IdentityKey) {
+    setFilters((selected) => {
+      const next = { ...selected };
+      delete next[key];
+      return next;
+    });
   }
 
   if (denied) return <AdminRequired />;
 
+  const narrowedBy = IDENTITY_KEYS.filter((key) => filters[key]);
   return (
     <div className="flex-1 overflow-y-auto">
       <section className="mx-auto w-full max-w-7xl px-6 py-10 lg:px-12 lg:py-14">
@@ -181,102 +240,96 @@ function UsageView({ initialQuery }: { initialQuery: string }) {
         </h1>
         <AdminNavigation current="usage" />
 
-        <div className="mt-8 flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-50">Usage</h2>
-            <p className="mt-1 max-w-3xl text-sm text-gray-500 dark:text-gray-400">
-              {WINDOW_BASIS}
-            </p>
-          </div>
-          <button className={BUTTON} type="button" disabled={loading} onClick={refresh}>
-            Refresh
-          </button>
-        </div>
-
-        <form onSubmit={apply} aria-label="Usage filters" className={`${CARD} mt-5 p-5`}>
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <label className="text-xs font-medium text-gray-500 dark:text-gray-400">
-              Created
-              <select
-                className={`${INPUT} mt-1.5`}
-                name="preset"
-                value={preset}
-                onChange={(e) => {
-                  setPreset(e.target.value);
-                  setPresetChosen(true);
-                }}
-              >
-                {PRESETS.map((option) => (
-                  <option key={option.key} value={option.key}>
-                    {option.label}
-                  </option>
-                ))}
-                <option value="custom">Custom</option>
-              </select>
-            </label>
-            {(
-              [
-                ['user_id', 'User ID'],
-                ['model', 'Configured model'],
-                ['runtime', 'Agent'],
-                ['repo', 'Repository'],
-              ] as const
-            ).map(([key, label]) => (
-              <label
-                key={`${key}:${filters[key] ?? ''}`}
-                className="text-xs font-medium text-gray-500 dark:text-gray-400"
-              >
-                {label}
-                <input
-                  className={`${INPUT} mt-1.5`}
-                  name={key}
-                  defaultValue={filters[key] ?? ''}
-                  placeholder="Any"
-                />
-              </label>
+        <h2 className="sr-only">Usage</h2>
+        <div className="mt-8 flex flex-wrap items-center gap-x-3 gap-y-2">
+          <label className="shrink-0" title={BASIS}>
+            <span className="sr-only">Turn created</span>
+            <select
+              className={TOOLBAR_SELECT}
+              value={windowKey}
+              onChange={(e) => chooseWindow(e.target.value)}
+            >
+              {PRESETS.map((preset) => (
+                <option key={preset.key} value={preset.key}>
+                  {preset.label}
+                </option>
+              ))}
+              {windowKey === 'custom' && <option value="custom">Custom</option>}
+            </select>
+          </label>
+          {windowKey === 'custom' && !linkError && (
+            <span className="text-xs text-gray-500 dark:text-gray-400">
+              {shortDay(filters.since)} – {shortDay(filters.until)}
+            </span>
+          )}
+          {!linkError &&
+            narrowedBy.map((key) => (
+              <FilterChip
+                key={key}
+                label={IDENTITY_LABELS[key]}
+                value={filters[key] ?? ''}
+                onRemove={() => widen(key)}
+              />
             ))}
-          </div>
-          <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-            Applied window: {dateTime(filters.since)} to {dateTime(filters.until)}
-          </p>
-          <div className="mt-4 flex justify-end border-t border-gray-100 pt-4 dark:border-white/5">
-            <button type="submit" className={BUTTON}>
-              Apply filters
+          <div className="ml-auto flex items-center gap-1">
+            {!linkError && (
+              <Link
+                href={activityHref(filters)}
+                prefetch={false}
+                className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-sm text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100"
+              >
+                Open in Activity
+                <ArrowIcon />
+              </Link>
+            )}
+            <button
+              className={ICON_BUTTON}
+              type="button"
+              aria-label="Refresh"
+              title="Refresh"
+              disabled={loading || Boolean(linkError)}
+              onClick={refresh}
+            >
+              <svg
+                aria-hidden
+                viewBox="0 0 20 20"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.6}
+                className="h-4 w-4"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M16.3 10a6.3 6.3 0 1 1-1.85-4.45M16.3 3.8v3.4h-3.4"
+                />
+              </svg>
             </button>
           </div>
-        </form>
+        </div>
 
-        {error && (
-          <ErrorNotice>
-            {error}
-            <ErrorRecovery linkError={Boolean(linkError)} retry={refresh} showRetry={!current} />
-          </ErrorNotice>
+        {linkError ? (
+          <ErrorNotice>{linkError} Choose a window to read a selection instead.</ErrorNotice>
+        ) : (
+          error && (
+            <ErrorNotice>
+              {error}
+              {current ? (
+                ' The numbers below are from the previous read.'
+              ) : (
+                <button type="button" className="ml-3 underline" onClick={refresh}>
+                  Retry
+                </button>
+              )}
+            </ErrorNotice>
+          )
         )}
 
         {loading && !current ? (
           <UsageSkeleton />
         ) : (
           current && (
-            <>
-              <Headline
-                aggregate={current.summary}
-                generatedAt={current.generated_at}
-                windowSince={current.selection.since}
-                windowUntil={current.selection.until}
-                failed={Boolean(error)}
-              />
-              <Coverage
-                aggregate={current.summary}
-                open={showDetails}
-                onToggle={() => setShowDetails((value) => !value)}
-              />
-              <Breakdown
-                usage={current}
-                dimension={dimension}
-                onDimension={setDimension}
-                filters={filters}
-              />
-            </>
+            <Dashboard usage={current} previous={before} filters={filters} onNarrow={narrow} />
           )
         )}
       </section>
@@ -284,361 +337,457 @@ function UsageView({ initialQuery }: { initialQuery: string }) {
   );
 }
 
-function Headline({
-  aggregate,
-  generatedAt,
-  windowSince,
-  windowUntil,
-  failed,
+function Dashboard({
+  usage,
+  previous,
+  filters,
+  onNarrow,
 }: {
-  aggregate: AdminUsageAggregate;
-  generatedAt: string;
-  windowSince: string;
-  windowUntil: string;
-  failed: boolean;
+  usage: AdminUsage;
+  previous: AdminUsage | null;
+  filters: AdminUsageFilters;
+  onNarrow: (dimension: RankedDimension, key: string) => void;
 }) {
+  const summary = usage.summary;
+  if (summary.run_count === 0) {
+    return (
+      <p className="mt-10 text-sm text-gray-500 dark:text-gray-400">
+        No turns were created in this window.
+      </p>
+    );
+  }
+  const unfinished = notFinal(summary);
   return (
     <>
-      <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {headline(aggregate).map((metric) => (
-          <div key={metric.label} className={`${CARD} p-5`}>
-            <p className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
-              {metric.label}
-            </p>
-            <p
-              className="mt-2 text-2xl font-semibold tabular-nums text-gray-900 dark:text-gray-50"
-              title={metric.exact ?? undefined}
-            >
-              {metric.value}
-            </p>
-            {metric.detail && (
-              <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">{metric.detail}</p>
-            )}
-          </div>
-        ))}
+      <Headline summary={summary} previous={previous?.summary ?? null} filters={filters} />
+      {unfinished.clauses.length > 0 && (
+        <p
+          className="mt-5 text-xs text-gray-500 dark:text-gray-400"
+          title={[
+            ...unfinished.detail,
+            `Usage is read from a cache; the oldest read is from ${dateTime(summary.oldest_queried_at)}.`,
+          ].join('\n')}
+        >
+          Not final: {unfinished.clauses.join(' · ')}.
+        </p>
+      )}
+      <DailyChart days={usage.days} filters={filters} />
+      <div className="mt-12 grid grid-cols-1 gap-x-12 gap-y-10 lg:grid-cols-2">
+        <Ranking
+          title="Users"
+          noun="user"
+          dimension="user_id"
+          breakdown={usage.by_user}
+          whole={summary}
+          filters={filters}
+          onNarrow={onNarrow}
+        />
+        <Ranking
+          title="Models"
+          noun="model"
+          dimension="model"
+          breakdown={usage.by_model}
+          whole={summary}
+          filters={filters}
+          onNarrow={onNarrow}
+        />
       </div>
-      <p className="mt-4 text-xs text-gray-500 dark:text-gray-400">
-        Page read at {dateTime(generatedAt)}. Selected window {dateTime(windowSince)} to{' '}
-        {dateTime(windowUntil)}. {CACHE_NOTICE}
-        {failed && ' The last refresh failed; these values are the previous successful read.'}
-      </p>
     </>
   );
 }
 
-function Coverage({
-  aggregate,
-  open,
-  onToggle,
+function Headline({
+  summary,
+  previous,
+  filters,
 }: {
-  aggregate: AdminUsageAggregate;
-  open: boolean;
-  onToggle: () => void;
+  summary: AdminUsageAggregate;
+  previous: AdminUsageAggregate | null;
+  filters: AdminUsageFilters;
 }) {
-  const statuses = statusLines(aggregate);
-  const unknown = Object.entries(aggregate.unknown_rows ?? {}).filter(([, count]) => count > 0);
+  const earlier = previousLabel(filters);
   return (
-    <section className={`${CARD} mt-5 p-5`} aria-labelledby="coverage-heading">
-      <h3 id="coverage-heading" className="text-sm font-semibold text-gray-900 dark:text-gray-50">
-        Usage coverage
-      </h3>
-      <p className="mt-2 text-sm text-gray-700 dark:text-gray-300">{coverageSummary(aggregate)}</p>
-      <ul className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
-        {aggregate.missing_attempts > 0 && (
-          <li>{number(aggregate.missing_attempts)} executions without a readable snapshot</li>
+    <dl className="mt-8 grid grid-cols-2 gap-x-8 gap-y-6 sm:grid-cols-3 lg:grid-cols-5">
+      {HEADLINE.map(({ metric, label, hint }) => {
+        const shown = metricDisplay(summary, metric);
+        const delta = previous
+          ? change(metricValue(summary, metric), metricValue(previous, metric))
+          : null;
+        const cached = metric === 'tokens_in' ? cachedShare(summary) : null;
+        return (
+          <div key={metric} className="min-w-0">
+            <dt className="text-xs text-gray-500 dark:text-gray-400" title={hint}>
+              {label}
+            </dt>
+            <dd
+              className="mt-1 truncate text-2xl font-semibold tabular-nums tracking-tight text-gray-900 dark:text-gray-50"
+              title={shown.exact ?? undefined}
+            >
+              {shown.display}
+            </dd>
+            <dd className="mt-0.5 flex h-4 gap-2 whitespace-nowrap text-xs tabular-nums text-gray-500 dark:text-gray-400">
+              {delta && previous && (
+                <span title={`${capitalize(earlier)}: ${metricDisplay(previous, metric).display}`}>
+                  {delta}
+                  <span className="sr-only"> from the {earlier}</span>
+                </span>
+              )}
+              {cached !== null && <span>{Math.round(cached * 100)}% cached</span>}
+            </dd>
+          </div>
+        );
+      })}
+    </dl>
+  );
+}
+
+function DailyChart({ days, filters }: { days: AdminUsageDay[]; filters: AdminUsageFilters }) {
+  const [metric, setMetric] = useState<UsageMetric>('cost');
+  const [pointed, setPointed] = useState<number | null>(null);
+  if (days.length === 0) return null;
+  const values = days.map((day) => metricValue(day.usage, metric));
+  const peak = Math.max(0, ...values.map((value) => value ?? 0));
+  const ticks = new Set(tickIndexes(days.length));
+  // The day being read out: the one pointed at, otherwise the latest.
+  const shown = pointed !== null && pointed < days.length ? pointed : days.length - 1;
+  const label = CHART_METRICS.find((item) => item.metric === metric)?.label ?? '';
+  return (
+    <section aria-label={`${label} by day`} className="mt-10">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div
+          role="group"
+          aria-label="Chart"
+          className="inline-flex rounded-lg bg-gray-100 p-0.5 dark:bg-white/5"
+        >
+          {CHART_METRICS.map((item) => (
+            <button
+              key={item.metric}
+              type="button"
+              aria-pressed={item.metric === metric}
+              onClick={() => setMetric(item.metric)}
+              className={`rounded-md px-3 py-1 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson ${
+                item.metric === metric
+                  ? 'bg-white text-gray-900 shadow-sm dark:bg-gray-800 dark:text-gray-50'
+                  : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100'
+              }`}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        <p className="text-xs tabular-nums text-gray-500 dark:text-gray-400">
+          {dayReading(days[shown], metric)}
+        </p>
+      </div>
+      <div className="relative mt-4 h-44 border-b border-gray-200 dark:border-white/10">
+        <div className="absolute inset-x-0 top-0 border-t border-dashed border-gray-200 dark:border-white/10" />
+        <span className="absolute left-0 top-1 text-[11px] tabular-nums text-gray-400 dark:text-gray-500">
+          {formatMetric(metric, peak)}
+        </span>
+        <div className="flex h-full items-end gap-[3px] pt-6">
+          {days.map((day, index) => {
+            const value = values[index];
+            const height = peak > 0 && value ? Math.max(2, (value / peak) * 100) : 0;
+            // A day with turns but no recorded value is unknown, not zero, so
+            // it is marked instead of drawn as an empty bar.
+            const unknown = value === null && day.usage.run_count > 0;
+            const href = runsHref(filters, {
+              dimension: 'day',
+              since: day.since,
+              until: day.until,
+            });
+            return (
+              <Link
+                key={day.date}
+                href={href ?? activityHref(filters)}
+                prefetch={false}
+                aria-label={dayReading(day, metric)}
+                onMouseEnter={() => setPointed(index)}
+                onMouseLeave={() => setPointed(null)}
+                onFocus={() => setPointed(index)}
+                onBlur={() => setPointed(null)}
+                className="group flex h-full min-w-0 flex-1 items-end justify-center focus-visible:outline-none"
+              >
+                {unknown ? (
+                  <span className="block w-full max-w-10 border-t-2 border-dotted border-gray-400 dark:border-gray-500" />
+                ) : (
+                  <span
+                    className={`block w-full max-w-10 rounded-t-sm transition-colors group-focus-visible:ring-2 group-focus-visible:ring-crimson ${
+                      index === pointed
+                        ? 'bg-gray-500 dark:bg-white/50'
+                        : 'bg-gray-300 group-hover:bg-gray-500 dark:bg-white/20 dark:group-hover:bg-white/50'
+                    } ${isPartialDay(day) ? 'opacity-60' : ''}`}
+                    style={{ height: `${height}%` }}
+                  />
+                )}
+              </Link>
+            );
+          })}
+        </div>
+      </div>
+      <div className="relative mt-1.5 h-4 text-[11px] tabular-nums text-gray-400 dark:text-gray-500">
+        {days.map((day, index) =>
+          ticks.has(index) ? (
+            <span
+              key={day.date}
+              className="absolute top-0 whitespace-nowrap"
+              style={tickPosition(index, days.length)}
+            >
+              {shortDay(day.date)}
+            </span>
+          ) : null,
         )}
-        {statuses.map((line) => (
-          <li key={line.label}>
-            {number(line.count)} {line.label.toLowerCase()}
-          </li>
-        ))}
-        {aggregate.active_runs > 0 && <li>{number(aggregate.active_runs)} still active</li>}
-        {aggregate.refreshing_runs > 0 && (
-          <li>{number(aggregate.refreshing_runs)} with an accounting update in progress</li>
+      </div>
+    </section>
+  );
+}
+
+/** Where a day's label sits: under its bar, kept inside the chart at both ends. */
+function tickPosition(index: number, total: number): React.CSSProperties {
+  if (index === 0) return { left: 0 };
+  if (index === total - 1) return { right: 0 };
+  return { left: `${((index + 0.5) / total) * 100}%`, transform: 'translateX(-50%)' };
+}
+
+/** One day as the chart reads it out: `Sep 23 · $3.42 · 17 turns`. */
+function dayReading(day: AdminUsageDay, metric: UsageMetric): string {
+  const name = `${shortDay(day.date)}${isPartialDay(day) ? ' (part of the day)' : ''}`;
+  const turns = day.usage.run_count;
+  if (turns === 0) return `${name} · no turns`;
+  const value = metricValue(day.usage, metric);
+  const turnText = `${number(turns)} turn${turns === 1 ? '' : 's'}`;
+  if (metric === 'turns') return `${name} · ${turnText}`;
+  if (value === null) return `${name} · ${turnText}, no usage recorded yet`;
+  return `${name} · ${formatMetric(metric, value)} · ${turnText}`;
+}
+
+function Ranking({
+  title,
+  noun,
+  dimension,
+  breakdown,
+  whole,
+  filters,
+  onNarrow,
+}: {
+  title: string;
+  noun: string;
+  dimension: RankedDimension;
+  breakdown: AdminUsageBreakdown;
+  whole: AdminUsageAggregate;
+  filters: AdminUsageFilters;
+  onNarrow: (dimension: RankedDimension, key: string) => void;
+}) {
+  const others = breakdown.group_count - breakdown.groups.length;
+  const headingId = `ranking-${dimension}`;
+  return (
+    <section aria-labelledby={headingId} className="min-w-0">
+      <div className="flex items-center gap-2 px-2 pb-1 text-xs text-gray-500 dark:text-gray-400">
+        <h3 id={headingId} className="min-w-0 flex-1 font-medium text-gray-900 dark:text-gray-100">
+          {title}
+        </h3>
+        <span className="hidden w-20 shrink-0 sm:block" />
+        <span className="w-12 shrink-0 text-right">Turns</span>
+        <span className="w-20 shrink-0 text-right">Cost</span>
+        <span className="w-5 shrink-0" />
+      </div>
+      <ul>
+        {breakdown.groups.map((group) => {
+          const identity =
+            group.key !== null && group.key.length <= MAX_FILTER_LENGTH ? group.key : null;
+          return (
+            <RankRow
+              key={group.key ?? 'unknown'}
+              name={group.key ?? `Unknown ${noun}`}
+              usage={group.usage}
+              whole={whole}
+              identity={identity}
+              reason={identity === null ? unfilterable(group.key, noun) : null}
+              narrowed={filters[dimension] === group.key}
+              href={runsHref(filters, { dimension, value: group.key })}
+              onNarrow={(key) => onNarrow(dimension, key)}
+            />
+          );
+        })}
+        {breakdown.other && (
+          <RankRow
+            name={`Other · ${number(others)} ${noun}${others === 1 ? '' : 's'}`}
+            usage={breakdown.other.usage}
+            whole={whole}
+            identity={null}
+            reason={`The ${noun}s after the first ${breakdown.groups.length}, added together; they are not one filter.`}
+            narrowed={false}
+            href={null}
+            onNarrow={() => {}}
+            muted
+          />
         )}
       </ul>
-      <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-        Oldest known snapshot query: {dateTime(aggregate.oldest_queried_at)}. Not finalized.{' '}
-        {COVERAGE_BASIS}
-      </p>
-      <button type="button" className="mt-3 text-xs underline" onClick={onToggle}>
-        {open ? 'Hide metric detail' : 'Show metric detail'}
-      </button>
-      {open && (
-        <div className="mt-3 border-t border-gray-100 pt-3 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
-          <p>
-            {aggregate.estimated_calls > 0
-              ? `${number(aggregate.estimated_calls)} recordings include an estimated usage value.`
-              : 'No recording used an estimated usage value.'}
-          </p>
-          {unknown.length === 0 ? (
-            <p className="mt-1">Every recorded metric came back with a value.</p>
-          ) : (
-            <ul className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
-              {unknown.map(([metric, count]) => (
-                <li key={metric}>
-                  {metric}: {number(count)} recordings unknown
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+      {breakdown.groups.length === 0 && (
+        <p className="px-2 py-2 text-sm text-gray-500 dark:text-gray-400">No {noun}s.</p>
       )}
     </section>
   );
 }
 
-/** The exact filter a row links to: a day keeps its intersection, a key its identity. */
-function runsTarget(
-  dimension: Dimension,
-  row: { key: string | null; since?: string; until?: string },
-): RunsTarget {
-  return dimension === 'day'
-    ? { dimension: 'day', since: row.since, until: row.until }
-    : { dimension, value: row.key };
+/** Why a group offers no filter, said in its tooltip rather than left unexplained. */
+function unfilterable(key: string | null, noun: string): string {
+  return key === null
+    ? `An unknown ${noun} cannot be filtered by.`
+    : 'Too long to filter by exactly. It is still counted.';
 }
 
-/** What the ranked table shows, including the groups folded into the remainder. */
-function rankedBasis(shown: number, groupCount: number): string {
-  return `Top ${shown} groups by recorded cost, out of ${number(
-    groupCount,
-  )}; a group with no recorded cost is listed last.`;
-}
-
-/**
- * What an error offers next.
- *
- * A broken link needs a selection, not a retry: it cannot succeed until the
- * admin applies one. Any other failure is worth retrying as it stands.
- */
-function ErrorRecovery({
-  linkError,
-  showRetry,
-  retry,
-}: {
-  linkError: boolean;
-  showRetry: boolean;
-  retry: () => void;
-}) {
-  if (linkError) return <> Choose a window and apply it to read a selection instead.</>;
-  if (!showRetry) return null;
-  return (
-    <button type="button" className="ml-3 underline" onClick={retry}>
-      Retry
-    </button>
-  );
-}
-
-function dayRows(usage: AdminUsage) {
-  return usage.days.map((day) => ({
-    key: day.date,
-    since: day.since,
-    until: day.until,
-    usage: day.usage,
-  }));
-}
-
-function breakdownGroups(usage: AdminUsage, dimension: 'user_id' | 'model') {
-  return usage[breakdownKey(dimension)].groups.map((group) => ({
-    key: group.key,
-    usage: group.usage,
-  }));
-}
-
-function Breakdown({
+function RankRow({
+  name,
   usage,
-  dimension,
-  onDimension,
-  filters,
+  whole,
+  identity,
+  reason,
+  narrowed,
+  href,
+  onNarrow,
+  muted = false,
 }: {
-  usage: AdminUsage;
-  dimension: Dimension;
-  onDimension: (value: Dimension) => void;
-  filters: AdminUsageFilters;
+  name: string;
+  usage: AdminUsageAggregate;
+  whole: AdminUsageAggregate;
+  identity: string | null;
+  reason: string | null;
+  narrowed: boolean;
+  href: string | null;
+  onNarrow: (key: string) => void;
+  muted?: boolean;
 }) {
-  const label = DIMENSIONS.find((entry) => entry.key === dimension) ?? DIMENSIONS[0];
-  const rows = dimension === 'day' ? dayRows(usage) : breakdownGroups(usage, dimension);
-  // Day rows are never ranked, so only the two identity dimensions have a
-  // remainder row.
-  const other = dimension === 'day' ? null : usage[breakdownKey(dimension)].other;
-  const otherGroups =
-    dimension === 'day' ? 0 : usage[breakdownKey(dimension)].group_count - rows.length;
-  const breakdownBasis =
-    dimension === 'day'
-      ? 'Every UTC creation day in the selected window.'
-      : rankedBasis(rows.length, usage[breakdownKey(dimension)].group_count);
-
+  const cost = costDisplay(usage.totals?.spent_usd);
+  const part = share(usage, whole);
+  const detail = [
+    `${number(usage.run_count)} turn${usage.run_count === 1 ? '' : 's'}`,
+    usage.totals ? `${number(usage.totals.calls)} model calls` : 'no usage recorded yet',
+    `${Math.round(part * 100)}% of the selection`,
+  ].join(' · ');
+  const text = `min-w-0 flex-1 truncate text-left text-[13px] ${
+    muted ? 'text-gray-500 dark:text-gray-400' : 'font-mono text-gray-900 dark:text-gray-100'
+  }`;
   return (
-    <section className={`${CARD} mt-5 overflow-hidden`} aria-labelledby="breakdown-heading">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 px-5 py-4 dark:border-white/5">
-        <div>
-          <h3
-            id="breakdown-heading"
-            className="text-sm font-semibold text-gray-900 dark:text-gray-50"
-          >
-            Breakdown
-          </h3>
-          <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{breakdownBasis}</p>
-        </div>
-        <div className="flex gap-1">
-          {DIMENSIONS.map((entry) => (
-            <button
-              key={entry.key}
-              type="button"
-              aria-pressed={dimension === entry.key}
-              className={`${BUTTON} ${dimension === entry.key ? 'border-crimson text-crimson' : ''}`}
-              onClick={() => onDimension(entry.key)}
-            >
-              {entry.label}
-            </button>
-          ))}
-        </div>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-left text-sm">
-          <thead className="border-b border-gray-100 bg-gray-50/70 text-[11px] uppercase tracking-wide text-gray-500 dark:border-white/5 dark:bg-white/[0.02] dark:text-gray-400">
-            <tr>
-              {[
-                label.column,
-                'Runs',
-                'Recorded cost',
-                'Calls',
-                'Input',
-                'Output',
-                'With snapshot',
-                '',
-              ].map((column, index) => (
-                <th
-                  key={column || 'actions'}
-                  className={`whitespace-nowrap px-5 py-3 font-medium ${
-                    index > 0 && index < 7 ? 'text-right' : ''
-                  }`}
-                >
-                  {column}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100 dark:divide-white/5">
-            {rows.length === 0 && (
-              <tr>
-                <td
-                  colSpan={8}
-                  className="px-5 py-6 text-center text-sm text-gray-500 dark:text-gray-400"
-                >
-                  No runs in this period.
-                </td>
-              </tr>
-            )}
-            {rows.map((row) => (
-              <BreakdownRow
-                key={row.key ?? 'unknown'}
-                row={row}
-                dimension={dimension}
-                filters={filters}
-              />
-            ))}
-            {other && (
-              <BreakdownRow
-                row={{ key: null, usage: other.usage, otherGroups }}
-                dimension={dimension}
-                filters={filters}
-                isOther
-              />
-            )}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
-function BreakdownRow({
-  row,
-  dimension,
-  filters,
-  isOther = false,
-}: {
-  row: {
-    key: string | null;
-    usage: AdminUsageAggregate;
-    since?: string;
-    until?: string;
-    otherGroups?: number;
-  };
-  dimension: Dimension;
-  filters: AdminUsageFilters;
-  isOther?: boolean;
-}) {
-  const cost = money(row.usage.totals?.spent_usd);
-  const href = isOther ? null : runsHref(filters, runsTarget(dimension, row));
-  const name = isOther
-    ? `Other · ${number(row.otherGroups ?? 0)} groups`
-    : dimension === 'day'
-      ? utcDate(row.since)
-      : groupLabel(dimension, { key: row.key, usage: row.usage });
-  return (
-    <tr className="align-top transition-colors hover:bg-gray-50/70 dark:hover:bg-white/[0.03]">
-      <th scope="row" className="max-w-xs px-5 py-3 font-normal">
-        <span
-          className="block truncate font-medium text-gray-900 dark:text-gray-100"
-          title={row.key ?? undefined}
+    <li
+      className="group relative flex h-9 items-center gap-2 rounded-md px-2 transition-colors hover:bg-gray-100 dark:hover:bg-gray-900"
+      title={[name, detail, reason].filter(Boolean).join('\n')}
+    >
+      {identity !== null && !narrowed ? (
+        <button
+          type="button"
+          onClick={() => onNarrow(identity)}
+          className={`${text} after:absolute after:inset-0 after:rounded-md focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-crimson`}
+          aria-label={`Show only ${name}`}
         >
           {name}
-        </span>
-        {dimension === 'day' && (
-          <span className="text-xs text-gray-500 dark:text-gray-400">
-            Runs created on this UTC day
-          </span>
-        )}
-      </th>
-      <Cell>{number(row.usage.run_count)}</Cell>
-      <Cell title={cost.exact ?? undefined}>{cost.display}</Cell>
-      <Cell>{row.usage.totals ? number(row.usage.totals.calls) : 'Unavailable'}</Cell>
-      <Cell>{number(row.usage.totals?.tokens_in)}</Cell>
-      <Cell>{number(row.usage.totals?.tokens_out)}</Cell>
-      <Cell>
-        {number(row.usage.runs_with_snapshot)} / {number(row.usage.run_count)}
-      </Cell>
-      <td className="px-5 py-3 text-right">
-        {href ? (
+        </button>
+      ) : (
+        <span className={text}>{name}</span>
+      )}
+      <span className="hidden h-1 w-20 shrink-0 overflow-hidden rounded-full bg-gray-200 sm:block dark:bg-white/10">
+        <span
+          className="block h-full rounded-full bg-gray-500 dark:bg-white/40"
+          style={{ width: `${part * 100}%` }}
+        />
+      </span>
+      <span className="w-12 shrink-0 text-right text-[13px] tabular-nums text-gray-500 dark:text-gray-400">
+        {number(usage.run_count)}
+      </span>
+      <span
+        className="w-20 shrink-0 text-right text-[13px] tabular-nums text-gray-900 dark:text-gray-100"
+        title={cost.exact ?? undefined}
+      >
+        {cost.display}
+      </span>
+      <span className="flex w-5 shrink-0 justify-end">
+        {href && !muted && (
           <Link
             href={href}
-            className="text-xs font-medium text-crimson hover:underline dark:text-crimson-light"
+            prefetch={false}
+            aria-label={`Open ${name} in Activity`}
+            title="Open in Activity"
+            className="relative z-10 rounded p-0.5 text-gray-400 opacity-0 dark:text-gray-500 transition-opacity hover:text-gray-900 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson group-hover:opacity-100 dark:hover:text-gray-100"
           >
-            View sessions
+            <ArrowIcon />
           </Link>
-        ) : (
-          <span className="text-xs text-gray-400 dark:text-gray-500">
-            {isOther ? 'Not a single filter' : 'Cannot be filtered exactly'}
-          </span>
         )}
-      </td>
-    </tr>
+      </span>
+    </li>
   );
 }
 
-function Cell({ children, title }: { children: React.ReactNode; title?: string }) {
+function FilterChip({
+  label,
+  value,
+  onRemove,
+}: {
+  label: string;
+  value: string;
+  onRemove: () => void;
+}) {
   return (
-    <td
-      className="whitespace-nowrap px-5 py-3 text-right tabular-nums text-gray-700 dark:text-gray-300"
-      title={title}
-    >
-      {children}
-    </td>
+    <span className="inline-flex h-7 min-w-0 max-w-xs items-center gap-1.5 rounded-md bg-gray-100 pl-2 pr-1 text-xs text-gray-700 dark:bg-white/5 dark:text-gray-300">
+      <span className="text-gray-500 dark:text-gray-400">{label}</span>
+      <span className="min-w-0 truncate font-mono" title={value}>
+        {value}
+      </span>
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={`Remove the ${label.toLowerCase()} filter`}
+        className="rounded p-0.5 text-gray-400 dark:text-gray-500 hover:bg-gray-200 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson dark:hover:bg-white/10 dark:hover:text-gray-100"
+      >
+        <svg aria-hidden viewBox="0 0 16 16" fill="none" stroke="currentColor" className="h-3 w-3">
+          <path strokeWidth={1.6} strokeLinecap="round" d="M4.5 4.5l7 7m0-7l-7 7" />
+        </svg>
+      </button>
+    </span>
   );
+}
+
+function ArrowIcon() {
+  return (
+    <svg aria-hidden viewBox="0 0 16 16" fill="none" stroke="currentColor" className="h-3.5 w-3.5">
+      <path
+        strokeWidth={1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M3 8h9.5M8.5 4l4 4-4 4"
+      />
+    </svg>
+  );
+}
+
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** The identities of a selection, without its window. */
+function identities(filters: AdminUsageFilters): AdminUsageFilters {
+  const kept: AdminUsageFilters = {};
+  for (const key of IDENTITY_KEYS) {
+    if (filters[key]) kept[key] = filters[key];
+  }
+  return kept;
 }
 
 function UsageSkeleton() {
   return (
-    <>
-      <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {Array.from({ length: SKELETON_CARDS }, (_, index) => (
-          <div key={index} className={`${CARD} h-28 animate-pulse p-5`} />
-        ))}
+    <div role="status" className="mt-8">
+      <span className="sr-only">Loading usage…</span>
+      <div aria-hidden className="animate-pulse">
+        <div className="grid grid-cols-2 gap-x-8 gap-y-6 sm:grid-cols-3 lg:grid-cols-5">
+          {HEADLINE.map((item) => (
+            <div key={item.metric} className="h-16 rounded-md bg-gray-100 dark:bg-white/5" />
+          ))}
+        </div>
+        <div className="mt-10 h-56 rounded-md bg-gray-100 dark:bg-white/5" />
+        <div className="mt-12 grid gap-x-12 gap-y-10 lg:grid-cols-2">
+          <div className="h-48 rounded-md bg-gray-100 dark:bg-white/5" />
+          <div className="h-48 rounded-md bg-gray-100 dark:bg-white/5" />
+        </div>
       </div>
-      <div className={`${CARD} mt-5 h-40 animate-pulse`} />
-      <div className={`${CARD} mt-5 h-64 animate-pulse`} />
-    </>
+    </div>
   );
 }
