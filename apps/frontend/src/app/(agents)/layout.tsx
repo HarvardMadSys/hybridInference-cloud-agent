@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
+import { FirstRunProvider } from '@/components/features/agents/firstRun';
 import { useAuth, useT } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
@@ -181,13 +182,17 @@ function AgentsShell({
     );
   }
 
+  // One first-run answer for the sidebar and every page, asked for here once
+  // rather than by each of them. Keyed by account, so another one starts over.
   return (
-    <div className="flex min-h-0 flex-1">
-      <AgentsSidebar collapsed={sidebarCollapsed} />
-      <main className="min-w-0 flex-1 overflow-y-auto bg-gray-50/40 dark:bg-gray-950">
-        {children}
-      </main>
-    </div>
+    <FirstRunProvider key={state.user?.id} userId={state.user?.id}>
+      <div className="flex min-h-0 flex-1">
+        <AgentsSidebar collapsed={sidebarCollapsed} />
+        <main className="min-w-0 flex-1 overflow-y-auto bg-gray-50/40 dark:bg-gray-950">
+          {children}
+        </main>
+      </div>
+    </FirstRunProvider>
   );
 }
 

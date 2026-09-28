@@ -159,6 +159,11 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.language.title': '语言',
   'settings.language.label': '界面语言',
 
+  'settings.gettingStarted.about': '新手指引是什么',
+  'settings.gettingStarted.help': '带你连上 GitHub，跑出第一个任务。',
+  'settings.gettingStarted.show': '重新显示',
+  'settings.gettingStarted.shown': '已显示',
+
   // ── Conversation turn navigation ────────────────────────────────────────
   'turnNavigation.rail': '对话轮次',
   'turnNavigation.emptyPreview': '暂无消息文本',
@@ -266,10 +271,10 @@ export const zhCN: Record<TranslationKey, string> = {
   // ── Composer ────────────────────────────────────────────────────────────
   'composer.heading': '让 Agent 做什么?',
   'composer.subheading': '在隔离沙箱里运行。',
-  'composer.placeholder':
-    '描述一个任务…… 例如:修复 /v1/messages 上的 SSE 总超时回归,并补一个单元测试',
-  'composer.placeholderDisconnected': '连接 GitHub 后才能描述任务',
+  'composer.subheadingFirstVisit':
+    '描述一个任务。Agent 在隔离沙箱里改代码，改完在你的仓库开一个 draft PR。',
   'composer.connectToRun': '连接 GitHub 后才能选仓库并运行',
+  'composer.connectToRunKept': '连好 GitHub 就能运行，写的内容会保留',
   'composer.repository': '仓库',
   'composer.repositoryPlaceholder': '选择仓库',
   'composer.repositorySearch': '搜索仓库…',
@@ -416,6 +421,23 @@ export const zhCN: Record<TranslationKey, string> = {
   'connect.actionRepositories': '配置仓库权限',
   'connect.leaving': '正在打开 GitHub…',
   'connect.bodyTemporarilyUnavailable': '仓库访问会自动恢复，请稍后再试。',
+
+  // ── 第一次使用 ──────────────────────────────────────────────────────────
+  'gettingStarted.title': '新手指引',
+  'gettingStarted.progress': '{done}/{total}',
+  'gettingStarted.skip': '跳过',
+  'gettingStarted.hidden': '已隐藏，可在「设置」里找回',
+  'gettingStarted.undo': '撤销',
+  'gettingStarted.connect': '连接 GitHub',
+  'gettingStarted.repository': '授权一个仓库',
+  'gettingStarted.firstTask': '跑第一个任务',
+  'firstRun.started': 'Agent 在云端运行，关掉这个页面也会继续；跑完后左边的任务旁会出现蓝点。',
+  'firstRun.preparing': '为这个会话创建隔离沙箱。第一轮会慢一点，之后的回复会复用它。',
+  'firstRun.checkedOut': '仓库已经克隆进沙箱，Agent 只改这份副本。',
+  'firstRun.publishing': '把改动推到 agent/… 分支，开一个草稿 PR。',
+  'firstRun.doneTitle': '第一个 draft PR 开好了',
+  'firstRun.doneBody':
+    '在 GitHub 上审阅，合不合并由你决定。想再改，直接在下面回复，会更新同一个 PR。',
 
   // ── Pending message queue ───────────────────────────────────────────────
   'queue.region': '待发送消息',

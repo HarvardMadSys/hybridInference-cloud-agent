@@ -14,6 +14,7 @@ import {
 import { CONVERSATION_RESTORED_EVENT, type ConversationRestoredDetail } from './conversationEvents';
 import { latestJob } from './conversationJob';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
+import { GettingStarted } from './GettingStarted';
 import { PaneResizer } from './PaneResizer';
 import { useAgentProjects } from './useAgentJobs';
 import { announcePaneResize, useResizablePane } from './useResizablePane';
@@ -873,6 +874,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
           </Link>
         </div>
 
+        <GettingStarted />
         <SettingsLauncher />
       </aside>
       <PaneResizer pane={pane} label={t('sidebar.resize')} controls="agents-sidebar" />

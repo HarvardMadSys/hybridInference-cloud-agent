@@ -14,12 +14,16 @@ import { useT } from '@/components/providers';
 // `unavailable` is the deployment's GitHub App failing to load, which the
 // service retries on its own (issue #47). There is nothing for the user to
 // connect or ask an administrator for, so it says so and offers no action.
+//
+// `highlight` is the composer pointing here: the owner tried to run a task
+// written before connecting, and this card is the step still missing.
 export function ConnectSourceControl({
   installUrl,
   unavailable = false,
   step = 'connect',
   onAction,
   pending = false,
+  highlight = false,
 }: {
   installUrl: string | null;
   unavailable?: boolean;
@@ -28,6 +32,7 @@ export function ConnectSourceControl({
   /** Go to GitHub for this step directly; without it, the Integrations page. */
   onAction?: () => void;
   pending?: boolean;
+  highlight?: boolean;
 }) {
   const t = useT();
   const repositories = step === 'repositories';
@@ -69,7 +74,12 @@ export function ConnectSourceControl({
   return (
     <div
       role="status"
-      className="flex flex-col gap-3 rounded-xl border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-gray-950 px-4 py-3.5 sm:flex-row sm:items-center"
+      data-highlighted={highlight || undefined}
+      className={`flex flex-col gap-3 rounded-xl border px-4 py-3.5 transition-shadow sm:flex-row sm:items-center ${
+        highlight
+          ? 'border-crimson/30 bg-white shadow-[0_0_0_4px_rgba(165,28,48,0.08)] dark:border-crimson-light/40 dark:bg-gray-900'
+          : 'border-gray-200 bg-gray-50 dark:border-white/10 dark:bg-gray-950'
+      }`}
     >
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-300 shadow-sm ring-1 ring-gray-200 dark:ring-white/10">
         <svg className="h-4 w-4" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">

@@ -1,13 +1,19 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createAgentJob, getAgentConfig, listRepoBranches } from '@/lib/api/agents';
 import type { AgentConfigApi, CreateAgentJobRequest, GoalInputApi } from '@/lib/api/agents';
 import { isComposerSubmit } from './composerKeys';
 import { ConnectSourceControl } from './ConnectSourceControl';
+import { NEW_TASK_PROMPT_ID, useFirstRun } from './firstRun';
 import { githubAccessUrl, leaveFor } from './githubAccess';
-import { forgetComposerDraft, peekComposerDraft, rememberReturn } from './githubReturn';
+import {
+  forgetComposerDraft,
+  onGitHubAccessRequest,
+  peekComposerDraft,
+  rememberReturn,
+} from './githubReturn';
 import { SOURCE_CONTROL_RECHECK_MS } from './sourceControlRecovery';
 import { highestEffort, offeredEfforts } from './effort';
 import { useT } from '@/components/providers';
@@ -71,6 +77,13 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   const [refreshing, setRefreshing] = useState(false);
   // Which trip to GitHub is starting: connecting, or adding repository access.
   const [leaving, setLeaving] = useState<'connect' | 'manage' | null>(null);
+  // The owner tried to run a task written before connecting GitHub. The card
+  // above is then the step still missing, so it is pointed at rather than the
+  // key ignored — and the text stays, because the trip to GitHub keeps it.
+  const [connectNudged, setConnectNudged] = useState(false);
+  const headingId = useId();
+  // Someone with no conversation yet is told, in one line, what a task becomes.
+  const firstVisit = useFirstRun().newcomer;
   const [branches, setBranches] = useState<string[]>([]);
   const [branch, setBranch] = useState('');
   const [runtime, setRuntime] = useState('');
@@ -145,6 +158,13 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     const available = Boolean(initialRepo && config.repos.includes(initialRepo));
     setRepo(available ? initialRepo! : '');
     setUnavailableRepo(initialRepo && !available ? initialRepo : null);
+    // Back with a task written and nowhere to run it yet — the usual shape of
+    // a first visit, which connects GitHub mid-sentence. Ask where, as Enter
+    // would have, so the next key sends it.
+    if (first && draft?.task.trim() && !available && config.repos.length > 0) {
+      setRepoPickerFromTask(true);
+      setRepoPickerOpen(true);
+    }
   }, [config, draft, initialRepo]);
 
   useEffect(() => {
@@ -244,6 +264,11 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
       : undefined;
 
   const disconnected = config?.github_connected === false;
+  // Someone who can go and connect may write the task first: the trip keeps
+  // it. Where nobody can connect right now — the deployment has no App, or its
+  // App is down — there is nothing for a draft to wait for.
+  const canConnect = Boolean(config?.github_install_url) && !githubUnavailable;
+  const locked = disconnected && !canConnect;
   // Connected, and GitHub has given the App no repository yet: a step still to
   // take, not a connection to make again.
   const noRepositories = config?.github_connected === true && config.repos.length === 0;
@@ -285,6 +310,12 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     }
     setLeaving(null);
   }
+
+  // A trip asked for elsewhere on the page — the sidebar's getting-started
+  // step — leaves from here, so the draft in this box goes with it.
+  const goToGitHubRef = useRef(goToGitHub);
+  goToGitHubRef.current = goToGitHub;
+  useEffect(() => onGitHubAccessRequest((kind) => void goToGitHubRef.current(kind)), []);
 
   function openRepositoryPicker(fromTask: boolean) {
     setRepoPickerFromTask(fromTask);
@@ -401,6 +432,11 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
 
   async function run() {
     if (!canRun) {
+      // Written before connecting GitHub: point at the step that is missing.
+      if (disconnected && canConnect && task.trim() && !busy) {
+        setConnectNudged(true);
+        return;
+      }
       // The one thing missing is where to run it: ask, rather than ignore the
       // key. Nothing is sent until a repository has actually been chosen.
       if (missingRepository && task.trim() && !busy) openRepositoryPicker(true);
@@ -432,11 +468,14 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
 
   return (
     <section className="mx-auto w-full max-w-3xl px-6 pb-20 pt-28">
-      <h1 className="text-center text-[28px] font-semibold tracking-[-0.025em] text-gray-950 dark:text-gray-50">
+      <h1
+        id={headingId}
+        className="text-center text-[28px] font-semibold tracking-[-0.025em] text-gray-950 dark:text-gray-50"
+      >
         {t('composer.heading')}
       </h1>
-      <p className="mt-2 text-center text-sm leading-relaxed text-gray-500 dark:text-gray-400">
-        {t('composer.subheading')}
+      <p className="mx-auto mt-2 max-w-lg text-center text-sm leading-relaxed text-gray-500 dark:text-gray-400">
+        {firstVisit ? t('composer.subheadingFirstVisit') : t('composer.subheading')}
       </p>
 
       {disconnected ? (
@@ -446,6 +485,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
             unavailable={githubUnavailable}
             onAction={() => void goToGitHub('connect')}
             pending={leaving === 'connect'}
+            highlight={connectNudged}
           />
         </div>
       ) : noRepositories ? (
@@ -460,7 +500,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
       ) : null}
 
       <div
-        aria-disabled={disconnected || undefined}
+        aria-disabled={locked || undefined}
         // Dropping onto the composer is the other way in, and the only one that
         // takes files and folders in a single gesture — a file input can offer
         // one or the other, never both.
@@ -485,10 +525,10 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           dropping
             ? 'border-crimson/40 ring-4 ring-crimson/[0.08]'
             : 'border-gray-200/90 dark:border-white/10'
-        } ${
-          disconnected
-            ? 'mt-4 bg-gray-50 dark:bg-gray-950'
-            : `${noRepositories ? 'mt-4' : 'mt-8'} bg-white dark:bg-gray-900 focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05]`
+        } ${disconnected || noRepositories ? 'mt-4' : 'mt-8'} ${
+          locked
+            ? 'bg-gray-50 dark:bg-gray-950'
+            : 'bg-white dark:bg-gray-900 focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05]'
         }`}
       >
         <ComposerCommandMenu
@@ -522,11 +562,12 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           aria-autocomplete="list"
           aria-controls={goalCommand.open ? goalCommand.menuId : undefined}
           aria-activedescendant={goalCommand.activeId}
-          disabled={disconnected}
-          placeholder={
-            disconnected ? t('composer.placeholderDisconnected') : t('composer.placeholder')
-          }
-          className="w-full resize-none rounded-t-xl border-0 bg-transparent px-5 pb-2 pt-4 text-[15px] leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0 disabled:cursor-not-allowed"
+          // No placeholder: the heading above already asks the question, and
+          // an example task read as a suggestion to run it.
+          id={NEW_TASK_PROMPT_ID}
+          aria-labelledby={headingId}
+          disabled={locked}
+          className="w-full resize-none rounded-t-xl border-0 bg-transparent px-5 pb-2 pt-4 text-[15px] leading-relaxed text-gray-900 dark:text-gray-50 focus:outline-none focus:ring-0 disabled:cursor-not-allowed"
         />
 
         {disconnected ? null : (
@@ -539,7 +580,14 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
 
         <div className="flex flex-wrap items-center gap-2 border-t border-gray-100/90 dark:border-white/5 px-3.5 py-2.5">
           {disconnected ? (
-            <span className="inline-flex min-w-0 flex-1 items-center gap-2 text-[13px] text-gray-400 dark:text-gray-500">
+            <span
+              aria-live="polite"
+              className={`inline-flex min-w-0 flex-1 items-center gap-2 text-[13px] ${
+                connectNudged
+                  ? 'text-crimson-dark dark:text-crimson-light'
+                  : 'text-gray-400 dark:text-gray-500'
+              }`}
+            >
               <svg
                 className="h-4 w-4 shrink-0"
                 viewBox="0 0 24 24"
@@ -554,7 +602,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
                   d="M8 10V7a4 4 0 0 1 8 0v3m-9 0h10a1 1 0 0 1 1 1v8H6v-8a1 1 0 0 1 1-1Z"
                 />
               </svg>
-              {t('composer.connectToRun')}
+              {connectNudged ? t('composer.connectToRunKept') : t('composer.connectToRun')}
             </span>
           ) : (
             <>

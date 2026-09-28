@@ -50,6 +50,29 @@ per signed-in user in the current browser. New turns or retried completions can
 show a new dot, while pinning and archiving do not reset read status. Detailed
 success and failure states remain in the conversation view.
 
+Someone who has not started a conversation yet — archived ones count — sees a
+**Getting started** row above **Settings**. It shows only the next step
+(**Connect GitHub**, **Grant a repository**, then **Run your first task**), how
+many of the three are done, and **Skip**. Each step is ticked off by what the
+owner actually did: the connection and repositories `/config` reports, then the
+first conversation, when the row disappears. The GitHub steps leave through the
+new-task composer when it is on screen, so a task already written there makes
+the trip too. The row is left out while the deployment's GitHub App is
+unavailable or not configured, since no step can be taken.
+
+**Skip** hides the row for that account in this browser. For about six seconds
+its place says where it went, with **Undo**; the note stays while it is pointed
+at or focused, and a Skip pressed from the keyboard moves focus to Undo. After
+that, **Settings** has a **Getting started** entry with **Show again**. The
+entry is only there for someone who is still new and skipped it; nobody else
+has anything to bring back.
+
+The app asks `GET /v1/agent/conversations?include_archived=true&limit=2` once
+when it loads, and the sidebar, the new-task page and the conversation page all
+read that one answer: the new-task page's first-visit line and the first turn's
+explanations come from it too. It is asked again on each page change only until
+the owner has two conversations; after that nothing depends on it.
+
 ## API
 
 `GET /v1/agent/conversations` accepts `q`, `repo`, `include_archived`, `pinned`,

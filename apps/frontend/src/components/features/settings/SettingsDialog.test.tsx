@@ -1,19 +1,67 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { FirstRunProvider } from '@/components/features/agents/firstRun';
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
 import { ThemeProvider } from '@/components/providers/ThemeProvider';
+import {
+  getAgentConfig,
+  listAgentConversations,
+  type AgentConversationApi,
+  type AgentJobApi,
+} from '@/lib/api/agents';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { DARK_CLASS, THEME_STORAGE_KEY } from '@/lib/theme';
 import { SettingsLauncher } from './SettingsLauncher';
+
+vi.mock('next/navigation', () => ({ usePathname: () => '/' }));
+
+vi.mock('@/lib/api/agents', () => ({
+  getAgentConfig: vi.fn(),
+  listAgentConversations: vi.fn(),
+}));
 
 function renderSettings() {
   return render(
     <ThemeProvider>
       <LocaleProvider>
         <SettingsLauncher />
+      </LocaleProvider>
+    </ThemeProvider>,
+  );
+}
+
+const SKIPPED = 'agents.gettingStarted.skipped.alice';
+
+/** Settings inside the app shell, for an owner with this many conversations. */
+function renderInApp(conversations: number) {
+  vi.mocked(listAgentConversations).mockResolvedValue({
+    conversations: Array.from(
+      { length: conversations },
+      (_, index): AgentConversationApi => ({
+        job: { id: `job_${index}`, thread_id: `thread_${index}` } as AgentJobApi,
+        title: 'A task',
+        archived: false,
+        last_activity_at: null,
+      }),
+    ),
+    next_cursor: null,
+  });
+  vi.mocked(getAgentConfig).mockResolvedValue({
+    repos: [],
+    runtimes: ['claude-code'],
+    models: ['model-a'],
+    github_connected: false,
+    github_install_url: '/agents/integrations',
+  });
+  return render(
+    <ThemeProvider>
+      <LocaleProvider>
+        <FirstRunProvider userId="alice">
+          <SettingsLauncher />
+        </FirstRunProvider>
       </LocaleProvider>
     </ThemeProvider>,
   );
@@ -135,5 +183,74 @@ describe('language', () => {
     renderSettings();
     fireEvent.click(await screen.findByRole('button', { name: /Settings|设置/ }));
     expect(await screen.findByRole('heading', { name: '设置' })).toBeInTheDocument();
+  });
+});
+
+describe('getting started', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('is offered back to a newcomer who skipped it', async () => {
+    window.localStorage.setItem(SKIPPED, '1');
+    renderInApp(0);
+    await openDialog();
+
+    const section = await screen.findByRole('region', { name: 'Getting started' });
+    fireEvent.click(within(section).getByRole('button', { name: 'Show again' }));
+
+    // Said in place until the dialog closes, rather than the row vanishing.
+    expect(within(section).getByRole('status')).toHaveTextContent('Shown');
+    expect(within(section).queryByRole('button', { name: 'Show again' })).not.toBeInTheDocument();
+    expect(window.localStorage.getItem(SKIPPED)).toBeNull();
+  });
+
+  it('keeps focus in the dialog when Show again goes away', async () => {
+    window.localStorage.setItem(SKIPPED, '1');
+    renderInApp(0);
+    const dialog = await openDialog();
+
+    const show = await screen.findByRole('button', { name: 'Show again' });
+    show.focus();
+    fireEvent.click(show);
+
+    // Not dropped to <body>, where Escape and Tab no longer reach the dialog.
+    expect(screen.getByRole('status')).toHaveFocus();
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    await waitFor(() => expect(dialog).not.toBeInTheDocument());
+  });
+
+  it('says what it is from a help button', async () => {
+    window.localStorage.setItem(SKIPPED, '1');
+    renderInApp(0);
+    await openDialog();
+
+    const help = await screen.findByRole('button', { name: 'What is getting started?' });
+    expect(help).toHaveAccessibleDescription(
+      'Takes you from connecting GitHub to your first task.',
+    );
+    // Hover and focus open it too; a click is for a screen with no hover.
+    expect(help).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(help);
+    expect(help).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it.each([
+    ['a newcomer who has not skipped it', 0, false],
+    ['someone with a conversation, even with Skip remembered', 1, true],
+  ])('is not offered to %s', async (_case, conversations, skipped) => {
+    if (skipped) window.localStorage.setItem(SKIPPED, '1');
+    renderInApp(conversations);
+    await openDialog();
+
+    await waitFor(() => expect(listAgentConversations).toHaveBeenCalled());
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(screen.queryByRole('region', { name: 'Getting started' })).not.toBeInTheDocument();
+  });
+
+  it('is not offered outside the app shell', async () => {
+    window.localStorage.setItem(SKIPPED, '1');
+    renderSettings();
+    await openDialog();
+
+    expect(screen.queryByRole('region', { name: 'Getting started' })).not.toBeInTheDocument();
   });
 });
