@@ -122,7 +122,8 @@ describe('session navigation', () => {
     const target = new URL(link.getAttribute('href')!, 'http://test');
     expect(target.pathname).toBe('/admin/sessions/thread-1');
     expect(target.searchParams.get('since')).toBe(since);
-    expect(screen.getByText('thread-1')).toBeInTheDocument();
+    // The session ID is the title's tooltip rather than a line of its own.
+    expect(link).toHaveAttribute('title', 'thread-1');
     expect(screen.queryByText('job-3')).not.toBeInTheDocument();
     expect(screen.getByText('idle')).toBeInTheDocument();
     expect(screen.queryByText('succeeded', { selector: 'span' })).not.toBeInTheDocument();
@@ -173,6 +174,9 @@ describe('session navigation', () => {
       .mockResolvedValue(page([conversation({ thread_id: 'thread-2', title: 'Second chat' })]));
     render(<List />);
     const link = await screen.findByRole('link', { name: 'Fix login' });
+    // A linked window is no preset, so the toolbar names its days.
+    expect(screen.getByLabelText('Turn created')).toHaveValue('custom');
+    expect(screen.getByText('Sep 10 – Sep 17')).toBeInTheDocument();
     // No control shows the identities the link arrived with, so they are stated.
     expect(
       screen.getByText('User: owner · Repository: org/repo · Agent: claude-code · Model: model-a'),
@@ -279,9 +283,10 @@ describe('level switch', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Turns' }));
     expect(screen.getByRole('button', { name: 'Turns', pressed: true })).toBeInTheDocument();
-    expect(
-      screen.getByText('Turns created in the selected window from every session, newest first.'),
-    ).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Level' })).toHaveAttribute(
+      'title',
+      'Turns created in the selected window from every session, newest first.',
+    );
     await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(1));
     // The same turns, read one per row: the window and the result carry over.
     expect(vi.mocked(getAdminRuns).mock.lastCall![0]).toEqual(selection);

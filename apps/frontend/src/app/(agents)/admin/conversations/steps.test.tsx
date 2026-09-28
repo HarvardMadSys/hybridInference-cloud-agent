@@ -121,7 +121,7 @@ describe('steps level', () => {
       'href',
       '/admin/runs/job-2',
     );
-    expect(within(newest).getByText('org/repo')).toBeInTheDocument();
+    expect(within(newest).getByTitle('org/repo')).toHaveTextContent('repo');
     expect(within(newest).getByText('26,000')).toBeInTheDocument();
     expect(within(newest).getByText('80.8%')).toBeInTheDocument();
     expect(within(older).getByRole('link', { name: 'Turn 1' })).toHaveAttribute(

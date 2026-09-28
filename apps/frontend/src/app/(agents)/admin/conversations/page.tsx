@@ -23,12 +23,14 @@ import { presetKey } from '../usage/present';
 import {
   accessDenied,
   AdminRequired,
+  ago,
   BUTTON,
   CARD,
   dateTime,
   ErrorNotice,
-  INPUT,
+  ICON_BUTTON,
   RunState,
+  TOOLBAR_SELECT,
 } from '../runs/shared';
 
 const STATES: AgentJobApiState[] = ['queued', 'running', 'succeeded', 'failed', 'cancelled'];
@@ -59,6 +61,17 @@ function windowOfLength(
     until: now.toISOString(),
     limit: 50,
   };
+}
+
+/** A UTC calendar day as a toolbar can afford it: `Sep 21`. */
+function shortDay(value: string | undefined): string {
+  const time = Date.parse(value ?? '');
+  if (!Number.isFinite(time)) return '—';
+  return new Date(time).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
 }
 
 function windowFilters(
@@ -179,95 +192,121 @@ function ConversationsList({
         </h1>
         <AdminNavigation current="sessions" />
 
-        <div className="mt-8">
-          <h2 className="sr-only">{active.label}</h2>
-          <div role="group" aria-label="Level" className="flex items-baseline gap-5">
+        {/* One toolbar: what a row stands for on the left, which turns match on
+            the right. The level's description is its tooltip, not a paragraph. */}
+        <h2 className="sr-only">{active.label}</h2>
+        <div className="mt-8 flex flex-wrap items-center gap-x-3 gap-y-2">
+          <div
+            role="group"
+            aria-label="Level"
+            title={active.description}
+            className="inline-flex rounded-lg bg-gray-100 p-0.5 dark:bg-white/5"
+          >
             {LEVELS.map((item) => (
               <button
                 key={item.key}
                 type="button"
                 aria-pressed={item.key === level}
                 onClick={() => setLevel(item.key)}
-                className={`text-xl font-semibold transition-colors ${
+                className={`rounded-md px-3 py-1 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson ${
                   item.key === level
-                    ? 'text-gray-900 dark:text-gray-50'
-                    : 'text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-200'
+                    ? 'bg-white text-gray-900 shadow-sm dark:bg-gray-800 dark:text-gray-50'
+                    : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100'
                 }`}
               >
                 {item.label}
               </button>
             ))}
           </div>
-          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            {active.description}
-            {linked.linked && ' Filters from the linked selection are preserved.'}
-          </p>
-        </div>
-
-        <div role="group" aria-label="Filters" className="mt-5 flex flex-wrap items-center gap-2">
-          <label className="w-40 shrink-0">
-            <span className="sr-only">Turn created</span>
-            <select
-              className={INPUT}
-              value={windowDays}
-              onChange={(e) => {
-                // Choosing a preset is the only action that re-anchors the
-                // window, and it keeps every other filter, including the
-                // identity a usage link arrived with.
-                const nextDays = Number(e.target.value);
-                setLinkedWindow(false);
-                setFilters((current) => windowFilters(nextDays, current));
-              }}
+          {selection && (
+            <span
+              className="min-w-0 truncate text-xs text-gray-500 dark:text-gray-400"
+              title={selection}
             >
-              <option value={7}>Last 7 days</option>
-              <option value={30}>Last 30 days</option>
-              <option value={90}>Last 90 days</option>
-              {windowDays === 'custom' && <option value="custom">Custom</option>}
-            </select>
-          </label>
-          <label className="w-40 shrink-0">
-            <span className="sr-only">Turn result</span>
-            <select
-              className={INPUT}
-              value={filters.state ?? ''}
-              onChange={(e) =>
-                // Status is not part of the window. Changing it keeps the exact
-                // since/until on screen: re-deriving them from a preset here
-                // widened a one-day link back to seven days.
-                setFilters((current) => ({
-                  ...current,
-                  state: (e.target.value || undefined) as AgentJobApiState | undefined,
-                }))
+              {selection}
+            </span>
+          )}
+          <div role="group" aria-label="Filters" className="ml-auto flex items-center gap-2">
+            {windowDays === 'custom' && (
+              <span className="text-xs text-gray-500 dark:text-gray-400">
+                {shortDay(filters.since)} – {shortDay(filters.until)}
+              </span>
+            )}
+            <label className="shrink-0">
+              <span className="sr-only">Turn created</span>
+              <select
+                className={TOOLBAR_SELECT}
+                value={windowDays}
+                onChange={(e) => {
+                  // Choosing a preset is the only action that re-anchors the
+                  // window, and it keeps every other filter, including the
+                  // identity a usage link arrived with.
+                  const nextDays = Number(e.target.value);
+                  setLinkedWindow(false);
+                  setFilters((current) => windowFilters(nextDays, current));
+                }}
+              >
+                <option value={7}>Last 7 days</option>
+                <option value={30}>Last 30 days</option>
+                <option value={90}>Last 90 days</option>
+                {windowDays === 'custom' && <option value="custom">Custom</option>}
+              </select>
+            </label>
+            <label className="shrink-0">
+              <span className="sr-only">Turn result</span>
+              <select
+                className={TOOLBAR_SELECT}
+                value={filters.state ?? ''}
+                onChange={(e) =>
+                  // Status is not part of the window. Changing it keeps the exact
+                  // since/until on screen: re-deriving them from a preset here
+                  // widened a one-day link back to seven days.
+                  setFilters((current) => ({
+                    ...current,
+                    state: (e.target.value || undefined) as AgentJobApiState | undefined,
+                  }))
+                }
+              >
+                <option value="">All results</option>
+                {STATES.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              className={ICON_BUTTON}
+              type="button"
+              aria-label="Refresh"
+              title="Refresh"
+              disabled={loading}
+              onClick={() =>
+                setFilters((current) =>
+                  // A linked window is absolute and stays as linked. Any other
+                  // window keeps its own length and re-anchors at now, which is
+                  // what refreshing a list is for.
+                  linkedWindow ? { ...current } : windowOfLength(windowLength(current), current),
+                )
               }
             >
-              <option value="">All turn results</option>
-              {STATES.map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            className={`${BUTTON} ml-auto h-10`}
-            type="button"
-            disabled={loading}
-            onClick={() =>
-              setFilters((current) =>
-                // A linked window is absolute and stays as linked. Any other
-                // window keeps its own length and re-anchors at now, which is
-                // what refreshing a list is for.
-                linkedWindow ? { ...current } : windowOfLength(windowLength(current), current),
-              )
-            }
-          >
-            Refresh
-          </button>
+              <svg
+                aria-hidden
+                viewBox="0 0 20 20"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.6}
+                className="h-4 w-4"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M16.3 10a6.3 6.3 0 1 1-1.85-4.45M16.3 3.8v3.4h-3.4"
+                />
+              </svg>
+            </button>
+          </div>
         </div>
-
-        {selection && (
-          <p className="mt-3 break-words text-xs text-gray-500 dark:text-gray-400">{selection}</p>
-        )}
 
         {linked.error ? (
           // A broken link has nothing to retry: the URL has to change.
@@ -380,9 +419,6 @@ function SessionResults({
       ) : (
         page && (
           <>
-            <p className="mt-6 text-xs text-gray-500 dark:text-gray-400">
-              Turns created {dateTime(page.since)} – {dateTime(page.until)}
-            </p>
             {page.conversations.length === 0 ? (
               <p className="mt-8 text-sm text-gray-500 dark:text-gray-400">
                 No sessions match these filters.
@@ -409,6 +445,16 @@ function SessionResults({
   );
 }
 
+/** The repository's own name; the owner is the same for nearly every row. */
+function repoName(repo: string): string {
+  return repo.split('/').pop() || repo;
+}
+
+/**
+ * One quiet line per session: its title and repository, then who, how it
+ * stands, what ran last, how many turns and when. Identifiers and exact times
+ * are one hover away rather than a line of their own.
+ */
 function ConversationsTable({
   page,
   filters,
@@ -416,14 +462,28 @@ function ConversationsTable({
   page: AdminConversationsPage;
   filters: AdminRunFilters;
 }) {
+  const now = Date.now();
   return (
-    <div className={`${CARD} mt-4 overflow-x-auto`}>
-      <table className="w-full min-w-[900px] text-left text-sm">
-        <thead className="border-b border-gray-100 bg-gray-50/70 text-xs uppercase text-gray-500 dark:border-white/5 dark:bg-white/[0.02] dark:text-gray-400">
-          <tr>
+    <div className="mt-4 overflow-x-auto">
+      <table className="w-full min-w-[900px] table-fixed text-left text-sm">
+        <colgroup>
+          <col />
+          <col className="w-36" />
+          <col className="w-24" />
+          <col className="w-56" />
+          <col className="w-16" />
+          <col className="w-24" />
+        </colgroup>
+        <thead className="text-xs text-gray-400 dark:text-gray-500">
+          <tr className="border-b border-gray-100 dark:border-white/5">
             {['Session', 'User', 'State', 'Latest agent / model', 'Turns', 'Last activity'].map(
               (label) => (
-                <th key={label} className="px-5 py-3 font-medium">
+                <th
+                  key={label}
+                  className={`px-3 py-2 font-normal ${
+                    label === 'Turns' || label === 'Last activity' ? 'text-right' : ''
+                  }`}
+                >
                   {label}
                 </th>
               ),
@@ -432,67 +492,61 @@ function ConversationsTable({
         </thead>
         <tbody className="divide-y divide-gray-100 dark:divide-white/5">
           {page.conversations.map((conversation) => (
-            <tr
-              key={conversation.thread_id}
-              className="align-top hover:bg-gray-50/70 dark:hover:bg-white/[0.03]"
-            >
-              <th scope="row" className="max-w-sm px-5 py-4 font-normal">
-                <Link
-                  href={conversationHref(conversation.thread_id, {
-                    ...filters,
-                    since: page.since,
-                    until: page.until,
-                  })}
-                  className="block truncate font-medium text-crimson hover:underline dark:text-crimson-light"
-                  title={conversation.title ?? conversation.thread_id}
-                >
-                  {conversation.title ?? conversation.thread_id}
-                </Link>
-                <span
-                  className="mt-1 block truncate font-mono text-xs text-gray-500 dark:text-gray-400"
-                  title={conversation.thread_id}
-                >
-                  {conversation.thread_id}
-                </span>
-                <span
-                  className="mt-1 block truncate text-xs text-gray-500 dark:text-gray-400"
-                  title={conversation.repo}
-                >
-                  {conversation.repo}
-                </span>
-                {(conversation.deleted_at || conversation.archived_at) && (
-                  <span className="mt-1 block text-xs text-gray-500 dark:text-gray-400">
-                    {conversation.deleted_at ? 'Deleted' : 'Archived'}
+            <tr key={conversation.thread_id} className="hover:bg-gray-100 dark:hover:bg-gray-900">
+              <th scope="row" className="px-3 py-2.5 font-normal">
+                <div className="flex min-w-0 items-baseline gap-2">
+                  <Link
+                    href={conversationHref(conversation.thread_id, {
+                      ...filters,
+                      since: page.since,
+                      until: page.until,
+                    })}
+                    className="min-w-0 truncate font-medium text-gray-900 hover:underline dark:text-gray-100"
+                    title={conversation.thread_id}
+                  >
+                    {conversation.title ?? conversation.thread_id}
+                  </Link>
+                  {/* The repository gives way first, so a narrow table keeps titles. */}
+                  <span
+                    className="min-w-0 shrink-[4] truncate text-xs text-gray-400 dark:text-gray-500"
+                    title={conversation.repo}
+                  >
+                    {repoName(conversation.repo)}
                   </span>
-                )}
+                  {(conversation.deleted_at || conversation.archived_at) && (
+                    <span className="shrink-0 text-xs text-gray-400 dark:text-gray-500">
+                      {conversation.deleted_at ? 'Deleted' : 'Archived'}
+                    </span>
+                  )}
+                </div>
               </th>
-              <td className="max-w-48 px-5 py-4">
+              <td className="px-3 py-2.5">
                 <span
-                  className="block truncate font-mono text-xs text-gray-600 dark:text-gray-300"
+                  className="block truncate font-mono text-xs text-gray-500 dark:text-gray-400"
                   title={conversation.user_id}
                 >
                   {conversation.user_id}
                 </span>
               </td>
-              <td className="px-5 py-4">
-                <RunState state={conversation.state} />
+              <td className="px-3 py-2.5">
+                <RunState state={conversation.state} quiet />
               </td>
-              <td className="max-w-56 px-5 py-4 text-gray-700 dark:text-gray-200">
-                <span className="block truncate" title={conversation.latest_runtime}>
-                  {conversation.latest_runtime}
-                </span>
+              <td className="px-3 py-2.5">
                 <span
-                  className="mt-1 block truncate text-xs text-gray-500 dark:text-gray-400"
-                  title={conversation.latest_model}
+                  className="block truncate text-xs text-gray-500 dark:text-gray-400"
+                  title={`${conversation.latest_runtime} · ${conversation.latest_model}`}
                 >
-                  {conversation.latest_model}
+                  {conversation.latest_runtime} · {conversation.latest_model}
                 </span>
               </td>
-              <td className="whitespace-nowrap px-5 py-4 text-gray-700 dark:text-gray-200">
+              <td className="px-3 py-2.5 text-right tabular-nums text-gray-700 dark:text-gray-200">
                 {conversation.turn_count}
               </td>
-              <td className="whitespace-nowrap px-5 py-4 text-xs text-gray-500 dark:text-gray-400">
-                {dateTime(conversation.last_activity_at)}
+              <td
+                className="whitespace-nowrap px-3 py-2.5 text-right text-xs text-gray-500 dark:text-gray-400"
+                title={dateTime(conversation.last_activity_at)}
+              >
+                {ago(conversation.last_activity_at, now)}
               </td>
             </tr>
           ))}

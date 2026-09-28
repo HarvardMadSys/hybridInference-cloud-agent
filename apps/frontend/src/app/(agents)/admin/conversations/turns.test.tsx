@@ -125,9 +125,8 @@ function deferred<T>() {
  * belongs to: "80 CPU-s appears somewhere" would also pass for a stale cell.
  */
 function row(runId: string): HTMLElement {
-  return screen.getByRole('row', {
-    name: (name: string) => name.startsWith(runId),
-  });
+  // The turn's link carries its run ID as its tooltip; the row is its row.
+  return screen.getByTitle(runId).closest('tr')!;
 }
 
 beforeEach(() => {
@@ -142,7 +141,7 @@ afterEach(cleanup);
 describe('turn level', () => {
   it('lists turns, not sessions, and reads nothing at the session level', async () => {
     render(<SessionsPage />);
-    await screen.findByRole('link', { name: 'job-1' });
+    await screen.findByTitle('job-1');
     expect(screen.getByRole('button', { name: 'Turns', pressed: true })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Sessions', pressed: false })).toBeInTheDocument();
     expect(getAdminConversations).not.toHaveBeenCalled();
@@ -153,7 +152,7 @@ describe('turn level', () => {
       page([run({ hosts: ['gpu-box', 'gpu-box-kata'], physical_hosts: ['gpu-box'] })]),
     );
     render(<SessionsPage />);
-    await screen.findByRole('link', { name: 'job-1' });
+    await screen.findByTitle('job-1');
     expect(screen.getByTitle('gpu-box')).toBeInTheDocument();
     expect(screen.queryByText('gpu-box-kata')).not.toBeInTheDocument();
     expect(screen.queryByText('+1')).not.toBeInTheDocument();
@@ -161,7 +160,7 @@ describe('turn level', () => {
 
   it('keeps legacy runner names when the API has no physical host field', async () => {
     render(<SessionsPage />);
-    await screen.findByRole('link', { name: 'job-1' });
+    await screen.findByTitle('job-1');
     expect(screen.getByTitle('host-a')).toBeInTheDocument();
   });
 
@@ -172,7 +171,7 @@ describe('turn level', () => {
       ]),
     );
     render(<SessionsPage />);
-    await screen.findByRole('link', { name: 'job-1' });
+    await screen.findByTitle('job-1');
     expect(screen.getByTitle('box-a, box-b')).toBeInTheDocument();
     expect(screen.getByText('+1')).toBeInTheDocument();
   });
@@ -190,12 +189,10 @@ describe('turn level', () => {
 
   it('defaults to an anchored seven-day window and exposes working admin sections', async () => {
     render(<SessionsPage />);
-    expect(await screen.findByRole('link', { name: 'job-1' })).toHaveAttribute(
-      'href',
-      '/admin/runs/job-1',
-    );
-    expect(screen.queryByText('Inspect parser')).not.toBeInTheDocument();
-    expect(screen.queryByTitle('Inspect parser')).not.toBeInTheDocument();
+    expect(await screen.findByTitle('job-1')).toHaveAttribute('href', '/admin/runs/job-1');
+    // One line per turn: its number and its session, the run ID one hover away.
+    expect(screen.getByTitle('job-1')).toHaveTextContent('Turn 2');
+    expect(within(row('job-1')).getByText('Inspect parser')).toBeInTheDocument();
     const filters = vi.mocked(getAdminRuns).mock.calls[0][0];
     expect(Date.parse(filters.until!) - Date.parse(filters.since!)).toBe(7 * 86_400_000);
     expect(screen.getByLabelText('Turn created')).toHaveValue('7');
@@ -204,7 +201,7 @@ describe('turn level', () => {
       within(screen.getByLabelText('Turn result'))
         .getAllByRole('option')
         .map((option) => option.textContent),
-    ).toEqual(['All turn results', 'queued', 'running', 'succeeded', 'failed', 'cancelled']);
+    ).toEqual(['All results', 'queued', 'running', 'succeeded', 'failed', 'cancelled']);
     const controls = within(screen.getByRole('group', { name: 'Filters' }));
     expect(controls.getAllByRole('combobox')).toHaveLength(2);
     expect(controls.getByRole('button', { name: 'Refresh' })).toBeInTheDocument();
@@ -235,7 +232,7 @@ describe('turn level', () => {
       'since=2026-09-01T00:00:00.000Z&until=2026-09-08T00:00:00.000Z&model=model-a&user_id=owner-one';
     vi.mocked(getAdminRuns).mockResolvedValue(page());
     render(<SessionsPage />);
-    await screen.findByRole('link', { name: 'job-1' });
+    await screen.findByTitle('job-1');
     // The linked window replaces the seven-day default, and the identities the
     // usage row was grouped by travel with it.
     expect(vi.mocked(getAdminRuns).mock.calls[0][0]).toMatchObject({
@@ -247,7 +244,8 @@ describe('turn level', () => {
     // The control names the window that is applied: a week that ended a month
     // ago is Custom, not "Last 7 days".
     expect(screen.getByLabelText('Turn created')).toHaveValue('custom');
-    expect(screen.getByText(/Filters from the linked selection are preserved/)).toBeInTheDocument();
+    // No control shows the identities the link arrived with, so they are stated.
+    expect(screen.getByText('User: owner-one · Model: model-a')).toBeInTheDocument();
   });
 
   it('keeps a linked window on Refresh instead of drifting with the clock', async () => {
@@ -257,7 +255,7 @@ describe('turn level', () => {
       search.value = 'since=2026-09-01T00:00:00.000Z&until=2026-09-08T00:00:00.000Z';
       vi.mocked(getAdminRuns).mockResolvedValue(page());
       render(<SessionsPage />);
-      await screen.findByRole('link', { name: 'job-1' });
+      await screen.findByTitle('job-1');
       vi.setSystemTime(new Date('2026-09-10T09:00:00Z'));
       fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
       await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(2));
@@ -279,7 +277,7 @@ describe('turn level', () => {
       vi.setSystemTime(new Date('2026-09-10T08:00:00Z'));
       vi.mocked(getAdminRuns).mockResolvedValue(page());
       render(<SessionsPage />);
-      await screen.findByRole('link', { name: 'job-1' });
+      await screen.findByTitle('job-1');
 
       vi.setSystemTime(new Date('2026-09-10T08:06:00Z'));
       fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
@@ -300,7 +298,7 @@ describe('turn level', () => {
 
   it('follows a URL that changes while the list stays mounted', async () => {
     render(<SessionsPage />);
-    await screen.findByRole('link', { name: 'job-1' });
+    await screen.findByTitle('job-1');
     expect(vi.mocked(getAdminRuns).mock.calls[0][0].model).toBeUndefined();
 
     search.set('since=2026-08-01T00:00:00.000Z&until=2026-08-08T00:00:00.000Z&model=model-a');
@@ -337,7 +335,7 @@ describe('turn level', () => {
     search.value = 'since=2026-09-09T00:00:00.000Z&until=2026-09-10T00:00:00.000Z';
     vi.mocked(getAdminRuns).mockResolvedValue(page());
     render(<SessionsPage />);
-    await screen.findByRole('link', { name: 'job-1' });
+    await screen.findByTitle('job-1');
     expect(screen.getByLabelText('Turn created')).toHaveValue('custom');
     fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
     await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(2));
@@ -350,13 +348,13 @@ describe('turn level', () => {
 
   it('applies filters and paginates with the same window and filter scope', async () => {
     render(<SessionsPage />);
-    await screen.findByRole('link', { name: 'job-1' });
+    await screen.findByTitle('job-1');
     vi.mocked(getAdminRuns)
       .mockResolvedValueOnce(page([run()], 'cursor-2'))
       .mockResolvedValueOnce(page([run({ id: 'job-2', title: 'Second run' })]));
     fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
     fireEvent.click(await screen.findByRole('button', { name: 'Load more turns' }));
-    await screen.findByRole('link', { name: 'job-2' });
+    await screen.findByTitle('job-2');
     expect(getAdminRuns).toHaveBeenLastCalledWith(
       expect.objectContaining({
         state: 'failed',
@@ -366,19 +364,20 @@ describe('turn level', () => {
       }),
       expect.any(AbortSignal),
     );
-    expect(screen.getByRole('link', { name: 'job-1' })).toBeInTheDocument();
-    expect(screen.queryByText('Second run')).not.toBeInTheDocument();
+    expect(screen.getByTitle('job-1')).toBeInTheDocument();
+    // Each turn names its own session, on its own row.
+    expect(within(row('job-2')).getByText('Second run')).toBeInTheDocument();
   });
 
   it('keeps the queued filter and badge across pages', async () => {
     render(<SessionsPage />);
-    await screen.findByRole('link', { name: 'job-1' });
+    await screen.findByTitle('job-1');
     vi.mocked(getAdminRuns)
       .mockResolvedValueOnce(page([run({ state: 'queued' })], 'group-cursor'))
       .mockResolvedValueOnce(page([run({ id: 'job-2', state: 'queued' })]));
     fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'queued' } });
     fireEvent.click(await screen.findByRole('button', { name: 'Load more turns' }));
-    await screen.findByRole('link', { name: 'job-2' });
+    await screen.findByTitle('job-2');
 
     expect(vi.mocked(getAdminRuns).mock.calls[1][0]).toEqual(
       expect.objectContaining({ state: 'queued' }),
@@ -404,25 +403,25 @@ describe('turn level', () => {
       .mockResolvedValueOnce(page([run({ id: 'job-failed', state: 'failed' })]));
     render(<SessionsPage />);
     fireEvent.click(await screen.findByRole('button', { name: 'Load more turns' }));
-    await screen.findByRole('link', { name: 'job-2' });
+    await screen.findByTitle('job-2');
 
     fireEvent.change(screen.getByLabelText('Turn created'), { target: { value: '30' } });
-    await screen.findByRole('link', { name: 'job-30-days' });
+    await screen.findByTitle('job-30-days');
     const timeFilters = vi.mocked(getAdminRuns).mock.lastCall![0];
     expect(Date.parse(timeFilters.until!) - Date.parse(timeFilters.since!)).toBe(30 * 86_400_000);
     expect(timeFilters.cursor).toBeUndefined();
-    expect(screen.queryByRole('link', { name: 'job-1' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'job-2' })).not.toBeInTheDocument();
+    expect(screen.queryByTitle('job-1')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('job-2')).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
-    await screen.findByRole('link', { name: 'job-failed' });
+    await screen.findByTitle('job-failed');
     const statusFilters = vi.mocked(getAdminRuns).mock.lastCall![0];
     expect(statusFilters.state).toBe('failed');
     expect(Date.parse(statusFilters.until!) - Date.parse(statusFilters.since!)).toBe(
       30 * 86_400_000,
     );
     expect(statusFilters.cursor).toBeUndefined();
-    expect(screen.queryByRole('link', { name: 'job-30-days' })).not.toBeInTheDocument();
+    expect(screen.queryByTitle('job-30-days')).not.toBeInTheDocument();
     expect(getAdminRuns).toHaveBeenCalledTimes(4);
   });
 
@@ -436,22 +435,22 @@ describe('turn level', () => {
         .mockResolvedValueOnce(page([run({ id: 'job-2', state: 'failed' })]))
         .mockResolvedValueOnce(page([run({ id: 'refreshed-run', state: 'failed' })]));
       render(<SessionsPage />);
-      await screen.findByRole('link', { name: 'job-1' });
+      await screen.findByTitle('job-1');
       fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
       fireEvent.click(await screen.findByRole('button', { name: 'Load more turns' }));
-      await screen.findByRole('link', { name: 'job-2' });
+      await screen.findByTitle('job-2');
 
       vi.setSystemTime(new Date('2026-09-10T09:00:00Z'));
       fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-      await screen.findByRole('link', { name: 'refreshed-run' });
+      await screen.findByTitle('refreshed-run');
       const filters = vi.mocked(getAdminRuns).mock.lastCall![0];
       expect(filters.since).toBe('2026-09-03T09:00:00.000Z');
       expect(filters.until).toBe('2026-09-10T09:00:00.000Z');
       expect(filters.state).toBe('failed');
       expect(filters.cursor).toBeUndefined();
       expect(screen.getByLabelText('Turn result')).toHaveValue('failed');
-      expect(screen.queryByRole('link', { name: 'job-1' })).not.toBeInTheDocument();
-      expect(screen.queryByRole('link', { name: 'job-2' })).not.toBeInTheDocument();
+      expect(screen.queryByTitle('job-1')).not.toBeInTheDocument();
+      expect(screen.queryByTitle('job-2')).not.toBeInTheDocument();
       expect(getAdminRuns).toHaveBeenCalledTimes(4);
     } finally {
       vi.useRealTimers();
@@ -465,9 +464,9 @@ describe('turn level', () => {
       .mockResolvedValueOnce(page([run({ id: 'current-match' })]));
     render(<SessionsPage />);
     fireEvent.change(screen.getByLabelText('Turn created'), { target: { value: '30' } });
-    await screen.findByRole('link', { name: 'current-match' });
+    await screen.findByTitle('current-match');
     await act(async () => pending.resolve(page([run({ id: 'stale-match' })])));
-    expect(screen.queryByRole('link', { name: 'stale-match' })).not.toBeInTheDocument();
+    expect(screen.queryByTitle('stale-match')).not.toBeInTheDocument();
     expect(vi.mocked(getAdminRuns).mock.calls[0][1]?.aborted).toBe(true);
   });
 
@@ -480,17 +479,17 @@ describe('turn level', () => {
     render(<SessionsPage />);
     fireEvent.click(await screen.findByRole('button', { name: 'Load more turns' }));
     fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
-    await screen.findByRole('link', { name: 'current-match' });
+    await screen.findByTitle('current-match');
     expect(vi.mocked(getAdminRuns).mock.calls[1][1]?.aborted).toBe(true);
     expect(vi.mocked(getAdminRuns).mock.lastCall![0].cursor).toBeUndefined();
 
     await act(async () =>
       pending.resolve(page([run({ id: 'stale-match' })], 'another-old-cursor')),
     );
-    expect(screen.queryByRole('link', { name: 'job-1' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'stale-match' })).not.toBeInTheDocument();
+    expect(screen.queryByTitle('job-1')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('stale-match')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Load more turns' })).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'current-match' })).toBeInTheDocument();
+    expect(screen.getByTitle('current-match')).toBeInTheDocument();
   });
 
   it('clears retained cross-user rows when a later page rejects revoked access', async () => {
@@ -500,7 +499,7 @@ describe('turn level', () => {
     render(<SessionsPage />);
     fireEvent.click(await screen.findByRole('button', { name: 'Load more turns' }));
     await screen.findByText('Admin access required');
-    expect(screen.queryByRole('link', { name: 'job-1' })).not.toBeInTheDocument();
+    expect(screen.queryByTitle('job-1')).not.toBeInTheDocument();
   });
 });
 
@@ -511,7 +510,7 @@ describe('turn level resource cells', () => {
   it('says a run with no whole-turn summary has none, rather than showing a zero', async () => {
     vi.mocked(getAdminRuns).mockResolvedValue(page([run()]));
     render(<SessionsPage />);
-    await screen.findByRole('link', { name: 'job-1' });
+    await screen.findByTitle('job-1');
     expect(within(row('job-1')).getAllByText('Not collected')).toHaveLength(3);
     expect(within(row('job-1')).queryByText('0 B')).not.toBeInTheDocument();
     expect(within(row('job-1')).queryByText('0 CPU-s')).not.toBeInTheDocument();
@@ -520,7 +519,7 @@ describe('turn level resource cells', () => {
   it('shows CPU and the sampled memory peak for a measured run', async () => {
     vi.mocked(getAdminRuns).mockResolvedValue(page([run({ resource_summary: runSummary() })]));
     render(<SessionsPage />);
-    await screen.findByRole('link', { name: 'job-1' });
+    await screen.findByTitle('job-1');
     expect(within(row('job-1')).getByText(`${formatCpuSeconds(80_000_000)}`)).toBeInTheDocument();
     expect(
       within(row('job-1')).getByText(`${formatMemoryBytes(1_288_490_189)} \u00b7 sampled`),
@@ -534,7 +533,7 @@ describe('turn level resource cells', () => {
       .mockResolvedValueOnce(page([run({ resource_summary: runSummary() })]))
       .mockResolvedValueOnce(page([run({ resource_summary: null })]));
     render(<SessionsPage />);
-    await screen.findByRole('link', { name: 'job-1' });
+    await screen.findByTitle('job-1');
     expect(within(row('job-1')).getByText('80 CPU-s')).toBeInTheDocument();
 
     // A filter change replaces the page; the old numbers must go with it.
@@ -562,7 +561,7 @@ describe('turn level resource cells', () => {
       ]),
     );
     render(<SessionsPage />);
-    await screen.findByRole('link', { name: 'job-1' });
+    await screen.findByTitle('job-1');
     const cpu = within(row('job-1')).getByText(/\u2265 80 CPU-s/);
     expect(cpu).toBeInTheDocument();
     expect(cpu.textContent).toContain('collection was interrupted');
@@ -587,7 +586,7 @@ describe('turn level resource cells', () => {
       ]),
     );
     render(<SessionsPage />);
-    await screen.findByRole('link', { name: 'job-1' });
+    await screen.findByTitle('job-1');
     const state = within(row('job-1')).getByText('Collecting');
     // The string handed to title is checked separately: jsdom renders the
     // attribute, and the sentence must name how far the window actually got.
@@ -611,7 +610,7 @@ describe('turn level resource cells', () => {
       ]),
     );
     render(<SessionsPage />);
-    await screen.findByRole('link', { name: 'job-1' });
+    await screen.findByTitle('job-1');
     const cpu = within(row('job-1')).getByText(/\u2265 80 CPU-s/);
     expect(cpu.getAttribute('title')).toBe(UNKNOWN_REASON_SENTENCE);
     expect(screen.queryByText(/deadbeef|uid=1001/)).not.toBeInTheDocument();

@@ -14,6 +14,12 @@ export const CARD =
 // control's own border, which is too light in dark mode to sit against.
 export const BUTTON =
   'rounded-lg border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:text-gray-200 dark:hover:bg-white/5 dark:focus-visible:ring-crimson-light dark:focus-visible:ring-offset-gray-900';
+//: A compact select for a toolbar, sized to sit beside a segmented control.
+export const TOOLBAR_SELECT =
+  'h-8 rounded-md border border-gray-200 bg-white pl-2.5 pr-8 text-sm text-gray-700 transition-colors hover:border-gray-300 focus:border-crimson focus:outline-none focus:ring-2 focus:ring-crimson focus:ring-offset-1 dark:border-white/10 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-white/20 dark:focus:border-crimson-light dark:focus:ring-crimson-light';
+//: An icon-only toolbar button; its label lives in aria-label and the tooltip.
+export const ICON_BUTTON =
+  'inline-flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson disabled:cursor-not-allowed disabled:opacity-40 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100 dark:focus-visible:ring-crimson-light';
 export const INPUT =
   'w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm transition-colors placeholder:text-gray-400 focus:border-crimson focus:outline-none focus:ring-2 focus:ring-crimson focus:ring-offset-2 focus:ring-offset-white dark:border-white/10 dark:bg-gray-900 dark:text-gray-100 dark:placeholder:text-gray-500 dark:focus:border-crimson-light dark:focus:ring-crimson-light dark:focus:ring-offset-gray-900';
 
@@ -73,9 +79,19 @@ const RUN_STATE_STYLES: Record<string, { badge: string; dot: string }> = {
 
 const RUN_STATE_FALLBACK = RUN_STATE_STYLES.queued;
 
-export function RunState({ state }: { state: string }) {
+export function RunState({ state, quiet = false }: { state: string; quiet?: boolean }) {
   const displayState = state === 'publishing' ? 'running' : state;
   const style = RUN_STATE_STYLES[displayState] ?? RUN_STATE_FALLBACK;
+  if (quiet) {
+    // In a list the row is already the frame: the dot carries the colour and
+    // the word stays grey, so a column of states reads as one quiet line each.
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+        <span aria-hidden className={`h-1.5 w-1.5 shrink-0 rounded-full ${style.dot}`} />
+        {displayState}
+      </span>
+    );
+  }
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${style.badge}`}
@@ -100,6 +116,27 @@ export function dateTime(value: string | null | undefined): string {
     timeStyle: 'medium',
     timeZone: 'UTC',
   })} UTC`;
+}
+
+/**
+ * How long ago, as the short label a list row can afford: `4m ago`, `5h ago`,
+ * `3d ago`, then a UTC calendar date. The exact instant belongs in a tooltip.
+ */
+export function ago(value: string | null | undefined, now: number = Date.now()): string {
+  const time = Date.parse(value ?? '');
+  if (!Number.isFinite(time)) return 'Unavailable';
+  const minutes = Math.floor(Math.max(0, now - time) / 60_000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(time).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
 }
 
 /** A UTC calendar day, without a time, for bucket labels. */

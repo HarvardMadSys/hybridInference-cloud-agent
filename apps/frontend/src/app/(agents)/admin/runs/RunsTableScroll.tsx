@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 
-import { CARD } from './shared';
 import styles from './RunsTableScroll.module.css';
 
 /** A native scrollbar that stays within reach while reading a long table. */
@@ -49,9 +48,9 @@ export function RunsTableScroll({ children }: { children: ReactNode }) {
 
   const overflowing = position.max > 1;
   return (
-    <div className={`${CARD} relative isolate mt-3`}>
+    <div className="relative isolate mt-4">
       {overflowing && (
-        <div className="sticky top-0 z-20 rounded-t-2xl border-b border-gray-100 bg-white px-3 py-1.5 dark:border-white/5 dark:bg-gray-900">
+        <div className="sticky top-0 z-20 bg-gray-50 py-1.5 dark:bg-gray-950">
           <div
             ref={scrollbar}
             role="scrollbar"
@@ -97,7 +96,7 @@ export function RunsTableScroll({ children }: { children: ReactNode }) {
         aria-label="Turns table"
         tabIndex={0}
         onScroll={measure}
-        className={`relative overflow-x-auto rounded-b-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson dark:focus-visible:ring-crimson-light ${overflowing ? '' : 'rounded-t-2xl'}`}
+        className="relative overflow-x-auto rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson dark:focus-visible:ring-crimson-light"
       >
         {children}
       </div>

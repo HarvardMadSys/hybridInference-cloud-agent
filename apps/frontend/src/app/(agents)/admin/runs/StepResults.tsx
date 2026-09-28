@@ -12,7 +12,7 @@ import {
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { cacheHitRate, durationLabel, modelLabel } from './LLMRequests';
-import { accessDenied, BUTTON, CARD, dateTime, ErrorNotice, money, number } from './shared';
+import { accessDenied, BUTTON, dateTime, ErrorNotice, money, number } from './shared';
 
 const UNAVAILABLE = '—';
 
@@ -139,8 +139,8 @@ export function StepResults({
       ) : (
         page && (
           <>
-            <p className="mt-6 text-xs text-gray-500 dark:text-gray-400">
-              Turns created {dateTime(page.since)} – {dateTime(page.until)} · requests of the{' '}
+            <p className="mt-4 text-xs text-gray-500 dark:text-gray-400">
+              Requests of the{' '}
               {page.turns.length === 1 ? 'newest turn' : `newest ${page.turns.length} turns`} so far
             </p>
             {unread.length > 0 && (
@@ -194,23 +194,51 @@ function appendPage(previous: AdminStepsPage, next: AdminStepsPage): AdminStepsP
   };
 }
 
+/** A request's start as a row can afford it, in UTC: `Sep 22, 06:41:10`. */
+function stepTime(value: string): string {
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return UNAVAILABLE;
+  return new Date(time).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+    timeZone: 'UTC',
+  });
+}
+
+/** The repository's own name; the owner is the same for nearly every row. */
+function repoName(repo: string): string {
+  return repo.split('/').pop() || repo;
+}
+
 function TurnLink({ turn }: { turn: AdminStepTurn }) {
   return (
     <Link
       href={`/admin/runs/${encodeURIComponent(turn.job_id)}`}
-      className="font-medium text-crimson hover:underline dark:text-crimson-light"
+      title={turn.job_id}
+      className="shrink-0 font-medium text-gray-900 hover:underline dark:text-gray-100"
     >
       Turn {turn.turn_no}
     </Link>
   );
 }
 
+const NUMBER_CELL = 'px-3 py-2.5 text-right text-xs text-gray-700 dark:text-gray-200';
+
+/**
+ * One quiet line per request. The time is exact to the second, since steps of
+ * one turn are seconds apart; the full instant and the request ID are in its
+ * tooltip. A status other than 2xx is the one thing coloured.
+ */
 function StepsTable({ page, turns }: { page: AdminStepsPage; turns: Map<string, AdminStepTurn> }) {
   return (
-    <div className={`${CARD} mt-4 overflow-x-auto`}>
+    <div className="mt-2 overflow-x-auto">
       <table aria-label="Steps" className="w-full min-w-[72rem] text-left text-sm tabular-nums">
-        <thead className="border-b border-gray-100 bg-gray-50/70 text-xs uppercase text-gray-500 dark:border-white/5 dark:bg-white/[0.02] dark:text-gray-400">
-          <tr className="[&>th]:whitespace-nowrap [&>th]:px-4 [&>th]:py-3 [&>th]:font-medium">
+        <thead className="text-xs text-gray-400 dark:text-gray-500">
+          <tr className="border-b border-gray-100 dark:border-white/5 [&>th]:whitespace-nowrap [&>th]:px-3 [&>th]:py-2 [&>th]:font-normal">
             <th scope="col" title="When the request started, in UTC">
               Time
             </th>
@@ -250,53 +278,73 @@ function StepsTable({ page, turns }: { page: AdminStepsPage; turns: Map<string, 
             const model = modelLabel(step);
             const hitRate = cacheHitRate(step);
             const amount = money(step.spent_usd);
+            const failed =
+              step.status_code !== null && (step.status_code < 200 || step.status_code >= 300);
             return (
               <tr
                 key={`${step.job_id}:${step.request_id}`}
-                className="align-top hover:bg-gray-50/70 dark:hover:bg-white/[0.03] [&>td]:px-4 [&>td]:py-3"
+                className="hover:bg-gray-100 dark:hover:bg-gray-900"
               >
-                <td className="whitespace-nowrap text-xs text-gray-600 dark:text-gray-300">
-                  <time dateTime={step.request_started_at} title={step.request_id}>
-                    {dateTime(step.request_started_at)}
+                <td className="whitespace-nowrap px-3 py-2.5 text-xs text-gray-500 dark:text-gray-400">
+                  <time
+                    dateTime={step.request_started_at}
+                    title={`${dateTime(step.request_started_at)} · ${step.request_id}`}
+                  >
+                    {stepTime(step.request_started_at)}
                   </time>
                 </td>
-                <td className="max-w-64">
+                <td className="max-w-64 px-3 py-2.5">
                   {turn ? (
-                    <>
+                    <div className="flex min-w-0 items-baseline gap-2">
                       <TurnLink turn={turn} />
                       <span
-                        className="mt-1 block truncate text-xs text-gray-500 dark:text-gray-400"
+                        className="min-w-0 truncate text-xs text-gray-400 dark:text-gray-500"
                         title={turn.repo}
                       >
-                        {turn.repo}
+                        {repoName(turn.repo)}
                       </span>
-                    </>
+                    </div>
                   ) : (
                     UNAVAILABLE
                   )}
                 </td>
-                <td className="max-w-40">
+                <td className="max-w-40 px-3 py-2.5">
                   <span
-                    className="block truncate font-mono text-xs text-gray-600 dark:text-gray-300"
+                    className="block truncate font-mono text-xs text-gray-500 dark:text-gray-400"
                     title={turn?.user_id}
                   >
                     {turn?.user_id ?? UNAVAILABLE}
                   </span>
                 </td>
-                <td className="max-w-48">
-                  <span className="block truncate" title={model.title ?? model.text}>
+                <td className="max-w-48 px-3 py-2.5">
+                  <span
+                    className="block truncate text-xs text-gray-600 dark:text-gray-300"
+                    title={model.title ?? model.text}
+                  >
                     {model.text}
                   </span>
                 </td>
-                <td className="text-right">{step.status_code ?? UNAVAILABLE}</td>
-                <td className="text-right">{tokens(step.tokens_in)}</td>
-                <td className="text-right">{tokens(step.tokens_out)}</td>
-                <td className="text-right">
+                <td
+                  className={`px-3 py-2.5 text-right text-xs ${
+                    failed
+                      ? 'font-medium text-red-600 dark:text-red-400'
+                      : 'text-gray-500 dark:text-gray-400'
+                  }`}
+                >
+                  {step.status_code ?? UNAVAILABLE}
+                </td>
+                <td className={NUMBER_CELL}>{tokens(step.tokens_in)}</td>
+                <td className={NUMBER_CELL}>{tokens(step.tokens_out)}</td>
+                <td className={NUMBER_CELL}>
                   {hitRate === null ? UNAVAILABLE : `${hitRate.toFixed(1)}%`}
                 </td>
-                <td className="whitespace-nowrap text-right">{durationLabel(step.ttft_ms)}</td>
-                <td className="whitespace-nowrap text-right">{durationLabel(step.latency_ms)}</td>
-                <td className="text-right" title={amount.exact ?? undefined}>
+                <td className={`${NUMBER_CELL} whitespace-nowrap`}>
+                  {durationLabel(step.ttft_ms)}
+                </td>
+                <td className={`${NUMBER_CELL} whitespace-nowrap`}>
+                  {durationLabel(step.latency_ms)}
+                </td>
+                <td className={NUMBER_CELL} title={amount.exact ?? undefined}>
                   {amount.exact === null ? UNAVAILABLE : amount.display}
                 </td>
               </tr>
