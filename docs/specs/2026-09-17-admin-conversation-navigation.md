@@ -19,9 +19,11 @@ The turn page shows the latest run's server, times and resource measurements,
 lists the LLM requests of every run in the order the runs happened, and says in
 one line when a turn was restarted and how each earlier run ended.
 
-`/admin/sessions` is the canonical list. The previous `/admin/conversations`
-and `/admin/runs` entries render the same pages, preserving existing bookmarks
-and usage links. The page switches between three levels of one selection:
+The admin's **Activity** tab lives at `/admin/activity`. The previous
+`/admin/sessions`, `/admin/conversations` and `/admin/runs` entries render the
+same page, preserving existing bookmarks and usage links; one session's page is
+`/admin/sessions/{thread_id}`. The tab switches between three levels of one
+selection:
 **Sessions** (one row per session with a matching turn), **Turns** (one row per
 matching turn, from every session, newest first) and **Steps** (one row per
 model request of those turns, newest first). All three share the same window,

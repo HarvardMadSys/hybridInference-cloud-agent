@@ -247,7 +247,7 @@ describe('admin usage page', () => {
     const href = within(row).getByRole('link', { name: 'View sessions' }).getAttribute('href')!;
     const params = new URLSearchParams(href.slice(href.indexOf('?') + 1));
     const filters = vi.mocked(getAdminUsage).mock.calls[0][0];
-    expect(href.startsWith('/admin/sessions?')).toBe(true);
+    expect(href.startsWith('/admin/activity?')).toBe(true);
     expect(params.get('since')).toBe(filters.since);
     expect(params.get('until')).toBe(filters.until);
     expect(params.get('user_id')).toBe('owner-one');

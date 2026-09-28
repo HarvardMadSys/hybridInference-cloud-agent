@@ -118,7 +118,7 @@ function RunDetails({ jobId }: { jobId: string }) {
             href={
               detail?.run.thread_id
                 ? conversationHref(detail.run.thread_id, linked.filters ?? {})
-                : '/admin/sessions'
+                : '/admin/activity'
             }
             className="text-sm text-crimson hover:underline dark:text-crimson-light"
           >

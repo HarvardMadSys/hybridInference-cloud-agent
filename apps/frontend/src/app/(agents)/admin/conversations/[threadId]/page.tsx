@@ -113,10 +113,10 @@ function ConversationDetails({ threadId, query }: { threadId: string; query: str
     <div className="min-w-0 flex-1 overflow-y-auto">
       <section className="mx-auto w-full max-w-7xl px-6 py-12 lg:px-12">
         <h1 className="text-3xl font-semibold text-gray-900 dark:text-gray-50">Admin</h1>
-        <AdminNavigation current="sessions" />
+        <AdminNavigation current="activity" />
         <div className="mt-6 flex items-center justify-between gap-4">
           <Link
-            href={`/admin/sessions${context}`}
+            href={`/admin/activity${context}`}
             className="text-sm text-crimson hover:underline dark:text-crimson-light"
           >
             ← All sessions

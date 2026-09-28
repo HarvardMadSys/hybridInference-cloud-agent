@@ -213,7 +213,7 @@ describe('turn level', () => {
       expect(screen.queryByLabelText(label)).not.toBeInTheDocument();
     }
     const nav = screen.getByRole('navigation', { name: 'Admin sections' });
-    expect(within(nav).getByRole('link', { name: 'Sessions' })).toHaveAttribute(
+    expect(within(nav).getByRole('link', { name: 'Activity' })).toHaveAttribute(
       'aria-current',
       'page',
     );

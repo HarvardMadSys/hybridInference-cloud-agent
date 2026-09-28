@@ -44,6 +44,7 @@ vi.mock('@/lib/api/adminRuns', async (importOriginal) => ({
 import List from './page';
 import Detail from './[threadId]/page';
 import PreviousEntry from '../runs/page';
+import ActivityList from '../activity/page';
 import SessionList from '../sessions/page';
 import SessionDetail from '../sessions/[threadId]/page';
 
@@ -131,12 +132,13 @@ describe('session navigation', () => {
     expect(screen.queryByRole('columnheader', { name: 'CPU' })).not.toBeInTheDocument();
     // A turn is reached through its session; there is no second run list.
     expect(screen.queryByRole('link', { name: /execution records/i })).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Sessions' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('link', { name: 'Activity' })).toHaveAttribute('aria-current', 'page');
     const filters = vi.mocked(getAdminConversations).mock.calls[0][0];
     expect(Date.parse(filters.until!) - Date.parse(filters.since!)).toBe(7 * 86400000);
   });
 
   it.each([
+    ['/admin/activity', ActivityList],
     ['/admin/sessions', SessionList],
     ['/admin/runs', PreviousEntry],
   ])('opens the session list at %s', async (_, Entry) => {
@@ -333,7 +335,7 @@ describe('session turns', () => {
     );
     expect(screen.getByRole('link', { name: '← All sessions' })).toHaveAttribute(
       'href',
-      `/admin/sessions?${context.query}`,
+      `/admin/activity?${context.query}`,
     );
   });
 
@@ -342,7 +344,7 @@ describe('session turns', () => {
     await screen.findByRole('heading', { name: 'Fix login' });
     expect(screen.getByRole('link', { name: '← All sessions' })).toHaveAttribute(
       'href',
-      '/admin/sessions',
+      '/admin/activity',
     );
   });
 

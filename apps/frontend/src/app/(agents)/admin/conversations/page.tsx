@@ -190,7 +190,7 @@ function ConversationsList({
         <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
           Admin
         </h1>
-        <AdminNavigation current="sessions" />
+        <AdminNavigation current="activity" />
 
         {/* One toolbar: what a row stands for on the left, which turns match on
             the right. The level's description is its tooltip, not a paragraph. */}
