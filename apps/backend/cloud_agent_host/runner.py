@@ -1853,6 +1853,12 @@ def _run_shared_live_attempt(
                 "memory_limit": seed_spec.memory_limit,
                 "cpu_limit": seed_spec.cpu_limit,
                 "stop_timeout_seconds": seed_spec.stop_timeout_s,
+                # What the image a new container is created from declares, so
+                # Fork can ask it of this group after the host moves on to a
+                # newer image. An existing group recorded its own already.
+                "shared_sandbox_protocol": (
+                    None if existing else (stamp.get("shared_sandbox_protocol") or None)
+                ),
             }
         )
     except LeaseLost:

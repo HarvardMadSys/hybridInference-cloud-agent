@@ -128,8 +128,8 @@ the child's first message.
 
 The selected anchor may be any successfully settled native turn in the source
 chat, including a historical one, once it has a positive persisted
-`native_turn_no`, the owner host advertises at-anchor support, and the host's
-current image digest matches the group's pin. Failed/cancelled turns and
+`native_turn_no`, the owner host advertises at-anchor support, and the group's
+own image can take the anchor (§12). Failed/cancelled turns and
 successful rows whose ordinal has not settled are neither advertised nor
 accepted as anchors. A sibling may continue running because the workspace is
 intentionally shared; only the source session is quiesced while its immutable
@@ -398,8 +398,9 @@ host must provide:
 - an authenticated workspace broker URL reachable by the control plane;
 - the expected Docker data root and sandbox image digest;
 - exact runtime/helper versions and shared protocol attestation;
-- `native-fork-at-anchor-v1` from the current host image, with that image
-  digest equal to the immutable digest of the retained group;
+- `native-fork-at-anchor-v1` from the current host image, and for each
+  retained group either that very image or the exact CLI version the group's
+  container runs (below);
 - at least two host slots and enough runner replicas to execute fork siblings
   concurrently (staging currently defaults both to three);
 - an immutable resident-slot capacity for each group;
@@ -469,10 +470,18 @@ deployment-SHA marker is likewise a rolling-compatibility fence and cannot
 select another executor. Historical fork has its own
 `native-fork-at-anchor-v1` attestation. The shared protocol is v2 for new
 images; a v1 retained container may keep serving ordinary follow-ups, but its
-older helpers cannot receive an at-anchor request. The control plane exposes
-Fork only when the host advertises that capability and its current sandbox
-image digest matches the group's pinned digest, so an upgrade fails closed
-instead of silently forking the latest provider message.
+older helpers cannot receive an at-anchor request. The group therefore records
+the protocol its image declares when the runner creates its container, and the
+control plane exposes Fork only when the host advertises that capability and
+either still runs the group's very image, or the group's image speaks v2 and
+the host's image ships the exact CLI version the container runs — the version
+its fork drivers were tested against. A group whose protocol was never
+recorded, or is older, fails closed instead of silently forking the latest
+provider message. Comparing only image digests is not enough: every release
+labels the image with its source commit, so the digest changes on every
+deployment even when nothing Fork depends on did. Mid-turn input asks the
+host's per-runtime capability and the same CLI version, and nothing of the
+image's helpers.
 
 ## 13. Acceptance contract
 

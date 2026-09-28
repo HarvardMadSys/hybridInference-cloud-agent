@@ -53,6 +53,7 @@ class SandboxRepository(Protocol):
         memory_limit: str = "4g",
         cpu_limit: str = "2",
         stop_timeout_seconds: int = 10,
+        shared_sandbox_protocol: str | None = None,
     ) -> dict[str, Any] | None:
         """Reserve/start one thread's durable sandbox under its attempt fence.
 
@@ -60,6 +61,10 @@ class SandboxRepository(Protocol):
         before persistent storage, the retained container's writable layer is
         the only copy. A different host must leave the turn queued rather than
         create an empty replacement and call it continuity.
+
+        ``shared_sandbox_protocol`` is what the image a new container is
+        created from declares; it is recorded with the group and ignored for
+        one that already exists.
         """
         ...
 

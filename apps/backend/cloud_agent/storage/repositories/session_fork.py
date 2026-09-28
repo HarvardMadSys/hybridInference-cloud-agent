@@ -14,7 +14,7 @@ from cloud_agent.domain.execution import CANCELLED, SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.ids import new_job_id, new_session_fork_id, new_thread_id
 from cloud_agent.storage._sql.jobs import JOB_SELECT
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, sandbox_row_to_dict
-from cloud_agent.storage._sql.sandbox import NATIVE_FORK_CAPABILITY_JSON, THREAD_SANDBOX_SOURCE
+from cloud_agent.storage._sql.sandbox import NATIVE_FORK_CAPABLE, THREAD_SANDBOX_SOURCE
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 from cloud_agent.storage.repositories.goals import new_goal_id
 
@@ -128,14 +128,7 @@ class PostgresSessionForkRepository:
                        g.execution_profile, g.state AS sandbox_state,
                        g.resident_slot_capacity, g.memory_limit, g.cpu_limit,
                        g.stop_timeout_seconds,
-                       EXISTS (
-                           SELECT 1 FROM agent_runner_hosts h
-                           WHERE h.host = g.host
-                             AND h.status = 'online'
-                             AND h.capabilities @>
-                                 '{NATIVE_FORK_CAPABILITY_JSON}'::jsonb
-                             AND h.sandbox_image_digest = g.sandbox_image_digest
-                       ) AS native_fork_capable
+                       {NATIVE_FORK_CAPABLE} AS native_fork_capable
                 FROM agent_thread_sandbox_memberships m
                 JOIN agent_sandboxes g ON g.id = m.sandbox_id
                 WHERE m.thread_id = $1

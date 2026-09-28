@@ -1017,11 +1017,18 @@ advertise it from the exact process that claims the job. A host's limit is at
 least two, because a fork's sibling runs beside its parent; `AGENT_HOST_SLOTS`
 (default three) is that limit until an admin sets one on the Servers page.
 
-Historical Fork additionally requires `native-fork-at-anchor-v1` and an exact
-match between the host's current sandbox image digest and the retained group's
-pinned digest. A container kept from the previous image remains usable for
-normal follow-ups after a rollout, but its older fork helper is never asked to
-interpret a historical anchor.
+Historical Fork additionally requires `native-fork-at-anchor-v1`, and for the
+retained group either the host's current sandbox image being the group's own,
+or the group's image having declared protocol v2 (recorded in
+`agent_sandboxes.shared_sandbox_protocol` when the container was created) while
+the host's image still ships the exact CLI version the container runs. A
+release therefore does not take Fork away from existing chats: it rebuilds the
+image, but the image's helpers and pinned CLIs stay the same unless the release
+changed them. A container kept from a v1 image remains usable for normal
+follow-ups, but its fork helper is never asked to interpret a historical
+anchor; nor is a host's fork driver pointed at a CLI version its own image no
+longer ships. Sending a message into a running turn follows the same
+CLI-version rule.
 
 The Docker socket (or reviewed mTLS Engine endpoint) is the only host
 control/data interface for chat state. No repository, workspace, Agent CLI
