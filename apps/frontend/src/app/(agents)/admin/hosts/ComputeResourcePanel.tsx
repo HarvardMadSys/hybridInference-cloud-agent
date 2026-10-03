@@ -122,8 +122,8 @@ export default function ComputeResourcePanel({
         </ul>
         {needsDeployment && (
           <p>
-            To deploy an imported resource, use Add server → Connect an existing resource with
-            the same account connection and resource ID.
+            To deploy an imported resource, use Add server → Connect an existing resource with the
+            same account connection and resource ID.
           </p>
         )}
         <Reasons reasons={allocation.blocked_reasons} />
