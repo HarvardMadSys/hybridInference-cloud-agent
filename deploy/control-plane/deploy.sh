@@ -186,6 +186,9 @@ compose() {
     esac
   fi
   local command=(docker compose -p "${COMPOSE_PROJECT}" --env-file .env -f "${COMPOSE_FILE}")
+  if [[ -n "${AGENT_COMPUTE_DIRECTORY:-$(from_env AGENT_COMPUTE_DIRECTORY)}" ]]; then
+    command+=(-f "$SCRIPT_DIR/docker-compose.compute.yml")
+  fi
   if [[ "${WATCH_READINESS:-0}" == "1" && -n "${DEPLOY_PEER_JOB:-}" ]]; then
     python3 "$SCRIPT_DIR/../watch_peer.py" --peer "$DEPLOY_PEER_JOB" \
       --container "$READINESS_CONTAINER" -- "${command[@]}" "$@"

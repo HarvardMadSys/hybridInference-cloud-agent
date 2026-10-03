@@ -1,0 +1,11 @@
+# Optional overlay; all paths in compute.json are container paths below this
+# one read-only mount. Keep this directory outside the repository/build context.
+services:
+  control-plane:
+    environment:
+      AGENT_COMPUTE_CONFIG: /run/compute/compute.json
+    volumes:
+      - type: bind
+        source: ${AGENT_COMPUTE_DIRECTORY:?absolute directory with operator compute configuration}
+        target: /run/compute
+        read_only: true

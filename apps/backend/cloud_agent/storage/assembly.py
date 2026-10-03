@@ -25,6 +25,7 @@ from cloud_agent.storage.repositories import (
     PostgresAttachmentRepository,
     PostgresAttemptCommands,
     PostgresAuditRepository,
+    PostgresComputeResourceRepository,
     PostgresConversationCommands,
     PostgresConversationQueries,
     PostgresCredentialQueries,
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
         AttachmentRepository,
         AttemptCommands,
         AuditRepository,
+        ComputeResourceRepository,
         ConversationCommands,
         ConversationQueries,
         CredentialQueries,
@@ -94,6 +96,7 @@ class Storage:
 
         self.attempt_commands: AttemptCommands = PostgresAttemptCommands(pool)
         self.audit: AuditRepository = PostgresAuditRepository(pool)
+        self.compute_resources: ComputeResourceRepository = PostgresComputeResourceRepository(pool)
         self.conversation_commands: ConversationCommands = PostgresConversationCommands(pool)
         self.conversation_queries: ConversationQueries = PostgresConversationQueries(pool)
         self.credential_queries: CredentialQueries = PostgresCredentialQueries(pool)

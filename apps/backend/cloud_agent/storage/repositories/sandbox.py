@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.domain.execution import TERMINAL_STATES
+from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.jobs import fail_unrunnable_follow_ups
 from cloud_agent.storage._sql.rows import load_json, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
@@ -141,6 +142,7 @@ class PostgresSandboxRepository:
         create an empty replacement and call it continuity.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            await lock_compute_entry(conn)
             earns = await conn.fetchrow(
                 """
                 SELECT j.id, j.thread_id, j.user_id

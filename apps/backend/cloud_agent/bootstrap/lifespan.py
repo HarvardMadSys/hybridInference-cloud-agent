@@ -167,7 +167,18 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     # `create_mcp_app` says no.
     app.state.mcp_catalog = None
     app.state.mcp_catalog_task = None
+    app.state.compute_commands = None
+    app.state.compute_resource_task = None
     if background:
+        from cloud_agent.bootstrap.compute import build_compute_runtime
+
+        app.state.compute_commands, compute_worker = build_compute_runtime(
+            repository=storage.compute_resources,
+            host_pool=storage.host_pool,
+        )
+        app.state.compute_resource_task = asyncio.create_task(compute_worker.run())
+        _BACKGROUND_TASKS.add(app.state.compute_resource_task)
+        app.state.compute_resource_task.add_done_callback(_BACKGROUND_TASKS.discard)
         app.state.mcp_catalog = McpCatalog(storage.mcp_catalog, http)
         app.state.mcp_catalog_task = asyncio.create_task(app.state.mcp_catalog.run())
         reaper = asyncio.create_task(
@@ -269,6 +280,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.queue_monitor_task,
             app.state.publish_task,
             app.state.profiling_policy_task,
+            app.state.compute_resource_task,
         ):
             if task is None:
                 continue

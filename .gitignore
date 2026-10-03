@@ -21,6 +21,7 @@ htmlcov/
 !.env.example
 *.pem
 *.key
+.compute-secrets/
 
 # Node / Next.js (web/)
 node_modules/

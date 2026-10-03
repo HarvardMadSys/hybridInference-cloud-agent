@@ -1,0 +1,125 @@
+"""Host administration shared by HTTP handlers and resource orchestration.
+
+These commands own execution-pool decisions only. Provider lifecycle changes
+and cloud credentials never enter this module. HTTP authentication, audit and
+snapshot formatting remain with the existing administrative routes.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from cloud_agent.host_pool import hash_secret, new_enroll_token
+
+if TYPE_CHECKING:
+    from cloud_agent.ports.host_pool import HostPoolRepository
+
+
+class HostCommandError(Exception):
+    """A public administrative refusal with the existing response semantics."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class SandboxPlacement:
+    """One global destination for new sandbox groups; existing owners stay fixed."""
+
+    def __init__(self, repository: HostPoolRepository) -> None:
+        self.repository = repository
+
+    async def set_active(self, host: str | None) -> str | None:
+        """Validate and change placement atomically through the pool contract."""
+        previous = await self.repository.active_runner_host()
+        if not await self.repository.set_active_runner_host(host=host):
+            current = await self.repository.get_host(host=host) if host else None
+            if current is not None:
+                raise HostCommandError(
+                    409,
+                    f"{host!r} cannot accept new sandboxes while its compute resource is unavailable, expiring, or retiring.",
+                )
+            raise HostCommandError(
+                404,
+                f"No runner on {host!r} has ever polled. Start one there "
+                "(deploy/host/sandbox_host.sh up) and it will appear here.",
+            )
+        return previous
+
+
+class HostCommands:
+    """Run existing Host use cases independently of an HTTP request."""
+
+    def __init__(self, repository: HostPoolRepository) -> None:
+        self.repository = repository
+
+    async def enroll_token(
+        self, *, host: str, ttl_seconds: float, actor: str | None
+    ) -> tuple[str, dict[str, Any]]:
+        """Issue a Host-bound token; only the caller receives its plaintext."""
+        token = new_enroll_token()
+        issued = await self.repository.issue_enroll_token(
+            token_hash=hash_secret(token), host=host, ttl_seconds=ttl_seconds, issued_by=actor
+        )
+        return token, issued
+
+    async def runtime_version(self, *, runtime: str, version: str | None) -> dict[str, str]:
+        """Select only an installed runtime and return previous selections for audit."""
+        _, _, previous, _ = await self.repository.runner_pool()
+        if not await self.repository.set_runtime_version(runtime=runtime, version=version):
+            raise HostCommandError(
+                404,
+                f"No host in the pool offers {runtime} {version!r}. "
+                "A version has to be built into the sandbox image before it can be "
+                "selected — add it to that host's *_EXTRA_VERSIONS and redeploy.",
+            )
+        return previous
+
+    async def forget(self, host: str) -> None:
+        """Forget administrative history only when no retained dependencies remain."""
+        outcome = await self.repository.forget_runner_host(host=host)
+        if outcome == "active":
+            raise HostCommandError(
+                409,
+                f"{host!r} is the active host. Switch to another host (or unpin) before removing it.",
+            )
+        if outcome == "unknown":
+            raise HostCommandError(404, f"Unknown runner host: {host}")
+        if outcome != "deleted":
+            raise HostCommandError(
+                409,
+                f"{host!r} still has {outcome.replace('_', ' ')}; clear those dependencies before forgetting it.",
+            )
+
+    async def set_status(self, *, host: str, status: str) -> None:
+        """Apply the existing drain/undrain transition table."""
+        outcome = await self.repository.set_host_status(host=host, status=status)
+        if outcome == "unknown":
+            raise HostCommandError(404, f"Unknown runner host: {host}")
+        if outcome == "invalid":
+            current = await self.repository.get_host(host=host)
+            raise HostCommandError(
+                409,
+                f"{host!r} is {current['status'] if current else 'unknown'!r} and cannot become {status!r}.",
+            )
+
+    async def remove(self, *, host: str, force: bool = False) -> None:
+        """Revoke Host access without releasing any underlying machine."""
+        outcome = await self.repository.remove_host(host=host, force=force)
+        if outcome == "unknown":
+            raise HostCommandError(404, f"Unknown runner host: {host}")
+        if outcome == "busy":
+            raise HostCommandError(
+                409,
+                f"{host!r} is still running attempts. Drain it first, or repeat with "
+                "force=true to let their leases expire under the retained-context fail-closed policy.",
+            )
+
+    async def slots(self, *, host: str, slots: int | None) -> dict[str, Any]:
+        """Save desired capacity and return the old observation for audit."""
+        before = await self.repository.get_host(host=host)
+        if before is None:
+            raise HostCommandError(404, f"Unknown runner host: {host}")
+        if await self.repository.set_host_slots_desired(host=host, slots=slots) == "unknown":
+            raise HostCommandError(404, f"Unknown runner host: {host}")
+        return before

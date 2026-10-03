@@ -21,7 +21,7 @@ the host applies to itself on its next heartbeat.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
@@ -31,6 +31,7 @@ from cloud_agent.api.deps import (
     log_admin_action,
     verify_admin_access,
 )
+from cloud_agent.application.host_commands import HostCommandError, HostCommands, SandboxPlacement
 from cloud_agent.capacity_protocol import (
     DEFAULT_HISTORY_RANGE,
     HISTORY_RANGES,
@@ -43,8 +44,6 @@ from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.host_pool import (
     HOST_DRAINING,
     HOST_ONLINE,
-    hash_secret,
-    new_enroll_token,
 )
 from cloud_agent.schemas import (
     AgentRunnerHost,
@@ -57,6 +56,8 @@ from cloud_agent.schemas import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
+
     from cloud_agent.ports import (
         AuditRepository,
         HostCapacityRepository,
@@ -88,6 +89,16 @@ def _no_store(response: Response) -> None:
 
 
 router = APIRouter(prefix="/admin", dependencies=[Depends(_no_store)])
+
+_Result = TypeVar("_Result")
+
+
+async def _apply(command: Awaitable[_Result]) -> _Result:
+    """Translate a use-case refusal without coupling the use case to FastAPI."""
+    try:
+        return await command
+    except HostCommandError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from None
 
 
 def _require_store(store: _AdminHostsStorage | None) -> _AdminHostsStorage:
@@ -198,19 +209,7 @@ async def set_active_agent_runner_host(
     starts.
     """
     job_store = _require_store(store)
-    previous = await job_store.host_pool.active_runner_host()
-
-    if not await job_store.host_pool.set_active_runner_host(host=payload.host):
-        # Pinning to a machine that has never polled parks the queue on a host
-        # that may not exist, and it presents as "every job hangs" with nothing
-        # in the logs to say why.
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"No runner on {payload.host!r} has ever polled. Start one there "
-                "(deploy/host/sandbox_host.sh up) and it will appear here."
-            ),
-        )
+    previous = await _apply(SandboxPlacement(job_store.host_pool).set_active(payload.host))
 
     await log_admin_action(
         job_store,
@@ -242,19 +241,11 @@ async def set_agent_runtime_version(
     groups; existing conversations keep the version they began on.
     """
     job_store = _require_store(store)
-    _, _, previous, _ = await job_store.host_pool.runner_pool()
-
-    if not await job_store.host_pool.set_runtime_version(
-        runtime=payload.runtime, version=payload.version
-    ):
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"No host in the pool offers {payload.runtime} {payload.version!r}. "
-                "A version has to be built into the sandbox image before it can be "
-                "selected — add it to that host's *_EXTRA_VERSIONS and redeploy."
-            ),
+    previous = await _apply(
+        HostCommands(job_store.host_pool).runtime_version(
+            runtime=payload.runtime, version=payload.version
         )
+    )
 
     await log_admin_action(
         job_store,
@@ -290,17 +281,7 @@ async def forget_agent_runner_host(
     is a read a concurrent switch can outrun.
     """
     job_store = _require_store(store)
-    outcome = await job_store.host_pool.forget_runner_host(host=host)
-    if outcome == "active":
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"{host!r} is the active host. Switch to another host (or unpin) "
-                "before removing it."
-            ),
-        )
-    if outcome == "unknown":
-        raise HTTPException(status_code=404, detail=f"Unknown runner host: {host}")
+    await _apply(HostCommands(job_store.host_pool).forget(host))
 
     await log_admin_action(
         job_store,
@@ -348,12 +329,12 @@ async def issue_host_enroll_token(
     body = payload
     # A body is now required: it carries the host name, and there is no
     # sensible default for "which machine may this enrol".
-    token = new_enroll_token()
-    issued = await job_store.host_pool.issue_enroll_token(
-        token_hash=hash_secret(token),
-        host=body.host,
-        ttl_seconds=body.ttl_seconds,
-        issued_by=_admin_id,
+    token, issued = await _apply(
+        HostCommands(job_store.host_pool).enroll_token(
+            host=body.host,
+            ttl_seconds=body.ttl_seconds,
+            actor=_admin_id,
+        )
     )
     await log_admin_action(
         job_store,
@@ -386,21 +367,7 @@ async def _set_status(
     actor_id: str,
 ) -> ListAgentRunnerHostsResponse:
     """Apply one table-driven status change, or say why it was refused."""
-    outcome = await job_store.host_pool.set_host_status(host=host, status=status)
-    if outcome == "unknown":
-        raise HTTPException(status_code=404, detail=f"Unknown runner host: {host}")
-    if outcome == "invalid":
-        # 409, not 400: the request is well-formed and would have been legal
-        # from another state. Naming the current state is what tells an
-        # operator whether to wait or to do something else.
-        current = await job_store.host_pool.get_host(host=host)
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"{host!r} is {current['status'] if current else 'unknown'!r} and cannot "
-                f"become {status!r}."
-            ),
-        )
+    await _apply(HostCommands(job_store.host_pool).set_status(host=host, status=status))
     await log_admin_action(
         job_store, get_client_ip(request), action, None, {"host": host}, actor_id=actor_id
     )
@@ -490,18 +457,7 @@ async def remove_agent_runner_host(
     evidence that the retained container or Docker data-root was deleted.
     """
     job_store = _require_store(store)
-    outcome = await job_store.host_pool.remove_host(host=host, force=force)
-    if outcome == "unknown":
-        raise HTTPException(status_code=404, detail=f"Unknown runner host: {host}")
-    if outcome == "busy":
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"{host!r} is still running attempts. Drain it first, or repeat with "
-                "force=true to let their leases expire under the retained-context "
-                "fail-closed policy."
-            ),
-        )
+    await _apply(HostCommands(job_store.host_pool).remove(host=host, force=force))
     await log_admin_action(
         job_store,
         get_client_ip(request),
@@ -540,16 +496,7 @@ async def set_agent_runner_host_slots(
     ``null`` returns the host to its own ``AGENT_HOST_SLOTS`` default.
     """
     job_store = _require_store(store)
-    before = await job_store.host_pool.get_host(host=host)
-    if before is None:
-        raise HTTPException(status_code=404, detail=f"Unknown runner host: {host}")
-
-    outcome = await job_store.host_pool.set_host_slots_desired(host=host, slots=payload.slots)
-    if outcome == "unknown":
-        # Forgotten between the read above and the write: a name that no
-        # longer exists cannot be sized, and saying so beats a snapshot that
-        # silently omits it.
-        raise HTTPException(status_code=404, detail=f"Unknown runner host: {host}")
+    before = await _apply(HostCommands(job_store.host_pool).slots(host=host, slots=payload.slots))
 
     await log_admin_action(
         job_store,

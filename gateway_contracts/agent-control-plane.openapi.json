@@ -1,6 +1,123 @@
 {
   "components": {
     "schemas": {
+      "AddComputeConnection": {
+        "additionalProperties": false,
+        "description": "Create a named, write-only credential in the control plane.",
+        "properties": {
+          "configuration": {
+            "additionalProperties": true,
+            "title": "Configuration",
+            "type": "object"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "provider_id": {
+            "enum": [
+              "existing_ssh",
+              "cloudlab"
+            ],
+            "title": "Provider Id",
+            "type": "string"
+          },
+          "secret": {
+            "format": "password",
+            "maxLength": 65536,
+            "minLength": 1,
+            "title": "Secret",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "name",
+          "provider_id",
+          "secret"
+        ],
+        "title": "AddComputeConnection",
+        "type": "object"
+      },
+      "AddServerRequest": {
+        "additionalProperties": false,
+        "description": "Acquire or attach a resource and deploy a configured Host profile.",
+        "properties": {
+          "configuration": {
+            "additionalProperties": true,
+            "title": "Configuration",
+            "type": "object"
+          },
+          "connection_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "deployment_profile": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Deployment Profile",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "attach",
+              "provision"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/RenewalPolicy"
+          },
+          "provider_id": {
+            "enum": [
+              "existing_ssh",
+              "cloudlab"
+            ],
+            "title": "Provider Id",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "ssh_connection_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ssh Connection Id"
+          }
+        },
+        "required": [
+          "request_id",
+          "name",
+          "provider_id",
+          "mode",
+          "connection_id",
+          "deployment_profile"
+        ],
+        "title": "AddServerRequest",
+        "type": "object"
+      },
       "AdminActivity": {
         "description": "An allowlisted event envelope; created_at is the receipt timestamp.",
         "properties": {
@@ -6285,6 +6402,13 @@
         "title": "BindingsResponse",
         "type": "object"
       },
+      "ComputeOperationAction": {
+        "additionalProperties": false,
+        "description": "An explicit action whose current state is checked under the operation lock.",
+        "properties": {},
+        "title": "ComputeOperationAction",
+        "type": "object"
+      },
       "ConnectionView": {
         "additionalProperties": false,
         "description": "One connection, as its owner sees it.\n\nNo field here can hold a secret. ``has_credential`` and ``secret_hint`` are\nthe whole disclosure: enough to tell a configured connection from an\nunconfigured one, and not enough to use either.",
@@ -6961,6 +7085,36 @@
         ],
         "title": "ExecutionProfile",
         "type": "string"
+      },
+      "ExtendComputeRequest": {
+        "additionalProperties": false,
+        "description": "A fixed absolute deadline survives retries without adding more hours.",
+        "properties": {
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "target_expires_at": {
+            "format": "date-time",
+            "title": "Target Expires At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "target_expires_at",
+          "reason"
+        ],
+        "title": "ExtendComputeRequest",
+        "type": "object"
       },
       "GitHubConnectRequest": {
         "description": "The callback values GitHub hands back after the user authorizes.",
@@ -8256,6 +8410,48 @@
         "title": "HostResidencyEstablishResponse",
         "type": "object"
       },
+      "ImportComputeRequest": {
+        "additionalProperties": false,
+        "description": "Observe an explicitly named existing cloud allocation without deploying.",
+        "properties": {
+          "configuration": {
+            "additionalProperties": true,
+            "title": "Configuration",
+            "type": "object"
+          },
+          "connection_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "provider_id": {
+            "const": "cloudlab",
+            "title": "Provider Id",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "name",
+          "provider_id",
+          "connection_id"
+        ],
+        "title": "ImportComputeRequest",
+        "type": "object"
+      },
       "ImportGitHubSkill": {
         "additionalProperties": false,
         "description": "Confirm the bytes reviewed; a moving branch must not replace them.",
@@ -9211,6 +9407,53 @@
         "title": "RegisterConnectorResponse",
         "type": "object"
       },
+      "RenewalPolicy": {
+        "additionalProperties": false,
+        "description": "Independent resource deadlines, expressed in seconds.",
+        "properties": {
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "extend_to_horizon_seconds": {
+            "default": 14400,
+            "maximum": 2592000.0,
+            "minimum": 120.0,
+            "title": "Extend To Horizon Seconds",
+            "type": "integer"
+          },
+          "reason": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Reason",
+            "type": "string"
+          },
+          "renew_before_seconds": {
+            "default": 3600,
+            "maximum": 604800.0,
+            "minimum": 60.0,
+            "title": "Renew Before Seconds",
+            "type": "integer"
+          },
+          "stop_claims_before_seconds": {
+            "default": 300,
+            "maximum": 604800.0,
+            "minimum": 0.0,
+            "title": "Stop Claims Before Seconds",
+            "type": "integer"
+          },
+          "stop_new_groups_before_seconds": {
+            "default": 1800,
+            "maximum": 604800.0,
+            "minimum": 0.0,
+            "title": "Stop New Groups Before Seconds",
+            "type": "integer"
+          }
+        },
+        "title": "RenewalPolicy",
+        "type": "object"
+      },
       "ReplaceBindingsRequest": {
         "additionalProperties": false,
         "description": "Replace a session's selection wholesale.",
@@ -9271,6 +9514,23 @@
           "generation"
         ],
         "title": "ResidencyBeat",
+        "type": "object"
+      },
+      "ResolveComputeOperation": {
+        "additionalProperties": false,
+        "description": "Adopt an explicitly identified result after an acquisition response was lost.",
+        "properties": {
+          "external_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "External Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "external_id"
+        ],
+        "title": "ResolveComputeOperation",
         "type": "object"
       },
       "ResourceMetricBrief": {
@@ -9444,6 +9704,29 @@
           "activation_generation"
         ],
         "title": "RetainedSandboxStop",
+        "type": "object"
+      },
+      "RetireComputeRequest": {
+        "additionalProperties": false,
+        "description": "Request retirement against the allocation scope the admin reviewed.",
+        "properties": {
+          "expected_revision": {
+            "minimum": 0.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "expected_revision"
+        ],
+        "title": "RetireComputeRequest",
         "type": "object"
       },
       "RunResourceSummary": {
@@ -10875,6 +11158,97 @@
           "method"
         ],
         "title": "TurnStorageIoResources",
+        "type": "object"
+      },
+      "UpdateComputeConnection": {
+        "additionalProperties": false,
+        "description": "Replace a credential only against the revision the editor observed.",
+        "properties": {
+          "configuration": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Configuration"
+          },
+          "expected_revision": {
+            "minimum": 0.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "secret": {
+            "anyOf": [
+              {
+                "format": "password",
+                "maxLength": 65536,
+                "minLength": 1,
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret"
+          }
+        },
+        "required": [
+          "expected_revision"
+        ],
+        "title": "UpdateComputeConnection",
+        "type": "object"
+      },
+      "UpdateComputePolicy": {
+        "additionalProperties": false,
+        "description": "Compare and replace the renewal policy and explicit management scope.",
+        "properties": {
+          "expected_revision": {
+            "minimum": 0.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "management_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "observe",
+                  "manage"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Management Mode"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/RenewalPolicy"
+          }
+        },
+        "required": [
+          "expected_revision",
+          "policy"
+        ],
+        "title": "UpdateComputePolicy",
         "type": "object"
       },
       "UpdateConnectionRequest": {
@@ -13140,6 +13514,936 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/admin/agent/compute-allocations/import": {
+      "post": {
+        "description": "Record an existing resource for observation without deploying a Host.",
+        "operationId": "import_resource_admin_agent_compute_allocations_import_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportComputeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Import Resource Admin Agent Compute Allocations Import Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Import Resource"
+      }
+    },
+    "/admin/agent/compute-allocations/{allocation_id}/extend": {
+      "post": {
+        "description": "Queue an extension to one fixed absolute expiration.",
+        "operationId": "extend_admin_agent_compute_allocations__allocation_id__extend_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "allocation_id",
+            "required": true,
+            "schema": {
+              "title": "Allocation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtendComputeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Extend Admin Agent Compute Allocations  Allocation Id  Extend Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Extend"
+      }
+    },
+    "/admin/agent/compute-allocations/{allocation_id}/policy": {
+      "patch": {
+        "description": "Save a revisioned renewal policy independently of an extension request.",
+        "operationId": "policy_admin_agent_compute_allocations__allocation_id__policy_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "allocation_id",
+            "required": true,
+            "schema": {
+              "title": "Allocation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateComputePolicy"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Policy Admin Agent Compute Allocations  Allocation Id  Policy Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Policy"
+      }
+    },
+    "/admin/agent/compute-allocations/{allocation_id}/retire": {
+      "post": {
+        "description": "Queue retirement of a complete allocation with retained-state guards.",
+        "operationId": "retire_admin_agent_compute_allocations__allocation_id__retire_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "allocation_id",
+            "required": true,
+            "schema": {
+              "title": "Allocation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetireComputeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Retire Admin Agent Compute Allocations  Allocation Id  Retire Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retire"
+      }
+    },
+    "/admin/agent/compute-allocations/{allocation_id}/retirement-impact": {
+      "get": {
+        "description": "Read the full resource scope and blockers before requesting retirement.",
+        "operationId": "retirement_impact_admin_agent_compute_allocations__allocation_id__retirement_impact_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "allocation_id",
+            "required": true,
+            "schema": {
+              "title": "Allocation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Retirement Impact Admin Agent Compute Allocations  Allocation Id  Retirement Impact Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retirement Impact"
+      }
+    },
+    "/admin/agent/compute-connections": {
+      "get": {
+        "description": "List connection metadata without plaintext credentials or ciphertext.",
+        "operationId": "connections_admin_agent_compute_connections_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Connections Admin Agent Compute Connections Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Connections"
+      },
+      "post": {
+        "description": "Save a write-only credential in the configured encrypted store.",
+        "operationId": "create_connection_admin_agent_compute_connections_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddComputeConnection"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Connection Admin Agent Compute Connections Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Connection"
+      }
+    },
+    "/admin/agent/compute-connections/{connection_id}": {
+      "patch": {
+        "description": "Replace connection metadata or credentials against the observed revision.",
+        "operationId": "update_connection_admin_agent_compute_connections__connection_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateComputeConnection"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Connection Admin Agent Compute Connections  Connection Id  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Connection"
+      }
+    },
+    "/admin/agent/compute-connections/{connection_id}/validate": {
+      "post": {
+        "description": "Validate a configured connection without allocating resources.",
+        "operationId": "validate_connection_admin_agent_compute_connections__connection_id__validate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Validate Connection Admin Agent Compute Connections  Connection Id  Validate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Validate Connection"
+      }
+    },
+    "/admin/agent/compute-operations": {
+      "get": {
+        "description": "Recover recent operations or one request whose response was lost.",
+        "operationId": "operations_admin_agent_compute_operations_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "request_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Request Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Operations Admin Agent Compute Operations Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Operations"
+      }
+    },
+    "/admin/agent/compute-operations/{operation_id}": {
+      "get": {
+        "description": "Read safe durable progress for a resource operation.",
+        "operationId": "operation_admin_agent_compute_operations__operation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Operation Admin Agent Compute Operations  Operation Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Operation"
+      }
+    },
+    "/admin/agent/compute-operations/{operation_id}/cancel": {
+      "post": {
+        "description": "Cancel a permitted retirement before the irreversible release boundary.",
+        "operationId": "cancel_admin_agent_compute_operations__operation_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComputeOperationAction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Cancel Admin Agent Compute Operations  Operation Id  Cancel Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel"
+      }
+    },
+    "/admin/agent/compute-operations/{operation_id}/resolve": {
+      "post": {
+        "description": "Adopt an explicitly identified result of an unknown acquisition.",
+        "operationId": "resolve_admin_agent_compute_operations__operation_id__resolve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveComputeOperation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Resolve Admin Agent Compute Operations  Operation Id  Resolve Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resolve"
+      }
+    },
+    "/admin/agent/compute-operations/{operation_id}/retry": {
+      "post": {
+        "description": "Resume recoverable work from its persisted checkpoint.",
+        "operationId": "retry_admin_agent_compute_operations__operation_id__retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComputeOperationAction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Retry Admin Agent Compute Operations  Operation Id  Retry Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry"
+      }
+    },
+    "/admin/agent/compute-providers": {
+      "get": {
+        "description": "List enabled resource providers and public deployment choices.",
+        "operationId": "providers_admin_agent_compute_providers_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Providers Admin Agent Compute Providers Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Providers"
+      }
+    },
     "/admin/agent/conversations": {
       "get": {
         "description": "List distinct conversations in a bounded turn-creation cohort.",
@@ -15568,6 +16872,171 @@
           }
         },
         "summary": "Set Agent Runtime Version"
+      }
+    },
+    "/admin/agent/server-preflights": {
+      "post": {
+        "description": "Queue read-only connection and deployment prerequisite checks.",
+        "operationId": "preflight_admin_agent_server_preflights_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddServerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Preflight Admin Agent Server Preflights Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preflight"
+      }
+    },
+    "/admin/agent/servers": {
+      "get": {
+        "description": "Read current allocations, Host bindings, and global placement from storage.",
+        "operationId": "servers_admin_agent_servers_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Servers Admin Agent Servers Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Servers"
+      },
+      "post": {
+        "description": "Queue an idempotent resource acquisition and shared Host deployment.",
+        "operationId": "add_server_admin_agent_servers_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddServerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Add Server Admin Agent Servers Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Server"
       }
     },
     "/admin/agent/steps": {

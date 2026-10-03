@@ -184,6 +184,12 @@ def _client_for(host: dict[str, Any]) -> WorkspaceBrokerClient | None:
     return WorkspaceBrokerClient(url, token, client=_pool_for(name, url))
 
 
+def broker_for_host(host: dict[str, Any]) -> WorkspaceBrokerClient | None:
+    """Reach a registered Host for administrative readiness and inventory checks."""
+    validate_broker_url(host.get("broker_url"))
+    return _client_for(host)
+
+
 async def broker_for_attempt(
     store: HostPoolRepository | None, attempt_id: int | None
 ) -> WorkspaceBrokerClient | None:

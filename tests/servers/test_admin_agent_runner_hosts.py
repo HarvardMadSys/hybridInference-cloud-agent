@@ -467,3 +467,39 @@ async def test_a_size_change_is_audited_with_both_values(admin_client):
         "new_slots": 6,
         "reported": 4,
     }
+
+
+@pytest.mark.asyncio
+async def test_forgetting_resource_bound_host_returns_conflict_without_mutation(
+    admin_client, monkeypatch
+):
+    client, store = admin_client
+    store.seed("bound-host")
+
+    async def refuse(*, host):
+        assert host == "bound-host"
+        return "resource_bound"
+
+    monkeypatch.setattr(store, "forget_runner_host", refuse)
+    response = await client.delete("/admin/agent/runner-hosts/bound-host", headers=ADMIN)
+    assert response.status_code == 409
+    assert "resource bound" in response.json()["detail"]
+    assert "bound-host" in store.rows
+
+
+@pytest.mark.asyncio
+async def test_global_placement_reports_known_compute_admission_refusal(admin_client, monkeypatch):
+    client, store = admin_client
+    store.seed("held-host")
+
+    async def refuse(*, host):
+        assert host == "held-host"
+        return False
+
+    monkeypatch.setattr(store, "set_active_runner_host", refuse)
+    response = await client.put(
+        "/admin/agent/runner-hosts/active", headers=ADMIN, json={"host": "held-host"}
+    )
+    assert response.status_code == 409
+    assert "compute resource" in response.json()["detail"]
+    assert store.active_host is None

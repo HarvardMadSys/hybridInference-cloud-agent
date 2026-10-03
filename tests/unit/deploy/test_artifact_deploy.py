@@ -171,6 +171,10 @@ def deployment(tmp_path: Path, stack: str, *, real_compose: bool = False) -> tup
         "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
     }
     for compose in recipe.rglob("docker-compose*.yml"):
+        # Optional compute is not enabled just because its overlay ships in
+        # the recipe. Tests explicitly opt in with a private directory below.
+        if compose.name == "docker-compose.compute.yml":
+            continue
         for key in re.findall(r"\$\{([A-Z_]+):\?", compose.read_text()):
             if not key.endswith("_IMAGE") and key != "AGENT_DEPLOYMENT_SHA":
                 config.setdefault(key, "fixture-value")
@@ -752,3 +756,76 @@ def test_abandoning_twice_is_not_an_error(tmp_path: Path):
 
     assert first.returncode == 0 and second.returncode == 0
     assert not any("stop" in call["args"] for call in calls), [c["args"] for c in calls]
+
+
+def test_compute_overlay_is_packaged_and_enabled_by_persistent_configuration(tmp_path: Path):
+    script, env = deployment(tmp_path, "control-plane")
+    private = tmp_path / "private compute"
+    private.mkdir()
+    configuration = Path(env["DEPLOY_ROOT"]) / ".env"
+    with configuration.open("a") as output:
+        output.write(f"AGENT_COMPUTE_DIRECTORY={private}\n")
+    result, calls = run(script, env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    overlay = str(script.parent / "docker-compose.compute.yml")
+    assert Path(overlay).is_file()
+    compose_calls = [call["args"] for call in calls if call["args"][:1] == ["compose"]]
+    # Includes preparation/migrations/readiness as well as final activation.
+    assert compose_calls
+    assert all(overlay in args for args in compose_calls if "config" not in args)
+    assert (script.parent / "compute.example.json").is_file()
+
+
+def test_compute_overlay_gives_credentials_and_mount_only_to_main_control_plane(tmp_path: Path):
+    script, env = deployment(tmp_path, "control-plane", real_compose=True)
+    private = tmp_path / "private compute"
+    private.mkdir()
+    configuration = Path(env["DEPLOY_ROOT"]) / ".env"
+    with configuration.open("a") as output:
+        output.write(
+            f"AGENT_COMPUTE_DIRECTORY={private}\nAGENT_COMPUTE_SECRET_KEY=test-only-independent-key-material\nAGENT_CLOUDLAB_API_URL=https://api.example.org\n"
+        )
+    result, _ = run(script, env, "--phase", "prepare")
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated = next((Path(env["DEPLOY_ROOT"]) / "deploy/control-plane").glob(".release-*.yml"))
+    config = subprocess.run(
+        [
+            env["TEST_REAL_COMPOSE"],
+            "compose",
+            "--env-file",
+            str(configuration),
+            "-f",
+            str(generated),
+            "-f",
+            str(script.parent / "docker-compose.compute.yml"),
+            "config",
+            "--format",
+            "json",
+        ],
+        env={**env, "AGENT_DEPLOYMENT_SHA": COMMIT},
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert config.returncode == 0, config.stderr
+    model = json.loads(config.stdout)
+    for name, service in model["services"].items():
+        keys = {
+            key
+            for key in service.get("environment", {})
+            if key.startswith("AGENT_COMPUTE_") or key == "AGENT_CLOUDLAB_API_URL"
+        }
+        compute_mounts = [
+            mount for mount in service.get("volumes", []) if mount.get("target") == "/run/compute"
+        ]
+        if name == "control-plane":
+            assert service["environment"]["AGENT_COMPUTE_CONFIG"] == "/run/compute/compute.json"
+            assert (
+                service["environment"]["AGENT_COMPUTE_SECRET_KEY"]
+                == "test-only-independent-key-material"
+            )
+            assert len(compute_mounts) == 1 and compute_mounts[0]["read_only"] is True
+            assert compute_mounts[0]["source"] == str(private)
+        else:
+            assert not keys, f"compute authority leaked to {name}"
+            assert not compute_mounts

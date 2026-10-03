@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.domain.execution import CANCELLED, SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.ids import new_job_id, new_session_fork_id, new_thread_id
+from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
 from cloud_agent.storage._sql.jobs import JOB_SELECT
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import NATIVE_FORK_CAPABILITY_JSON, THREAD_SANDBOX_SOURCE
@@ -50,6 +51,7 @@ class PostgresSessionForkRepository:
         operation_id = new_session_fork_id()
         target_thread_id = new_thread_id()
         async with self._pool.acquire() as conn, conn.transaction():
+            await lock_compute_entry(conn)
             # A request may race itself across two HTTP workers. Serialize the
             # unique-key lookup before either can observe a missing row.
             await conn.execute(
@@ -145,6 +147,9 @@ class PostgresSessionForkRepository:
             )
             if row is None:
                 return {"error": "not_shared_live"}
+            resource_new, _ = await host_compute_admission(conn, str(row["host"]))
+            if not resource_new:
+                return {"error": "resource_admission_blocked"}
             if not row["native_fork_capable"]:
                 # Existing retained v1 containers remain valid for follow-up
                 # turns.  Their bundled helpers do not understand historical

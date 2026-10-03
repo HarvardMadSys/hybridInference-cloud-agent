@@ -92,6 +92,11 @@ services:
       # while deploy.sh correctly refused to replace the old API.
       AGENT_DEPLOYMENT_SHA: ${AGENT_DEPLOYMENT_SHA:?exact commit this control plane serves}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      # Optional compute management runs only on this stable main listener.
+      # Mount the operator configuration using docker-compose.compute.yml.
+      AGENT_COMPUTE_CONFIG: ${AGENT_COMPUTE_CONFIG:-}
+      AGENT_COMPUTE_SECRET_KEY: ${AGENT_COMPUTE_SECRET_KEY:-}
+      AGENT_CLOUDLAB_API_URL: ${AGENT_CLOUDLAB_API_URL:-}
       # How long a member-scoped resident credential lives between runner
       # heartbeats. Chat inactivity is a separate group clock on the host
       # (AGENT_CHAT_IDLE_TIMEOUT_S); refreshing this lease does not keep an

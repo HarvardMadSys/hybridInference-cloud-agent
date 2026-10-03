@@ -1,17 +1,11 @@
 'use client';
 
-// The runner host pool — the whole of this service's operations surface.
+// Host admission and capacity, alongside the independent compute resource lifecycle.
 //
 // Runners pull work, so nothing here moves a sandbox to a machine. The pin
 // chooses where chats without a sandbox may be materialized; an existing
 // retained chat remains claimable only by its Docker-owning host. "Pinned",
 // not "assigned"; "last polled", not "online".
-//
-// Enrolment is deliberately absent. Minting a host credential is a real
-// operation and its endpoint stays, but it exists to stop a machine claiming
-// to be a machine it is not — and every runner in this pool is ours, so the
-// control was answering a question nobody here asks. Issue a token from the
-// API on the rare day a new host needs one.
 //
 // ── Capacity ──────────────────────────────────────────────────────────
 //
@@ -50,6 +44,7 @@ import type {
 import { MAX_HOST_SLOTS, MIN_HOST_SLOTS } from '@/lib/api/admin';
 import {
   drainAgentRunnerHost,
+  forgetAgentRunnerHost,
   getAgentRunnerHostCapacityHistory,
   getAgentRunnerHosts,
   removeAgentRunnerHost,
@@ -58,9 +53,11 @@ import {
   setAgentRuntimeVersion,
   undrainAgentRunnerHost,
 } from '@/lib/api/admin';
+import type { ComputeServerSnapshot } from '@/lib/api/compute';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import CapacityPanel from './CapacityPanel';
+import ComputeResources from './ComputeResources';
 import {
   type CapacityCell,
   type HostGroupCapacity,
@@ -289,6 +286,7 @@ function panelIdFor(name: string): string {
 }
 
 function HostsView() {
+  const [computeInventory, setComputeInventory] = useState<ComputeServerSnapshot | null>(null);
   const [pool, setPool] = useState<PoolSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -482,7 +480,14 @@ function HostsView() {
     () => serverInventory(hosts, executionProfile),
     [hosts, executionProfile],
   );
-  const availableServers = servers.filter((server) => server.available);
+  const availableHosts = hosts.filter(
+    (host) =>
+      computeInventory?.hosts.find((resource) => resource.host === host.host)?.allows_new_groups !==
+        false &&
+      host.enrolled &&
+      host.status === 'online' &&
+      (executionProfile === 'trusted-v1' || host.sandbox_runtime === 'io.containerd.kata.v2'),
+  );
   const visibleServers = servers.filter(
     (server) => server.host && server.host.status !== 'disabled',
   );
@@ -490,12 +495,13 @@ function HostsView() {
     (server) => !server.host || server.host.status === 'disabled',
   );
   const activeHost = pool?.activeHost ?? null;
-  const selectedServer = servers.find((server) => server.selected);
   const selectionUnavailable = Boolean(
     activeHost &&
     !hosts.some(
       (host) =>
         host.host === activeHost &&
+        computeInventory?.hosts.find((resource) => resource.host === host.host)
+          ?.allows_new_groups !== false &&
         host.enrolled &&
         host.status === 'online' &&
         (executionProfile === 'trusted-v1' || host.sandbox_runtime === 'io.containerd.kata.v2'),
@@ -626,6 +632,20 @@ function HostsView() {
     void run(() => removeAgentRunnerHost(host, slotsUsed > 0), `Removed ${host} from the pool.`);
   };
 
+  const handleForget = (host: string) => {
+    if (
+      !window.confirm(
+        `Forget the management record for ${host}? This leaves the machine and its files intact. ` +
+          'Retained sandboxes, running work, placement references, or managed cloud resources block this action.',
+      )
+    )
+      return;
+    void run(
+      () => forgetAgentRunnerHost(host),
+      `Forgot ${host}. The machine and its files were not deleted.`,
+    );
+  };
+
   const toggleServer = (server: string, facts: HostGroupCapacity) => {
     if (expanded === server) {
       setExpanded(null);
@@ -744,6 +764,11 @@ function HostsView() {
           </div>
         )}
 
+        <ComputeResources
+          onHostsChanged={() => void load(true)}
+          onInventory={setComputeInventory}
+        />
+
         {/* Physical inventory groups independently enrolled execution environments.
             Actions still target the original deployment identity. */}
         <div className="mt-10">
@@ -760,46 +785,49 @@ function HostsView() {
             )}
           </div>
 
-          {availableServers.length > 1 && (
-            <div className="mt-3 flex items-center gap-3">
-              <label
-                htmlFor="server-placement"
-                className="text-sm text-gray-600 dark:text-gray-400"
-              >
-                New chats
-              </label>
-              <select
-                id="server-placement"
-                disabled={busy}
-                value={
-                  activeHost
-                    ? selectionUnavailable
-                      ? '__unavailable__'
-                      : (selectedServer?.name ?? '__unavailable__')
-                    : ''
-                }
-                onChange={(event) => {
-                  const chosen = availableServers.find(
-                    (server) => server.name === event.target.value,
-                  );
-                  void handlePin(chosen?.host?.host ?? null);
-                }}
-                className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm"
-              >
-                <option value="">Automatic</option>
-                {selectionUnavailable && (
-                  <option value="__unavailable__" disabled>
-                    Selected server unavailable
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <label htmlFor="server-placement" className="text-sm text-gray-600 dark:text-gray-400">
+              Global sandbox location
+            </label>
+            <select
+              id="server-placement"
+              disabled={busy || pool === null}
+              value={activeHost ? (selectionUnavailable ? '__unavailable__' : activeHost) : ''}
+              onChange={(event) => void handlePin(event.target.value || null)}
+              className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm"
+            >
+              <option value="">Automatic — eligible server pool</option>
+              {selectionUnavailable && (
+                <option value="__unavailable__" disabled>
+                  Selected server unavailable
+                </option>
+              )}
+              {availableHosts.map((host) => {
+                const physicalName = servers.find((server) =>
+                  server.members.some((member) => member.host === host.host),
+                )?.name;
+                const allocationId = computeInventory?.hosts.find(
+                  (item) => item.host === host.host,
+                )?.allocation_id;
+                const source = computeInventory?.allocations.find(
+                  (item) => item.id === allocationId,
+                )?.provider_id;
+                return (
+                  <option key={host.host} value={host.host}>
+                    {physicalName && physicalName !== host.host
+                      ? `${physicalName} / ${host.host}`
+                      : host.host}
+                    {source ? ` · ${source}` : ''}
                   </option>
-                )}
-                {availableServers.map((server) => (
-                  <option key={server.name} value={server.name}>
-                    {server.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
+                );
+              })}
+            </select>
+          </div>
+          <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+            Applies to every new sandbox that has not been assigned yet. Existing sandboxes and
+            their Forks stay on their owning Hosts. Switching saves the target; it does not migrate
+            them or release the old server. A fixed target never falls back to another server.
+          </p>
           {selectionUnavailable && (
             <div role="alert" className="mt-3 text-sm text-amber-700 dark:text-amber-300">
               The selected server cannot accept new chats.
@@ -1067,17 +1095,34 @@ function HostsView() {
               </table>
             </div>
           )}
-          {inactiveServers.length > 0 && (
+          {(inactiveServers.length > 0 || hosts.some((host) => host.status === 'disabled')) && (
             <details className="mt-4 text-sm text-gray-500 dark:text-gray-400">
               <summary className="cursor-pointer">
-                Unavailable servers ({inactiveServers.length})
+                Unavailable servers and removed Host records
               </summary>
-              <ul className="mt-2 space-y-1">
-                {inactiveServers.map((server) => (
-                  <li key={server.name}>
-                    {server.name} — {server.host?.status ?? 'unavailable'}
-                  </li>
-                ))}
+              <ul className="mt-2 space-y-2">
+                {inactiveServers
+                  .filter((server) => !server.members.some((host) => host.status === 'disabled'))
+                  .map((server) => (
+                    <li key={server.name}>
+                      {server.name} — {server.host?.status ?? 'unavailable'}
+                    </li>
+                  ))}
+                {hosts
+                  .filter((host) => host.status === 'disabled')
+                  .map((host) => (
+                    <li key={host.host} className="flex flex-wrap items-center gap-3">
+                      <span>{host.host} — disabled</span>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => handleForget(host.host)}
+                        className="rounded-md border border-gray-200 px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-40 dark:border-white/10 dark:hover:bg-white/5"
+                      >
+                        Forget {host.host}
+                      </button>
+                    </li>
+                  ))}
               </ul>
             </details>
           )}

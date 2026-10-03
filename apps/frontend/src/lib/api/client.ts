@@ -174,6 +174,11 @@ export async function jsonOrThrow<T>(resp: Response): Promise<T> {
         // used.
         errorCode = error.type;
       }
+    } else if (typeof detail?.code === 'string' && typeof detail.message === 'string') {
+      // Typed resource errors retain their own recovery semantics. A provider
+      // credential error must not be mistaken for an expired user session.
+      errorCode = detail.code;
+      errorMessage = detail.message;
     } else if (data.detail) {
       // FastAPI validation error format: { detail: "..." }
       errorMessage = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);

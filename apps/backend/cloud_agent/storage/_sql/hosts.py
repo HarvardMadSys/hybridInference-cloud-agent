@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 # — and is reported only as the boolean ``enrolled``.
 HOST_COLUMN_NAMES = (
     "host",
+    "compute_node_id",
     "last_worker_id",
     "first_seen_at",
     "last_seen_at",
@@ -106,4 +107,16 @@ async def release_host_slot(conn: Any, host: str | None) -> None:
         "UPDATE agent_runner_hosts SET slots_used = slots_used - 1 "
         "WHERE host = $1 AND slots_used > 0",
         host,
+    )
+
+
+async def revoke_host_credentials(conn: Any, hosts: list[str]) -> None:
+    """Disable execution identities without deleting hosts or provider machines.
+
+    Callers own admission locks and busy/retention policy; this is the one
+    credential transition shared by Host Remove and committed resource release.
+    """
+    await conn.execute(
+        "UPDATE agent_runner_hosts SET status='disabled',credential_hash=NULL WHERE host=ANY($1::text[])",
+        hosts,
     )

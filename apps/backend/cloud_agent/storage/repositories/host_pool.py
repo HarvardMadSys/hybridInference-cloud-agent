@@ -24,10 +24,16 @@ from cloud_agent.host_pool import (
     transition_allowed,
 )
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.storage._sql.compute_admission import (
+    host_compute_admission,
+    lock_compute_entry,
+    lock_compute_topology,
+)
 from cloud_agent.storage._sql.hosts import (
     HOST_CAPACITY_COLUMNS,
     HOST_COLUMNS,
     QUALIFIED_HOST_COLUMNS,
+    revoke_host_credentials,
 )
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
@@ -156,6 +162,17 @@ class PostgresHostPoolRepository:
         one line that no machine ever drew.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            await lock_compute_entry(conn)
+            retiring = await conn.fetchval(
+                """SELECT 1 FROM agent_runner_hosts h
+                JOIN agent_compute_nodes n ON n.id=h.compute_node_id
+                JOIN agent_compute_allocations a ON a.id=n.allocation_id
+                WHERE h.host=$1 AND (a.desired_state='absent' OR a.release_committed_at IS NOT NULL)
+            """,
+                host,
+            )
+            if retiring:
+                raise ValueError("resource_retiring")
             row = await conn.fetchrow(
                 f"""
                 INSERT INTO agent_runner_hosts
@@ -418,14 +435,7 @@ class PostgresHostPoolRepository:
                 return "unknown"
             if row["slots_used"] > 0 and not force:
                 return "busy"
-            await conn.execute(
-                f"""
-                UPDATE agent_runner_hosts
-                SET status = '{HOST_DISABLED}', credential_hash = NULL
-                WHERE host = $1
-                """,
-                host,
-            )
+            await revoke_host_credentials(conn, [host])
         return "ok"
 
     async def reap_offline_hosts(
@@ -736,6 +746,7 @@ class PostgresHostPoolRepository:
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute("SELECT active_host FROM agent_runner_policy WHERE id FOR UPDATE")
+            await lock_compute_topology(conn)
             # Checked before anything is written — and locked, not merely read:
             # a bare existence check lets a concurrent removal commit before
             # this does, leaving the queue pinned to a host that is gone.
@@ -744,6 +755,9 @@ class PostgresHostPoolRepository:
                     "SELECT 1 FROM agent_runner_hosts WHERE host = $1 FOR SHARE", host
                 )
                 if not known:
+                    return False
+                admitted, _ = await host_compute_admission(conn, host)
+                if not admitted:
                     return False
             # Upsert, not a bare UPDATE: against a database whose policy row is
             # missing, an UPDATE touches nothing and still reports success —
@@ -762,7 +776,7 @@ class PostgresHostPoolRepository:
     async def forget_runner_host(self, *, host: str) -> str:
         """Drop a host from the pool. A runner still polling re-adds itself.
 
-        Returns ``"deleted"``, ``"active"`` (refused) or ``"unknown"``.
+        Return a deletion result or the precise dependency that prevents it.
 
         The active-host refusal lives here rather than in the caller because
         checking there is a read the switch can outrun: the endpoint sees the
@@ -774,11 +788,63 @@ class PostgresHostPoolRepository:
             active = await conn.fetchval(
                 "SELECT active_host FROM agent_runner_policy WHERE id FOR UPDATE"
             )
+            await lock_compute_topology(conn, exclusive=True)
             if active == host:
                 return "active"
+            retained = await conn.fetchval(
+                "SELECT 1 FROM agent_sandboxes WHERE host=$1 LIMIT 1", host
+            )
+            if retained:
+                return "retained_groups_present"
+            host_row = await conn.fetchrow(
+                "SELECT compute_node_id,status FROM agent_runner_hosts WHERE host=$1 FOR UPDATE",
+                host,
+            )
+            bound = None if host_row is None else host_row["compute_node_id"]
+            local_cleanup_allocation = None
+            if bound is not None:
+                resource = await conn.fetchrow(
+                    """SELECT a.id,a.observed_state,a.release_supported
+                    FROM agent_compute_allocations a JOIN agent_compute_nodes n ON n.allocation_id=a.id
+                    WHERE n.id=$1""",
+                    bound,
+                )
+                if resource is None:
+                    return "resource_bound"
+                local_cleanup = (
+                    not resource["release_supported"] and host_row["status"] == HOST_DISABLED
+                )
+                if resource["observed_state"] not in ("terminated", "absent") and not local_cleanup:
+                    return "resource_bound"
+                if await conn.fetchval(
+                    """SELECT 1 FROM agent_compute_operations
+                    WHERE allocation_id=$1 AND state NOT IN ('succeeded','failed','cancelled') LIMIT 1""",
+                    resource["id"],
+                ):
+                    return "pending_compute_operations"
+                if local_cleanup:
+                    local_cleanup_allocation = resource["id"]
+            running = await conn.fetchval(
+                "SELECT 1 FROM agent_attempts WHERE host_id=$1 AND status='running' LIMIT 1", host
+            )
+            if running:
+                return "active_attempts_present"
             deleted = await conn.fetchval(
                 "DELETE FROM agent_runner_hosts WHERE host = $1 RETURNING host", host
             )
+            if deleted is not None and local_cleanup_allocation is not None:
+                # This is inventory deregistration for an attached machine,
+                # never a provider release, shutdown, or filesystem action.
+                await conn.execute(
+                    """UPDATE agent_compute_allocations a
+                    SET observed_state='absent',desired_state='absent',provider_state='deregistered',
+                        revision=revision+1,updated_at=NOW()
+                    WHERE a.id=$1 AND NOT EXISTS (
+                        SELECT 1 FROM agent_runner_hosts h JOIN agent_compute_nodes n ON n.id=h.compute_node_id
+                        WHERE n.allocation_id=a.id)
+                """,
+                    local_cleanup_allocation,
+                )
         return "deleted" if deleted is not None else "unknown"
 
     @staticmethod

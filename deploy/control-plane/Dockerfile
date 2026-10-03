@@ -11,9 +11,9 @@
 # MIGRATION.md, "Manifest corrections".
 #
 # **No agent runtimes, no docker socket, no git credentials at build time.**
-# This image never executes an agent and never checks a repository out. The one
-# credential it holds at *runtime* is the git token used to publish, and that
-# arrives as configuration, not as a layer.
+# This image never executes an agent and never checks a repository out.
+# Publishing and optional compute lifecycle credentials arrive at runtime,
+# through configuration or the encrypted credential store, never as a layer.
 
 FROM python:3.12-slim AS base
 
@@ -24,6 +24,7 @@ RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.
     && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update \
     && apt-get install -y --no-install-recommends \
         git \
+        openssh-client \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

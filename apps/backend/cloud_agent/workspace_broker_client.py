@@ -200,6 +200,32 @@ class WorkspaceBrokerClient:
         if response.is_error:
             raise self._response_error(response)
 
+    async def list_sandboxes(self, *, timeout: float = 10) -> list[dict[str, Any]]:
+        """Read the complete retained-container inventory, including stopped groups."""
+        try:
+            async with self._http(timeout) as client:
+                response = await client.get(
+                    f"{self._base_url}/sandboxes",
+                    headers=self._headers,
+                    timeout=timeout,
+                )
+        except httpx.HTTPError:
+            raise WorkspaceBrokerError(
+                503, "The workspace broker inventory is unavailable."
+            ) from None
+        if response.is_error:
+            raise WorkspaceBrokerError(503, "The workspace broker refused the inventory request.")
+        try:
+            body = response.json()
+        except ValueError:
+            raise WorkspaceBrokerError(502, "The workspace broker inventory is invalid.") from None
+        if not isinstance(body, dict) or not isinstance(body.get("sandboxes"), list):
+            raise WorkspaceBrokerError(502, "The workspace broker inventory is incomplete.")
+        rows = body["sandboxes"]
+        if not all(isinstance(row, dict) and row.get("sandbox_id") for row in rows):
+            raise WorkspaceBrokerError(502, "The workspace broker inventory is invalid.")
+        return rows
+
     def _profiling_headers(self, context: Mapping[str, Any] | None) -> dict[str, str]:
         """Return this request's headers, carrying the inherited selection.
 

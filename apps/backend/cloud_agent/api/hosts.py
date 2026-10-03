@@ -199,15 +199,28 @@ async def register_host(
             },
         )
     credential = mint_host_token(host=body.name)
-    host = await job_store.host_pool.register_host(
-        host=body.name,
-        credential_hash=hash_secret(credential),
-        capabilities=body.capabilities,
-        slots_total=body.slots_total,
-        broker_url=broker_url,
-        runner_version=body.runner_version,
-        labels=dict(body.labels),
-    )
+    try:
+        host = await job_store.host_pool.register_host(
+            host=body.name,
+            credential_hash=hash_secret(credential),
+            capabilities=body.capabilities,
+            slots_total=body.slots_total,
+            broker_url=broker_url,
+            runner_version=body.runner_version,
+            labels=dict(body.labels),
+        )
+    except ValueError as exc:
+        if str(exc) != "resource_retiring":
+            raise
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "resource_retiring",
+                    "message": "This resource is retiring; registration is closed.",
+                }
+            },
+        ) from exc
     return HostRegisterResponse(
         host=host["host"],
         credential=credential,

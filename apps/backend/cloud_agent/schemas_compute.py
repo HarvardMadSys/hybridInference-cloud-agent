@@ -1,0 +1,117 @@
+"""Write contracts for administrator-owned compute resources.
+
+Provider configuration is checked by the selected adapter before persistence.
+Secrets have their own write-only field and never enter operation requests.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Literal, Self
+
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr, model_validator
+
+
+class ComputeRequest(BaseModel):
+    """Reject misspelled commands rather than silently dropping controls."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+class RenewalPolicy(ComputeRequest):
+    """Independent resource deadlines, expressed in seconds."""
+
+    enabled: bool = False
+    renew_before_seconds: int = Field(default=3600, ge=60, le=604800)
+    extend_to_horizon_seconds: int = Field(default=14400, ge=120, le=2592000)
+    stop_new_groups_before_seconds: int = Field(default=1800, ge=0, le=604800)
+    stop_claims_before_seconds: int = Field(default=300, ge=0, le=604800)
+    reason: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def ordered_deadlines(self) -> Self:
+        """Renew early enough to react before either admission deadline."""
+        if not (
+            self.extend_to_horizon_seconds
+            > self.renew_before_seconds
+            > self.stop_new_groups_before_seconds
+            >= self.stop_claims_before_seconds
+        ):
+            raise ValueError("require horizon > renew_before > stop_new_groups >= stop_claims")
+        if self.enabled and not self.reason:
+            raise ValueError("an actual reason is required to enable automatic renewal")
+        return self
+
+
+class AddComputeConnection(ComputeRequest):
+    """Create a named, write-only credential in the control plane."""
+
+    name: str = Field(min_length=1, max_length=120)
+    provider_id: Literal["existing_ssh", "cloudlab"]
+    configuration: dict[str, Any] = Field(default_factory=dict)
+    secret: SecretStr = Field(min_length=1, max_length=65536)
+
+
+class UpdateComputeConnection(ComputeRequest):
+    """Replace a credential only against the revision the editor observed."""
+
+    expected_revision: int = Field(ge=0)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    configuration: dict[str, Any] | None = None
+    secret: SecretStr | None = Field(default=None, min_length=1, max_length=65536)
+
+
+class AddServerRequest(ComputeRequest):
+    """Acquire or attach a resource and deploy a configured Host profile."""
+
+    request_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=120)
+    provider_id: Literal["existing_ssh", "cloudlab"]
+    mode: Literal["attach", "provision"]
+    connection_id: str = Field(min_length=1, max_length=128)
+    ssh_connection_id: str | None = Field(default=None, min_length=1, max_length=128)
+    configuration: dict[str, Any] = Field(default_factory=dict)
+    deployment_profile: str = Field(min_length=1, max_length=120)
+    policy: RenewalPolicy = Field(default_factory=RenewalPolicy)
+
+
+class ImportComputeRequest(ComputeRequest):
+    """Observe an explicitly named existing cloud allocation without deploying."""
+
+    request_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=120)
+    provider_id: Literal["cloudlab"]
+    connection_id: str = Field(min_length=1, max_length=128)
+    configuration: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateComputePolicy(ComputeRequest):
+    """Compare and replace the renewal policy and explicit management scope."""
+
+    expected_revision: int = Field(ge=0)
+    policy: RenewalPolicy
+    management_mode: Literal["observe", "manage"] | None = None
+
+
+class ExtendComputeRequest(ComputeRequest):
+    """A fixed absolute deadline survives retries without adding more hours."""
+
+    request_id: str = Field(min_length=1, max_length=128)
+    target_expires_at: AwareDatetime
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class RetireComputeRequest(ComputeRequest):
+    """Request retirement against the allocation scope the admin reviewed."""
+
+    request_id: str = Field(min_length=1, max_length=128)
+    expected_revision: int = Field(ge=0)
+
+
+class ComputeOperationAction(ComputeRequest):
+    """An explicit action whose current state is checked under the operation lock."""
+
+
+class ResolveComputeOperation(ComputeRequest):
+    """Adopt an explicitly identified result after an acquisition response was lost."""
+
+    external_id: str = Field(min_length=1, max_length=512)

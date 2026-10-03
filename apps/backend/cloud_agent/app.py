@@ -102,6 +102,7 @@ def create_app() -> FastAPI:
     configure_process_logging()
 
     from cloud_agent.api import (
+        admin_compute,
         admin_conversations,
         admin_hosts,
         admin_llm_requests,
@@ -143,6 +144,7 @@ def create_app() -> FastAPI:
     # credential, and it should be removable without editing the host API.
     app.include_router(host_profiling.router)
     app.include_router(admin_hosts.router)
+    app.include_router(admin_compute.router)
     app.include_router(admin_conversations.router)
     app.include_router(admin_runs.router)
     app.include_router(admin_usage.router)

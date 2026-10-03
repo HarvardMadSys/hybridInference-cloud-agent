@@ -367,7 +367,11 @@ class HostPoolRepository(Protocol):
     async def forget_runner_host(self, *, host: str) -> str:
         """Drop a host from the pool. A runner still polling re-adds itself.
 
-        Returns ``"deleted"``, ``"active"`` (refused) or ``"unknown"``.
+        Returns ``"deleted"`` or ``"unknown"``; refuses ``"active"``,
+        ``"retained_groups_present"``, ``"resource_bound"``,
+        ``"active_attempts_present"`` and ``"pending_compute_operations"``.
+        A disabled attached machine without external release capability may
+        be deregistered after dependency checks; this never shuts it down.
 
         The active-host refusal lives here rather than in the caller because
         checking there is a read the switch can outrun: the endpoint sees the

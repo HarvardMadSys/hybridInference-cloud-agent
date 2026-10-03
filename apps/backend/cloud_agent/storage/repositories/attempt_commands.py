@@ -32,6 +32,7 @@ from cloud_agent.execution_profiles import (
     shared_sandbox_claim_attested,
 )
 from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
+from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
 from cloud_agent.storage._sql.events import insert_event
 from cloud_agent.storage._sql.goals import arm_finish_wakeup, goal_after_terminal
 from cloud_agent.storage._sql.hosts import host_slots_exhausted, release_host_slot
@@ -154,11 +155,15 @@ class PostgresAttemptCommands:
             policy = await conn.fetchrow(
                 "SELECT active_host, runtime_versions FROM agent_runner_policy WHERE id FOR SHARE"
             )
+            await lock_compute_topology(conn)
+            resource_new, resource_claims = await host_compute_admission(conn, host)
+            if not resource_claims:
+                return None
             active_host = None if policy is None else policy["active_host"]
             selected_versions = (
                 {} if policy is None else load_json(policy["runtime_versions"]) or {}
             )
-            pin_allows_new_sandbox = active_host is None or host == active_host
+            pin_allows_new_sandbox = resource_new and (active_host is None or host == active_host)
             host_row = await conn.fetchrow(
                 "SELECT status, capabilities, slots_total, slots_used, slots_desired, "
                 "(credential_hash IS NOT NULL AND credential_hash = $2) "
