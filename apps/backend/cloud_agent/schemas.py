@@ -1681,6 +1681,10 @@ class WorkerSandboxReserveRequest(BaseModel):
     memory_limit: str = Field("4g", min_length=1, max_length=32)
     cpu_limit: str = Field("2", min_length=1, max_length=32)
     stop_timeout_seconds: int = Field(10, ge=1, le=300)
+    #: The image's claude-session-fork helper version, sent by the runner that
+    #: is about to create the container from it. Native Fork asks it of the
+    #: group rather than of whatever image the host runs by then.
+    fork_helper_version: str | None = Field(None, max_length=32)
 
 
 class WorkerSandboxRunningRequest(BaseModel):

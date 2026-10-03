@@ -10,16 +10,46 @@ from __future__ import annotations
 import json
 
 from cloud_agent_shared.shared_protocol import (
+    FORK_HELPER,
     MID_TURN_INPUT_CAPABILITY_PREFIX,
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+    SHARED_SANDBOX_HELPER_PINS,
 )
+
+NATIVE_FORK_CAPABILITY_JSON = json.dumps([NATIVE_FORK_AT_ANCHOR_CAPABILITY], separators=(",", ":"))
+
+# Host ``h`` ships the exact Agent CLI version group ``g``'s container runs:
+# the version its drivers were built and tested against. A release that only
+# rebuilds the sandbox image leaves this true. Every release does rebuild it —
+# the image is labelled with its source commit — so asking whether the host
+# still runs the group's very image would be false after every deployment.
+HOST_SHIPS_GROUP_CLI = "(h.runtime_versions_available -> g.runtime_id) ? g.runtime_version"
+
+# Whether the host holding group ``g`` can fork one of its members at a
+# historical anchor. The host must advertise it, and the fork must run the way
+# it was tested: the container's own fork helper understands the anchor (the
+# original helper ignored it and silently forked the latest message), and the
+# host drives the CLI version the container runs. A host running the very image
+# the group was created from satisfies both, and is the only proof for a group
+# whose helper version is unrecorded or outside the reviewed pin. A helper pin
+# change therefore requires an explicit review of retained-group compatibility.
+NATIVE_FORK_CAPABLE = f"""EXISTS (
+    SELECT 1 FROM agent_runner_hosts h
+    WHERE h.host = g.host
+      AND h.status = 'online'
+      AND h.capabilities @> '{NATIVE_FORK_CAPABILITY_JSON}'::jsonb
+      AND (
+          h.sandbox_image_digest = g.sandbox_image_digest
+          OR (
+              g.fork_helper_version = '{SHARED_SANDBOX_HELPER_PINS[FORK_HELPER]}'
+              AND {HOST_SHIPS_GROUP_CLI}
+          )
+      )
+)"""
 
 # Every runnable chat is a member of a retained shared-live group: one
 # ``agent_sandboxes`` row per container, one membership row per chat. This is
 # the read shape the worker and owner routes see for a thread's sandbox.
-NATIVE_FORK_CAPABILITY_JSON = json.dumps([NATIVE_FORK_AT_ANCHOR_CAPABILITY], separators=(",", ":"))
-
-
 THREAD_SANDBOX_SOURCE = f"""
 (
     SELECT
@@ -45,15 +75,11 @@ THREAD_SANDBOX_SOURCE = f"""
             LIMIT 1
         ) AS workspace_publication_state,
         g.workspace_epoch,
-        EXISTS (
-            SELECT 1 FROM agent_runner_hosts h
-            WHERE h.host = g.host
-              AND h.status = 'online'
-              AND h.capabilities @> '{NATIVE_FORK_CAPABILITY_JSON}'::jsonb
-              AND h.sandbox_image_digest = g.sandbox_image_digest
-        ) AS native_fork_capable,
+        {NATIVE_FORK_CAPABLE} AS native_fork_capable,
         -- The host holding this group can hand a message to a running turn of
-        -- the group's runtime: its broker and driver say so, per runtime.
+        -- the group's runtime: its broker and driver say so, per runtime, and
+        -- the driver speaks the CLI version this container runs. No helper in
+        -- the container takes part; the message goes to the CLI itself.
         EXISTS (
             SELECT 1 FROM agent_runner_hosts h
             WHERE h.host = g.host
@@ -61,7 +87,10 @@ THREAD_SANDBOX_SOURCE = f"""
               AND h.capabilities @> jsonb_build_array(
                   '{MID_TURN_INPUT_CAPABILITY_PREFIX}' || g.runtime_id
               )
-              AND h.sandbox_image_digest = g.sandbox_image_digest
+              AND (
+                  h.sandbox_image_digest = g.sandbox_image_digest
+                  OR {HOST_SHIPS_GROUP_CLI}
+              )
         ) AS mid_turn_input_capable,
         COALESCE((
             SELECT jsonb_agg(

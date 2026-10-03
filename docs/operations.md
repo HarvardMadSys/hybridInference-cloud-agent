@@ -1017,11 +1017,27 @@ advertise it from the exact process that claims the job. A host's limit is at
 least two, because a fork's sibling runs beside its parent; `AGENT_HOST_SLOTS`
 (default three) is that limit until an admin sets one on the Servers page.
 
-Historical Fork additionally requires `native-fork-at-anchor-v1` and an exact
-match between the host's current sandbox image digest and the retained group's
-pinned digest. A container kept from the previous image remains usable for
-normal follow-ups after a rollout, but its older fork helper is never asked to
-interpret a historical anchor.
+Historical Fork additionally requires `native-fork-at-anchor-v1`, and for the
+retained group either the host's current sandbox image being the group's own,
+or the group's `claude-session-fork` helper matching the reviewed version
+(recorded in `agent_sandboxes.fork_helper_version` when the container was created) while
+the host's image still ships the exact CLI version the container runs. A
+release therefore does not take Fork away from existing chats: it rebuilds the
+image, but the image's helpers and pinned CLIs stay the same unless the release
+changed them. An older, unknown or unreviewed fork helper keeps the exact-image
+rule, so it is never assumed to understand a historical anchor; nor is a host's
+fork driver pointed at a CLI version its own image no longer ships. Sending a
+message into a running turn follows the same CLI-version rule and does not
+depend on the fork helper.
+
+Migration `0026_fork_helper_version` records version `2` for existing groups
+created under this schema: both the old protocol-v2 claim gate and the newer
+helper-version gate required that same at-anchor implementation. Groups copied
+from a legacy database stay unrecorded. A runner creating a group reports the
+helper version in its reservation; a later reservation cannot overwrite it
+with a rebuilt host image's version. An older API ignores the optional field,
+and an older runner omits it, leaving new rows unrecorded until their image's
+capability can be proved rather than inferred from the host's current image.
 
 The Docker socket (or reviewed mTLS Engine endpoint) is the only host
 control/data interface for chat state. No repository, workspace, Agent CLI

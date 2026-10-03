@@ -33,7 +33,7 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
-from cloud_agent_shared.shared_protocol import FORK_HELPER
+from cloud_agent_shared.shared_protocol import FORK_HELPER, mid_turn_input_capability
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -330,6 +330,7 @@ async def _reserve_shared_chat(
     *,
     metadata: dict | None = None,
     task_prompt: str = "fix the flaky test",
+    fork_helper_version: str | None = None,
 ) -> tuple[dict, dict, dict]:
     """Create, claim, and reserve one capability-gated shared-live chat."""
     await store.host_pool.register_host(
@@ -365,6 +366,7 @@ async def _reserve_shared_chat(
         runtime_version=claim.get("runtime_version"),
         sandbox_image_digest=claim.get("sandbox_image_digest"),
         execution_profile=job["execution_profile"],
+        fork_helper_version=fork_helper_version,
     )
     assert sandbox is not None and sandbox["shared_live"] is True
     return job, claim, sandbox
@@ -858,6 +860,130 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
     wire_members = [SharedSandboxMemberRequest.model_validate(member) for member in manifest]
     assert {member.thread_id for member in wire_members} == expected_members
     assert all(member.resident_slot_id is not None for member in wire_members)
+
+
+@pytest.mark.parametrize("reported_helper_version", [None, "1", "3"])
+async def test_an_existing_group_keeps_its_own_fork_helper_version(
+    store: Storage, pool, reported_helper_version: str | None
+):
+    """A later reservation cannot replace the retained container's helper evidence."""
+    helper = SHARED_SANDBOX_HELPER_PINS[FORK_HELPER]
+    job, claim, sandbox = await _reserve_shared_chat(store, fork_helper_version=helper)
+    reserved_again = await store.sandbox.reserve_thread_sandbox(
+        thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        host="shared-runner",
+        sandbox_id=sandbox["sandbox_id"],
+        container_name=sandbox["container_name"],
+        runtime_id=sandbox["runtime_id"],
+        runtime_version=sandbox["runtime_version"],
+        sandbox_image_digest=sandbox["sandbox_image_digest"],
+        execution_profile=sandbox["execution_profile"],
+        fork_helper_version=reported_helper_version,
+    )
+    assert reserved_again is not None
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT fork_helper_version FROM agent_sandboxes WHERE id = $1",
+                sandbox["sandbox_id"],
+            )
+            == helper
+        )
+
+
+@pytest.mark.parametrize(
+    ("fork_helper_version", "forkable_after_rebuild"),
+    [(SHARED_SANDBOX_HELPER_PINS[FORK_HELPER], True), ("1", False), ("3", False), (None, False)],
+)
+async def test_a_rebuilt_host_image_leaves_fork_and_mid_turn_input_to_the_group(
+    store: Storage,
+    fork_helper_version: str | None,
+    forkable_after_rebuild: bool,
+):
+    """Every release rebuilds the sandbox image; that alone must not retire a chat.
+
+    The image is labelled with its source commit, so the host's digest differs
+    from the group's after any deployment. Fork is then asked of the group's
+    own image — do its helpers understand a historical anchor — and both Fork
+    and mid-turn input of whether the host still ships the CLI version the
+    container runs. An unrecorded or unreviewed helper keeps the old Fork rule.
+    """
+    job, claim, sandbox = await _reserve_shared_chat(store, fork_helper_version=fork_helper_version)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-shared-one",
+        context_status="new",
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.settle_thread_sandbox(
+        **fence,
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="native-source",
+        idle_timeout_seconds=1800,
+        base_sha=job["base_sha"],
+    )
+    assert await store.attempt_commands.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    cli = sandbox["runtime_version"]
+    assert cli == SHARED_SANDBOX_RUNTIME_PINS["claude-code"]
+
+    async def host_runs(image: str, versions: list[str]) -> dict:
+        await store.host_pool.record_host_heartbeat(
+            host="shared-runner",
+            capabilities=[*_SHARED_HOST_CAPABILITIES, mid_turn_input_capability("claude-code")],
+            sandbox_image_digest=image,
+            runtime_versions_available={"claude-code": versions},
+        )
+        observed = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+        assert observed is not None
+        return observed
+
+    # The image the group was created from answers for any group, even when
+    # its CLI has since left the host's menu: nothing about it has changed.
+    same_image = await host_runs("sha256:shared-image", ["0.0.0-elsewhere"])
+    assert same_image["native_fork_capable"] is True
+    assert same_image["mid_turn_input_capable"] is True
+
+    # A host that no longer ships the container's CLI drives neither.
+    moved_on = await host_runs("sha256:next-release", ["0.0.0-elsewhere"])
+    assert moved_on["native_fork_capable"] is False
+    assert moved_on["mid_turn_input_capable"] is False
+    assert await store.session_fork.prepare_session_fork(
+        source_job_id=job["id"],
+        user_id=job["user_id"],
+        idempotency_key="fork-without-the-cli",
+    ) == {"error": "native_fork_unavailable"}
+
+    # The next release: the same CLI in a newly built image.
+    rebuilt = await host_runs("sha256:next-release", [cli])
+    assert rebuilt["native_fork_capable"] is forkable_after_rebuild
+    assert rebuilt["mid_turn_input_capable"] is True
+    # The gate that admits the operation agrees with the flag the page reads.
+    operation = await store.session_fork.prepare_session_fork(
+        source_job_id=job["id"],
+        user_id=job["user_id"],
+        idempotency_key="fork-after-a-rebuild",
+    )
+    if forkable_after_rebuild:
+        assert operation is not None and operation.get("error") is None
+        assert operation["state"] == "preparing"
+    else:
+        assert operation == {"error": "native_fork_unavailable"}
 
 
 async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(

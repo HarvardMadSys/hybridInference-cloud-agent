@@ -128,8 +128,8 @@ the child's first message.
 
 The selected anchor may be any successfully settled native turn in the source
 chat, including a historical one, once it has a positive persisted
-`native_turn_no`, the owner host advertises at-anchor support, and the host's
-current image digest matches the group's pin. Failed/cancelled turns and
+`native_turn_no`, the owner host advertises at-anchor support, and the group's
+own image can take the anchor (§12). Failed/cancelled turns and
 successful rows whose ordinal has not settled are neither advertised nor
 accepted as anchors. A sibling may continue running because the workspace is
 intentionally shared; only the source session is quiesced while its immutable
@@ -398,8 +398,9 @@ host must provide:
 - an authenticated workspace broker URL reachable by the control plane;
 - the expected Docker data root and sandbox image digest;
 - exact runtime/helper versions;
-- `native-fork-at-anchor-v1` from the current host image, with that image
-  digest equal to the immutable digest of the retained group;
+- `native-fork-at-anchor-v1` from the current host image, and for each
+  retained group either that very image or the exact CLI version the group's
+  container runs plus its recorded compatible fork helper (below);
 - at least two host slots and enough runner replicas to execute fork siblings
   concurrently (staging currently defaults both to three);
 - an immutable resident-slot capacity for each group;
@@ -472,10 +473,16 @@ select another executor. Historical fork has its own
 `native-fork-at-anchor-v1` attestation, and the in-image helper that
 interprets the anchor is pinned by its own version label
 (`claude-session-fork`) beside the other helpers; there is no separate
-shared-sandbox protocol number. The control plane exposes
-Fork only when the host advertises that capability and its current sandbox
-image digest matches the group's pinned digest, so an upgrade fails closed
-instead of silently forking the latest provider message.
+shared-sandbox protocol number. The group records this helper's version when
+the runner creates its container. The control plane exposes Fork only when
+the host advertises that capability and either still runs the group's very
+image, or the group's recorded helper matches the reviewed pin and the host
+ships the exact CLI version the container runs. An unrecorded or unreviewed
+helper stays on the exact-image rule; it is never assumed to understand a
+historical anchor. Every release labels its image with its source commit, so
+comparing only digests would disable Fork on each deployment even when the
+helper and CLI remain compatible. Mid-turn input asks only for the host's
+per-runtime capability and the same CLI version; it uses no fork helper.
 
 ## 13. Acceptance contract
 

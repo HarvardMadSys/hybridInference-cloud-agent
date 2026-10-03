@@ -1065,6 +1065,7 @@ async def worker_reserve_thread_sandbox(
             memory_limit=body.memory_limit,
             cpu_limit=body.cpu_limit,
             stop_timeout_seconds=body.stop_timeout_seconds,
+            fork_helper_version=body.fork_helper_version,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

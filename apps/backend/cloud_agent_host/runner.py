@@ -128,7 +128,7 @@ from cloud_agent_host.shared_protocol import (
 from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.git.source_archive import build_upload_archive
-from cloud_agent_shared.shared_protocol import mid_turn_input_capability
+from cloud_agent_shared.shared_protocol import FORK_HELPER, mid_turn_input_capability
 
 DEFAULT_LEASE_TTL_S = 120.0
 HEARTBEAT_INTERVAL_S = 30.0
@@ -1859,6 +1859,12 @@ def _run_shared_live_attempt(
                 "memory_limit": seed_spec.memory_limit,
                 "cpu_limit": seed_spec.cpu_limit,
                 "stop_timeout_seconds": seed_spec.stop_timeout_s,
+                # What the image a new container is created from declares, so
+                # Fork can ask it of this group after the host moves on to a
+                # newer image. An existing group recorded its own already.
+                "fork_helper_version": (
+                    None if existing else (stamp.get("helper_versions") or {}).get(FORK_HELPER)
+                ),
             }
         )
     except LeaseLost:

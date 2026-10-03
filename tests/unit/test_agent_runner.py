@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 from cloud_agent_host import runner as runner_mod
+from cloud_agent_host.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.runner import ClaimedJob, LeaseLost
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError
@@ -465,6 +466,7 @@ def _run_shared_boundary_case(
     resident_stages=None,
     broker_records=True,
     broker_truncated=False,
+    thread_sandbox=None,
 ):
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
@@ -536,6 +538,7 @@ def _run_shared_boundary_case(
             _JOB,
             runtime=runtime_id,
             runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS[runtime_id],
+            thread_sandbox=thread_sandbox,
         ),
         control=control,
         heart=SimpleNamespace(),
@@ -548,6 +551,40 @@ def _run_shared_boundary_case(
     )
 
     return result, control, supervisor, finish
+
+
+@pytest.mark.parametrize("follow_up", [False, True])
+def test_only_the_runner_creating_a_group_reports_its_fork_helper_version(monkeypatch, follow_up):
+    """Fork asks a group what its own image speaks, not what the host runs by then."""
+    existing = None
+    if follow_up:
+        spec = ChatSandboxSpec(
+            thread_id=_JOB.thread_id,
+            sandbox_id="asbx_existing",
+            generation=1,
+            runtime_id="claude-code",
+        )
+        existing = {
+            "shared_live": True,
+            "sandbox_id": spec.sandbox_id,
+            "origin_thread_id": spec.thread_id,
+            "generation": spec.generation,
+            "host": "host-a",
+            "container_name": spec.container_name,
+            "runtime_id": spec.runtime_id,
+            "runtime_version": runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
+            "sandbox_image_digest": "sha256:the-image-it-was-created-from",
+            "execution_profile": "trusted-v1",
+        }
+
+    _result, control, _supervisor, _finish = _run_shared_boundary_case(
+        monkeypatch, 0, None, "claude-code", thread_sandbox=existing
+    )
+
+    reservation = control.reserve_chat_sandbox.call_args.args[0]
+    assert reservation["fork_helper_version"] == (
+        None if follow_up else runner_mod.SHARED_SANDBOX_HELPER_PINS[runner_mod.FORK_HELPER]
+    )
 
 
 @pytest.mark.parametrize(

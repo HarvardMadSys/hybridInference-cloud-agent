@@ -53,6 +53,7 @@ class SandboxRepository(Protocol):
         memory_limit: str = "4g",
         cpu_limit: str = "2",
         stop_timeout_seconds: int = 10,
+        fork_helper_version: str | None = None,
     ) -> dict[str, Any] | None:
         """Reserve/start one thread's durable sandbox under its attempt fence.
 
@@ -60,6 +61,9 @@ class SandboxRepository(Protocol):
         before persistent storage, the retained container's writable layer is
         the only copy. A different host must leave the turn queued rather than
         create an empty replacement and call it continuity.
+
+        ``fork_helper_version`` is the image's ``claude-session-fork`` version;
+        it is recorded with a new group and ignored for one that already exists.
         """
         ...
 

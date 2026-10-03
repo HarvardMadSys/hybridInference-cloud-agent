@@ -133,6 +133,7 @@ class PostgresSandboxRepository:
         memory_limit: str = "4g",
         cpu_limit: str = "2",
         stop_timeout_seconds: int = 10,
+        fork_helper_version: str | None = None,
     ) -> dict[str, Any] | None:
         """Reserve/start one thread's durable sandbox under its attempt fence.
 
@@ -140,6 +141,9 @@ class PostgresSandboxRepository:
         before persistent storage, the retained container's writable layer is
         the only copy. A different host must leave the turn queued rather than
         create an empty replacement and call it continuity.
+
+        ``fork_helper_version`` is the image's ``claude-session-fork`` version;
+        it is recorded with a new group and ignored for one that already exists.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn)
@@ -179,6 +183,7 @@ class PostgresSandboxRepository:
                 memory_limit=memory_limit,
                 cpu_limit=cpu_limit,
                 stop_timeout_seconds=stop_timeout_seconds,
+                fork_helper_version=fork_helper_version,
                 user_id=str(earns["user_id"]),
                 job_id=str(earns["id"]),
             )
@@ -828,6 +833,7 @@ class PostgresSandboxRepository:
         memory_limit: str,
         cpu_limit: str,
         stop_timeout_seconds: int,
+        fork_helper_version: str | None,
         user_id: str,
         job_id: str,
     ) -> dict[str, Any] | None:
@@ -872,9 +878,9 @@ class PostgresSandboxRepository:
                     id, origin_thread_id, user_id, host, container_name,
                     runtime_id, runtime_version, sandbox_image_digest,
                     execution_profile, resident_slot_capacity, memory_limit,
-                    cpu_limit, stop_timeout_seconds
+                    cpu_limit, stop_timeout_seconds, fork_helper_version
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                 """,
                 sandbox_id,
                 thread_id,
@@ -889,6 +895,8 @@ class PostgresSandboxRepository:
                 memory_limit,
                 cpu_limit,
                 stop_timeout_seconds,
+                # An image without the label says nothing, not "".
+                fork_helper_version or None,
             )
             await conn.execute(
                 """
@@ -918,6 +926,9 @@ class PostgresSandboxRepository:
         )
         if group is None:
             return None
+        # The image's fork helper version is written once, with the group, and is not
+        # compared here: only the runner creating the container reads it off
+        # the image, so a follow-up's reservation does not carry it.
         immutable = {
             "id": sandbox_id,
             "host": host,
