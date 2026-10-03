@@ -33,7 +33,6 @@ from cloud_agent_host.sandbox import (
     _labelled,
     _split_menu,
 )
-from cloud_agent_host.shared_protocol import SHARED_SANDBOX_PROTOCOL
 
 _MENU = {"claude-code": ["2.1.220", "2.1.235"]}
 _DEFAULT = {"claude-code": "2.1.220"}
@@ -249,7 +248,6 @@ def test_the_menu_survives_validation() -> None:
             "runtime_versions": {"claude-code": "2.1.220"},
             "runtime_versions_available": {"claude-code": ["2.1.220", "2.1.235"]},
             "helper_versions": {"claude-agent-sdk": "0.2.148"},
-            "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
             "runner_capabilities": ["shared-sandbox-v1"],
         }
     )
@@ -260,7 +258,6 @@ def test_the_menu_survives_validation() -> None:
         "claude-code": ["2.1.220", "2.1.235"]
     }
     assert attestation.model_dump()["helper_versions"] == {"claude-agent-sdk": "0.2.148"}
-    assert attestation.model_dump()["shared_sandbox_protocol"] == SHARED_SANDBOX_PROTOCOL
     assert attestation.model_dump()["runner_capabilities"] == ["shared-sandbox-v1"]
 
 

@@ -41,10 +41,10 @@ it('uses admin-only, uncached reads and preserves encoded filter and cursor iden
   ).toBe(true);
 });
 
-it('carries selection into a conversation without reusing the list pagination cursor', () => {
+it('carries selection into a session without reusing the list pagination cursor', () => {
   const filters = { user_id: 'owner&one', cursor: 'list-cursor', limit: 100 };
   expect(conversationHref('thread/one', filters)).toBe(
-    '/admin/conversations/thread%2Fone?user_id=owner%26one',
+    '/admin/sessions/thread%2Fone?user_id=owner%26one',
   );
   expect(filters.cursor).toBe('list-cursor');
 });

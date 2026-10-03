@@ -375,6 +375,58 @@ class AdminLlmRequestPage(BaseModel):
     next_cursor: str | None = None
 
 
+# ── Steps: the model requests of a page of turns ─────────────────────────
+#
+# A step is one model request of a turn. The gateway lists requests one grant
+# window at a time, so a steps page reads a page of turns -- the runs list's
+# cohort, order and cursor -- and then each turn's stored references.
+
+#: How completely a page read one turn's requests. ``partial``: some run had
+#: more requests than a page reads, and the turn's own page lists the rest.
+#: ``unavailable``: a run's requests could not be read (``reason`` says why).
+#: ``not_started``: the turn has no run that began, so it made no requests.
+StepCoverage = Literal["complete", "partial", "unavailable", "not_started"]
+
+
+class AdminStep(AdminLlmRequest):
+    """One model request, with the turn and the run of it that made it."""
+
+    job_id: str
+    attempt_no: int
+
+
+class AdminStepTurn(BaseModel):
+    """A turn a steps page read, and how completely its requests were read."""
+
+    job_id: str
+    thread_id: str | None
+    turn_no: int
+    user_id: str
+    repo: str
+    runtime: str
+    state: str
+    created_at: datetime
+    coverage: StepCoverage
+    reason: str | None = None
+
+
+class AdminStepsPage(BaseModel):
+    """The steps of one page of turns, newest request first.
+
+    Pages follow the runs list: each reads the next turns in creation order
+    and lists their requests together. The order is exact within a page; a
+    long turn on a later page can hold requests newer than this page's last.
+    """
+
+    since: datetime
+    until: datetime
+    fetched_at: datetime
+    source: Literal["gateway_api_logs"] = "gateway_api_logs"
+    turns: list[AdminStepTurn]
+    steps: list[AdminStep]
+    next_cursor: str | None = None
+
+
 class LlmRequestSourceCursor(BaseModel):
     """Keyset cursor over ``(attempt_no, attempt_id, ledger id)``."""
 
@@ -531,7 +583,7 @@ def encode_llm_request_cursor(
     return token
 
 
-def response_body_bytes(page: AdminLlmRequestPage) -> int:
+def response_body_bytes(page: BaseModel) -> int:
     """Size of an admin page as it will actually be serialized, in UTF-8 bytes.
 
     Measured on the finished model, after the continuation is attached and with

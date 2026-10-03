@@ -1,10 +1,11 @@
 'use client';
 
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useFirstRun } from '@/components/features/agents/firstRun';
 import { useLocale, useTheme } from '@/components/providers';
 import { LOCALES, LOCALE_LABELS, isLocale } from '@/lib/i18n/locales';
 import { THEME_PREFERENCES, type ThemePreference } from '@/lib/theme';
-import { CloseIcon, MonitorIcon, MoonIcon, SunIcon } from './icons';
+import { CheckIcon, CloseIcon, HelpIcon, MonitorIcon, MoonIcon, SunIcon } from './icons';
 
 const THEME_ICONS: Record<ThemePreference, typeof SunIcon> = {
   light: SunIcon,
@@ -29,9 +30,17 @@ const FOCUSABLE =
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const { t, locale, setLocale } = useLocale();
   const { preference, setPreference } = useTheme();
+  const firstRun = useFirstRun();
+  // Brought back from here: the row stays to say so until the dialog closes.
+  const [gettingStartedShown, setGettingStartedShown] = useState(false);
+  // Open on click too, for a screen with no hover.
+  const [helpOpen, setHelpOpen] = useState(false);
+  const helpId = useId();
 
   const panel = useRef<HTMLDivElement>(null);
   const titleId = 'settings-dialog-title';
+
+  const shownNote = useRef<HTMLSpanElement>(null);
 
   // Focus has to land inside the dialog, or a keyboard user's next Tab
   // continues through the page behind it — which is still rendered, just
@@ -39,6 +48,13 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     panel.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
   }, []);
+
+  // For the same reason, Show again hands its place to the note that replaces
+  // it: a pressed button that disappears drops focus to <body>, and Escape
+  // and Tab would stop reaching the dialog.
+  useEffect(() => {
+    if (gettingStartedShown) shownNote.current?.focus();
+  }, [gettingStartedShown]);
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -174,6 +190,66 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
               </label>
             </div>
           </section>
+
+          {/* Only for a newcomer who skipped the sidebar's getting-started
+              row: the one way back to it. Nobody else has anything here. */}
+          {firstRun.hidden || gettingStartedShown ? (
+            <section
+              aria-labelledby="settings-getting-started"
+              className="mt-5 border-t border-gray-100 pt-4 dark:border-white/5"
+            >
+              <div className="flex items-center gap-1">
+                <h3 id="settings-getting-started" className={FIELD_LABEL}>
+                  {t('gettingStarted.title')}
+                </h3>
+                <span className="group/help relative inline-flex">
+                  <button
+                    type="button"
+                    onClick={() => setHelpOpen((open) => !open)}
+                    aria-label={t('settings.gettingStarted.about')}
+                    aria-describedby={helpId}
+                    aria-expanded={helpOpen}
+                    className="rounded-full p-0.5 text-gray-400 transition-colors hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:text-gray-500 dark:hover:text-gray-300"
+                  >
+                    <HelpIcon />
+                  </button>
+                  {/* Above the row, which sits at the bottom of a scrolling
+                      panel: below it, the panel would cut it off. */}
+                  <span
+                    id={helpId}
+                    role="tooltip"
+                    className={`pointer-events-none absolute bottom-full left-0 z-10 mb-1.5 w-max max-w-64 rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] leading-relaxed text-gray-600 shadow-lg transition-opacity group-hover/help:opacity-100 group-focus-within/help:opacity-100 dark:border-white/10 dark:bg-gray-800 dark:text-gray-300 ${
+                      helpOpen ? 'opacity-100' : 'opacity-0'
+                    }`}
+                  >
+                    {t('settings.gettingStarted.help')}
+                  </span>
+                </span>
+                {gettingStartedShown ? (
+                  <span
+                    ref={shownNote}
+                    role="status"
+                    tabIndex={-1}
+                    className="ml-auto inline-flex h-8 shrink-0 items-center gap-1 text-[12px] text-gray-500 outline-none dark:text-gray-400"
+                  >
+                    <CheckIcon className="h-3.5 w-3.5 shrink-0" />
+                    {t('settings.gettingStarted.shown')}
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      firstRun.show();
+                      setGettingStartedShown(true);
+                    }}
+                    className="ml-auto inline-flex h-8 shrink-0 items-center rounded-lg border border-gray-200 bg-white px-3 text-[13px] font-medium text-gray-700 transition-colors hover:border-gray-300 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:border-white/10 dark:bg-gray-800 dark:text-gray-200 dark:hover:border-white/20 dark:hover:bg-gray-700"
+                  >
+                    {t('settings.gettingStarted.show')}
+                  </button>
+                )}
+              </div>
+            </section>
+          ) : null}
         </div>
 
         <div className="flex shrink-0 justify-end border-t border-gray-200/80 px-5 py-3 dark:border-white/10">

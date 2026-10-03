@@ -79,6 +79,40 @@ describe('an automatic round', () => {
   });
 });
 
+describe("a first run's milestones", () => {
+  it('say what they mean on the first turn of an owner’s first conversation', () => {
+    render(
+      <EventRow
+        event={{ kind: 'lifecycle', text: 'workspace_preparing' }}
+        blockKey="ajob_1:event:2"
+        firstRun
+      />,
+    );
+
+    const label = screen.getByText('Preparing workspace');
+    expect(screen.getByText(/Creating an isolated sandbox for this session/)).toBeInTheDocument();
+    // The explanation belongs to the row, which keeps its place for navigation.
+    expect(label.closest('[data-block-key="ajob_1:event:2"]')).toHaveTextContent(
+      /Creating an isolated sandbox/,
+    );
+  });
+
+  it('are left plain on every other turn', () => {
+    render(<EventRow event={{ kind: 'lifecycle', text: 'workspace_preparing' }} />);
+
+    expect(screen.getByText('Preparing workspace')).toBeInTheDocument();
+    expect(screen.queryByText(/Creating an isolated sandbox/)).not.toBeInTheDocument();
+  });
+
+  it('explain only the steps that need it', () => {
+    render(<EventRow event={{ kind: 'lifecycle', text: 'result' }} blockKey="k" firstRun />);
+
+    expect(screen.getByText('Agent finished').closest('[data-block-key="k"]')).toHaveTextContent(
+      /^Agent finished$/,
+    );
+  });
+});
+
 describe('a message sent into a running turn', () => {
   it('reads as the owner speaking, where it arrived', () => {
     render(

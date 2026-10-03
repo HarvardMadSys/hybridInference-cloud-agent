@@ -1219,7 +1219,7 @@ function RecordBody({ detail }: { detail: MeasurementDetail }) {
           {detail.thread_id ? (
             <Link
               className="text-crimson hover:underline dark:text-crimson-light"
-              href={`/admin/conversations/${encodeURIComponent(detail.thread_id)}`}
+              href={`/admin/sessions/${encodeURIComponent(detail.thread_id)}`}
             >
               {detail.thread_id}
             </Link>

@@ -161,6 +161,11 @@ export const en = {
   'settings.language.title': 'Language',
   'settings.language.label': 'Display language',
 
+  'settings.gettingStarted.about': 'What is getting started?',
+  'settings.gettingStarted.help': 'Takes you from connecting GitHub to your first task.',
+  'settings.gettingStarted.show': 'Show again',
+  'settings.gettingStarted.shown': 'Shown',
+
   // ── Conversation turn navigation ────────────────────────────────────────
   'turnNavigation.rail': 'Conversation turns',
   'turnNavigation.emptyPreview': 'No message text',
@@ -275,10 +280,10 @@ export const en = {
   // ── Composer ────────────────────────────────────────────────────────────
   'composer.heading': 'What should the agent do?',
   'composer.subheading': 'Runs in an isolated sandbox.',
-  'composer.placeholder':
-    'Describe a task… e.g. Fix the SSE total-timeout regression on /v1/messages and add a unit test',
-  'composer.placeholderDisconnected': 'Connect GitHub to describe a task',
+  'composer.subheadingFirstVisit':
+    'Describe a task. The agent works in an isolated sandbox and opens a draft pull request in your repository.',
   'composer.connectToRun': 'Connect GitHub to select a repository and run',
+  'composer.connectToRunKept': 'Connect GitHub to run it. What you wrote is kept.',
   'composer.repository': 'Repository',
   'composer.repositoryPlaceholder': 'Select repository',
   'composer.repositorySearch': 'Search repositories…',
@@ -437,6 +442,26 @@ export const en = {
   'connect.leaving': 'Opening GitHub…',
   'connect.bodyTemporarilyUnavailable':
     'Repository access will come back on its own. Try again in a minute.',
+
+  // ── First visit ─────────────────────────────────────────────────────────
+  'gettingStarted.title': 'Getting started',
+  'gettingStarted.progress': '{done}/{total}',
+  'gettingStarted.skip': 'Skip',
+  'gettingStarted.hidden': 'Hidden. Bring it back in Settings.',
+  'gettingStarted.undo': 'Undo',
+  'gettingStarted.connect': 'Connect GitHub',
+  'gettingStarted.repository': 'Grant a repository',
+  'gettingStarted.firstTask': 'Run your first task',
+  'firstRun.started':
+    'The agent runs in the cloud and keeps going if you close this page. A blue dot appears next to the task when it finishes.',
+  'firstRun.preparing':
+    'Creating an isolated sandbox for this session. The first turn is slower; replies reuse it.',
+  'firstRun.checkedOut':
+    'Your repository is cloned into the sandbox. The agent only edits this copy.',
+  'firstRun.publishing': 'Pushing the changes to an agent/… branch and opening a draft PR.',
+  'firstRun.doneTitle': 'Your first draft PR is ready',
+  'firstRun.doneBody':
+    'Review it on GitHub; merging is up to you. Want changes? Reply below and the same PR is updated.',
 
   // ── Pending message queue ───────────────────────────────────────────────
   'queue.region': 'Queued messages',

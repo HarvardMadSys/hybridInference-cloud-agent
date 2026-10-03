@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { Suspense, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
@@ -17,16 +17,20 @@ import { conversationLink } from './filters';
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../AdminNavigation';
+import { TurnResults } from '../runs/AllRuns';
+import { StepResults } from '../runs/StepResults';
 import { presetKey } from '../usage/present';
 import {
   accessDenied,
   AdminRequired,
+  ago,
   BUTTON,
   CARD,
   dateTime,
   ErrorNotice,
-  INPUT,
+  ICON_BUTTON,
   RunState,
+  TOOLBAR_SELECT,
 } from '../runs/shared';
 
 const STATES: AgentJobApiState[] = ['queued', 'running', 'succeeded', 'failed', 'cancelled'];
@@ -59,6 +63,17 @@ function windowOfLength(
   };
 }
 
+/** A UTC calendar day as a toolbar can afford it: `Sep 21`. */
+function shortDay(value: string | undefined): string {
+  const time = Date.parse(value ?? '');
+  if (!Number.isFinite(time)) return '—';
+  return new Date(time).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
 function windowFilters(
   days: number,
   keep: AdminRunFilters = {},
@@ -66,6 +81,33 @@ function windowFilters(
 ): AdminRunFilters {
   return windowOfLength(days * 86_400_000, keep, now);
 }
+
+/**
+ * The levels the Sessions tab lists, one selection at a time.
+ *
+ * A session is made of turns, and a turn of steps (its model requests), so
+ * each level is the same selection read at a finer grain.
+ */
+const LEVELS = [
+  {
+    key: 'sessions',
+    label: 'Sessions',
+    description: 'Sessions with turns created in the selected window, newest matching turn first.',
+  },
+  {
+    key: 'turns',
+    label: 'Turns',
+    description: 'Turns created in the selected window from every session, newest first.',
+  },
+  {
+    key: 'steps',
+    label: 'Steps',
+    description:
+      'Model requests of the turns created in the selected window, newest first, read a few turns at a time.',
+  },
+] as const;
+
+type Level = (typeof LEVELS)[number]['key'];
 
 export default function AdminConversationsPage() {
   const { state } = useAuth();
@@ -77,10 +119,18 @@ export default function AdminConversationsPage() {
   );
 }
 
-/** Read the linked filters once, keyed by the query so a new link remounts. */
+/**
+ * Read the linked filters once, keyed by the query so a new link remounts.
+ *
+ * `level=turns` or `level=steps` opens that level. It chooses what is listed
+ * rather than which turns match, so it is taken off before the filters are read.
+ */
 function LinkedConversationsList() {
-  const query = useSearchParams().toString();
-  return <ConversationsList key={query} initialQuery={query} />;
+  const params = new URLSearchParams(useSearchParams().toString());
+  const level: Level = LEVELS.find((item) => item.key === params.get('level'))?.key ?? 'sessions';
+  params.delete('level');
+  const query = params.toString();
+  return <ConversationsList key={`${level}:${query}`} initialQuery={query} initialLevel={level} />;
 }
 
 function ConversationsSkeleton() {
@@ -93,7 +143,13 @@ function ConversationsSkeleton() {
   );
 }
 
-function ConversationsList({ initialQuery }: { initialQuery: string }) {
+function ConversationsList({
+  initialQuery,
+  initialLevel,
+}: {
+  initialQuery: string;
+  initialLevel: Level;
+}) {
   // A link from the usage page carries an absolute window and the identities
   // of the group it came from. It replaces the seven-day default and is kept
   // for as long as the admin stays on this selection.
@@ -108,20 +164,185 @@ function ConversationsList({ initialQuery }: { initialQuery: string }) {
   // A linked window is absolute and stays exactly as linked; a window chosen
   // here re-anchors on Refresh so the list picks up work finished meanwhile.
   const [linkedWindow, setLinkedWindow] = useState(linked.linked);
-  const [page, setPage] = useState<AdminConversationsPage | null>(null);
+  // Sessions and turns are two readings of one selection: switching level
+  // keeps every filter, the window included.
+  const [level, setLevel] = useState<Level>(initialLevel);
   const [loading, setLoading] = useState(!linked.error);
-  const [moreLoading, setMoreLoading] = useState(false);
-  const [error, setError] = useState<string | null>(linked.error);
   const [denied, setDenied] = useState(false);
+  const onDenied = useCallback(() => setDenied(true), []);
+  const active = LEVELS.find((item) => item.key === level) ?? LEVELS[0];
+  // The identities a usage link arrived with. No control on this page shows
+  // them, so they are stated here.
+  const selection = [
+    filters.user_id && `User: ${filters.user_id}`,
+    filters.repo && `Repository: ${filters.repo}`,
+    filters.runtime && `Agent: ${filters.runtime}`,
+    filters.model && `Model: ${filters.model}`,
+    filters.host && `Host: ${filters.host}`,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  if (denied) return <AdminRequired />;
+  return (
+    <div className="min-w-0 flex-1">
+      <section className="w-full px-4 py-10 sm:px-6 lg:px-8 lg:py-14">
+        <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
+          Admin
+        </h1>
+        <AdminNavigation current="activity" />
+
+        {/* One toolbar: what a row stands for on the left, which turns match on
+            the right. The level's description is its tooltip, not a paragraph. */}
+        <h2 className="sr-only">{active.label}</h2>
+        <div className="mt-8 flex flex-wrap items-center gap-x-3 gap-y-2">
+          <div
+            role="group"
+            aria-label="Level"
+            title={active.description}
+            className="inline-flex rounded-lg bg-gray-100 p-0.5 dark:bg-white/5"
+          >
+            {LEVELS.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                aria-pressed={item.key === level}
+                onClick={() => setLevel(item.key)}
+                className={`rounded-md px-3 py-1 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson ${
+                  item.key === level
+                    ? 'bg-white text-gray-900 shadow-sm dark:bg-gray-800 dark:text-gray-50'
+                    : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100'
+                }`}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          {selection && (
+            <span
+              className="min-w-0 truncate text-xs text-gray-500 dark:text-gray-400"
+              title={selection}
+            >
+              {selection}
+            </span>
+          )}
+          <div role="group" aria-label="Filters" className="ml-auto flex items-center gap-2">
+            {windowDays === 'custom' && (
+              <span className="text-xs text-gray-500 dark:text-gray-400">
+                {shortDay(filters.since)} – {shortDay(filters.until)}
+              </span>
+            )}
+            <label className="shrink-0">
+              <span className="sr-only">Turn created</span>
+              <select
+                className={TOOLBAR_SELECT}
+                value={windowDays}
+                onChange={(e) => {
+                  // Choosing a preset is the only action that re-anchors the
+                  // window, and it keeps every other filter, including the
+                  // identity a usage link arrived with.
+                  const nextDays = Number(e.target.value);
+                  setLinkedWindow(false);
+                  setFilters((current) => windowFilters(nextDays, current));
+                }}
+              >
+                <option value={7}>Last 7 days</option>
+                <option value={30}>Last 30 days</option>
+                <option value={90}>Last 90 days</option>
+                {windowDays === 'custom' && <option value="custom">Custom</option>}
+              </select>
+            </label>
+            <label className="shrink-0">
+              <span className="sr-only">Turn result</span>
+              <select
+                className={TOOLBAR_SELECT}
+                value={filters.state ?? ''}
+                onChange={(e) =>
+                  // Status is not part of the window. Changing it keeps the exact
+                  // since/until on screen: re-deriving them from a preset here
+                  // widened a one-day link back to seven days.
+                  setFilters((current) => ({
+                    ...current,
+                    state: (e.target.value || undefined) as AgentJobApiState | undefined,
+                  }))
+                }
+              >
+                <option value="">All results</option>
+                {STATES.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              className={ICON_BUTTON}
+              type="button"
+              aria-label="Refresh"
+              title="Refresh"
+              disabled={loading}
+              onClick={() =>
+                setFilters((current) =>
+                  // A linked window is absolute and stays as linked. Any other
+                  // window keeps its own length and re-anchors at now, which is
+                  // what refreshing a list is for.
+                  linkedWindow ? { ...current } : windowOfLength(windowLength(current), current),
+                )
+              }
+            >
+              <svg
+                aria-hidden
+                viewBox="0 0 20 20"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.6}
+                className="h-4 w-4"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M16.3 10a6.3 6.3 0 1 1-1.85-4.45M16.3 3.8v3.4h-3.4"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        {linked.error ? (
+          // A broken link has nothing to retry: the URL has to change.
+          <ErrorNotice>{linked.error}</ErrorNotice>
+        ) : level === 'sessions' ? (
+          <SessionResults filters={filters} onLoading={setLoading} onDenied={onDenied} />
+        ) : level === 'turns' ? (
+          <TurnResults filters={filters} onLoading={setLoading} onDenied={onDenied} />
+        ) : (
+          <StepResults filters={filters} onLoading={setLoading} onDenied={onDenied} />
+        )}
+      </section>
+    </div>
+  );
+}
+
+/** The session level: each session with a matching turn, newest matching turn first. */
+function SessionResults({
+  filters,
+  onLoading,
+  onDenied,
+}: {
+  filters: AdminRunFilters;
+  onLoading: (loading: boolean) => void;
+  onDenied: () => void;
+}) {
+  const [page, setPage] = useState<AdminConversationsPage | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [moreLoading, setMoreLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [revision, setRevision] = useState(0);
   const moreRequest = useRef<AbortController | null>(null);
 
+  useEffect(() => onLoading(loading), [loading, onLoading]);
+
   useEffect(() => {
-    if (linked.error) {
-      // A link this list cannot use is reported as it is. Requesting with a
-      // substituted window would return runs the link never named.
-      setLoading(false);
-      return;
-    }
     const controller = new AbortController();
     moreRequest.current?.abort();
     setMoreLoading(false);
@@ -134,7 +355,7 @@ function ConversationsList({ initialQuery }: { initialQuery: string }) {
       })
       .catch((e: unknown) => {
         if (!controller.signal.aborted) {
-          if (accessDenied(e)) setDenied(true);
+          if (accessDenied(e)) onDenied();
           else setError(getErrorMessage(e));
         }
       })
@@ -145,7 +366,7 @@ function ConversationsList({ initialQuery }: { initialQuery: string }) {
       controller.abort();
       moreRequest.current?.abort();
     };
-  }, [filters, linked.error]);
+  }, [filters, revision, onDenied]);
 
   async function loadMore() {
     if (!page?.next_cursor || moreLoading) return;
@@ -167,7 +388,7 @@ function ConversationsList({ initialQuery }: { initialQuery: string }) {
         );
     } catch (e) {
       if (!controller.signal.aborted) {
-        if (accessDenied(e)) setDenied(true);
+        if (accessDenied(e)) onDenied();
         else setError(getErrorMessage(e));
       }
     } finally {
@@ -175,161 +396,65 @@ function ConversationsList({ initialQuery }: { initialQuery: string }) {
     }
   }
 
-  if (denied) return <AdminRequired />;
   return (
-    <div className="min-w-0 flex-1">
-      <section className="w-full px-4 py-10 sm:px-6 lg:px-8 lg:py-14">
-        <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
-          Admin
-        </h1>
-        <AdminNavigation current="conversations" />
-
-        <div className="mt-8">
-          <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-50">Conversations</h2>
-          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Conversations with turns created in the selected window, newest matching turn first.
-            {linked.linked && ' Filters from the linked selection are preserved.'}
-          </p>
-        </div>
-
-        <div
-          role="group"
-          aria-label="Conversation filters"
-          className="mt-5 flex flex-wrap items-center gap-2"
-        >
-          <label className="w-40 shrink-0">
-            <span className="sr-only">Turn created</span>
-            <select
-              className={INPUT}
-              value={windowDays}
-              onChange={(e) => {
-                // Choosing a preset is the only action that re-anchors the
-                // window, and it keeps every other filter, including the
-                // identity a usage link arrived with.
-                const nextDays = Number(e.target.value);
-                setLinkedWindow(false);
-                setFilters((current) => windowFilters(nextDays, current));
-              }}
+    <>
+      {error && (
+        <ErrorNotice>
+          {error}
+          {!page && (
+            <button
+              type="button"
+              className="ml-3 underline"
+              onClick={() => setRevision((value) => value + 1)}
             >
-              <option value={7}>Last 7 days</option>
-              <option value={30}>Last 30 days</option>
-              <option value={90}>Last 90 days</option>
-              {windowDays === 'custom' && <option value="custom">Custom</option>}
-            </select>
-          </label>
-          <label className="w-40 shrink-0">
-            <span className="sr-only">Turn result</span>
-            <select
-              className={INPUT}
-              value={filters.state ?? ''}
-              onChange={(e) =>
-                // Status is not part of the window. Changing it keeps the exact
-                // since/until on screen: re-deriving them from a preset here
-                // widened a one-day link back to seven days.
-                setFilters((current) => ({
-                  ...current,
-                  state: (e.target.value || undefined) as AgentJobApiState | undefined,
-                }))
-              }
-            >
-              <option value="">All turn results</option>
-              {STATES.map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            className={`${BUTTON} ml-auto h-10`}
-            type="button"
-            disabled={loading}
-            onClick={() =>
-              setFilters((current) =>
-                // A linked window is absolute and stays as linked. Any other
-                // window keeps its own length and re-anchors at now, which is
-                // what refreshing a list is for.
-                linkedWindow ? { ...current } : windowOfLength(windowLength(current), current),
-              )
-            }
-          >
-            Refresh
-          </button>
-        </div>
-
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-gray-500 dark:text-gray-400">
-          <span>
-            {[
-              filters.user_id && `User: ${filters.user_id}`,
-              filters.repo && `Repository: ${filters.repo}`,
-              filters.runtime && `Agent: ${filters.runtime}`,
-              filters.model && `Model: ${filters.model}`,
-              filters.host && `Host: ${filters.host}`,
-            ]
-              .filter(Boolean)
-              .join(' · ')}
-          </span>
-          <Link
-            href="/admin/runs/all"
-            className="text-crimson hover:underline dark:text-crimson-light"
-          >
-            All execution records
-          </Link>
-        </div>
-
-        {error && (
-          <ErrorNotice>
-            {error}
-            {/* A broken link has nothing to retry: the URL has to change. */}
-            {!page && !linked.error && (
-              <button
-                type="button"
-                className="ml-3 underline"
-                onClick={() => setFilters({ ...filters })}
-              >
-                Retry
-              </button>
-            )}
-          </ErrorNotice>
-        )}
-
-        {linked.error ? null : loading ? (
-          <p role="status" className="mt-8 text-sm text-gray-500 dark:text-gray-400">
-            Loading conversations…
-          </p>
-        ) : (
-          page && (
-            <>
-              <p className="mt-6 text-xs text-gray-500 dark:text-gray-400">
-                Turns created {dateTime(page.since)} – {dateTime(page.until)}
+              Retry
+            </button>
+          )}
+        </ErrorNotice>
+      )}
+      {loading ? (
+        <p role="status" className="mt-8 text-sm text-gray-500 dark:text-gray-400">
+          Loading sessions…
+        </p>
+      ) : (
+        page && (
+          <>
+            {page.conversations.length === 0 ? (
+              <p className="mt-8 text-sm text-gray-500 dark:text-gray-400">
+                No sessions match these filters.
               </p>
-              {page.conversations.length === 0 ? (
-                <p className="mt-8 text-sm text-gray-500 dark:text-gray-400">
-                  No conversations match these filters.
-                </p>
-              ) : (
-                <ConversationsTable page={page} filters={filters} />
-              )}
-              {page.next_cursor && (
-                <div className="mt-5 flex justify-center">
-                  <button
-                    type="button"
-                    className={BUTTON}
-                    disabled={moreLoading}
-                    onClick={() => void loadMore()}
-                  >
-                    {moreLoading ? 'Loading…' : 'Load more conversations'}
-                  </button>
-                </div>
-              )}
-            </>
-          )
-        )}
-      </section>
-    </div>
+            ) : (
+              <ConversationsTable page={page} filters={filters} />
+            )}
+            {page.next_cursor && (
+              <div className="mt-5 flex justify-center">
+                <button
+                  type="button"
+                  className={BUTTON}
+                  disabled={moreLoading}
+                  onClick={() => void loadMore()}
+                >
+                  {moreLoading ? 'Loading…' : 'Load more sessions'}
+                </button>
+              </div>
+            )}
+          </>
+        )
+      )}
+    </>
   );
 }
 
+/** The repository's own name; the owner is the same for nearly every row. */
+function repoName(repo: string): string {
+  return repo.split('/').pop() || repo;
+}
+
+/**
+ * One quiet line per session: its title and repository, then who, how it
+ * stands, what ran last, how many turns and when. Identifiers and exact times
+ * are one hover away rather than a line of their own.
+ */
 function ConversationsTable({
   page,
   filters,
@@ -337,88 +462,91 @@ function ConversationsTable({
   page: AdminConversationsPage;
   filters: AdminRunFilters;
 }) {
+  const now = Date.now();
   return (
-    <div className={`${CARD} mt-4 overflow-x-auto`}>
-      <table className="w-full min-w-[900px] text-left text-sm">
-        <thead className="border-b border-gray-100 bg-gray-50/70 text-xs uppercase text-gray-500 dark:border-white/5 dark:bg-white/[0.02] dark:text-gray-400">
-          <tr>
-            {[
-              'Conversation',
-              'User',
-              'State',
-              'Latest agent / model',
-              'Turns',
-              'Last activity',
-            ].map((label) => (
-              <th key={label} className="px-5 py-3 font-medium">
-                {label}
-              </th>
-            ))}
+    <div className="mt-4 overflow-x-auto">
+      <table className="w-full min-w-[900px] table-fixed text-left text-sm">
+        <colgroup>
+          <col />
+          <col className="w-36" />
+          <col className="w-24" />
+          <col className="w-56" />
+          <col className="w-16" />
+          <col className="w-24" />
+        </colgroup>
+        <thead className="text-xs text-gray-400 dark:text-gray-500">
+          <tr className="border-b border-gray-100 dark:border-white/5">
+            {['Session', 'User', 'State', 'Latest agent / model', 'Turns', 'Last activity'].map(
+              (label) => (
+                <th
+                  key={label}
+                  className={`px-3 py-2 font-normal ${
+                    label === 'Turns' || label === 'Last activity' ? 'text-right' : ''
+                  }`}
+                >
+                  {label}
+                </th>
+              ),
+            )}
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100 dark:divide-white/5">
           {page.conversations.map((conversation) => (
-            <tr
-              key={conversation.thread_id}
-              className="align-top hover:bg-gray-50/70 dark:hover:bg-white/[0.03]"
-            >
-              <th scope="row" className="max-w-sm px-5 py-4 font-normal">
-                <Link
-                  href={conversationHref(conversation.thread_id, {
-                    ...filters,
-                    since: page.since,
-                    until: page.until,
-                  })}
-                  className="block truncate font-medium text-crimson hover:underline dark:text-crimson-light"
-                  title={conversation.title ?? conversation.thread_id}
-                >
-                  {conversation.title ?? conversation.thread_id}
-                </Link>
-                <span
-                  className="mt-1 block truncate font-mono text-xs text-gray-500 dark:text-gray-400"
-                  title={conversation.thread_id}
-                >
-                  {conversation.thread_id}
-                </span>
-                <span
-                  className="mt-1 block truncate text-xs text-gray-500 dark:text-gray-400"
-                  title={conversation.repo}
-                >
-                  {conversation.repo}
-                </span>
-                {(conversation.deleted_at || conversation.archived_at) && (
-                  <span className="mt-1 block text-xs text-gray-500 dark:text-gray-400">
-                    {conversation.deleted_at ? 'Deleted' : 'Archived'}
+            <tr key={conversation.thread_id} className="hover:bg-gray-100 dark:hover:bg-gray-900">
+              <th scope="row" className="px-3 py-2.5 font-normal">
+                <div className="flex min-w-0 items-baseline gap-2">
+                  <Link
+                    href={conversationHref(conversation.thread_id, {
+                      ...filters,
+                      since: page.since,
+                      until: page.until,
+                    })}
+                    className="min-w-0 truncate font-medium text-gray-900 hover:underline dark:text-gray-100"
+                    title={conversation.thread_id}
+                  >
+                    {conversation.title ?? conversation.thread_id}
+                  </Link>
+                  {/* The repository gives way first, so a narrow table keeps titles. */}
+                  <span
+                    className="min-w-0 shrink-[4] truncate text-xs text-gray-400 dark:text-gray-500"
+                    title={conversation.repo}
+                  >
+                    {repoName(conversation.repo)}
                   </span>
-                )}
+                  {(conversation.deleted_at || conversation.archived_at) && (
+                    <span className="shrink-0 text-xs text-gray-400 dark:text-gray-500">
+                      {conversation.deleted_at ? 'Deleted' : 'Archived'}
+                    </span>
+                  )}
+                </div>
               </th>
-              <td className="max-w-48 px-5 py-4">
+              <td className="px-3 py-2.5">
                 <span
-                  className="block truncate font-mono text-xs text-gray-600 dark:text-gray-300"
+                  className="block truncate font-mono text-xs text-gray-500 dark:text-gray-400"
                   title={conversation.user_id}
                 >
                   {conversation.user_id}
                 </span>
               </td>
-              <td className="px-5 py-4">
-                <RunState state={conversation.state} />
+              <td className="px-3 py-2.5">
+                <RunState state={conversation.state} quiet />
               </td>
-              <td className="max-w-56 px-5 py-4 text-gray-700 dark:text-gray-200">
-                <span className="block truncate" title={conversation.latest_runtime}>
-                  {conversation.latest_runtime}
-                </span>
+              <td className="px-3 py-2.5">
                 <span
-                  className="mt-1 block truncate text-xs text-gray-500 dark:text-gray-400"
-                  title={conversation.latest_model}
+                  className="block truncate text-xs text-gray-500 dark:text-gray-400"
+                  title={`${conversation.latest_runtime} · ${conversation.latest_model}`}
                 >
-                  {conversation.latest_model}
+                  {conversation.latest_runtime} · {conversation.latest_model}
                 </span>
               </td>
-              <td className="whitespace-nowrap px-5 py-4 text-gray-700 dark:text-gray-200">
+              <td className="px-3 py-2.5 text-right tabular-nums text-gray-700 dark:text-gray-200">
                 {conversation.turn_count}
               </td>
-              <td className="whitespace-nowrap px-5 py-4 text-xs text-gray-500 dark:text-gray-400">
-                {dateTime(conversation.last_activity_at)}
+              <td
+                className="whitespace-nowrap px-3 py-2.5 text-right text-xs text-gray-500 dark:text-gray-400"
+                title={dateTime(conversation.last_activity_at)}
+              >
+                {ago(conversation.last_activity_at, now)}
               </td>
             </tr>
           ))}

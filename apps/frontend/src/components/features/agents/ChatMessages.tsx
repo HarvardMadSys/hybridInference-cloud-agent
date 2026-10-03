@@ -57,7 +57,27 @@ function ToolIcon({ tool }: { tool: string }) {
   );
 }
 
-function LifecycleRow({ text, blockKey }: { text: string; blockKey?: string }) {
+// What a first run's milestones mean, said once: on the first turn of the
+// owner's first conversation, and never again. The rest need no gloss, and a
+// later turn's publishing updates the draft PR rather than opening one.
+const FIRST_RUN_CAPTIONS: Partial<Record<string, TranslationKey>> = {
+  started: 'firstRun.started',
+  workspace_preparing: 'firstRun.preparing',
+  checked_out: 'firstRun.checkedOut',
+  publishing: 'firstRun.publishing',
+  shared_snapshot_publishing: 'firstRun.publishing',
+};
+
+function LifecycleRow({
+  text,
+  blockKey,
+  firstRun = false,
+}: {
+  text: string;
+  blockKey?: string;
+  firstRun?: boolean;
+}) {
+  const t = useT();
   const { text: label, milestone } = lifecyclePhaseLabel(text);
 
   // A phase this build does not recognise is a diagnostic, not an achievement:
@@ -74,10 +94,11 @@ function LifecycleRow({ text, blockKey }: { text: string; blockKey?: string }) {
     );
   }
 
-  return (
+  const caption = firstRun ? FIRST_RUN_CAPTIONS[text.trim().toLowerCase()] : undefined;
+  const row = (
     <div
-      data-block-key={blockKey}
-      className="flex items-center gap-2.5 py-2 text-[13px] text-gray-500 dark:text-gray-400"
+      data-block-key={caption ? undefined : blockKey}
+      className={`flex items-center gap-2.5 ${caption ? 'pt-2' : 'py-2'} text-[13px] text-gray-500 dark:text-gray-400`}
     >
       <span className="flex h-4 w-4 items-center justify-center rounded-full bg-gray-100 dark:bg-white/5 text-gray-500 dark:text-gray-400">
         <svg
@@ -92,6 +113,15 @@ function LifecycleRow({ text, blockKey }: { text: string; blockKey?: string }) {
         </svg>
       </span>
       <span className="capitalize">{label}</span>
+    </div>
+  );
+  if (!caption) return row;
+  return (
+    <div data-block-key={blockKey} className="pb-2">
+      {row}
+      <p className="ml-[26px] mt-0.5 text-xs leading-relaxed text-gray-400 dark:text-gray-500">
+        {t(caption)}
+      </p>
     </div>
   );
 }
@@ -414,6 +444,7 @@ export function EventRow({
   busy,
   footer,
   blockKey,
+  firstRun,
 }: {
   event: AgentEvent;
   onFork?: () => void;
@@ -421,8 +452,11 @@ export function EventRow({
   footer?: ReactNode;
   /** Stable row identity, so a layout change never moves a reader off it. */
   blockKey?: string;
+  /** The first turn of the owner's first conversation: milestones say what they mean. */
+  firstRun?: boolean;
 }) {
-  if (event.kind === 'lifecycle') return <LifecycleRow text={event.text} blockKey={blockKey} />;
+  if (event.kind === 'lifecycle')
+    return <LifecycleRow text={event.text} blockKey={blockKey} firstRun={firstRun} />;
   if (event.kind === 'thinking') {
     return (
       <div

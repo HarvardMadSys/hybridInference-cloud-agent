@@ -124,7 +124,7 @@ capacity are known. Partial, interrupted, collecting, legacy, and contradictory
 readings show `—`, never a guessed percentage or a zero. Values above 100% are
 unavailable rather than clamped. No peak utilisation can be inferred from a
 cumulative CPU counter. Cumulative CPU accounting remains available to other
-consumers and the compact Runs list.
+consumers and the compact Turns list.
 
 The optional capacity field is omitted during serialization when unknown, so
 retries of legacy reports keep the same stored payload. Existing collectors

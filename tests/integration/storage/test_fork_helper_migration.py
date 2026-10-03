@@ -1,25 +1,28 @@
-"""The sandbox-protocol revision: groups this schema created are recorded as v2."""
+"""Retained groups record historical Fork support across the image-label change."""
 
 from __future__ import annotations
 
 import asyncpg
 import pytest
-from tests.integration.storage.test_agent_job_store import _reserve_shared_chat
+from tests.integration.storage.test_agent_job_store import (
+    _reserve_retained_chat,
+    _reserve_shared_chat,
+)
 from tests.integration.storage.test_schema_upgrade import _db_config, store as store
 from tests.support.migrations import apply_migrations, downgrade_to
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 _BEFORE = "0025_github_user_tokens"
-_THIS = "0026_sandbox_protocol"
+_THIS = "0026_fork_helper_version"
 
 
 async def _groups(conn) -> list[dict]:
     return [dict(row) for row in await conn.fetch("SELECT * FROM agent_sandboxes ORDER BY id")]
 
 
-async def test_an_existing_group_is_recorded_as_v2_and_nothing_else_changes(store):
-    """Only a v2 image could ever create a group, so the backfill states a fact."""
+async def test_an_existing_group_records_its_at_anchor_helper_and_nothing_else_changes(store):
+    """Both sides of #351 required the same historical-Fork implementation."""
     await _reserve_shared_chat(store)
     config = _db_config()
     downgrade_to(config, _BEFORE)
@@ -33,10 +36,10 @@ async def test_an_existing_group_is_recorded_as_v2_and_nothing_else_changes(stor
     apply_migrations(config, _THIS)
     conn = await asyncpg.connect(**config)
     try:
-        assert await _groups(conn) == [{**row, "shared_sandbox_protocol": "v2"} for row in before]
+        assert await _groups(conn) == [{**row, "fork_helper_version": "2"} for row in before]
         # An image without the label is recorded as null, never as "".
         with pytest.raises(asyncpg.CheckViolationError):
-            await conn.execute("UPDATE agent_sandboxes SET shared_sandbox_protocol = ''")
+            await conn.execute("UPDATE agent_sandboxes SET fork_helper_version = ''")
     finally:
         await conn.close()
 
@@ -50,8 +53,9 @@ async def test_an_existing_group_is_recorded_as_v2_and_nothing_else_changes(stor
 
 
 async def test_a_group_copied_from_an_old_chain_database_stays_unrecorded(store):
-    """A converted copy's groups may predate v2; they keep the exact-image rule."""
+    """Converted groups may predate historical Fork; other groups can be backfilled."""
     _job, _claim, archived = await _reserve_shared_chat(store)
+    _other_job, _other_claim, current = await _reserve_retained_chat(store)
     config = _db_config()
     downgrade_to(config, _BEFORE)
     conn = await asyncpg.connect(**config)
@@ -72,10 +76,17 @@ async def test_a_group_copied_from_an_old_chain_database_stays_unrecorded(store)
         try:
             assert (
                 await conn.fetchval(
-                    "SELECT shared_sandbox_protocol FROM agent_sandboxes WHERE id = $1",
+                    "SELECT fork_helper_version FROM agent_sandboxes WHERE id = $1",
                     archived["sandbox_id"],
                 )
                 is None
+            )
+            assert (
+                await conn.fetchval(
+                    "SELECT fork_helper_version FROM agent_sandboxes WHERE id = $1",
+                    current["sandbox_id"],
+                )
+                == "2"
             )
         finally:
             await conn.close()

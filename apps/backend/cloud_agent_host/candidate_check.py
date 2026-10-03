@@ -13,7 +13,6 @@ import os
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError, build_backend_from_env
 from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_HELPER_PINS,
-    SHARED_SANDBOX_PROTOCOL,
     SHARED_SANDBOX_RUNTIME_PINS,
 )
 
@@ -24,8 +23,6 @@ def check_candidate(backend: ContainerBackend) -> None:
     stamp = backend.version_stamp()
     if not stamp.get("sandbox_image_digest"):
         raise SandboxError("candidate image has no immutable digest")
-    if stamp.get("shared_sandbox_protocol") != SHARED_SANDBOX_PROTOCOL:
-        raise SandboxError("candidate image shared-sandbox protocol does not match the runner")
     for field, expected in (
         ("runtime_versions", SHARED_SANDBOX_RUNTIME_PINS),
         ("helper_versions", SHARED_SANDBOX_HELPER_PINS),

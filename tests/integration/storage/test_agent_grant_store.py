@@ -34,7 +34,6 @@ from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
-    SHARED_SANDBOX_PROTOCOL,
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
@@ -121,7 +120,6 @@ async def _claimed(store: Storage, *, prompt: str = "fix it") -> dict:
         host_credential_hash=credential_hash,
         claim_attestation={
             "sandbox_image_digest": "sha256:grant-test-image",
-            "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
             "runner_capabilities": [
                 SHARED_SANDBOX_CAPABILITY,
                 NATIVE_FORK_AT_ANCHOR_CAPABILITY,

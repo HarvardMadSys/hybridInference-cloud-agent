@@ -20,6 +20,7 @@ import {
   getAgentJobGit,
   getAgentJobUsage,
   getAgentThreadStats,
+  listAgentConversations,
   listAgentTerminals,
   pauseAgentGoal,
   setAgentGoal,
@@ -58,6 +59,7 @@ import {
 import { APIError } from '@/lib/utils/errors';
 
 import { installSideChatLocks } from './sideChatTestSupport';
+import { FirstRunProvider } from './firstRun';
 import { sideChatKeys } from './sideChatStorage';
 import { JobDetail, WORKSPACE_WIDTH_STORAGE_KEY } from './JobDetail';
 import type { AgentJob } from './types';
@@ -66,6 +68,7 @@ const navigation = vi.hoisted(() => ({ push: vi.fn() }));
 
 vi.mock('next/navigation', () => ({
   useRouter: () => navigation,
+  usePathname: () => '/ajob_1',
 }));
 
 vi.mock('@/lib/api/mcp', async (importOriginal) => ({
@@ -122,6 +125,7 @@ vi.mock('@/lib/api/agents', () => ({
   getAgentJobUsage: vi.fn(),
   getAgentAttemptTelemetry: vi.fn(),
   getAgentThreadStats: vi.fn(),
+  listAgentConversations: vi.fn(),
   listAgentTerminals: vi.fn(),
   resizeAgentTerminal: vi.fn(),
   refreshAgentJobUsage: vi.fn(),
@@ -625,6 +629,7 @@ describe('JobDetail', () => {
     vi.mocked(unpinAgentJob).mockReset();
     vi.mocked(getAgentConfig).mockReset();
     vi.mocked(getAgentConfig).mockResolvedValue(AGENT_CONFIG);
+    vi.mocked(listAgentConversations).mockReset();
     vi.mocked(getAgentJobFiles).mockReset();
     vi.mocked(getAgentJobFiles).mockResolvedValue({
       path: '',
@@ -1621,6 +1626,70 @@ describe('JobDetail', () => {
     expect(git).toHaveTextContent('agent/ajob_1');
     expect(git).not.toHaveTextContent('Live workspace');
     expect(git).not.toHaveTextContent('Shared workspace');
+  });
+
+  function ownedConversation(id: string) {
+    return {
+      job: { id, thread_id: id } as AgentJobApi,
+      title: 'Current task',
+      archived: false,
+      last_activity_at: null,
+    };
+  }
+
+  // The conversation page reads the app's first-run answer, as the layout
+  // provides it; it asks nothing itself.
+  function inApp(job: AgentJob) {
+    return render(
+      <FirstRunProvider userId="alice">
+        <JobDetail job={job} />
+      </FirstRunProvider>,
+    );
+  }
+
+  it('says where an owner’s first draft PR is, and that replies update it', async () => {
+    vi.mocked(listAgentConversations).mockResolvedValue({
+      conversations: [ownedConversation('ajob_1')],
+      next_cursor: null,
+    });
+    const prUrl = 'https://github.com/owner/repository/pull/7';
+
+    inApp(makeJob({ state: 'done', prUrl }));
+
+    expect(await screen.findByText('Your first draft PR is ready')).toBeInTheDocument();
+    expect(screen.getByText(/Reply below and the same PR is updated/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open draft PR' })).toHaveAttribute('href', prUrl);
+    // Its milestones say what they mean, this once.
+    expect(screen.getByText(/keeps going if you close this page/)).toBeInTheDocument();
+  });
+
+  it('keeps the plain actions for an owner with more than this conversation', async () => {
+    vi.mocked(listAgentConversations).mockResolvedValue({
+      conversations: [ownedConversation('ajob_1'), ownedConversation('ajob_0')],
+      next_cursor: null,
+    });
+
+    inApp(makeJob({ state: 'done', prUrl: 'https://github.com/owner/repository/pull/7' }));
+
+    await waitFor(() => expect(listAgentConversations).toHaveBeenCalled());
+    expect(screen.getByRole('link', { name: 'Open draft PR' })).toBeInTheDocument();
+    expect(screen.queryByText('Your first draft PR is ready')).not.toBeInTheDocument();
+    expect(screen.queryByText(/keeps going if you close this page/)).not.toBeInTheDocument();
+  });
+
+  it('keeps a later turn of the first conversation plain', async () => {
+    vi.mocked(listAgentConversations).mockResolvedValue({
+      conversations: [ownedConversation('ajob_1')],
+      next_cursor: null,
+    });
+
+    inApp(
+      makeJob({ state: 'done', turnNo: 2, prUrl: 'https://github.com/owner/repository/pull/7' }),
+    );
+
+    await waitFor(() => expect(listAgentConversations).toHaveBeenCalled());
+    expect(screen.getByRole('link', { name: 'Open draft PR' })).toBeInTheDocument();
+    expect(screen.queryByText('Your first draft PR is ready')).not.toBeInTheDocument();
   });
 
   it('keeps the empty workspace free of change and absent-PR placeholders', () => {

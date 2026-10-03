@@ -30,11 +30,10 @@ from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
-    SHARED_SANDBOX_PROTOCOL,
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
-from cloud_agent_shared.shared_protocol import mid_turn_input_capability
+from cloud_agent_shared.shared_protocol import FORK_HELPER, mid_turn_input_capability
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -208,10 +207,32 @@ def _shared_claim_attestation() -> dict[str, object]:
     """Return the exact process-local fence required for shared work."""
     return {
         "sandbox_image_digest": "sha256:shared-image",
-        "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
         "runner_capabilities": _SHARED_HOST_CAPABILITIES,
         "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
         "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),
+    }
+
+
+def _previous_release_claim_attestation() -> dict[str, object]:
+    """A runner of the release from before the fork helper had its own label.
+
+    Its image reports every other helper, and it proves its own, older
+    deployment. The protocol number it also sends never reaches the store:
+    the claim model drops it.
+    """
+    return {
+        **_shared_claim_attestation(),
+        "runner_capabilities": [
+            SHARED_SANDBOX_CAPABILITY,
+            NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+            shared_deployment_capability("previous-deployment"),
+            GOAL_REPORT_CAPABILITY,
+        ],
+        "helper_versions": {
+            helper_id: version
+            for helper_id, version in SHARED_SANDBOX_HELPER_PINS.items()
+            if helper_id != FORK_HELPER
+        },
     }
 
 
@@ -309,7 +330,7 @@ async def _reserve_shared_chat(
     *,
     metadata: dict | None = None,
     task_prompt: str = "fix the flaky test",
-    shared_sandbox_protocol: str | None = None,
+    fork_helper_version: str | None = None,
 ) -> tuple[dict, dict, dict]:
     """Create, claim, and reserve one capability-gated shared-live chat."""
     await store.host_pool.register_host(
@@ -345,7 +366,7 @@ async def _reserve_shared_chat(
         runtime_version=claim.get("runtime_version"),
         sandbox_image_digest=claim.get("sandbox_image_digest"),
         execution_profile=job["execution_profile"],
-        shared_sandbox_protocol=shared_sandbox_protocol,
+        fork_helper_version=fork_helper_version,
     )
     assert sandbox is not None and sandbox["shared_live"] is True
     return job, claim, sandbox
@@ -841,13 +862,44 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
     assert all(member.resident_slot_id is not None for member in wire_members)
 
 
+@pytest.mark.parametrize("reported_helper_version", [None, "1", "3"])
+async def test_an_existing_group_keeps_its_own_fork_helper_version(
+    store: Storage, pool, reported_helper_version: str | None
+):
+    """A later reservation cannot replace the retained container's helper evidence."""
+    helper = SHARED_SANDBOX_HELPER_PINS[FORK_HELPER]
+    job, claim, sandbox = await _reserve_shared_chat(store, fork_helper_version=helper)
+    reserved_again = await store.sandbox.reserve_thread_sandbox(
+        thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        host="shared-runner",
+        sandbox_id=sandbox["sandbox_id"],
+        container_name=sandbox["container_name"],
+        runtime_id=sandbox["runtime_id"],
+        runtime_version=sandbox["runtime_version"],
+        sandbox_image_digest=sandbox["sandbox_image_digest"],
+        execution_profile=sandbox["execution_profile"],
+        fork_helper_version=reported_helper_version,
+    )
+    assert reserved_again is not None
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT fork_helper_version FROM agent_sandboxes WHERE id = $1",
+                sandbox["sandbox_id"],
+            )
+            == helper
+        )
+
+
 @pytest.mark.parametrize(
-    ("protocol", "forkable_after_rebuild"),
-    [(SHARED_SANDBOX_PROTOCOL, True), ("v1", False), (None, False)],
+    ("fork_helper_version", "forkable_after_rebuild"),
+    [(SHARED_SANDBOX_HELPER_PINS[FORK_HELPER], True), ("1", False), ("3", False), (None, False)],
 )
 async def test_a_rebuilt_host_image_leaves_fork_and_mid_turn_input_to_the_group(
     store: Storage,
-    protocol: str | None,
+    fork_helper_version: str | None,
     forkable_after_rebuild: bool,
 ):
     """Every release rebuilds the sandbox image; that alone must not retire a chat.
@@ -856,9 +908,9 @@ async def test_a_rebuilt_host_image_leaves_fork_and_mid_turn_input_to_the_group(
     from the group's after any deployment. Fork is then asked of the group's
     own image — do its helpers understand a historical anchor — and both Fork
     and mid-turn input of whether the host still ships the CLI version the
-    container runs. A group whose protocol nobody recorded keeps the old rule.
+    container runs. An unrecorded or unreviewed helper keeps the old Fork rule.
     """
-    job, claim, sandbox = await _reserve_shared_chat(store, shared_sandbox_protocol=protocol)
+    job, claim, sandbox = await _reserve_shared_chat(store, fork_helper_version=fork_helper_version)
     fence = {
         "thread_id": job["thread_id"],
         "attempt_id": claim["attempt_id"],
@@ -3020,10 +3072,10 @@ async def test_retained_follow_up_keeps_owning_host_image_and_cli_pin_after_pool
         lease_ttl_seconds=60,
         host="runner-a",
         claim_attestation={
-            **_shared_claim_attestation(),
-            # v2 added historical Fork only. An old owner may continue the
-            # exact retained group it already holds after placement moves.
-            "shared_sandbox_protocol": "v1",
+            **_previous_release_claim_attestation(),
+            # An owner may stay on the previous release and keep continuing
+            # the exact retained group it holds after placement moves, even
+            # from a rebuilt runner image.
             "sandbox_runtime": "runc",
             "sandbox_image_digest": "sha256:new-runner-image",
             "runtime_versions_available": {"claude-code": ["2.1.220", "2.1.999"]},
@@ -3054,23 +3106,23 @@ async def test_retained_follow_up_keeps_owning_host_image_and_cli_pin_after_pool
     assert new_claim is not None and new_claim["id"] == fresh["id"]
 
 
-async def test_compatible_v1_runner_cannot_materialize_a_new_group(store: Storage):
+async def test_a_runner_of_the_previous_release_cannot_materialize_a_new_group(
+    store: Storage,
+):
     fresh = await _create_job(store)
-    v1_attestation = {
-        **_shared_claim_attestation(),
-        "shared_sandbox_protocol": "v1",
-    }
 
-    claim = await _claim(
+    refused = await _claim(
         store,
-        worker_id="v1-runner",
+        worker_id="previous-release-runner",
         lease_ttl_seconds=60,
         host="runner-a",
-        claim_attestation=v1_attestation,
+        claim_attestation=_previous_release_claim_attestation(),
     )
 
-    assert claim is None
+    assert refused is None
     assert (await store.conversation_queries.get_job(fresh["id"]))["state"] == "queued"
+    claim = await _claim(store, worker_id="current-runner", lease_ttl_seconds=60)
+    assert claim is not None and claim["id"] == fresh["id"]
 
 
 async def test_failed_preadmission_activation_requests_an_immediate_stop(

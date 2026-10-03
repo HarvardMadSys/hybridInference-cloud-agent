@@ -71,7 +71,6 @@ from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
-    SHARED_SANDBOX_PROTOCOL,
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
@@ -359,7 +358,6 @@ def _shared_claim_attestation() -> dict[str, object]:
     """Return the exact process-local fence a shared claim requires."""
     return {
         "sandbox_image_digest": "sha256:acceptance-image",
-        "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
         "runner_capabilities": _SHARED_HOST_CAPABILITIES,
         "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
         "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),

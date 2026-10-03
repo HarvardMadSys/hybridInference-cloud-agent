@@ -13,12 +13,11 @@ from collections.abc import Mapping
 from enum import StrEnum
 
 from cloud_agent_shared.shared_protocol import (
+    FORK_HELPER,
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
-    SHARED_SANDBOX_PROTOCOL,
     SHARED_SANDBOX_RUNTIME_PINS,
-    SHARED_SANDBOX_V1_HELPER_PINS,
     has_shared_deployment_capability,
 )
 
@@ -41,7 +40,6 @@ RESERVED_EXECUTION_METADATA_KEYS = frozenset(
         "sandbox_image_digest",
         "runtime_versions",
         "helper_versions",
-        "shared_sandbox_protocol",
         "runner_capabilities",
         "host_kernel",
         "guest_kernel",
@@ -50,14 +48,16 @@ RESERVED_EXECUTION_METADATA_KEYS = frozenset(
 
 
 def _shared_sandbox_claim_attested(
-    attestation: Mapping[str, object], *, protocols: frozenset[str]
+    attestation: Mapping[str, object], *, creates_group: bool
 ) -> bool:
-    """Validate the common image/runtime proof for one set of protocols."""
+    """Validate the image/runtime proof both claim gates share.
+
+    Only a replica that may create a group must prove the fork helper. A Fork
+    of that group runs it inside the group's own container; an ordinary turn
+    never runs it.
+    """
     digest = attestation.get("sandbox_image_digest")
     if not isinstance(digest, str) or not digest.strip():
-        return False
-    protocol = attestation.get("shared_sandbox_protocol")
-    if protocol not in protocols:
         return False
     capabilities = attestation.get("runner_capabilities")
     if not isinstance(capabilities, list) or SHARED_SANDBOX_CAPABILITY not in capabilities:
@@ -69,13 +69,10 @@ def _shared_sandbox_claim_attested(
     ):
         return False
     helpers = attestation.get("helper_versions")
-    helper_pins = (
-        SHARED_SANDBOX_HELPER_PINS
-        if protocol == SHARED_SANDBOX_PROTOCOL
-        else SHARED_SANDBOX_V1_HELPER_PINS
-    )
     return isinstance(helpers, Mapping) and all(
-        helpers.get(helper_id) == version for helper_id, version in helper_pins.items()
+        helpers.get(helper_id) == version
+        for helper_id, version in SHARED_SANDBOX_HELPER_PINS.items()
+        if creates_group or helper_id != FORK_HELPER
     )
 
 
@@ -84,7 +81,7 @@ def shared_sandbox_claim_attested(
     *,
     expected_deployment_sha: str | None = None,
 ) -> bool:
-    """Whether this exact replica may create or claim current-protocol work.
+    """Whether this exact replica may create a group or claim new work.
 
     A host heartbeat is machine-level and is shared by every runner replica on
     that machine. During a rolling deployment it can therefore describe a new
@@ -96,10 +93,7 @@ def shared_sandbox_claim_attested(
     """
     capabilities = attestation.get("runner_capabilities")
     return (
-        _shared_sandbox_claim_attested(
-            attestation,
-            protocols=frozenset({SHARED_SANDBOX_PROTOCOL}),
-        )
+        _shared_sandbox_claim_attested(attestation, creates_group=True)
         and isinstance(capabilities, list)
         and NATIVE_FORK_AT_ANCHOR_CAPABILITY in capabilities
         and has_shared_deployment_capability(
@@ -112,16 +106,15 @@ def shared_sandbox_claim_attested(
 def compatible_shared_sandbox_followup_attested(attestation: Mapping[str, object]) -> bool:
     """Whether a replica may continue a retained group it already owns.
 
-    Protocol v2 added only the historical native-fork anchor. The reviewed v1
-    runner/image tuple therefore remains compatible with ordinary turns in its
-    existing Docker layer, but it must never materialize a new group or receive
-    an at-anchor fork request. Keep the allowlist explicit so a future protocol
-    revision is fail-closed until its compatibility is reviewed here.
+    A follow-up needs neither the completed target deployment nor the fork
+    helper. During a rolling deployment a host that owns groups may stay on the
+    previous release for ordinary follow-ups, and a release from before the
+    fork helper had a label reports no version for it; an ordinary turn never
+    runs it. Every Agent CLI and every other helper must still match exactly,
+    so a replica whose turn-time contract changed stays refused until its
+    compatibility is reviewed here.
     """
-    return _shared_sandbox_claim_attested(
-        attestation,
-        protocols=frozenset({"v1", SHARED_SANDBOX_PROTOCOL}),
-    )
+    return _shared_sandbox_claim_attested(attestation, creates_group=False)
 
 
 def default_execution_profile(env: Mapping[str, str] | None = None) -> ExecutionProfile:

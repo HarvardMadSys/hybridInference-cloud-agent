@@ -655,9 +655,6 @@ class ContainerBackend(SandboxBackend):
                 for runtime_id, default in versions.items()
             }
             stamp["helper_versions"] = _helper_versions(labels)
-            stamp["shared_sandbox_protocol"] = str(
-                labels.get("org.freeinference.shared-sandbox.protocol") or ""
-            )
         return stamp
 
     @property

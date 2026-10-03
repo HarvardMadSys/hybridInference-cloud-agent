@@ -88,10 +88,6 @@ ENV_DEPLOYMENT_SHA = "AGENT_DEPLOYMENT_SHA"
 #: no-container-attribution invariant a wire-level contract, not a convention
 #: that a buggy runner can accidentally violate.
 SHARED_MEMBER_ACCOUNTING_VERSION = "shared-member-v1"
-# v2 adds the provider-transcript anchor carried by native fork requests.  A
-# v1 retained container may still serve ordinary follow-up turns, but must not
-# be asked to interpret a historical anchor that its bundled helpers ignore.
-SHARED_SANDBOX_PROTOCOL = "v2"
 SHARED_SANDBOX_RUNTIME_PINS = {
     "claude-code": "2.1.220",
     "codex": "0.145.0",
@@ -99,8 +95,19 @@ SHARED_SANDBOX_RUNTIME_PINS = {
     "opencode": "1.18.9",
     "kilo": "7.4.17",
 }
+#: The in-image helper that forks a native Claude session. Only a Fork runs it,
+#: inside the group's own container, so the control plane asks for it before a
+#: replica creates a group and never before a follow-up. That is also what lets
+#: a host still on the release from before this helper had a label keep
+#: serving the groups it owns during a rolling deployment.
+FORK_HELPER = "claude-session-fork"
 SHARED_SANDBOX_HELPER_PINS = {
     "claude-agent-sdk": "0.2.148",
+    # 2 forks at the historical anchor a native fork request names; the first,
+    # unlabelled helper ignored the anchor and forked the latest message. This
+    # pin is the whole statement that an image's fork helper may be handed an
+    # anchor; there is no separate shared-sandbox protocol number.
+    FORK_HELPER: "2",
     # The host's OpenCode/Kilo reply collector requires message-role metadata.
     "http-agent-live-bridge": "2",
     # Bumped with the observer's own protocol: the image that carries a v2
@@ -109,10 +116,6 @@ SHARED_SANDBOX_HELPER_PINS = {
     "guest-observer": "2",
     "tool-mark": "1",
 }
-# Protocol v1 predates guest-kernel accounting. Those helpers are not needed
-# to continue an ordinary turn in an already-owned retained container; the
-# SDK pin is the reviewed compatibility floor for that old replica.
-SHARED_SANDBOX_V1_HELPER_PINS = {"claude-agent-sdk": "0.2.148"}
 
 
 def shared_deployment_capability(deployment_sha: str) -> str:

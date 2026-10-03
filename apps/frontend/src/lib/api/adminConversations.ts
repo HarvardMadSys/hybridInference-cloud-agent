@@ -50,7 +50,7 @@ export function conversationHref(threadId: string, filters: AdminRunFilters = {}
   const context = { ...filters };
   delete context.cursor;
   delete context.limit;
-  return `/admin/conversations/${encodeURIComponent(threadId)}${conversationQuery(context)}`;
+  return `/admin/sessions/${encodeURIComponent(threadId)}${conversationQuery(context)}`;
 }
 
 async function read<T>(path: string, signal?: AbortSignal): Promise<T> {

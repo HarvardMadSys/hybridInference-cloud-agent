@@ -26,6 +26,7 @@ export type {
 } from './agents';
 
 const RUNS = '/admin/agent/runs';
+const STEPS = '/admin/agent/steps';
 
 /** Metadata only. User-authored content is retrieved through the audited endpoint. */
 export interface AdminRun {
@@ -155,6 +156,43 @@ export interface AdminLlmRequestPage {
   next_cursor: string | null;
 }
 
+/** One model request of a turn, with the turn and the run of it that made it. */
+export interface AdminStep extends AdminLlmRequest {
+  job_id: string;
+  attempt_no: number;
+}
+
+/**
+ * How completely a steps page read one turn's requests. `partial`: a run had
+ * more requests than a page reads, and the turn's own page lists them all.
+ * `unavailable`: a run's requests could not be read, and `reason` says why.
+ */
+export type StepCoverage = 'complete' | 'partial' | 'unavailable' | 'not_started';
+
+export interface AdminStepTurn {
+  job_id: string;
+  thread_id: string | null;
+  turn_no: number;
+  user_id: string;
+  repo: string;
+  runtime: string;
+  state: AgentJobApiState;
+  created_at: string;
+  coverage: StepCoverage;
+  reason: string | null;
+}
+
+/** The steps of one page of turns, newest request first. */
+export interface AdminStepsPage {
+  since: string;
+  until: string;
+  fetched_at: string;
+  source: 'gateway_api_logs';
+  turns: AdminStepTurn[];
+  steps: AdminStep[];
+  next_cursor: string | null;
+}
+
 function query(values: Record<string, string | number | undefined>): string {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(values)) {
@@ -176,6 +214,19 @@ export function getAdminRuns(
   signal?: AbortSignal,
 ): Promise<AdminRunsPage> {
   return read(`${RUNS}${query({ ...filters })}`, signal);
+}
+
+/**
+ * One page of steps: the model requests of the next few turns in a selection.
+ *
+ * The page size counts turns and is the server's to choose, so the list's own
+ * `limit` is not sent; the cursor is the runs list's.
+ */
+export function getAdminSteps(
+  filters: AdminRunFilters,
+  signal?: AbortSignal,
+): Promise<AdminStepsPage> {
+  return read(`${STEPS}${query({ ...filters, limit: undefined })}`, signal);
 }
 
 export function getAdminRun(jobId: string, signal?: AbortSignal): Promise<AdminRunDetail> {

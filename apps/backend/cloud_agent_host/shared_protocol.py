@@ -39,9 +39,7 @@ from cloud_agent_shared.shared_protocol import (
     SHARED_MEMBER_ACCOUNTING_VERSION,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
-    SHARED_SANDBOX_PROTOCOL,
     SHARED_SANDBOX_RUNTIME_PINS,
-    SHARED_SANDBOX_V1_HELPER_PINS,
     has_shared_deployment_capability,
     shared_deployment_capability,
 )
@@ -60,9 +58,7 @@ __all__ = [
     "SHARED_MEMBER_ACCOUNTING_VERSION",
     "SHARED_SANDBOX_CAPABILITY",
     "SHARED_SANDBOX_HELPER_PINS",
-    "SHARED_SANDBOX_PROTOCOL",
     "SHARED_SANDBOX_RUNTIME_PINS",
-    "SHARED_SANDBOX_V1_HELPER_PINS",
     "has_shared_deployment_capability",
     "shared_deployment_capability",
 ]

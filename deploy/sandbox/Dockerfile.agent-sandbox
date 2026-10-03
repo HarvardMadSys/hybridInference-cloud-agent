@@ -206,6 +206,7 @@ LABEL org.freeinference.runtime.claude-code.version="${CLAUDE_CODE_VERSION}" \
       org.freeinference.helper.claude-agent-sdk.version="0.2.148" \
       org.freeinference.helper.http-agent-live-bridge.version="2" \
       org.freeinference.helper.guest-observer.version="2" \
+      org.freeinference.helper.claude-session-fork.version="2" \
       org.freeinference.helper.member-window.version="1" \
       org.freeinference.helper.tool-mark.version="1" \
       org.freeinference.runtime.codex.version="${CODEX_VERSION}" \
@@ -218,8 +219,7 @@ LABEL org.freeinference.runtime.claude-code.version="${CLAUDE_CODE_VERSION}" \
       org.freeinference.runtime.codex.versions="${CODEX_VERSIONS}" \
       org.freeinference.runtime.pi.versions="${PI_VERSIONS}" \
       org.freeinference.runtime.opencode.versions="${OPENCODE_VERSIONS}" \
-      org.freeinference.runtime.kilo.versions="${KILO_VERSIONS}" \
-      org.freeinference.shared-sandbox.protocol="v2"
+      org.freeinference.runtime.kilo.versions="${KILO_VERSIONS}"
 
 # What this image is, in the two places a deployment looks: OCI's own labels,
 # and one of ours naming the artifact's role. A resolver reads both out of the

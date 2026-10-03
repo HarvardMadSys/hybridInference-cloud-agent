@@ -122,14 +122,13 @@ from cloud_agent_host.shared_protocol import (
     PROFILING_CONTROL_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
-    SHARED_SANDBOX_PROTOCOL,
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
 from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.git.source_archive import build_upload_archive
-from cloud_agent_shared.shared_protocol import mid_turn_input_capability
+from cloud_agent_shared.shared_protocol import FORK_HELPER, mid_turn_input_capability
 
 DEFAULT_LEASE_TTL_S = 120.0
 HEARTBEAT_INTERVAL_S = 30.0
@@ -1148,8 +1147,6 @@ def _shared_live_host_capabilities(
     digest = stamp.get("sandbox_image_digest")
     if not isinstance(digest, str) or not digest.strip():
         return []
-    if stamp.get("shared_sandbox_protocol") != SHARED_SANDBOX_PROTOCOL:
-        return []
     versions = stamp.get("runtime_versions")
     if not isinstance(versions, dict) or any(
         versions.get(runtime_id) != version
@@ -1229,6 +1226,15 @@ def _claim_attestation(backend: SandboxBackend) -> dict[str, Any]:
     # needed to use it; a sibling replica's host heartbeat cannot stand in for
     # those process-local facts during a rolling deployment.
     stamp["runner_capabilities"] = _shared_live_host_capabilities(backend, stamp)
+    if stamp["runner_capabilities"]:
+        # For a control plane older than this release. Hosts roll out before
+        # the API, so a replacement runner polls that API for a while, and it
+        # refuses every claim that does not name the image's shared-sandbox
+        # protocol. This image has no such label. Its "v2" meant a fork
+        # helper that takes an anchor, which the capabilities above already
+        # required. This control plane reads nothing from it. Remove once
+        # every deployment's control plane is at least this release.
+        stamp["shared_sandbox_protocol"] = "v2"
     return stamp
 
 
@@ -1856,8 +1862,8 @@ def _run_shared_live_attempt(
                 # What the image a new container is created from declares, so
                 # Fork can ask it of this group after the host moves on to a
                 # newer image. An existing group recorded its own already.
-                "shared_sandbox_protocol": (
-                    None if existing else (stamp.get("shared_sandbox_protocol") or None)
+                "fork_helper_version": (
+                    None if existing else (stamp.get("helper_versions") or {}).get(FORK_HELPER)
                 ),
             }
         )

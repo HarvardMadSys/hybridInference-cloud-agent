@@ -7,11 +7,49 @@ title, thread ID, owner, repository, current conversation state, latest agent
 and model, turn counts, and last activity. CPU, memory and accounting retain
 their existing execution scope in the turn detail.
 
-`/admin/conversations` is the canonical list. The previous `/admin/runs` entry
-also renders this list, preserving existing usage bookmarks. The secondary
-“All execution records” link opens the existing run table at `/admin/runs/all`.
-Existing `/admin/runs/{job_id}` links and APIs continue to work; a turn detail
-links back to its conversation with the originating selection.
+The admin UI names the levels **session → turn → step**: a session is a
+conversation (`agent_threads`), a turn is one user message and the agent work
+it starts (`agent_jobs`), and a step is one model request, listed as LLM
+requests on the turn page. Only the UI labels changed; the database and the
+API keep `thread`, `job` and `conversations`.
+
+Attempts are not a level of the admin. A turn normally runs once; the
+platform starts another run only when one stops reporting or cannot start.
+The turn page shows the latest run's server, times and resource measurements,
+lists the LLM requests of every run in the order the runs happened, and says in
+one line when a turn was restarted and how each earlier run ended.
+
+The admin's **Activity** tab lives at `/admin/activity`. The previous
+`/admin/sessions`, `/admin/conversations` and `/admin/runs` entries render the
+same page, preserving existing bookmarks and usage links; one session's page is
+`/admin/sessions/{thread_id}`. The tab switches between three levels of one
+selection:
+**Sessions** (one row per session with a matching turn), **Turns** (one row per
+matching turn, from every session, newest first) and **Steps** (one row per
+model request of those turns, newest first). All three share the same window,
+result and linked filters, so switching changes what a row stands for, not
+which turns match. `?level=turns` or `?level=steps` opens that level, and the
+former `/admin/runs/all` table redirects to Turns. Existing
+`/admin/runs/{job_id}` links and APIs continue to work; a turn detail links
+back to its session with the originating selection.
+
+## Steps
+
+The gateway lists requests one grant window at a time; there is no read
+across turns. `GET /admin/agent/steps` therefore reads a page of turns with
+the runs list's own filters, order and cursor (five turns by default, at most
+ten), then each turn's stored references, and asks the gateway for up to 50
+requests per run, four reads in flight at once. The rows are merged newest
+first; the order is exact within a page, and a long turn on a later page can
+hold requests newer than a page's last row.
+
+Every turn read is listed with its coverage. `partial`: a run had more than 50
+requests, or the turn more runs than a page reads; the turn's own page lists
+everything. `unavailable`: a run's requests could not be read, with the stored
+reference's reason or `gateway_unavailable`. A run that never started is
+skipped, as on the turn page. A page above the 256 KiB admin response ceiling
+is refused whole rather than trimmed. Like the per-turn request page, the read
+writes nothing and renews no grant.
 
 ## Selection and pagination
 

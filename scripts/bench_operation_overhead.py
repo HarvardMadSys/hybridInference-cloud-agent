@@ -753,7 +753,6 @@ async def _seed_workspace_rows(storage: Any) -> dict[str, Any]:
         NATIVE_FORK_AT_ANCHOR_CAPABILITY,
         SHARED_SANDBOX_CAPABILITY,
         SHARED_SANDBOX_HELPER_PINS,
-        SHARED_SANDBOX_PROTOCOL,
         SHARED_SANDBOX_RUNTIME_PINS,
         shared_deployment_capability,
     )
@@ -792,7 +791,6 @@ async def _seed_workspace_rows(storage: Any) -> dict[str, Any]:
         host_credential_hash=BENCH_HOST_CREDENTIAL,
         claim_attestation={
             "sandbox_image_digest": BENCH_IMAGE_DIGEST,
-            "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
             "runner_capabilities": capabilities,
             "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
             "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),

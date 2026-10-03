@@ -10,7 +10,7 @@ import { SessionStatistics } from './SessionStatistics';
 
 afterEach(cleanup);
 
-describe('session statistics', () => {
+describe('turn statistics', () => {
   it('shows human-readable performance metrics separately from token totals with estimate provenance', () => {
     render(
       <SessionStatistics
@@ -24,7 +24,7 @@ describe('session statistics', () => {
       />,
     );
 
-    const section = within(screen.getByRole('region', { name: 'Session statistics' }));
+    const section = within(screen.getByRole('region', { name: 'Turn statistics' }));
     expect(section.getByText('27m 47s')).toBeVisible();
     expect(section.getByText('108m 10s')).toBeVisible();
     expect(section.getByText('2.9s')).toBeVisible();
@@ -40,7 +40,7 @@ describe('session statistics', () => {
     );
     expect(section.getByText('Avg time to first token (TTFT)')).toHaveAttribute(
       'title',
-      expect.stringContaining('across executions with a recorded sample'),
+      expect.stringContaining('averaged over runs with a recorded sample'),
     );
     expect(section.getByText('Tokens per second (TPS)')).toHaveAttribute(
       'title',

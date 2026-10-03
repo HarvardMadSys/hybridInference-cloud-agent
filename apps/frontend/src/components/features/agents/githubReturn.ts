@@ -114,3 +114,30 @@ export function forgetComposerDraft(): void {
   remove(DRAFT_KEY);
   remove(RETURN_KEY);
 }
+
+const GITHUB_ACCESS_REQUEST = 'agents:github-access-request';
+
+/**
+ * Hand a trip to GitHub to the new-task composer, when one is on screen.
+ *
+ * The composer is what holds the owner's draft, so a trip started elsewhere on
+ * the page — the sidebar's getting-started step — goes through it, and the
+ * task written so far comes back with the owner. Whether a composer took the
+ * trip; when none did, the caller makes it.
+ */
+export function requestGitHubAccess(kind: 'connect' | 'manage'): boolean {
+  const request = new CustomEvent(GITHUB_ACCESS_REQUEST, { detail: kind, cancelable: true });
+  return !window.dispatchEvent(request);
+}
+
+/** Take the trips to GitHub asked for elsewhere on the page. Returns the unsubscribe. */
+export function onGitHubAccessRequest(take: (kind: 'connect' | 'manage') => void): () => void {
+  const listener = (request: Event) => {
+    const kind = (request as CustomEvent<unknown>).detail;
+    if (kind !== 'connect' && kind !== 'manage') return;
+    request.preventDefault();
+    take(kind);
+  };
+  window.addEventListener(GITHUB_ACCESS_REQUEST, listener);
+  return () => window.removeEventListener(GITHUB_ACCESS_REQUEST, listener);
+}

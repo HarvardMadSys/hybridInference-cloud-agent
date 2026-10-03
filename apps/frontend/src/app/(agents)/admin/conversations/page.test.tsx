@@ -10,6 +10,7 @@ import type {
   AdminConversationsPage,
 } from '@/lib/api/adminConversations';
 import { getAdminConversation, getAdminConversations } from '@/lib/api/adminConversations';
+import { getAdminRuns } from '@/lib/api/adminRuns';
 import { APIError } from '@/lib/utils/errors';
 
 const context = vi.hoisted(() => ({ admin: true, user: 'admin', query: '', threadId: 'thread-1' }));
@@ -35,10 +36,17 @@ vi.mock('@/lib/api/adminConversations', async (importOriginal) => ({
   getAdminConversations: vi.fn(),
   getAdminConversation: vi.fn(),
 }));
+vi.mock('@/lib/api/adminRuns', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/adminRuns')>()),
+  getAdminRuns: vi.fn(),
+}));
 
 import List from './page';
 import Detail from './[threadId]/page';
 import PreviousEntry from '../runs/page';
+import ActivityList from '../activity/page';
+import SessionList from '../sessions/page';
+import SessionDetail from '../sessions/[threadId]/page';
 
 const since = '2026-09-10T08:00:00Z';
 const until = '2026-09-17T08:00:00Z';
@@ -104,37 +112,42 @@ beforeEach(() => {
   Object.assign(context, { admin: true, user: 'admin', query: '', threadId: 'thread-1' });
   vi.mocked(getAdminConversations).mockResolvedValue(page());
   vi.mocked(getAdminConversation).mockResolvedValue(detail());
+  vi.mocked(getAdminRuns).mockResolvedValue({ runs: [], next_cursor: null, since, until });
 });
 afterEach(cleanup);
 
-describe('conversation navigation', () => {
-  it('makes a titled conversation the row identity and separates state from turn results', async () => {
+describe('session navigation', () => {
+  it('makes a titled session the row identity and separates state from turn results', async () => {
     render(<List />);
     const link = await screen.findByRole('link', { name: 'Fix login' });
     const target = new URL(link.getAttribute('href')!, 'http://test');
-    expect(target.pathname).toBe('/admin/conversations/thread-1');
+    expect(target.pathname).toBe('/admin/sessions/thread-1');
     expect(target.searchParams.get('since')).toBe(since);
-    expect(screen.getByText('thread-1')).toBeInTheDocument();
+    // The session ID is the title's tooltip rather than a line of its own.
+    expect(link).toHaveAttribute('title', 'thread-1');
     expect(screen.queryByText('job-3')).not.toBeInTheDocument();
     expect(screen.getByText('idle')).toBeInTheDocument();
     expect(screen.queryByText('succeeded', { selector: 'span' })).not.toBeInTheDocument();
     expect(screen.getByRole('cell', { name: '3' })).toBeInTheDocument();
     expect(screen.queryByRole('columnheader', { name: 'CPU' })).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Conversations' })).toHaveAttribute(
-      'aria-current',
-      'page',
-    );
+    // A turn is reached through its session; there is no second run list.
+    expect(screen.queryByRole('link', { name: /execution records/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Activity' })).toHaveAttribute('aria-current', 'page');
     const filters = vi.mocked(getAdminConversations).mock.calls[0][0];
     expect(Date.parse(filters.until!) - Date.parse(filters.since!)).toBe(7 * 86400000);
   });
 
-  it('opens the conversation list at the previous Runs entry point', async () => {
-    render(<PreviousEntry />);
-    expect(await screen.findByRole('heading', { name: 'Conversations' })).toBeInTheDocument();
+  it.each([
+    ['/admin/activity', ActivityList],
+    ['/admin/sessions', SessionList],
+    ['/admin/runs', PreviousEntry],
+  ])('opens the session list at %s', async (_, Entry) => {
+    render(<Entry />);
+    expect(await screen.findByRole('heading', { name: 'Sessions' })).toBeInTheDocument();
     await screen.findByRole('link', { name: 'Fix login' });
   });
 
-  it('falls back to the conversation ID and keeps conversations with identical titles separate', async () => {
+  it('falls back to the session ID and keeps sessions with identical titles separate', async () => {
     vi.mocked(getAdminConversations).mockResolvedValue(
       page([
         conversation(),
@@ -145,11 +158,11 @@ describe('conversation navigation', () => {
     render(<List />);
     expect(await screen.findAllByRole('link', { name: 'Fix login' })).toHaveLength(2);
     expect(screen.getByRole('link', { name: 'thread-3' }).getAttribute('href')).toContain(
-      '/admin/conversations/thread-3?',
+      '/admin/sessions/thread-3?',
     );
   });
 
-  it('preserves usage filters, a fixed window, and pagination in conversation links', async () => {
+  it('preserves usage filters, a fixed window, and pagination in session links', async () => {
     context.query = new URLSearchParams({
       since,
       until,
@@ -163,11 +176,18 @@ describe('conversation navigation', () => {
       .mockResolvedValue(page([conversation({ thread_id: 'thread-2', title: 'Second chat' })]));
     render(<List />);
     const link = await screen.findByRole('link', { name: 'Fix login' });
+    // A linked window is no preset, so the toolbar names its days.
+    expect(screen.getByLabelText('Turn created')).toHaveValue('custom');
+    expect(screen.getByText('Sep 10 – Sep 17')).toBeInTheDocument();
+    // No control shows the identities the link arrived with, so they are stated.
+    expect(
+      screen.getByText('User: owner · Repository: org/repo · Agent: claude-code · Model: model-a'),
+    ).toBeInTheDocument();
     const params = new URL(link.getAttribute('href')!, 'http://test').searchParams;
     expect(Object.fromEntries(params)).toEqual(
       Object.fromEntries(new URLSearchParams(context.query)),
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Load more conversations' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Load more sessions' }));
     await screen.findByRole('link', { name: 'Second chat' });
     expect(getAdminConversations).toHaveBeenLastCalledWith(
       expect.objectContaining({ since, until, cursor: 'next', model: 'model-a' }),
@@ -193,7 +213,7 @@ describe('conversation navigation', () => {
       .mockResolvedValueOnce(page([conversation({ title: 'Failed conversation' })]));
     render(<List />);
     await screen.findByRole('link', { name: 'Fix login' });
-    fireEvent.click(screen.getByRole('button', { name: 'Load more conversations' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Load more sessions' }));
     fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
     await screen.findByRole('link', { name: 'Failed conversation' });
     expect(vi.mocked(getAdminConversations).mock.lastCall![0]).toMatchObject({
@@ -224,7 +244,7 @@ describe('conversation navigation', () => {
     render(<List />);
     await screen.findByRole('alert');
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
-    expect(await screen.findByText('No conversations match these filters.')).toBeInTheDocument();
+    expect(await screen.findByText('No sessions match these filters.')).toBeInTheDocument();
   });
 
   it('clears cross-user rows on a denied later page', async () => {
@@ -233,7 +253,7 @@ describe('conversation navigation', () => {
       .mockRejectedValueOnce(new APIError('FORBIDDEN', 'Denied', 403));
     render(<List />);
     await screen.findByRole('link', { name: 'Fix login' });
-    fireEvent.click(screen.getByRole('button', { name: 'Load more conversations' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Load more sessions' }));
     await screen.findByText('Admin access required');
     expect(screen.queryByText('Fix login')).not.toBeInTheDocument();
   });
@@ -252,7 +272,54 @@ describe('conversation navigation', () => {
   });
 });
 
-describe('conversation turns', () => {
+describe('level switch', () => {
+  it('switches between sessions and turns without losing the selection', async () => {
+    render(<List />);
+    await screen.findByRole('link', { name: 'Fix login' });
+    expect(screen.getByRole('button', { name: 'Sessions', pressed: true })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
+    fireEvent.change(screen.getByLabelText('Turn created'), { target: { value: '30' } });
+    await waitFor(() => expect(getAdminConversations).toHaveBeenCalledTimes(3));
+    const selection = vi.mocked(getAdminConversations).mock.lastCall![0];
+    expect(getAdminRuns).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Turns' }));
+    expect(screen.getByRole('button', { name: 'Turns', pressed: true })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Level' })).toHaveAttribute(
+      'title',
+      'Turns created in the selected window from every session, newest first.',
+    );
+    await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(1));
+    // The same turns, read one per row: the window and the result carry over.
+    expect(vi.mocked(getAdminRuns).mock.lastCall![0]).toEqual(selection);
+    expect(screen.getByLabelText('Turn result')).toHaveValue('failed');
+    expect(screen.getByLabelText('Turn created')).toHaveValue('30');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
+    await waitFor(() => expect(getAdminConversations).toHaveBeenCalledTimes(4));
+    expect(vi.mocked(getAdminConversations).mock.lastCall![0]).toEqual(selection);
+  });
+
+  it('opens the turn level from a link and keeps its filters', async () => {
+    context.query = new URLSearchParams({
+      level: 'turns',
+      since,
+      until,
+      model: 'model-a',
+    }).toString();
+    render(<List />);
+    await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('button', { name: 'Turns', pressed: true })).toBeInTheDocument();
+    expect(vi.mocked(getAdminRuns).mock.lastCall![0]).toMatchObject({
+      since,
+      until,
+      model: 'model-a',
+    });
+    expect(getAdminConversations).not.toHaveBeenCalled();
+  });
+});
+
+describe('session turns', () => {
   it('keeps all turns in order, marks matches and carries selection to execution details', async () => {
     context.query = new URLSearchParams({ since, until, model: 'model-a' }).toString();
     render(<Detail />);
@@ -266,9 +333,18 @@ describe('conversation turns', () => {
       'href',
       `/admin/runs/job-3?${context.query}`,
     );
-    expect(screen.getByRole('link', { name: '← All conversations' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: '← All sessions' })).toHaveAttribute(
       'href',
-      `/admin/conversations?${context.query}`,
+      `/admin/activity?${context.query}`,
+    );
+  });
+
+  it('opens a session at its /admin/sessions address', async () => {
+    render(<SessionDetail />);
+    await screen.findByRole('heading', { name: 'Fix login' });
+    expect(screen.getByRole('link', { name: '← All sessions' })).toHaveAttribute(
+      'href',
+      '/admin/activity',
     );
   });
 
@@ -301,7 +377,7 @@ describe('conversation turns', () => {
     );
   });
 
-  it('clears the previous conversation and aborts older-turn reads when navigating', async () => {
+  it('clears the previous session and aborts older-turn reads when navigating', async () => {
     const pending = deferred<AdminConversationDetail>();
     vi.mocked(getAdminConversation)
       .mockResolvedValueOnce({ ...detail(), next_cursor: 'older' })
@@ -322,7 +398,7 @@ describe('conversation turns', () => {
     expect(screen.queryByRole('link', { name: 'Turn 3' })).not.toBeInTheDocument();
   });
 
-  it('clears a conversation after admin access is revoked during paging', async () => {
+  it('clears a session after admin access is revoked during paging', async () => {
     vi.mocked(getAdminConversation)
       .mockResolvedValueOnce({ ...detail(), next_cursor: 'older' })
       .mockRejectedValueOnce(new APIError('FORBIDDEN', 'Denied', 403));

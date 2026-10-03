@@ -71,11 +71,12 @@ class AttemptCommands(Protocol):
         surface, which is where the question is answerable.
 
         Every profile requires a shared-live capability attestation from the
-        exact claiming replica. New groups require the current protocol; the
-        explicitly compatible v1 protocol may claim only an existing group on
-        its owning host. ``untrusted-kata-v1`` additionally requires the Kata
-        runtime plus unequal host/guest kernels. The mutable heartbeat row is
-        not evidence for a particular replica during a rolling deploy.
+        exact claiming replica. New groups require the completed target
+        deployment; a replica of the previous generation may claim only an
+        existing group on its owning host. ``untrusted-kata-v1`` additionally
+        requires the Kata runtime plus unequal host/guest kernels. The mutable
+        heartbeat row is not evidence for a particular replica during a
+        rolling deploy.
         """
         ...
 

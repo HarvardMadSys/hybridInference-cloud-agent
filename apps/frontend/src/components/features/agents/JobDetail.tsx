@@ -85,6 +85,7 @@ import {
   ComposerSendButton,
 } from './ConversationComposer';
 import { hasLostContext, ownerRunNote } from './conversationJob';
+import { useFirstRun } from './firstRun';
 import { SideChat } from './SideChat';
 import { WorkspaceTabBar } from './WorkspaceTabBar';
 import { useWorkspaceTabs, type WorkspaceTab } from './useWorkspaceTabs';
@@ -214,12 +215,58 @@ function RunNotices({ job }: { job: AgentJob }) {
   );
 }
 
-function OutcomeCard({ job, onOpenDiff }: { job: AgentJob; onOpenDiff: () => void }) {
+/**
+ * The first draft PR someone gets: where it is, that merging is theirs, and
+ * that the conversation goes on. Said once; later turns get the plain actions.
+ */
+function FirstRunOutcome({ job, onOpenDiff }: { job: AgentJob; onOpenDiff: () => void }) {
+  const t = useT();
+  return (
+    <div className="mt-6 flex gap-3 rounded-xl border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-gray-950 px-4 py-3.5">
+      <span
+        aria-hidden="true"
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-emerald-600 ring-1 ring-inset ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:ring-emerald-500/25"
+      >
+        <svg
+          className="h-3.5 w-3.5"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={2.5}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="m6 12 4 4 8-9" />
+        </svg>
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium text-gray-900 dark:text-gray-50">
+          {t('firstRun.doneTitle')}
+        </p>
+        <p className="mt-0.5 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+          {t('firstRun.doneBody')}
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <RunActions job={job} onOpenDiff={onOpenDiff} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OutcomeCard({
+  job,
+  onOpenDiff,
+  firstRun = false,
+}: {
+  job: AgentJob;
+  onOpenDiff: () => void;
+  firstRun?: boolean;
+}) {
   if (job.state === 'running' || job.state === 'queued') return null;
   const successful = job.state === 'done' || job.state === 'needs_review';
   if (successful) {
     const hasActions = job.diffFiles.length > 0 || Boolean(job.prUrl);
     if (!hasActions && !hasLostContext(job)) return null;
+    if (firstRun && job.prUrl) return <FirstRunOutcome job={job} onOpenDiff={onOpenDiff} />;
     return (
       <div className="mt-6">
         {hasActions ? (
@@ -599,6 +646,10 @@ export function JobDetail({
   // refused rather than silently overwritten.
   const currentGoal = job.goal ?? null;
   const threadId = job.threadId ?? job.id;
+  // The first turn of the owner's first conversation explains itself as it
+  // goes, and says where its draft PR is when it has one.
+  const { onlyThreadId } = useFirstRun();
+  const firstRun = (job.turnNo ?? 1) === 1 && onlyThreadId === threadId;
   const goalCommand = useGoalCommand({
     value: followUp,
     setValue: setFollowUp,
@@ -1523,6 +1574,7 @@ export function JobDetail({
                           event={event}
                           blockKey={eventBlockKey(job.id, event, index)}
                           busy={forking}
+                          firstRun={firstRun}
                           footer={index === lastVisibleMessageIndex ? usageFooter : undefined}
                           onFork={
                             event.kind === 'message' &&
@@ -1563,7 +1615,11 @@ export function JobDetail({
                       </button>
                     </div>
 
-                    <OutcomeCard job={job} onOpenDiff={() => openWorkspace('git')} />
+                    <OutcomeCard
+                      job={job}
+                      firstRun={firstRun}
+                      onOpenDiff={() => openWorkspace('git')}
+                    />
                     {selectedAttemptIsCurrent ? <RunNotices job={job} /> : null}
                     {usageFooter && lastVisibleMessageIndex < 0 && currentReplyId === undefined ? (
                       <div className="mt-4">{usageFooter}</div>

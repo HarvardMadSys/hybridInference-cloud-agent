@@ -39,7 +39,6 @@ from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
-    SHARED_SANDBOX_PROTOCOL,
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
@@ -56,7 +55,6 @@ def _claim_body(worker_id: str) -> dict[str, Any]:
         "worker_id": worker_id,
         "attestation": {
             "sandbox_image_digest": "sha256:lifecycle-test-image",
-            "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
             "runner_capabilities": [
                 SHARED_SANDBOX_CAPABILITY,
                 NATIVE_FORK_AT_ANCHOR_CAPABILITY,

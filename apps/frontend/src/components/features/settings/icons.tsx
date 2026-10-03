@@ -1,5 +1,5 @@
 // Icons for the settings surface. Inline rather than a dependency: the app
-// draws every other icon this way, and three glyphs do not earn a package.
+// draws every other icon this way, and a handful of glyphs do not earn a package.
 
 const BASE = 'h-4 w-4 shrink-0';
 
@@ -88,6 +88,42 @@ export function CloseIcon({ className = BASE }: { className?: string }) {
       aria-hidden="true"
     >
       <path d="m6 6 12 12M18 6 6 18" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function HelpIcon({ className = BASE }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="9" />
+      <path
+        d="M9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="16.9" r=".7" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export function CheckIcon({ className = BASE }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      aria-hidden="true"
+    >
+      <path d="m6 12 4 4 8-9" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

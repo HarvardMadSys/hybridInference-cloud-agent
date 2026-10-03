@@ -1014,9 +1014,6 @@ async def test_a_host_credential_names_the_claiming_machine(claim_client):
                 # Non-CLI helpers (currently the Claude Agent SDK fork
                 # helper) are attested separately from runtime binaries.
                 "helper_versions": {},
-                # Shared-live claims carry a process-local protocol/version
-                # fence; omitted values normalize to safe non-attestation.
-                "shared_sandbox_protocol": None,
                 "runner_capabilities": [],
                 "host_kernel": "host",
                 "guest_kernel": "guest",

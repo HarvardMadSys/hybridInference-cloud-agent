@@ -132,10 +132,10 @@ export function StartupMeasurement({
         </button>
       </div>
       <p className="mt-1 max-w-3xl text-xs text-gray-500 dark:text-gray-400">
-        Opt-in profiling of this attempt&rsquo;s startup, read by job and attempt from the same
-        stored records the Measurements page lists. Runner-rooted: it covers the claim through the
-        supervisor dispatching the prompt. Control-plane queueing, first model output and anything
-        the browser waits for are outside it.
+        Opt-in profiling of this turn&rsquo;s startup, read from the same stored records the
+        Measurements page lists. Runner-rooted: it covers the claim through the supervisor
+        dispatching the prompt. Control-plane queueing, first model output and anything the browser
+        waits for are outside it.
       </p>
 
       <div className={`${CARD} mt-4 overflow-hidden`}>
@@ -152,7 +152,7 @@ export function StartupMeasurement({
         {rows !== null && rows.length === 0 && !error && (
           <div className="px-5 py-4">
             <p className="text-sm text-gray-700 dark:text-gray-200">
-              No saved startup measurement for this attempt.
+              No saved startup measurement for this turn.
             </p>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
               {emptyReason ?? 'An empty page is not zero latency.'} A missing sample is{' '}
@@ -195,7 +195,7 @@ export function StartupMeasurement({
             </p>
             {rows.length > 1 && (
               <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">
-                {rows.length} startup records are stored for this attempt. A retry is a second
+                {rows.length} startup records are stored for this turn. A retry is a second
                 measurement, not a correction of the first, so read them separately rather than
                 averaging them.
               </p>
@@ -212,7 +212,7 @@ export function StartupMeasurement({
                 className="text-crimson hover:underline dark:text-crimson-light"
                 href={filterHref}
               >
-                Every stored record for this attempt
+                Every stored record for this turn
               </Link>
             </p>
           </div>

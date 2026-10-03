@@ -35,7 +35,6 @@ from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepositor
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
-    SHARED_SANDBOX_PROTOCOL,
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
@@ -140,7 +139,6 @@ def _kata_attestation(**overrides) -> dict:
     stamp = {
         "sandbox_runtime": "io.containerd.kata.v2",
         "sandbox_image_digest": "sandbox@sha256:claim",
-        "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
         "runner_capabilities": [
             "shared-sandbox-v1",
             NATIVE_FORK_AT_ANCHOR_CAPABILITY,
@@ -160,7 +158,6 @@ def _shared_attestation(**overrides) -> dict:
     stamp = {
         "sandbox_runtime": "",
         "sandbox_image_digest": "sandbox@sha256:shared",
-        "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
         "runner_capabilities": [
             "shared-sandbox-v1",
             NATIVE_FORK_AT_ANCHOR_CAPABILITY,
@@ -589,7 +586,9 @@ async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(
             ]
         ),
         _shared_attestation(sandbox_image_digest=""),
-        _shared_attestation(shared_sandbox_protocol="v0"),
+        _shared_attestation(
+            helper_versions={**SHARED_SANDBOX_HELPER_PINS, "claude-session-fork": "1"}
+        ),
         _shared_attestation(
             helper_versions={
                 "claude-agent-sdk": "0.2.147",

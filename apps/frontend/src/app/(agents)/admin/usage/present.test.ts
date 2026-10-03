@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { money, metric, number, utcDate } from '@/app/(agents)/admin/runs/shared';
 import {
-  identityFromForm,
+  activityHref,
   presetKey,
   runsHref,
   selectionFromQuery,
@@ -51,11 +51,6 @@ describe('admin usage window', () => {
     expect(selectionFromQuery('')).toEqual({ filters: null, error: null, linked: false });
   });
 
-  it('drops a cleared identity filter from the next request', () => {
-    const values: Record<string, string> = { user_id: '', model: ' m1 ', runtime: '' };
-    expect(identityFromForm((key) => values[key] ?? '')).toEqual({ model: 'm1' });
-  });
-
   it('writes the selection under the path it is actually served on', () => {
     expect(urlFor('/agents/admin/usage', { since: 'a', until: 'b', model: 'm' })).toBe(
       '/agents/admin/usage?since=a&until=b&model=m',
@@ -99,6 +94,18 @@ describe('admin usage window', () => {
     const params = new URLSearchParams(href.slice(href.indexOf('?') + 1));
     expect(params.get('since')).toBe('2026-09-04T00:00:00Z');
     expect(params.get('until')).toBe('2026-09-05T00:00:00Z');
+  });
+
+  it('opens Activity on the whole selection, leaving out empty filters', () => {
+    const href = activityHref({
+      since: '2026-09-21T00:00:00.000Z',
+      until: '2026-09-28T00:00:00.000Z',
+      model: 'glm-5.1',
+      repo: '',
+    });
+    expect(href).toBe(
+      '/admin/activity?since=2026-09-21T00%3A00%3A00.000Z&until=2026-09-28T00%3A00%3A00.000Z&model=glm-5.1',
+    );
   });
 
   it('offers no link for an unknown identity or one no filter can express', () => {

@@ -53,7 +53,7 @@ export function UsageSnapshot({ usage }: { usage: AgentJobUsageApi }) {
           <div className="flex flex-wrap gap-x-5 gap-y-2 border-b border-gray-100 px-5 py-4 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
             {ledger.missing_attempts > 0 && (
               <span className="text-amber-700 dark:text-amber-400">
-                {ledger.missing_attempts} execution(s) have no gateway totals.
+                Gateway totals are missing for part of this turn.
               </span>
             )}
             {ledger.estimated_calls > 0 && (

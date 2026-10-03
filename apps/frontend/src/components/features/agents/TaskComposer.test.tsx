@@ -4,15 +4,23 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createAgentJob, getAgentConfig, listRepoBranches } from '@/lib/api/agents';
-import type { AgentConfigApi } from '@/lib/api/agents';
+import {
+  createAgentJob,
+  getAgentConfig,
+  listAgentConversations,
+  listRepoBranches,
+} from '@/lib/api/agents';
+import type { AgentConfigApi, AgentConversationApi, AgentJobApi } from '@/lib/api/agents';
 
+import { FirstRunProvider } from './firstRun';
+import { requestGitHubAccess } from './githubReturn';
 import { TaskComposer } from './TaskComposer';
 
 const navigation = vi.hoisted(() => ({ push: vi.fn() }));
 
 vi.mock('next/navigation', () => ({
   useRouter: () => navigation,
+  usePathname: () => '/',
 }));
 
 import { listSkills } from '@/lib/api/skills';
@@ -33,6 +41,7 @@ vi.mock('@/lib/api/attachments', () => ({
 vi.mock('@/lib/api/agents', () => ({
   createAgentJob: vi.fn(),
   getAgentConfig: vi.fn(),
+  listAgentConversations: vi.fn(),
   listRepoBranches: vi.fn(),
 }));
 
@@ -48,6 +57,15 @@ function config(overrides: Partial<AgentConfigApi> = {}): AgentConfigApi {
     github_connected: true,
     github_install_url: null,
     ...overrides,
+  };
+}
+
+function conversation(archived = false): AgentConversationApi {
+  return {
+    job: { id: 'ajob_0', thread_id: 'thread_0' } as AgentJobApi,
+    title: 'Earlier task',
+    archived,
+    last_activity_at: null,
   };
 }
 
@@ -173,13 +191,17 @@ describe('TaskComposer source-control onboarding', () => {
     navigation.push.mockReset();
     vi.mocked(createAgentJob).mockReset();
     vi.mocked(getAgentConfig).mockReset();
+    vi.mocked(listAgentConversations).mockReset();
     vi.mocked(listRepoBranches).mockReset();
     vi.mocked(listRepoBranches).mockResolvedValue({ default: 'dev', branches: ['dev', 'main'] });
   });
 
   afterEach(() => cleanup());
 
-  it('shows inline GitHub onboarding and a disabled composer when installation is available', async () => {
+  // Someone arriving for the first time writes the task before they have
+  // connected anything: the box takes it, the connect card is the next step,
+  // and the trip to GitHub keeps what they wrote.
+  it('takes a task written before GitHub is connected, and points at connecting to run it', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(
       config({
         github_connected: false,
@@ -191,10 +213,24 @@ describe('TaskComposer source-control onboarding', () => {
     render(<TaskComposer initialRepo="owner/repository" />);
 
     expect(await screen.findByText('Connect GitHub to start')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'What should the agent do?' })).toBeInTheDocument();
-    expect(screen.getByRole('textbox')).toBeDisabled();
+    // Named by the question above it, with no example task in it.
+    const box = screen.getByRole('textbox', { name: 'What should the agent do?' });
+    expect(box).toBeEnabled();
+    expect(box).not.toHaveAttribute('placeholder');
+    fireEvent.change(box, { target: { value: 'Fix the flaky test' } });
+    expect(screen.getByRole('button', { name: /Run/ })).toBeDisabled();
+
+    // Enter cannot run it yet, so it points at the step that is missing.
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(
+      await screen.findByText('Connect GitHub to run it. What you wrote is kept.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveAttribute('data-highlighted', 'true');
+    expect(createAgentJob).not.toHaveBeenCalled();
+    expect(box).toHaveValue('Fix the flaky test');
+
     // Straight to GitHub, noting where to come back to — the Integrations page
-    // used to be where the trip ended.
+    // used to be where the trip ended — and what was written.
     fireEvent.click(screen.getByRole('button', { name: /Connect GitHub/ }));
     await waitFor(() =>
       expect(leaveFor).toHaveBeenCalledWith('https://github.test/login/oauth/authorize'),
@@ -203,11 +239,118 @@ describe('TaskComposer source-control onboarding', () => {
     expect(JSON.parse(sessionStorage.getItem('agents.github.return')!).value).toBe(
       '/?repo=owner%2Frepository',
     );
-    expect(screen.getByRole('button', { name: /Run/ })).toBeDisabled();
+    expect(JSON.parse(sessionStorage.getItem('agents.composer.draft')!).value).toMatchObject({
+      task: 'Fix the flaky test',
+    });
     expect(screen.queryByLabelText('Repository')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Agent')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Model')).not.toBeInTheDocument();
     expect(listRepoBranches).not.toHaveBeenCalled();
+  });
+
+  it('asks where to run a task written before connecting, once back from GitHub', async () => {
+    sessionStorage.setItem(
+      'agents.composer.draft',
+      JSON.stringify({
+        value: { task: 'Fix the flaky test', repo: '', runtime: '', model: '' },
+        savedAt: Date.now(),
+      }),
+    );
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ repos: ['owner/other', 'owner/repository'] }),
+    );
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
+
+    render(<TaskComposer />);
+
+    // Open already, as Enter would have opened it; nothing was chosen for them.
+    const dialog = await screen.findByRole('dialog', { name: 'Repository' });
+    expect(within(dialog).getByRole('searchbox')).toHaveFocus();
+    const box = screen.getByRole('textbox', { name: 'What should the agent do?' });
+    expect(box).toHaveValue('Fix the flaky test');
+    expect(createAgentJob).not.toHaveBeenCalled();
+
+    // Choosing hands the caret back to the task, so the next key sends it.
+    fireEvent.click(within(dialog).getByRole('button', { name: 'owner/repository' }));
+    expect(box).toHaveFocus();
+    await screen.findByLabelText('Branch');
+    fireEvent.keyDown(box, { key: 'Enter' });
+    await waitFor(() =>
+      expect(createAgentJob).toHaveBeenCalledWith(
+        expect.objectContaining({ repo: 'owner/repository', task_prompt: 'Fix the flaky test' }),
+      ),
+    );
+  });
+
+  it('takes a trip to GitHub asked for elsewhere on the page, draft and all', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ github_connected: false, github_install_url: '/agents/integrations' }),
+    );
+    vi.mocked(githubAccessUrl).mockResolvedValue('https://github.test/login/oauth/authorize');
+
+    render(<TaskComposer />);
+    fireEvent.change(await screen.findByRole('textbox'), {
+      target: { value: 'Fix the flaky test' },
+    });
+    // The sidebar's getting-started step asks; this box is the one that leaves.
+    let taken = false;
+    act(() => {
+      taken = requestGitHubAccess('connect');
+    });
+
+    expect(taken).toBe(true);
+    await waitFor(() =>
+      expect(leaveFor).toHaveBeenCalledWith('https://github.test/login/oauth/authorize'),
+    );
+    expect(JSON.parse(sessionStorage.getItem('agents.composer.draft')!).value).toMatchObject({
+      task: 'Fix the flaky test',
+    });
+  });
+
+  // The app's first-run answer, as the layout provides it.
+  function composerInApp() {
+    return render(
+      <FirstRunProvider userId="alice">
+        <TaskComposer />
+      </FirstRunProvider>,
+    );
+  }
+
+  it('tells someone with no task yet what a task becomes', async () => {
+    vi.mocked(listAgentConversations).mockResolvedValue({ conversations: [], next_cursor: null });
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+
+    composerInApp();
+
+    expect(
+      await screen.findByText(
+        'Describe a task. The agent works in an isolated sandbox and opens a draft pull request in your repository.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Runs in an isolated sandbox.')).not.toBeInTheDocument();
+  });
+
+  it('keeps the usual line for someone who has had a task, even an archived one', async () => {
+    vi.mocked(listAgentConversations).mockResolvedValue({
+      conversations: [conversation(true)],
+      next_cursor: null,
+    });
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+
+    composerInApp();
+
+    await waitFor(() => expect(listAgentConversations).toHaveBeenCalled());
+    expect(await screen.findByText('Runs in an isolated sandbox.')).toBeInTheDocument();
+    expect(screen.queryByText(/opens a draft pull request/)).not.toBeInTheDocument();
+  });
+
+  it('asks nothing itself: the answer is the app’s', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+
+    render(<TaskComposer />);
+
+    expect(await screen.findByText('Runs in an isolated sandbox.')).toBeInTheDocument();
+    expect(listAgentConversations).not.toHaveBeenCalled();
   });
 
   // Connected, and the App reaches no repository: the next step is repository

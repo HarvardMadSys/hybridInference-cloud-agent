@@ -12,7 +12,6 @@ from cloud_agent_host.candidate_check import check_candidate
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_HELPER_PINS,
-    SHARED_SANDBOX_PROTOCOL,
     SHARED_SANDBOX_RUNTIME_PINS,
 )
 
@@ -34,7 +33,6 @@ def _backend():
     backend = Mock(spec=ContainerBackend)
     backend.version_stamp.return_value = {
         "sandbox_image_digest": "sha256:abc",
-        "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
         "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
         "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),
     }
@@ -42,7 +40,12 @@ def _backend():
 
 
 @pytest.mark.parametrize(
-    "field,key", [("runtime_versions", "codex"), ("helper_versions", "guest-observer")]
+    "field,key",
+    [
+        ("runtime_versions", "codex"),
+        ("helper_versions", "guest-observer"),
+        ("helper_versions", "claude-session-fork"),
+    ],
 )
 def test_image_pin_drift_names_the_mismatch(field, key):
     backend = _backend()

@@ -48,6 +48,37 @@ def _bench():
     return module
 
 
+def test_every_backend_name_the_benchmark_imports_exists():
+    """Its imports sit inside functions that only a live run reaches.
+
+    Nothing type-checks ``scripts/``, so a removed export would otherwise show
+    up as an ImportError halfway through a benchmark instead of here.
+    """
+    import ast
+    import importlib
+
+    tree = ast.parse(_BENCH_PATH.read_text(encoding="utf-8"))
+    missing = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        if node.module.split(".")[0] not in {
+            "cloud_agent",
+            "cloud_agent_host",
+            "cloud_agent_shared",
+        }:
+            continue
+        module = importlib.import_module(node.module)
+        for alias in node.names:
+            if hasattr(module, alias.name):
+                continue
+            try:
+                importlib.import_module(f"{node.module}.{alias.name}")
+            except ModuleNotFoundError:
+                missing.append(f"{node.module}.{alias.name}")
+    assert not missing, f"the benchmark imports names the backend does not have: {missing}"
+
+
 @pytest.fixture
 def enabled(monkeypatch):
     """One live experiment covering the startup operation for one job."""
