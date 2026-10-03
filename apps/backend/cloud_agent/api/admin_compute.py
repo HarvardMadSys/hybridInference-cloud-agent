@@ -21,7 +21,7 @@ from cloud_agent.application.compute_resources import (
 )
 from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import ComputeRefusal
-from cloud_agent.ports.compute_provider import ProviderError
+from cloud_agent.ports.external.compute_provider import ProviderError
 from cloud_agent.schemas_compute import (  # noqa: TC001 - FastAPI request models.
     AddComputeConnection,
     AddServerRequest,
@@ -54,6 +54,10 @@ _STORAGE_ERRORS: dict[str, tuple[int, str]] = {
     "idempotency_conflict": (409, "This request ID belongs to different parameters."),
     "release_committed": (409, "Release is committed and can no longer be cancelled."),
     "resource_retiring": (409, "The resource is retiring and cannot accept new dependencies."),
+    "external_operation_unresolved": (
+        409,
+        "The external operation is unresolved; reconcile its result before continuing.",
+    ),
     "operation_in_flight": (409, "The operation is running; wait for its result."),
     "operation_not_cancellable": (409, "The operation cannot be cancelled in its current state."),
     "operation_not_retryable": (409, "The operation cannot be retried in its current state."),

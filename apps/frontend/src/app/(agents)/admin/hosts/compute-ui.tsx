@@ -6,9 +6,10 @@ import type { BlockedReason, ComputeField, ComputeOperation } from '@/lib/api/co
 
 export const inputClass =
   'w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 dark:border-white/20 dark:bg-gray-900 dark:text-gray-100';
-export const buttonClass =
-  'rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/20 dark:hover:bg-white/10';
-export const primaryClass = `${buttonClass} bg-crimson text-white hover:bg-crimson/90 dark:hover:bg-crimson/90`;
+const buttonBase =
+  'rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/20';
+export const buttonClass = `${buttonBase} hover:bg-gray-100 dark:hover:bg-white/10`;
+export const primaryClass = `${buttonBase} bg-crimson text-white hover:bg-crimson/90 dark:hover:bg-crimson/90`;
 
 export function Panel({
   title,

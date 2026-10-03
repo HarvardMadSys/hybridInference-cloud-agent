@@ -20,10 +20,13 @@ class ServerQueries:
         repository: ComputeResourceRepository,
         registry: ComputeProviderRegistry,
         secrets: ComputeSecretStore,
+        *,
+        observation_seconds: int,
     ) -> None:
         self.repository = repository
         self.registry = registry
         self.secrets = secrets
+        self.observation_seconds = observation_seconds
 
     async def servers(self) -> dict[str, Any]:
         """Read inventory from one database snapshot; never refresh cloud APIs here."""
@@ -87,6 +90,11 @@ class ServerQueries:
             "expires_at": row.get("expires_at"),
             "expiration_known": row.get("expiration_known", False),
             "observed_at": row.get("observed_at"),
+            "check_interval_seconds": (
+                self.observation_seconds
+                if not terminal and row.get("external_id") and entry and self.secrets.configured
+                else None
+            ),
             "policy": RenewalPolicy.model_validate(row.get("policy") or {}).model_dump(),
             "revision": row["revision"],
             "management_mode": row.get("management_mode", "observe"),

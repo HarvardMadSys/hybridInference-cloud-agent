@@ -14,8 +14,12 @@ import pytest
 from dotenv import dotenv_values
 from pydantic import SecretStr, ValidationError
 
-from cloud_agent.ports.compute_provider import NodeObservation, ProviderError, SshConnection
-from cloud_agent.ports.host_bootstrap import BootstrapIntent, DeploymentProfile
+from cloud_agent.ports.external.compute_provider import (
+    NodeObservation,
+    ProviderError,
+    SshConnection,
+)
+from cloud_agent.ports.external.host_bootstrap import BootstrapIntent, DeploymentProfile
 from cloud_agent.providers.compute.host_bootstrap import (
     _DEPLOY,
     _INVENTORY,
@@ -318,3 +322,79 @@ async def test_checked_operator_example_loads_and_renders_real_bootstrap_payload
         assert env["AGENT_BROKER_REVERSE_PORT"] == "19092"
         assert "{" not in archive.extractfile(".env").read().decode()
         assert len([m for m in archive.getmembers() if m.name.startswith(".compute-secrets/")]) == 6
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        None,
+        "other-host/credential",
+        "other-host/.enroll.lock",
+        "managed-host-1/nested/credential",
+        "managed-host-1/workspace.txt",
+        "symlink",
+    ],
+)
+def test_remote_inventory_only_exempts_exact_current_host_enrollment_files(
+    tmp_path, monkeypatch, capsys, extra
+):
+    """Run the shipped inventory script against isolated real filesystem state."""
+    import pathlib
+
+    filesystem = tmp_path / "machine"
+    state = filesystem / "var/lib/cloud-agent" / INTENT.host
+    state.mkdir(parents=True)
+    (state / "credential").write_text("persisted enrollment")
+    (state / ".enroll.lock").touch()
+    if extra == "symlink":
+        (state / "credential").unlink()
+        (state / "credential").symlink_to(tmp_path / "unobserved")
+    elif extra:
+        unexpected = state.parent / extra
+        unexpected.parent.mkdir(parents=True, exist_ok=True)
+        unexpected.write_text("retained or unmanaged")
+    original_path = pathlib.Path
+
+    def isolated_path(value):
+        value = str(value)
+        return (
+            filesystem / value.lstrip("/")
+            if value.startswith("/var/lib/")
+            else original_path(value)
+        )
+
+    params = {
+        "root": str(tmp_path / "no-deploy-yet"),
+        "identity": {"host": INTENT.host, "node_id": INTENT.node_id},
+    }
+    monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/bin/docker")
+    # The complete Docker inventory is empty; only on-disk state distinguishes
+    # the safe fresh Host from another Host's unobserved retained files.
+    monkeypatch.setattr("subprocess.check_output", lambda args, **kwargs: "")
+    with monkeypatch.context() as local:
+        local.setattr("pathlib.Path", isolated_path)
+        exec(_INVENTORY, {})
+    result = json.loads(capsys.readouterr().out)
+    assert result["complete"] is True
+    assert result["orphan_state"] is (extra is not None)
+    assert ("orphan_state_present" in result["blocked_reasons"]) is (extra is not None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name",
+    [
+        "UNRELATED_DATABASE_PASSWORD",
+        "AGENT_COMPUTE_SECRET_KEY",
+        "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
+        "AGENT_CONTROL_TOKEN_SECRET",
+        "AGENT_SESSION_SECRET",
+    ],
+)
+async def test_deployment_environment_rejects_unrelated_and_control_plane_authority(tmp_path, name):
+    bootstrap, profile, transport, secrets = setup(tmp_path)
+    secrets["deployment:env"] += f"\n{name}=must-not-leave-control-plane"
+    with pytest.raises(ProviderError, match="security boundary"):
+        await bootstrap.deploy(NODE, profile, INTENT, SecretStr("enrollment"))
+    assert transport.run.await_count == 1

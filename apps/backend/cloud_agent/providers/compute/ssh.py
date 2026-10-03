@@ -10,10 +10,10 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cloud_agent.ports.compute_provider import ProviderError
+from cloud_agent.ports.external.compute_provider import ProviderError
 
 if TYPE_CHECKING:
-    from cloud_agent.ports.compute_provider import SecretResolver, SshConnection
+    from cloud_agent.ports.external.compute_provider import SecretResolver, SshConnection
 
 
 class OpenSshTransport:

@@ -51,7 +51,9 @@ class ComputeCommands:
         self.registry = registry
         self.secrets = secrets
         self.configuration = configuration
-        self.queries = ServerQueries(repository, registry, secrets)
+        self.queries = ServerQueries(
+            repository, registry, secrets, observation_seconds=configuration.observation_seconds
+        )
 
     def catalog(self) -> dict[str, Any]:
         """Return enabled implementations and public profile names only."""

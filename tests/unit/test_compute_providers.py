@@ -12,7 +12,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from cloud_agent.ports.compute_provider import (
+from cloud_agent.ports.external.compute_provider import (
     AcquireRequest,
     ExtendRequest,
     OperationIntent,
@@ -325,7 +325,7 @@ async def test_partial_extension_is_not_success_and_retries_keep_absolute_target
 
 
 @pytest.mark.asyncio
-async def test_release_waits_for_confirmed_deletion_and_does_not_treat_403_as_gone():
+async def test_release_checkpoints_documented_204_deletion_without_another_get():
     requests = []
 
     def respond(request):
@@ -338,14 +338,17 @@ async def test_release_waits_for_confirmed_deletion_and_does_not_treat_403_as_go
     receipt = await provider(respond).release(
         ResourceRef(external_id=EXPERIMENT, config=CONFIG), intent()
     )
-    assert receipt.outcome == "unknown"
+    assert receipt.outcome == "confirmed"
     assert receipt.resource.external_id == EXPERIMENT
-    assert receipt.observation is None
-    assert [request.method for request in requests] == ["DELETE", "GET"]
+    assert receipt.observation.state == "terminated"
+    assert receipt.observation.raw_state == "delete_acknowledged"
+    assert receipt.observation.scope_complete
+    assert [request.method for request in requests] == ["DELETE"]
+    assert requests[0].url.path == f"/v1/experiments/{EXPERIMENT}"
 
 
 @pytest.mark.asyncio
-async def test_release_404_is_terminal_but_project_mismatch_is_never_adopted():
+async def test_404_with_valid_other_account_list_never_proves_deletion():
     adapter = provider(
         lambda request: (
             httpx.Response(200, json={"experiments": []})
@@ -354,12 +357,63 @@ async def test_release_404_is_terminal_but_project_mismatch_is_never_adopted():
         )
     )
     receipt = await adapter.release(ResourceRef(external_id=EXPERIMENT, config=CONFIG), intent())
-    assert receipt.outcome == "confirmed"
-    assert receipt.observation.state == "terminated"
-    adapter = provider(lambda request: httpx.Response(200, json=resource(project="other-project")))
+    assert receipt.outcome == "unknown"
+    assert receipt.observation is None
+    ref = ResourceRef(external_id=EXPERIMENT, config=CONFIG)
+    # A list endpoint can authenticate another valid account while the
+    # original resource remains alive and inaccessible to that account.
+    await adapter.validate_connection(CONFIG["credential_ref"])
+    with pytest.raises(ProviderError) as error:
+        await adapter.inspect(ref)
+    assert error.value.code == "resource_visibility_unknown"
+
+
+@pytest.mark.asyncio
+async def test_project_mismatch_is_never_adopted_even_for_terminal_status():
+    adapter = provider(
+        lambda request: httpx.Response(
+            200, json=resource(project="other-project", status="terminated")
+        )
+    )
     with pytest.raises(ProviderError) as error:
         await adapter.inspect(ResourceRef(external_id=EXPERIMENT, config=CONFIG))
     assert error.value.code == "resource_identity_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_lost_delete_acknowledgement_requires_explicit_terminal_evidence():
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        if request.method == "DELETE":
+            raise httpx.ReadTimeout("acknowledgement lost", request=request)
+        return httpx.Response(404, json={"error": "missing"})
+
+    adapter = provider(respond)
+    ref = ResourceRef(external_id=EXPERIMENT, config=CONFIG)
+    receipt = await adapter.release(ref, intent())
+    assert receipt.outcome == "unknown" and receipt.observation is None
+    with pytest.raises(ProviderError) as error:
+        await adapter.inspect(ref)
+    assert error.value.code == "resource_visibility_unknown"
+    assert [request.method for request in requests] == ["DELETE", "GET"]
+    adapter = provider(lambda request: httpx.Response(200, json=resource(status="terminated")))
+    observation = await adapter.inspect(ref)
+    assert observation.state == "terminated" and observation.ref == ref
+
+
+@pytest.mark.asyncio
+async def test_release_rejects_forbidden_and_undocumented_success_responses():
+    ref = ResourceRef(external_id=EXPERIMENT, config=CONFIG)
+    adapter = provider(lambda request: httpx.Response(403, json={"error": TOKEN}))
+    with pytest.raises(ProviderError) as error:
+        await adapter.release(ref, intent())
+    assert error.value.code == "permission_denied" and TOKEN not in str(error.value)
+    adapter = provider(lambda request: httpx.Response(200, json={"error": TOKEN}))
+    receipt = await adapter.release(ref, intent())
+    assert receipt.outcome == "unknown" and receipt.observation is None
+    assert TOKEN not in receipt.model_dump_json()
 
 
 @pytest.mark.asyncio

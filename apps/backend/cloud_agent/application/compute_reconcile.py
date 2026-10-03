@@ -17,7 +17,7 @@ from cloud_agent.broker_routing import broker_for_host
 from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import ComputeRefusal
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.ports.compute_provider import (
+from cloud_agent.ports.external.compute_provider import (
     AcquireRequest,
     ExtendRequest,
     NodeObservation,
@@ -27,16 +27,40 @@ from cloud_agent.ports.compute_provider import (
     ResourceObservation,
     ResourceRef,
 )
-from cloud_agent.ports.host_bootstrap import BootstrapIntent, DeploymentProfile
+from cloud_agent.ports.external.host_bootstrap import BootstrapIntent, DeploymentProfile
 from cloud_agent.schemas_compute import ExtendComputeRequest, RenewalPolicy
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 
 if TYPE_CHECKING:
     from cloud_agent.application.compute_resources import ComputeCommands
-    from cloud_agent.ports.host_bootstrap import HostBootstrap
+    from cloud_agent.ports.external.host_bootstrap import HostBootstrap
     from cloud_agent.ports.host_pool import HostPoolRepository
 
 logger = get_logger(__name__)
+
+_BOOTSTRAP_REASONS = {
+    "supported_os": "Use Ubuntu 22.04 or 24.04.",
+    "architecture": "The deployment requires x86-64.",
+    "privileged_deploy": "SSH deployment requires passwordless sudo.",
+    "kvm": "KVM is required for sandbox isolation.",
+    "docker": "Install Docker or enable prerequisite installation.",
+    "compose": "Docker Compose is unavailable.",
+    "machine_identity_changed": "The verified machine identity has changed.",
+    "prerequisites_update_failed": "The node could not refresh its package repositories.",
+    "prerequisites_install_failed": "The node could not install the required packages.",
+    "docker_start_failed": "Docker could not be started.",
+    "kata_install_failed": "The pinned Kata runtime could not be installed.",
+    "host_deployment_failed": "The Host deployment recipe failed.",
+    "host_readiness_failed": "The deployed Host did not pass its readiness checks.",
+}
+_PREFLIGHT_CHECKS = {
+    "supported_os",
+    "architecture",
+    "privileged_deploy",
+    "kvm",
+    "docker",
+    "compose",
+}
 
 
 def _now() -> datetime:
@@ -248,15 +272,18 @@ class ComputeReconciler:
             observation.nodes[0], DeploymentProfile.model_validate(parameters["profile"])
         )
         if not checked.ready:
-            raise ProviderError(
-                "preflight_failed", "Server prerequisites or machine identity could not be verified"
-            )
+            await self._bootstrap_blocked(operation, checked.blocked_reasons)
+            return
         await self._finish(
             operation,
             "succeeded",
             "preflight_complete",
             "Connection, identity and deployment prerequisites checked.",
-            result={"checks": checked.checks},
+            result={
+                "checks": {
+                    key: value for key, value in checked.checks.items() if key in _PREFLIGHT_CHECKS
+                }
+            },
         )
 
     async def _acquire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
@@ -336,13 +363,13 @@ class ComputeReconciler:
                 enrollment = SecretStr(token)
             deployed = await self.bootstrap.deploy(observed_node, profile, intent, enrollment)
             if not deployed.ready:
-                raise ProviderError(
-                    "bootstrap_not_ready", "Host deployment has not passed readiness"
-                )
+                await self._bootstrap_blocked(operation, deployed.blocked_reasons)
+                return
             await self._checkpoint(operation, "verifying_host", {"deployed": True})
         readiness = await self.bootstrap.readiness(observed_node, profile, intent)
         if not readiness.ready:
-            raise ProviderError("bootstrap_not_ready", "The deployed Host did not pass readiness")
+            await self._bootstrap_blocked(operation, readiness.blocked_reasons)
+            return
         host = await self.host_pool.get_host(host=intent.host)
         if host is None or host.get("status") != "online" or not host.get("enrolled"):
             await self._finish(
@@ -381,6 +408,28 @@ class ComputeReconciler:
             "ready",
             "Server is ready. It can now be selected as the global sandbox location.",
             result={"nodes_ready": 1, "external_pending": False, "blocked_reasons": []},
+        )
+
+    async def _bootstrap_blocked(self, operation: dict[str, Any], reasons: tuple[str, ...]) -> None:
+        # Public diagnostics use our vocabulary, never remote exception/output text.
+        blocked = [
+            {"code": code, "message": _BOOTSTRAP_REASONS[code]}
+            for code in reasons
+            if code in _BOOTSTRAP_REASONS
+        ]
+        if not blocked:
+            blocked = [
+                {
+                    "code": "bootstrap_not_ready",
+                    "message": "Host deployment or readiness checks did not pass.",
+                }
+            ]
+        await self._finish(
+            operation,
+            "blocked",
+            operation["step"],
+            "Host deployment needs attention.",
+            result={"blocked_reasons": blocked},
         )
 
     async def _inspect(
@@ -701,7 +750,13 @@ class ComputeReconciler:
                 for node in allocation.get("nodes", [])
             }
             actual = {(node.provider_node_id, node.instance_identity) for node in observation.nodes}
-            if not observation.scope_complete or expected != actual:
+            committed_pending = (
+                allocation.get("release_committed_at")
+                and observation.state == "pending"
+                and not observation.scope_complete
+                and actual <= expected
+            )
+            if not committed_pending and (not observation.scope_complete or expected != actual):
                 raise ProviderError(
                     "resource_identity_changed", "The allocation's complete node scope has changed"
                 )
@@ -715,23 +770,20 @@ class ComputeReconciler:
                 "expires_at": observation.expires_at,
                 "expiration_known": observation.lease_known,
                 "scope_complete": observation.scope_complete,
-            },
-            **self._fence(operation),
-        )
-        if allocation.get("desired_state") == "present":
-            for node in observation.nodes:
-                await self.repository.upsert_node(
-                    allocation_id=allocation["id"],
-                    node={
+                "nodes": [
+                    {
                         "provider_node_id": node.provider_node_id,
                         "instance_identity": node.instance_identity,
                         "name": node.display_name,
                         "connection": node.connection.model_dump(mode="json")
                         if node.connection
                         else {},
-                    },
-                    **self._fence(operation),
-                )
+                    }
+                    for node in observation.nodes
+                ],
+            },
+            **self._fence(operation),
+        )
         policy = RenewalPolicy.model_validate(allocation.get("policy") or {})
         scope = None
         if observation.expires_at is not None:

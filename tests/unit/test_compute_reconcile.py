@@ -17,7 +17,7 @@ import pytest
 
 from cloud_agent.application import compute_reconcile
 from cloud_agent.application.compute_reconcile import ComputeReconciler
-from cloud_agent.ports.compute_provider import (
+from cloud_agent.ports.external.compute_provider import (
     AcquisitionResolution,
     NodeObservation,
     ProviderError,
@@ -25,7 +25,7 @@ from cloud_agent.ports.compute_provider import (
     ResourceObservation,
     ResourceRef,
 )
-from cloud_agent.ports.host_bootstrap import BootstrapResult, DeploymentProfile
+from cloud_agent.ports.external.host_bootstrap import BootstrapResult, DeploymentProfile
 from cloud_agent.schemas_compute import RenewalPolicy
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
 
@@ -108,7 +108,23 @@ def harness(monkeypatch, *, kind="acquire", identified=False):
     }
 
     async def save_observation(**kwargs):
-        allocation.update(kwargs["observation"])
+        observation = kwargs["observation"]
+        allocation.update({key: value for key, value in observation.items() if key != "nodes"})
+        # Persistence keeps durable node IDs when atomically merging provider
+        # facts; the provider descriptor itself never chooses those IDs.
+        nodes = {node["provider_node_id"]: node for node in allocation["nodes"]}
+        if not allocation.get("release_committed_at") and observation.get("observed_state") not in {
+            "terminated",
+            "absent",
+        }:
+            for fact in observation.get("nodes", []):
+                existing = nodes.get(fact["provider_node_id"], {})
+                nodes[fact["provider_node_id"]] = {
+                    "id": existing.get("id", "fixture-" + fact["provider_node_id"]),
+                    **existing,
+                    **fact,
+                }
+        allocation["nodes"] = list(nodes.values())
         allocation["observed_at"] = NOW
         return allocation
 
@@ -363,6 +379,28 @@ async def test_committed_release_waits_if_provider_already_processing_it(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_committed_release_polls_terminating_without_manifest_until_terminal(monkeypatch):
+    h = harness(monkeypatch, kind="retire", identified=True)
+    h.allocation.update(release_committed_at=NOW, desired_state="absent")
+    h.operation["result"]["release_requested"] = True
+    original_nodes = deepcopy(h.allocation["nodes"])
+    # CloudLab loses a complete manifest while the experiment is terminating.
+    h.provider.inspect.side_effect = [
+        observed(state="pending").model_copy(update={"scope_complete": False, "nodes": ()}),
+        observed(state="terminated").model_copy(update={"scope_complete": False, "nodes": ()}),
+    ]
+    await h.reconciler.execute(h.operation)
+    assert h.operation["state"] == "waiting"
+    assert h.operation["result"]["external_pending"]
+    assert h.allocation["nodes"] == original_nodes
+    await h.reconciler.execute(h.operation)
+    assert h.operation["state"] == "succeeded"
+    assert not h.operation["result"]["external_pending"]
+    h.provider.release.assert_not_awaited()
+    h.repository.begin_retirement.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_retirement_waiting_does_not_stop_previously_enabled_renewal(monkeypatch):
     h = harness(monkeypatch, kind="retire", identified=True)
     h.allocation.update(
@@ -462,3 +500,30 @@ async def test_pending_extension_with_increased_but_short_deadline_requires_revi
     assert h.operation["step"] == "partial_extension"
     assert h.operation["result"]["actual_expires_at"] == shorter.isoformat()
     h.provider.extend.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reasons", "expected_code"),
+    [
+        (("kvm", "secret-looking-remote-output"), "kvm"),
+        (("secret-looking-remote-output",), "bootstrap_not_ready"),
+    ],
+)
+async def test_bootstrap_refusal_reports_only_public_diagnostics(
+    monkeypatch, reasons, expected_code
+):
+    """A failed deployment remains blocked and never renders arbitrary remote output."""
+    h = harness(monkeypatch, identified=True)
+    h.bootstrap.deploy.return_value = BootstrapResult(
+        ready=False,
+        host="compute-nodeid",
+        deployment_sha=PROFILE.deployment_sha,
+        blocked_reasons=reasons,
+    )
+    await h.reconciler.execute(h.operation)
+    assert h.operation["state"] == "blocked"
+    assert [item["code"] for item in h.operation["result"]["blocked_reasons"]] == [expected_code]
+    assert "secret-looking-remote-output" not in str(h.operation["result"])
+    h.bootstrap.readiness.assert_not_awaited()
+    h.repository.clear_bootstrap_hold.assert_not_awaited()

@@ -46,6 +46,8 @@ export default function ComputeResourcePanel({
   const [notice, setNotice] = useState<string | null>(null);
   const requestIds = useRef<{ extend?: string; retire?: string }>({});
   const allows = (action: string) => allocation.allowed_actions.includes(action);
+  const needsDeployment =
+    allocation.management_mode === 'observe' && !allocation.nodes.some((node) => node.hosts.length);
 
   async function intent(kind: 'extend' | 'retire') {
     if (busy) return;
@@ -104,7 +106,12 @@ export default function ComputeResourcePanel({
           Provider observation: {absoluteTime(allocation.observed_at)}. The countdown is based on
           this observation; it does not confirm a new extension.
         </p>
-        {allocation.next_check_at && <p>Next check: {absoluteTime(allocation.next_check_at)}</p>}
+        {allocation.check_interval_seconds != null && (
+          <p>
+            Periodic provider checks: about every {allocation.check_interval_seconds} seconds.
+            Pending operations can delay a check.
+          </p>
+        )}
         <p>Nodes and execution environments affected by resource operations:</p>
         <ul className="list-inside list-disc">
           {allocation.nodes.map((node) => (
@@ -113,6 +120,12 @@ export default function ComputeResourcePanel({
             </li>
           ))}
         </ul>
+        {needsDeployment && (
+          <p>
+            To deploy an imported resource, use Add server → Connect an existing resource with
+            the same account connection and resource ID.
+          </p>
+        )}
         <Reasons reasons={allocation.blocked_reasons} />
       </div>
 

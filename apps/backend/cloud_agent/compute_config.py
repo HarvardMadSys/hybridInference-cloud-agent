@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from pydantic import ValidationError
 
 from cloud_agent.compute_secrets import ComputeSecretError
-from cloud_agent.ports.host_bootstrap import DeploymentProfile
+from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
 
 if TYPE_CHECKING:
     from cloud_agent.compute_secrets import ComputeSecretStore

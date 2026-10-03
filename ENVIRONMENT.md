@@ -160,6 +160,22 @@ user-added connection may dial.
 | `AGENT_TIMEOUT_S` | existing | Hard watchdog for one actively executing Agent CLI turn (default 3600 seconds). Hitting it fails/fences that turn; it does not mean the chat was idle and is not an alternate sandbox lifecycle timeout. |
 | `AGENT_RUNNER_HOST` | existing | Execution environment name redeemed by `AGENT_ENROLL_TOKEN` on first registration and shared by every turn the machine runs. After enrollment, the credential is authoritative; changing this value does not rename the environment. Use `AGENT_PHYSICAL_HOST` to group environments for display without changing existing identities. |
 
+### Optional compute-resource management
+
+These values belong only to the stable main control plane, not its MCP-only
+listener, any Host, or any sandbox. See [the compute runbook](docs/operations-compute.md)
+for deployment profiles, verified SSH access and CloudLab endpoint setup.
+
+| Variable | Meaning |
+| --- | --- |
+| `AGENT_COMPUTE_SECRET_KEY` | Independent encryption key, at least 32 bytes, for stored compute connections. Preserve it with database backups. |
+| `AGENT_COMPUTE_CONFIG` | Absolute path inside the control-plane process to the operator-owned JSON deployment configuration. |
+| `AGENT_COMPUTE_DIRECTORY` | Absolute host directory mounted read-only at `/run/compute` by the optional Compose overlay; `deploy.sh` includes the overlay when this is set. |
+| `AGENT_CLOUDLAB_API_URL` | Operator-verified HTTPS Portal API base. Leave unset to disable the CloudLab adapter. |
+
+Without this configuration the existing Host management remains available;
+resource creation requires configured credentials and deployment profiles.
+
 ## Host agent (`cloud_agent_host`)
 
 ### The stack's own identity
@@ -467,10 +483,12 @@ in the API for retained-session ownership but are not offered for new chats.
 Keep one placement executor per physical server; extra old deployments must be
 retired after their retained conversations are no longer needed.
 
-With one available server there is no placement selector. With multiple servers,
-the persistent New chats selector shows Automatic or the selected server; its
-value does not disappear after changing it. An unavailable saved selection is
-always shown with a recovery action, even if only one server remains available.
+The global sandbox location selector is always visible, including with one
+server. It shows Automatic or the exact selected Host identity; grouping by a
+physical server never silently chooses a different executor. It applies to all
+new, unassigned sandbox groups. Retained groups keep their original Host, and
+the page shows their actual distribution. An unavailable saved selection stays
+visible with a recovery action and never silently falls back to another Host.
 Disabled servers are listed in a collapsed Unavailable servers section, not
 counted as choices. Slots are the displayed environment's concurrency limit, not
 GPU counts or a sum of old and current deployments. Grouping never changes

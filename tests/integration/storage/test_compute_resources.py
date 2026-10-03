@@ -537,6 +537,7 @@ async def test_existing_ssh_unmonitored_lease_can_claim_but_managed_unknown_expi
         allocation_id=allocation_id,
         observation={
             "observed_state": "ready",
+            "scope_complete": True,
             "expiration_known": False,
             "configuration": {"expected_machine_identity": "verified-machine"},
         },
@@ -709,3 +710,201 @@ async def test_allocator_identity_is_immutable_and_resolution_cannot_replace_jou
     )
     with pytest.raises(ValueError, match="operation_not_resolvable"):
         await repo.resolve_acquisition(operation_id=op["id"], external_id="unrelated-uuid")
+
+
+async def test_failed_latest_inspection_stops_new_groups_before_snapshot_age_limit(
+    db, store, hosts
+):
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, hosts)
+    deadline = (await repo.get_allocation(allocation_id))["expires_at"]
+    await repo.record_observation_error(allocation_id=allocation_id, message="credentials_expired")
+    async with db.acquire() as conn, conn.transaction():
+        await lock_compute_entry(conn)
+        assert await host_compute_admission(conn, "machine") == (False, True)
+    await _create_job(store)
+    assert await _claim(store, worker_id="new-group", lease_ttl_seconds=90, host="machine") is None
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={
+            "observed_state": "ready",
+            "expiration_known": True,
+            "expires_at": deadline,
+            "scope_complete": True,
+        },
+    )
+    assert (
+        await _claim(store, worker_id="after-recovery", lease_ttl_seconds=90, host="machine")
+        is not None
+    )
+
+
+async def test_node_identity_validation_and_ready_observation_commit_atomically(db, store, hosts):
+    import asyncpg
+
+    repo = store.compute_resources
+    allocation_id, node, _ = await resource(store, hosts)
+    await repo.record_observation_error(
+        allocation_id=allocation_id, message="previous_inspection_failed"
+    )
+    before = await repo.get_allocation(allocation_id)
+    op = await operation(repo, allocation_id, "inspect")
+    base = {
+        "observed_state": "ready",
+        "expiration_known": True,
+        "scope_complete": True,
+        "expires_at": datetime.now(UTC) + timedelta(hours=8),
+    }
+    with pytest.raises(ValueError, match="resource_identity_changed"):
+        await repo.observe_allocation(
+            allocation_id=allocation_id,
+            observation={
+                **base,
+                "nodes": [
+                    {
+                        "provider_node_id": node["provider_node_id"],
+                        "instance_identity": "replacement",
+                        "name": "replacement",
+                    }
+                ],
+            },
+            **fence(op),
+        )
+    with pytest.raises(ValueError, match="resource_identity_changed"):
+        await repo.observe_allocation(
+            allocation_id=allocation_id, observation={**base, "nodes": []}, **fence(op)
+        )
+    # A later node write can itself fail. Even an earlier node update and the
+    # readiness/lease update must roll back with it, rather than partly land.
+    with pytest.raises(asyncpg.UniqueViolationError):
+        await repo.observe_allocation(
+            allocation_id=allocation_id,
+            observation={
+                **base,
+                "nodes": [
+                    {
+                        "provider_node_id": node["provider_node_id"],
+                        "instance_identity": node["instance_identity"],
+                        "name": "changed-before-failure",
+                    },
+                    {
+                        "provider_node_id": "another-node",
+                        "instance_identity": node["instance_identity"],
+                        "name": "identity-collision",
+                    },
+                ],
+            },
+            **fence(op),
+        )
+    after = await repo.get_allocation(allocation_id)
+    assert (
+        after["expires_at"] == before["expires_at"]
+        and after["observed_at"] == before["observed_at"]
+    )
+    assert after["observation_error"] == "previous_inspection_failed"
+    assert after["nodes"] == before["nodes"]
+    async with db.acquire() as conn, conn.transaction():
+        await lock_compute_entry(conn)
+        assert await host_compute_admission(conn, "machine") == (False, True)
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={
+            **base,
+            "nodes": [
+                {
+                    "provider_node_id": node["provider_node_id"],
+                    "instance_identity": node["instance_identity"],
+                    "name": "verified-name",
+                }
+            ],
+        },
+        **fence(op),
+    )
+    successful = await repo.get_allocation(allocation_id)
+    assert successful["observation_error"] is None
+    assert successful["expires_at"] == base["expires_at"]
+    assert successful["nodes"][0]["name"] == "verified-name"
+
+
+async def test_partial_ready_scope_does_not_reopen_new_group_admission(db, store, hosts):
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, hosts)
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={
+            "observed_state": "ready",
+            "expiration_known": True,
+            "expires_at": datetime.now(UTC) + timedelta(hours=4),
+            "scope_complete": False,
+            "nodes": [],
+        },
+    )
+    async with db.acquire() as conn, conn.transaction():
+        await lock_compute_entry(conn)
+        assert await host_compute_admission(conn, "machine") == (False, True)
+
+
+async def test_committed_release_accepts_disappearing_manifest_without_rebinding(db, store, hosts):
+    repo = store.compute_resources
+    allocation_id, node, _ = await resource(store, hosts)
+    op = await operation(repo, allocation_id)
+    await repo.begin_retirement(allocation_id=allocation_id, operation_id=op["id"])
+    pending = {"observed_state": "pending", "scope_complete": False, "nodes": []}
+    with pytest.raises(ValueError, match="resource_identity_changed"):
+        await repo.observe_allocation(allocation_id=allocation_id, observation=pending, **fence(op))
+    assert await repo.record_inventory(
+        allocation_id=allocation_id, hosts=["machine"], empty=True, **fence(op)
+    )
+    assert (await repo.commit_release(allocation_id=allocation_id, **fence(op)))[
+        "release_committed"
+    ]
+    before = await repo.get_allocation(allocation_id)
+    await repo.observe_allocation(allocation_id=allocation_id, observation=pending, **fence(op))
+    after = await repo.get_allocation(allocation_id)
+    assert after["observed_state"] == "pending" and not after["scope_complete"]
+    assert after["nodes"] == before["nodes"]
+    assert after["expires_at"] == before["expires_at"]
+    async with db.acquire() as conn, conn.transaction():
+        await lock_compute_entry(conn)
+        assert await host_compute_admission(conn, "machine") == (False, False)
+    # A partial manifest never authorizes accepting a replacement instance,
+    # changing the allocation identity, or treating a complete missing node as safe.
+    invalid = [
+        {**pending, "external_id": "different-experiment"},
+        {**pending, "scope_complete": True},
+        {
+            **pending,
+            "nodes": [
+                {"provider_node_id": node["provider_node_id"], "instance_identity": "replacement"}
+            ],
+        },
+    ]
+    for observation in invalid:
+        with pytest.raises(ValueError, match="resource_identity_changed"):
+            await repo.observe_allocation(
+                allocation_id=allocation_id, observation=observation, **fence(op)
+            )
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={
+            "observed_state": "ready",
+            "scope_complete": True,
+            "nodes": [
+                {
+                    "provider_node_id": node["provider_node_id"],
+                    "instance_identity": node["instance_identity"],
+                    "name": "must-not-change-after-commit",
+                }
+            ],
+        },
+        **fence(op),
+    )
+    assert (await repo.get_allocation(allocation_id))["nodes"] == before["nodes"]
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={**pending, "observed_state": "terminated"},
+        **fence(op),
+    )
+    terminal = await repo.get_allocation(allocation_id)
+    assert terminal["observed_state"] == "terminated"
+    assert terminal["nodes"] == before["nodes"]

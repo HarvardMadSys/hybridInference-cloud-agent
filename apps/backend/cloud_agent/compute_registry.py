@@ -16,8 +16,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from cloud_agent.compute_config import ComputeConfiguration
-    from cloud_agent.ports.compute_provider import ComputeProvider, SecretResolver
-    from cloud_agent.ports.host_bootstrap import SshTransport
+    from cloud_agent.ports.external.compute_provider import ComputeProvider, SecretResolver
+    from cloud_agent.ports.external.host_bootstrap import SshTransport
 
 
 @dataclass(frozen=True)

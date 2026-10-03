@@ -57,11 +57,14 @@ async def host_compute_admission(conn: Any, host: str) -> tuple[bool, bool]:
     new = (
         not row["held"]
         and row["desired_state"] == "present"
+        and row["scope_complete"]
         and row["observed_state"] in ("ready", "active", "running")
     )
     claims = not row["all_held"] and row["release_committed_at"] is None
     if row["observed_state"] in ("terminated", "absent", "failed"):
         return False, False
+    if row["observation_error"]:
+        new = False
     if (row["lease_managed"] and not row["expiration_known"]) or row["observed_at"] is None:
         new = False
     if row["observed_at"] is not None and (now - row["observed_at"]).total_seconds() > 300:

@@ -16,7 +16,7 @@ from cloud_agent.compute_config import ComputeConfiguration
 from cloud_agent.compute_registry import ComputeProviderRegistration, ComputeProviderRegistry
 from cloud_agent.compute_secrets import ComputeSecretStore
 from cloud_agent.host_pool import hash_secret
-from cloud_agent.ports.compute_provider import (
+from cloud_agent.ports.external.compute_provider import (
     NodeObservation,
     ProviderCapabilities,
     ProviderReceipt,
@@ -24,7 +24,11 @@ from cloud_agent.ports.compute_provider import (
     ResourceRef,
     SshConnection,
 )
-from cloud_agent.ports.host_bootstrap import BootstrapResult, DeploymentProfile, HostInventory
+from cloud_agent.ports.external.host_bootstrap import (
+    BootstrapResult,
+    DeploymentProfile,
+    HostInventory,
+)
 from cloud_agent.storage._sql.compute_admission import host_compute_admission
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
 
@@ -190,7 +194,7 @@ async def test_acquisition_to_global_placement_then_release_requires_empty_broke
 async def test_receipt_survives_failed_observation_and_retry_never_creates_twice(
     db, store, hosts, monkeypatch
 ):
-    from cloud_agent.ports.compute_provider import ProviderError
+    from cloud_agent.ports.external.compute_provider import ProviderError
 
     r = await rig(store, hosts, monkeypatch)
     r.provider.acquire.return_value = ProviderReceipt(outcome="pending", resource=r.observation.ref)

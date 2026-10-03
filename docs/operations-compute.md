@@ -223,6 +223,19 @@ new request ID is a new command, not a substitute for finding the prior result.
 | Resource still has retained state | Keep it available or explicitly manage its chat lifecycle. Stopped containers and archived chats do not prove state is disposable. |
 | Release committed, response unknown | Keep admission closed and confirm that exact immutable resource ID. Cancellation cannot undo a committed release. |
 
+CloudLab's documented DELETE response `204` confirms deletion of that exact
+experiment UUID. An explicit terminal experiment object with matching UUID and
+project also permits recovery. A `404` by itself does not prove deletion: the
+selected token's account or project visibility may have changed, even when an
+authenticated experiment-list request succeeds. The adapter reports
+`resource_visibility_unknown` and retains the resource reservation. If a DELETE
+acknowledgement is lost and subsequent queries return `404`, the operation stays
+committed and requires provider confirmation; it does not claim success or free
+the deployment profile. Restore the correct access and retry the existing
+operation. Do not bypass the release fence or edit database state to infer
+deletion from absence. The public API provides no project-permission query that
+would establish stronger evidence from that `404`.
+
 The worker continues an already enabled renewal policy while retirement waits
 on retained state. Manual Drain and resource-owned admission holds remain
 separate. A successful renewal does not clear an administrator's Drain or a

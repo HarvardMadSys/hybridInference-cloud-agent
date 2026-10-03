@@ -19,14 +19,26 @@ from typing import TYPE_CHECKING, Any
 
 from dotenv import dotenv_values
 
-from cloud_agent.ports.compute_provider import ProviderError
-from cloud_agent.ports.host_bootstrap import BootstrapResult, HostInventory, PreflightResult
+from cloud_agent.ports.external.compute_provider import ProviderError
+from cloud_agent.ports.external.host_bootstrap import (
+    BootstrapResult,
+    HostInventory,
+    PreflightResult,
+)
 
 if TYPE_CHECKING:
     from pydantic import SecretStr
 
-    from cloud_agent.ports.compute_provider import NodeObservation, SecretResolver, SshConnection
-    from cloud_agent.ports.host_bootstrap import BootstrapIntent, DeploymentProfile, SshTransport
+    from cloud_agent.ports.external.compute_provider import (
+        NodeObservation,
+        SecretResolver,
+        SshConnection,
+    )
+    from cloud_agent.ports.external.host_bootstrap import (
+        BootstrapIntent,
+        DeploymentProfile,
+        SshTransport,
+    )
 
 
 _PREFLIGHT = r"""
@@ -146,9 +158,21 @@ _REQUIRED_ENV = {
     "AGENT_EGRESS_CHAT_NETWORK_POOL",
     "AGENT_EGRESS_DNS_SERVER",
 }
+# Host configuration has its own namespace. Unrelated service/process variables
+# are not forwarded even when an operator accidentally includes them in a file.
+_ALLOWED_NON_AGENT_ENV = {
+    "COMPOSE_PROJECT",
+    "SIBLING_COMPOSE_PROJECTS",
+    "SHARED_READY_TIMEOUT",
+    "CLAUDE_CODE_EXTRA_VERSIONS",
+    "CODEX_EXTRA_VERSIONS",
+    "PI_EXTRA_VERSIONS",
+    "OPENCODE_EXTRA_VERSIONS",
+    "KILO_EXTRA_VERSIONS",
+}
 _FORBIDDEN_ENV = {
-    "API_KEY_SECRET",
-    "JWT_SECRET_KEY",
+    "AGENT_COMPUTE_SECRET_KEY",
+    "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
     "AGENT_CONTROL_TOKEN_SECRET",
     "AGENT_SESSION_SECRET",
     "AGENT_SANDBOX_ALLOW_OPEN_NETWORK",
@@ -254,7 +278,11 @@ class SshHostBootstrap:
             template = template.replace("{" + key + "}", value)
         values = dotenv_values(stream=io.StringIO(template), interpolate=False)
         if (
-            any(name in values for name in _FORBIDDEN_ENV)
+            any(
+                not name.startswith("AGENT_") and name not in _ALLOWED_NON_AGENT_ENV
+                for name in values
+            )
+            or any(name in values for name in _FORBIDDEN_ENV)
             or values.get("AGENT_SANDBOX_BACKEND", "kata") != "kata"
         ):
             raise ProviderError(
@@ -472,10 +500,16 @@ else:
                 result['unknown_containers'] += 1
         networks = output(['docker', 'network', 'ls', '-q', '--filter', 'label=org.freeinference.chat-sandbox-network=true'])
         volumes = output(['docker', 'volume', 'ls', '-q'])
-        state = Path('/var/lib/cloud-agent') / params['identity']['host']
-        files = [p for p in state.rglob('*') if p.is_file()] if state.exists() else []
+        state_root = Path('/var/lib/cloud-agent')
+        state = state_root / params['identity']['host']
+        # Only this exact deployment's enrollment credential and flock file
+        # are inert. Another host, nested same-named file, or a symlink can
+        # hide retained state and must never be excused by its basename.
+        inert = {state / 'credential', state / '.enroll.lock'}
+        paths = list(state_root.rglob('*')) if state_root.exists() else []
+        unexpected = state_root.is_symlink() or any(p.is_symlink() or (not p.is_dir() and p not in inert) for p in paths)
         legacy = Path('/var/lib/hybridinference')
-        result['orphan_state'] = bool(networks or volumes or any(p.name != 'credential' for p in files) or (legacy.exists() and any(legacy.iterdir())))
+        result['orphan_state'] = bool(networks or volumes or unexpected or (legacy.exists() and any(legacy.iterdir())))
         result['complete'] = True
     except (subprocess.SubprocessError, ValueError):
         result['blocked_reasons'].append('host_inventory_unavailable')

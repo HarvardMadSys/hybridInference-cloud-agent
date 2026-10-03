@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.ports.compute_provider import (
+from cloud_agent.ports.external.compute_provider import (
     AcquireRequest,
     AcquisitionResolution,
     ComputeProvider,
@@ -23,7 +23,7 @@ from cloud_agent.ports.compute_provider import (
 )
 
 if TYPE_CHECKING:
-    from cloud_agent.ports.host_bootstrap import SshTransport
+    from cloud_agent.ports.external.host_bootstrap import SshTransport
 
 
 class ExistingSSHConfig(SshConnection):

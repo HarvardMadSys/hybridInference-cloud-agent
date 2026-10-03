@@ -522,15 +522,70 @@ class PostgresComputeResourceRepository:
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn, exclusive=True)
             await self._fence(conn, operation_id, generation, worker_id, allocation_id)
-            current_identity = await conn.fetchval(
-                "SELECT external_id FROM agent_compute_allocations WHERE id=$1 FOR UPDATE",
+            allocation = await conn.fetchrow(
+                "SELECT external_id,desired_state,release_committed_at FROM agent_compute_allocations WHERE id=$1 FOR UPDATE",
                 allocation_id,
             )
+            if allocation is None:
+                raise ValueError("allocation_not_found")
+            current_identity = allocation["external_id"]
             if current_identity is not None and observation.get("external_id") not in (
                 None,
                 current_identity,
             ):
                 raise ValueError("resource_identity_changed")
+            nodes = observation.get("nodes")
+            if nodes is not None and observation.get("observed_state") not in (
+                "terminated",
+                "absent",
+            ):
+                existing_nodes = {
+                    r["provider_node_id"]: r["instance_identity"]
+                    for r in await conn.fetch(
+                        "SELECT provider_node_id,instance_identity FROM agent_compute_nodes WHERE allocation_id=$1",
+                        allocation_id,
+                    )
+                }
+                observed_nodes = {n["provider_node_id"]: n["instance_identity"] for n in nodes}
+                if len(observed_nodes) != len(nodes):
+                    raise ValueError("resource_identity_changed")
+                changed = any(
+                    key in observed_nodes and observed_nodes[key] != identity
+                    for key, identity in existing_nodes.items()
+                )
+                missing = (
+                    observation.get("scope_complete")
+                    and not existing_nodes.keys() <= observed_nodes.keys()
+                )
+                retiring = allocation["desired_state"] != "present"
+                committed_pending = (
+                    allocation["release_committed_at"] is not None
+                    and observation.get("observed_state") == "pending"
+                    and not observation.get("scope_complete")
+                )
+                if (
+                    changed
+                    or missing
+                    or (
+                        retiring
+                        and not (
+                            committed_pending and observed_nodes.items() <= existing_nodes.items()
+                        )
+                        and (
+                            not observation.get("scope_complete")
+                            or existing_nodes != observed_nodes
+                        )
+                    )
+                ):
+                    raise ValueError("resource_identity_changed")
+                # Node identity and the allocation's readiness/lease form one
+                # snapshot. Losing a worker between these writes rolls back
+                # everything instead of publishing fresh readiness first.
+                # After release commits, a disappearing manifest is expected;
+                # outcome polling must preserve the last verified bindings.
+                if allocation["release_committed_at"] is None:
+                    for node in nodes:
+                        await self._upsert_node(conn, allocation_id, node)
             row = await conn.fetchrow(
                 """UPDATE agent_compute_allocations SET
                 external_id=COALESCE($2,external_id),observed_state=$3,provider_state=$4,
@@ -571,24 +626,29 @@ class PostgresComputeResourceRepository:
             )
             if allocation is None or allocation["desired_state"] != "present":
                 raise ValueError("resource_retiring")
-            row = await conn.fetchrow(
-                """INSERT INTO agent_compute_nodes
-                (id,allocation_id,provider_node_id,instance_identity,name,connection,managed)
-                VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)
-                ON CONFLICT (allocation_id,provider_node_id) DO UPDATE
-                SET name=EXCLUDED.name,connection=EXCLUDED.connection,updated_at=NOW()
-                WHERE agent_compute_nodes.instance_identity=EXCLUDED.instance_identity RETURNING *""",
-                node.get("id") or str(uuid4()),
-                allocation_id,
-                node["provider_node_id"],
-                node["instance_identity"],
-                node["name"],
-                _json(node.get("connection", {})),
-                node.get("managed", True),
-            )
-            if row is None:
-                raise ValueError("resource_identity_changed")
-            return _row(row)
+            return await self._upsert_node(conn, allocation_id, node)
+
+    async def _upsert_node(
+        self, conn: Any, allocation_id: str, node: dict[str, Any]
+    ) -> dict[str, Any]:
+        row = await conn.fetchrow(
+            """INSERT INTO agent_compute_nodes
+            (id,allocation_id,provider_node_id,instance_identity,name,connection,managed)
+            VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)
+            ON CONFLICT (allocation_id,provider_node_id) DO UPDATE
+            SET name=EXCLUDED.name,connection=EXCLUDED.connection,updated_at=NOW()
+            WHERE agent_compute_nodes.instance_identity=EXCLUDED.instance_identity RETURNING *""",
+            node.get("id") or str(uuid4()),
+            allocation_id,
+            node["provider_node_id"],
+            node["instance_identity"],
+            node["name"],
+            _json(node.get("connection", {})),
+            node.get("managed", True),
+        )
+        if row is None:
+            raise ValueError("resource_identity_changed")
+        return _row(row)
 
     async def claim_operation(
         self, *, worker_id: str, lease_seconds: float = 120

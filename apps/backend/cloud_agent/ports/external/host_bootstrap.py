@@ -6,7 +6,7 @@ from typing import Protocol
 
 from pydantic import Field, SecretStr, field_validator
 
-from cloud_agent.ports.compute_provider import ComputeValue, NodeObservation, SshConnection
+from cloud_agent.ports.external.compute_provider import ComputeValue, NodeObservation, SshConnection
 
 
 class DeploymentProfile(ComputeValue):

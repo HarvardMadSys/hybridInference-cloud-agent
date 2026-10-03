@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0026_compute_resources"
-down_revision = "0025_github_user_tokens"
+revision = "0027_compute_resources"
+down_revision = "0026_fork_helper_version"
 branch_labels = None
 depends_on = None
 

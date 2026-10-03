@@ -318,6 +318,28 @@ describe('connection credentials', () => {
 });
 
 describe('resource management', () => {
+  it('shows the configured check interval without promising the next execution time', () => {
+    const { rerender } = render(
+      <ComputeResourcePanel
+        allocation={allocation({ check_interval_seconds: 75 })}
+        onSaved={vi.fn()}
+        onOperation={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/Periodic provider checks: about every 75 seconds/)).toHaveTextContent(
+      'Pending operations can delay a check.',
+    );
+    expect(screen.queryByText(/Next check:/)).not.toBeInTheDocument();
+    rerender(
+      <ComputeResourcePanel
+        allocation={allocation({ state: 'terminated', check_interval_seconds: null })}
+        onSaved={vi.fn()}
+        onOperation={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText(/Periodic provider checks:/)).not.toBeInTheDocument();
+  });
+
   it('keeps renewal policy save separate from confirmed extension and preserves conflict edits', async () => {
     vi.mocked(api.setComputePolicy).mockRejectedValue(
       new Error('The policy was updated by another administrator.'),

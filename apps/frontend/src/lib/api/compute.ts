@@ -76,7 +76,7 @@ export interface ComputeAllocation {
   external_id: string | null;
   expires_at: string | null;
   observed_at: string | null;
-  next_check_at?: string | null;
+  check_interval_seconds?: number | null;
   policy: RenewalPolicy;
   revision: number;
   management_mode?: 'observe' | 'manage';

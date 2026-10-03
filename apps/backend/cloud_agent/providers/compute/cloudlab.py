@@ -16,7 +16,7 @@ from xml.etree import ElementTree
 import httpx
 from pydantic import Field, ValidationError, field_validator
 
-from cloud_agent.ports.compute_provider import (
+from cloud_agent.ports.external.compute_provider import (
     AcquireRequest,
     AcquisitionResolution,
     ComputeProvider,
@@ -34,7 +34,7 @@ from cloud_agent.ports.compute_provider import (
 )
 
 if TYPE_CHECKING:
-    from cloud_agent.ports.compute_provider import SecretResolver
+    from cloud_agent.ports.external.compute_provider import SecretResolver
 
 
 class CloudLabConfig(ComputeValue):
@@ -265,18 +265,13 @@ class CloudLabProvider(ComputeProvider):
         except ProviderError as exc:
             if exc.code != "not_found":
                 raise
-            # A proxy/default-page 404 or broken credentials are not evidence
-            # of deletion. Verify that this endpoint still speaks the API and
-            # authenticates the same account before accepting exact-ID absence.
-            await self.validate_connection(config.credential_ref)
-            return ResourceObservation(
-                ref=ref,
-                state="terminated",
-                raw_state="not_found",
-                observed_at=datetime.now(timezone.utc),
-                lease_known=True,
-                scope_complete=True,
-            )
+            # A valid token or empty experiment list does not prove access to
+            # this resource's project. Credentials and membership can change;
+            # the public API does not promise visibility-independent absence.
+            raise ProviderError(
+                "resource_visibility_unknown",
+                "CloudLab cannot confirm this experiment's existence or visibility",
+            ) from None
         data = self._json(response)
         if data.get("id") != external_id or data.get("project") != config.project:
             raise ProviderError(
@@ -463,25 +458,32 @@ class CloudLabProvider(ComputeProvider):
         """Terminate the immutable experiment UUID; exact-ID DELETE replay is safe.
 
         A second DELETE cannot affect a later experiment with the same name.
-        Its 404 still needs an authenticated inspection before terminal success.
+        Only documented 204 acknowledgement proves deletion. A 404 may reflect
+        lost visibility and cannot confirm a previously ambiguous operation.
         """
         config = CloudLabConfig.model_validate(ref.config)
         external_id = str(UUID(ref.external_id))
         try:
-            await self._request("DELETE", f"/experiments/{external_id}", config.credential_ref)
+            response = await self._request(
+                "DELETE", f"/experiments/{external_id}", config.credential_ref
+            )
         except ProviderError as exc:
-            if exc.code == "result_unknown":
+            if exc.code in {"result_unknown", "not_found"}:
                 return ProviderReceipt(outcome="unknown", resource=ref)
-            if exc.code != "not_found":
-                raise
-        # Orchestration retains its committed release fence until this GET
-        # confirms terminal state. Authentication failure never becomes gone.
-        try:
-            observation = await self.inspect(ref)
-        except ProviderError:
+            raise
+        # The official contract defines 204 as "Experiment deleted". Save
+        # that evidence immediately rather than lose it to a failing GET.
+        if response.status_code != 204:
             return ProviderReceipt(outcome="unknown", resource=ref)
         return ProviderReceipt(
-            outcome="confirmed" if observation.state == "terminated" else "pending",
+            outcome="confirmed",
             resource=ref,
-            observation=observation,
+            observation=ResourceObservation(
+                ref=ref,
+                state="terminated",
+                raw_state="delete_acknowledged",
+                observed_at=datetime.now(timezone.utc),
+                lease_known=True,
+                scope_complete=True,
+            ),
         )

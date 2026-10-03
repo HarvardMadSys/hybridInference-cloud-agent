@@ -405,7 +405,8 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
     startup and kept them for as long as they ran. Asserted on the real
     lifespan, because the bug was in the wiring and nowhere else.
     """
-    from unittest.mock import AsyncMock
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
 
     import asyncpg
 
@@ -448,11 +449,31 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
     ):
         monkeypatch.setattr(loop_path, idle)
 
+    compute_stopped = asyncio.Event()
+
+    async def compute_loop() -> None:
+        started["compute"] = {}
+        try:
+            await asyncio.Event().wait()
+        finally:
+            compute_stopped.set()
+
+    compute_commands = object()
+    compute_builder = Mock(return_value=(compute_commands, SimpleNamespace(run=compute_loop)))
+    monkeypatch.setattr("cloud_agent.bootstrap.compute.build_compute_runtime", compute_builder)
+
     app = FastAPI()
     async with lifespan(app, background=True):
         runtime = app.state.source_control
         await asyncio.sleep(0)
         assert isinstance(runtime, SourceControlRuntime)
+        assert app.state.compute_commands is compute_commands
+        compute_builder.assert_called_once_with(
+            repository=app.state.storage.compute_resources,
+            host_pool=app.state.storage.host_pool,
+        )
+        assert "compute" in started
+        assert not app.state.compute_resource_task.done()
         assert not hasattr(app.state, "app_credentials")
         assert started["reaper"]["github_app"] is runtime.github
         assert started["publisher"]["github_app"] is runtime.github
@@ -462,6 +483,17 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
             pass
 
     assert client.is_closed, "the App's client outlived the application that owned it"
+    assert compute_stopped.is_set()
+    assert app.state.compute_resource_task.cancelled()
+
+    # The MCP listener shares the database but must not start another scheduler.
+    compute_builder.reset_mock()
+    relay = FastAPI()
+    async with lifespan(relay, background=False):
+        await asyncio.sleep(0)
+        assert relay.state.compute_commands is None
+        assert relay.state.compute_resource_task is None
+        compute_builder.assert_not_called()
 
 
 def test_only_the_routes_that_describe_the_state_tolerate_an_unloaded_app() -> None:

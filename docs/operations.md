@@ -777,6 +777,13 @@ produce patches, they just never become PRs.
 
 ## Running self-hosted
 
+Administrators can also attach an SSH-accessible server or provision a CloudLab
+experiment from Servers, then select the ready Host as the global location for
+new sandboxes. The [compute-resource runbook](operations-compute.md) covers
+operator profiles, credentials, automatic renewal and guarded resource release.
+Existing retained sandboxes remain on their original Host when this selection
+changes; neither Host Remove nor Forget destroys the underlying machine.
+
 The runner must be a **standing service**, not a process someone starts by
 hand: a queued job waits until something claims it, and "someone's laptop had
 the runner up that afternoon" is how the first real job actually ran.

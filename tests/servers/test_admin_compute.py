@@ -15,8 +15,8 @@ from cloud_agent.application.compute_resources import ComputeCommands
 from cloud_agent.compute_config import ComputeConfiguration
 from cloud_agent.compute_registry import ComputeProviderRegistration, ComputeProviderRegistry
 from cloud_agent.compute_secrets import ComputeSecretStore
-from cloud_agent.ports.compute_provider import ProviderCapabilities
-from cloud_agent.ports.host_bootstrap import DeploymentProfile
+from cloud_agent.ports.external.compute_provider import ProviderCapabilities
+from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
 from cloud_agent.schemas_compute import RenewalPolicy
 
 ADMIN = {"Authorization": "Bearer test-compute-admin"}
@@ -123,6 +123,10 @@ class MemoryResources:
         return {
             "allocation_id": allocation_id,
             "revision": row["revision"],
+            "provider_id": row["provider_id"],
+            "management_mode": row["management_mode"],
+            "deployment_profile_configured": bool(row.get("deployment_profile")),
+            "scope_complete": row["scope_complete"],
             "nodes": row["nodes"],
             "hosts": row["hosts"],
             "active_attempts": 2,
@@ -177,6 +181,7 @@ async def compute_api(monkeypatch):
         ]
     )
     configuration = ComputeConfiguration(
+        observation_seconds=75,
         profiles={
             "kata": DeploymentProfile(
                 id="kata",
@@ -186,7 +191,7 @@ async def compute_api(monkeypatch):
                 deployment_sha="b" * 40,
                 environment_ref="deployment:host-environment",
             )
-        }
+        },
     )
     commands = ComputeCommands(
         repository=repo,
@@ -418,6 +423,7 @@ async def test_impact_whitelists_scope_and_irreversible_release_disables_actions
     assert response.json()["retained_groups"] == 1
     assert response.json()["hosts"] == ["host-a"]
     assert response.json()["revision"] == row["revision"]
+    assert response.json()["allowed_actions"] == ["retire"]
     assert "private-reference" not in response.text
     assert "private-hash" not in response.text
     repo.operations[operation["id"]].update(kind="retire", state="unknown")
@@ -438,3 +444,56 @@ async def test_catalog_exposes_no_deployment_secret_paths(compute_api):
     assert response.json()["deployment_profiles"] == [{"id": "kata", "label": "Kata"}]
     assert "private/operator" not in response.text
     assert "environment_ref" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_unresolved_external_result_returns_safe_conflict(compute_api, monkeypatch):
+    """Storage fencing stays an actionable refusal when a prior provider call is unknown."""
+    client, repo, _ = compute_api
+    _, operation = await allocation(client)
+    repo.operations[operation["id"]].update(
+        kind="retire", state="blocked", step="awaiting_reconciliation"
+    )
+
+    async def refuse_cancel(operation_id):
+        assert operation_id == operation["id"]
+        raise ValueError("external_operation_unresolved")
+
+    monkeypatch.setattr(repo, "cancel_operation", refuse_cancel)
+    response = await client.post(
+        f"/admin/agent/compute-operations/{operation['id']}/cancel", headers=ADMIN, json={}
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "external_operation_unresolved",
+        "message": "The external operation is unresolved; reconcile its result before continuing.",
+    }
+    assert response.headers["cache-control"] == "no-store"
+    assert repo.operations[operation["id"]]["state"] == "blocked"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "external_id", "provider_id", "expected"),
+    [
+        ("ready", "experiment-a", "cloudlab", 75),
+        ("unknown", None, "cloudlab", None),
+        ("terminated", "experiment-a", "cloudlab", None),
+        ("absent", "experiment-a", "cloudlab", None),
+        ("ready", "experiment-a", "unconfigured", None),
+    ],
+)
+async def test_inventory_reports_configured_period_only_for_observable_resources(
+    compute_api, state, external_id, provider_id, expected
+):
+    """A periodic interval is configuration, not a promised next execution timestamp."""
+    client, repo, _ = compute_api
+    _, operation = await allocation(client)
+    repo.allocations[operation["allocation_id"]].update(
+        observed_state=state, external_id=external_id, provider_id=provider_id
+    )
+    response = await client.get("/admin/agent/servers", headers=ADMIN)
+    assert response.status_code == 200
+    resource = response.json()["allocations"][0]
+    assert resource["check_interval_seconds"] == expected
+    assert "next_check_at" not in resource
