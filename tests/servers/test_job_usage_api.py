@@ -189,3 +189,116 @@ async def test_claude_fallback_normalizes_cache_instead_of_changing_input_defini
     runtime = response.json()["runtime"]
     assert runtime["input_tokens"] == 200
     assert runtime["normalized_input_tokens"] == 400
+
+
+@pytest.fixture
+def request_grants(app, store):
+    from tests.unit.test_grant_usage_requests import GRANT, SINCE, UNTIL, page_payload, request_row
+
+    from cloud_agent.api.deps import get_grant_client
+    from cloud_agent.grant_usage import GrantUsageRequestPage
+
+    store.get_job.return_value = {
+        "id": "ajob_1",
+        "user_id": "owner",
+        "thread_id": "athr_requests_1",
+    }
+    store.ledger_rows_for_job.return_value = [
+        ledger_row(grant_id=GRANT, window_since=SINCE, window_until=UNTIL)
+    ]
+    client = SimpleNamespace(
+        binding_id="gw_one",
+        usage_requests=AsyncMock(
+            return_value=GrantUsageRequestPage.model_validate(
+                page_payload(rows=[request_row(response_id="msg_1")], response_id="msg_1")
+            )
+        ),
+    )
+    app.dependency_overrides[get_grant_client] = lambda: client
+    return client
+
+
+MESSAGE_PATH = "/v1/agent/jobs/ajob_1/attempts/10/messages/msg_1/request"
+
+
+@pytest.mark.asyncio
+async def test_message_request_is_owner_scoped_and_reads_exact_identity(app, store, request_grants):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(MESSAGE_PATH)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["status"] == "available"
+    assert response.json()["request"]["ttft_ms"] == 240
+    assert response.json()["request"]["tokens_out"] == 413
+    assert response.json()["request"]["reasoning"] is None
+    assert "grant_id" not in response.text
+    assert "binding_id" not in response.text
+    assert request_grants.usage_requests.await_args.kwargs["response_id"] == "msg_1"
+    assert (
+        request_grants.usage_requests.await_args.kwargs["external_job_id"]
+        == "thread:athr_requests_1"
+    )
+    store.queue_job_ledger_refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_owner", [True, False])
+async def test_message_request_refuses_other_owner_or_attempt(
+    app, store, request_grants, other_owner
+):
+    if other_owner:
+        store.get_job.return_value["user_id"] = "other"
+    else:
+        store.ledger_rows_for_job.return_value[0]["attempt_id"] = 11
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(MESSAGE_PATH)
+    assert response.status_code == 404
+    request_grants.usage_requests.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change", [{"binding_id": "old-gateway"}, {"id": None}, {"window_since": None}]
+)
+async def test_message_request_never_guesses_missing_attribution(
+    app, store, request_grants, change
+):
+    store.ledger_rows_for_job.return_value[0].update(change)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(MESSAGE_PATH)
+    assert response.status_code == 200
+    assert response.json()["request"] is None
+    request_grants.usage_requests.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case,expected",
+    [("duplicate", "ambiguous"), ("missing", "not_recorded"), ("failed", "unavailable")],
+)
+async def test_message_request_does_not_select_arbitrary_or_unavailable_rows(
+    app, request_grants, case, expected
+):
+    from cloud_agent.gateway import GatewayError
+
+    page = request_grants.usage_requests.return_value
+    if case == "duplicate":
+        request_grants.usage_requests.return_value = page.model_copy(
+            update={
+                "requests": [
+                    page.requests[0],
+                    page.requests[0].model_copy(update={"request_id": "req_other"}),
+                ]
+            }
+        )
+    elif case == "missing":
+        request_grants.usage_requests.return_value = page.model_copy(update={"requests": []})
+    else:
+        request_grants.usage_requests.side_effect = GatewayError(
+            "private diagnostics", error_type="usage_unavailable"
+        )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(MESSAGE_PATH)
+    assert response.json()["status"] == expected
+    assert response.json()["request"] is None
+    assert "private diagnostics" not in response.text

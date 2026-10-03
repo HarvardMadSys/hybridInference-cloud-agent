@@ -244,6 +244,7 @@ class GrantUsageRequest(_UsageModel):
     """
 
     request_id: RequestId
+    response_id: RequestId | None = None
     request_started_at: datetime
     logged_at: datetime
     model: RequestModelId | None
@@ -277,6 +278,7 @@ class GrantUsageRequestPage(GrantUsageReport):
 
     requests: list[GrantUsageRequest]
     next_cursor: GatewayCursor | None
+    response_id: RequestId | None = None
 
 
 def parse_usage_request_page(
@@ -289,6 +291,7 @@ def parse_usage_request_page(
     external_job_id: str,
     cursor: str | None = None,
     after: tuple[datetime, str] | None = None,
+    response_id: str | None = None,
 ) -> GrantUsageRequestPage:
     """Validate one request page against the exact query that asked for it.
 
@@ -307,6 +310,7 @@ def parse_usage_request_page(
         after: The last ``(request_started_at, request_id)`` of the previous
             page, kept locally so continuation never depends on decoding the
             gateway's opaque cursor.
+        response_id: Exact message identity; the gateway must echo this selector.
 
     Returns:
         The validated page.
@@ -349,6 +353,17 @@ def parse_usage_request_page(
             error_type="usage_response_mismatch",
         )
     _check_request_page(page, limit=limit, since=since, until=until, cursor=cursor, after=after)
+    if response_id is not None:
+        if page.response_id != response_id:
+            raise GatewayError(
+                "gateway does not support message request correlation",
+                error_type="message_correlation_unsupported",
+            )
+        if any(row.response_id != response_id for row in page.requests):
+            raise GatewayError(
+                "gateway returned requests for another message",
+                error_type="usage_response_mismatch",
+            )
     return page
 
 

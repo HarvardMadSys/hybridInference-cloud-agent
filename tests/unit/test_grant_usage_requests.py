@@ -189,7 +189,8 @@ async def test_allowlist_drops_credentials_prompts_and_raw_metadata() -> None:
     assert TOKEN not in encoded
     assert "private input" not in encoded
     assert "private upstream failure" not in encoded
-    assert set(page.requests[0].model_dump()) == set(request_row())
+    assert set(page.requests[0].model_dump()) == set(request_row()) | {"response_id"}
+    assert page.requests[0].response_id is None
 
 
 async def test_a_page_with_more_rows_keeps_the_opaque_gateway_cursor() -> None:
@@ -569,3 +570,66 @@ async def test_counts_a_browser_cannot_hold_are_refused_rather_than_rounded() ->
     with pytest.raises(GatewayError) as raised:
         await _read(page_payload([request_row(tokens_in=2**53)]))
     assert raised.value.error_type == "usage_invalid_response"
+
+
+@pytest.mark.parametrize(
+    "payload,reason",
+    [
+        (page_payload(), "message_correlation_unsupported"),
+        (page_payload(rows=[], response_id="msg_other"), "message_correlation_unsupported"),
+        (
+            page_payload(rows=[request_row(response_id="msg_other")], response_id="msg_1"),
+            "usage_response_mismatch",
+        ),
+    ],
+)
+def test_message_filter_requires_echo_and_matching_rows(payload, reason):
+    from cloud_agent.grant_usage import parse_usage_request_page
+
+    with pytest.raises(GatewayError) as exc:
+        parse_usage_request_page(
+            payload,
+            grant_id=GRANT,
+            since=SINCE,
+            until=UNTIL,
+            limit=2,
+            external_job_id=JOB,
+            response_id="msg_1",
+        )
+    assert exc.value.error_type == reason
+
+
+def test_message_filter_retains_measured_zero_and_unknown_breakdown():
+    from cloud_agent.grant_usage import parse_usage_request_page
+
+    page = parse_usage_request_page(
+        page_payload(
+            rows=[request_row(response_id="msg_1", ttft_ms=0, tokens_out=0)], response_id="msg_1"
+        ),
+        grant_id=GRANT,
+        since=SINCE,
+        until=UNTIL,
+        limit=2,
+        external_job_id=JOB,
+        response_id="msg_1",
+    )
+    assert page.requests[0].ttft_ms == 0
+    assert page.requests[0].tokens_out == 0
+    assert page.requests[0].reasoning is None
+
+
+async def test_client_sends_the_exact_message_selector_and_accepts_its_echo():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(
+            200, json=page_payload(rows=[request_row(response_id="msg_1")], response_id="msg_1")
+        )
+
+    page = await _client(handler).usage_requests(
+        GRANT, since=SINCE, until=UNTIL, limit=2, external_job_id=JOB, response_id="msg_1"
+    )
+    assert seen[0].url.params["response_id"] == "msg_1"
+    assert seen[0].url.params["limit"] == "2"
+    assert page.requests[0].response_id == "msg_1"

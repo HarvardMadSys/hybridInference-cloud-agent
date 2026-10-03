@@ -339,6 +339,10 @@ paths:
           in: query
           description: Opaque continuation bound to grant, since, until and sort order.
           schema: { type: string }
+        - name: response_id
+          in: query
+          description: Exact delivered response identity; filters request rows only, not totals. Echoed in the response and bound into the cursor.
+          schema: { type: string, minLength: 1, maxLength: 256, pattern: '^[A-Za-z0-9_.:-]+$' }
       responses:
         "200":
           description: Legacy job totals or one grant's versioned windowed report.
@@ -456,6 +460,10 @@ components:
       description: Safe request metadata only; no prompt, response, raw metadata or credentials.
       properties:
         request_id: { type: string }
+        response_id:
+          type: [string, "null"]
+          maxLength: 256
+          description: Delivered response identity recorded independently of full-content logging. Absent or null for older rows.
         request_started_at: { type: string, format: date-time }
         logged_at: { type: string, format: date-time }
         model: { type: [string, "null"] }
@@ -494,6 +502,9 @@ components:
         totals: { $ref: "#/components/schemas/UsageTotals" }
         unknown_rows: { $ref: "#/components/schemas/UsageUnknownRows" }
         estimated_calls: { $ref: "#/components/schemas/NonnegativeCount" }
+        response_id:
+          type: [string, "null"]
+          description: Echo of the optional identity selector on detail=requests. Consumers must require an exact echo when filtering; older gateways may ignore the selector.
         requests:
           type: array
           description: Present only for detail=requests; totals still cover the whole window.

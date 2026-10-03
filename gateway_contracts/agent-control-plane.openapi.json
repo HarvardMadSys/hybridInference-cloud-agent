@@ -7385,6 +7385,204 @@
         "title": "GrantUsageDerivedTotals",
         "type": "object"
       },
+      "GrantUsageRequest": {
+        "description": "One logged gateway request, with no prompt, response or raw metadata.\n\nA row is one request the gateway admitted, identified by its request ID.\nStreaming chunks are not separate rows, and a retry inside the gateway need\nnot appear at all: this is an entry-request log, never a supplier-attempt\ntimeline. A null metric is \"not reported\" and is never rendered as zero.",
+        "properties": {
+          "cache_read": {
+            "anyOf": [
+              {
+                "maximum": 9007199254740991.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read"
+          },
+          "cache_write": {
+            "anyOf": [
+              {
+                "maximum": 9007199254740991.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Write"
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "maximum": 9007199254740991.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "logged_at": {
+            "format": "date-time",
+            "title": "Logged At",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "maximum": 9007199254740991.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning"
+          },
+          "request_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "request_started_at": {
+            "format": "date-time",
+            "title": "Request Started At",
+            "type": "string"
+          },
+          "response_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Id"
+          },
+          "served_model_id": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Served Model Id"
+          },
+          "spent_usd": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^[0-9]+(?:\\.[0-9]+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spent Usd"
+          },
+          "status_code": {
+            "anyOf": [
+              {
+                "maximum": 9007199254740991.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Code"
+          },
+          "tokens_in": {
+            "anyOf": [
+              {
+                "maximum": 9007199254740991.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tokens In"
+          },
+          "tokens_out": {
+            "anyOf": [
+              {
+                "maximum": 9007199254740991.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tokens Out"
+          },
+          "ttft_ms": {
+            "anyOf": [
+              {
+                "maximum": 9007199254740991.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ttft Ms"
+          },
+          "usage_estimated": {
+            "title": "Usage Estimated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "request_id",
+          "request_started_at",
+          "logged_at",
+          "model",
+          "served_model_id",
+          "tokens_in",
+          "tokens_out",
+          "cache_read",
+          "cache_write",
+          "reasoning",
+          "spent_usd",
+          "ttft_ms",
+          "latency_ms",
+          "status_code",
+          "usage_estimated"
+        ],
+        "title": "GrantUsageRequest",
+        "type": "object"
+      },
       "GrantUsageUnknownRows": {
         "description": "How many request rows lack each metric; never a fabricated zero.",
         "properties": {
@@ -8972,6 +9170,47 @@
           "label"
         ],
         "title": "McpIntegrationResponse",
+        "type": "object"
+      },
+      "MessageRequestDetail": {
+        "description": "A request matched by response identity inside one owner's execution.",
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GrantUsageRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "available",
+              "not_recorded",
+              "ambiguous",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "MessageRequestDetail",
         "type": "object"
       },
       "OAuthConnectRequest": {
@@ -17141,6 +17380,87 @@
           }
         },
         "summary": "Archive Agent Thread"
+      }
+    },
+    "/v1/agent/jobs/{job_id}/attempts/{attempt_id}/messages/{message_id}/request": {
+      "get": {
+        "description": "Read measured request statistics without attributing turn totals to a message.\n\nAll grant and time-window selectors come from the owned job's ledger.\nMultiple matches are ambiguous, never joined by order or guessed timing.\nOld gateways must echo the identity filter before any row is accepted.",
+        "operationId": "get_message_request_v1_agent_jobs__job_id__attempts__attempt_id__messages__message_id__request_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "attempt_id",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Attempt Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_.:-]+$",
+              "title": "Message Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageRequestDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Message Request",
+        "tags": [
+          "agent"
+        ]
       }
     },
     "/v1/agent/jobs/{job_id}/attempts/{attempt_id}/telemetry": {

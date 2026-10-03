@@ -388,20 +388,30 @@ runtime 在启动时对自己的配置所做的陈述，作为可选证据字段
 
 ## 10. 用量、时间与 Schema 的数据证据
 
+2026-10-04 更新（#229）：Assistant 请求统计通过当前用户拥有的 job、指定 attempt
+的 ledger 引用和精确 native response ID 读取网关记录。网关独立保留响应 ID 元数据，
+不依赖完整 prompt/response 日志。要求网关回显 ID 筛选条件，并校验 grant、时间窗口、
+thread 和返回行的 ID；存在多个匹配时不归属统计，不按顺序或邻接时间猜测。
+
+网关的请求开始时间、TTFT、总耗时和 output/input tokens 可用于此消息的详情。
+Generation = latency − TTFT（仅在两者已知且非负时）；Throughput = output tokens / Generation
+（仅在 Generation > 0 时）。未采集的细分不展示为空行，历史记录与旧网关显示未关联原因。
+事件入库时间差不再显示为模型请求耗时。日志异步写入时做有限次数重试，并提供手动重试。
+
 | 详情字段 | 当前可以使用的证据 | 禁止替代方式 |
 | --- | --- | --- |
 | Tool Payload / Result | 匹配事件的实际字段 | 单行预览冒充完整实参/结果 |
 | Tool Hierarchy | 明确 message identity / parent identity；Claude 经验证的 usage_id 关联 | 最近 Assistant、相邻 seq、同工具名 |
 | Assistant Source | 实际保存的 native message/request 标识 | 自造 `Request #N`；将 CLI 控制协议 request ID 当成模型 request ID |
-| Assistant tokens | 同 native message 的 usage 及明确的 usage scope | 整轮/全会话 totals 平均分配到 step |
-| Assistant Request Timing | 同请求记录的 started/first-token/finished | 相邻 Assistant 的 created_at 差；thread-level TTFT |
+| Assistant tokens | 精确 response ID 关联的网关用量，或同 native message 的 usage 及明确的 usage scope | 整轮/全会话 totals 平均分配到 step |
+| Assistant Request Timing | 精确 response ID 关联的网关请求 started/TTFT/latency；或同请求记录的 started/first-token/finished | 相邻 Assistant 的 created_at 差；thread-level TTFT |
 | Tool Timing | 匹配调用的 telemetry 或事件时间区间 | 混合来源；跨 attempt 配对；负值夹为零 |
 | Tool Schema | 当次调用有版本/来源依据的定义快照 | 根据实参猜 schema；当前全局工具定义冒充历史快照 |
 
 ### 10.1 Token 语义
 
-- Assistant 的 `Tokens` 指该 native message/request 的生成 token；Reasoning 与 Content 是在 runtime 明确记录/定义时才能展示的分项，不包含输入 token。
-- 输入用量如有需要可放在展开的 usage 明细，不把 input + output 标成截图中的 Tokens。
+- Assistant 的 `Output tokens` 指该 native message/request 的生成 token；`Reasoning tokens` 与 `Content tokens` 仅在数据源明确提供时展示，不包含输入 token。网关用量优先于 runtime 的临时计数，并注明数据来源或估算标识。
+- 已关联的网关输入用量单列 `Input tokens`，不将 input + output 标为输出 token。
 - 同一 `usage_id` 在 text/thinking/tool blocks 上可能重复；按 identity 去重，不能求和重复 usage。
 - `usage_scope = attempt` 明确属于 attempt，不填到某个 Assistant。
 - 若一个 runtime 的 output 是否包含 reasoning 不明确，Content 显示未记录，不能直接做减法。只有语义确认且非负时才允许 `content = output − reasoning`。

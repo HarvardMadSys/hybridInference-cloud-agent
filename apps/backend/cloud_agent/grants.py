@@ -421,6 +421,7 @@ class GrantClient:
         external_job_id: str,
         cursor: str | None = None,
         after: tuple[datetime, str] | None = None,
+        response_id: str | None = None,
     ) -> GrantUsageRequestPage:
         """Read one page of the request rows behind a window's totals.
 
@@ -440,6 +441,7 @@ class GrantClient:
             after: The previous page's last ``(request_started_at,
                 request_id)``, kept locally so a continuation is checked
                 without decoding the gateway's opaque cursor.
+            response_id: Filter by the exact delivered message identity.
 
         Returns:
             The validated page.
@@ -466,6 +468,8 @@ class GrantClient:
         }
         if cursor is not None:
             params["cursor"] = cursor
+        if response_id is not None:
+            params["response_id"] = response_id
         url = f"{self._base_url}{path}"
         headers = {"Authorization": f"Bearer {self._token}"}
         timeout = httpx.Timeout(_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
@@ -505,6 +509,7 @@ class GrantClient:
             external_job_id=external_job_id,
             cursor=cursor,
             after=after,
+            response_id=response_id,
         )
 
     async def revoke(self, grant_id: str) -> bool:

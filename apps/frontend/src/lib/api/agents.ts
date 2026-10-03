@@ -1103,6 +1103,38 @@ export async function getAgentAttemptTelemetry(
   return jsonOrThrow<AgentAttemptTelemetryApi>(resp);
 }
 
+/** One gateway request, correlated by the delivered response ID. */
+export interface AgentMessageRequestApi {
+  status: 'available' | 'not_recorded' | 'ambiguous' | 'unavailable';
+  reason: string | null;
+  request: {
+    request_id: string;
+    response_id: string | null;
+    request_started_at: string;
+    tokens_in: number | null;
+    tokens_out: number | null;
+    reasoning: number | null;
+    spent_usd: string | null;
+    ttft_ms: number | null;
+    latency_ms: number | null;
+    usage_estimated: boolean;
+  } | null;
+}
+
+export async function getAgentMessageRequest(
+  jobId: string,
+  attemptId: number,
+  messageId: string,
+  signal?: AbortSignal,
+): Promise<AgentMessageRequestApi> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/attempts/${attemptId}/messages/${encodeURIComponent(messageId)}/request`,
+    { signal },
+  );
+  return jsonOrThrow<AgentMessageRequestApi>(resp);
+}
+
 /** Read cached snapshots; a pre-ledger control plane returns null, never zero usage. */
 export async function getAgentJobUsage(
   jobId: string,

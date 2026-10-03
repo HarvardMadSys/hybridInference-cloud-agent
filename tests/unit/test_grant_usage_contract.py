@@ -199,6 +199,10 @@ def test_request_models_require_every_declared_row_field() -> None:
     document = yaml.safe_load(CONTRACT.read_text())
     page = GrantUsageRequestPage.model_validate(_request_page())
     schemas = document["components"]["schemas"]
-    assert set(type(page.requests[0]).model_fields) == set(schemas["UsageRequest"]["required"])
+    fields = type(page.requests[0]).model_fields
+    assert set(fields) == set(schemas["UsageRequest"]["properties"])
+    assert {name for name, field in fields.items() if field.is_required()} == set(
+        schemas["UsageRequest"]["required"]
+    )
     assert set(schemas["WindowedUsage"]["required"]) <= set(type(page).model_fields)
     assert page.next_cursor == "opaque-next-cursor"
