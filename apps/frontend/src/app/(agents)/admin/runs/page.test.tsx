@@ -321,6 +321,18 @@ function deferred<T>() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // An assertion can fail before a queued response is consumed. Reset only
+  // these API doubles so one test's one-shot response cannot reach the next.
+  for (const read of [
+    getAdminRun,
+    getAdminAttemptResources,
+    getAdminLlmRequestSources,
+    getAdminLlmRequests,
+    listMeasurements,
+    measurements.getMeasurement,
+  ]) {
+    vi.mocked(read).mockReset();
+  }
   auth.access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
   auth.id = 'admin-1';
   route.jobId = 'job-1';
@@ -393,10 +405,22 @@ describe('admin run observation', () => {
       );
     render(<AdminRunPage />);
     await screen.findByText('host-b');
-    expect(getAdminAttemptResources).toHaveBeenLastCalledWith('job-1', 20, expect.any(AbortSignal));
+    await waitFor(() =>
+      expect(getAdminAttemptResources).toHaveBeenLastCalledWith(
+        'job-1',
+        20,
+        expect.any(AbortSignal),
+      ),
+    );
     fireEvent.click(screen.getByRole('button', { name: 'Refresh turn' }));
     await screen.findByText('host-c');
-    expect(getAdminAttemptResources).toHaveBeenLastCalledWith('job-1', 30, expect.any(AbortSignal));
+    await waitFor(() =>
+      expect(getAdminAttemptResources).toHaveBeenLastCalledWith(
+        'job-1',
+        30,
+        expect.any(AbortSignal),
+      ),
+    );
     // Still running, so the turn has no end time yet.
     expect(screen.queryByText('Finished', { selector: 'dt' })).not.toBeInTheDocument();
     expect(
@@ -732,6 +756,12 @@ describe('admin run observation', () => {
     await screen.findByText('host-d');
     expect(firstRead?.aborted).toBe(true);
     expect(screen.queryByText(/Restarted/)).not.toBeInTheDocument();
-    expect(getAdminAttemptResources).toHaveBeenLastCalledWith('job-2', 40, expect.any(AbortSignal));
+    await waitFor(() =>
+      expect(getAdminAttemptResources).toHaveBeenLastCalledWith(
+        'job-2',
+        40,
+        expect.any(AbortSignal),
+      ),
+    );
   });
 });
