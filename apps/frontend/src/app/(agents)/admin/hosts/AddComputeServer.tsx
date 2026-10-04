@@ -7,14 +7,21 @@ import {
   getComputeOperations,
   importComputeResource,
   preflightComputeServer,
+  saveComputeConnection,
   type ComputeCatalog,
   type ComputeConnection,
   type ComputeOperation,
+  type ComputeProvider,
   type ServerRequest,
 } from '@/lib/api/compute';
 import { getErrorMessage } from '@/lib/utils/errors';
 
-import ComputeConnectionForm from './ComputeConnectionForm';
+import {
+  CredentialPicker,
+  initialCredential,
+  NEW_CREDENTIAL,
+  type CredentialDraft,
+} from './ComputeCredentials';
 
 import {
   buttonClass,
@@ -41,7 +48,6 @@ export default function AddComputeServer({
   onOperation: (operation: ComputeOperation, submitted: boolean) => void;
   onConnectionSaved: (connection: ComputeConnection) => void;
 }) {
-  const [connectionTarget, setConnectionTarget] = useState<'account' | 'ssh' | null>(null);
   const [newConnections, setNewConnections] = useState<ComputeConnection[]>([]);
   const availableConnections = [
     ...newConnections,
@@ -53,8 +59,9 @@ export default function AddComputeServer({
   const provider = catalog.providers.find((item) => item.id === providerId);
   const [mode, setMode] = useState<'attach' | 'provision'>(provider?.modes[0] ?? 'attach');
   const [name, setName] = useState('');
-  const [connectionId, setConnectionId] = useState('');
-  const [sshConnectionId, setSshConnectionId] = useState('');
+  const [account, setAccount] = useState(() => initialCredential(provider, connections));
+  const sshProvider = catalog.providers.find((item) => item.id === 'existing_ssh');
+  const [ssh, setSsh] = useState(() => initialCredential(sshProvider, connections));
   const [deploymentProfile, setDeploymentProfile] = useState(
     catalog.deployment_profiles[0]?.id ?? '',
   );
@@ -74,21 +81,59 @@ export default function AddComputeServer({
     setError(null);
   };
 
+  async function saveCredential(
+    draft: CredentialDraft,
+    owner: ComputeProvider,
+    update: (draft: CredentialDraft) => void,
+  ): Promise<string> {
+    if (draft.selection !== NEW_CREDENTIAL) {
+      if (!draft.selection)
+        throw new Error(`Select a ${owner.id === 'existing_ssh' ? 'SSH key' : 'cloud account'}.`);
+      return draft.selection;
+    }
+    const { connection } = await saveComputeConnection({
+      name:
+        draft.name.trim() ||
+        `${name.trim() || 'Server'} ${owner.id === 'existing_ssh' ? 'key' : 'account'}`,
+      provider_id: owner.id,
+      configuration: parseFields(owner.connection_fields, draft.values),
+      secret: draft.secret,
+    });
+    // Keep each successful save across partial failures; never send a secret with a server request.
+    update({ ...draft, selection: connection.id, secret: '' });
+    setNewConnections((current) => [
+      connection,
+      ...current.filter((item) => item.id !== connection.id),
+    ]);
+    onConnectionSaved(connection);
+    return connection.id;
+  }
+
   async function submit(action: 'validate' | 'deploy' | 'import') {
     if (busy || !provider) return;
     setBusy(true);
     setError(null);
     const requestId = requestIds.current[action] ?? crypto.randomUUID();
     requestIds.current[action] = requestId;
+    let submitted = false;
     try {
+      const configuration = parseFields(fields, values);
+      if (provider.requires_ssh_connection && action !== 'import' && !sshProvider) {
+        throw new Error('SSH access is not configured.');
+      }
+      const connectionId = await saveCredential(account, provider, setAccount);
+      const sshConnectionId =
+        provider.requires_ssh_connection && action !== 'import'
+          ? await saveCredential(ssh, sshProvider!, setSsh)
+          : undefined;
       const body: ServerRequest = {
         request_id: requestId,
         name,
         provider_id: provider.id,
         mode,
         connection_id: connectionId,
-        ...(provider.requires_ssh_connection ? { ssh_connection_id: sshConnectionId } : {}),
-        configuration: parseFields(fields, values),
+        ...(sshConnectionId ? { ssh_connection_id: sshConnectionId } : {}),
+        configuration,
         deployment_profile: deploymentProfile,
       };
       const send =
@@ -97,6 +142,7 @@ export default function AddComputeServer({
           : action === 'import'
             ? importComputeResource
             : createComputeServer;
+      submitted = true;
       const { operation } = await send(body);
       if (action === 'validate') setPreflightId(operation.id);
       onOperation(operation, action !== 'validate');
@@ -104,7 +150,7 @@ export default function AddComputeServer({
       // A lost response does not justify creating a second resource. Ask by the
       // stable request ID before allowing a retry with the same payload.
       try {
-        const recovered = await getComputeOperations(requestId);
+        const recovered = submitted ? await getComputeOperations(requestId) : { operations: [] };
         const operation = recovered.operations.find((item) => item.request_id === requestId);
         if (operation) {
           if (action === 'validate') setPreflightId(operation.id);
@@ -120,36 +166,6 @@ export default function AddComputeServer({
     }
   }
 
-  if (connectionTarget) {
-    return (
-      <div className="space-y-5">
-        <button type="button" className={buttonClass} onClick={() => setConnectionTarget(null)}>
-          ← Back to server setup
-        </button>
-        <h3 className="text-base font-semibold">
-          {connectionTarget === 'ssh' || providerId === 'existing_ssh'
-            ? 'Add SSH connection'
-            : `Add ${provider?.label ?? ''} connection`}
-        </h3>
-        <ComputeConnectionForm
-          catalog={catalog}
-          fixedProviderId={connectionTarget === 'ssh' ? 'existing_ssh' : providerId}
-          onSaved={(connection) => {
-            setNewConnections((current) => [
-              connection,
-              ...current.filter((item) => item.id !== connection.id),
-            ]);
-            if (connectionTarget === 'ssh') setSshConnectionId(connection.id);
-            else setConnectionId(connection.id);
-            changed();
-            setConnectionTarget(null);
-            onConnectionSaved(connection);
-          }}
-        />
-      </div>
-    );
-  }
-
   return (
     <form
       className="space-y-4"
@@ -157,7 +173,7 @@ export default function AddComputeServer({
       onSubmit={(event) => {
         event.preventDefault();
         const action = (event.nativeEvent as SubmitEvent).submitter?.getAttribute('value');
-        void submit(action === 'deploy' || action === 'import' ? action : 'validate');
+        void submit(action === 'validate' || action === 'import' ? action : 'deploy');
       }}
     >
       <fieldset disabled={busy} className="space-y-4">
@@ -176,8 +192,8 @@ export default function AddComputeServer({
                     setProviderId(item.id);
                     setMode(item.modes.includes('provision') ? 'provision' : 'attach');
                     setValues(initialFields(item.fields));
-                    setConnectionId('');
-                    setSshConnectionId('');
+                    setAccount(initialCredential(item, availableConnections));
+                    setSsh(initialCredential(sshProvider, availableConnections));
                   }}
                 />
                 <span className="block h-full rounded-xl border border-gray-200 p-4 peer-checked:border-crimson peer-checked:bg-crimson/5 peer-focus-visible:ring-2 peer-focus-visible:ring-crimson dark:border-white/15 dark:peer-checked:border-crimson-light">
@@ -217,59 +233,25 @@ export default function AddComputeServer({
             onChange={(event) => setName(event.target.value)}
           />
         </Field>
-        <Field label="Account connection">
-          <select
-            className={inputClass}
-            required
-            value={connectionId}
-            onChange={(event) => setConnectionId(event.target.value)}
-          >
-            <option value="">Select connection…</option>
-            {availableConnections
-              .filter((item) => item.provider_id === providerId)
-              .map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name} · {item.status}
-                </option>
-              ))}
-          </select>
-        </Field>
-        <button
-          type="button"
-          className={buttonClass}
-          onClick={() => setConnectionTarget('account')}
-        >
-          {providerId === 'existing_ssh' ? 'Add SSH connection' : 'Add account connection'}
-        </button>
-        {provider?.requires_ssh_connection && (
-          <div className="space-y-2">
-            <Field label="SSH deployment connection">
-              <select
-                className={inputClass}
-                required
-                value={sshConnectionId}
-                onChange={(event) => setSshConnectionId(event.target.value)}
-              >
-                <option value="">Select SSH connection…</option>
-                {availableConnections
-                  .filter((item) => item.provider_id === 'existing_ssh')
-                  .map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name} · {item.status}
-                    </option>
-                  ))}
-              </select>
-            </Field>
-            <button
-              type="button"
-              className={buttonClass}
-              onClick={() => setConnectionTarget('ssh')}
-            >
-              Add SSH connection
-            </button>
-          </div>
-        )}
         <ProviderFields fields={fields} values={values} onChange={setValues} />
+        {provider && (
+          <CredentialPicker
+            provider={provider}
+            connections={availableConnections}
+            value={account}
+            onChange={setAccount}
+            serverName={name}
+          />
+        )}
+        {provider?.requires_ssh_connection && sshProvider && (
+          <CredentialPicker
+            provider={sshProvider}
+            connections={availableConnections}
+            value={ssh}
+            onChange={setSsh}
+            serverName={name}
+          />
+        )}
         <details open={!deploymentProfile}>
           <summary className="cursor-pointer text-sm text-gray-600 dark:text-gray-300">
             Deployment settings
@@ -296,9 +278,18 @@ export default function AddComputeServer({
           </div>
         </details>
         <p className="text-xs text-gray-500 dark:text-gray-400">
-          Installs the agent. Select this server as the global location once it is ready.
+          The agent will be installed on this server. You can use it for new sandboxes once it is
+          ready.
         </p>
         <div className="flex flex-wrap gap-2">
+          <button
+            className={primaryClass}
+            type="submit"
+            value="deploy"
+            disabled={!provider || !deploymentProfile}
+          >
+            {mode === 'provision' ? 'Create server' : 'Add server'}
+          </button>
           <button
             className={buttonClass}
             type="submit"
@@ -306,14 +297,6 @@ export default function AddComputeServer({
             disabled={!provider || !deploymentProfile}
           >
             Validate configuration
-          </button>
-          <button
-            className={primaryClass}
-            type="submit"
-            value="deploy"
-            disabled={!provider || !deploymentProfile}
-          >
-            {mode === 'provision' ? 'Provision and deploy' : 'Connect and deploy'}
           </button>
           {mode === 'attach' && provider?.capabilities.import && (
             <button className={buttonClass} type="submit" value="import" formNoValidate>

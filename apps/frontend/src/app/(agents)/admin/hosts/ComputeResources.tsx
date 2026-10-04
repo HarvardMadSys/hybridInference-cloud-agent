@@ -9,7 +9,6 @@ import {
   getComputeProviders,
   getComputeServers,
   resolveComputeOperation,
-  validateComputeConnection,
   type ComputeAllocation,
   type ComputeCatalog,
   type ComputeConnection,
@@ -19,7 +18,8 @@ import {
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import AddComputeServer from './AddComputeServer';
-import ComputeConnectionForm from './ComputeConnectionForm';
+import ServerAccess from './ServerAccess';
+import ServerActions from './ServerActions';
 import ComputeResourcePanel from './ComputeResourcePanel';
 import ComputeServerList, { type ComputeServerGroup } from './ComputeServerList';
 import {
@@ -31,14 +31,11 @@ import {
   OperationDetails,
   Panel,
   primaryClass,
-  Reasons,
 } from './compute-ui';
 
 type OpenPanel =
   | { kind: 'add' }
-  | { kind: 'connections' }
   | { kind: 'operations' }
-  | { kind: 'connection'; id?: string }
   | { kind: 'resource'; id: string }
   | { kind: 'host'; hosts: string[]; name: string }
   | { kind: 'operation'; id: string }
@@ -77,7 +74,9 @@ export default function ComputeResources({
   const [allocations, setAllocations] = useState<ComputeAllocation[]>([]);
   const [operations, setOperations] = useState<ComputeOperation[]>([]);
   const [panel, setPanel] = useState<OpenPanel>(null);
-  const [serverTab, setServerTab] = useState<'overview' | 'lease' | 'activity'>('overview');
+  const [serverTab, setServerTab] = useState<
+    'overview' | 'lease' | 'activity' | 'access' | 'retire'
+  >('overview');
   const [operationOrigin, setOperationOrigin] = useState<OpenPanel>({ kind: 'operations' });
   const [error, setError] = useState<string | null>(null);
   const [readAt, setReadAt] = useState<string | null>(null);
@@ -179,10 +178,6 @@ export default function ComputeResources({
     ]);
     void refresh();
   };
-  const receiveConnection = (connection: ComputeConnection) => {
-    saveConnectionInList(connection);
-    setPanel({ kind: 'connections' });
-  };
   function openResource(id: string) {
     onHostControlsClosed?.();
     setServerTab('overview');
@@ -235,6 +230,17 @@ export default function ComputeResources({
   const pending = operations.filter((item) => !FINISHED.has(item.state));
   const shownOperations = showAllOperations ? operations : pending;
 
+  const resourceActions = [];
+  if (catalog)
+    resourceActions.push({ label: 'Access settings', onSelect: () => setServerTab('access') });
+  if (currentAllocation?.allowed_actions.includes('retire')) {
+    resourceActions.push({
+      label:
+        currentAllocation.provider_id === 'existing_ssh' ? 'Disconnect server' : 'Release server',
+      onSelect: () => setServerTab('retire'),
+    });
+  }
+
   if (denied)
     return (
       <p className="mt-6" role="alert">
@@ -258,14 +264,6 @@ export default function ComputeResources({
                 {pending.length} active
               </span>
             )}
-          </button>
-          <button
-            className={buttonClass}
-            type="button"
-            onClick={() => setPanel({ kind: 'connections' })}
-            disabled={!catalog}
-          >
-            Connections
           </button>
           <button
             className={primaryClass}
@@ -357,78 +355,6 @@ export default function ComputeResources({
           />
         </Panel>
       )}
-      {panel?.kind === 'connection' && catalog && (
-        <Panel
-          title={panel.id ? 'Edit connection' : 'Add connection'}
-          onClose={closeServer}
-          onBack={() => setPanel({ kind: 'connections' })}
-        >
-          <ComputeConnectionForm
-            key={panel.id ?? 'new'}
-            catalog={catalog}
-            connection={connections.find((item) => item.id === panel.id)}
-            onSaved={receiveConnection}
-          />
-        </Panel>
-      )}
-      {panel?.kind === 'connections' && catalog && (
-        <Panel title="Connections" onClose={() => setPanel(null)}>
-          <div className="space-y-4">
-            {connections.map((connection) => (
-              <div
-                key={connection.id}
-                className="space-y-2 border-b border-gray-200 pb-3 text-sm dark:border-white/10"
-              >
-                <p className="font-medium">
-                  {connection.name} · {connection.status}
-                </p>
-                <p>{connection.masked_summary}</p>
-                <Reasons reasons={connection.blocked_reasons} />
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    className={buttonClass}
-                    disabled={!catalog.secret_store_configured}
-                    onClick={() => setPanel({ kind: 'connection', id: connection.id })}
-                  >
-                    Edit {connection.name}
-                  </button>
-                  <button
-                    type="button"
-                    className={buttonClass}
-                    disabled={busy === connection.id || !catalog.secret_store_configured}
-                    onClick={async () => {
-                      setBusy(connection.id);
-                      setError(null);
-                      try {
-                        receiveConnection(
-                          (await validateComputeConnection(connection.id)).connection,
-                        );
-                      } catch (error) {
-                        setError(getErrorMessage(error));
-                      } finally {
-                        setBusy(null);
-                      }
-                    }}
-                  >
-                    Validate {connection.name}
-                  </button>
-                </div>
-              </div>
-            ))}
-            {!connections.length && <p className="text-sm">No account connections configured.</p>}
-            <button
-              type="button"
-              className={primaryClass}
-              disabled={!catalog.secret_store_configured}
-              onClick={() => setPanel({ kind: 'connection' })}
-            >
-              Add connection
-            </button>
-            <ErrorNotice error={error} />
-          </div>
-        </Panel>
-      )}
       {panel?.kind === 'host' && (
         <Panel title={panel.name} onClose={closeServer}>
           {hostFeedback}
@@ -437,7 +363,11 @@ export default function ComputeResources({
         </Panel>
       )}
       {currentAllocation && (
-        <Panel title={currentAllocation.name} onClose={closeServer}>
+        <Panel
+          title={currentAllocation.name}
+          onClose={closeServer}
+          actions={<ServerActions items={resourceActions} />}
+        >
           {hostFeedback}
           <nav
             className="mb-5 flex gap-1 border-b border-gray-200 dark:border-white/10"
@@ -473,6 +403,34 @@ export default function ComputeResources({
               onSaved={() => undefined}
               onOperation={receiveOperation}
             />
+            {catalog && (
+              <button type="button" className={buttonClass} onClick={() => setServerTab('access')}>
+                Access settings
+              </button>
+            )}
+          </div>
+          {(serverTab === 'access' || serverTab === 'retire') && (
+            <button
+              type="button"
+              className="mb-4 text-sm text-gray-500 hover:underline dark:text-gray-400"
+              onClick={() => setServerTab('overview')}
+            >
+              ← Overview
+            </button>
+          )}
+          <div hidden={serverTab !== 'access'}>
+            {catalog && (
+              <ServerAccess
+                key={currentAllocation.id}
+                allocation={currentAllocation}
+                allocations={allocations}
+                catalog={catalog}
+                connections={connections}
+                onSaved={saveConnectionInList}
+              />
+            )}
+          </div>
+          <div hidden={serverTab !== 'retire'}>
             <ComputeResourcePanel
               section="retire"
               allocation={currentAllocation}

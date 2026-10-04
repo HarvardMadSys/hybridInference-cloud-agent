@@ -63,6 +63,9 @@ export interface RenewalPolicy {
 
 export interface ComputeNode {
   id: string;
+  address?: string | null;
+  port?: number | null;
+  username?: string | null;
   name: string;
   hosts: string[];
   state?: string;
@@ -70,6 +73,8 @@ export interface ComputeNode {
 
 export interface ComputeAllocation {
   id: string;
+  connection_id?: string | null;
+  ssh_connection_id?: string | null;
   name: string;
   provider_id: string;
   state: string;

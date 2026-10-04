@@ -15,11 +15,13 @@ export function Panel({
   title,
   onClose,
   onBack,
+  actions,
   children,
 }: {
   title: string;
   onClose: () => void;
   onBack?: () => void;
+  actions?: ReactNode;
   children: ReactNode;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
@@ -35,7 +37,7 @@ export function Panel({
       ref={dialog}
       aria-label={title}
       onCancel={onClose}
-      className="m-0 ml-auto h-dvh max-h-none w-[min(38rem,100vw)] max-w-none overflow-y-auto border-l border-gray-200 bg-white p-6 text-gray-900 shadow-xl backdrop:bg-black/40 dark:backdrop:bg-black/60 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
+      className="m-auto max-h-[calc(100dvh-2rem)] w-[min(42rem,calc(100vw-2rem))] max-w-none overflow-y-auto rounded-2xl border border-gray-200 bg-white p-6 text-gray-900 shadow-xl backdrop:bg-black/30 dark:backdrop:bg-black/60 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
     >
       <div className="mb-5 flex items-center justify-between gap-4">
         <div>
@@ -50,9 +52,26 @@ export function Panel({
           )}
           <h2 className="text-lg font-semibold">{title}</h2>
         </div>
-        <button className={buttonClass} type="button" onClick={onClose} aria-label="Close panel">
-          Close
-        </button>
+        <div className="flex shrink-0 items-center gap-1">
+          {actions}
+          <button
+            className="rounded-lg p-2 text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-white/5"
+            type="button"
+            onClick={onClose}
+            aria-label="Close panel"
+          >
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 20 20"
+              className="h-4 w-4"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+            >
+              <path d="m5 5 10 10M5 15 15 5" />
+            </svg>
+          </button>
+        </div>
       </div>
       {children}
     </dialog>

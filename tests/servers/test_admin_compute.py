@@ -281,6 +281,50 @@ async def test_credentials_are_encrypted_and_never_returned_or_audited(compute_a
 
 
 @pytest.mark.asyncio
+async def test_server_access_projection_links_credentials_without_transport_secrets(compute_api):
+    client, repo, _ = compute_api
+    body, operation = await allocation(client)
+    row = repo.allocations[operation["allocation_id"]]
+    row["ssh_connection_id"] = "ssh-access-id"
+    row["nodes"] = [
+        {
+            "id": "node-a",
+            "name": "Research node",
+            "connection": {
+                "address": "node.example",
+                "port": 2222,
+                "username": "researcher",
+                "credential_ref": "private-reference-canary",
+                "known_hosts_ref": "private-known-hosts-canary",
+            },
+            "instance_identity": "private-identity-canary",
+        }
+    ]
+    row["configuration"]["extra"] = "private-config-canary"
+    row["hosts"] = [
+        {"host": "host-a", "compute_node_id": "node-a", "credential_hash": "private-hash-canary"}
+    ]
+    response = await client.get("/admin/agent/servers", headers=ADMIN)
+    assert response.status_code == 200
+    public = response.json()["allocations"][0]
+    assert public["connection_id"] == body["connection_id"]
+    assert public["ssh_connection_id"] == "ssh-access-id"
+    assert public["nodes"] == [
+        {
+            "id": "node-a",
+            "name": "Research node",
+            "hosts": ["host-a"],
+            "address": "node.example",
+            "port": 2222,
+            "username": "researcher",
+        }
+    ]
+    assert "canary" not in response.text
+    assert "configuration" not in public
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "body",
     [

@@ -75,6 +75,9 @@ class ServerQueries:
             {
                 "id": node["id"],
                 "name": node["name"],
+                "address": (node.get("connection") or {}).get("address"),
+                "port": (node.get("connection") or {}).get("port"),
+                "username": (node.get("connection") or {}).get("username"),
                 "hosts": [
                     host["host"] for host in hosts if host.get("compute_node_id") == node["id"]
                 ],
@@ -85,6 +88,10 @@ class ServerQueries:
             "id": row["id"],
             "name": row["name"],
             "provider_id": row["provider_id"],
+            # IDs link the admin-only credential editor; transport secrets and
+            # the rest of provider configuration remain private.
+            "connection_id": row.get("connection_id"),
+            "ssh_connection_id": row.get("ssh_connection_id"),
             "state": row.get("observed_state", "unknown"),
             "external_id": row.get("external_id"),
             "expires_at": row.get("expires_at"),

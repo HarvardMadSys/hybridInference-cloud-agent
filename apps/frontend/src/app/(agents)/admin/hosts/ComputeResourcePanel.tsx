@@ -119,34 +119,53 @@ export default function ComputeResourcePanel({
               deploy.
             </p>
           )}
-          <details className="text-sm" open={!allows('policy')}>
-            <summary className="cursor-pointer text-gray-600 dark:text-gray-300">
-              Server details
-            </summary>
-            <div className="mt-3 space-y-2 text-gray-500 dark:text-gray-400">
-              <p className="break-all">ID: {allocation.external_id ?? 'Pending acquisition'}</p>
-              <p>
-                Status:{' '}
+          <dl className="divide-y divide-gray-100 rounded-xl border border-gray-200 text-sm dark:divide-white/10 dark:border-white/10">
+            <div className="flex justify-between gap-4 px-4 py-3">
+              <dt className="shrink-0 text-gray-500 dark:text-gray-400">Resource ID</dt>
+              <dd className="break-all text-right">
+                {allocation.external_id ?? 'Pending acquisition'}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-4 px-4 py-3">
+              <dt className="shrink-0 text-gray-500 dark:text-gray-400">Status</dt>
+              <dd className="text-right">
                 {allocation.state === 'absent'
                   ? 'Deregistered (machine still exists)'
                   : allocation.state}
-              </p>
-              <ul className="space-y-1">
-                {allocation.nodes.map((node) => (
-                  <li key={node.id}>
-                    {node.name} · {node.hosts.join(', ') || 'Awaiting agent'}
-                  </li>
-                ))}
-              </ul>
-              <p>Last observed: {absoluteTime(allocation.observed_at)}</p>
-              {allocation.check_interval_seconds != null && (
-                <p>
-                  Periodic provider checks: about every {allocation.check_interval_seconds} seconds.
-                  Pending operations can delay a check.
-                </p>
-              )}
+              </dd>
             </div>
-          </details>
+            {allocation.nodes.map((node) => (
+              <div key={node.id} className="flex flex-wrap justify-between gap-2 px-4 py-3">
+                <dt className="text-gray-500 dark:text-gray-400">
+                  {allocation.nodes.length > 1 ? node.name : 'Host'}
+                </dt>
+                <dd className="min-w-0 break-all text-right">
+                  {node.address ? (
+                    <>
+                      {node.username && `${node.username}@`}
+                      {node.address}
+                      {node.port && node.port !== 22 ? `:${node.port}` : ''}
+                    </>
+                  ) : (
+                    node.name
+                  )}
+                  <span className="mt-1 block text-xs text-gray-500 dark:text-gray-400">
+                    {node.hosts.join(', ') || 'Awaiting agent'}
+                  </span>
+                </dd>
+              </div>
+            ))}
+            <div className="flex justify-between gap-4 px-4 py-3">
+              <dt className="shrink-0 text-gray-500 dark:text-gray-400">Last observed</dt>
+              <dd className="text-right">{absoluteTime(allocation.observed_at)}</dd>
+            </div>
+          </dl>
+          {allocation.check_interval_seconds != null && (
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              Periodic provider checks: about every {allocation.check_interval_seconds} seconds.
+              Pending operations can delay a check.
+            </p>
+          )}
         </>
       )}
       {(section === 'all' || section === 'lease') && allows('policy') && (
@@ -313,7 +332,10 @@ export default function ComputeResourcePanel({
       )}
 
       {(section === 'all' || section === 'retire') && allows('retire') && (
-        <details className="border-t border-gray-200 pt-4 dark:border-white/10">
+        <details
+          open={section === 'retire'}
+          className="border-t border-gray-200 pt-4 dark:border-white/10"
+        >
           <summary className="cursor-pointer text-sm font-medium text-red-600 dark:text-red-400">
             {allocation.provider_id === 'existing_ssh'
               ? 'Disconnect server'

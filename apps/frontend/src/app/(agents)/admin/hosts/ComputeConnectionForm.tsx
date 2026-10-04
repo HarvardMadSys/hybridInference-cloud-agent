@@ -9,44 +9,36 @@ import {
 } from '@/lib/api/compute';
 import { getErrorMessage } from '@/lib/utils/errors';
 
-import {
-  ErrorNotice,
-  Field,
-  initialFields,
-  inputClass,
-  parseFields,
-  primaryClass,
-  ProviderFields,
-} from './compute-ui';
+import { CredentialFields, type CredentialDraft } from './ComputeCredentials';
+import { buttonClass, ErrorNotice, parseFields, primaryClass } from './compute-ui';
 
 export default function ComputeConnectionForm({
   catalog,
   connection,
-  fixedProviderId,
   onSaved,
+  onCancel,
 }: {
   catalog: ComputeCatalog;
-  connection?: ComputeConnection;
-  fixedProviderId?: string;
+  connection: ComputeConnection;
   onSaved: (connection: ComputeConnection) => void;
+  onCancel?: () => void;
 }) {
-  const [providerId, setProviderId] = useState(
-    connection?.provider_id ?? fixedProviderId ?? catalog.providers[0]?.id,
-  );
-  const provider = catalog.providers.find((item) => item.id === providerId);
-  const [name, setName] = useState(connection?.name ?? '');
-  const [values, setValues] = useState(() => {
-    if (!connection) return initialFields(provider?.connection_fields ?? []);
-    return Object.fromEntries(
+  const provider = catalog.providers.find((item) => item.id === connection.provider_id);
+  const [draft, setDraft] = useState<CredentialDraft>({
+    selection: connection.id,
+    name: connection.name,
+    values: Object.fromEntries(
       Object.entries(connection.configuration).map(([key, value]) => [key, String(value)]),
-    );
+    ),
+    secret: '',
   });
-  const [secret, setSecret] = useState('');
+  // The revision belongs to the draft, even when inventory polling returns a newer record.
+  const [revision] = useState(connection.revision);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (!catalog.secret_store_configured) {
-    return <p>Connection management is unavailable until the server secret store is configured.</p>;
+  if (!catalog.secret_store_configured || !provider) {
+    return <p>Credential editing is unavailable.</p>;
   }
 
   return (
@@ -54,82 +46,43 @@ export default function ComputeConnectionForm({
       className="space-y-4"
       onSubmit={async (event) => {
         event.preventDefault();
-        if (busy || !provider) return;
+        if (busy) return;
         setBusy(true);
         setError(null);
         try {
           const result = await saveComputeConnection(
             {
-              name,
+              name: draft.name,
               provider_id: provider.id,
-              configuration: parseFields(provider.connection_fields, values),
-              ...(secret ? { secret } : {}),
-              ...(connection ? { expected_revision: connection.revision } : {}),
+              configuration: parseFields(provider.connection_fields, draft.values),
+              ...(draft.secret ? { secret: draft.secret } : {}),
+              expected_revision: revision,
             },
-            connection?.id,
+            connection.id,
           );
-          setSecret('');
+          setDraft((current) => ({ ...current, secret: '' }));
           onSaved(result.connection);
         } catch (error) {
-          // No form values or secrets are logged, persisted, or included in diagnostics.
           setError(getErrorMessage(error));
         } finally {
           setBusy(false);
         }
       }}
     >
-      <Field label="Connection name">
-        <input
-          className={inputClass}
-          value={name}
-          required
-          onChange={(e) => setName(e.target.value)}
-        />
-      </Field>
-      <Field label="Connection provider">
-        <select
-          className={inputClass}
-          value={providerId}
-          disabled={Boolean(connection || fixedProviderId)}
-          onChange={(event) => {
-            const next = catalog.providers.find((item) => item.id === event.target.value);
-            setProviderId(next?.id ?? '');
-            setValues(initialFields(next?.connection_fields ?? []));
-            setSecret('');
-          }}
-        >
-          {catalog.providers.map((provider) => (
-            <option value={provider.id} key={provider.id}>
-              {provider.label}
-            </option>
-          ))}
-        </select>
-      </Field>
-      <ProviderFields
-        fields={provider?.connection_fields ?? []}
-        values={values}
-        onChange={setValues}
-      />
-      <Field label={provider?.secret_label ?? 'Credential'}>
-        <textarea
-          className={inputClass}
-          rows={4}
-          required={!connection}
-          value={secret}
-          onChange={(event) => setSecret(event.target.value)}
-          autoComplete="off"
-          autoCorrect="off"
-          spellCheck={false}
-          placeholder={connection ? 'Leave blank to keep the current credential' : undefined}
-        />
-      </Field>
-      <p className="text-xs text-gray-500 dark:text-gray-400">
-        This credential cannot be viewed after saving.
-      </p>
-      <ErrorNotice error={error} />
-      <button className={primaryClass} disabled={busy || !provider} type="submit">
-        {busy ? 'Saving…' : connection ? 'Save connection changes' : 'Save connection'}
-      </button>
+      <fieldset disabled={busy} className="space-y-4">
+        <CredentialFields provider={provider} value={draft} onChange={setDraft} editing />
+        <ErrorNotice error={error} />
+        <div className="flex gap-2">
+          <button className={primaryClass} disabled={busy} type="submit">
+            {busy ? 'Saving…' : 'Save changes'}
+          </button>
+          {onCancel && (
+            <button className={buttonClass} type="button" onClick={onCancel}>
+              Cancel
+            </button>
+          )}
+        </div>
+      </fieldset>
     </form>
   );
 }

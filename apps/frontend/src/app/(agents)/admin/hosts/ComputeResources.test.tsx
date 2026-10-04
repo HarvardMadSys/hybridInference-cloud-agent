@@ -114,6 +114,8 @@ function allocation(over: Partial<ComputeAllocation> = {}): ComputeAllocation {
     id: 'resource-a',
     name: 'CloudLab experiment',
     provider_id: 'cloudlab',
+    connection_id: 'cloudlab-account',
+    ssh_connection_id: 'ssh-account',
     state: 'ready',
     external_id: 'experiment-a',
     expires_at: '2026-10-05T08:00:00Z',
@@ -171,7 +173,7 @@ function renderAdd(onOperation = vi.fn()) {
 function fillSshForm() {
   fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Test server' } });
   fireEvent.change(screen.getByLabelText('Host address'), { target: { value: 'host.example' } });
-  fireEvent.change(screen.getByLabelText('Account connection'), {
+  fireEvent.change(screen.getByLabelText('Use SSH key'), {
     target: { value: 'ssh-account' },
   });
 }
@@ -182,7 +184,7 @@ describe('server acquisition UI', () => {
     vi.mocked(api.createComputeServer).mockResolvedValue({ operation: next });
     const receive = renderAdd();
     fillSshForm();
-    fireEvent.click(screen.getByRole('button', { name: 'Connect and deploy' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
     await waitFor(() => expect(receive).toHaveBeenCalledWith(next, true));
     expect(api.createComputeServer).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -204,15 +206,15 @@ describe('server acquisition UI', () => {
     expect(screen.queryByRole('radio', { name: /AWS/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
     fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Cloud machine' } });
-    fireEvent.change(screen.getByLabelText('Account connection'), {
+    fireEvent.change(screen.getByLabelText('Use CloudLab account'), {
       target: { value: 'cloudlab-account' },
     });
-    fireEvent.change(screen.getByLabelText('SSH deployment connection'), {
+    fireEvent.change(screen.getByLabelText('Use SSH key'), {
       target: { value: 'ssh-account' },
     });
     fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'FAST25-AE' } });
     fireEvent.change(screen.getByLabelText('Profile'), { target: { value: 'small-lan' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Provision and deploy' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create server' }));
     await waitFor(() =>
       expect(api.createComputeServer).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -234,7 +236,7 @@ describe('server acquisition UI', () => {
     }));
     const receive = renderAdd();
     fillSshForm();
-    fireEvent.click(screen.getByRole('button', { name: 'Connect and deploy' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
     await waitFor(() =>
       expect(receive).toHaveBeenCalledWith(expect.objectContaining({ id: next.id }), true),
     );
@@ -249,7 +251,7 @@ describe('server acquisition UI', () => {
     vi.mocked(api.createComputeServer).mockRejectedValue(new Error('Connection interrupted'));
     renderAdd();
     fillSshForm();
-    const submit = screen.getByRole('button', { name: 'Connect and deploy' });
+    const submit = screen.getByRole('button', { name: 'Add server' });
     fireEvent.click(submit);
     await screen.findByRole('alert');
     const first = vi.mocked(api.createComputeServer).mock.calls[0][0];
@@ -264,6 +266,49 @@ describe('server acquisition UI', () => {
     await waitFor(() => expect(api.createComputeServer).toHaveBeenCalledTimes(3));
     expect(vi.mocked(api.createComputeServer).mock.calls[2][0].request_id).not.toBe(
       first.request_id,
+    );
+  });
+
+  it('keeps a saved cloud account when saving the SSH key fails, then submits only their IDs', async () => {
+    vi.mocked(api.saveComputeConnection)
+      .mockResolvedValueOnce({ connection: connections[1] })
+      .mockRejectedValueOnce(new Error('SSH key rejected'))
+      .mockResolvedValueOnce({ connection: connections[0] });
+    vi.mocked(api.createComputeServer).mockResolvedValue({ operation: operation() });
+    render(
+      <AddComputeServer
+        catalog={catalog}
+        connections={[]}
+        operations={[]}
+        onOperation={vi.fn()}
+        onConnectionSaved={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
+    fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Research' } });
+    fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'FAST25' } });
+    fireEvent.change(screen.getByLabelText('Profile'), { target: { value: 'small' } });
+    fireEvent.change(screen.getByLabelText('Portal API token'), {
+      target: { value: 'cloud-token' },
+    });
+    fireEvent.change(screen.getByLabelText('SSH private key'), { target: { value: 'ssh-key' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create server' }));
+    await screen.findByText('SSH key rejected');
+    expect(api.createComputeServer).not.toHaveBeenCalled();
+    expect(api.getComputeOperations).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Use CloudLab account')).toHaveValue('cloudlab-account');
+    expect(screen.queryByLabelText('Portal API token')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Create server' }));
+    await waitFor(() => expect(api.createComputeServer).toHaveBeenCalledOnce());
+    expect(api.saveComputeConnection).toHaveBeenCalledTimes(3);
+    expect(api.createComputeServer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connection_id: 'cloudlab-account',
+        ssh_connection_id: 'ssh-account',
+      }),
+    );
+    expect(JSON.stringify(vi.mocked(api.createComputeServer).mock.calls)).not.toMatch(
+      /cloud-token|ssh-key/,
     );
   });
 
@@ -284,16 +329,16 @@ describe('connection credentials', () => {
     const saved = vi.fn();
     vi.mocked(api.saveComputeConnection).mockResolvedValue({ connection: connections[0] });
     const local = vi.spyOn(Storage.prototype, 'setItem');
-    render(<ComputeConnectionForm catalog={catalog} onSaved={saved} />);
-    fireEvent.change(screen.getByLabelText('Connection name'), { target: { value: 'Lab key' } });
+    render(<ComputeConnectionForm catalog={catalog} connection={connections[0]} onSaved={saved} />);
+    fireEvent.change(screen.getByLabelText('Key name'), { target: { value: 'Lab key' } });
     fireEvent.change(screen.getByLabelText('SSH private key'), {
       target: { value: 'sensitive-private-key' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save connection' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await waitFor(() => expect(saved).toHaveBeenCalledWith(connections[0]));
     expect(api.saveComputeConnection).toHaveBeenCalledWith(
       expect.objectContaining({ secret: 'sensitive-private-key' }),
-      undefined,
+      'ssh-account',
     );
     expect(screen.getByLabelText('SSH private key')).toHaveValue('');
     expect(local).not.toHaveBeenCalled();
@@ -302,11 +347,19 @@ describe('connection credentials', () => {
 
   it('does not populate a previous secret when rotating, and sends the observed revision', async () => {
     vi.mocked(api.saveComputeConnection).mockResolvedValue({ connection: connections[0] });
-    render(
+    const { rerender } = render(
       <ComputeConnectionForm catalog={catalog} connection={connections[0]} onSaved={vi.fn()} />,
     );
     expect(screen.getByLabelText('SSH private key')).toHaveValue('');
-    fireEvent.click(screen.getByRole('button', { name: 'Save connection changes' }));
+    rerender(
+      <ComputeConnectionForm
+        catalog={catalog}
+        connection={{ ...connections[0], revision: 2, name: 'Changed elsewhere' }}
+        onSaved={vi.fn()}
+      />,
+    );
+    expect(screen.getByLabelText('Key name')).toHaveValue('Lab key');
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await waitFor(() =>
       expect(api.saveComputeConnection).toHaveBeenCalledWith(
         expect.objectContaining({ expected_revision: 1 }),
@@ -433,8 +486,8 @@ describe('resource dashboard', () => {
       ],
     });
     render(<ComputeResources onHostsChanged={vi.fn()} />);
-    const oldServer = (await screen.findByRole('rowheader', { name: /old-host/ })).closest('tr')!;
-    expect(within(oldServer).getByText('3')).toBeInTheDocument();
+    const oldServer = await screen.findByRole('listitem', { name: /old-host/ });
+    expect(within(oldServer).getByText('3 sandboxes')).toBeInTheDocument();
     expect(within(oldServer).getByText('draining')).toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: /Activity.*1 active/ }));
     fireEvent.click(
@@ -495,18 +548,18 @@ describe('resource dashboard', () => {
       observed_at: '2026-10-04T08:00:00Z',
     });
     const { rerender } = render(<ComputeResources onHostsChanged={vi.fn()} activeHost="host-a" />);
-    const table = await screen.findByRole('table', { name: 'Server inventory' });
-    expect(within(table).getAllByRole('row')).toHaveLength(3);
-    const cloudRow = screen.getByRole('rowheader', { name: /CloudLab experiment/ }).closest('tr')!;
-    const oldRow = screen.getByRole('rowheader', { name: /old-host/ }).closest('tr')!;
-    expect(within(cloudRow).getByText('5')).toBeInTheDocument();
-    expect(within(cloudRow).getByText('Selected')).toBeInTheDocument();
-    expect(within(oldRow).getByText('3')).toBeInTheDocument();
+    const table = await screen.findByRole('list', { name: 'Server inventory' });
+    expect(within(table).getAllByRole('listitem')).toHaveLength(2);
+    const cloudRow = screen.getByRole('listitem', { name: /CloudLab experiment/ });
+    const oldRow = screen.getByRole('listitem', { name: /old-host/ });
+    expect(within(cloudRow).getByText('5 sandboxes')).toBeInTheDocument();
+    expect(within(cloudRow).getByText('Current target')).toBeInTheDocument();
+    expect(within(oldRow).getByText('3 sandboxes')).toBeInTheDocument();
     rerender(<ComputeResources onHostsChanged={vi.fn()} activeHost="old-host" />);
-    expect(within(oldRow).getByText('Selected')).toBeInTheDocument();
-    expect(within(cloudRow).queryByText('Selected')).not.toBeInTheDocument();
-    expect(within(cloudRow).getByText('5')).toBeInTheDocument();
-    expect(within(oldRow).getByText('3')).toBeInTheDocument();
+    expect(within(oldRow).getByText('Current target')).toBeInTheDocument();
+    expect(within(cloudRow).queryByText('Current target')).not.toBeInTheDocument();
+    expect(within(cloudRow).getByText('5 sandboxes')).toBeInTheDocument();
+    expect(within(oldRow).getByText('3 sandboxes')).toBeInTheDocument();
   });
 
   it('opens one management panel for all enrollments of the selected machine', async () => {
@@ -545,11 +598,11 @@ describe('resource dashboard', () => {
         ]}
       />,
     );
-    const table = await screen.findByRole('table', { name: 'Server inventory' });
-    expect(within(table).getAllByRole('row')).toHaveLength(2);
-    const row = screen.getByRole('rowheader', { name: /Team server/ }).closest('tr')!;
-    expect(within(row).getByText('7')).toBeInTheDocument();
-    expect(within(row).getByText('Selected')).toBeInTheDocument();
+    const table = await screen.findByRole('list', { name: 'Server inventory' });
+    expect(within(table).getAllByRole('listitem')).toHaveLength(1);
+    const row = screen.getByRole('listitem', { name: /Team server/ });
+    expect(within(row).getByText('7 sandboxes')).toBeInTheDocument();
+    expect(within(row).getByText('Current target')).toBeInTheDocument();
     expect(within(row).getByText('Online')).toBeInTheDocument();
     expect(controls).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Manage Team server' }));
@@ -653,43 +706,96 @@ describe('resource dashboard', () => {
     expect(
       within(dialog).queryByRole('button', { name: 'Use for new sandboxes' }),
     ).not.toBeInTheDocument();
-    expect(within(dialog).getByText('Disconnect server')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByLabelText('Server actions'));
+    fireEvent.click(within(dialog).getByRole('menuitem', { name: 'Disconnect server' }));
+    expect(
+      within(dialog).getByRole('button', { name: 'Preview retirement impact' }),
+    ).toBeInTheDocument();
   });
 
   it('does not call a ready cloud resource online before its agent has enrolled', async () => {
     render(<ComputeResources onHostsChanged={vi.fn()} />);
-    const row = (await screen.findByRole('rowheader', { name: /CloudLab experiment/ })).closest(
-      'tr',
-    )!;
+    const row = await screen.findByRole('listitem', { name: /CloudLab experiment/ });
     expect(within(row).getByText('Awaiting agent')).toBeInTheDocument();
     expect(within(row).queryByText('Online')).not.toBeInTheDocument();
   });
 
-  it('keeps an unfinished server form when adding a connection', async () => {
-    vi.mocked(api.saveComputeConnection).mockResolvedValue({ connection: connections[0] });
+  it('adds a key inline and reuses it after a failed server request without losing the draft', async () => {
+    vi.mocked(api.saveComputeConnection).mockResolvedValue({
+      connection: { ...connections[0], id: 'new-key' },
+    });
+    vi.mocked(api.createComputeServer)
+      .mockRejectedValueOnce(new Error('Try again'))
+      .mockResolvedValueOnce({ operation: operation() });
+    const local = vi.spyOn(Storage.prototype, 'setItem');
     render(<ComputeResources onHostsChanged={vi.fn()} />);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Add server' })).toBeEnabled());
+    expect(screen.queryByRole('button', { name: 'Connections' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
-    fireEvent.change(await screen.findByLabelText('Server name'), {
+    const dialog = screen.getByRole('dialog', { name: 'Add server' });
+    fireEvent.change(within(dialog).getByLabelText('Server name'), {
       target: { value: 'Pending new server' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Add SSH connection' }));
-    const connectionDialog = screen.getByRole('dialog', { name: 'Add server' });
-    expect(screen.getAllByRole('dialog')).toHaveLength(1);
-    expect(within(connectionDialog).getByLabelText('Connection provider')).toBeDisabled();
-    fireEvent.change(within(connectionDialog).getByLabelText('Connection name'), {
-      target: { value: 'New key' },
+    fireEvent.change(within(dialog).getByLabelText('Host address'), {
+      target: { value: 'host.example' },
     });
-    fireEvent.change(within(connectionDialog).getByLabelText('SSH private key'), {
+    fireEvent.change(within(dialog).getByLabelText('Use SSH key'), {
+      target: { value: '__new__' },
+    });
+    fireEvent.change(within(dialog).getByLabelText('SSH private key'), {
       target: { value: 'private-key-input' },
     });
-    fireEvent.click(within(connectionDialog).getByRole('button', { name: 'Save connection' }));
-    await waitFor(() =>
-      expect(screen.getByLabelText('Account connection')).toHaveValue('ssh-account'),
-    );
-    expect(screen.getByLabelText('Server name')).toHaveValue('Pending new server');
-    expect(screen.queryByLabelText('SSH private key')).not.toBeInTheDocument();
     expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(within(dialog).queryByRole('button', { name: /Save/ })).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add server' }));
+    await within(dialog).findByText('Try again');
+    expect(within(dialog).getByLabelText('Use SSH key')).toHaveValue('new-key');
+    expect(within(dialog).getByLabelText('Server name')).toHaveValue('Pending new server');
+    expect(within(dialog).queryByLabelText('SSH private key')).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add server' }));
+    await waitFor(() => expect(api.createComputeServer).toHaveBeenCalledTimes(2));
+    expect(api.saveComputeConnection).toHaveBeenCalledTimes(1);
+    expect(api.saveComputeConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Pending new server key', secret: 'private-key-input' }),
+    );
+    expect(vi.mocked(api.createComputeServer).mock.calls[1][0]).toEqual(
+      vi.mocked(api.createComputeServer).mock.calls[0][0],
+    );
+    expect(vi.mocked(api.createComputeServer).mock.calls[0][0].connection_id).toBe('new-key');
+    expect(JSON.stringify(vi.mocked(api.createComputeServer).mock.calls)).not.toContain(
+      'private-key-input',
+    );
+    expect(local).not.toHaveBeenCalled();
+    local.mockRestore();
+  });
+
+  it('edits shared credentials from the selected server and stays in that server', async () => {
+    vi.mocked(api.getComputeServers).mockResolvedValue({
+      allocations: [allocation(), allocation({ id: 'second', name: 'Another server', nodes: [] })],
+      hosts: [],
+      active_host: null,
+      observed_at: '2026-10-04T08:00:00Z',
+    });
+    vi.mocked(api.saveComputeConnection).mockResolvedValue({ connection: connections[1] });
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage CloudLab experiment' }));
+    const dialog = screen.getByRole('dialog', { name: 'CloudLab experiment' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Access settings' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Edit account' }));
+    expect(within(dialog).getByText(/Used by 2 servers; changes apply to all/)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Portal API token')).toHaveValue('');
+    fireEvent.change(within(dialog).getByLabelText('Portal API token'), {
+      target: { value: 'rotated-token' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+    await within(dialog).findByText('Access settings saved.');
+    expect(api.saveComputeConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ expected_revision: 1, secret: 'rotated-token' }),
+      'cloudlab-account',
+    );
+    expect(within(dialog).queryByLabelText('Portal API token')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(api.createComputeServer).not.toHaveBeenCalled();
   });
 
   it('keeps old Host management independent when resource management is not configured', async () => {
