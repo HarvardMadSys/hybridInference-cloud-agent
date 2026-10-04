@@ -1126,58 +1126,6 @@ function HostsView() {
               </button>
             </div>
           )}
-          <div className="mt-5 border-t border-gray-200 pt-5 dark:border-white/10">
-            {/* No subtitle, unlike the section above, because both of the
-                things one would say are already said where they land: that a
-                running conversation keeps its version is in the confirmation
-                after the change, and where the options come from — and how to
-                add one — is deployment documentation, in `.env.example` and
-                ENVIRONMENT.md, read by the person editing the `.env` rather
-                than by anyone standing on this page. */}
-            <h2 className="text-base font-semibold text-gray-900 dark:text-gray-50">
-              Harness version
-            </h2>
-            <div className="mt-2">
-              {menu.length === 0 && (
-                <p className="py-2 text-sm text-gray-500 dark:text-gray-400">
-                  No server has reported available versions yet.
-                </p>
-              )}
-              {menu.map(([runtime, versions], index) => (
-                <div
-                  key={runtime}
-                  className={`flex flex-col justify-center gap-3 py-2.5 sm:flex-row sm:items-center ${
-                    index > 0 ? 'border-t border-gray-100 dark:border-white/5' : ''
-                  }`}
-                >
-                  <div className="min-w-0 flex-1">
-                    <label
-                      htmlFor={`harness-version-${runtime}`}
-                      className="text-sm text-gray-700 dark:text-gray-300"
-                    >
-                      {runtime}
-                    </label>
-                  </div>
-                  <div className="flex shrink-0 justify-end">
-                    <select
-                      id={`harness-version-${runtime}`}
-                      disabled={busy}
-                      value={runtimeVersions[runtime] ?? ''}
-                      onChange={(event) => void handleVersion(runtime, event.target.value)}
-                      className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
-                    >
-                      <option value="">Image default</option>
-                      {versions.map((version) => (
-                        <option key={version} value={version}>
-                          {version}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
         </div>
 
         <ComputeResources
@@ -1196,6 +1144,59 @@ function HostsView() {
           settingBusy={busy}
           hostNotice={notice}
         />
+
+        <div className="mt-8 rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/10 dark:bg-gray-900">
+          {/* No subtitle, unlike the section above, because both of the
+              things one would say are already said where they land: that a
+              running conversation keeps its version is in the confirmation
+              after the change, and where the options come from — and how to
+              add one — is deployment documentation, in `.env.example` and
+              ENVIRONMENT.md, read by the person editing the `.env` rather
+              than by anyone standing on this page. */}
+          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-50">
+            Harness version
+          </h2>
+          <div className="mt-2">
+            {menu.length === 0 && (
+              <p className="py-2 text-sm text-gray-500 dark:text-gray-400">
+                No server has reported available versions yet.
+              </p>
+            )}
+            {menu.map(([runtime, versions], index) => (
+              <div
+                key={runtime}
+                className={`flex flex-col justify-center gap-3 py-2.5 sm:flex-row sm:items-center ${
+                  index > 0 ? 'border-t border-gray-100 dark:border-white/5' : ''
+                }`}
+              >
+                <div className="min-w-0 flex-1">
+                  <label
+                    htmlFor={`harness-version-${runtime}`}
+                    className="text-sm text-gray-700 dark:text-gray-300"
+                  >
+                    {runtime}
+                  </label>
+                </div>
+                <div className="flex shrink-0 justify-end">
+                  <select
+                    id={`harness-version-${runtime}`}
+                    disabled={busy}
+                    value={runtimeVersions[runtime] ?? ''}
+                    onChange={(event) => void handleVersion(runtime, event.target.value)}
+                    className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
+                  >
+                    <option value="">Image default</option>
+                    {versions.map((version) => (
+                      <option key={version} value={version}>
+                        {version}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
       </section>
     </div>
   );

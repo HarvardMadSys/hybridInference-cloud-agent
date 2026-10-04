@@ -266,11 +266,16 @@ describe('AdminHostsPage', () => {
     expect(mocked.list).not.toHaveBeenCalled();
   });
 
-  it('keeps location and harness controls together in global settings', async () => {
+  it('places servers between global location and harness controls', async () => {
     renderPage();
     const settings = screen.getByRole('heading', { name: 'Global settings' }).parentElement!;
-    expect(await within(settings).findByLabelText('claude-code')).toBeInTheDocument();
-    expect(within(settings).getByLabelText('Global sandbox location')).toBeInTheDocument();
+    const location = within(settings).getByLabelText('Global sandbox location');
+    const server = await screen.findByRole('rowheader', { name: 'runner-a' });
+    const harness = screen.getByLabelText('claude-code');
+    expect(
+      location.compareDocumentPosition(server) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(server.compareDocumentPosition(harness) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('admits a free account granted Agent administration', async () => {
