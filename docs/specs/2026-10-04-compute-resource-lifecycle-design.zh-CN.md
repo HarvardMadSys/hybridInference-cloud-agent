@@ -167,20 +167,21 @@ POST  /admin/agent/compute-operations/{id}/cancel   取消尚未提交释放的�
 
 ### 前端页面与交互
 
-这是一项前后端完整功能，日常接入、查询、配置和下线都在现有 **Admin → Servers** 页面完成。本实现保留列表、容量、并发、Drain 和 Remove 等界面，新增 Provider 接入、云资源操作、连接配置及全局运行位置管理。
+这是一项前后端完整功能，日常接入、查询、配置和下线都在现有 **Admin → Servers** 页面完成。容量、并发、暂停接单与移出池继续调用已有 Host 接口；Provider 接入、租期和释放通过独立的资源接口完成。前端集中入口，不合并两套后端职责。
 
-页面按日常管理顺序组织：顶部设置全局运行位置，中间是一张统一服务器列表，底部按需展开 **Performance & maintenance**。首页不再并列展示 Compute resources 和 Host 两套清单，也不展开内部操作步骤。已有 SSH 机器与云资源共用列表；多个旧 Host 按现有物理机器规则分组。一个云 Allocation 的节点显示在同一行及其详情内，续期和释放始终以整个 Allocation 为范围。
+页面只有两个主要区域：顶部 **Global settings** 集中全局运行位置和 **Harness version**，下面是统一服务器列表。点击名称或 Manage 后，所有针对该服务器的操作在同一详情抽屉中完成，不再跳转到独立维护区。已有 SSH 机器与云资源共用列表；多个旧 Host 按现有物理机器规则分组。一个云 Allocation 的节点显示在同一行及其详情内，续期和释放始终以整个 Allocation 为范围。
 
 | 页面区域 | 展示内容 | 主要操作 |
 | --- | --- | --- |
-| 全局运行位置 | 当前统一目标，一句话说明已有 sandbox 保持原位置 | 统一切换新 sandbox 的目标服务器 |
+| Global settings | 统一运行位置、Harness version | 选择新 sandbox 的目标和新会话使用的 CLI 版本；无版本菜单时保留标题并说明等待服务器上报 |
 | Servers 列表 | 名称和来源、在线状态、已有 sandbox 数、剩余租期、自动续期状态 | 新增、查看详情；较大列表支持搜索和来源筛选 |
-| 服务器详情抽屉 | 确认的到期时间和自动续期设置 | 保存策略；手动续期、移除、节点信息和高级时序按需展开 |
-| Performance & maintenance | 原有容量、并发、Host 记录及历史图表 | 并发调整、Drain、移出池、Forget |
+| 服务器详情 → Overview | 当前状态、并发、CPU/内存/存储、sandbox、节点信息 | 原地调整并发、暂停/恢复接单、移出池、Forget；合格服务器可设为全局目标，资源释放入口单独说明范围 |
+| 服务器详情 → Lease | 确认的到期时间、自动续期策略 | 保存策略、手动续期；切换页签保留策略草稿，仅有租期能力的资源显示该入口 |
+| 服务器详情 → Activity | 仅该资源的操作记录 | 查看进度，再返回同一服务器的记录页签 |
 | Activity 抽屉 | 进行中的操作及历史；首页仅显示活跃数量 | 查看进度，按后端允许的动作重试、核对结果或取消 |
 | Connections 抽屉 | 已配置 SSH 与云账号连接 | 添加、验证、更新凭证 |
 
-新增抽屉用类型卡片区分 **Existing SSH server** 和已支持的云 Provider。SSH 直接填写连接目标；支持申请资源的云默认进入 Create new，也可以选择 Connect existing。部署模板放在 Deployment settings，首页不解释凭证和部署实现。
+新增抽屉用类型卡片区分 **Existing SSH server** 和已支持的云 Provider。SSH 直接填写连接目标；支持申请资源的云默认进入 Create new，也可以选择 Connect existing。缺少账号或 SSH 连接时，在当前抽屉内创建，保存后回到原表单并自动选中刚创建的连接；取消也保留服务器配置，不再叠加弹窗。部署模板放在 Deployment settings。操作详情区分 Back 与 Close：Back 回来源，Close 关闭抽屉。Host 操作结果在当前详情内反馈；云资源查询失败时仍可通过已有 Host 清单进行管理。
 
 申请尚未完成时，Activity 保留操作及其进度，已取得的资源显示在列表中。资源可用但 Host 尚未注册时显示 Awaiting agent；列表的 Online 表示在线观测，能否用于全局位置仍按接单条件判断。HTTP 202 不代表服务器已经可用。下线影响、已有 sandbox 阻塞及整组释放范围在移除入口展示。
 

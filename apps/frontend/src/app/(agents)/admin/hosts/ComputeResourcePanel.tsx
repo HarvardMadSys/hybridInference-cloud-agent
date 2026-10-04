@@ -30,12 +30,12 @@ export default function ComputeResourcePanel({
   allocation,
   onSaved,
   onOperation,
-  onInspectHost,
+  section = 'all',
 }: {
   allocation: ComputeAllocation;
   onSaved: (allocation: ComputeAllocation) => void;
   onOperation: (operation: ComputeOperation) => void;
-  onInspectHost?: (host: string) => void;
+  section?: 'all' | 'lease' | 'retire' | 'details';
 }) {
   const [policy, setPolicy] = useState(allocation.policy);
   const [adoptManagement, setAdoptManagement] = useState(false);
@@ -91,70 +91,65 @@ export default function ComputeResourcePanel({
 
   return (
     <div className="space-y-6">
-      <div className="rounded-xl bg-gray-50 p-4 dark:bg-white/5">
-        <p className="text-xs text-gray-500 dark:text-gray-400">
-          {allocation.provider_id === 'existing_ssh' ? 'Lease' : 'Confirmed expiry'}
-        </p>
-        <p className="mt-1 text-xl font-semibold tracking-tight">
-          {allocation.expires_at
-            ? remainingTime(allocation.expires_at)
-            : allocation.provider_id === 'existing_ssh'
-              ? 'Not managed'
-              : 'Not reported'}
-        </p>
-        {allocation.expires_at && (
-          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            {absoluteTime(allocation.expires_at)}
+      {(section === 'all' || section === 'lease') && (
+        <div className="rounded-xl bg-gray-50 p-4 dark:bg-white/5">
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            {allocation.provider_id === 'existing_ssh' ? 'Lease' : 'Confirmed expiry'}
           </p>
-        )}
-      </div>
-      <Reasons reasons={allocation.blocked_reasons} />
-      {needsDeployment && (
-        <p className="text-sm text-amber-800 dark:text-amber-300">
-          Agent not installed. Use Add server → Connect existing with this resource ID to deploy.
-        </p>
-      )}
-      <details className="text-sm" open={!allows('policy')}>
-        <summary className="cursor-pointer text-gray-600 dark:text-gray-300">
-          Server details
-        </summary>
-        <div className="mt-3 space-y-2 text-gray-500 dark:text-gray-400">
-          <p className="break-all">ID: {allocation.external_id ?? 'Pending acquisition'}</p>
-          <p>
-            Status:{' '}
-            {allocation.state === 'absent'
-              ? 'Deregistered (machine still exists)'
-              : allocation.state}
+          <p className="mt-1 text-xl font-semibold tracking-tight">
+            {allocation.expires_at
+              ? remainingTime(allocation.expires_at)
+              : allocation.provider_id === 'existing_ssh'
+                ? 'Not managed'
+                : 'Not reported'}
           </p>
-          <ul className="space-y-1">
-            {allocation.nodes.map((node) => (
-              <li key={node.id}>
-                {node.name} · {node.hosts.join(', ') || 'Awaiting agent'}
-                {onInspectHost &&
-                  node.hosts.map((host) => (
-                    <button
-                      key={host}
-                      type="button"
-                      className="mt-2 block text-sm underline underline-offset-4"
-                      onClick={() => onInspectHost(host)}
-                    >
-                      Performance &amp; maintenance{node.hosts.length > 1 ? ` · ${host}` : ''}
-                    </button>
-                  ))}
-              </li>
-            ))}
-          </ul>
-          <p>Last observed: {absoluteTime(allocation.observed_at)}</p>
-          {allocation.check_interval_seconds != null && (
-            <p>
-              Periodic provider checks: about every {allocation.check_interval_seconds} seconds.
-              Pending operations can delay a check.
+          {allocation.expires_at && (
+            <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              {absoluteTime(allocation.expires_at)}
             </p>
           )}
         </div>
-      </details>
-
-      {allows('policy') && (
+      )}
+      {(section === 'all' || section === 'details') && (
+        <>
+          <Reasons reasons={allocation.blocked_reasons} />
+          {needsDeployment && (
+            <p className="text-sm text-amber-800 dark:text-amber-300">
+              Agent not installed. Use Add server → Connect existing with this resource ID to
+              deploy.
+            </p>
+          )}
+          <details className="text-sm" open={!allows('policy')}>
+            <summary className="cursor-pointer text-gray-600 dark:text-gray-300">
+              Server details
+            </summary>
+            <div className="mt-3 space-y-2 text-gray-500 dark:text-gray-400">
+              <p className="break-all">ID: {allocation.external_id ?? 'Pending acquisition'}</p>
+              <p>
+                Status:{' '}
+                {allocation.state === 'absent'
+                  ? 'Deregistered (machine still exists)'
+                  : allocation.state}
+              </p>
+              <ul className="space-y-1">
+                {allocation.nodes.map((node) => (
+                  <li key={node.id}>
+                    {node.name} · {node.hosts.join(', ') || 'Awaiting agent'}
+                  </li>
+                ))}
+              </ul>
+              <p>Last observed: {absoluteTime(allocation.observed_at)}</p>
+              {allocation.check_interval_seconds != null && (
+                <p>
+                  Periodic provider checks: about every {allocation.check_interval_seconds} seconds.
+                  Pending operations can delay a check.
+                </p>
+              )}
+            </div>
+          </details>
+        </>
+      )}
+      {(section === 'all' || section === 'lease') && allows('policy') && (
         <form
           className="space-y-3 border-t border-gray-200 pt-4 dark:border-white/10"
           onSubmit={async (event) => {
@@ -191,8 +186,8 @@ export default function ComputeResourcePanel({
                 checked={adoptManagement}
                 onChange={(event) => setAdoptManagement(event.target.checked)}
               />
-              I authorize lifecycle management of this entire allocation and every node listed
-              above, including renewal and release after dependency checks.
+              I authorize lifecycle management of this entire allocation and all its nodes,
+              including renewal and release after dependency checks.
             </label>
           )}
           <label className="flex items-center gap-2 text-sm">
@@ -276,7 +271,7 @@ export default function ComputeResourcePanel({
         </form>
       )}
 
-      {allows('extend') && (
+      {(section === 'all' || section === 'lease') && allows('extend') && (
         <details className="border-t border-gray-200 pt-4 dark:border-white/10">
           <summary className="cursor-pointer text-sm font-medium">Extend now</summary>
           <form
@@ -317,10 +312,12 @@ export default function ComputeResourcePanel({
         </details>
       )}
 
-      {allows('retire') && (
+      {(section === 'all' || section === 'retire') && allows('retire') && (
         <details className="border-t border-gray-200 pt-4 dark:border-white/10">
           <summary className="cursor-pointer text-sm font-medium text-red-600 dark:text-red-400">
-            Remove server
+            {allocation.provider_id === 'existing_ssh'
+              ? 'Disconnect server'
+              : 'Release cloud resource'}
           </summary>
           <div className="mt-4 space-y-3">
             <p className="text-sm">

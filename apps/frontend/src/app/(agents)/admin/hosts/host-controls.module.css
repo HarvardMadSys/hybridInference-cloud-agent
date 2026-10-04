@@ -1,0 +1,60 @@
+.controls {
+  --label-color: #6b7280;
+  --border-color: #e5e7eb;
+}
+
+:global(.dark) .controls {
+  --label-color: #9ca3af;
+  --border-color: #374151;
+}
+
+.table {
+  width: 100%;
+}
+
+.table > thead {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.table > tbody,
+.table > tbody > tr:not(.hostRow),
+.table > tbody > tr:not(.hostRow) > td {
+  display: block;
+  width: 100%;
+}
+
+.hostRow {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  padding: 20px;
+}
+
+.hostRow > th {
+  grid-column: 1 / -1;
+  padding: 0;
+  overflow-wrap: anywhere;
+}
+
+.hostRow > td {
+  min-width: 0;
+  padding: 0;
+}
+
+.hostRow > td[data-label]::before {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--label-color);
+  content: attr(data-label);
+  font-size: 12px;
+}
+
+.hostRow > .actions {
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--border-color);
+  padding-top: 16px;
+}

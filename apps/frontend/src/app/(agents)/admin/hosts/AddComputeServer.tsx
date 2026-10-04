@@ -14,6 +14,8 @@ import {
 } from '@/lib/api/compute';
 import { getErrorMessage } from '@/lib/utils/errors';
 
+import ComputeConnectionForm from './ComputeConnectionForm';
+
 import {
   buttonClass,
   ErrorNotice,
@@ -31,14 +33,22 @@ export default function AddComputeServer({
   connections,
   operations,
   onOperation,
-  onConnection,
+  onConnectionSaved,
 }: {
   catalog: ComputeCatalog;
   connections: ComputeConnection[];
   operations: ComputeOperation[];
   onOperation: (operation: ComputeOperation, submitted: boolean) => void;
-  onConnection: () => void;
+  onConnectionSaved: (connection: ComputeConnection) => void;
 }) {
+  const [connectionTarget, setConnectionTarget] = useState<'account' | 'ssh' | null>(null);
+  const [newConnections, setNewConnections] = useState<ComputeConnection[]>([]);
+  const availableConnections = [
+    ...newConnections,
+    ...connections.filter(
+      (connection) => !newConnections.some((saved) => saved.id === connection.id),
+    ),
+  ];
   const [providerId, setProviderId] = useState(catalog.providers[0]?.id ?? '');
   const provider = catalog.providers.find((item) => item.id === providerId);
   const [mode, setMode] = useState<'attach' | 'provision'>(provider?.modes[0] ?? 'attach');
@@ -108,6 +118,36 @@ export default function AddComputeServer({
     } finally {
       setBusy(false);
     }
+  }
+
+  if (connectionTarget) {
+    return (
+      <div className="space-y-5">
+        <button type="button" className={buttonClass} onClick={() => setConnectionTarget(null)}>
+          ← Back to server setup
+        </button>
+        <h3 className="text-base font-semibold">
+          {connectionTarget === 'ssh' || providerId === 'existing_ssh'
+            ? 'Add SSH connection'
+            : `Add ${provider?.label ?? ''} connection`}
+        </h3>
+        <ComputeConnectionForm
+          catalog={catalog}
+          fixedProviderId={connectionTarget === 'ssh' ? 'existing_ssh' : providerId}
+          onSaved={(connection) => {
+            setNewConnections((current) => [
+              connection,
+              ...current.filter((item) => item.id !== connection.id),
+            ]);
+            if (connectionTarget === 'ssh') setSshConnectionId(connection.id);
+            else setConnectionId(connection.id);
+            changed();
+            setConnectionTarget(null);
+            onConnectionSaved(connection);
+          }}
+        />
+      </div>
+    );
   }
 
   return (
@@ -185,7 +225,7 @@ export default function AddComputeServer({
             onChange={(event) => setConnectionId(event.target.value)}
           >
             <option value="">Select connection…</option>
-            {connections
+            {availableConnections
               .filter((item) => item.provider_id === providerId)
               .map((item) => (
                 <option key={item.id} value={item.id}>
@@ -194,28 +234,41 @@ export default function AddComputeServer({
               ))}
           </select>
         </Field>
-        {provider?.requires_ssh_connection && (
-          <Field label="SSH deployment connection">
-            <select
-              className={inputClass}
-              required
-              value={sshConnectionId}
-              onChange={(event) => setSshConnectionId(event.target.value)}
-            >
-              <option value="">Select SSH connection…</option>
-              {connections
-                .filter((item) => item.provider_id === 'existing_ssh')
-                .map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name} · {item.status}
-                  </option>
-                ))}
-            </select>
-          </Field>
-        )}
-        <button type="button" className={buttonClass} onClick={onConnection}>
-          Add connection
+        <button
+          type="button"
+          className={buttonClass}
+          onClick={() => setConnectionTarget('account')}
+        >
+          {providerId === 'existing_ssh' ? 'Add SSH connection' : 'Add account connection'}
         </button>
+        {provider?.requires_ssh_connection && (
+          <div className="space-y-2">
+            <Field label="SSH deployment connection">
+              <select
+                className={inputClass}
+                required
+                value={sshConnectionId}
+                onChange={(event) => setSshConnectionId(event.target.value)}
+              >
+                <option value="">Select SSH connection…</option>
+                {availableConnections
+                  .filter((item) => item.provider_id === 'existing_ssh')
+                  .map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name} · {item.status}
+                    </option>
+                  ))}
+              </select>
+            </Field>
+            <button
+              type="button"
+              className={buttonClass}
+              onClick={() => setConnectionTarget('ssh')}
+            >
+              Add SSH connection
+            </button>
+          </div>
+        )}
         <ProviderFields fields={fields} values={values} onChange={setValues} />
         <details open={!deploymentProfile}>
           <summary className="cursor-pointer text-sm text-gray-600 dark:text-gray-300">

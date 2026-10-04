@@ -163,7 +163,7 @@ function renderAdd(onOperation = vi.fn()) {
       connections={connections}
       operations={[]}
       onOperation={onOperation}
-      onConnection={vi.fn()}
+      onConnectionSaved={vi.fn()}
     />,
   );
   return onOperation;
@@ -379,7 +379,7 @@ describe('resource management', () => {
     render(
       <ComputeResourcePanel allocation={allocation()} onSaved={vi.fn()} onOperation={vi.fn()} />,
     );
-    fireEvent.click(screen.getByText('Remove server'));
+    fireEvent.click(screen.getByText('Release cloud resource'));
     fireEvent.click(screen.getByRole('button', { name: 'Preview retirement impact' }));
     expect(
       await screen.findByText('1 running attempts · 2 retained sandbox groups'),
@@ -509,8 +509,8 @@ describe('resource dashboard', () => {
     expect(within(oldRow).getByText('3')).toBeInTheDocument();
   });
 
-  it('groups legacy enrollments by machine while inspecting the exact compatible host', async () => {
-    const inspect = vi.fn();
+  it('opens one management panel for all enrollments of the selected machine', async () => {
+    const controls = vi.fn((hosts: string[]) => <div>Controls: {hosts.join(', ')}</div>);
     vi.mocked(api.getComputeServers).mockResolvedValue({
       allocations: [],
       hosts: [
@@ -535,7 +535,7 @@ describe('resource dashboard', () => {
     render(
       <ComputeResources
         onHostsChanged={vi.fn()}
-        onInspectHost={inspect}
+        renderHostControls={controls}
         serverGroups={[
           {
             name: 'Team server',
@@ -551,8 +551,109 @@ describe('resource dashboard', () => {
     expect(within(row).getByText('7')).toBeInTheDocument();
     expect(within(row).getByText('Selected')).toBeInTheDocument();
     expect(within(row).getByText('Online')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Inspect Team server' }));
-    expect(inspect).toHaveBeenCalledWith('kata-host');
+    expect(controls).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Manage Team server' }));
+    expect(controls).toHaveBeenCalledWith(['old-host', 'kata-host']);
+    const dialog = screen.getByRole('dialog', { name: 'Team server' });
+    expect(within(dialog).getByText('Controls: old-host, kata-host')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close panel' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('keeps resource actions, renewal drafts and activity under the selected server', async () => {
+    vi.mocked(api.getComputeOperations).mockResolvedValue({
+      operations: [
+        operation(),
+        operation({
+          id: 'other-op',
+          allocation_id: 'other-resource',
+          message: 'Other server activity',
+        }),
+      ],
+    });
+    const controls = vi.fn((hosts: string[]) => <button>Pause {hosts.join(', ')}</button>);
+    const useHost = vi.fn();
+    render(
+      <ComputeResources
+        onHostsChanged={vi.fn()}
+        renderHostControls={controls}
+        activeHost="old-host"
+        eligibleHosts={['host-a']}
+        onUseHost={useHost}
+        hostNotice="Host command saved."
+      />,
+    );
+    expect(controls).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage CloudLab experiment' }));
+    let dialog = screen.getByRole('dialog', { name: 'CloudLab experiment' });
+    expect(controls).toHaveBeenCalledWith(['host-a']);
+    expect(within(dialog).getByRole('status')).toHaveTextContent('Host command saved.');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Use for new sandboxes' }));
+    expect(useHost).toHaveBeenCalledWith('host-a');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Lease' }));
+    expect(within(dialog).queryByRole('button', { name: 'Pause host-a' })).not.toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText('Renewal reason'), {
+      target: { value: 'Keep this draft' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Overview' }));
+    expect(within(dialog).getByRole('button', { name: 'Pause host-a' })).toBeVisible();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Lease' }));
+    expect(within(dialog).getByLabelText('Renewal reason')).toHaveValue('Keep this draft');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Activity' }));
+    expect(within(dialog).queryByText('Other server activity')).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: /acquire · running/ }));
+    const operationDialog = screen.getByRole('dialog', { name: 'Resource operation' });
+    fireEvent.click(within(operationDialog).getByRole('button', { name: '← Back' }));
+    dialog = screen.getByRole('dialog', { name: 'CloudLab experiment' });
+    expect(within(dialog).getByRole('button', { name: 'Activity' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    fireEvent.click(within(dialog).getByRole('button', { name: /acquire · running/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close panel' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('retains a working Host management entry when the compute query fails', async () => {
+    vi.mocked(api.getComputeServers).mockRejectedValue(new Error('Resource service unavailable'));
+    const controls = vi.fn(() => <button>Pause old-host</button>);
+    render(
+      <ComputeResources
+        onHostsChanged={vi.fn()}
+        renderHostControls={controls}
+        serverGroups={[
+          {
+            name: 'Original server',
+            host: { host: 'old-host' },
+            members: [{ host: 'old-host', status: 'online' }],
+          },
+        ]}
+      />,
+    );
+    await screen.findByText('Resource service unavailable');
+    fireEvent.click(screen.getByRole('button', { name: 'Manage Original server' }));
+    const dialog = screen.getByRole('dialog', { name: 'Original server' });
+    expect(within(dialog).getByRole('button', { name: 'Pause old-host' })).toBeInTheDocument();
+    expect(controls).toHaveBeenCalledWith(['old-host']);
+  });
+
+  it('does not offer placement or lease controls for an ineligible SSH server', async () => {
+    vi.mocked(api.getComputeServers).mockResolvedValue({
+      allocations: [
+        allocation({ provider_id: 'existing_ssh', allowed_actions: ['retire'], expires_at: null }),
+      ],
+      hosts: [],
+      active_host: null,
+      observed_at: '2026-10-04T08:00:00Z',
+    });
+    render(<ComputeResources onHostsChanged={vi.fn()} eligibleHosts={[]} onUseHost={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage CloudLab experiment' }));
+    const dialog = screen.getByRole('dialog', { name: 'CloudLab experiment' });
+    expect(within(dialog).queryByRole('button', { name: 'Lease' })).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole('button', { name: 'Use for new sandboxes' }),
+    ).not.toBeInTheDocument();
+    expect(within(dialog).getByText('Disconnect server')).toBeInTheDocument();
   });
 
   it('does not call a ready cloud resource online before its agent has enrolled', async () => {
@@ -572,8 +673,10 @@ describe('resource dashboard', () => {
     fireEvent.change(await screen.findByLabelText('Server name'), {
       target: { value: 'Pending new server' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Add connection' }));
-    const connectionDialog = await screen.findByRole('dialog', { name: 'Add connection' });
+    fireEvent.click(screen.getByRole('button', { name: 'Add SSH connection' }));
+    const connectionDialog = screen.getByRole('dialog', { name: 'Add server' });
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(within(connectionDialog).getByLabelText('Connection provider')).toBeDisabled();
     fireEvent.change(within(connectionDialog).getByLabelText('Connection name'), {
       target: { value: 'New key' },
     });
@@ -582,9 +685,11 @@ describe('resource dashboard', () => {
     });
     fireEvent.click(within(connectionDialog).getByRole('button', { name: 'Save connection' }));
     await waitFor(() =>
-      expect(screen.queryByRole('dialog', { name: 'Add connection' })).not.toBeInTheDocument(),
+      expect(screen.getByLabelText('Account connection')).toHaveValue('ssh-account'),
     );
     expect(screen.getByLabelText('Server name')).toHaveValue('Pending new server');
+    expect(screen.queryByLabelText('SSH private key')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
   });
 
   it('keeps old Host management independent when resource management is not configured', async () => {

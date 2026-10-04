@@ -12,7 +12,7 @@ type InventoryHost = ComputeServerSnapshot['hosts'][number];
 export interface ComputeServerGroup {
   name: string;
   host?: { host: string };
-  members: { host: string }[];
+  members: { host: string; status?: string }[];
 }
 
 function serverStatus(allocation: ComputeAllocation, hosts: InventoryHost[]): string {
@@ -52,7 +52,7 @@ export default function ComputeServerList({
   catalog,
   activeHost,
   onManage,
-  onInspectHost,
+  onManageHosts,
   serverGroups,
 }: {
   allocations: ComputeAllocation[];
@@ -60,7 +60,7 @@ export default function ComputeServerList({
   catalog: ComputeCatalog | null;
   activeHost: string | null;
   onManage: (id: string) => void;
-  onInspectHost?: (host: string) => void;
+  onManageHosts?: (hosts: string[], name: string) => void;
   serverGroups?: ComputeServerGroup[];
 }) {
   const [search, setSearch] = useState('');
@@ -68,8 +68,17 @@ export default function ComputeServerList({
   const linkedHosts = new Set(
     allocations.flatMap((allocation) => allocation.nodes.flatMap((node) => node.hosts)),
   );
-  const existingHosts =
-    inventory?.hosts.filter((host) => !host.allocation_id && !linkedHosts.has(host.host)) ?? [];
+  const existingHosts: InventoryHost[] =
+    inventory?.hosts.filter((host) => !host.allocation_id && !linkedHosts.has(host.host)) ??
+    (serverGroups ?? []).flatMap((server) =>
+      server.members.map((member) => ({
+        host: member.host,
+        status: member.status ?? 'unknown',
+        retained_groups: 0,
+        allocation_id: null,
+        compute_node_id: null,
+      })),
+    );
   // Preserve the existing physical-server grouping for manually enrolled hosts.
   // Retained groups belong to every member, while actions target the representative.
   const groupedIds = new Set<string>();
@@ -143,7 +152,7 @@ export default function ComputeServerList({
           </select>
         </div>
       )}
-      {!inventory ? (
+      {!inventory && !serverGroups ? (
         <p className="p-8 text-center text-sm text-gray-500 dark:text-gray-400">Loading servers…</p>
       ) : shownAllocations.length + shownExisting.length === 0 ? (
         <p className="p-8 text-center text-sm text-gray-500 dark:text-gray-400">
@@ -171,7 +180,7 @@ export default function ComputeServerList({
             <tbody className="divide-y divide-gray-100 dark:divide-white/5">
               {shownAllocations.map((allocation) => {
                 const hostIds = allocation.nodes.flatMap((node) => node.hosts);
-                const hosts = inventory.hosts.filter(
+                const hosts = (inventory?.hosts ?? []).filter(
                   (host) => host.allocation_id === allocation.id || hostIds.includes(host.host),
                 );
                 const selected =
@@ -285,20 +294,25 @@ export default function ComputeServerList({
                     className="px-4 py-5 tabular-nums"
                     title="Retained sandbox groups, including paused sandboxes"
                   >
-                    {host.retained_groups}
+                    {inventory ? host.retained_groups : '—'}
                   </td>
                   <td data-label="Lease" className="px-4 py-5 text-gray-500 dark:text-gray-400">
                     Not managed
                   </td>
                   <td className="px-5 py-5 text-right">
-                    {onInspectHost && (
+                    {onManageHosts && (
                       <button
                         type="button"
                         className={buttonClass}
-                        aria-label={`Inspect ${host.name}`}
-                        onClick={() => onInspectHost(host.host)}
+                        aria-label={`Manage ${host.name}`}
+                        onClick={() =>
+                          onManageHosts(
+                            host.members.map((member) => member.host),
+                            host.name,
+                          )
+                        }
                       >
-                        Inspect
+                        Manage
                       </button>
                     )}
                   </td>

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 
 import {
   actOnComputeOperation,
@@ -40,6 +40,7 @@ type OpenPanel =
   | { kind: 'operations' }
   | { kind: 'connection'; id?: string }
   | { kind: 'resource'; id: string }
+  | { kind: 'host'; hosts: string[]; name: string }
   | { kind: 'operation'; id: string }
   | null;
 
@@ -48,13 +49,23 @@ const FINISHED = new Set(['succeeded', 'cancelled', 'failed']);
 export default function ComputeResources({
   onHostsChanged,
   onInventory,
-  onInspectHost,
+  renderHostControls,
+  onHostControlsClosed,
+  eligibleHosts = [],
+  onUseHost,
+  settingBusy = false,
+  hostNotice,
   activeHost,
   serverGroups,
 }: {
   onHostsChanged: () => void;
   onInventory?: (inventory: ComputeServerSnapshot) => void;
-  onInspectHost?: (host: string) => void;
+  renderHostControls?: (hosts: string[]) => ReactNode;
+  onHostControlsClosed?: () => void;
+  eligibleHosts?: string[];
+  onUseHost?: (host: string) => void;
+  settingBusy?: boolean;
+  hostNotice?: string | null;
   activeHost?: string | null;
   serverGroups?: ComputeServerGroup[];
 }) {
@@ -63,8 +74,9 @@ export default function ComputeResources({
   const [distribution, setDistribution] = useState<ComputeServerSnapshot | null>(null);
   const [allocations, setAllocations] = useState<ComputeAllocation[]>([]);
   const [operations, setOperations] = useState<ComputeOperation[]>([]);
-  const [addConnectionOpen, setAddConnectionOpen] = useState(false);
   const [panel, setPanel] = useState<OpenPanel>(null);
+  const [serverTab, setServerTab] = useState<'overview' | 'lease' | 'activity'>('overview');
+  const [operationOrigin, setOperationOrigin] = useState<OpenPanel>({ kind: 'operations' });
   const [error, setError] = useState<string | null>(null);
   const [readAt, setReadAt] = useState<string | null>(null);
   const [denied, setDenied] = useState(false);
@@ -98,7 +110,6 @@ export default function ComputeResources({
       )
     ) {
       setDenied(true);
-      setAddConnectionOpen(false);
       setPanel(null);
       setCatalog(null);
       setConnections([]);
@@ -150,26 +161,75 @@ export default function ComputeResources({
   const receiveOperation = (operation: ComputeOperation, submitted = true) => {
     generation.current += 1;
     setOperations((current) => [operation, ...current.filter((item) => item.id !== operation.id)]);
-    if (submitted) setPanel({ kind: 'operation', id: operation.id });
+    if (submitted) {
+      if (panel?.kind !== 'operation') {
+        setOperationOrigin(panel?.kind === 'resource' ? panel : { kind: 'operations' });
+      }
+      setPanel({ kind: 'operation', id: operation.id });
+    }
     void refresh();
   };
-  const receiveConnection = (connection: ComputeConnection) => {
+  const saveConnectionInList = (connection: ComputeConnection) => {
     generation.current += 1;
     setConnections((current) => [
       connection,
       ...current.filter((item) => item.id !== connection.id),
     ]);
-    setPanel({ kind: 'connections' });
     void refresh();
   };
-  function inspectHost(host: string) {
+  const receiveConnection = (connection: ComputeConnection) => {
+    saveConnectionInList(connection);
+    setPanel({ kind: 'connections' });
+  };
+  function openResource(id: string) {
+    onHostControlsClosed?.();
+    setServerTab('overview');
+    setPanel({ kind: 'resource', id });
+  }
+  function closeServer() {
     setPanel(null);
-    onInspectHost?.(host);
+    onHostControlsClosed?.();
+  }
+  function openOperation(id: string) {
+    setOperationOrigin(panel);
+    setPanel({ kind: 'operation', id });
   }
   const currentOperation =
     panel?.kind === 'operation' ? operations.find((item) => item.id === panel.id) : undefined;
   const currentAllocation =
     panel?.kind === 'resource' ? allocations.find((item) => item.id === panel.id) : undefined;
+  const selectedHost = activeHost === undefined ? (distribution?.active_host ?? null) : activeHost;
+  const hostFeedback = hostNotice ? (
+    <p role="status" className="mb-4 rounded-lg bg-gray-50 px-3 py-2 text-sm dark:bg-white/5">
+      {hostNotice}
+    </p>
+  ) : null;
+  function placementControls(hosts: string[]) {
+    if (selectedHost && hosts.includes(selectedHost))
+      return (
+        <p className="rounded-lg bg-crimson/5 px-3 py-2 text-sm text-crimson dark:text-crimson-light">
+          Default location for new sandboxes
+        </p>
+      );
+    const ready = [...new Set(hosts)].filter((host) => eligibleHosts.includes(host));
+    return (
+      onUseHost &&
+      ready.map((host) => (
+        <button
+          key={host}
+          type="button"
+          className={buttonClass}
+          disabled={settingBusy}
+          onClick={() => onUseHost(host)}
+        >
+          Use for new sandboxes{ready.length > 1 ? ` · ${host}` : ''}
+        </button>
+      ))
+    );
+  }
+  const operationAllocation = allocations.find(
+    (item) => item.id === currentOperation?.allocation_id,
+  );
   const pending = operations.filter((item) => !FINISHED.has(item.state));
   const shownOperations = showAllOperations ? operations : pending;
 
@@ -237,9 +297,12 @@ export default function ComputeResources({
         serverGroups={serverGroups}
         inventory={distribution}
         catalog={catalog}
-        activeHost={activeHost === undefined ? (distribution?.active_host ?? null) : activeHost}
-        onManage={(id) => setPanel({ kind: 'resource', id })}
-        onInspectHost={onInspectHost}
+        activeHost={selectedHost}
+        onManage={openResource}
+        onManageHosts={(hosts, name) => {
+          onHostControlsClosed?.();
+          setPanel({ kind: 'host', hosts, name });
+        }}
       />
       {panel?.kind === 'operations' && (
         <Panel title="Server activity" onClose={() => setPanel(null)}>
@@ -264,7 +327,7 @@ export default function ComputeResources({
                 <button
                   type="button"
                   className="w-full rounded-lg px-3 py-4 text-left text-sm hover:bg-gray-50 dark:hover:bg-white/5"
-                  onClick={() => setPanel({ kind: 'operation', id: operation.id })}
+                  onClick={() => openOperation(operation.id)}
                 >
                   {operation.kind} ·{' '}
                   {allocations.find((item) => item.id === operation.allocation_id)?.name ??
@@ -287,30 +350,15 @@ export default function ComputeResources({
             connections={connections}
             operations={operations}
             onOperation={receiveOperation}
-            onConnection={() => setAddConnectionOpen(true)}
-          />
-        </Panel>
-      )}
-      {addConnectionOpen && catalog && (
-        <Panel title="Add connection" onClose={() => setAddConnectionOpen(false)}>
-          <ComputeConnectionForm
-            catalog={catalog}
-            onSaved={(connection) => {
-              generation.current += 1;
-              setConnections((current) => [
-                connection,
-                ...current.filter((item) => item.id !== connection.id),
-              ]);
-              setAddConnectionOpen(false);
-              void refresh();
-            }}
+            onConnectionSaved={saveConnectionInList}
           />
         </Panel>
       )}
       {panel?.kind === 'connection' && catalog && (
         <Panel
           title={panel.id ? 'Edit connection' : 'Add connection'}
-          onClose={() => setPanel({ kind: 'connections' })}
+          onClose={closeServer}
+          onBack={() => setPanel({ kind: 'connections' })}
         >
           <ComputeConnectionForm
             key={panel.id ?? 'new'}
@@ -378,25 +426,112 @@ export default function ComputeResources({
           </div>
         </Panel>
       )}
+      {panel?.kind === 'host' && (
+        <Panel title={panel.name} onClose={closeServer}>
+          {hostFeedback}
+          {placementControls(panel.hosts)}
+          {renderHostControls?.(panel.hosts)}
+        </Panel>
+      )}
       {currentAllocation && (
-        <Panel title={currentAllocation.name} onClose={() => setPanel(null)}>
-          <ComputeResourcePanel
-            key={currentAllocation.id}
-            allocation={currentAllocation}
-            onInspectHost={onInspectHost ? inspectHost : undefined}
-            onOperation={receiveOperation}
-            onSaved={(allocation) => {
-              generation.current += 1;
-              setAllocations((current) =>
-                current.map((item) => (item.id === allocation.id ? allocation : item)),
-              );
-              void refresh();
-            }}
-          />
+        <Panel title={currentAllocation.name} onClose={closeServer}>
+          {hostFeedback}
+          <nav
+            className="mb-5 flex gap-1 border-b border-gray-200 dark:border-white/10"
+            aria-label="Server sections"
+          >
+            {(['overview', 'lease', 'activity'] as const)
+              .filter(
+                (tab) =>
+                  tab !== 'lease' ||
+                  currentAllocation.allowed_actions.some((action) =>
+                    ['policy', 'extend'].includes(action),
+                  ),
+              )
+              .map((tab) => (
+                <button
+                  key={tab}
+                  type="button"
+                  aria-pressed={serverTab === tab}
+                  className={`border-b-2 px-4 py-2 text-sm ${serverTab === tab ? 'border-crimson font-medium text-crimson dark:text-crimson-light' : 'border-transparent text-gray-500 dark:text-gray-400'}`}
+                  onClick={() => setServerTab(tab)}
+                >
+                  {tab === 'overview' ? 'Overview' : tab === 'lease' ? 'Lease' : 'Activity'}
+                </button>
+              ))}
+          </nav>
+          <div hidden={serverTab !== 'overview'} className="space-y-5">
+            {placementControls(currentAllocation.nodes.flatMap((node) => node.hosts))}
+            {currentAllocation.nodes.some((node) => node.hosts.length) &&
+              renderHostControls?.(currentAllocation.nodes.flatMap((node) => node.hosts))}
+            <ComputeResourcePanel
+              section="details"
+              allocation={currentAllocation}
+              onSaved={() => undefined}
+              onOperation={receiveOperation}
+            />
+            <ComputeResourcePanel
+              section="retire"
+              allocation={currentAllocation}
+              onSaved={() => undefined}
+              onOperation={receiveOperation}
+            />
+          </div>
+          <div hidden={serverTab !== 'lease'}>
+            <ComputeResourcePanel
+              key={currentAllocation.id}
+              section="lease"
+              allocation={currentAllocation}
+              onOperation={receiveOperation}
+              onSaved={(allocation) => {
+                generation.current += 1;
+                setAllocations((current) =>
+                  current.map((item) => (item.id === allocation.id ? allocation : item)),
+                );
+                void refresh();
+              }}
+            />
+          </div>
+          <div hidden={serverTab !== 'activity'}>
+            {operations.filter((operation) => operation.allocation_id === currentAllocation.id)
+              .length === 0 && (
+              <p className="py-6 text-sm text-gray-500 dark:text-gray-400">
+                No operations for this server.
+              </p>
+            )}
+            {operations
+              .filter((operation) => operation.allocation_id === currentAllocation.id)
+              .map((operation) => (
+                <button
+                  key={operation.id}
+                  type="button"
+                  className="block w-full border-b border-gray-100 py-4 text-left text-sm dark:border-white/5"
+                  onClick={() => openOperation(operation.id)}
+                >
+                  {operation.kind} · {operation.state}
+                  <span className="mt-1 block text-xs text-gray-500 dark:text-gray-400">
+                    {operation.message}
+                  </span>
+                </button>
+              ))}
+          </div>
         </Panel>
       )}
       {currentOperation && (
-        <Panel title="Resource operation" onClose={() => setPanel({ kind: 'operations' })}>
+        <Panel
+          title="Resource operation"
+          onClose={closeServer}
+          onBack={() => setPanel(operationOrigin ?? { kind: 'operations' })}
+        >
+          {operationAllocation && (
+            <button
+              type="button"
+              className={`${buttonClass} mb-4`}
+              onClick={() => openResource(operationAllocation.id)}
+            >
+              View server
+            </button>
+          )}
           <OperationDetails operation={currentOperation} />
           {currentOperation.allowed_actions.includes('resolve') && (
             <form

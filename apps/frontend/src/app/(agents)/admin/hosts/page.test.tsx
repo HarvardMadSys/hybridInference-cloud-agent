@@ -4,6 +4,8 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { ReactNode } from 'react';
+
 import type { AgentRunnerHostPool } from '@/lib/api/admin';
 import type { AgentAccessApi } from '@/lib/api/session';
 import { APIError } from '@/lib/utils/errors';
@@ -57,8 +59,20 @@ import { reasonLabel } from './capacity';
 import { formatAge, runtimeMenu } from './format';
 import AdminHostsPage from './page';
 
-// The independent resource surface has its own integration tests.
-vi.mock('./ComputeResources', () => ({ default: () => null }));
+// Exercise the parent's Host commands and polling through its scoped render contract.
+// ComputeResources.test verifies the real drawer selection and navigation.
+vi.mock('./ComputeResources', () => ({
+  default: ({
+    renderHostControls,
+    serverGroups,
+  }: {
+    renderHostControls: (hosts: string[]) => ReactNode;
+    serverGroups?: { members: { host: string }[] }[];
+  }) =>
+    renderHostControls(
+      (serverGroups ?? []).flatMap((server) => server.members.map((host) => host.host)),
+    ),
+}));
 
 const mocked = {
   list: getAgentRunnerHosts as unknown as ReturnType<typeof vi.fn>,
@@ -222,12 +236,8 @@ async function openPanel(name = 'runner-a'): Promise<void> {
   fireEvent.click(target());
 }
 
-// Capacity and host-action tests deliberately open the secondary maintenance surface.
 function renderPage() {
-  const view = render(<AdminHostsPage />);
-  const maintenance = screen.queryByText('Performance & maintenance');
-  if (maintenance) fireEvent.click(maintenance);
-  return view;
+  return render(<AdminHostsPage />);
 }
 
 describe('AdminHostsPage', () => {
@@ -256,14 +266,11 @@ describe('AdminHostsPage', () => {
     expect(mocked.list).not.toHaveBeenCalled();
   });
 
-  it('opens maintenance controls only when requested', async () => {
-    render(<AdminHostsPage />);
-    const summary = screen.getByText('Performance & maintenance');
-    expect(summary.closest('details')).not.toHaveAttribute('open');
-    fireEvent.click(summary);
-    expect(await screen.findByRole('rowheader', { name: 'runner-a' })).toBeInTheDocument();
-    fireEvent.click(summary);
-    expect(summary.closest('details')).not.toHaveAttribute('open');
+  it('keeps location and harness controls together in global settings', async () => {
+    renderPage();
+    const settings = screen.getByRole('heading', { name: 'Global settings' }).parentElement!;
+    expect(await within(settings).findByLabelText('claude-code')).toBeInTheDocument();
+    expect(within(settings).getByLabelText('Global sandbox location')).toBeInTheDocument();
   });
 
   it('admits a free account granted Agent administration', async () => {
@@ -339,7 +346,7 @@ describe('AdminHostsPage', () => {
         host({ host: 'gpu-box-kata', labels: { physical_host: 'gpu-box' }, status: 'draining' }),
       ]),
     );
-    fireEvent.click(within(row).getByRole('button', { name: 'Drain' }));
+    fireEvent.click(within(row).getByRole('button', { name: 'Pause new work' }));
     await waitFor(() => expect(mocked.drain).toHaveBeenCalledWith('gpu-box-kata'));
   });
 
@@ -429,11 +436,11 @@ describe('AdminHostsPage', () => {
     mocked.drain.mockResolvedValue(pool([host({ status: 'draining' })]));
     renderPage();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Drain' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Pause new work' }));
 
     await waitFor(() => expect(mocked.drain).toHaveBeenCalledWith('runner-a'));
     expect(mocked.pin).not.toHaveBeenCalled();
-    expect(await screen.findByRole('button', { name: 'Undrain' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Resume new work' })).toBeInTheDocument();
   });
 
   it('forgets only a disabled Host record after explaining the scope', async () => {
@@ -471,7 +478,7 @@ describe('AdminHostsPage', () => {
     mocked.remove.mockResolvedValue(pool([]));
     renderPage();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove from pool' }));
 
     await waitFor(() => expect(mocked.remove).toHaveBeenCalledWith('runner-a', false));
   });
@@ -482,7 +489,7 @@ describe('AdminHostsPage', () => {
     vi.stubGlobal('confirm', confirm);
     renderPage();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove from pool' }));
 
     expect(confirm).toHaveBeenCalledTimes(1);
     // The consequence has to be in the prompt: force does not stop the
@@ -492,7 +499,7 @@ describe('AdminHostsPage', () => {
 
     confirm.mockReturnValue(true);
     mocked.remove.mockResolvedValue(pool([]));
-    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove from pool' }));
     await waitFor(() => expect(mocked.remove).toHaveBeenCalledWith('runner-a', true));
   });
 
@@ -813,7 +820,7 @@ describe('capacity columns', () => {
     expect(within(row).queryByText('0%')).not.toBeInTheDocument();
     // The rest of the row is untouched: slots and actions still work.
     expect(within(row).getByText('0 / 4 in use')).toBeInTheDocument();
-    expect(within(row).getByRole('button', { name: 'Drain' })).toBeEnabled();
+    expect(within(row).getByRole('button', { name: 'Pause new work' })).toBeEnabled();
   });
 
   it('counts a renamed machine once, not as a partial of two records', async () => {
@@ -1456,15 +1463,15 @@ describe('polling and actions', () => {
 
     // The action answers first.
     mocked.drain.mockResolvedValue(pool([host({ status: 'draining' })]));
-    fireEvent.click(screen.getByRole('button', { name: 'Drain' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Pause new work' }));
     await vi.waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Undrain' })).toBeInTheDocument(),
+      expect(screen.getByRole('button', { name: 'Resume new work' })).toBeInTheDocument(),
     );
 
     // The older read lands afterwards and must be discarded.
     landPoll(pool([host()]));
     await vi.advanceTimersByTimeAsync(0);
-    expect(screen.getByRole('button', { name: 'Undrain' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Resume new work' })).toBeInTheDocument();
   });
 });
 
@@ -1535,14 +1542,14 @@ describe('harness version selection', () => {
     await waitFor(() => expect(mocked.setVersion).toHaveBeenCalledWith('claude-code', null));
   });
 
-  it('hides the selector when no host reports a menu', async () => {
-    // A pool of pre-menu hosts. An empty control that cannot do anything is
-    // worse than no control: it reads as broken rather than as absent.
+  it('explains an unavailable harness menu without hiding the setting', async () => {
     mocked.list.mockResolvedValue(pool([host({ runtime_versions_available: null })]));
     renderPage();
 
     await screen.findByRole('rowheader', { name: 'runner-a' });
-    expect(screen.queryByText('Harness version')).not.toBeInTheDocument();
+    expect(screen.getByText('Harness version')).toBeInTheDocument();
+    expect(screen.getByText('No server has reported available versions yet.')).toBeInTheDocument();
+    expect(screen.queryByLabelText('claude-code')).not.toBeInTheDocument();
   });
 });
 

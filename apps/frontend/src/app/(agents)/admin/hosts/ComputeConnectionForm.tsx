@@ -22,13 +22,17 @@ import {
 export default function ComputeConnectionForm({
   catalog,
   connection,
+  fixedProviderId,
   onSaved,
 }: {
   catalog: ComputeCatalog;
   connection?: ComputeConnection;
+  fixedProviderId?: string;
   onSaved: (connection: ComputeConnection) => void;
 }) {
-  const [providerId, setProviderId] = useState(connection?.provider_id ?? catalog.providers[0]?.id);
+  const [providerId, setProviderId] = useState(
+    connection?.provider_id ?? fixedProviderId ?? catalog.providers[0]?.id,
+  );
   const provider = catalog.providers.find((item) => item.id === providerId);
   const [name, setName] = useState(connection?.name ?? '');
   const [values, setValues] = useState(() => {
@@ -86,7 +90,7 @@ export default function ComputeConnectionForm({
         <select
           className={inputClass}
           value={providerId}
-          disabled={Boolean(connection)}
+          disabled={Boolean(connection || fixedProviderId)}
           onChange={(event) => {
             const next = catalog.providers.find((item) => item.id === event.target.value);
             setProviderId(next?.id ?? '');
