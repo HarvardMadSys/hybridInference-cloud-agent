@@ -120,8 +120,7 @@ export default function ComputeConnectionForm({
         />
       </Field>
       <p className="text-xs text-gray-500 dark:text-gray-400">
-        Credentials are write-only and stored by the control plane. They are never returned by this
-        page or sent into a sandbox. Use server validation before deploying.
+        This credential cannot be viewed after saving.
       </p>
       <ErrorNotice error={error} />
       <button className={primaryClass} disabled={busy || !provider} type="submit">

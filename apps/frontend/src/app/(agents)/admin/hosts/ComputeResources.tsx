@@ -21,6 +21,7 @@ import { APIError, getErrorMessage } from '@/lib/utils/errors';
 import AddComputeServer from './AddComputeServer';
 import ComputeConnectionForm from './ComputeConnectionForm';
 import ComputeResourcePanel from './ComputeResourcePanel';
+import ComputeServerList, { type ComputeServerGroup } from './ComputeServerList';
 import {
   absoluteTime,
   buttonClass,
@@ -31,12 +32,12 @@ import {
   Panel,
   primaryClass,
   Reasons,
-  remainingTime,
 } from './compute-ui';
 
 type OpenPanel =
   | { kind: 'add' }
   | { kind: 'connections' }
+  | { kind: 'operations' }
   | { kind: 'connection'; id?: string }
   | { kind: 'resource'; id: string }
   | { kind: 'operation'; id: string }
@@ -47,9 +48,15 @@ const FINISHED = new Set(['succeeded', 'cancelled', 'failed']);
 export default function ComputeResources({
   onHostsChanged,
   onInventory,
+  onInspectHost,
+  activeHost,
+  serverGroups,
 }: {
   onHostsChanged: () => void;
   onInventory?: (inventory: ComputeServerSnapshot) => void;
+  onInspectHost?: (host: string) => void;
+  activeHost?: string | null;
+  serverGroups?: ComputeServerGroup[];
 }) {
   const [catalog, setCatalog] = useState<ComputeCatalog | null>(null);
   const [connections, setConnections] = useState<ComputeConnection[]>([]);
@@ -63,8 +70,6 @@ export default function ComputeResources({
   const [denied, setDenied] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [resolveExternalId, setResolveExternalId] = useState('');
-  const [search, setSearch] = useState('');
-  const [providerFilter, setProviderFilter] = useState('');
   const [showAllOperations, setShowAllOperations] = useState(false);
   const generation = useRef(0);
   const mounted = useRef(true);
@@ -157,6 +162,10 @@ export default function ComputeResources({
     setPanel({ kind: 'connections' });
     void refresh();
   };
+  function inspectHost(host: string) {
+    setPanel(null);
+    onInspectHost?.(host);
+  }
   const currentOperation =
     panel?.kind === 'operation' ? operations.find((item) => item.id === panel.id) : undefined;
   const currentAllocation =
@@ -172,19 +181,22 @@ export default function ComputeResources({
     );
 
   return (
-    <section
-      className="mt-8 space-y-4 rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/10 dark:bg-gray-900"
-      aria-label="Compute resources"
-    >
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="font-semibold">Compute resources</h2>
-          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Connect servers, manage leases, and track deployment. Select the global running location
-            below once a Host is ready.
-          </p>
-        </div>
-        <div className="flex gap-2">
+    <section className="mt-8" aria-label="Servers">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-base font-semibold text-gray-900 dark:text-gray-50">Servers</h2>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            className="rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-white/5"
+            type="button"
+            onClick={() => setPanel({ kind: 'operations' })}
+          >
+            Activity
+            {pending.length > 0 && (
+              <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-800 dark:bg-amber-500/15 dark:text-amber-300">
+                {pending.length} active
+              </span>
+            )}
+          </button>
           <button
             className={buttonClass}
             type="button"
@@ -197,173 +209,76 @@ export default function ComputeResources({
             className={primaryClass}
             type="button"
             onClick={() => setPanel({ kind: 'add' })}
+            aria-label="Add server"
             disabled={!catalog?.providers.length || !catalog.secret_store_configured}
           >
-            Add server
+            + Add server
           </button>
         </div>
       </div>
-      {!catalog && !error && <p className="text-sm">Loading resource management…</p>}
       {catalog && !catalog.secret_store_configured && (
-        <p className="text-sm text-amber-800 dark:text-amber-300">
-          Configure the control plane secret store before adding connections or servers.
+        <p className="mb-3 text-sm text-amber-800 dark:text-amber-300">
+          Configure the control plane secret store to add servers.
         </p>
       )}
       {error && (
-        <div>
+        <div className="mb-4 rounded-xl border border-amber-200 p-4 dark:border-amber-500/25">
           <ErrorNotice error={error} />
           <p className="text-xs text-gray-500 dark:text-gray-400">
-            Last complete read: {absoluteTime(readAt)}. Previous observations may be stale.
+            Last updated {absoluteTime(readAt)}. Displayed data may be stale.
           </p>
-          <button className={buttonClass} type="button" onClick={() => void refresh()}>
+          <button className="mt-2 text-sm underline" type="button" onClick={() => void refresh()}>
             Refresh resource state
           </button>
         </div>
       )}
-      {distribution && distribution.hosts.some((host) => host.retained_groups > 0) && (
-        <div className="rounded-lg bg-gray-50 p-3 text-sm dark:bg-white/5">
-          <h3 className="font-medium">Existing sandbox locations</h3>
-          <ul className="mt-1 space-y-1">
-            {distribution.hosts
-              .filter((host) => host.retained_groups > 0)
-              .map((host) => (
-                <li key={host.host}>
-                  {host.host}: {host.retained_groups} retained sandbox groups · {host.status}
-                  {distribution.active_host === host.host ? ' · current global target' : ''}
-                </li>
-              ))}
-          </ul>
-          <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-            These groups remain on their owning Hosts, including paused groups. Recorded at{' '}
-            {absoluteTime(distribution.observed_at)}.
-          </p>
-        </div>
-      )}
-      {allocations.length > 0 && (
-        <>
-          <div className="flex flex-wrap gap-2">
-            <input
-              aria-label="Search compute resources"
-              className={`${inputClass} sm:!w-64`}
-              type="search"
-              placeholder="Search resources or nodes"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-            />
-            <select
-              aria-label="Filter resource provider"
-              className={`${inputClass} sm:!w-48`}
-              value={providerFilter}
-              onChange={(event) => setProviderFilter(event.target.value)}
+      <ComputeServerList
+        allocations={allocations}
+        serverGroups={serverGroups}
+        inventory={distribution}
+        catalog={catalog}
+        activeHost={activeHost === undefined ? (distribution?.active_host ?? null) : activeHost}
+        onManage={(id) => setPanel({ kind: 'resource', id })}
+        onInspectHost={onInspectHost}
+      />
+      {panel?.kind === 'operations' && (
+        <Panel title="Server activity" onClose={() => setPanel(null)}>
+          <div className="mb-4 flex items-center justify-between gap-3 text-sm">
+            <span className="text-gray-500 dark:text-gray-400">{pending.length} active</span>
+            <button
+              type="button"
+              className="underline underline-offset-4"
+              onClick={() => setShowAllOperations(!showAllOperations)}
             >
-              <option value="">All providers</option>
-              {catalog?.providers.map((provider) => (
-                <option key={provider.id} value={provider.id}>
-                  {provider.label}
-                </option>
-              ))}
-            </select>
+              {showAllOperations ? 'Show active operations' : 'Show recent operations'}
+            </button>
           </div>
+          {shownOperations.length === 0 && (
+            <p className="py-6 text-center text-sm text-gray-500 dark:text-gray-400">
+              No {showAllOperations ? 'recent' : 'active'} operations.
+            </p>
+          )}
           <ul className="divide-y divide-gray-100 dark:divide-white/10">
-            {allocations
-              .filter(
-                (item) =>
-                  (!providerFilter || item.provider_id === providerFilter) &&
-                  `${item.name} ${item.external_id} ${item.nodes.map((node) => node.name).join(' ')}`
-                    .toLowerCase()
-                    .includes(search.toLowerCase()),
-              )
-              .map((allocation) => (
-                <li
-                  key={allocation.id}
-                  className="flex flex-wrap items-start justify-between gap-3 py-3"
+            {shownOperations.map((operation) => (
+              <li key={operation.id}>
+                <button
+                  type="button"
+                  className="w-full rounded-lg px-3 py-4 text-left text-sm hover:bg-gray-50 dark:hover:bg-white/5"
+                  onClick={() => setPanel({ kind: 'operation', id: operation.id })}
                 >
-                  <div className="min-w-0 text-sm">
-                    <p className="font-medium">
-                      {allocation.name}{' '}
-                      <span className="font-normal text-gray-500 dark:text-gray-400">
-                        ·{' '}
-                        {catalog?.providers.find((item) => item.id === allocation.provider_id)
-                          ?.label ?? allocation.provider_id}
-                      </span>
-                    </p>
-                    <p>
-                      Resource:{' '}
-                      {allocation.state === 'absent'
-                        ? 'Deregistered (machine still exists)'
-                        : allocation.state}{' '}
-                      · {allocation.nodes.length} nodes
-                    </p>
-                    {allocation.nodes.map((node) => (
-                      <p key={node.id} className="text-xs text-gray-500 dark:text-gray-400">
-                        {node.name}: {node.hosts.join(', ') || 'Awaiting Host enrollment'}
-                      </p>
-                    ))}
-                    {allocation.expires_at ? (
-                      <p>
-                        Expiry: {absoluteTime(allocation.expires_at)} (
-                        {remainingTime(allocation.expires_at)}) · Auto-renewal{' '}
-                        {allocation.policy.enabled ? 'enabled' : 'disabled'}
-                      </p>
-                    ) : (
-                      <p>Lease not managed</p>
-                    )}
-                    <p className="text-xs text-gray-500 dark:text-gray-400">
-                      Provider observed: {absoluteTime(allocation.observed_at)}
-                    </p>
-                    <Reasons reasons={allocation.blocked_reasons} />
-                  </div>
-                  <button
-                    type="button"
-                    className={buttonClass}
-                    onClick={() => setPanel({ kind: 'resource', id: allocation.id })}
-                  >
-                    Manage {allocation.name}
-                  </button>
-                </li>
-              ))}
+                  {operation.kind} ·{' '}
+                  {allocations.find((item) => item.id === operation.allocation_id)?.name ??
+                    'New server'}{' '}
+                  · {operation.state}
+                  <span className="mt-1 block text-xs text-gray-500 dark:text-gray-400">
+                    {operation.message || operation.step}
+                  </span>
+                </button>
+              </li>
+            ))}
           </ul>
-        </>
+        </Panel>
       )}
-      {catalog && allocations.length === 0 && (
-        <p className="text-sm text-gray-500 dark:text-gray-400">
-          Existing Hosts remain in the server inventory below. Add a resource to manage its
-          provisioning and lease.
-        </p>
-      )}
-      <div className="border-t border-gray-200 pt-3 dark:border-white/10">
-        <div className="flex items-center justify-between gap-3">
-          <h3 className="text-sm font-semibold">Operations ({pending.length} active)</h3>
-          <button
-            type="button"
-            className="text-sm underline"
-            onClick={() => setShowAllOperations(!showAllOperations)}
-          >
-            {showAllOperations ? 'Show active operations' : 'Show recent operations'}
-          </button>
-        </div>
-        {shownOperations.length === 0 && (
-          <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
-            No {showAllOperations ? 'recent' : 'active'} operations.
-          </p>
-        )}
-        <ul className="mt-2 space-y-2">
-          {shownOperations.map((operation) => (
-            <li key={operation.id}>
-              <button
-                type="button"
-                className="text-left text-sm underline underline-offset-2"
-                onClick={() => setPanel({ kind: 'operation', id: operation.id })}
-              >
-                {operation.kind} ·{' '}
-                {allocations.find((item) => item.id === operation.allocation_id)?.name ??
-                  'Resource acquisition'}{' '}
-                · {operation.state} · {operation.step}
-              </button>
-            </li>
-          ))}
-        </ul>
-      </div>
 
       {panel?.kind === 'add' && catalog && (
         <Panel title="Add server" onClose={() => setPanel(null)}>
@@ -468,6 +383,7 @@ export default function ComputeResources({
           <ComputeResourcePanel
             key={currentAllocation.id}
             allocation={currentAllocation}
+            onInspectHost={onInspectHost ? inspectHost : undefined}
             onOperation={receiveOperation}
             onSaved={(allocation) => {
               generation.current += 1;
@@ -480,7 +396,7 @@ export default function ComputeResources({
         </Panel>
       )}
       {currentOperation && (
-        <Panel title="Resource operation" onClose={() => setPanel(null)}>
+        <Panel title="Resource operation" onClose={() => setPanel({ kind: 'operations' })}>
           <OperationDetails operation={currentOperation} />
           {currentOperation.allowed_actions.includes('resolve') && (
             <form

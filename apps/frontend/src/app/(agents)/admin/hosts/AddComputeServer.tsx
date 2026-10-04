@@ -121,39 +121,54 @@ export default function AddComputeServer({
       }}
     >
       <fieldset disabled={busy} className="space-y-4">
-        <Field label="Resource provider">
-          <select
-            className={inputClass}
-            value={providerId}
-            onChange={(event) => {
-              const next = catalog.providers.find((item) => item.id === event.target.value);
-              setProviderId(next?.id ?? '');
-              setMode(next?.modes[0] ?? 'attach');
-              setValues(initialFields(next?.fields ?? []));
-              setConnectionId('');
-              setSshConnectionId('');
-            }}
-          >
+        <fieldset>
+          <legend className="mb-2 text-sm font-medium">Server type</legend>
+          <div className="grid gap-3 sm:grid-cols-2">
             {catalog.providers.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}
-              </option>
+              <label key={item.id} className="cursor-pointer">
+                <input
+                  className="peer sr-only"
+                  type="radio"
+                  name="provider"
+                  value={item.id}
+                  checked={providerId === item.id}
+                  onChange={() => {
+                    setProviderId(item.id);
+                    setMode(item.modes.includes('provision') ? 'provision' : 'attach');
+                    setValues(initialFields(item.fields));
+                    setConnectionId('');
+                    setSshConnectionId('');
+                  }}
+                />
+                <span className="block h-full rounded-xl border border-gray-200 p-4 peer-checked:border-crimson peer-checked:bg-crimson/5 peer-focus-visible:ring-2 peer-focus-visible:ring-crimson dark:border-white/15 dark:peer-checked:border-crimson-light">
+                  <span className="block text-sm font-medium">{item.label}</span>
+                  <span className="mt-1 block text-xs text-gray-500 dark:text-gray-400">
+                    {item.id === 'existing_ssh'
+                      ? 'Connect with SSH'
+                      : item.modes.includes('provision')
+                        ? 'Create or connect a cloud server'
+                        : 'Connect a cloud server'}
+                  </span>
+                </span>
+              </label>
             ))}
-          </select>
-        </Field>
-        <Field label="Resource source">
-          <select
-            className={inputClass}
-            value={mode}
-            onChange={(event) => setMode(event.target.value as typeof mode)}
-          >
-            {provider?.modes.map((item) => (
-              <option key={item} value={item}>
-                {item === 'attach' ? 'Connect an existing resource' : 'Provision a new resource'}
-              </option>
-            ))}
-          </select>
-        </Field>
+          </div>
+        </fieldset>
+        {provider && provider.modes.length > 1 && (
+          <Field label="Cloud resource">
+            <select
+              className={inputClass}
+              value={mode}
+              onChange={(event) => setMode(event.target.value as typeof mode)}
+            >
+              {provider?.modes.map((item) => (
+                <option key={item} value={item}>
+                  {item === 'attach' ? 'Connect existing' : 'Create new'}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
         <Field label="Server name">
           <input
             className={inputClass}
@@ -202,30 +217,33 @@ export default function AddComputeServer({
           Add connection
         </button>
         <ProviderFields fields={fields} values={values} onChange={setValues} />
-        <Field label="Agent deployment">
-          <select
-            className={inputClass}
-            required
-            value={deploymentProfile}
-            onChange={(event) => setDeploymentProfile(event.target.value)}
-          >
-            <option value="">Select deployment…</option>
-            {catalog.deployment_profiles.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        {!catalog.deployment_profiles.length && (
-          <p>No deployment profiles are configured on the control plane.</p>
-        )}
-        <p className="text-sm text-gray-500 dark:text-gray-400">
-          {mode === 'provision'
-            ? 'This requests a new resource and deploys the selected Agent environment.'
-            : 'This connects to an existing resource and deploys the selected Agent environment.'}{' '}
-          It becomes available after readiness checks. The global sandbox location stays unchanged.
-          Automatic renewal starts disabled and can be configured after acquisition.
+        <details open={!deploymentProfile}>
+          <summary className="cursor-pointer text-sm text-gray-600 dark:text-gray-300">
+            Deployment settings
+          </summary>
+          <div className="mt-3 space-y-3">
+            <Field label="Agent deployment">
+              <select
+                className={inputClass}
+                required
+                value={deploymentProfile}
+                onChange={(event) => setDeploymentProfile(event.target.value)}
+              >
+                <option value="">Select deployment…</option>
+                {catalog.deployment_profiles.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            {!catalog.deployment_profiles.length && (
+              <p>No deployment profiles are configured on the control plane.</p>
+            )}
+          </div>
+        </details>
+        <p className="text-xs text-gray-500 dark:text-gray-400">
+          Installs the agent. Select this server as the global location once it is ready.
         </p>
         <div className="flex flex-wrap gap-2">
           <button

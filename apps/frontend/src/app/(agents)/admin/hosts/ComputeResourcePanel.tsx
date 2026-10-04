@@ -30,10 +30,12 @@ export default function ComputeResourcePanel({
   allocation,
   onSaved,
   onOperation,
+  onInspectHost,
 }: {
   allocation: ComputeAllocation;
   onSaved: (allocation: ComputeAllocation) => void;
   onOperation: (operation: ComputeOperation) => void;
+  onInspectHost?: (host: string) => void;
 }) {
   const [policy, setPolicy] = useState(allocation.policy);
   const [adoptManagement, setAdoptManagement] = useState(false);
@@ -89,45 +91,68 @@ export default function ComputeResourcePanel({
 
   return (
     <div className="space-y-6">
-      <div className="space-y-2 text-sm">
-        <p>
-          Resource: {allocation.external_id ?? 'Pending acquisition'} ·{' '}
-          {allocation.state === 'absent' ? 'Deregistered (machine still exists)' : allocation.state}
+      <div className="rounded-xl bg-gray-50 p-4 dark:bg-white/5">
+        <p className="text-xs text-gray-500 dark:text-gray-400">
+          {allocation.provider_id === 'existing_ssh' ? 'Lease' : 'Confirmed expiry'}
         </p>
-        {allocation.expires_at ? (
-          <p>
-            Confirmed expiry: {absoluteTime(allocation.expires_at)} (
-            {remainingTime(allocation.expires_at)})
-          </p>
-        ) : (
-          <p>No managed lease has been observed.</p>
-        )}
-        <p className="text-gray-500 dark:text-gray-400">
-          Provider observation: {absoluteTime(allocation.observed_at)}. The countdown is based on
-          this observation; it does not confirm a new extension.
+        <p className="mt-1 text-xl font-semibold tracking-tight">
+          {allocation.expires_at
+            ? remainingTime(allocation.expires_at)
+            : allocation.provider_id === 'existing_ssh'
+              ? 'Not managed'
+              : 'Not reported'}
         </p>
-        {allocation.check_interval_seconds != null && (
-          <p>
-            Periodic provider checks: about every {allocation.check_interval_seconds} seconds.
-            Pending operations can delay a check.
+        {allocation.expires_at && (
+          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+            {absoluteTime(allocation.expires_at)}
           </p>
         )}
-        <p>Nodes and execution environments affected by resource operations:</p>
-        <ul className="list-inside list-disc">
-          {allocation.nodes.map((node) => (
-            <li key={node.id}>
-              {node.name} — {node.hosts.join(', ') || 'No Host registered yet'}
-            </li>
-          ))}
-        </ul>
-        {needsDeployment && (
-          <p>
-            To deploy an imported resource, use Add server → Connect an existing resource with the
-            same account connection and resource ID.
-          </p>
-        )}
-        <Reasons reasons={allocation.blocked_reasons} />
       </div>
+      <Reasons reasons={allocation.blocked_reasons} />
+      {needsDeployment && (
+        <p className="text-sm text-amber-800 dark:text-amber-300">
+          Agent not installed. Use Add server → Connect existing with this resource ID to deploy.
+        </p>
+      )}
+      <details className="text-sm" open={!allows('policy')}>
+        <summary className="cursor-pointer text-gray-600 dark:text-gray-300">
+          Server details
+        </summary>
+        <div className="mt-3 space-y-2 text-gray-500 dark:text-gray-400">
+          <p className="break-all">ID: {allocation.external_id ?? 'Pending acquisition'}</p>
+          <p>
+            Status:{' '}
+            {allocation.state === 'absent'
+              ? 'Deregistered (machine still exists)'
+              : allocation.state}
+          </p>
+          <ul className="space-y-1">
+            {allocation.nodes.map((node) => (
+              <li key={node.id}>
+                {node.name} · {node.hosts.join(', ') || 'Awaiting agent'}
+                {onInspectHost &&
+                  node.hosts.map((host) => (
+                    <button
+                      key={host}
+                      type="button"
+                      className="mt-2 block text-sm underline underline-offset-4"
+                      onClick={() => onInspectHost(host)}
+                    >
+                      Performance &amp; maintenance{node.hosts.length > 1 ? ` · ${host}` : ''}
+                    </button>
+                  ))}
+              </li>
+            ))}
+          </ul>
+          <p>Last observed: {absoluteTime(allocation.observed_at)}</p>
+          {allocation.check_interval_seconds != null && (
+            <p>
+              Periodic provider checks: about every {allocation.check_interval_seconds} seconds.
+              Pending operations can delay a check.
+            </p>
+          )}
+        </div>
+      </details>
 
       {allows('policy') && (
         <form
@@ -149,7 +174,7 @@ export default function ComputeResourcePanel({
               setPolicy(result.allocation.policy);
               onSaved(result.allocation);
               setNotice(
-                'Renewal policy saved. This does not confirm an extension. Background renewal continues when this page is closed.',
+                'Policy saved. The expiry updates after the provider confirms an extension.',
               );
             } catch (error) {
               setError(getErrorMessage(error));
@@ -167,7 +192,7 @@ export default function ComputeResourcePanel({
                 onChange={(event) => setAdoptManagement(event.target.checked)}
               />
               I authorize lifecycle management of this entire allocation and every node listed
-              above, including renewal and eventual release after dependency checks.
+              above, including renewal and release after dependency checks.
             </label>
           )}
           <label className="flex items-center gap-2 text-sm">
@@ -204,7 +229,7 @@ export default function ComputeResourcePanel({
             />
           </Field>
           <details>
-            <summary className="cursor-pointer text-sm">Admission deadlines</summary>
+            <summary className="cursor-pointer text-sm">Advanced timing</summary>
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               <PolicyNumber
                 field="stop_new_groups_before_seconds"
@@ -219,12 +244,16 @@ export default function ComputeResourcePanel({
                 onChange={setPolicy}
               />
             </div>
+            <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+              Renewal starts before sandbox admission closes. The extension horizon must exceed the
+              renewal lead time.
+            </p>
           </details>
-          <p className="text-xs text-gray-500 dark:text-gray-400">
-            Extension horizon must exceed renewal lead time, which must exceed the new sandbox
-            deadline. The all-turn deadline must be at or after the new sandbox deadline. Disabling
-            automatic renewal does not cancel an already submitted request.
-          </p>
+          {allocation.policy.enabled && !policy.enabled && (
+            <p className="text-xs text-amber-800 dark:text-amber-300">
+              Requests already submitted will still complete.
+            </p>
+          )}
           {revision !== allocation.revision && (
             <div className="space-y-2 text-sm text-amber-800 dark:text-amber-300">
               <p>The resource changed since this form was opened. Your edits are preserved.</p>
@@ -248,99 +277,107 @@ export default function ComputeResourcePanel({
       )}
 
       {allows('extend') && (
-        <form
-          className="space-y-3 border-t border-gray-200 pt-4 dark:border-white/10"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void intent('extend');
-          }}
-        >
-          <h3 className="font-semibold">Request an extension now</h3>
-          <Field label="Requested expiry (your local time)">
-            <input
-              className={inputClass}
-              type="datetime-local"
-              required
-              value={target}
-              onChange={(event) => {
-                setTarget(event.target.value);
-                delete requestIds.current.extend;
-              }}
-            />
-          </Field>
-          <Field label="Extension reason">
-            <textarea
-              className={inputClass}
-              maxLength={2000}
-              required
-              value={reason}
-              onChange={(event) => {
-                setReason(event.target.value);
-                delete requestIds.current.extend;
-              }}
-            />
-          </Field>
-          <button className={buttonClass} type="submit" disabled={busy !== null}>
-            Request extension
-          </button>
-        </form>
+        <details className="border-t border-gray-200 pt-4 dark:border-white/10">
+          <summary className="cursor-pointer text-sm font-medium">Extend now</summary>
+          <form
+            className="space-y-3 border-t border-gray-200 pt-4 dark:border-white/10"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void intent('extend');
+            }}
+          >
+            <Field label="Requested expiry (your local time)">
+              <input
+                className={inputClass}
+                type="datetime-local"
+                required
+                value={target}
+                onChange={(event) => {
+                  setTarget(event.target.value);
+                  delete requestIds.current.extend;
+                }}
+              />
+            </Field>
+            <Field label="Extension reason">
+              <textarea
+                className={inputClass}
+                maxLength={2000}
+                required
+                value={reason}
+                onChange={(event) => {
+                  setReason(event.target.value);
+                  delete requestIds.current.extend;
+                }}
+              />
+            </Field>
+            <button className={buttonClass} type="submit" disabled={busy !== null}>
+              Request extension
+            </button>
+          </form>
+        </details>
       )}
 
       {allows('retire') && (
-        <div className="space-y-3 border-t border-gray-200 pt-4 dark:border-white/10">
-          <h3 className="font-semibold">Retire and release resource</h3>
-          <p className="text-sm">
-            This affects the entire allocation and all its nodes. Retained sandboxes prevent
-            release. Moving the global location does not migrate them.
-          </p>
-          <button
-            type="button"
-            className={buttonClass}
-            disabled={busy !== null}
-            onClick={async () => {
-              setBusy('preview');
-              setError(null);
-              try {
-                setImpact(await getRetirementImpact(allocation.id));
-                delete requestIds.current.retire;
-              } catch (error) {
-                setError(getErrorMessage(error));
-              } finally {
-                setBusy(null);
-              }
-            }}
-          >
-            Preview retirement impact
-          </button>
-          {impact && (
-            <div className="space-y-2 rounded-lg border border-amber-300 p-3 text-sm dark:border-amber-700">
-              <p>
-                {impact.nodes.length} nodes · {impact.hosts.length} Host environments
-              </p>
-              <p>
-                {impact.active_attempts} running attempts · {impact.retained_groups} retained
-                sandbox groups
-              </p>
-              <p>Affected Hosts: {impact.hosts.join(', ') || 'None registered'}</p>
-              {impact.global_active_host && (
-                <p>Global sandbox location refers to {impact.global_active_host}.</p>
-              )}
-              <Reasons reasons={impact.blocked_reasons} />
-              <p>
-                Admission closes when retirement starts. The server rechecks dependencies before
-                release.
-              </p>
-              <button
-                className={buttonClass}
-                type="button"
-                disabled={busy !== null || !impact.allowed_actions.includes('retire')}
-                onClick={() => void intent('retire')}
-              >
-                Start retirement for entire resource
-              </button>
-            </div>
-          )}
-        </div>
+        <details className="border-t border-gray-200 pt-4 dark:border-white/10">
+          <summary className="cursor-pointer text-sm font-medium text-red-600 dark:text-red-400">
+            Remove server
+          </summary>
+          <div className="mt-4 space-y-3">
+            <p className="text-sm">
+              {allocation.provider_id === 'existing_ssh'
+                ? 'Disconnects this server. The machine is not deleted.'
+                : 'Releases the entire cloud resource and every node in it.'}{' '}
+              Existing sandboxes must be cleared first.
+            </p>
+            <button
+              type="button"
+              className={buttonClass}
+              disabled={busy !== null}
+              onClick={async () => {
+                setBusy('preview');
+                setError(null);
+                try {
+                  setImpact(await getRetirementImpact(allocation.id));
+                  delete requestIds.current.retire;
+                } catch (error) {
+                  setError(getErrorMessage(error));
+                } finally {
+                  setBusy(null);
+                }
+              }}
+            >
+              Preview retirement impact
+            </button>
+            {impact && (
+              <div className="space-y-2 rounded-lg border border-amber-300 p-3 text-sm dark:border-amber-700">
+                <p>
+                  {impact.nodes.length} nodes · {impact.hosts.length} Host environments
+                </p>
+                <p>
+                  {impact.active_attempts} running attempts · {impact.retained_groups} retained
+                  sandbox groups
+                </p>
+                <p>Affected Hosts: {impact.hosts.join(', ') || 'None registered'}</p>
+                {impact.global_active_host && (
+                  <p>Global sandbox location refers to {impact.global_active_host}.</p>
+                )}
+                <Reasons reasons={impact.blocked_reasons} />
+                <p>
+                  Admission closes when retirement starts. The server rechecks dependencies before
+                  release.
+                </p>
+                <button
+                  className={buttonClass}
+                  type="button"
+                  disabled={busy !== null || !impact.allowed_actions.includes('retire')}
+                  onClick={() => void intent('retire')}
+                >
+                  Start retirement for entire resource
+                </button>
+              </div>
+            )}
+          </div>
+        </details>
       )}
       {notice && (
         <p role="status" className="text-sm">

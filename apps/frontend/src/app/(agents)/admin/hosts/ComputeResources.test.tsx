@@ -201,8 +201,8 @@ describe('server acquisition UI', () => {
   it('requests CloudLab using separate cloud and SSH connections, and only enabled providers', async () => {
     vi.mocked(api.createComputeServer).mockResolvedValue({ operation: operation() });
     renderAdd();
-    expect(screen.queryByRole('option', { name: 'AWS' })).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Resource provider'), { target: { value: 'cloudlab' } });
+    expect(screen.queryByRole('radio', { name: /AWS/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
     fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Cloud machine' } });
     fireEvent.change(screen.getByLabelText('Account connection'), {
       target: { value: 'cloudlab-account' },
@@ -379,6 +379,7 @@ describe('resource management', () => {
     render(
       <ComputeResourcePanel allocation={allocation()} onSaved={vi.fn()} onOperation={vi.fn()} />,
     );
+    fireEvent.click(screen.getByText('Remove server'));
     fireEvent.click(screen.getByRole('button', { name: 'Preview retirement impact' }));
     expect(
       await screen.findByText('1 running attempts · 2 retained sandbox groups'),
@@ -432,8 +433,10 @@ describe('resource dashboard', () => {
       ],
     });
     render(<ComputeResources onHostsChanged={vi.fn()} />);
-    expect(await screen.findByText('Existing sandbox locations')).toBeInTheDocument();
-    expect(screen.getByText(/old-host: 3 retained sandbox groups/)).toBeInTheDocument();
+    const oldServer = (await screen.findByRole('rowheader', { name: /old-host/ })).closest('tr')!;
+    expect(within(oldServer).getByText('3')).toBeInTheDocument();
+    expect(within(oldServer).getByText('draining')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: /Activity.*1 active/ }));
     fireEvent.click(
       await screen.findByRole('button', { name: /acquire · CloudLab experiment · unknown/ }),
     );
@@ -455,6 +458,7 @@ describe('resource dashboard', () => {
       operation: operation({ state: 'pending' }),
     });
     render(<ComputeResources onHostsChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Activity.*1 active/ }));
     fireEvent.click(
       await screen.findByRole('button', { name: /acquire · CloudLab experiment · unknown/ }),
     );
@@ -466,6 +470,98 @@ describe('resource dashboard', () => {
       expect(api.resolveComputeOperation).toHaveBeenCalledWith('op-a', 'confirmed-experiment-id'),
     );
     expect(api.createComputeServer).not.toHaveBeenCalled();
+  });
+
+  it('keeps one resource row and its retained count when the global target changes', async () => {
+    vi.mocked(api.getComputeServers).mockResolvedValue({
+      allocations: [allocation()],
+      hosts: [
+        {
+          host: 'host-a',
+          status: 'online',
+          retained_groups: 5,
+          allocation_id: 'resource-a',
+          compute_node_id: 'node-a',
+        },
+        {
+          host: 'old-host',
+          status: 'online',
+          retained_groups: 3,
+          allocation_id: null,
+          compute_node_id: null,
+        },
+      ],
+      active_host: 'host-a',
+      observed_at: '2026-10-04T08:00:00Z',
+    });
+    const { rerender } = render(<ComputeResources onHostsChanged={vi.fn()} activeHost="host-a" />);
+    const table = await screen.findByRole('table', { name: 'Server inventory' });
+    expect(within(table).getAllByRole('row')).toHaveLength(3);
+    const cloudRow = screen.getByRole('rowheader', { name: /CloudLab experiment/ }).closest('tr')!;
+    const oldRow = screen.getByRole('rowheader', { name: /old-host/ }).closest('tr')!;
+    expect(within(cloudRow).getByText('5')).toBeInTheDocument();
+    expect(within(cloudRow).getByText('Selected')).toBeInTheDocument();
+    expect(within(oldRow).getByText('3')).toBeInTheDocument();
+    rerender(<ComputeResources onHostsChanged={vi.fn()} activeHost="old-host" />);
+    expect(within(oldRow).getByText('Selected')).toBeInTheDocument();
+    expect(within(cloudRow).queryByText('Selected')).not.toBeInTheDocument();
+    expect(within(cloudRow).getByText('5')).toBeInTheDocument();
+    expect(within(oldRow).getByText('3')).toBeInTheDocument();
+  });
+
+  it('groups legacy enrollments by machine while inspecting the exact compatible host', async () => {
+    const inspect = vi.fn();
+    vi.mocked(api.getComputeServers).mockResolvedValue({
+      allocations: [],
+      hosts: [
+        {
+          host: 'old-host',
+          status: 'draining',
+          retained_groups: 3,
+          allocation_id: null,
+          compute_node_id: null,
+        },
+        {
+          host: 'kata-host',
+          status: 'online',
+          retained_groups: 4,
+          allocation_id: null,
+          compute_node_id: null,
+        },
+      ],
+      active_host: 'kata-host',
+      observed_at: '2026-10-04T08:00:00Z',
+    });
+    render(
+      <ComputeResources
+        onHostsChanged={vi.fn()}
+        onInspectHost={inspect}
+        serverGroups={[
+          {
+            name: 'Team server',
+            host: { host: 'kata-host' },
+            members: [{ host: 'old-host' }, { host: 'kata-host' }],
+          },
+        ]}
+      />,
+    );
+    const table = await screen.findByRole('table', { name: 'Server inventory' });
+    expect(within(table).getAllByRole('row')).toHaveLength(2);
+    const row = screen.getByRole('rowheader', { name: /Team server/ }).closest('tr')!;
+    expect(within(row).getByText('7')).toBeInTheDocument();
+    expect(within(row).getByText('Selected')).toBeInTheDocument();
+    expect(within(row).getByText('Online')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect Team server' }));
+    expect(inspect).toHaveBeenCalledWith('kata-host');
+  });
+
+  it('does not call a ready cloud resource online before its agent has enrolled', async () => {
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    const row = (await screen.findByRole('rowheader', { name: /CloudLab experiment/ })).closest(
+      'tr',
+    )!;
+    expect(within(row).getByText('Awaiting agent')).toBeInTheDocument();
+    expect(within(row).queryByText('Online')).not.toBeInTheDocument();
   });
 
   it('keeps an unfinished server form when adding a connection', async () => {

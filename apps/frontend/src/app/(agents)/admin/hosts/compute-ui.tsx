@@ -33,7 +33,7 @@ export function Panel({
       ref={dialog}
       aria-label={title}
       onCancel={onClose}
-      className="m-auto max-h-[90vh] w-[min(44rem,95vw)] overflow-y-auto rounded-2xl border border-gray-200 bg-white p-6 text-gray-900 shadow-xl backdrop:bg-black/40 dark:backdrop:bg-black/60 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
+      className="m-0 ml-auto h-dvh max-h-none w-[min(38rem,100vw)] max-w-none overflow-y-auto border-l border-gray-200 bg-white p-6 text-gray-900 shadow-xl backdrop:bg-black/40 dark:backdrop:bg-black/60 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
     >
       <div className="mb-5 flex items-center justify-between gap-4">
         <h2 className="text-lg font-semibold">{title}</h2>
@@ -206,7 +206,7 @@ export function OperationDetails({ operation }: { operation: ComputeOperation })
         Last update: {absoluteTime(operation.updated_at)}
       </p>
       <p className="text-xs text-gray-500 dark:text-gray-400">
-        Processing continues on the server when you close this panel.
+        You can close this panel. The operation will continue.
       </p>
     </div>
   );

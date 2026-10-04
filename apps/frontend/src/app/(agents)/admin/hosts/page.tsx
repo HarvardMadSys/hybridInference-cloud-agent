@@ -297,6 +297,8 @@ function HostsView() {
   const [refreshFailed, setRefreshFailed] = useState(false);
   const [nowMs, setNowMs] = useState(monotonicNow);
 
+  const [maintenanceOpen, setMaintenanceOpen] = useState(false);
+  const maintenancePanel = useRef<HTMLDetailsElement>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   /** Which enrollment's curve the open panel shows; null means the default. */
   const [sourceChoice, setSourceChoice] = useState<string | null>(null);
@@ -764,29 +766,12 @@ function HostsView() {
           </div>
         )}
 
-        <ComputeResources
-          onHostsChanged={() => void load(true)}
-          onInventory={setComputeInventory}
-        />
-
-        {/* Physical inventory groups independently enrolled execution environments.
-            Actions still target the original deployment identity. */}
-        <div className="mt-10">
-          <div className="flex flex-wrap items-baseline gap-x-3">
-            <h2 className="text-base font-semibold text-gray-900 dark:text-gray-50">Servers</h2>
-            {refreshFailed && (
-              <span
-                aria-live="polite"
-                className="ml-auto text-[11px] text-amber-700 dark:text-amber-300"
-              >
-                Refresh failed — showing the last successful read
-                {pool?.observedAt ? ` from ${formatUtcTimestamp(pool.observedAt)}` : ''}.
-              </span>
-            )}
-          </div>
-
-          <div className="mt-3 flex flex-wrap items-center gap-3">
-            <label htmlFor="server-placement" className="text-sm text-gray-600 dark:text-gray-400">
+        <div className="mt-8 rounded-2xl border border-gray-200 bg-gray-50/70 px-5 py-5 dark:border-white/10 dark:bg-white/[0.03]">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <label
+              htmlFor="server-placement"
+              className="text-sm font-semibold text-gray-900 dark:text-gray-100"
+            >
               Global sandbox location
             </label>
             <select
@@ -796,7 +781,7 @@ function HostsView() {
               onChange={(event) => void handlePin(event.target.value || null)}
               className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm"
             >
-              <option value="">Automatic — eligible server pool</option>
+              <option value="">Automatic — available servers</option>
               {selectionUnavailable && (
                 <option value="__unavailable__" disabled>
                   Selected server unavailable
@@ -809,24 +794,27 @@ function HostsView() {
                 const allocationId = computeInventory?.hosts.find(
                   (item) => item.host === host.host,
                 )?.allocation_id;
-                const source = computeInventory?.allocations.find(
+                const allocation = computeInventory?.allocations.find(
                   (item) => item.id === allocationId,
-                )?.provider_id;
+                );
+                const allocationHosts = allocation?.nodes.flatMap((node) => node.hosts) ?? [];
+                const displayName = allocation
+                  ? allocationHosts.length > 1
+                    ? `${allocation.name} / ${host.host}`
+                    : allocation.name
+                  : physicalName && physicalName !== host.host
+                    ? `${physicalName} / ${host.host}`
+                    : host.host;
                 return (
                   <option key={host.host} value={host.host}>
-                    {physicalName && physicalName !== host.host
-                      ? `${physicalName} / ${host.host}`
-                      : host.host}
-                    {source ? ` · ${source}` : ''}
+                    {displayName}
                   </option>
                 );
               })}
             </select>
           </div>
-          <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-            Applies to every new sandbox that has not been assigned yet. Existing sandboxes and
-            their Forks stay on their owning Hosts. Switching saves the target; it does not migrate
-            them or release the old server. A fixed target never falls back to another server.
+          <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">
+            All new sandboxes use this location. Existing sandboxes stay on their current server.
           </p>
           {selectionUnavailable && (
             <div role="alert" className="mt-3 text-sm text-amber-700 dark:text-amber-300">
@@ -841,7 +829,51 @@ function HostsView() {
               </button>
             </div>
           )}
+        </div>
 
+        <ComputeResources
+          onHostsChanged={() => void load(true)}
+          onInventory={setComputeInventory}
+          activeHost={activeHost}
+          serverGroups={servers}
+          onInspectHost={(hostId) => {
+            setMaintenanceOpen(true);
+            const server = servers.find((item) =>
+              item.members.some((member) => member.host === hostId),
+            );
+            if (server && expanded !== server.name) {
+              toggleServer(server.name, groupCapacityFacts(server.members, elapsedMs));
+            }
+            const member =
+              server && curveSourceHosts(server.members).find((item) => item.host === hostId);
+            if (member) {
+              setSourceChoice(member.host);
+              setPanelEpoch(member.capacity_epoch ?? null);
+            }
+            maintenancePanel.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+          }}
+        />
+
+        <details
+          ref={maintenancePanel}
+          className="mt-8 border-t border-gray-200 pt-5 dark:border-white/10"
+          open={maintenanceOpen}
+        >
+          <summary
+            onClick={(event) => {
+              event.preventDefault();
+              setMaintenanceOpen(!maintenanceOpen);
+            }}
+            className="cursor-pointer text-sm font-medium text-gray-600 dark:text-gray-300"
+          >
+            Performance &amp; maintenance
+          </summary>
+          {refreshFailed && (
+            <p aria-live="polite" className="mt-3 text-xs text-amber-700 dark:text-amber-300">
+              Refresh failed — showing the last successful read
+              {pool?.observedAt ? ` from ${formatUtcTimestamp(pool.observedAt)}` : ''}.
+            </p>
+          )}
           {loading && pool === null ? (
             <TableSkeleton />
           ) : visibleServers.length === 0 ? (
@@ -1126,7 +1158,7 @@ function HostsView() {
               </ul>
             </details>
           )}
-        </div>
+        </details>
 
         {/* ── Harness version ──────────────────────────────────────────
             One row per runtime, because the previous inline strip put five
