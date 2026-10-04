@@ -65,13 +65,19 @@ vi.mock('./ComputeResources', () => ({
   default: ({
     renderHostControls,
     serverGroups,
+    placementControl,
   }: {
+    placementControl?: ReactNode;
     renderHostControls: (hosts: string[]) => ReactNode;
     serverGroups?: { members: { host: string }[] }[];
-  }) =>
-    renderHostControls(
-      (serverGroups ?? []).flatMap((server) => server.members.map((host) => host.host)),
-    ),
+  }) => (
+    <section aria-label="Servers">
+      {placementControl}
+      {renderHostControls(
+        (serverGroups ?? []).flatMap((server) => server.members.map((host) => host.host)),
+      )}
+    </section>
+  ),
 }));
 
 const mocked = {
@@ -266,10 +272,11 @@ describe('AdminHostsPage', () => {
     expect(mocked.list).not.toHaveBeenCalled();
   });
 
-  it('places servers between global location and harness controls', async () => {
+  it('keeps placement inside Servers with harness controls below', async () => {
     renderPage();
-    const settings = screen.getByRole('heading', { name: 'Global settings' }).parentElement!;
-    const location = within(settings).getByLabelText('Global sandbox location');
+    const servers = screen.getByRole('region', { name: 'Servers' });
+    const location = within(servers).getByLabelText('New sandbox location');
+    expect(screen.queryByRole('heading', { name: 'Global settings' })).not.toBeInTheDocument();
     const server = await screen.findByRole('rowheader', { name: 'runner-a' });
     const harness = screen.getByLabelText('claude-code');
     expect(
@@ -345,7 +352,7 @@ describe('AdminHostsPage', () => {
     expect(screen.queryByText('pinned')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Any host' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Pin' })).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Global sandbox location')).toBeInTheDocument();
+    expect(screen.getByLabelText('New sandbox location')).toBeInTheDocument();
     mocked.drain.mockResolvedValue(
       pool([
         host({ host: 'gpu-box-kata', labels: { physical_host: 'gpu-box' }, status: 'draining' }),
@@ -360,11 +367,11 @@ describe('AdminHostsPage', () => {
     mocked.list.mockResolvedValue(pool(rows, 'runner-a'));
     mocked.pin.mockResolvedValue(pool([host(), host({ host: 'runner-b' })]));
     renderPage();
-    const select = await screen.findByLabelText('Global sandbox location');
+    const select = await screen.findByLabelText('New sandbox location');
     expect(select).toHaveValue('runner-a');
     fireEvent.change(select, { target: { value: '' } });
     await waitFor(() => expect(mocked.pin).toHaveBeenCalledWith(null));
-    expect(screen.getByLabelText('Global sandbox location')).toHaveValue('');
+    expect(screen.getByLabelText('New sandbox location')).toHaveValue('');
     expect(await screen.findByRole('status')).toHaveTextContent('assigned automatically');
   });
 
@@ -373,7 +380,7 @@ describe('AdminHostsPage', () => {
     mocked.list.mockResolvedValue(pool(rows));
     mocked.pin.mockResolvedValue(pool(rows, 'gpu-box-kata'));
     renderPage();
-    fireEvent.change(await screen.findByLabelText('Global sandbox location'), {
+    fireEvent.change(await screen.findByLabelText('New sandbox location'), {
       target: { value: 'gpu-box-kata' },
     });
     await waitFor(() => expect(mocked.pin).toHaveBeenCalledWith('gpu-box-kata'));
@@ -388,7 +395,7 @@ describe('AdminHostsPage', () => {
     mocked.list.mockResolvedValue(pool(rows));
     mocked.pin.mockResolvedValue(pool(rows, 'gpu-kata-b'));
     renderPage();
-    const select = await screen.findByLabelText('Global sandbox location');
+    const select = await screen.findByLabelText('New sandbox location');
     await waitFor(() => expect(within(select).getAllByRole('option')).toHaveLength(3));
     fireEvent.change(select, { target: { value: 'gpu-kata-b' } });
     await waitFor(() => expect(mocked.pin).toHaveBeenCalledWith('gpu-kata-b'));
@@ -404,7 +411,7 @@ describe('AdminHostsPage', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Clear unavailable selection' }));
     await waitFor(() => expect(mocked.pin).toHaveBeenCalledWith(null));
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
-    expect(screen.getByLabelText('Global sandbox location')).toBeInTheDocument();
+    expect(screen.getByLabelText('New sandbox location')).toBeInTheDocument();
   });
 
   it('keeps a fixed server visible if it becomes unavailable', async () => {
@@ -419,7 +426,7 @@ describe('AdminHostsPage', () => {
       ),
     );
     renderPage();
-    expect(await screen.findByLabelText('Global sandbox location')).toHaveValue('__unavailable__');
+    expect(await screen.findByLabelText('New sandbox location')).toHaveValue('__unavailable__');
     expect(screen.getByRole('option', { name: 'Selected server unavailable' })).toBeDisabled();
   });
 
@@ -432,7 +439,7 @@ describe('AdminHostsPage', () => {
       ]),
     );
     renderPage();
-    const select = await screen.findByLabelText('Global sandbox location');
+    const select = await screen.findByLabelText('New sandbox location');
     expect(within(select).getAllByRole('option')).toHaveLength(3);
     expect(within(select).queryByRole('option', { name: 'disabled' })).not.toBeInTheDocument();
   });

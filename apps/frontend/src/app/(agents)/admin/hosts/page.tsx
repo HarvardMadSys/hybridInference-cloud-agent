@@ -1062,73 +1062,74 @@ function HostsView() {
           </div>
         )}
 
-        <div className="mt-8 rounded-2xl border border-gray-200 bg-gray-50/70 px-5 py-5 dark:border-white/10 dark:bg-white/[0.03]">
-          <h2 className="mb-5 text-base font-semibold">Global settings</h2>
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <label
-              htmlFor="server-placement"
-              className="text-sm font-semibold text-gray-900 dark:text-gray-100"
-            >
-              Global sandbox location
-            </label>
-            <select
-              id="server-placement"
-              disabled={busy || pool === null}
-              value={activeHost ? (selectionUnavailable ? '__unavailable__' : activeHost) : ''}
-              onChange={(event) => void handlePin(event.target.value || null)}
-              className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm"
-            >
-              <option value="">Automatic — available servers</option>
-              {selectionUnavailable && (
-                <option value="__unavailable__" disabled>
-                  Selected server unavailable
-                </option>
-              )}
-              {availableHosts.map((host) => {
-                const physicalName = servers.find((server) =>
-                  server.members.some((member) => member.host === host.host),
-                )?.name;
-                const allocationId = computeInventory?.hosts.find(
-                  (item) => item.host === host.host,
-                )?.allocation_id;
-                const allocation = computeInventory?.allocations.find(
-                  (item) => item.id === allocationId,
-                );
-                const allocationHosts = allocation?.nodes.flatMap((node) => node.hosts) ?? [];
-                const displayName = allocation
-                  ? allocationHosts.length > 1
-                    ? `${allocation.name} / ${host.host}`
-                    : allocation.name
-                  : physicalName && physicalName !== host.host
-                    ? `${physicalName} / ${host.host}`
-                    : host.host;
-                return (
-                  <option key={host.host} value={host.host}>
-                    {displayName}
-                  </option>
-                );
-              })}
-            </select>
-          </div>
-          <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">
-            All new sandboxes use this location. Existing sandboxes stay on their current server.
-          </p>
-          {selectionUnavailable && (
-            <div role="alert" className="mt-3 text-sm text-amber-700 dark:text-amber-300">
-              The selected server cannot accept new chats.
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void handlePin(null)}
-                className="ml-2 underline"
-              >
-                Clear unavailable selection
-              </button>
-            </div>
-          )}
-        </div>
-
         <ComputeResources
+          placementControl={
+            <div className="mb-4 rounded-xl border border-gray-200 bg-gray-50/70 p-4 dark:border-white/10 dark:bg-white/[0.03]">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <label
+                  htmlFor="server-placement"
+                  className="text-sm font-semibold text-gray-900 dark:text-gray-100"
+                >
+                  New sandbox location
+                </label>
+                <select
+                  id="server-placement"
+                  disabled={busy || pool === null}
+                  value={activeHost ? (selectionUnavailable ? '__unavailable__' : activeHost) : ''}
+                  onChange={(event) => void handlePin(event.target.value || null)}
+                  className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm"
+                >
+                  <option value="">Automatic — available servers</option>
+                  {selectionUnavailable && (
+                    <option value="__unavailable__" disabled>
+                      Selected server unavailable
+                    </option>
+                  )}
+                  {availableHosts.map((host) => {
+                    const physicalName = servers.find((server) =>
+                      server.members.some((member) => member.host === host.host),
+                    )?.name;
+                    const allocationId = computeInventory?.hosts.find(
+                      (item) => item.host === host.host,
+                    )?.allocation_id;
+                    const allocation = computeInventory?.allocations.find(
+                      (item) => item.id === allocationId,
+                    );
+                    const allocationHosts = allocation?.nodes.flatMap((node) => node.hosts) ?? [];
+                    const displayName = allocation
+                      ? allocationHosts.length > 1
+                        ? `${allocation.name} / ${host.host}`
+                        : allocation.name
+                      : physicalName && physicalName !== host.host
+                        ? `${physicalName} / ${host.host}`
+                        : host.host;
+                    return (
+                      <option key={host.host} value={host.host}>
+                        {displayName}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+              <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">
+                All new sandboxes use this location. Existing sandboxes stay on their current
+                server.
+              </p>
+              {selectionUnavailable && (
+                <div role="alert" className="mt-3 text-sm text-amber-700 dark:text-amber-300">
+                  The selected server cannot accept new chats.
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void handlePin(null)}
+                    className="ml-2 underline"
+                  >
+                    Clear unavailable selection
+                  </button>
+                </div>
+              )}
+            </div>
+          }
           onHostsChanged={() => void load(true)}
           onInventory={setComputeInventory}
           activeHost={activeHost}

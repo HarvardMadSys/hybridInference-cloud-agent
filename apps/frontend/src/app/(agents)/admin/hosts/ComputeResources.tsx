@@ -49,6 +49,7 @@ const FINISHED = new Set(['succeeded', 'cancelled', 'failed']);
 export default function ComputeResources({
   onHostsChanged,
   onInventory,
+  placementControl,
   renderHostControls,
   onHostControlsClosed,
   eligibleHosts = [],
@@ -60,6 +61,7 @@ export default function ComputeResources({
 }: {
   onHostsChanged: () => void;
   onInventory?: (inventory: ComputeServerSnapshot) => void;
+  placementControl?: ReactNode;
   renderHostControls?: (hosts: string[]) => ReactNode;
   onHostControlsClosed?: () => void;
   eligibleHosts?: string[];
@@ -276,6 +278,7 @@ export default function ComputeResources({
           </button>
         </div>
       </div>
+      {placementControl}
       {catalog && !catalog.secret_store_configured && (
         <p className="mb-3 text-sm text-amber-800 dark:text-amber-300">
           Configure the control plane secret store to add servers.

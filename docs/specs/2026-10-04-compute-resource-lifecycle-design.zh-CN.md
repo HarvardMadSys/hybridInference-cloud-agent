@@ -169,11 +169,11 @@ POST  /admin/agent/compute-operations/{id}/cancel   取消尚未提交释放的�
 
 这是一项前后端完整功能，日常接入、查询、配置和下线都在现有 **Admin → Servers** 页面完成。容量、并发、暂停接单与移出池继续调用已有 Host 接口；Provider 接入、租期和释放通过独立的资源接口完成。前端集中入口，不合并两套后端职责。
 
-页面从上到下依次是 **Global settings** 中的全局运行位置、统一 **Servers** 列表、**Harness version**。点击名称或 Manage 后，所有针对该服务器的操作在同一详情抽屉中完成，不再跳转到独立维护区。已有 SSH 机器与云资源共用列表；多个旧 Host 按现有物理机器规则分组。一个云 Allocation 的节点显示在同一行及其详情内，续期和释放始终以整个 Allocation 为范围。
+页面以 **Servers** 为主要管理区域：顶部是 **New sandbox location**，下面直接列出统一服务器清单；**Harness version** 放在整个 Servers 区域下方。全局放置和服务器管理在后端继续独立，前端不再拆出单独的 Global settings 区块。点击名称或 Manage 后，所有针对该服务器的操作在同一详情抽屉中完成，不再跳转到独立维护区。已有 SSH 机器与云资源共用列表；多个旧 Host 按现有物理机器规则分组。一个云 Allocation 的节点显示在同一行及其详情内，续期和释放始终以整个 Allocation 为范围。
 
 | 页面区域 | 展示内容 | 主要操作 |
 | --- | --- | --- |
-| Global settings | 统一运行位置 | 选择新 sandbox 的目标 |
+| Servers 顶部 | New sandbox location | 选择所有新 sandbox 的统一目标 |
 | Servers 列表 | 名称和来源、在线状态、已有 sandbox 数、剩余租期、自动续期状态 | 新增、查看详情；较大列表支持搜索和来源筛选 |
 | Harness version | 位于服务器列表下方的版本选择器 | 选择新会话使用的 CLI 版本；无版本菜单时保留标题并说明等待服务器上报 |
 | 服务器详情 → Overview | 当前状态、并发、CPU/内存/存储、sandbox、节点信息 | 原地调整并发、暂停/恢复接单、移出池、Forget；合格服务器可设为全局目标，资源释放入口单独说明范围 |
