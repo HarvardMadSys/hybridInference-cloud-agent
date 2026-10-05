@@ -1,12 +1,11 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 import {
   createComputeServer,
   getComputeOperations,
   importComputeResource,
-  preflightComputeServer,
   saveComputeConnection,
   type ComputeCatalog,
   type ComputeConnection,
@@ -22,32 +21,41 @@ import {
   NEW_CREDENTIAL,
   type CredentialDraft,
 } from './ComputeCredentials';
-
 import {
-  buttonClass,
   ErrorNotice,
   Field,
   initialFields,
   inputClass,
-  OperationDetails,
   parseFields,
   primaryClass,
+  ProviderFieldError,
   ProviderFields,
 } from './compute-ui';
+
+function Section({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section
+      className="space-y-4 border-t border-gray-200 pt-5 dark:border-white/10"
+      aria-label={title}
+    >
+      <h3 className="text-sm font-semibold">{title}</h3>
+      {children}
+    </section>
+  );
+}
 
 export default function AddComputeServer({
   catalog,
   connections,
-  operations,
   onOperation,
   onConnectionSaved,
 }: {
   catalog: ComputeCatalog;
   connections: ComputeConnection[];
-  operations: ComputeOperation[];
   onOperation: (operation: ComputeOperation, submitted: boolean) => void;
   onConnectionSaved: (connection: ComputeConnection) => void;
 }) {
+  const form = useRef<HTMLFormElement>(null);
   const [newConnections, setNewConnections] = useState<ComputeConnection[]>([]);
   const availableConnections = [
     ...newConnections,
@@ -66,20 +74,37 @@ export default function AddComputeServer({
   const [values, setValues] = useState(() => initialFields(provider?.fields ?? []));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [preflightId, setPreflightId] = useState<string | null>(null);
+  const [accountError, setAccountError] = useState<string | null>(null);
+  const [sshError, setSshError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [observeOnly, setObserveOnly] = useState(false);
   // Retained after an ambiguous network result; repeated submits use the same intent.
-  const requestIds = useRef<Partial<Record<'validate' | 'deploy' | 'import', string>>>({});
+  const requestIds = useRef<Partial<Record<'deploy' | 'import', string>>>({});
   const fields = (provider?.fields ?? []).filter(
-    (field) => !field.modes || field.modes.includes(mode),
+    (field) =>
+      (!field.modes || field.modes.includes(mode)) && !(observeOnly && field.deployment_only),
   );
   const mainFields = fields.filter((field) => !field.advanced || field.required);
   const advancedFields = fields.filter((field) => field.advanced && !field.required);
-  const preflight = operations.find((operation) => operation.id === preflightId);
+  const resourceFields = mainFields.filter((field) => !field.section);
+  const templateFields = mainFields.filter((field) => field.section === 'template');
+  const accessFields = mainFields.filter((field) => field.section === 'access');
+  const cloud = provider?.id !== 'existing_ssh';
+  const needsSshKey = provider?.requires_ssh_connection;
+  const canObserve = mode === 'attach' && provider?.capabilities.import;
   const changed = () => {
     requestIds.current = {};
-    setPreflightId(null);
     setError(null);
+    setAccountError(null);
+    setSshError(null);
+    setFieldErrors({});
   };
+  useEffect(() => {
+    if (Object.keys(fieldErrors).length) {
+      form.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
+    }
+  }, [fieldErrors]);
 
   async function saveCredential(
     draft: CredentialDraft,
@@ -109,26 +134,33 @@ export default function AddComputeServer({
     return connection.id;
   }
 
-  async function submit(action: 'validate' | 'deploy' | 'import') {
+  async function submit() {
     if (busy || !provider) return;
     setBusy(true);
     setError(null);
+    setAccountError(null);
+    setSshError(null);
+    setFieldErrors({});
+    const action = observeOnly ? 'import' : 'deploy';
     const requestId = requestIds.current[action] ?? crypto.randomUUID();
     requestIds.current[action] = requestId;
+    let stage: 'fields' | 'account' | 'ssh' | 'server' = 'fields';
     let submitted = false;
     try {
-      if (action !== 'import' && !deploymentConfigured) {
+      if (!observeOnly && !deploymentConfigured) {
         throw new Error('Server setup is not configured. Contact your administrator.');
       }
       const configuration = parseFields(fields, values);
-      if (provider.requires_ssh_connection && action !== 'import' && !sshProvider) {
+      if (needsSshKey && !observeOnly && !sshProvider) {
         throw new Error('SSH access is not configured.');
       }
+      stage = 'account';
       const connectionId = await saveCredential(account, provider, setAccount);
-      const sshConnectionId =
-        provider.requires_ssh_connection && action !== 'import'
-          ? await saveCredential(ssh, sshProvider!, setSsh)
-          : undefined;
+      let sshConnectionId: string | undefined;
+      if (needsSshKey && !observeOnly) {
+        stage = 'ssh';
+        sshConnectionId = await saveCredential(ssh, sshProvider!, setSsh);
+      }
       const body: ServerRequest = {
         request_id: requestId,
         name,
@@ -138,16 +170,10 @@ export default function AddComputeServer({
         ...(sshConnectionId ? { ssh_connection_id: sshConnectionId } : {}),
         configuration,
       };
-      const send =
-        action === 'validate'
-          ? preflightComputeServer
-          : action === 'import'
-            ? importComputeResource
-            : createComputeServer;
+      stage = 'server';
       submitted = true;
-      const { operation } = await send(body);
-      if (action === 'validate') setPreflightId(operation.id);
-      onOperation(operation, action !== 'validate');
+      const { operation } = await (observeOnly ? importComputeResource : createComputeServer)(body);
+      onOperation(operation, true);
     } catch (error) {
       // A lost response does not justify creating a second resource. Ask by the
       // stable request ID before allowing a retry with the same payload.
@@ -155,14 +181,19 @@ export default function AddComputeServer({
         const recovered = submitted ? await getComputeOperations(requestId) : { operations: [] };
         const operation = recovered.operations.find((item) => item.request_id === requestId);
         if (operation) {
-          if (action === 'validate') setPreflightId(operation.id);
-          onOperation(operation, action !== 'validate');
+          onOperation(operation, true);
           return;
         }
       } catch {
         /* The same request ID remains available for reconciliation. */
       }
-      setError(getErrorMessage(error));
+      const message = getErrorMessage(error);
+      if (stage === 'fields' && error instanceof ProviderFieldError) {
+        setFieldErrors({ [error.field]: message });
+        if (advancedFields.some((field) => field.key === error.field)) setAdvancedOpen(true);
+      } else if (stage === 'account') setAccountError(message);
+      else if (stage === 'ssh') setSshError(message);
+      else setError(message);
     } finally {
       setBusy(false);
     }
@@ -170,15 +201,23 @@ export default function AddComputeServer({
 
   return (
     <form
-      className="space-y-4"
+      ref={form}
+      className="space-y-5"
       onChange={changed}
+      onInvalidCapture={(event) => {
+        const details = (event.target as HTMLElement).closest('details');
+        if (details) {
+          // Reveal native-validation failures before the browser focuses them.
+          details.open = true;
+          setAdvancedOpen(true);
+        }
+      }}
       onSubmit={(event) => {
         event.preventDefault();
-        const action = (event.nativeEvent as SubmitEvent).submitter?.getAttribute('value');
-        void submit(action === 'validate' || action === 'import' ? action : 'deploy');
+        void submit();
       }}
     >
-      <fieldset disabled={busy} className="space-y-4">
+      <fieldset disabled={busy} className="space-y-5">
         <fieldset>
           <legend className="mb-2 text-sm font-medium">Server type</legend>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -193,6 +232,8 @@ export default function AddComputeServer({
                   onChange={() => {
                     setProviderId(item.id);
                     setMode(item.modes.includes('provision') ? 'provision' : 'attach');
+                    setObserveOnly(false);
+                    setAdvancedOpen(false);
                     setValues(initialFields(item.fields));
                     setAccount(initialCredential(item, availableConnections));
                     setSsh(initialCredential(sshProvider, availableConnections));
@@ -202,7 +243,7 @@ export default function AddComputeServer({
                   <span className="block text-sm font-medium">{item.label}</span>
                   <span className="mt-1 block text-xs text-gray-500 dark:text-gray-400">
                     {item.id === 'existing_ssh'
-                      ? 'Connect with SSH'
+                      ? 'Connect a machine you already have'
                       : item.modes.includes('provision')
                         ? 'Create or connect a cloud server'
                         : 'Connect a cloud server'}
@@ -213,91 +254,161 @@ export default function AddComputeServer({
           </div>
         </fieldset>
         {provider && provider.modes.length > 1 && (
-          <Field label="Cloud resource">
-            <select
+          <fieldset className="flex flex-wrap gap-4" aria-label="Cloud resource">
+            {provider.modes.map((item) => (
+              <label key={item} className="flex items-center gap-2 text-sm">
+                <input
+                  type="radio"
+                  name="mode"
+                  value={item}
+                  checked={mode === item}
+                  onChange={() => {
+                    setMode(item);
+                    setObserveOnly(false);
+                    setAdvancedOpen(false);
+                  }}
+                />
+                {item === 'attach' ? 'Connect existing' : 'Create new'}
+              </label>
+            ))}
+          </fieldset>
+        )}
+        <div>
+          <Field label="Server name">
+            <input
               className={inputClass}
-              value={mode}
-              onChange={(event) => setMode(event.target.value as typeof mode)}
-            >
-              {provider?.modes.map((item) => (
-                <option key={item} value={item}>
-                  {item === 'attach' ? 'Connect existing' : 'Create new'}
-                </option>
-              ))}
-            </select>
+              required
+              value={name}
+              placeholder="e.g. Research server"
+              aria-describedby="server-name-help"
+              onChange={(event) => setName(event.target.value)}
+            />
           </Field>
-        )}
-        <Field label="Server name">
-          <input
-            className={inputClass}
-            required
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-          />
-        </Field>
-        <ProviderFields fields={mainFields} values={values} onChange={setValues} />
-        {advancedFields.length > 0 && (
-          <details key={`${providerId}-${mode}`}>
-            <summary className="cursor-pointer text-sm text-gray-600 dark:text-gray-300">
-              Advanced options
-            </summary>
-            <div className="mt-3 space-y-3">
-              <ProviderFields fields={advancedFields} values={values} onChange={setValues} />
-            </div>
-          </details>
-        )}
-        {provider && (
+          <span id="server-name-help" className="block text-xs text-gray-500 dark:text-gray-400">
+            Name shown in your server list.
+          </span>
+        </div>
+        {provider && cloud && (
           <CredentialPicker
+            key={provider.id}
             provider={provider}
             connections={availableConnections}
             value={account}
             onChange={setAccount}
             serverName={name}
+            error={accountError}
           />
         )}
-        {provider?.requires_ssh_connection && sshProvider && (
-          <CredentialPicker
-            provider={sshProvider}
-            connections={availableConnections}
-            value={ssh}
-            onChange={setSsh}
-            serverName={name}
-          />
+        {resourceFields.length > 0 && (
+          <Section title={cloud ? 'Cloud resource' : 'Server address'}>
+            <div
+              className={resourceFields.length === 2 ? 'grid gap-4 sm:grid-cols-2' : 'space-y-4'}
+            >
+              <ProviderFields
+                fields={resourceFields}
+                values={values}
+                onChange={setValues}
+                errors={fieldErrors}
+              />
+            </div>
+          </Section>
         )}
-        {!deploymentConfigured && (
+        {templateFields.length > 0 && (
+          <Section title="Machine template">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <ProviderFields
+                fields={templateFields}
+                values={values}
+                onChange={setValues}
+                errors={fieldErrors}
+              />
+            </div>
+          </Section>
+        )}
+        {!observeOnly && provider && (!cloud || needsSshKey || accessFields.length > 0) && (
+          <Section title="SSH access">
+            <div className={accessFields.length === 2 ? 'grid gap-4 sm:grid-cols-2' : 'space-y-4'}>
+              <ProviderFields
+                fields={accessFields}
+                values={values}
+                onChange={setValues}
+                errors={fieldErrors}
+              />
+            </div>
+            {needsSshKey && sshProvider ? (
+              <CredentialPicker
+                provider={sshProvider}
+                connections={availableConnections}
+                value={ssh}
+                onChange={setSsh}
+                serverName={name}
+                error={sshError}
+              />
+            ) : !cloud ? (
+              <CredentialPicker
+                provider={provider}
+                connections={availableConnections}
+                value={account}
+                onChange={setAccount}
+                serverName={name}
+                error={accountError}
+              />
+            ) : null}
+          </Section>
+        )}
+        {(advancedFields.length > 0 || canObserve) && (
+          <details
+            open={advancedOpen}
+            onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
+          >
+            <summary className="cursor-pointer text-sm text-gray-600 dark:text-gray-300">
+              Advanced options
+            </summary>
+            <div className="mt-3 space-y-4">
+              <ProviderFields
+                fields={advancedFields}
+                values={values}
+                onChange={setValues}
+                errors={fieldErrors}
+              />
+              {canObserve && (
+                <label className="flex items-start gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={observeOnly}
+                    onChange={(event) => setObserveOnly(event.target.checked)}
+                  />
+                  Only track this resource (skip server setup)
+                </label>
+              )}
+            </div>
+          </details>
+        )}
+        {!deploymentConfigured && !observeOnly && (
           <ErrorNotice error="Server setup is not configured. Contact your administrator." />
         )}
-        <p className="text-xs text-gray-500 dark:text-gray-400">
-          The agent will be installed on this server. You can use it for new sandboxes once it is
-          ready.
-        </p>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-4 border-t border-gray-200 pt-4 dark:border-white/10">
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            {observeOnly
+              ? 'Tracks status only. This resource cannot run sandboxes.'
+              : 'Access checks and setup run automatically.'}
+          </p>
           <button
             className={primaryClass}
             type="submit"
-            value="deploy"
-            disabled={!provider || !deploymentConfigured}
+            disabled={!provider || (!observeOnly && !deploymentConfigured)}
           >
-            {mode === 'provision' ? 'Create server' : 'Add server'}
+            {busy
+              ? 'Submitting…'
+              : observeOnly
+                ? 'Import resource'
+                : mode === 'provision'
+                  ? 'Create server'
+                  : 'Add server'}
           </button>
-          <button
-            className={buttonClass}
-            type="submit"
-            value="validate"
-            disabled={!provider || !deploymentConfigured}
-          >
-            Validate configuration
-          </button>
-          {mode === 'attach' && provider?.capabilities.import && (
-            <button className={buttonClass} type="submit" value="import" formNoValidate>
-              Import for observation only
-            </button>
-          )}
         </div>
       </fieldset>
-      {busy && <p role="status">Submitting request…</p>}
       <ErrorNotice error={error} />
-      {preflight && <OperationDetails operation={preflight} />}
     </form>
   );
 }

@@ -349,7 +349,6 @@ export default function ComputeResources({
           <AddComputeServer
             catalog={catalog}
             connections={connections}
-            operations={operations}
             onOperation={receiveOperation}
             onConnectionSaved={saveConnectionInList}
           />

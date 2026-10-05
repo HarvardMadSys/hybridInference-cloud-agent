@@ -1,6 +1,8 @@
+import { useEffect, useRef, useState } from 'react';
+
 import type { ComputeConnection, ComputeProvider } from '@/lib/api/compute';
 
-import { Field, initialFields, inputClass, ProviderFields } from './compute-ui';
+import { ErrorNotice, Field, initialFields, inputClass, ProviderFields } from './compute-ui';
 
 export const NEW_CREDENTIAL = '__new__';
 
@@ -93,26 +95,66 @@ export function CredentialPicker({
   value,
   onChange,
   serverName,
+  error = null,
 }: {
   provider: ComputeProvider;
   connections: ComputeConnection[];
   value: CredentialDraft;
   onChange: (value: CredentialDraft) => void;
   serverName: string;
+  error?: string | null;
 }) {
+  const [editingSelection, setEditingSelection] = useState<string | null>(null);
+  const fieldset = useRef<HTMLFieldSetElement>(null);
+  useEffect(() => {
+    if (error) fieldset.current?.focus();
+  }, [error]);
   const saved = connections.filter((item) => item.provider_id === provider.id);
   const label = credentialLabel(provider.id, provider.label);
   const selected = saved.find((item) => item.id === value.selection);
+  const choosing = !selected || editingSelection === value.selection;
+  const picker = useRef<HTMLSelectElement>(null);
+  const changeButton = useRef<HTMLButtonElement>(null);
+  const wasChoosing = useRef(choosing);
+  useEffect(() => {
+    if (wasChoosing.current !== choosing) {
+      if (choosing) picker.current?.focus();
+      else changeButton.current?.focus();
+    }
+    wasChoosing.current = choosing;
+  }, [choosing]);
   return (
-    <fieldset className="space-y-3 rounded-xl border border-gray-200 p-4 dark:border-white/10">
+    <fieldset
+      ref={fieldset}
+      tabIndex={-1}
+      className="space-y-3 rounded-xl border border-gray-200 p-4 dark:border-white/10"
+    >
       <legend className="px-1 text-sm font-medium">{label}</legend>
-      {saved.length > 0 && (
+      {selected && !choosing && (
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-sm">{selected.name}</span>
+          <button
+            type="button"
+            ref={changeButton}
+            aria-label={`Change ${label}`}
+            className="text-sm text-crimson hover:underline dark:text-crimson-light"
+            onClick={() => setEditingSelection(value.selection)}
+          >
+            Change
+          </button>
+        </div>
+      )}
+      {saved.length > 0 && choosing && (
         <select
+          ref={picker}
           aria-label={`Use ${label}`}
           className={inputClass}
           required
           value={value.selection}
-          onChange={(event) => onChange({ ...value, selection: event.target.value, secret: '' })}
+          onChange={(event) => {
+            onChange({ ...value, selection: event.target.value, secret: '' });
+            setEditingSelection(null);
+          }}
         >
           <option value="">Select…</option>
           {saved.map((item) => (
@@ -125,6 +167,15 @@ export function CredentialPicker({
           </option>
         </select>
       )}
+      {selected && choosing && (
+        <button
+          type="button"
+          className="text-sm text-crimson hover:underline dark:text-crimson-light"
+          onClick={() => setEditingSelection(null)}
+        >
+          Done
+        </button>
+      )}
       {value.selection === NEW_CREDENTIAL && (
         <CredentialFields
           provider={provider}
@@ -133,6 +184,7 @@ export function CredentialPicker({
           suggestedName={`${serverName || 'Server'} ${provider.id === 'existing_ssh' ? 'key' : 'account'}`}
         />
       )}
+      <ErrorNotice error={error} />
       {selected?.blocked_reasons.map((reason) => (
         <p key={reason.code} className="text-sm text-amber-700 dark:text-amber-300">
           {reason.message}

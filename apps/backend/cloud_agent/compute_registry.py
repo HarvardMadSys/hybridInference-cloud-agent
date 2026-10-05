@@ -160,16 +160,30 @@ def build_registry(
             secret_label="SSH private key",
             credential_kind="ssh_key",
             fields=(
-                {"key": "address", "label": "SSH address", "type": "text", "required": True},
+                {
+                    "key": "address",
+                    "label": "SSH address",
+                    "type": "text",
+                    "required": True,
+                    "section": "access",
+                },
                 {
                     "key": "port",
                     "label": "SSH port",
                     "type": "number",
+                    "advanced": True,
+                    "section": "access",
                     "default": 22,
                     "min": 1,
                     "max": 65535,
                 },
-                {"key": "username", "label": "SSH user", "type": "text", "required": True},
+                {
+                    "key": "username",
+                    "label": "SSH user",
+                    "type": "text",
+                    "required": True,
+                    "section": "access",
+                },
             ),
             connection_fields=(
                 {
@@ -192,7 +206,13 @@ def build_registry(
                 can_import=True,
                 ssh_credential_fields=("ssh_credential_ref", "ssh_known_hosts_ref"),
                 fields=(
-                    {"key": "project", "label": "Project", "type": "text", "required": True},
+                    {
+                        "key": "project",
+                        "label": "CloudLab project",
+                        "type": "text",
+                        "required": True,
+                        "description": "Project that will own this experiment.",
+                    },
                     {
                         "key": "external_id",
                         "label": "Experiment UUID",
@@ -202,21 +222,26 @@ def build_registry(
                     },
                     {
                         "key": "name",
-                        "label": "Experiment name",
+                        "label": "CloudLab experiment name",
+                        "description": "Generated automatically if left blank.",
                         "type": "text",
                         "advanced": True,
                         "modes": ["provision"],
                     },
                     {
                         "key": "profile_project",
-                        "label": "Profile project",
+                        "label": "Template project",
+                        "section": "template",
+                        "description": "Project that publishes the CloudLab profile.",
                         "type": "text",
                         "required": True,
                         "modes": ["provision"],
                     },
                     {
                         "key": "profile_name",
-                        "label": "Profile name",
+                        "label": "Template name",
+                        "section": "template",
+                        "description": "Name of the CloudLab profile to use.",
                         "type": "text",
                         "required": True,
                         "modes": ["provision"],
@@ -242,6 +267,7 @@ def build_registry(
                     {
                         "key": "ssh_username",
                         "label": "CloudLab SSH user",
+                        "section": "access",
                         "type": "text",
                         "required": True,
                         "deployment_only": True,

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useId, useRef, type ReactNode } from 'react';
 
 import type { BlockedReason, ComputeField, ComputeOperation } from '@/lib/api/compute';
 
@@ -119,6 +119,15 @@ export function initialFields(fields: ComputeField[]): Record<string, string> {
   );
 }
 
+export class ProviderFieldError extends Error {
+  constructor(
+    public field: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 export function parseFields(
   fields: ComputeField[],
   values: Record<string, string>,
@@ -132,7 +141,7 @@ export function parseFields(
           try {
             return [field.key, JSON.parse(raw)];
           } catch {
-            throw new Error(`${field.label} must contain valid JSON.`);
+            throw new ProviderFieldError(field.key, `${field.label} must contain valid JSON.`);
           }
         }
         return [field.key, field.type === 'number' ? Number(raw) : raw];
@@ -144,16 +153,27 @@ export function ProviderFields({
   fields,
   values,
   onChange,
+  errors = {},
 }: {
   fields: ComputeField[];
   values: Record<string, string>;
   onChange: (values: Record<string, string>) => void;
+  errors?: Record<string, string>;
 }) {
+  const id = useId();
   return (
     <>
       {fields.map((field) => {
         const common = {
           className: inputClass,
+          'aria-invalid': Boolean(errors[field.key]) || undefined,
+          'aria-describedby':
+            [
+              field.description && `${id}-${field.key}-help`,
+              errors[field.key] && `${id}-${field.key}-error`,
+            ]
+              .filter(Boolean)
+              .join(' ') || undefined,
           required: field.required,
           value: values[field.key] ?? '',
           onChange: (
@@ -161,33 +181,47 @@ export function ProviderFields({
           ) => onChange({ ...values, [field.key]: event.target.value }),
         };
         return (
-          <Field label={field.label} key={field.key}>
-            {field.type === 'select' ? (
-              <select {...common}>
-                <option value="">Select…</option>
-                {field.options?.map((option) => (
-                  <option value={option.value} key={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            ) : field.type === 'json' || field.type === 'textarea' ? (
-              <textarea {...common} rows={4} spellCheck={false} />
-            ) : (
-              <input
-                {...common}
-                type={field.type === 'number' ? 'number' : 'text'}
-                min={field.min}
-                max={field.max}
-                autoComplete="off"
-              />
-            )}
+          <div key={field.key}>
+            <Field label={field.label}>
+              {field.type === 'select' ? (
+                <select {...common}>
+                  <option value="">Select…</option>
+                  {field.options?.map((option) => (
+                    <option value={option.value} key={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              ) : field.type === 'json' || field.type === 'textarea' ? (
+                <textarea {...common} rows={4} spellCheck={false} />
+              ) : (
+                <input
+                  {...common}
+                  type={field.type === 'number' ? 'number' : 'text'}
+                  min={field.min}
+                  max={field.max}
+                  autoComplete="off"
+                />
+              )}
+            </Field>
             {field.description && (
-              <span className="block text-xs text-gray-500 dark:text-gray-400">
+              <span
+                id={`${id}-${field.key}-help`}
+                className="block text-xs text-gray-500 dark:text-gray-400"
+              >
                 {field.description}
               </span>
             )}
-          </Field>
+            {errors[field.key] && (
+              <span
+                id={`${id}-${field.key}-error`}
+                role="alert"
+                className="block text-xs text-red-700 dark:text-red-300"
+              >
+                {errors[field.key]}
+              </span>
+            )}
+          </div>
         );
       })}
     </>

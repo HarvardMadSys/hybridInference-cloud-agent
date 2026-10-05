@@ -17,6 +17,8 @@ export interface ComputeField {
   type: 'text' | 'number' | 'select' | 'json' | 'textarea';
   required?: boolean;
   advanced?: boolean;
+  section?: 'template' | 'access';
+  deployment_only?: boolean;
   default?: unknown;
   description?: string;
   options?: { value: string; label: string }[];
