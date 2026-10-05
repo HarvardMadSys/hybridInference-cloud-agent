@@ -62,9 +62,7 @@ export default function AddComputeServer({
   const [account, setAccount] = useState(() => initialCredential(provider, connections));
   const sshProvider = catalog.providers.find((item) => item.id === 'existing_ssh');
   const [ssh, setSsh] = useState(() => initialCredential(sshProvider, connections));
-  const [deploymentProfile, setDeploymentProfile] = useState(
-    catalog.deployment_profiles[0]?.id ?? '',
-  );
+  const deploymentConfigured = catalog.deployment_profiles.length > 0;
   const [values, setValues] = useState(() => initialFields(provider?.fields ?? []));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -74,6 +72,8 @@ export default function AddComputeServer({
   const fields = (provider?.fields ?? []).filter(
     (field) => !field.modes || field.modes.includes(mode),
   );
+  const mainFields = fields.filter((field) => !field.advanced || field.required);
+  const advancedFields = fields.filter((field) => field.advanced && !field.required);
   const preflight = operations.find((operation) => operation.id === preflightId);
   const changed = () => {
     requestIds.current = {};
@@ -117,6 +117,9 @@ export default function AddComputeServer({
     requestIds.current[action] = requestId;
     let submitted = false;
     try {
+      if (action !== 'import' && !deploymentConfigured) {
+        throw new Error('Server setup is not configured. Contact your administrator.');
+      }
       const configuration = parseFields(fields, values);
       if (provider.requires_ssh_connection && action !== 'import' && !sshProvider) {
         throw new Error('SSH access is not configured.');
@@ -134,7 +137,6 @@ export default function AddComputeServer({
         connection_id: connectionId,
         ...(sshConnectionId ? { ssh_connection_id: sshConnectionId } : {}),
         configuration,
-        deployment_profile: deploymentProfile,
       };
       const send =
         action === 'validate'
@@ -233,7 +235,17 @@ export default function AddComputeServer({
             onChange={(event) => setName(event.target.value)}
           />
         </Field>
-        <ProviderFields fields={fields} values={values} onChange={setValues} />
+        <ProviderFields fields={mainFields} values={values} onChange={setValues} />
+        {advancedFields.length > 0 && (
+          <details key={`${providerId}-${mode}`}>
+            <summary className="cursor-pointer text-sm text-gray-600 dark:text-gray-300">
+              Advanced options
+            </summary>
+            <div className="mt-3 space-y-3">
+              <ProviderFields fields={advancedFields} values={values} onChange={setValues} />
+            </div>
+          </details>
+        )}
         {provider && (
           <CredentialPicker
             provider={provider}
@@ -252,31 +264,9 @@ export default function AddComputeServer({
             serverName={name}
           />
         )}
-        <details open={!deploymentProfile}>
-          <summary className="cursor-pointer text-sm text-gray-600 dark:text-gray-300">
-            Deployment settings
-          </summary>
-          <div className="mt-3 space-y-3">
-            <Field label="Agent deployment">
-              <select
-                className={inputClass}
-                required
-                value={deploymentProfile}
-                onChange={(event) => setDeploymentProfile(event.target.value)}
-              >
-                <option value="">Select deployment…</option>
-                {catalog.deployment_profiles.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.label}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            {!catalog.deployment_profiles.length && (
-              <p>No deployment profiles are configured on the control plane.</p>
-            )}
-          </div>
-        </details>
+        {!deploymentConfigured && (
+          <ErrorNotice error="Server setup is not configured. Contact your administrator." />
+        )}
         <p className="text-xs text-gray-500 dark:text-gray-400">
           The agent will be installed on this server. You can use it for new sandboxes once it is
           ready.
@@ -286,7 +276,7 @@ export default function AddComputeServer({
             className={primaryClass}
             type="submit"
             value="deploy"
-            disabled={!provider || !deploymentProfile}
+            disabled={!provider || !deploymentConfigured}
           >
             {mode === 'provision' ? 'Create server' : 'Add server'}
           </button>
@@ -294,7 +284,7 @@ export default function AddComputeServer({
             className={buttonClass}
             type="submit"
             value="validate"
-            disabled={!provider || !deploymentProfile}
+            disabled={!provider || !deploymentConfigured}
           >
             Validate configuration
           </button>

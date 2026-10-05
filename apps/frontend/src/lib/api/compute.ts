@@ -16,6 +16,7 @@ export interface ComputeField {
   label: string;
   type: 'text' | 'number' | 'select' | 'json' | 'textarea';
   required?: boolean;
+  advanced?: boolean;
   default?: unknown;
   description?: string;
   options?: { value: string; label: string }[];
@@ -113,7 +114,7 @@ export interface ServerRequest {
   connection_id: string;
   ssh_connection_id?: string;
   configuration: Record<string, unknown>;
-  deployment_profile: string;
+  deployment_profile?: string;
 }
 
 export interface RetirementImpact {

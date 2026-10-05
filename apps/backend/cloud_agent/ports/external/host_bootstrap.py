@@ -10,7 +10,7 @@ from cloud_agent.ports.external.compute_provider import ComputeValue, NodeObserv
 
 
 class DeploymentProfile(ComputeValue):
-    """Operator configuration only; the browser selects ``id`` from a catalog.
+    """Operator configuration only; selected by the control plane or an explicit ID.
 
     source_bundle is a trusted local git-archive tar for deployment_sha. Its
     digest is checked before upload. Environment and files are trusted secret

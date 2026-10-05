@@ -179,10 +179,12 @@ function fillSshForm() {
 }
 
 describe('server acquisition UI', () => {
-  it('submits an SSH resource with credential references and a configured deployment', async () => {
+  it('submits SSH credential references and leaves deployment selection to the server', async () => {
     const next = operation();
     vi.mocked(api.createComputeServer).mockResolvedValue({ operation: next });
     const receive = renderAdd();
+    expect(screen.queryByLabelText('Agent deployment')).not.toBeInTheDocument();
+    expect(screen.queryByText('Deployment settings')).not.toBeInTheDocument();
     fillSshForm();
     fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
     await waitFor(() => expect(receive).toHaveBeenCalledWith(next, true));
@@ -192,8 +194,10 @@ describe('server acquisition UI', () => {
         mode: 'attach',
         connection_id: 'ssh-account',
         configuration: { address: 'host.example' },
-        deployment_profile: 'secure-kata',
       }),
+    );
+    expect(vi.mocked(api.createComputeServer).mock.calls[0][0]).not.toHaveProperty(
+      'deployment_profile',
     );
     expect(JSON.stringify(vi.mocked(api.createComputeServer).mock.calls)).not.toContain(
       'verified-public-key',
@@ -223,6 +227,63 @@ describe('server acquisition UI', () => {
           connection_id: 'cloudlab-account',
           ssh_connection_id: 'ssh-account',
           configuration: { project: 'FAST25-AE', profile: 'small-lan' },
+        }),
+      ),
+    );
+  });
+
+  it('keeps optional CloudLab values and defaults when advanced options are collapsed', async () => {
+    vi.mocked(api.createComputeServer).mockResolvedValue({ operation: operation() });
+    const withAdvancedFields: ComputeCatalog = {
+      ...catalog,
+      providers: catalog.providers.map((provider) => {
+        if (provider.id !== 'cloudlab') return provider;
+        return {
+          ...provider,
+          fields: [
+            ...provider.fields,
+            { key: 'group', label: 'Project group', type: 'text', advanced: true },
+            {
+              key: 'bindings',
+              label: 'Profile parameters',
+              type: 'json',
+              default: {},
+              advanced: true,
+            },
+          ],
+        };
+      }),
+    };
+    render(
+      <AddComputeServer
+        catalog={withAdvancedFields}
+        connections={connections}
+        operations={[]}
+        onOperation={vi.fn()}
+        onConnectionSaved={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
+    fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Cloud machine' } });
+    fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'FAST25-AE' } });
+    fireEvent.change(screen.getByLabelText('Profile'), { target: { value: 'small-lan' } });
+    const advanced = screen.getByText('Advanced options');
+    const details = advanced.closest('details')!;
+    expect(details).not.toHaveAttribute('open');
+    fireEvent.click(advanced);
+    fireEvent.change(screen.getByLabelText('Project group'), { target: { value: 'research' } });
+    fireEvent.click(advanced);
+    expect(details).not.toHaveAttribute('open');
+    fireEvent.click(screen.getByRole('button', { name: 'Create server' }));
+    await waitFor(() =>
+      expect(api.createComputeServer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          configuration: {
+            project: 'FAST25-AE',
+            profile: 'small-lan',
+            group: 'research',
+            bindings: {},
+          },
         }),
       ),
     );

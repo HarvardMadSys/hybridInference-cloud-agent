@@ -57,10 +57,17 @@
             "type": "string"
           },
           "deployment_profile": {
-            "maxLength": 120,
-            "minLength": 1,
-            "title": "Deployment Profile",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployment Profile"
           },
           "mode": {
             "enum": [
@@ -112,8 +119,7 @@
           "name",
           "provider_id",
           "mode",
-          "connection_id",
-          "deployment_profile"
+          "connection_id"
         ],
         "title": "AddServerRequest",
         "type": "object"

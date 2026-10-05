@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -378,6 +379,191 @@ async def test_request_identity_recovers_one_operation_and_refuses_changed_input
     assert conflict.status_code == 409
     assert conflict.json()["detail"]["code"] == "idempotency_conflict"
     assert len(repo.allocations) == 1
+
+
+@pytest.mark.asyncio
+async def test_automatic_server_setup_replay_keeps_original_profile(compute_api):
+    client, repo, app = compute_api
+    body = {
+        "name": "Automatic setup",
+        "request_id": "automatic-a",
+        "provider_id": "cloudlab",
+        "mode": "provision",
+        "connection_id": await connection(client),
+        "configuration": {"project": "research"},
+    }
+    response = await client.post("/admin/agent/servers", headers=ADMIN, json=body)
+    assert response.status_code == 202, response.text
+    operation = response.json()["operation"]
+    profile = repo.allocations[operation["allocation_id"]]["deployment_profile"]
+    assert profile["id"] == "kata"
+    assert repo.operations[operation["id"]]["parameters"]["deployment_profile"] is None
+
+    # The persisted allocation owns the chosen setup, including if configuration
+    # changes before the client recovers an ambiguous response.
+    app.state.compute_commands.configuration.profiles.clear()
+    replay = await client.post("/admin/agent/servers", headers=ADMIN, json=body)
+    assert replay.status_code == 202, replay.text
+    assert replay.json()["operation"]["id"] == operation["id"]
+    assert len(repo.allocations) == len(repo.operations) == 1
+    assert repo.allocations[operation["allocation_id"]]["deployment_profile"] == profile
+    conflict = await client.post(
+        "/admin/agent/servers", headers=ADMIN, json={**body, "name": "Changed"}
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "idempotency_conflict"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed_input", [False, True])
+async def test_concurrent_setup_selection_recovers_duplicate_before_capacity_refusal(
+    compute_api, monkeypatch, changed_input
+):
+    client, repo, app = compute_api
+    commands = app.state.compute_commands
+    configure = commands._configuration
+    allocate = repo.create_allocation_operation
+    both_requests_entered = asyncio.Event()
+    first_allocated = asyncio.Event()
+    entered = 0
+
+    async def interleaved_configuration(*args, **kwargs):
+        nonlocal entered
+        entered += 1
+        if entered == 1:
+            await both_requests_entered.wait()
+        else:
+            both_requests_entered.set()
+            await first_allocated.wait()
+        return await configure(*args, **kwargs)
+
+    async def signal_allocation(**kwargs):
+        operation = await allocate(**kwargs)
+        first_allocated.set()
+        return operation
+
+    monkeypatch.setattr(commands, "_configuration", interleaved_configuration)
+    monkeypatch.setattr(repo, "create_allocation_operation", signal_allocation)
+    body = {
+        "name": "Concurrent setup",
+        "request_id": "automatic-concurrent",
+        "provider_id": "cloudlab",
+        "mode": "provision",
+        "connection_id": await connection(client),
+    }
+    second_body = {**body, "name": "Changed"} if changed_input else body
+    first, second = await asyncio.wait_for(
+        asyncio.gather(
+            client.post("/admin/agent/servers", headers=ADMIN, json=body),
+            client.post("/admin/agent/servers", headers=ADMIN, json=second_body),
+        ),
+        timeout=5,
+    )
+    assert entered == 2
+    assert first.status_code == 202, first.text
+    if changed_input:
+        assert second.status_code == 409
+        assert second.json()["detail"]["code"] == "idempotency_conflict"
+    else:
+        assert second.status_code == 202, second.text
+        assert second.json()["operation"]["id"] == first.json()["operation"]["id"]
+    assert len(repo.allocations) == len(repo.operations) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["pending", "ready", "failed", "unknown"])
+async def test_automatic_server_setup_skips_live_profile(compute_api, state):
+    client, repo, app = compute_api
+    body, existing = await allocation(client)
+    repo.allocations[existing["allocation_id"]]["observed_state"] = state
+    profiles = app.state.compute_commands.configuration.profiles
+    profiles["second"] = profiles["kata"].model_copy(
+        update={"id": "second", "environment_ref": "deployment:second-host-environment"}
+    )
+    del body["deployment_profile"]
+    body["request_id"] = "automatic-second"
+    response = await client.post("/admin/agent/servers", headers=ADMIN, json=body)
+    assert response.status_code == 202, response.text
+    created = repo.allocations[response.json()["operation"]["allocation_id"]]
+    assert created["deployment_profile"] == profiles["second"].model_dump(mode="json")
+    assert len(repo.allocations) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["terminated", "absent"])
+async def test_automatic_server_setup_reuses_only_confirmed_released_profile(compute_api, state):
+    client, repo, _ = compute_api
+    body, existing = await allocation(client)
+    repo.allocations[existing["allocation_id"]]["observed_state"] = state
+    del body["deployment_profile"]
+    body["request_id"] = "automatic-replacement"
+    response = await client.post("/admin/agent/servers", headers=ADMIN, json=body)
+    assert response.status_code == 202, response.text
+    created = repo.allocations[response.json()["operation"]["allocation_id"]]
+    assert created["deployment_profile"]["id"] == "kata"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", [True, False])
+async def test_automatic_server_setup_refuses_without_available_capacity(compute_api, configured):
+    client, repo, app = compute_api
+    body, _ = await allocation(client)
+    if not configured:
+        app.state.compute_commands.configuration.profiles.clear()
+    del body["deployment_profile"]
+    body["request_id"] = "automatic-unavailable"
+    response = await client.post("/admin/agent/servers", headers=ADMIN, json=body)
+    assert response.status_code == (409 if configured else 422)
+    assert response.json()["detail"]["code"] == "profile_unavailable"
+    assert len(repo.allocations) == len(repo.operations) == 1
+
+
+@pytest.mark.asyncio
+async def test_automatic_preflight_uses_setup_without_reserving_it(compute_api):
+    client, repo, _ = compute_api
+    body = {
+        "name": "Preflight",
+        "request_id": "automatic-preflight",
+        "provider_id": "cloudlab",
+        "mode": "provision",
+        "connection_id": await connection(client),
+    }
+    response = await client.post("/admin/agent/server-preflights", headers=ADMIN, json=body)
+    assert response.status_code == 202, response.text
+    operation_id = response.json()["operation"]["id"]
+    assert repo.operations[operation_id]["parameters"]["profile"]["id"] == "kata"
+    assert not repo.allocations
+    body["request_id"] = "automatic-after-preflight"
+    response = await client.post("/admin/agent/servers", headers=ADMIN, json=body)
+    assert response.status_code == 202, response.text
+    created = repo.allocations[response.json()["operation"]["allocation_id"]]
+    assert created["deployment_profile"]["id"] == "kata"
+
+
+@pytest.mark.asyncio
+async def test_automatic_server_setup_preserves_repository_race_refusal(compute_api, monkeypatch):
+    client, repo, _ = compute_api
+
+    async def occupied_after_selection(**kwargs):
+        assert kwargs["allocation"]["deployment_profile"]["id"] == "kata"
+        raise ValueError("deployment_profile_in_use")
+
+    monkeypatch.setattr(repo, "create_allocation_operation", occupied_after_selection)
+    response = await client.post(
+        "/admin/agent/servers",
+        headers=ADMIN,
+        json={
+            "name": "Racing addition",
+            "request_id": "automatic-race",
+            "provider_id": "cloudlab",
+            "mode": "provision",
+            "connection_id": await connection(client),
+        },
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "deployment_profile_in_use"
+    assert not repo.allocations
+    assert not repo.operations
 
 
 @pytest.mark.asyncio

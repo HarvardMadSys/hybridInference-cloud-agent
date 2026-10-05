@@ -58,8 +58,9 @@ installation leaves the resource visible and does not automatically destroy it.
 
 ## Prepare a trusted deployment profile
 
-The browser only selects a profile ID. It cannot supply scripts, source paths,
-Docker flags or environment values. Start from:
+The Servers form uses the first available profile in configuration order. API
+clients may still specify a profile ID explicitly. Requests cannot supply
+scripts, source paths, Docker flags or environment values. Start from:
 
 - [`compute.example.json`](../deploy/control-plane/compute.example.json)
 - [`compute-host.env.example`](../deploy/control-plane/compute-host.env.example)
@@ -102,7 +103,12 @@ The first version reserves a profile for one present allocation because its
 broker reverse-forward endpoint is fixed. For an overlapping old/new deployment,
 prepare a second profile with its own reverse port, source deployment directory
 and dedicated tunnel authorization. Simply changing the profile name while
-reusing its broker endpoint does not create a separate endpoint.
+reusing its broker endpoint does not create a separate endpoint. Automatic
+selection skips profiles held by live allocations and refuses when none remain;
+only confirmed `terminated` or `absent` allocations free their profiles. An
+identical request retry reuses its original operation and selected profile. The
+allocation transaction still checks occupancy, so concurrent additions cannot
+share a profile; retry a refused addition after refreshing availability.
 
 ### Three tunnels and the broker route
 

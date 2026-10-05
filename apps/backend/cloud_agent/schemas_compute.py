@@ -70,7 +70,7 @@ class AddServerRequest(ComputeRequest):
     connection_id: str = Field(min_length=1, max_length=128)
     ssh_connection_id: str | None = Field(default=None, min_length=1, max_length=128)
     configuration: dict[str, Any] = Field(default_factory=dict)
-    deployment_profile: str = Field(min_length=1, max_length=120)
+    deployment_profile: str | None = Field(default=None, min_length=1, max_length=120)
     policy: RenewalPolicy = Field(default_factory=RenewalPolicy)
 
 

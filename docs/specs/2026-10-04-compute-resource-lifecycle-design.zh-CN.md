@@ -182,7 +182,7 @@ POST  /admin/agent/compute-operations/{id}/cancel   取消尚未提交释放的�
 | Activity 窗口 | 进行中的操作及历史；首页仅显示活跃数量 | 查看进度，按后端允许的动作重试、核对结果或取消 |
 | 服务器详情 → Access settings | 该服务器使用的云账号与 SSH 密钥 | 验证、更新凭证；修改共享凭证时显示受影响的服务器数量 |
 
-新增窗口用类型卡片区分 **Existing SSH server** 和已支持的云 Provider。SSH 直接填写连接目标；支持申请资源的云默认进入 Create new，也可以选择 Connect existing。账号和 SSH 密钥在 Add server 的同一表单内选择或填写，主页面不再提供独立 Connections 入口。提交时先保存新凭证，再以返回的 ID 提交服务器请求；部分失败会保留已保存的凭证并清除其秘密输入，重试不会重复保存。凭证仍由独立接口维护，不会进入服务器请求。部署模板放在 Deployment settings。已有服务器从 Access settings 修改已绑定的账号／密钥，密钥不回显；编辑草稿绑定打开时的 revision，后台刷新不能绕过并发修改检查。服务器查询只增加凭证记录 ID 与节点的 SSH 地址、端口、用户名，不返回原始 Provider 配置或秘密引用。操作详情区分 Back 与 Close：Back 回来源，Close 关闭窗口。Host 操作结果在当前详情内反馈；云资源查询失败时仍可通过已有 Host 清单进行管理。
+新增窗口用类型卡片区分 **Existing SSH server** 和已支持的云 Provider。SSH 直接填写连接目标；支持申请资源的云默认进入 Create new，也可以选择 Connect existing。账号和 SSH 密钥在 Add server 的同一表单内选择或填写，主页面不再提供独立 Connections 入口。提交时先保存新凭证，再以返回的 ID 提交服务器请求；部分失败会保留已保存的凭证并清除其秘密输入，重试不会重复保存。凭证仍由独立接口维护，不会进入服务器请求。前端不显示 Agent deployment 或 Deployment settings；新增请求省略部署模板，由控制面从运维配置中自动选择尚未占用的模板，原有显式模板 ID API 仍兼容。没有可用模板时明确拒绝，不能复用其他服务器的身份或放宽隔离。CloudLab 主表单保留项目、模板所属项目／名称、初始时长、SSH 用户及凭证；实验名、模板参数和项目组默认收在 Advanced options 中，可选值和默认值仍照常提交。已有服务器从 Access settings 修改已绑定的账号／密钥，密钥不回显；编辑草稿绑定打开时的 revision，后台刷新不能绕过并发修改检查。服务器查询只增加凭证记录 ID 与节点的 SSH 地址、端口、用户名，不返回原始 Provider 配置或秘密引用。操作详情区分 Back 与 Close：Back 回来源，Close 关闭窗口。Host 操作结果在当前详情内反馈；云资源查询失败时仍可通过已有 Host 清单进行管理。
 
 申请尚未完成时，Activity 保留操作及其进度，已取得的资源显示在列表中。资源可用但 Host 尚未注册时显示 Awaiting agent；列表的 Online 表示在线观测，能否用于全局位置仍按接单条件判断。HTTP 202 不代表服务器已经可用。下线影响、已有 sandbox 阻塞及整组释放范围在移除入口展示。
 

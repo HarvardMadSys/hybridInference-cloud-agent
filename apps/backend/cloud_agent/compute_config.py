@@ -1,7 +1,8 @@
 """Trusted deployment profiles and file-backed deployment secrets.
 
-Administrators select a configured profile; browser requests cannot supply
-shell fragments, environment files, bundle paths, or deployment credentials.
+The control plane selects an available configured profile by default; API
+clients may name one explicitly. Browser requests cannot supply shell fragments,
+environment files, bundle paths, or deployment credentials.
 """
 
 from __future__ import annotations

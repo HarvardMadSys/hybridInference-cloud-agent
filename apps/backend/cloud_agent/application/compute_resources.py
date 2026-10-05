@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from cloud_agent.compute_registry import ComputeProviderRegistration, ComputeProviderRegistry
     from cloud_agent.compute_secrets import ComputeSecretStore
     from cloud_agent.ports.compute_resources import ComputeResourceRepository
+    from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
     from cloud_agent.schemas_compute import (
         AddComputeConnection,
         AddServerRequest,
@@ -168,11 +169,15 @@ class ComputeCommands:
             request.configuration,
             deploy=True,
         )
-        profile = self.configuration.profiles.get(request.deployment_profile)
-        if profile is None:
-            raise ComputeRefusal(
-                "profile_unavailable", "Select a configured deployment profile.", status=422
-            )
+        try:
+            profile = await self._deployment_profile(request.deployment_profile)
+        except ComputeRefusal:
+            # A duplicate request may have claimed the last free profile after
+            # our first lookup. Recover that operation before refusing capacity.
+            existing = await self._existing(request.request_id, kind, parameters)
+            if existing is not None:
+                return existing
+            raise
         if request.policy.enabled and (
             not entry.provider.capabilities().can_extend or request.mode != "provision"
         ):
@@ -438,6 +443,39 @@ class ComputeCommands:
                 "allocation_not_found", "The allocation does not exist.", status=404
             )
         return row
+
+    async def _deployment_profile(self, requested: str | None) -> DeploymentProfile:
+        """Choose configured setup capacity without sharing a live broker endpoint."""
+        profiles = self.configuration.profiles
+        if requested is not None:
+            profile = profiles.get(requested)
+            if profile is not None:
+                return profile
+            raise ComputeRefusal(
+                "profile_unavailable", "The requested server setup is not configured.", status=422
+            )
+        if not profiles:
+            raise ComputeRefusal(
+                "profile_unavailable",
+                "Server setup is not configured on the control plane.",
+                status=422,
+            )
+        allocations = await self.repository.list_allocations()
+        occupied = {
+            (row.get("deployment_profile") or {}).get("id")
+            for row in allocations
+            if row.get("observed_state") not in {"terminated", "absent"}
+        }
+        for profile in profiles.values():
+            if profile.id not in occupied:
+                # The repository rechecks occupancy under its allocation lock.
+                # Concurrent requests may safely refuse rather than share a route.
+                return profile
+        raise ComputeRefusal(
+            "profile_unavailable",
+            "All configured server setups are in use. Configure another setup before adding a server.",
+            status=409,
+        )
 
     async def _configuration(
         self,
