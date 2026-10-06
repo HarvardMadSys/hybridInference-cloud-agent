@@ -171,7 +171,6 @@ def build_registry(
                     "key": "port",
                     "label": "SSH port",
                     "type": "number",
-                    "advanced": True,
                     "section": "access",
                     "default": 22,
                     "min": 1,
