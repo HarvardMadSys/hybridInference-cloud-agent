@@ -109,7 +109,7 @@ with open(lock_path, 'a') as lock:
             raise SystemExit(0)
     if params['install']:
         run('prerequisites_update_failed', ['apt-get', 'update'])
-        run('prerequisites_install_failed', ['apt-get', 'install', '-y', 'docker.io', 'docker-compose-v2', 'curl', 'ca-certificates', 'xz-utils', 'nftables'])
+        run('prerequisites_install_failed', ['apt-get', 'install', '-y', 'docker.io', 'docker-compose-v2', 'docker-buildx', 'curl', 'ca-certificates', 'xz-utils', 'zstd', 'nftables'])
         run('docker_start_failed', ['systemctl', 'enable', '--now', 'docker'])
         # The bundled script validates its pinned download checksum and KVM.
         run('kata_install_failed', ['bash', 'deploy/host/setup_kata_runtime.sh'])

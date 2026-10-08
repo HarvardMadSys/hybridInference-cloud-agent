@@ -234,12 +234,20 @@ def test_remote_scripts_compile_and_deployment_refuses_existing_unowned_root(tmp
     assert original.read_text() == "existing secret"
 
 
-def test_remote_deployment_retry_identity_and_enrollment_cleanup(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("install", [False, True])
+def test_remote_deployment_retry_identity_and_enrollment_cleanup(
+    tmp_path, monkeypatch, capsys, install
+):
     import subprocess
     from types import SimpleNamespace
 
     root = tmp_path / "managed"
-    params = {"root": str(root), "sha": "a" * 40, "install": False, "identity": {"host": "managed"}}
+    params = {
+        "root": str(root),
+        "sha": "a" * 40,
+        "install": install,
+        "identity": {"host": "managed"},
+    }
     payload = io.BytesIO()
     with tarfile.open(fileobj=payload, mode="w:gz") as archive:
         data = b"A='keep'\nAGENT_ENROLL_TOKEN='spent-token'\nB='keep-too'\n"
@@ -261,6 +269,13 @@ def test_remote_deployment_retry_identity_and_enrollment_cleanup(tmp_path, monke
     assert (root / ".env").read_text() == "A='keep'\nB='keep-too'\n"
     assert (root / ".env").stat().st_mode & 0o777 == 0o600
     assert calls.count(["bash", "deploy/host/sandbox_host.sh", "up"]) == 2
+    installations = [args for args in calls if args[:2] == ["apt-get", "install"]]
+    assert len(installations) == (2 if install else 0)
+    for args in installations:
+        # The host recipe uses Buildx's --provenance flag and extracts Kata's
+        # zstd archive; Ubuntu's Docker and Compose packages do not supply them.
+        assert {"docker-buildx", "zstd"}.issubset(args)
+        assert calls.index(args) < calls.index(["bash", "deploy/host/sandbox_host.sh", "up"])
     assert all(json.loads(line)["ready"] for line in capsys.readouterr().out.splitlines())
 
 
