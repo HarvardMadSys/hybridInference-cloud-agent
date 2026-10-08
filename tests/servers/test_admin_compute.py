@@ -423,6 +423,7 @@ async def test_concurrent_setup_selection_recovers_duplicate_before_capacity_ref
     commands = app.state.compute_commands
     configure = commands._configuration
     allocate = repo.create_allocation_operation
+    first_request_entered = asyncio.Event()
     both_requests_entered = asyncio.Event()
     first_allocated = asyncio.Event()
     entered = 0
@@ -431,6 +432,7 @@ async def test_concurrent_setup_selection_recovers_duplicate_before_capacity_ref
         nonlocal entered
         entered += 1
         if entered == 1:
+            first_request_entered.set()
             await both_requests_entered.wait()
         else:
             both_requests_entered.set()
@@ -452,10 +454,17 @@ async def test_concurrent_setup_selection_recovers_duplicate_before_capacity_ref
         "connection_id": await connection(client),
     }
     second_body = {**body, "name": "Changed"} if changed_input else body
+
+    async def submit_second_request():
+        # HTTP dependencies can reorder requests before they reach the command.
+        # Start the duplicate only once the original is blocked in configuration.
+        await first_request_entered.wait()
+        return await client.post("/admin/agent/servers", headers=ADMIN, json=second_body)
+
     first, second = await asyncio.wait_for(
         asyncio.gather(
             client.post("/admin/agent/servers", headers=ADMIN, json=body),
-            client.post("/admin/agent/servers", headers=ADMIN, json=second_body),
+            submit_second_request(),
         ),
         timeout=5,
     )
