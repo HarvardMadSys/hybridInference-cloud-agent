@@ -112,7 +112,9 @@ class CloudLabProvider(ComputeProvider):
 
     async def validate_connection(self, credential_ref: str) -> None:
         """Validate token access without creating or changing any experiment."""
-        data = self._json(await self._request("GET", "/experiments", credential_ref))
+        # The deployed Portal API uses a trailing slash for the collection.
+        # Call it directly: redirects must never carry account credentials.
+        data = self._json(await self._request("GET", "/experiments/", credential_ref))
         if not isinstance(data.get("experiments"), list):
             raise ProviderError(
                 "invalid_response", "CloudLab API endpoint did not return an experiment list"
@@ -213,7 +215,7 @@ class CloudLabProvider(ComputeProvider):
             payload["group"] = config.group
         try:
             response = await self._request(
-                "POST", "/experiments", config.credential_ref, payload=payload
+                "POST", "/experiments/", config.credential_ref, payload=payload
             )
             data = self._json(response)
             external_id = str(UUID(str(data["id"])))

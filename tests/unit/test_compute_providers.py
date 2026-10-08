@@ -199,11 +199,30 @@ async def test_cloudlab_observe_import_needs_no_ssh_or_manifest():
 
 
 @pytest.mark.asyncio
+async def test_cloudlab_validation_uses_canonical_collection_without_redirect():
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        if request.url.path == "/v1/experiments":
+            return httpx.Response(307, headers={"Location": "/v1/experiments/"})
+        assert request.url.path == "/v1/experiments/"
+        return httpx.Response(200, json={"experiments": []})
+
+    await provider(respond).validate_connection("account-1")
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert requests[0].headers["X-Api-Token"] == TOKEN
+
+
+@pytest.mark.asyncio
 async def test_cloudlab_provision_retains_returned_uuid_and_matches_create_contract():
     requests = []
 
     def respond(request):
         requests.append(request)
+        if request.url.path == "/v1/experiments":
+            return httpx.Response(307, headers={"Location": "/v1/experiments/"})
         return httpx.Response(201, json={"id": EXPERIMENT})
 
     adapter = provider(respond)
@@ -223,7 +242,7 @@ async def test_cloudlab_provision_retains_returned_uuid_and_matches_create_contr
     assert payload["profile_project"] == "PortalProfiles"
     assert payload["bindings"] == {"hardware": "c220g2"}
     assert "credential_ref" not in payload and "ssh_credential_ref" not in payload
-    assert requests[0].url.path == "/v1/experiments"
+    assert requests[0].url.path == "/v1/experiments/"
 
 
 @pytest.mark.asyncio
@@ -352,7 +371,7 @@ async def test_404_with_valid_other_account_list_never_proves_deletion():
     adapter = provider(
         lambda request: (
             httpx.Response(200, json={"experiments": []})
-            if request.url.path.endswith("/experiments")
+            if request.url.path.endswith("/experiments/")
             else httpx.Response(404, json={"error": "missing"})
         )
     )
