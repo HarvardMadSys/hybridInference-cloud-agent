@@ -11,11 +11,12 @@
 // own `sync_note` is what the card repeats instead of pretending to have
 // measured the lag.
 //
-// One button, whose label follows the state, is the whole surface:
+// It reads as one line -- "Measurement on · what · where · since · samples" --
+// and one button, whose label follows the state, is the whole surface:
 //
-//   * off  -- "Enable measurement" opens the inline form;
-//   * on   -- "Disable measurement" stops the run immediately, with no
-//             confirmation, because the command is reversible in one click;
+//   * off  -- "Turn on" opens the inline form;
+//   * on   -- "Turn off" stops the run immediately, with no confirmation,
+//             because the command is reversible in one click;
 //   * a state this deployment cannot be commanded in (unavailable, unmanaged)
 //             offers no button at all and explains why instead.
 //
@@ -29,7 +30,15 @@
 // stale, because a card that empties itself on a network blip is a card that
 // reports an outage nobody had.
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from 'react';
 
 import { getAgentRunnerHosts, type AgentRunnerHost } from '@/lib/api/admin';
 import {
@@ -44,6 +53,7 @@ import {
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { accessDenied, BUTTON, CARD, dateTime, ErrorNotice, INPUT, number } from '../runs/shared';
+import { shortTime } from './present';
 
 /** A live experiment changes within seconds; an idle deployment does not. */
 const LIVE_POLL_MS = 5000;
@@ -81,41 +91,50 @@ const SAMPLE_NOTE =
 /**
  * The one-line status, which is a statement about configuration.
  *
- * It is not a consensus and must not be read as one: collection is "Enabled"
- * the moment the deployment is configured for it, whether or not every process
- * has caught up. The wording says exactly that -- "Enabled"/"Disabled" rather
- * than "Measuring"/"Off", which would claim samples are arriving.
+ * It is not a consensus and must not be read as one: collection is "on" the
+ * moment the deployment is configured for it, whether or not every process
+ * has caught up -- which is why it says "Measurement on" rather than
+ * "Measuring", which would claim samples are arriving.
  */
 function statusLine(status: string): string {
-  if (status === 'off') return 'Disabled';
-  if (status === 'on') return 'Enabled';
-  if (status === 'unmanaged') return 'Managed by deployment configuration';
-  return 'Unavailable';
+  if (status === 'off') return 'Measurement off';
+  if (status === 'on') return 'Measurement on';
+  if (status === 'unmanaged') return 'Measurement set by deployment configuration';
+  return 'Measurement unavailable';
 }
 
-/** Why the deployment is in that state, in words that do not overclaim. */
-function statusDetail(control: ProfilingControlSnapshot): string {
-  if (control.status === 'on') {
-    return 'Server-side timings are being collected for the selected operations.';
-  }
-  if (control.status === 'off') {
+/**
+ * Why a deployment offers no switch, for the two states that have none.
+ *
+ * Neither is "off": off is a statement about collection, and these are
+ * statements about whether this page may command the deployment at all.
+ */
+function noSwitchReason(status: string): string | null {
+  if (status === 'unmanaged') {
     return (
-      'No new operations are selected. Disabling stops selecting; a measurement that already ' +
-      'started finishes and is stored. Records server-side timings only, while sandboxes, ' +
-      'terminals and files are used.'
+      "This deployment's own configuration decides what is measured, so there is no switch " +
+      'here. It may still be collecting.'
     );
   }
-  if (control.status === 'unmanaged') {
-    return (
-      "Measurement collection is set by this deployment's own configuration, not by Admin " +
-      'commands, so there is no switch here. That is not the same as off: the deployment may ' +
-      'be collecting under its own configuration.'
-    );
+  if (status === 'unavailable') {
+    return 'This deployment is not set up for Admin control, so there is nothing to switch here.';
   }
-  return (
-    'This deployment is not configured for Admin control: there is no control state here to ' +
-    'start or stop. That is not the same as off.'
-  );
+  return null;
+}
+
+/** A stop reason in words, or nothing for the ordinary one. */
+function stopWords(reason: string | null): string | null {
+  if (!reason || reason === 'stopped' || reason === 'stopped_by_admin') return null;
+  if (reason === 'expired') return 'expired';
+  return reason;
+}
+
+/** The server's sync note as a sentence. */
+function sentence(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return '';
+  const capital = `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
+  return /[.!?]$/.test(capital) ? capital : `${capital}.`;
 }
 
 function operationWords(operations: string[]): string {
@@ -184,6 +203,8 @@ export function MeasurementControlPanel({
   /** Which write is in flight, so the button can show its pending verb. */
   const [write, setWrite] = useState<'enable' | 'disable' | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  /** A write succeeded here, so the sync lag is worth saying out loud. */
+  const [changed, setChanged] = useState(false);
 
   const [formOpen, setFormOpen] = useState(false);
   const [groups, setGroups] = useState<MeasurementOperationGroup[]>(ALL_GROUP_NAMES);
@@ -249,6 +270,7 @@ export function MeasurementControlPanel({
     setWrite(null);
     setFormOpen(false);
     setActionError(null);
+    setChanged(false);
     setHostsError(null);
     onDenied();
   }, [onDenied]);
@@ -443,6 +465,7 @@ export function MeasurementControlPanel({
       readSeq.current += 1;
       appliedSeq.current += 1;
       applyControl(response.control);
+      setChanged(true);
       enableAttempt.current = null;
       setFormOpen(false);
       setHostsError(null);
@@ -478,6 +501,7 @@ export function MeasurementControlPanel({
       readSeq.current += 1;
       appliedSeq.current += 1;
       applyControl(response.control);
+      setChanged(true);
       disableAttempt.current = null;
     } catch (e) {
       if (!mounted.current || controller.signal.aborted) return;
@@ -493,150 +517,177 @@ export function MeasurementControlPanel({
 
   const buttonLabel = busy
     ? write === 'disable'
-      ? 'Disabling…'
-      : 'Enabling…'
+      ? 'Turning off…'
+      : 'Turning on…'
     : collecting
-      ? 'Disable measurement'
-      : 'Enable measurement';
+      ? 'Turn off'
+      : 'Turn on';
+  const reason = control === null ? null : noSwitchReason(control.status);
+  const dot = collecting
+    ? 'bg-emerald-500'
+    : control?.status === 'off'
+      ? 'bg-gray-300 dark:bg-gray-600'
+      : 'bg-amber-500';
 
   return (
-    <section className={`${CARD} mt-6 p-5`} aria-labelledby="measurement-control-heading">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h3
-            id="measurement-control-heading"
-            className="text-sm font-semibold text-gray-900 dark:text-gray-50"
-          >
-            Measurement collection
-          </h3>
-          {control === null ? (
-            <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              {loading ? 'Reading the control state…' : 'No control state has been read.'}
-            </p>
-          ) : (
-            <>
-              <p className="mt-1 text-base font-medium text-gray-900 dark:text-gray-50">
-                {statusLine(control.status)}
-              </p>
-              <p className="mt-1 max-w-3xl text-sm text-gray-500 dark:text-gray-400">
-                {statusDetail(control)}
-              </p>
-            </>
-          )}
-        </div>
-        {control !== null && commandable && !formOpen && (
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              className={BUTTON}
-              type="button"
-              disabled={busy}
-              onClick={collecting ? submitDisable : openForm}
+    <section className={`${CARD} mt-6 px-5 py-4`} aria-labelledby="measurement-control-heading">
+      <h3 id="measurement-control-heading" className="sr-only">
+        Measurement collection
+      </h3>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        {control === null ? (
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            {loading
+              ? 'Reading whether measurement is on…'
+              : 'Could not read whether measurement is on.'}
+          </p>
+        ) : (
+          <p className="min-w-0 text-sm text-gray-500 dark:text-gray-400">
+            <span
+              aria-hidden
+              className={`mr-2 inline-block h-2 w-2 rounded-full align-middle ${dot}`}
+            />
+            <span
+              className="font-medium text-gray-900 dark:text-gray-100"
+              title={control.sync_note ? sentence(control.sync_note) : undefined}
             >
-              {buttonLabel}
-            </button>
-          </div>
+              {statusLine(control.status)}
+            </span>
+            {activeRun !== null && (
+              <RunFacts control={control} run={activeRun} secondsLeft={secondsLeft} />
+            )}
+            {stoppedRun !== null && <StoppedRun run={stoppedRun} />}
+          </p>
+        )}
+        {control !== null && commandable && !formOpen && (
+          <button
+            className={BUTTON}
+            type="button"
+            disabled={busy}
+            onClick={collecting ? submitDisable : openForm}
+          >
+            {buttonLabel}
+          </button>
         )}
       </div>
 
       {readError !== null && <ErrorNotice>{readError}</ErrorNotice>}
 
       {refreshFailed && (
-        <p className="mt-3 text-xs text-amber-700 dark:text-amber-400">
-          The last refresh failed; showing the last successful read.
+        <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">
+          Couldn’t refresh; showing the last successful read.
         </p>
       )}
 
-      {control !== null && activeRun !== null && (
-        <RunFacts control={control} run={activeRun} secondsLeft={secondsLeft} />
-      )}
+      {reason !== null && <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">{reason}</p>}
 
-      {control !== null && stoppedRun !== null && (
-        <p className="mt-3 text-sm text-gray-700 dark:text-gray-300">
-          {`Last experiment: ${stoppedRun.run_id}`}
-          {stoppedRun.stop_reason
-            ? ` · Stop reason: ${stoppedRun.stop_reason}`
-            : ' · The control plane recorded no stop reason for it.'}
+      {activeRun !== null && control?.stored_samples === 0 && (
+        <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+          No samples yet. Use a sandbox, open a terminal or browse files, and they will appear
+          below.
         </p>
       )}
 
-      {control !== null && control.sync_note !== '' && (
-        <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">{control.sync_note}</p>
+      {changed && control !== null && control.sync_note !== '' && (
+        <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+          {sentence(control.sync_note)}
+        </p>
       )}
 
       {actionError !== null && <ErrorNotice>{actionError}</ErrorNotice>}
 
       {formOpen && control !== null && (
         <form
-          className="mt-4 border-t border-gray-100 pt-4 dark:border-white/5"
+          className="mt-4 flex flex-wrap items-end gap-x-8 gap-y-4 border-t border-gray-100 pt-4 dark:border-white/5"
           onSubmit={submitEnable}
         >
-          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
-            What to measure
-          </p>
-          <div className="mt-2 flex flex-wrap gap-x-6 gap-y-2">
-            {OPERATION_GROUPS.map(({ group, label }) => (
-              <label
-                key={group}
-                className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300"
-              >
-                <input
-                  type="checkbox"
-                  className="h-4 w-4 rounded border-gray-300 text-crimson focus:ring-crimson dark:border-white/20 dark:bg-gray-900"
-                  checked={groups.includes(group)}
-                  disabled={busy}
-                  onChange={() => toggleGroup(group)}
-                />
-                {label}
-              </label>
-            ))}
-          </div>
-
-          <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <div>
-              <label
-                className="block text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400"
-                htmlFor="measurement-target-host"
-              >
-                Host
-              </label>
-              <select
-                id="measurement-target-host"
-                className={`${INPUT} mt-1`}
-                value={host}
-                disabled={busy}
-                onChange={(event) => setHost(event.target.value)}
-              >
-                <option value="">Choose a host…</option>
-                <option value={ALL_HOSTS}>All hosts</option>
-                {(hosts ?? []).map((option) => (
-                  <option key={option.host} value={option.host}>
-                    {option.host}
-                  </option>
-                ))}
-              </select>
-              {hostsError !== null && (
-                <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">
-                  {`${hostsError} The host list could not be read; All hosts is still offered and no host name was invented.`}
-                </p>
-              )}
+          <fieldset>
+            <legend className="text-xs font-medium text-gray-500 dark:text-gray-400">
+              Measure
+            </legend>
+            <div className="mt-2.5 flex flex-wrap gap-x-5 gap-y-2">
+              {OPERATION_GROUPS.map(({ group, label }) => (
+                <label
+                  key={group}
+                  className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300"
+                >
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded border-gray-300 text-crimson focus:ring-crimson dark:border-white/20 dark:bg-gray-900"
+                    checked={groups.includes(group)}
+                    disabled={busy}
+                    onChange={() => toggleGroup(group)}
+                  />
+                  {label}
+                </label>
+              ))}
             </div>
+          </fieldset>
+
+          <div className="w-60">
+            <label
+              className="block text-xs font-medium text-gray-500 dark:text-gray-400"
+              htmlFor="measurement-target-host"
+            >
+              Host
+            </label>
+            <select
+              id="measurement-target-host"
+              className={`${INPUT} mt-1 py-1.5`}
+              value={host}
+              disabled={busy}
+              onChange={(event) => setHost(event.target.value)}
+            >
+              <option value="">Choose a host…</option>
+              <option value={ALL_HOSTS}>All hosts</option>
+              {(hosts ?? []).map((option) => (
+                <option key={option.host} value={option.host}>
+                  {option.host}
+                </option>
+              ))}
+            </select>
           </div>
 
-          <div className="mt-4 flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-2">
             <button className={BUTTON} type="submit" disabled={busy}>
-              {busy ? 'Enabling…' : 'Enable measurement'}
+              {busy ? 'Turning on…' : 'Turn on'}
             </button>
             <button className={BUTTON} type="button" disabled={busy} onClick={closeForm}>
               Cancel
             </button>
           </div>
+
+          {hostsError !== null && (
+            <p className="basis-full text-xs text-amber-700 dark:text-amber-400">
+              {`Couldn’t read the host list (${hostsError}). All hosts is still offered.`}
+            </p>
+          )}
         </form>
       )}
     </section>
   );
 }
 
-/** The facts of a run that is in force, and what a stored sample is. */
+/**
+ * Facts that continue the status line, each after a separator.
+ *
+ * The separator is glued to the fact before it, so a narrow card wraps
+ * between facts rather than leaving a lone "·" on a line of its own.
+ */
+function Facts({ items }: { items: ReactNode[] }) {
+  return (
+    <>
+      {items.map((item, index) => (
+        <Fragment key={index}>
+          {'\u00a0· '}
+          {item}
+        </Fragment>
+      ))}
+    </>
+  );
+}
+
+/** What a run in force measures, where, since when, and what it has stored so far. */
 function RunFacts({
   control,
   run,
@@ -646,28 +697,44 @@ function RunFacts({
   run: ProfilingControlRun;
   secondsLeft: number | null;
 }) {
+  const samples = control.stored_samples;
+  const items: ReactNode[] = [
+    <span key="operations">{operationWords(run.operations)}</span>,
+    <span key="host">{hostWords(run)}</span>,
+  ];
+  if (run.started_at) {
+    items.push(
+      <span key="since" title={dateTime(run.started_at)}>
+        since {shortTime(run.started_at)}
+      </span>,
+    );
+  }
+  items.push(
+    <span key="samples" className="cursor-help" title={SAMPLE_NOTE}>
+      {number(samples)} sample{samples === 1 ? '' : 's'}
+    </span>,
+  );
+  if (run.expires_at !== null) {
+    items.push(
+      <span key="expires" title={`Stops at ${dateTime(run.expires_at)}`}>
+        {secondsLeft === null ? 'stops at a set time' : `stops in ${mmss(secondsLeft)}`}
+      </span>,
+    );
+  }
+  return <Facts items={items} />;
+}
+
+/** The run the most recent stop ended, as context for "off". */
+function StoppedRun({ run }: { run: ProfilingControlRun }) {
+  const why = stopWords(run.stop_reason);
   return (
-    <>
-      <ul className="mt-3 space-y-1 text-sm text-gray-700 dark:text-gray-300">
-        <li>{`Operations: ${operationWords(run.operations)}`}</li>
-        <li>{`Host: ${hostWords(run)}`}</li>
-        {run.expires_at === null ? (
-          <li>Collecting until you disable measurement.</li>
-        ) : (
-          <>
-            <li>{`Expires at: ${dateTime(run.expires_at)}`}</li>
-            <li>{`Time left: ${secondsLeft === null ? 'Unavailable' : mmss(secondsLeft)}`}</li>
-          </>
-        )}
-        <li>{`Stored samples: ${number(control.stored_samples)}`}</li>
-      </ul>
-      {control.stored_samples === 0 && (
-        <p className="mt-2 text-sm text-gray-700 dark:text-gray-300">
-          No matching operation has happened yet, so nothing has been stored. That is not a failure:
-          use a sandbox, open a terminal or browse files, and the first sample should follow.
-        </p>
-      )}
-      <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">{SAMPLE_NOTE}</p>
-    </>
+    <Facts
+      items={[
+        <span key="stopped" title={run.run_id}>
+          {run.stopped_at ? `last run stopped ${shortTime(run.stopped_at)}` : 'last run stopped'}
+          {why ? ` (${why})` : ''}
+        </span>,
+      ]}
+    />
   );
 }

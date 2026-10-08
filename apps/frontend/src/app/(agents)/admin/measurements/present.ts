@@ -1,18 +1,18 @@
 // Pure presentation for the Admin measurements page.
 //
 // Separate from `page.tsx` because Next type-checks a page's exports, and
-// tested directly rather than only through the rendered tables. Nothing here
-// fetches or renders: it decides what a stored number means, which is the part
-// that has to stay honest when the page changes.
+// tested directly rather than only through the rendered page. Nothing here
+// fetches or renders: it turns stored records into the words and rows the page
+// shows, and keeps an unknown value unknown instead of rendering it as zero.
+//
+// The turn page shows a turn's startup as one line that links to its sample
+// here, so the breakdown is read in one place only.
 
 import type {
-  MeasurementDetail,
-  MeasurementPage,
   MeasurementRecord,
-  MeasurementStage,
   MeasurementSummary,
-  MeasurementSummaryGroup,
   MeasurementSummaryResponse,
+  ProfilingRun,
 } from '@/lib/api/adminMeasurements';
 
 import { number } from '../runs/shared';
@@ -21,54 +21,61 @@ import { number } from '../runs/shared';
 export const MEASUREMENTS_PATH = '/admin/measurements';
 
 /**
- * The notice this whole surface is read under.
+ * What every number on the page covers, said once, in the page's tooltip.
  *
- * A server-side duration is not the user's wait, and the difference is not a
- * detail a reader can be left to infer: today there is no browser-side
- * producer, so every stored record stops at the server.
+ * There is no browser-side producer, so every stored record stops at the
+ * server: none of these durations is the wait a user saw.
  */
-export const SERVER_ONLY_NOTICE =
-  'Server-side measurements only. Coverage is either the host startup (runner-rooted: ' +
-  'from the runner claiming an attempt to the supervisor dispatching its prompt) or a ' +
-  'server request (control-plane-rooted: after authentication, ownership and broker ' +
-  'resolution, up to the business result being validated). Response encoding and transfer ' +
-  'are not measured. Browser-to-server time is not measured, and end_to_end_complete is ' +
-  'false for every record stored so far because ' +
-  'no browser-side producer exists. Nothing here is an end-to-end latency.';
+export const SERVER_SIDE_NOTE =
+  'Timed on the server only. A sandbox startup runs from the runner claiming the turn to the ' +
+  'prompt reaching the agent; a terminal or file request runs from the request being ' +
+  'authorized to its result being ready. Network, response transfer and browser time are not ' +
+  'included, so none of these is the wait a user saw.';
 
 /** The minimum eligible sample a percentile needs before it is worth reading. */
 export const MIN_PERCENTILE_SAMPLES = 20;
 
 // ---------------------------------------------------------------------------
-// Durations
+// Durations and times
 // ---------------------------------------------------------------------------
 
 export interface FormattedDuration {
-  /** Rendered value. Never `0 ms` in place of an unreported duration. */
+  /** Rendered value; `—` for an unreported duration, never `0`. */
   display: string;
   /** The exact recorded microseconds, for a tooltip: the display rounds, the record does not. */
   exact: string | null;
 }
 
 /**
- * Format recorded microseconds.
+ * Format recorded microseconds in the unit a reader compares in.
  *
- * Microseconds are what the producer recorded and are what stay exact; the
- * conversion happens only for the reader. A missing or non-numeric value is
- * `Unavailable` -- an unreported duration is unknown, and a zero would be a
- * claim the record never made.
+ * Microseconds are what the producer recorded and stay exact in `exact`; the
+ * display switches to milliseconds and then seconds so a 12-second startup
+ * reads as `12.40 s` rather than `12,401.79 ms`. A missing value is `—`: an
+ * unreported duration is unknown, and a zero would be a claim the record never
+ * made.
  */
 export function duration(us: number | null | undefined): FormattedDuration {
-  if (typeof us !== 'number' || !Number.isFinite(us)) {
-    return { display: 'Unavailable', exact: null };
-  }
+  if (typeof us !== 'number' || !Number.isFinite(us)) return { display: '—', exact: null };
   const exact = `${number(us)} µs`;
-  if (Math.abs(us) < 1000) return { display: exact, exact };
-  const ms = us / 1000;
-  return {
-    display: `${ms.toLocaleString('en-US', { maximumFractionDigits: 2 })} ms`,
-    exact,
-  };
+  const size = Math.abs(us);
+  if (size < 1_000) return { display: exact, exact };
+  if (size < 1_000_000) {
+    const ms = (us / 1_000).toLocaleString('en-US', {
+      maximumFractionDigits: size < 10_000 ? 1 : 0,
+    });
+    return { display: `${ms} ms`, exact };
+  }
+  if (size < 60_000_000) {
+    const seconds = (us / 1_000_000).toLocaleString('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+    return { display: `${seconds} s`, exact };
+  }
+  const minutes = Math.floor(size / 60_000_000);
+  const seconds = Math.round((size % 60_000_000) / 1_000_000);
+  return { display: `${us < 0 ? '-' : ''}${minutes} min ${seconds} s`, exact };
 }
 
 /**
@@ -87,79 +94,92 @@ export function shareOf(
   return `${percent.toLocaleString('en-US', { maximumFractionDigits: 1 })}%`;
 }
 
+/** An instant as `Sep 22, 08:00 UTC`, for labels where the full form is too long. */
+export function shortTime(value: string | null | undefined): string {
+  if (!value || !Number.isFinite(Date.parse(value))) return '—';
+  return `${new Date(value).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+    timeZone: 'UTC',
+  })} UTC`;
+}
+
 // ---------------------------------------------------------------------------
-// Stages
+// Names
 // ---------------------------------------------------------------------------
 
-export interface StageRow {
-  /** Unique per recorded position: stage names repeat within one record. */
-  key: string;
-  /** 0 for a local stage, 1 for a duration another producer attached to it. */
-  depth: number;
-  name: string;
-  /** Offset on the record's own timeline; null for an attached child, which has none. */
-  startUs: number | null;
-  durationUs: number | null;
-  /** Share of the record's total; null for an attached child, which is not on that timeline. */
-  share: string | null;
-  outcome: string | null;
-  /** The producer that reported this duration, for an attached child. */
-  source: string | null;
-  callId: string | null;
-  /** The reporter stopped at its own deadline, so this duration is a floor. */
-  truncated: boolean;
+const OPERATION_NAMES: Record<string, string> = {
+  'attempt.startup': 'Sandbox startup',
+  'terminal.open': 'Terminal opening',
+  'files.list': 'File listing',
+  'files.open': 'File opening',
+};
+
+/** The operations an admin can filter the sample list by, in the order they are offered. */
+export const LISTED_OPERATIONS = Object.keys(OPERATION_NAMES);
+
+/**
+ * The requests one operation is made of, where there is more than one kind,
+ * in the order they happen.
+ */
+const REQUEST_KIND_NAMES: Record<string, string> = {
+  'terminal.list': 'list terminals',
+  'terminal.create': 'create terminal',
+  'terminal.stream_attach': 'attach stream',
+  'files.read': 'read file',
+};
+
+/**
+ * The four startup paths the runner classifies, by what they had to do.
+ *
+ * They differ by the work they skipped, so they are never folded together: a
+ * new sandbox and a reused live one are different operations.
+ */
+const STARTUP_PATH_NAMES: Record<string, string> = {
+  new_group: 'new sandbox',
+  resume_stopped: 'stopped sandbox restarted',
+  resume_running: 'running sandbox, agent restarted',
+  reuse_live: 'live sandbox reused',
+  unknown: 'path unclassified',
+};
+
+/** An operation in the words an operator uses, or the raw name when this page does not know it. */
+export function operationName(operation: string): string {
+  return OPERATION_NAMES[operation] ?? operation;
 }
 
 /**
- * Flatten a record's stages for display, in the order they were recorded.
+ * One line naming what a sample measured.
  *
- * An attached child is a duration another producer measured; it is shown under
- * the stage it was attached to and never added to the parent's duration or to
- * the record's total. Two producers on two clocks can overlap, so a sum would
- * be a number no one measured.
+ * The operation, then which request of it, then which startup path. A coverage
+ * scope is added only when it is not one this page knows: every known scope
+ * follows from the operation, while an unknown one may cover something the
+ * page's server-side note does not, and must not be read under it.
  */
-export function stageRows(record: Pick<MeasurementRecord, 'stages' | 'duration_us'>): StageRow[] {
-  const stages: MeasurementStage[] = record.stages ?? [];
-  const rows: StageRow[] = [];
-  stages.forEach((stage, index) => {
-    rows.push({
-      key: `stage-${index}`,
-      depth: 0,
-      name: stage.stage,
-      startUs: stage.start_offset_us ?? null,
-      durationUs: stage.duration_us,
-      share: shareOf(stage.duration_us, record.duration_us),
-      outcome: null,
-      source: null,
-      callId: null,
-      truncated: false,
-    });
-    (stage.children ?? []).forEach((child, childIndex) => {
-      rows.push({
-        key: `stage-${index}-child-${childIndex}`,
-        depth: 1,
-        name: child.stage,
-        startUs: null,
-        durationUs: child.duration_us,
-        share: null,
-        outcome: child.outcome ?? null,
-        source: child.source ?? null,
-        callId: child.call_id ?? null,
-        truncated: Boolean(child.truncated),
-      });
-    });
-  });
-  return rows;
+export function operationLabel(item: {
+  operation: string;
+  request_kind?: string | null;
+  startup_path?: string | null;
+  coverage_scope?: string | null;
+}): string {
+  const parts = [operationName(item.operation)];
+  const kind = item.request_kind;
+  if (kind && kind !== item.operation) parts.push(REQUEST_KIND_NAMES[kind] ?? kind);
+  const path = item.startup_path;
+  if (path) parts.push(STARTUP_PATH_NAMES[path] ?? path);
+  const scope = item.coverage_scope;
+  if (scope && !SCOPES[scope]) parts.push(coverageScope(scope).label);
+  return parts.join(' · ');
 }
 
-/** What an attached child's duration is and is not, stated where it is shown. */
-export const ATTACHED_STAGE_NOTE =
-  'Attached from another producer. It carries a duration but no offset on this record’s ' +
-  'timeline, and it is not part of the total above.';
-
-/** What a truncated duration is, stated wherever one is shown. */
-export const TRUNCATED_STAGE_NOTE =
-  'Observed up to the collection deadline: a floor, not the stage’s full duration.';
+/** A stage or span name as words: `supervisor_acquire` reads as `Supervisor acquire`. */
+export function stageName(name: string): string {
+  const words = name.replace(/[_.]+/g, ' ').trim();
+  return words ? `${words.charAt(0).toUpperCase()}${words.slice(1)}` : name;
+}
 
 // ---------------------------------------------------------------------------
 // Outcome and completeness
@@ -191,40 +211,41 @@ export function outcomeLabel(outcome: string | null | undefined): string {
   return OUTCOME_LABELS[outcome] ?? `${outcome} (unrecognised outcome)`;
 }
 
-export interface CompletenessLine {
+export interface SampleResult {
   label: string;
-  value: string;
-  /** True when this line is the reason a record is not whole. */
-  warn: boolean;
+  /** `ok` is quiet; the other two are the only results a reader has to act on. */
+  tone: 'ok' | 'warn' | 'bad';
+  title: string;
 }
 
 /**
- * The two completeness questions, never collapsed into one.
+ * What a list row says about how its operation ended.
  *
- * `collection_complete` is about this producer's own collection closing;
- * `end_to_end_complete` is about a browser being joined to the record. A
- * record can be the first and not the second, which is the state of every
- * record today -- so neither may be rendered as plain "complete".
+ * Two different problems, said apart: an operation that did not succeed, and a
+ * successful one whose collection did not close -- its duration may stop short
+ * of the operation's end. A summary row carries no truncation flag, so a row
+ * can be called partial here but never whole; the record says the rest.
  */
-export function completenessLines(
-  record: Pick<MeasurementRecord, 'collection_complete' | 'end_to_end_complete'>,
-): CompletenessLine[] {
-  return [
-    {
-      label: 'Collection',
-      value: record.collection_complete
-        ? 'Complete: every boundary this record expected was answered.'
-        : 'Incomplete: at least one expected boundary was never answered, or collection was cut short.',
-      warn: !record.collection_complete,
-    },
-    {
-      label: 'End to end',
-      value: record.end_to_end_complete
-        ? 'The record claims a browser producer was joined to it.'
-        : 'Not covered: server-side only, so the time between the browser and the server is not in this duration.',
-      warn: !record.end_to_end_complete,
-    },
-  ];
+export function sampleResult(
+  row: Pick<MeasurementSummary, 'outcome' | 'collection_complete'>,
+): SampleResult {
+  if (!isCompleteOutcome(row.outcome)) {
+    return {
+      label: outcomeLabel(row.outcome),
+      tone: 'bad',
+      title: 'The operation did not complete, so this sample is kept out of the timings.',
+    };
+  }
+  if (!row.collection_complete) {
+    return {
+      label: 'Partly measured',
+      tone: 'warn',
+      title:
+        'The operation completed, but collection did not close: the duration may stop short, ' +
+        'so this sample is kept out of the timings.',
+    };
+  }
+  return { label: 'OK', tone: 'ok', title: outcomeLabel(row.outcome) };
 }
 
 /**
@@ -277,27 +298,6 @@ export function partialReasons(record: MeasurementRecord): string[] {
     );
   }
   return reasons;
-}
-
-/**
- * Whether a list row is anything less than a whole, successful measurement.
- *
- * A summary row carries no truncation flag, so this is deliberately narrower
- * than `partialReasons`: it can say a row is partial, not that it is whole.
- */
-export function rowIsPartial(
-  row: Pick<MeasurementSummary, 'collection_complete' | 'outcome'>,
-): boolean {
-  return !row.collection_complete || !isCompleteOutcome(row.outcome);
-}
-
-/** What a list row says about its own completeness, without expanding it. */
-export function rowCompleteness(
-  row: Pick<MeasurementSummary, 'collection_complete' | 'end_to_end_complete'>,
-): string {
-  const collection = row.collection_complete ? 'Collection closed' : 'Collection incomplete';
-  const endToEnd = row.end_to_end_complete ? 'End-to-end claimed' : 'Server-side only';
-  return `${collection} · ${endToEnd}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -354,148 +354,403 @@ export function coverageLine(scope: string | null | undefined): string {
 }
 
 // ---------------------------------------------------------------------------
-// Empty pages and paging
+// One record's timeline
 // ---------------------------------------------------------------------------
 
-/**
- * Why an empty page cannot be read as "nothing was slow".
- *
- * The four causes are named because the page genuinely cannot tell them apart:
- * the data that would distinguish them (was collection on, was this operation
- * selected, did the producer deliver) is not in the response.
- */
-export const EMPTY_BASIS =
-  'An empty page is not zero latency. The experiment may have collection switched off, this ' +
-  'operation may not be selected by it, a delivered sample may have been dropped, or the ' +
-  'producer may be an older build that does not report measurements at all. This page cannot ' +
-  'tell those apart.';
+/** What an attached duration is and is not, for the tooltip where one is shown. */
+export const ATTACHED_STAGE_NOTE =
+  'Measured by another process and attached to the stage above. It has no position on this ' +
+  'timeline and is not added to the total.';
 
-/** The empty state, using the server's own wording when it sent one. */
-export function emptyPageNotice(page: Pick<MeasurementPage, 'empty_reason'>): string {
-  const reason = page.empty_reason?.trim().replace(/\.$/, '');
-  return reason
-    ? `${reason.charAt(0).toUpperCase()}${reason.slice(1)}. ${EMPTY_BASIS}`
-    : EMPTY_BASIS;
-}
+/** What a truncated duration is, for the tooltip where one is shown. */
+export const TRUNCATED_STAGE_NOTE =
+  'Observed up to the collection deadline: a floor, not the stage’s full duration.';
 
-/**
- * What one page of the list supports, and what only the summary does.
- *
- * The list route returns no total, so this cannot say how many samples the
- * experiment holds -- only that the page is not it.
- */
-export function listNotice(page: MeasurementPage): string {
-  if (page.count === 0) return emptyPageNotice(page);
-  const more = page.next_cursor
-    ? ' More rows follow, so this is not the end of the list either.'
-    : ' This is the last page of this selection.';
-  return (
-    `${number(page.count)} of at most ${number(page.limit)} rows, newest first. A page is not ` +
-    'the population: counts and percentiles over it would describe the page, so the experiment ' +
-    `summary below is what aggregates in SQL over every stored sample.${more}`
-  );
-}
+/** The name of an interval no stage or span covers. */
+export const GAP_NAME = 'No stage recorded';
 
-// ---------------------------------------------------------------------------
-// Distribution
-// ---------------------------------------------------------------------------
+/** What such an interval is, for its tooltip. */
+export const GAP_NOTE =
+  'Part of the total, but no stage or span on this record covers this interval, so nothing ' +
+  'says what happened in it.';
 
-export interface GroupRow {
+export interface TimelineRow {
   key: string;
-  /** The dimensions the server folded by, in the order it named them. */
-  dimensions: { name: string; value: string }[];
-  sampleCount: number;
-  interactionCount: number;
-  eligibleCount: number;
+  /**
+   * `stage` and `span` sit on the record's own clock; `gap` is an interval of
+   * it nothing covers; `attached` is another process's duration, with no
+   * position on this clock.
+   */
+  kind: 'stage' | 'span' | 'gap' | 'attached';
+  depth: number;
+  name: string;
+  /** The recorded name, when the display name was made from it. */
+  rawName: string | null;
+  /** Offset on the record's timeline; null where the record gives none. */
+  startUs: number | null;
+  durationUs: number | null;
+  /** Share of the record's total; null off the timeline. */
+  share: string | null;
+  /** The process that measured an attached duration. */
+  source: string | null;
+  /** An outcome worth showing: anything but success. */
+  problem: string | null;
+  /** A floor rather than a duration. */
+  truncated: boolean;
+}
+
+function problemOutcome(outcome: string | null | undefined): string | null {
+  if (!outcome || outcome === 'ok' || isCompleteOutcome(outcome)) return null;
+  return outcomeLabel(outcome);
+}
+
+/** Whether a stage row and an interval share any time on the record's timeline. */
+function overlaps(
+  row: TimelineRow,
+  startUs: number | null | undefined,
+  durationUs: number | null | undefined,
+): boolean {
+  if (row.startUs === null || typeof startUs !== 'number') return false;
+  const rowEnd = row.startUs + (row.durationUs ?? 0);
+  const end = startUs + (typeof durationUs === 'number' ? durationUs : 0);
+  return startUs < rowEnd && row.startUs < end;
+}
+
+/**
+ * One record as a waterfall: where its time went, in time order.
+ *
+ * Stages and root spans are placed by their offset on the record's clock. An
+ * interval none of them covers is shown as its own row, because "the first
+ * stage began five seconds in" is the finding, and a list of stage durations
+ * hides it. Gaps smaller than 1% of the total (and under a millisecond) are
+ * boundary noise and are not shown.
+ *
+ * An attached child -- another process's duration -- goes under its stage with
+ * no bar and no share: it is not on this clock and is never part of the total.
+ * A stage without an offset cannot be placed; it is listed after the placed
+ * ones, without a bar, rather than given a position it never recorded.
+ */
+export function timelineRows(
+  record: Pick<MeasurementRecord, 'stages' | 'spans' | 'duration_us'>,
+): TimelineRow[] {
+  const total = record.duration_us;
+  interface Entry {
+    row: TimelineRow;
+    children: TimelineRow[];
+    order: number;
+  }
+  const placed: Entry[] = [];
+  const unplaced: Entry[] = [];
+  let order = 0;
+
+  (record.stages ?? []).forEach((stage, index) => {
+    const start = typeof stage.start_offset_us === 'number' ? stage.start_offset_us : null;
+    const entry: Entry = {
+      order: order++,
+      row: {
+        key: `stage-${index}`,
+        kind: 'stage',
+        depth: 0,
+        name: stageName(stage.stage),
+        rawName: stage.stage,
+        startUs: start,
+        durationUs: stage.duration_us,
+        share: start === null ? null : shareOf(stage.duration_us, total),
+        source: null,
+        problem: null,
+        truncated: false,
+      },
+      children: (stage.children ?? []).map((child, childIndex) => ({
+        key: `stage-${index}-child-${childIndex}`,
+        kind: 'attached' as const,
+        depth: 1,
+        name: stageName(child.stage),
+        rawName: child.stage,
+        startUs: null,
+        durationUs: child.duration_us,
+        share: null,
+        source: child.source ?? null,
+        problem: problemOutcome(child.outcome),
+        truncated: Boolean(child.truncated),
+      })),
+    };
+    (start === null ? unplaced : placed).push(entry);
+  });
+
+  const spans = record.spans ?? [];
+  const spanIds = new Set(spans.map((span) => span.span_id));
+  const spanEntries = new Map<string, Entry>();
+  const spanRow = (span: (typeof spans)[number], depth: number): TimelineRow => ({
+    key: `span-${span.span_id}`,
+    kind: 'span',
+    depth,
+    name: stageName(span.name),
+    rawName: span.name,
+    startUs: span.start_offset_us,
+    durationUs: typeof span.duration_us === 'number' ? span.duration_us : null,
+    share: shareOf(span.duration_us, total),
+    source: null,
+    problem: problemOutcome(span.outcome),
+    truncated: Boolean(span.truncated),
+  });
+  const hasChildren = new Set(spans.map((span) => span.parent_span_id).filter(Boolean));
+  for (const span of spans) {
+    // A child whose parent is not on this record is shown as a root rather
+    // than dropped: it was recorded, and hiding it would shorten the record.
+    if (span.parent_span_id && spanIds.has(span.parent_span_id)) continue;
+    // The runner records some steps (preflight) as both a stage and a span
+    // over the same interval. One row says it; the span only adds a problem.
+    const twin = placed.find(
+      (entry) =>
+        !hasChildren.has(span.span_id) &&
+        entry.row.kind === 'stage' &&
+        entry.row.rawName === span.name &&
+        overlaps(entry.row, span.start_offset_us, span.duration_us),
+    );
+    if (twin) {
+      twin.row.problem ??= problemOutcome(span.outcome);
+      twin.row.truncated ||= Boolean(span.truncated);
+      continue;
+    }
+    const entry: Entry = { order: order++, row: spanRow(span, 0), children: [] };
+    spanEntries.set(span.span_id, entry);
+    placed.push(entry);
+  }
+  for (const span of spans) {
+    if (!span.parent_span_id || !spanIds.has(span.parent_span_id)) continue;
+    spanEntries.get(span.parent_span_id)?.children.push(spanRow(span, 1));
+  }
+
+  placed.sort((a, b) => (a.row.startUs ?? 0) - (b.row.startUs ?? 0) || a.order - b.order);
+
+  const rows: TimelineRow[] = [];
+  const threshold = Math.max(1_000, (Number.isFinite(total) ? total : 0) * 0.01);
+  let covered = 0;
+  const gap = (from: number, to: number) => {
+    if (to - from <= threshold) return;
+    rows.push({
+      key: `gap-${from}`,
+      kind: 'gap',
+      depth: 0,
+      name: GAP_NAME,
+      rawName: null,
+      startUs: from,
+      durationUs: to - from,
+      share: shareOf(to - from, total),
+      source: null,
+      problem: null,
+      truncated: false,
+    });
+  };
+  for (const entry of placed) {
+    const start = entry.row.startUs ?? 0;
+    gap(covered, start);
+    rows.push(entry.row, ...entry.children);
+    covered = Math.max(covered, start + (entry.row.durationUs ?? 0));
+  }
+  if (placed.length && Number.isFinite(total)) gap(covered, total);
+  for (const entry of unplaced) rows.push(entry.row, ...entry.children);
+  return rows;
+}
+
+/** The first and last boundary a record was measured between, in words. */
+export function measuredBetween(
+  record: Pick<MeasurementRecord, 'coverage_scope' | 'start_boundary' | 'end_boundary'>,
+): string | null {
+  if (record.coverage_scope === 'host_startup') {
+    return 'From the runner claiming the turn to the prompt reaching the agent';
+  }
+  if (record.coverage_scope === 'server_request') {
+    return 'From the request being authorized to its result being ready';
+  }
+  if (record.start_boundary && record.end_boundary) {
+    return `From ${record.start_boundary} to ${record.end_boundary}`;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Timings over a whole run
+// ---------------------------------------------------------------------------
+
+export interface TimingRow {
+  key: string;
+  label: string;
+  /** What else tells this row apart from its neighbours, when anything does. */
+  detail: string | null;
+  /** Every dimension the server grouped by, exactly as named, for a tooltip. */
+  title: string;
+  samples: number;
+  eligible: number;
+  /** Stored samples kept out of the percentiles, and why, when there are any. */
+  excluded: { count: number; label: string; title: string } | null;
+  min: FormattedDuration;
   p50: FormattedDuration;
   p95: FormattedDuration;
-  min: FormattedDuration;
   max: FormattedDuration;
   /** Fewer eligible samples than a percentile needs to be read as a distribution. */
-  insufficient: boolean;
-  /** What was stored but kept out of the percentiles, and why. */
-  excluded: string | null;
-}
-
-/** A dimension value, with the two ways one can be absent said out loud. */
-export function dimensionValue(name: string, value: string | number | null): string {
-  if (value === null || value === '') {
-    return name === 'startup_path' ? 'Not a startup' : 'Not reported';
-  }
-  if (name === 'startup_path' && value === 'unknown') return 'Unclassified';
-  return String(value);
-}
-
-/** What the percentiles in a group were computed over, and what was left out. */
-export function groupBasis(group: MeasurementSummaryGroup): string {
-  const excluded: string[] = [];
-  if (group.incomplete_count) {
-    excluded.push(`${number(group.incomplete_count)} with collection incomplete`);
-  }
-  if (group.failed_count) excluded.push(`${number(group.failed_count)} not successful`);
-  const stored = `${number(group.sample_count)} stored sample(s), ${number(
-    group.interaction_count,
-  )} interaction(s), ${number(group.eligible_count)} eligible for the percentiles`;
-  if (!excluded.length) return `${stored}; nothing was excluded.`;
-  // The two counts are conditions, not categories: a sample whose collection
-  // did not close *and* whose outcome failed is in both, so their sum is an
-  // upper bound on the exclusion rather than a partition of the stored rows.
-  // Saying so here is what keeps a reader from adding them up.
-  return `${stored}; excluded: ${excluded.join(', ')}. A sample can be both, so these may overlap.`;
-}
-
-/** The caution a small sample needs before anyone reads a percentile into it. */
-export function sampleCaution(eligibleCount: number): string | null {
-  if (eligibleCount >= MIN_PERCENTILE_SAMPLES) return null;
-  return `Fewer than ${number(
-    MIN_PERCENTILE_SAMPLES,
-  )} eligible samples: read the percentiles as an indication, not as a distribution to optimize against.`;
+  few: boolean;
 }
 
 /**
- * Fold the summary response into rows.
- *
- * The grouping dimensions are taken from the response's own `group` object, so
- * a dimension this page has never heard of is still shown rather than dropped.
- * An absent percentile stays `Unavailable` -- with no eligible sample there is
- * no distribution, and a zero would be a fabricated measurement.
+ * Dimensions a timing row never adds as detail: the label already says the
+ * first four, and the runtime version is said together with the runtime.
  */
-export function groupRows(response: MeasurementSummaryResponse): GroupRow[] {
-  return response.groups.map((group, index) => {
-    const dimensions = Object.entries(group.group ?? {}).map(([name, value]) => ({
-      name,
-      value: dimensionValue(name, value),
-    }));
+const LABELLED_DIMENSIONS = new Set([
+  'operation',
+  'request_kind',
+  'startup_path',
+  'coverage_scope',
+  'runtime_version',
+]);
+
+function dimensionText(name: string, group: Record<string, string | number | null>): string {
+  const value = group[name];
+  if (name === 'runtime_id') {
+    const version = group.runtime_version;
+    if (value === null || value === undefined || value === '') return 'runtime not reported';
+    return version ? `${value} ${version}` : String(value);
+  }
+  if (value === null || value === undefined || value === '') return `${name} not reported`;
+  if (name === 'boundary_version') return `boundary v${value}`;
+  if (name === 'execution_profile') return String(value);
+  return `${name} ${value}`;
+}
+
+/**
+ * A run's summary as one row per comparable group.
+ *
+ * The server groups by every dimension that decides comparability, so two
+ * rows can share an operation and differ only by runtime version. The label
+ * names the operation, request and startup path; any other dimension is added
+ * only when it actually differs between rows of the same operation, so the
+ * common case reads as one short line and the rare one still tells its rows
+ * apart. A dimension this page has never heard of is treated the same way
+ * rather than dropped.
+ *
+ * Percentiles cover only the eligible samples -- completed, with collection
+ * closed -- and the rest are counted beside them rather than hidden. With no
+ * eligible sample a percentile is `—`: there is nothing to compute it from.
+ */
+export function timingRows(response: MeasurementSummaryResponse): TimingRow[] {
+  // operation -> dimension -> the values its groups carry.
+  const seen = new Map<string, Map<string, Set<string>>>();
+  for (const group of response.groups) {
+    const dims = group.group ?? {};
+    const operation = String(dims.operation ?? '');
+    const values = seen.get(operation) ?? new Map<string, Set<string>>();
+    seen.set(operation, values);
+    for (const name of Object.keys(dims)) {
+      if (LABELLED_DIMENSIONS.has(name)) continue;
+      values.set(name, (values.get(name) ?? new Set<string>()).add(dimensionText(name, dims)));
+    }
+  }
+  const varying = (operation: string) =>
+    [...(seen.get(operation) ?? new Map<string, Set<string>>())]
+      .filter(([, values]) => values.size > 1)
+      .map(([name]) => name)
+      .sort();
+
+  // The server orders groups alphabetically by dimension; a reader expects the
+  // order things happen in: startup first, a terminal's list before its create.
+  const rank = (names: Record<string, string>, value: unknown) => {
+    const index = Object.keys(names).indexOf(String(value ?? ''));
+    return index === -1 ? Number.MAX_SAFE_INTEGER : index;
+  };
+  const ordered = response.groups
+    .map((group, index) => ({ group, index }))
+    .sort(
+      (a, b) =>
+        rank(OPERATION_NAMES, a.group.group?.operation) -
+          rank(OPERATION_NAMES, b.group.group?.operation) ||
+        rank(REQUEST_KIND_NAMES, a.group.group?.request_kind) -
+          rank(REQUEST_KIND_NAMES, b.group.group?.request_kind) ||
+        rank(STARTUP_PATH_NAMES, a.group.group?.startup_path) -
+          rank(STARTUP_PATH_NAMES, b.group.group?.startup_path) ||
+        a.index - b.index,
+    );
+
+  return ordered.map(({ group, index }) => {
+    const dims = group.group ?? {};
+    const operation = String(dims.operation ?? '');
+    const detail = varying(operation).map((name) => dimensionText(name, dims));
+    const excludedCount = group.sample_count - group.eligible_count;
+    const reasons: string[] = [];
+    if (group.incomplete_count) {
+      reasons.push(`${number(group.incomplete_count)} with collection incomplete`);
+    }
+    if (group.failed_count) reasons.push(`${number(group.failed_count)} not successful`);
+    // The two counts are conditions, not categories: a sample that failed and
+    // whose collection did not close is in both, so they are not added up.
+    const overlap = reasons.length > 1 ? '; one sample can be both' : '';
+    const excludedTitle =
+      `${reasons.join(', ')}. The timings use the ${number(group.eligible_count)} that ` +
+      `completed with collection closed${overlap}.`;
+    // Say the one reason when there is one: "1 failed" reads, "1 not counted"
+    // sends the reader to the tooltip.
+    const excludedLabel =
+      group.failed_count === excludedCount && !group.incomplete_count
+        ? `${number(excludedCount)} failed`
+        : group.incomplete_count === excludedCount && !group.failed_count
+          ? `${number(excludedCount)} incomplete`
+          : `${number(excludedCount)} not counted`;
     return {
-      key: `${index}:${dimensions.map((dimension) => `${dimension.name}=${dimension.value}`).join('|')}`,
-      dimensions,
-      sampleCount: group.sample_count,
-      interactionCount: group.interaction_count,
-      eligibleCount: group.eligible_count,
+      key: `${index}:${Object.entries(dims)
+        .map(([name, value]) => `${name}=${value}`)
+        .join('|')}`,
+      label: operationLabel({
+        operation,
+        request_kind: dims.request_kind === null ? null : String(dims.request_kind ?? ''),
+        startup_path: dims.startup_path === null ? null : String(dims.startup_path ?? '') || null,
+        coverage_scope: dims.coverage_scope === null ? null : String(dims.coverage_scope ?? ''),
+      }),
+      detail: detail.length ? detail.join(' · ') : null,
+      title: Object.entries(dims)
+        .map(([name, value]) => `${name}=${value ?? 'not reported'}`)
+        .join('\n'),
+      samples: group.sample_count,
+      eligible: group.eligible_count,
+      excluded:
+        excludedCount > 0
+          ? { count: excludedCount, label: excludedLabel, title: excludedTitle }
+          : null,
+      min: duration(group.min_us),
       p50: duration(group.p50_us),
       p95: duration(group.p95_us),
-      min: duration(group.min_us),
       max: duration(group.max_us),
-      insufficient: group.eligible_count < MIN_PERCENTILE_SAMPLES,
-      excluded: groupBasis(group),
+      few: group.eligible_count < MIN_PERCENTILE_SAMPLES,
     };
   });
 }
 
-/** The sentence the distribution table may never be read without. */
-export const DISTRIBUTION_BASIS =
-  'Computed in SQL over the whole experiment, not over the page above. Percentiles include ' +
-  'only samples whose collection closed and whose outcome was completed or dispatched; each ' +
-  'group states what was stored and excluded. A percentile is not an end-to-end latency.';
+// ---------------------------------------------------------------------------
+// Runs
+// ---------------------------------------------------------------------------
+
+/**
+ * A measurement run -- one switch-on to switch-off -- as a reader picks it:
+ * when it started producing, and where.
+ *
+ * The catalogue row is created by the first delivered sample, so its creation
+ * is when the run began producing, which is what a reader recognizes; the run
+ * id stays in the tooltip.
+ */
+export function runLabel(run: Pick<ProfilingRun, 'created_at' | 'target'>): string {
+  const host = run.target?.host;
+  return `${shortTime(run.created_at)} · ${host ? host : 'all hosts'}`;
+}
 
 // ---------------------------------------------------------------------------
-// Selection: the URL, links, and the filter form
+// Selection: the URL
 // ---------------------------------------------------------------------------
 
 export interface MeasurementSelection {
-  /** The experiment the list is scoped to; null reads across experiments. */
+  /**
+   * The run the page is about; null means the newest one, or every run for a
+   * link that names records.
+   */
   run: string | null;
-  /** The one record expanded below the list. */
+  /** The one sample expanded in the list. */
   measurement: string | null;
   operation: string[];
   request_kind: string[];
@@ -506,15 +761,13 @@ export interface MeasurementSelection {
   job_id: string | null;
   thread_id: string | null;
   /**
-   * One execution's startup records. Kept as the raw text the URL and the form
-   * carry, because an unparseable value is a link this page cannot serve and
-   * must say so rather than quietly reading every attempt.
+   * One execution's startup records. Kept as the raw text the URL carries,
+   * because an unparseable value is a link this page cannot serve and must
+   * say so rather than quietly reading every attempt.
    */
   attempt_id: string | null;
   /** Every request of one logical interaction, such as a single terminal open. */
   interaction_id: string | null;
-  /** The opaque cursor. Never carried across a filter change. */
-  after: string | null;
 }
 
 export const EMPTY_SELECTION: MeasurementSelection = {
@@ -529,7 +782,6 @@ export const EMPTY_SELECTION: MeasurementSelection = {
   thread_id: null,
   attempt_id: null,
   interaction_id: null,
-  after: null,
 };
 
 /** The one-value query parameters of the page's own selection. */
@@ -542,47 +794,32 @@ const SINGLE_KEYS = [
   'thread_id',
   'attempt_id',
   'interaction_id',
-  'after',
 ] as const;
 
 /** The repeatable ones. A comma-joined value would name one operation that does not exist. */
 const REPEATED_KEYS = ['operation', 'request_kind', 'coverage_scope'] as const;
 
-const QUERY_KEYS: readonly string[] = [...SINGLE_KEYS, ...REPEATED_KEYS];
+/**
+ * Accepted and dropped. The list used to page through the URL; a cursor is a
+ * position, not a filter, so an old link that carries one still opens -- at
+ * the first page -- rather than failing.
+ */
+const IGNORED_KEYS = ['after'];
 
-/** The filter fields the form submits. */
-export const FORM_KEYS = [
-  'operation',
-  'request_kind',
-  'coverage_scope',
-  'outcome',
-  'collection_complete',
-  'job_id',
-  'thread_id',
-  'attempt_id',
-  'interaction_id',
-] as const;
-
-export type FormKey = (typeof FORM_KEYS)[number];
+const QUERY_KEYS: readonly string[] = [...SINGLE_KEYS, ...REPEATED_KEYS, ...IGNORED_KEYS];
 
 /**
  * Parse one attempt id, or explain why this page will not read it.
  *
  * The API takes a non-negative integer and this page must not send anything
- * else: an unparseable value dropped on the way out would read the whole
- * experiment while the address bar still said one attempt.
+ * else: an unparseable value dropped on the way out would read every attempt
+ * while the address bar still said one.
  */
 export function parseAttemptId(value: string): { attemptId: number | null; error: string | null } {
   const trimmed = value.trim();
   if (!trimmed) return { attemptId: null, error: null };
-  if (!/^\d+$/.test(trimmed)) {
-    return {
-      attemptId: null,
-      error: `This link asks for attempt_id=${trimmed}, which is not an attempt number.`,
-    };
-  }
   const parsed = Number(trimmed);
-  if (!Number.isSafeInteger(parsed)) {
+  if (!/^\d+$/.test(trimmed) || !Number.isSafeInteger(parsed)) {
     return {
       attemptId: null,
       error: `This link asks for attempt_id=${trimmed}, which is not an attempt number.`,
@@ -605,7 +842,7 @@ export function selectionFromQuery(query: string): {
   const params = new URLSearchParams(query);
   const unknown = [...params.keys()].filter((key) => !QUERY_KEYS.includes(key));
   if (unknown.length) {
-    return { selection: EMPTY_SELECTION, error: `Unsupported filter: ${unknown[0]}` };
+    return { selection: EMPTY_SELECTION, error: `Unsupported filter: ${unknown[0]}.` };
   }
   const complete = params.get('collection_complete');
   if (complete !== null && complete !== 'true' && complete !== 'false') {
@@ -627,11 +864,8 @@ export function selectionFromQuery(query: string): {
     collection_complete: complete === null ? null : complete === 'true',
     job_id: params.get('job_id'),
     thread_id: params.get('thread_id'),
-    // Stored as the text the URL carries; `listMeasurements` parses it once,
-    // through the same function, so the page and the query cannot disagree.
     attempt_id: params.get('attempt_id'),
     interaction_id: params.get('interaction_id'),
-    after: params.get('after'),
   };
   // An empty string is how a URL spells "absent"; keep it out of the selection
   // so a link with `?run=` cannot become a run named "".
@@ -641,13 +875,8 @@ export function selectionFromQuery(query: string): {
   return { selection, error: null };
 }
 
-/**
- * Serialize a selection into a link, or into this page's own address bar.
- *
- * The pathname is passed rather than assumed: a deployment mounted under a
- * base path keeps its prefix, which native history does not add.
- */
-export function selectionHref(pathname: string, selection: MeasurementSelection): string {
+/** A selection as a query string, in one canonical order, without the `?`. */
+export function selectionQuery(selection: MeasurementSelection): string {
   const params = new URLSearchParams();
   for (const key of SINGLE_KEYS) {
     const value = selection[key];
@@ -661,156 +890,81 @@ export function selectionHref(pathname: string, selection: MeasurementSelection)
       if (value) params.append(key, value);
     }
   }
-  const query = params.toString();
-  return query ? `${pathname}?${query}` : pathname;
-}
-
-/** Split a filter field into the values it names, without duplicates. */
-export function splitValues(value: string): string[] {
-  return [
-    ...new Set(
-      value
-        .split(/[\s,]+/)
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  ];
+  return params.toString();
 }
 
 /**
- * The selection an applied filter form asks for.
+ * Serialize a selection into a link.
  *
- * The form is the authority: a cleared field disappears rather than keeping
- * its previous value. The cursor is dropped because it is a position in one
- * ordering -- resuming it under different filters would splice two different
- * selections into one list. The expanded record is dropped for the same
- * reason: it belongs to the selection that listed it.
+ * The pathname is passed rather than assumed: a deployment mounted under a
+ * base path keeps its prefix, which native history does not add.
  */
-export function selectionFromForm(
-  read: (key: FormKey) => string,
-  run: string | null,
-): MeasurementSelection {
-  const complete = read('collection_complete');
-  return {
-    ...EMPTY_SELECTION,
-    run,
-    operation: splitValues(read('operation')),
-    request_kind: splitValues(read('request_kind')),
-    coverage_scope: splitValues(read('coverage_scope')),
-    outcome: read('outcome').trim() || null,
-    collection_complete: complete === 'true' ? true : complete === 'false' ? false : null,
-    job_id: read('job_id').trim() || null,
-    thread_id: read('thread_id').trim() || null,
-    attempt_id: read('attempt_id').trim() || null,
-    interaction_id: read('interaction_id').trim() || null,
-  };
+export function selectionHref(pathname: string, selection: MeasurementSelection): string {
+  const query = selectionQuery(selection);
+  return query ? `${pathname}?${query}` : pathname;
 }
 
-/** The selection as one line, so a reader can see what the list was filtered by. */
-export function selectionSummary(selection: MeasurementSelection): string {
-  const parts: string[] = [];
-  if (selection.run) parts.push(`experiment ${selection.run}`);
-  else parts.push('all experiments');
-  if (selection.operation.length) parts.push(`operation in ${selection.operation.join(', ')}`);
-  if (selection.request_kind.length)
-    parts.push(`request kind in ${selection.request_kind.join(', ')}`);
-  if (selection.coverage_scope.length)
-    parts.push(`scope in ${selection.coverage_scope.join(', ')}`);
-  if (selection.outcome) parts.push(`outcome ${selection.outcome}`);
+/**
+ * Whether the selection names particular records rather than a run.
+ *
+ * Such a link -- the turn page's "every record for this attempt" -- is read
+ * across every run, because the reader asked for those records wherever they
+ * are, not for the newest run's.
+ */
+export function namesRecords(selection: MeasurementSelection): boolean {
+  return Boolean(
+    selection.job_id || selection.thread_id || selection.attempt_id || selection.interaction_id,
+  );
+}
+
+export interface FilterChip {
+  /** The selection fields removing this chip clears. */
+  clear: Partial<MeasurementSelection>;
+  label: string;
+}
+
+/**
+ * Every filter the operation menu does not show, as a removable chip.
+ *
+ * These arrive by link -- from the turn page, or from a sample's own "every
+ * request of this terminal opening" -- and must stay visible for as long as
+ * they narrow the list, or the list would look like the whole run.
+ */
+export function filterChips(selection: MeasurementSelection): FilterChip[] {
+  const chips: FilterChip[] = [];
+  if (selection.job_id) chips.push({ clear: { job_id: null }, label: `Turn ${selection.job_id}` });
+  if (selection.attempt_id) {
+    chips.push({ clear: { attempt_id: null }, label: `Startup #${selection.attempt_id}` });
+  }
+  if (selection.thread_id) {
+    chips.push({ clear: { thread_id: null }, label: `Session ${selection.thread_id}` });
+  }
+  if (selection.interaction_id) {
+    chips.push({
+      clear: { interaction_id: null },
+      label: `Interaction ${selection.interaction_id}`,
+    });
+  }
+  if (selection.request_kind.length) {
+    chips.push({
+      clear: { request_kind: [] },
+      label: `Request ${selection.request_kind.join(', ')}`,
+    });
+  }
+  if (selection.coverage_scope.length) {
+    chips.push({
+      clear: { coverage_scope: [] },
+      label: `Scope ${selection.coverage_scope.join(', ')}`,
+    });
+  }
+  if (selection.outcome) {
+    chips.push({ clear: { outcome: null }, label: `Result ${outcomeLabel(selection.outcome)}` });
+  }
   if (selection.collection_complete !== null) {
-    parts.push(selection.collection_complete ? 'collection closed' : 'collection incomplete only');
+    chips.push({
+      clear: { collection_complete: null },
+      label: selection.collection_complete ? 'Fully measured only' : 'Partly measured only',
+    });
   }
-  if (selection.job_id) parts.push(`job ${selection.job_id}`);
-  if (selection.thread_id) parts.push(`thread ${selection.thread_id}`);
-  if (selection.attempt_id) parts.push(`attempt ${selection.attempt_id}`);
-  if (selection.interaction_id) parts.push(`interaction ${selection.interaction_id}`);
-  // An attempt and an interaction select different records, so a selection
-  // carrying both is stated as the intersection it is rather than as one key.
-  if (selection.attempt_id && selection.interaction_id) {
-    parts.push('both, so only a record carrying each is listed');
-  }
-  return `Showing ${parts.join(' · ')}.`;
-}
-
-/** Whether a selection asks for something the wide-open default does not. */
-export function isFiltered(selection: MeasurementSelection): boolean {
-  return (
-    selection.operation.length > 0 ||
-    selection.request_kind.length > 0 ||
-    selection.coverage_scope.length > 0 ||
-    selection.outcome !== null ||
-    selection.collection_complete !== null ||
-    selection.job_id !== null ||
-    selection.thread_id !== null ||
-    selection.attempt_id !== null ||
-    selection.interaction_id !== null
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Record detail odds and ends
-// ---------------------------------------------------------------------------
-
-/** The record's facts as displayable pairs, sorted so two reads agree. */
-export function factLines(
-  facts: Record<string, unknown> | undefined,
-): { name: string; value: string }[] {
-  if (!facts) return [];
-  return Object.entries(facts)
-    .map(([name, value]) => ({ name, value: factValue(value) }))
-    .sort((left, right) => left.name.localeCompare(right.name));
-}
-
-/** A fact value, with a nested value shown rather than flattened into "[object]". */
-export function factValue(value: unknown): string {
-  if (value === null || value === undefined) return 'Not reported';
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-  try {
-    return JSON.stringify(value) ?? 'Not reported';
-  } catch {
-    // A fact that cannot be serialized is still a fact; say so rather than
-    // throwing away the row that held it.
-    return 'Unrenderable value';
-  }
-}
-
-/** The run's target selectors as displayable pairs. */
-export function targetLines(
-  target: Record<string, string> | undefined,
-): { name: string; value: string }[] {
-  if (!target) return [];
-  return Object.entries(target).map(([name, value]) => ({ name, value: value || 'Not reported' }));
-}
-
-/** How many records a run's summary was folded from, across every group. */
-export function summaryTotals(response: MeasurementSummaryResponse): {
-  samples: number;
-  eligible: number;
-  incomplete: number;
-  failed: number;
-  interactions: number;
-} {
-  return response.groups.reduce(
-    (total, group) => ({
-      samples: total.samples + group.sample_count,
-      eligible: total.eligible + group.eligible_count,
-      incomplete: total.incomplete + group.incomplete_count,
-      failed: total.failed + group.failed_count,
-      // Distinct interactions are not additive across groups -- one interaction
-      // can appear in several -- so the largest group's count is reported as a
-      // floor rather than a total this page cannot compute.
-      interactions: Math.max(total.interactions, group.interaction_count),
-    }),
-    { samples: 0, eligible: 0, incomplete: 0, failed: 0, interactions: 0 },
-  );
-}
-
-/** The one-line header for a detail read, naming what it is and is not. */
-export function detailHeading(
-  detail: Pick<MeasurementDetail, 'operation' | 'request_kind'>,
-): string {
-  return detail.request_kind && detail.request_kind !== detail.operation
-    ? `${detail.operation} · ${detail.request_kind}`
-    : detail.operation;
+  return chips;
 }

@@ -39,10 +39,10 @@ vi.mock('@/lib/api/adminRuns', () => ({
   getAdminLlmRequestSources: vi.fn(),
   getAdminLlmRequests: vi.fn(),
 }));
-// The startup panel reads the measurement surface, a different client. Mocked
+// The Startup line reads the measurement surface, a different client. Mocked
 // for the same reason the run client is: jsdom has no control plane to answer,
 // and a real fetch would fail these tests for a reason unrelated to what they
-// assert. The panel's own honesty rules are proven in its own test file.
+// assert.
 const measurements = vi.hoisted(() => ({
   listMeasurements: vi.fn(),
   getMeasurement: vi.fn(),
@@ -345,9 +345,9 @@ beforeEach(() => {
     next_cursor: null,
     reason: null,
   });
-  // The attempt detail also renders the startup panel. Its default answer here
-  // is "nothing stored", which is what an attempt that was never selected by an
-  // experiment legitimately has; the panel's own tests cover the other states.
+  // The header's Startup line reads the latest run's startup sample. Its default
+  // answer here is "nothing stored", which is what a turn has while measurement
+  // is off.
   vi.mocked(listMeasurements).mockResolvedValue({
     measurements: [],
     count: 0,
@@ -367,6 +367,61 @@ describe('run state badge', () => {
 });
 
 describe('admin run observation', () => {
+  it('shows the startup as one line that opens its breakdown', async () => {
+    vi.mocked(listMeasurements).mockResolvedValue({
+      measurements: [
+        {
+          measurement_id: 'msm_1',
+          operation: 'attempt.startup',
+          duration_us: 3_730_750,
+          outcome: 'dispatched',
+          collection_complete: true,
+        } as never,
+      ],
+      count: 1,
+      limit: 1,
+      next_cursor: null,
+    });
+    render(<AdminRunPage />);
+    const link = await screen.findByRole('link', { name: '3.73 s' });
+    expect(link).toHaveAttribute('href', '/admin/measurements?measurement=msm_1');
+    expect(screen.getByText('Startup', { selector: 'dt' })).toBeInTheDocument();
+    expect(vi.mocked(listMeasurements).mock.calls[0][0]).toMatchObject({
+      job_id: 'job-1',
+      operation: ['attempt.startup'],
+    });
+    // A successful startup needs no word beside its duration.
+    expect(screen.queryByText('OK')).not.toBeInTheDocument();
+  });
+
+  it('says a failed startup failed', async () => {
+    vi.mocked(listMeasurements).mockResolvedValue({
+      measurements: [
+        {
+          measurement_id: 'msm_2',
+          operation: 'attempt.startup',
+          duration_us: 60_403_510,
+          outcome: 'failed',
+          collection_complete: true,
+        } as never,
+      ],
+      count: 1,
+      limit: 1,
+      next_cursor: null,
+    });
+    render(<AdminRunPage />);
+    const link = await screen.findByRole('link', { name: '1 min 0 s' });
+    expect(link.parentElement).toHaveTextContent('Failed');
+  });
+
+  it('shows no startup line while measurement recorded nothing', async () => {
+    render(<AdminRunPage />);
+    await screen.findByText('Server', { selector: 'dt' });
+    await waitFor(() => expect(listMeasurements).toHaveBeenCalled());
+    expect(screen.queryByText('Startup', { selector: 'dt' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Startup measurement/)).not.toBeInTheDocument();
+  });
+
   it('shows where and when the turn ran as part of the turn', async () => {
     render(<AdminRunPage />);
     const facts = (await screen.findByText('Server', { selector: 'dt' })).closest('dl')!;

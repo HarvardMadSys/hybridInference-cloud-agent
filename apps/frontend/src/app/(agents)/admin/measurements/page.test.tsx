@@ -335,189 +335,291 @@ describe('admin measurements page', () => {
     expect(getMeasurementWriterStatus).not.toHaveBeenCalled();
   });
 
-  it('reads the newest experiments and one page of samples, and says what it covers', async () => {
+  async function timings(): Promise<HTMLElement> {
+    return (await screen.findByRole('heading', { name: 'Timings' })).closest('section')!;
+  }
+
+  function samples(): HTMLElement {
+    return screen.getByRole('heading', { name: 'Samples' }).closest('section')!;
+  }
+
+  /** The row button that expands a sample, by its operation label. */
+  async function sampleButton(label: string): Promise<HTMLElement> {
+    return within(samples()).findByRole('button', { name: label });
+  }
+
+  it('reads the newest run, its timings and its samples, and says they are server-side', async () => {
     render(<AdminMeasurementsPage />);
-    await screen.findByText('msm_1');
+    await sampleButton('File listing');
 
     expect(vi.mocked(listProfilingRuns).mock.calls[0][0]).toEqual({ limit: 50 });
-    // No experiment in the URL reads across experiments; the filter is absent
-    // rather than sent as an empty selector.
-    expect(vi.mocked(listMeasurements).mock.calls[0][0]).toMatchObject({ run_id: undefined });
-    // A distribution is about one experiment, so nothing asks for one yet.
-    expect(summarizeProfilingRun).not.toHaveBeenCalled();
+    // The page is about one run, the newest, until the admin picks another.
+    expect(vi.mocked(summarizeProfilingRun).mock.calls[0].slice(0, 2)).toEqual(['run-1', []]);
+    expect(vi.mocked(listMeasurements).mock.calls[0][0]).toMatchObject({ run_id: 'run-1' });
     expect(getMeasurement).not.toHaveBeenCalled();
-    expect(getMeasurementWriterStatus).toHaveBeenCalledTimes(1);
 
     const nav = screen.getByRole('navigation', { name: 'Admin sections' });
     expect(within(nav).getByRole('link', { name: 'Measurements' })).toHaveAttribute(
       'aria-current',
       'page',
     );
-    // Server coverage is stated before any number is read.
-    expect(screen.getByText('What these measurements cover')).toBeInTheDocument();
-    expect(screen.getByText(/Server-side measurements only/)).toBeInTheDocument();
-    expect(screen.getByText(/Browser-to-server time is not measured/)).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Local persistence writer' })).toBeInTheDocument();
-    expect(screen.getByText('Running')).toBeInTheDocument();
-  });
-
-  it('links an experiment, and once selected reads its manifest, samples and distribution', async () => {
-    render(<AdminMeasurementsPage />);
-    await screen.findByText('msm_1');
-    const experiments = screen.getByRole('heading', { name: 'Experiments' }).closest('section')!;
-    expect(within(experiments).getByRole('link', { name: 'run-1' })).toHaveAttribute(
-      'href',
-      '/admin/measurements?run=run-1',
+    // What every number covers is said once, where the page says what it is.
+    expect(screen.getByText('timed on the server')).toHaveAttribute(
+      'title',
+      expect.stringMatching(/none of these is the wait a user saw/),
     );
-
-    search.set('run=run-1');
-    await act(async () => {});
-    await waitFor(() => expect(summarizeProfilingRun).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(summarizeProfilingRun).mock.calls[0][0]).toBe('run-1');
-    expect(vi.mocked(listMeasurements).mock.calls.at(-1)?.[0]).toMatchObject({ run_id: 'run-1' });
-    expect(await screen.findByText('cp-1 (max_operations=500)')).toBeInTheDocument();
+    expect(within(await timings()).getByText('Run Sep 17, 10:00 UTC · host-a')).toBeInTheDocument();
+    expect(
+      within(await timings()).getByRole('rowheader', { name: 'File listing' }),
+    ).toBeInTheDocument();
+    // A writer that lost nothing is not something to read about.
+    expect(screen.queryByText(/lost on this server/)).not.toBeInTheDocument();
   });
 
-  it('does not render an empty page as zero latency', async () => {
-    vi.mocked(listMeasurements).mockResolvedValue(
-      page({
-        measurements: [],
-        count: 0,
-        empty_reason:
-          'no stored samples match this selection; the experiment may be off, unselected, undelivered',
+  it('reads no samples until it knows which run is the newest', async () => {
+    let answer: (value: Awaited<ReturnType<typeof listProfilingRuns>>) => void = () => {};
+    vi.mocked(listProfilingRuns).mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve;
       }),
     );
     render(<AdminMeasurementsPage />);
-    await screen.findByText(/No stored samples match this selection/);
-    expect(screen.getByText(/An empty page is not zero latency/)).toBeInTheDocument();
-    expect(screen.getByText(/collection switched off/)).toBeInTheDocument();
-    expect(screen.getByText(/older build/)).toBeInTheDocument();
-    // No row, and no table of zeros standing in for one.
-    expect(screen.queryByText('0 µs')).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'Open record' })).not.toBeInTheDocument();
-  });
-
-  it('never presents a page as the population', async () => {
-    vi.mocked(listMeasurements).mockResolvedValue(
-      page({ count: 50, limit: 50, next_cursor: 'msm_50' }),
-    );
-    render(<AdminMeasurementsPage />);
-    await screen.findByText(/50 of at most 50 rows/);
-    expect(screen.getByText(/A page is not the population/)).toBeInTheDocument();
-    expect(screen.getByText(/More rows follow/)).toBeInTheDocument();
-  });
-
-  it('pages with the cursor in the link, and offers the way back to the first page', async () => {
-    vi.mocked(listMeasurements).mockResolvedValue(
-      page({ count: 50, limit: 50, next_cursor: 'msm_50' }),
-    );
-    render(<AdminMeasurementsPage />);
-    await screen.findByRole('link', { name: 'Next page' });
-    expect(screen.getByRole('link', { name: 'Next page' })).toHaveAttribute(
-      'href',
-      '/admin/measurements?after=msm_50',
-    );
-    expect(screen.queryByRole('link', { name: 'First page' })).not.toBeInTheDocument();
-
-    search.set('run=run-1&after=msm_50');
     await act(async () => {});
-    await screen.findByRole('link', { name: 'First page' });
-    expect(vi.mocked(listMeasurements).mock.calls.at(-1)?.[0]).toMatchObject({
-      run_id: 'run-1',
-      after: 'msm_50',
-    });
-    expect(screen.getByRole('link', { name: 'First page' })).toHaveAttribute(
-      'href',
-      '/admin/measurements?run=run-1',
-    );
+    // Reading every run first and the newest one later would flash a list the
+    // page is not about.
+    expect(listMeasurements).not.toHaveBeenCalled();
+
+    await act(async () => answer({ runs: [run({ run_id: 'run-7' })], count: 1, limit: 50 }));
+    await waitFor(() => expect(listMeasurements).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(listMeasurements).mock.calls[0][0]).toMatchObject({ run_id: 'run-7' });
   });
 
-  it('states each row’s completeness rather than calling a partial row whole', async () => {
+  it('reads every run for a link that names records, and shows what narrows it', async () => {
+    search.value = 'job_id=ajob_1&attempt_id=42';
+    render(<AdminMeasurementsPage />);
+    await within(samples()).findByText('From every run, only');
+
+    expect(vi.mocked(listMeasurements).mock.calls[0][0]).toMatchObject({
+      job_id: 'ajob_1',
+      attempt_id: 42,
+    });
+    expect(vi.mocked(listMeasurements).mock.calls[0][0].run_id).toBeUndefined();
+    // A run's timings are not what this link asked about.
+    expect(summarizeProfilingRun).not.toHaveBeenCalled();
+    expect(screen.queryByRole('heading', { name: 'Timings' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove filter: Startup #42' }));
+    await waitFor(() => expect(listMeasurements).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(listMeasurements).mock.calls[1][0]).toMatchObject({ job_id: 'ajob_1' });
+    expect(vi.mocked(listMeasurements).mock.calls[1][0].attempt_id).toBeUndefined();
+
+    // With nothing naming records, the page is about the newest run again.
+    fireEvent.click(screen.getByRole('button', { name: 'Remove filter: Turn ajob_1' }));
+    await waitFor(() => expect(listMeasurements).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(listMeasurements).mock.calls[2][0]).toMatchObject({ run_id: 'run-1' });
+    await waitFor(() => expect(summarizeProfilingRun).toHaveBeenCalledTimes(1));
+  });
+
+  it('reads nothing at all for a link it cannot serve, rather than widening it', async () => {
+    search.value = 'run=run-1&host=host-a';
+    const replace = vi.spyOn(window.history, 'replaceState');
+    render(<AdminMeasurementsPage />);
+    await screen.findByText(/Unsupported filter: host\. Nothing was read\./);
+    expect(listProfilingRuns).not.toHaveBeenCalled();
+    expect(listMeasurements).not.toHaveBeenCalled();
+    // Writing the default selection back would replace the link being reported.
+    await act(async () => {});
+    expect(replace).not.toHaveBeenCalled();
+    expect(screen.getByRole('link', { name: 'Show all measurements' })).toHaveAttribute(
+      'href',
+      '/admin/measurements',
+    );
+    replace.mockRestore();
+  });
+
+  it('refuses an attempt_id link it cannot serve, before reading anything', async () => {
+    search.value = 'attempt_id=latest';
+    render(<AdminMeasurementsPage />);
+    await screen.findByText(/not an attempt number/);
+    expect(listMeasurements).not.toHaveBeenCalled();
+  });
+
+  it('opens an old paged link at its first page', async () => {
+    search.value = 'run=run-1&after=msm_9';
+    const replace = vi.spyOn(window.history, 'replaceState');
+    render(<AdminMeasurementsPage />);
+    await sampleButton('File listing');
+    expect(vi.mocked(listMeasurements).mock.calls[0][0].after).toBeUndefined();
+    await waitFor(() => expect(replace).toHaveBeenCalled());
+    expect(String(replace.mock.calls.at(-1)?.[2])).toBe('/?run=run-1');
+    replace.mockRestore();
+  });
+
+  it('names each sample by what it measured, and flags only the ones that need a look', async () => {
     vi.mocked(listMeasurements).mockResolvedValue(
       page({
         measurements: [
-          row({ measurement_id: 'msm_ok' }),
+          row({
+            measurement_id: 'msm_start',
+            operation: 'attempt.startup',
+            request_kind: 'attempt.startup',
+            coverage_scope: 'host_startup',
+            startup_path: 'new_group',
+            outcome: 'dispatched',
+            duration_us: 12_401_792,
+          }),
+          row({ measurement_id: 'msm_failed', outcome: 'failed' }),
           row({
             measurement_id: 'msm_partial',
+            operation: 'files.open',
+            request_kind: 'files.read',
             collection_complete: false,
-            outcome: 'failed',
           }),
         ],
-        count: 2,
+        count: 3,
       }),
     );
     render(<AdminMeasurementsPage />);
-    await screen.findByText('msm_partial');
-    expect(screen.getAllByText('Collection closed · Server-side only').length).toBe(1);
-    expect(screen.getByText('Collection incomplete · Server-side only')).toBeInTheDocument();
-    expect(screen.getByText('Failed')).toBeInTheDocument();
+    const startup = await sampleButton('Sandbox startup · new sandbox');
+    const row1 = startup.closest('tr')!;
+    expect(within(row1).getByText('12.40 s')).toHaveAttribute('title', '12,401,792 µs');
+    expect(within(row1).getByText('OK')).toBeInTheDocument();
+    expect(
+      within((await sampleButton('File listing')).closest('tr')!).getByText('Failed'),
+    ).toBeInTheDocument();
+    expect(
+      within((await sampleButton('File opening · read file')).closest('tr')!).getByText(
+        'Partly measured',
+      ),
+    ).toBeInTheDocument();
   });
 
-  it('expands one frozen record with its stages, shares and attached children', async () => {
-    render(<AdminMeasurementsPage />);
-    await screen.findByText('msm_1');
-    // A link click needs a mounted app router; what the page promises is the
-    // URL, and the URL is what re-reads the record.
-    expect(screen.getByRole('link', { name: 'Open record' })).toHaveAttribute(
-      'href',
-      '/admin/measurements?measurement=msm_1',
+  it('keeps an unknown coverage scope visibly unknown', async () => {
+    vi.mocked(listMeasurements).mockResolvedValue(
+      page({ measurements: [row({ coverage_scope: 'browser_interaction' })] }),
     );
-    search.set('measurement=msm_1');
-    await act(async () => {});
+    render(<AdminMeasurementsPage />);
+    expect(
+      await sampleButton('File listing · browser_interaction (unknown scope)'),
+    ).toBeInTheDocument();
+  });
 
-    expect(await screen.findByText('files.list — frozen record')).toBeInTheDocument();
+  it('filters by operation and writes the selection to the address bar', async () => {
+    const replace = vi.spyOn(window.history, 'replaceState');
+    render(<AdminMeasurementsPage />);
+    await sampleButton('File listing');
+
+    fireEvent.change(within(samples()).getByLabelText('Operation'), {
+      target: { value: 'files.open' },
+    });
+    await waitFor(() => expect(listMeasurements).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(listMeasurements).mock.calls[1][0]).toMatchObject({
+      run_id: 'run-1',
+      operation: ['files.open'],
+    });
+    await waitFor(() => expect(replace).toHaveBeenCalled());
+    expect(String(replace.mock.calls.at(-1)?.[2])).toBe('/?operation=files.open');
+    // The run's timings do not depend on the list's filter.
+    expect(summarizeProfilingRun).toHaveBeenCalledTimes(1);
+    replace.mockRestore();
+  });
+
+  it('shows several linked operations rather than pretending to one of them', async () => {
+    search.value = 'operation=files.list&operation=files.open';
+    render(<AdminMeasurementsPage />);
+    await sampleButton('File listing');
+    expect(within(samples()).getByLabelText('Operation')).toHaveDisplayValue(
+      'File listing, File opening',
+    );
+  });
+
+  it('expands a sample into where its time went, without re-reading the list', async () => {
+    const replace = vi.spyOn(window.history, 'replaceState');
+    render(<AdminMeasurementsPage />);
+    const button = await sampleButton('File listing');
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(button);
+    const timeline = await screen.findByRole('table', { name: 'Where the time went' });
     expect(vi.mocked(getMeasurement).mock.calls[0][0]).toBe('msm_1');
-    const stages = screen.getByRole('heading', { name: 'Stage timings' }).parentElement!;
-    expect(within(stages).getByText('resolve')).toBeInTheDocument();
-    expect(within(stages).getByText('read')).toBeInTheDocument();
-    expect(within(stages).getByText('broker.fetch')).toBeInTheDocument();
+    expect(listMeasurements).toHaveBeenCalledTimes(1);
+    expect(button).toHaveAttribute('aria-expanded', 'true');
+    await waitFor(() => expect(String(replace.mock.calls.at(-1)?.[2])).toBe('/?measurement=msm_1'));
+
     // 500 µs and 2000 µs are their shares of the 2500 µs record.
-    expect(within(stages).getByText('20%')).toBeInTheDocument();
-    expect(within(stages).getByText('80%')).toBeInTheDocument();
-    // An attached child has no share of this record's timeline and says so.
-    expect(within(stages).getByText('attached')).toBeInTheDocument();
-    expect(within(stages).getByText('Not on this timeline')).toBeInTheDocument();
-    expect(within(stages).getByText(/not part of the total above/)).toBeInTheDocument();
+    expect(within(timeline).getByRole('rowheader', { name: 'Resolve' })).toBeInTheDocument();
+    const read = within(timeline).getByRole('rowheader', { name: 'Read' }).closest('tr')!;
+    expect(within(read).getByText('2 ms')).toBeInTheDocument();
+    expect(within(read).getByText('80%')).toBeInTheDocument();
+    // Another process's duration sits under its stage, with no share of this one.
+    const fetch = within(timeline).getByText('Broker fetch').closest('tr')!;
+    expect(within(fetch).getByText(/broker/)).toBeInTheDocument();
+    expect(within(fetch).getByText('1.8 ms')).toBeInTheDocument();
+    expect(fetch.querySelectorAll('td')[2]).toHaveTextContent('');
+    expect(within(timeline).getByRole('rowheader', { name: 'Total' })).toBeInTheDocument();
+    // Everything else the record carries is one click away, not on the page.
+    expect(screen.getByText('Raw record')).toBeInTheDocument();
+    expect(screen.getByText(/"payload_hash": "sha256:abc"/)).not.toBeVisible();
+
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(screen.queryByRole('table', { name: 'Where the time went' })).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(String(replace.mock.calls.at(-1)?.[2])).toBe('/'));
+    replace.mockRestore();
   });
 
-  it('links a record to the exact attempt and interaction it belongs to', async () => {
-    vi.mocked(getMeasurement).mockResolvedValue(detail({ attempt_id: 42 }));
+  it('shows time no stage covers as its own row', async () => {
+    vi.mocked(getMeasurement).mockResolvedValue(
+      detail({
+        operation: 'attempt.startup',
+        request_kind: 'attempt.startup',
+        coverage_scope: 'host_startup',
+        attempt_id: 52,
+        record: record({
+          operation: 'attempt.startup',
+          coverage_scope: 'host_startup',
+          duration_us: 7_034_534,
+          spans: [
+            {
+              span_id: 's1',
+              name: 'claim',
+              ordinal: 1,
+              start_offset_us: 32,
+              duration_us: 325_559,
+              outcome: 'ok',
+            },
+          ],
+          stages: [
+            { stage: 'validate', start_offset_us: 5_617_043, duration_us: 950_341 },
+            { stage: 'prompt_dispatch', start_offset_us: 6_567_384, duration_us: 467_150 },
+          ],
+        }),
+      }),
+    );
+    search.value = 'measurement=msm_1';
     render(<AdminMeasurementsPage />);
-    await screen.findByText('msm_1');
-    search.set('measurement=msm_1');
-    await act(async () => {});
-
-    // Two different precise keys, not a job-wide read: the attempt names this
-    // execution and the interaction names the one logical interaction.
-    const interaction = await screen.findByRole('link', { name: 'msm_1' });
-    expect(interaction).toHaveAttribute('href', expect.stringContaining('interaction_id=msm_1'));
-    const attempt = screen.getByRole('link', { name: '42' });
-    expect(attempt).toHaveAttribute('href', expect.stringContaining('attempt_id=42'));
+    const timeline = await screen.findByRole('table', { name: 'Where the time went' });
+    const gap = within(timeline).getByRole('rowheader', { name: 'No stage recorded' });
+    expect(gap).toHaveAttribute('title', expect.stringMatching(/no stage or span/));
+    expect(within(gap.closest('tr')!).getByText('5.29 s')).toBeInTheDocument();
+    expect(within(gap.closest('tr')!).getByText('75.2%')).toBeInTheDocument();
+    expect(
+      screen.getByText(/runner claiming the turn to the prompt reaching the agent/),
+    ).toBeInTheDocument();
+    // Attempts are an engineering fallback; the admin never names them.
+    expect(screen.queryByText(/Attempt/)).not.toBeInTheDocument();
   });
 
-  it('says an unattributed startup and a non-startup differ when neither has an attempt', async () => {
-    // A file or terminal request genuinely has no attempt; a startup whose
-    // attribution never arrived is a different absence. Rendering both as
-    // "no attempt" would hide which one an operator is looking at.
-    vi.mocked(getMeasurement).mockResolvedValue(detail({ attempt_id: null }));
-    render(<AdminMeasurementsPage />);
-    await screen.findByText('msm_1');
-    search.set('measurement=msm_1');
-    await act(async () => {});
-    expect(await screen.findByText('Not a startup record')).toBeInTheDocument();
-  });
-
-  it('shows a partial record as partial, with its failure stage and missing fragments', async () => {
+  it('lists every reason a sample is partial, and marks a floor as a floor', async () => {
     vi.mocked(getMeasurement).mockResolvedValue(
       detail({
         collection_complete: false,
         outcome: 'failed',
-        end_to_end_complete: false,
         record: record({
           collection_complete: false,
           outcome: 'failed',
           failure_stage: 'sandbox.start',
-          truncated: true,
           missing_fragments: ['broker:call-2:sandbox.start'],
           missing_producers: ['broker'],
           truncated_fragments: ['broker:call-1'],
@@ -525,7 +627,7 @@ describe('admin measurements page', () => {
             {
               stage: 'sandbox.start',
               start_offset_us: 0,
-              duration_us: 1200,
+              duration_us: 2500,
               children: [
                 {
                   stage: 'broker.wake',
@@ -541,241 +643,280 @@ describe('admin measurements page', () => {
         }),
       }),
     );
+    search.value = 'measurement=msm_1';
     render(<AdminMeasurementsPage />);
-    await screen.findByText('msm_1');
-    search.set('measurement=msm_1');
-    await act(async () => {});
 
     const notice = await screen.findByRole('alert');
-    expect(within(notice).getByText(/does not describe a whole operation/)).toBeInTheDocument();
+    expect(within(notice).getByText(/Collection did not close/)).toBeInTheDocument();
     expect(within(notice).getByText(/Failed at stage “sandbox.start”/)).toBeInTheDocument();
     expect(within(notice).getByText(/broker:call-1/)).toBeInTheDocument();
     expect(
       within(notice).getByText(/never answered: broker:call-2:sandbox.start/),
     ).toBeInTheDocument();
     expect(within(notice).getByText(/never reported: broker/)).toBeInTheDocument();
-    // Both completeness flags stay visible, and neither is collapsed into the other.
-    const recordSection = screen
-      .getByRole('heading', { name: 'files.list — frozen record' })
-      .closest('section')!;
-    // The outcome is shown beside them, not instead of them.
-    expect(within(recordSection).getAllByText('Failed').length).toBeGreaterThan(1);
-    expect(within(recordSection).getByText('Outcome')).toBeInTheDocument();
-    expect(within(recordSection).getByText('Failure stage')).toBeInTheDocument();
-    expect(within(recordSection).getAllByText('sandbox.start').length).toBeGreaterThan(0);
-    expect(within(recordSection).getByText('Collection')).toBeInTheDocument();
-    expect(within(recordSection).getByText(/Collection did not close/)).toBeInTheDocument();
-    expect(within(recordSection).getByText('End to end')).toBeInTheDocument();
-    expect(within(recordSection).getByText(/Not covered: server-side only/)).toBeInTheDocument();
-    expect(
-      within(recordSection).getByText(/Observed up to the collection deadline/),
-    ).toBeInTheDocument();
-    expect(within(recordSection).getByText('call call-1')).toBeInTheDocument();
+    const timeline = screen.getByRole('table', { name: 'Where the time went' });
+    const wake = within(timeline).getByText('Broker wake').closest('tr')!;
+    expect(within(wake).getByText('Failed')).toBeInTheDocument();
+    expect(within(wake).getByText('≥ 900 µs')).toHaveAttribute(
+      'title',
+      expect.stringMatching(/a floor/),
+    );
   });
 
-  it('does not claim completeness for a record with no reasons listed', async () => {
+  it('says nothing is wrong by saying nothing', async () => {
+    search.value = 'measurement=msm_1';
     render(<AdminMeasurementsPage />);
-    await screen.findByText('msm_1');
-    search.set('measurement=msm_1');
-    await act(async () => {});
-    await screen.findByText('Nothing flags this record as partial');
-    expect(screen.getByText(/That is not a claim of completeness/)).toBeInTheDocument();
-    // The record is still not end-to-end, and says so beside the "no reasons" line.
-    expect(screen.getByText(/Not covered: server-side only/)).toBeInTheDocument();
+    await screen.findByRole('table', { name: 'Where the time went' });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('keeps an unknown coverage scope visibly unknown', async () => {
+  it('links a sample to its conversation and turn, and a terminal opening to its other requests', async () => {
     vi.mocked(listMeasurements).mockResolvedValue(
-      page({ measurements: [row({ coverage_scope: 'browser_interaction' })] }),
+      page({
+        measurements: [
+          row({
+            measurement_id: 'msm_t',
+            interaction_id: 'aint_1',
+            operation: 'terminal.open',
+            request_kind: 'terminal.create',
+          }),
+        ],
+      }),
+    );
+    vi.mocked(getMeasurement).mockResolvedValue(
+      detail({
+        measurement_id: 'msm_t',
+        interaction_id: 'aint_1',
+        operation: 'terminal.open',
+        request_kind: 'terminal.create',
+      }),
     );
     render(<AdminMeasurementsPage />);
-    await screen.findByText('browser_interaction (unknown scope)');
-    // The notice above names both known scopes; the row is what must not claim one.
-    const measured = screen.getByText('browser_interaction (unknown scope)').closest('tr')!;
-    expect(within(measured).queryByText('Server request')).not.toBeInTheDocument();
+    fireEvent.click(await sampleButton('Terminal opening · create terminal'));
+
+    expect(await screen.findByRole('link', { name: 'Session' })).toHaveAttribute(
+      'href',
+      '/admin/sessions/athr_1',
+    );
+    expect(screen.getByRole('link', { name: 'Turn' })).toHaveAttribute(
+      'href',
+      '/admin/runs/ajob_1',
+    );
+    // A file or terminal request has no attempt, and that is not worth a word.
+    expect(screen.queryByText(/Attempt/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Every request of this terminal opening' }));
+    await waitFor(() => expect(listMeasurements).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(listMeasurements).mock.calls[1][0]).toMatchObject({
+      run_id: 'run-1',
+      interaction_id: 'aint_1',
+    });
+    expect(within(samples()).getByText('Only')).toBeInTheDocument();
+    expect(
+      within(samples()).getByRole('button', { name: 'Remove filter: Interaction aint_1' }),
+    ).toBeInTheDocument();
   });
 
-  it('aggregates in SQL over the whole experiment and says what was excluded', async () => {
-    search.value = 'run=run-1';
+  it('opens a sample a link names even when it is not on the page it read', async () => {
+    vi.mocked(getMeasurement).mockResolvedValue(detail({ measurement_id: 'msm_9' }));
+    search.value = 'measurement=msm_9';
     render(<AdminMeasurementsPage />);
-    await screen.findByText(/Computed in SQL over the whole experiment/);
-    expect(screen.getByText(/not filtered by the form above/)).toBeInTheDocument();
-    expect(
-      screen.getByText(/3 with collection incomplete and 2 not successful/),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/may count one sample twice/)).toBeInTheDocument();
-    expect(
-      screen.getByText(/30 stored sample\(s\), 12 interaction\(s\), 25 eligible/),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/excluded: 3 with collection incomplete, 2 not successful/),
-    ).toBeInTheDocument();
-    const distribution = screen
-      .getByRole('heading', { name: 'Distribution over the whole experiment' })
-      .closest('section')!;
-    expect(within(distribution).getByText('operation=files.list')).toBeInTheDocument();
-    expect(within(distribution).getByText('startup_path=Not a startup')).toBeInTheDocument();
-    expect(within(distribution).getByText('coverage_scope=server_request')).toBeInTheDocument();
+    expect(await within(samples()).findByText('Sample msm_9')).toBeInTheDocument();
+    await screen.findByRole('table', { name: 'Where the time went' });
+    expect(vi.mocked(getMeasurement).mock.calls[0][0]).toBe('msm_9');
+
+    fireEvent.click(within(samples()).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByText('Sample msm_9')).not.toBeInTheDocument());
   });
 
-  it('flags a percentile computed from too few samples, and unknown percentiles as unknown', async () => {
-    search.value = 'run=run-1';
+  it('follows the address bar when a link changes it', async () => {
+    render(<AdminMeasurementsPage />);
+    await sampleButton('File listing');
+    search.set('measurement=msm_1');
+    await screen.findByRole('table', { name: 'Where the time went' });
+    expect(getMeasurement).toHaveBeenCalledTimes(1);
+    // Opening a sample is not a new question about the run.
+    expect(listMeasurements).toHaveBeenCalledTimes(1);
+    expect(listProfilingRuns).toHaveBeenCalledTimes(1);
+  });
+
+  it('says there are no samples rather than showing a zero', async () => {
+    vi.mocked(listMeasurements).mockResolvedValue(
+      page({ measurements: [], count: 0, empty_reason: 'no stored samples match this selection' }),
+    );
+    render(<AdminMeasurementsPage />);
+    const empty = await within(samples()).findByText(/No samples yet\./);
+    expect(empty).toHaveAttribute('title', 'no stored samples match this selection');
+    expect(screen.queryByText('0 µs')).not.toBeInTheDocument();
+
+    fireEvent.change(within(samples()).getByLabelText('Operation'), {
+      target: { value: 'files.open' },
+    });
+    expect(
+      await within(samples()).findByText('No samples match these filters.'),
+    ).toBeInTheDocument();
+  });
+
+  it('loads more samples after the last one it has', async () => {
+    vi.mocked(listMeasurements)
+      .mockResolvedValueOnce(page({ next_cursor: 'msm_1' }))
+      .mockResolvedValueOnce(
+        page({
+          measurements: [
+            row({ measurement_id: 'msm_2', operation: 'files.open', request_kind: 'files.open' }),
+          ],
+          next_cursor: null,
+        }),
+      );
+    render(<AdminMeasurementsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more samples' }));
+    await sampleButton('File opening');
+    expect(vi.mocked(listMeasurements).mock.calls[1][0]).toMatchObject({
+      run_id: 'run-1',
+      after: 'msm_1',
+    });
+    expect(await sampleButton('File listing')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Load more samples' })).not.toBeInTheDocument();
+  });
+
+  it('summarizes a run with what was left out counted, not hidden', async () => {
+    render(<AdminMeasurementsPage />);
+    const row = (
+      await within(await timings()).findByRole('rowheader', { name: 'File listing' })
+    ).closest('tr')!;
+    expect(within(row).getByText('30')).toBeInTheDocument();
+    const excluded = within(row).getByText('(5 not counted)');
+    expect(excluded).toHaveAttribute(
+      'title',
+      expect.stringMatching(
+        /3 with collection incomplete, 2 not successful.*one sample can be both/,
+      ),
+    );
+    expect(within(row).getByText('500 µs')).toBeInTheDocument();
+    expect(within(row).getByText('2.5 ms')).toBeInTheDocument();
+    expect(within(row).getByText('9 ms')).toBeInTheDocument();
+    expect(within(row).getByText('20 ms')).toBeInTheDocument();
+    expect(screen.queryByText(/rough figure/)).not.toBeInTheDocument();
+  });
+
+  it('renders a percentile with nothing to compute from as a dash, and flags small samples', async () => {
     vi.mocked(summarizeProfilingRun).mockResolvedValue({
       run_id: 'run-1',
       groups: [
-        group({ eligible_count: 3, p50_us: null, p95_us: null, min_us: null, max_us: null }),
+        group({ eligible_count: 0, p50_us: null, p95_us: null, min_us: null, max_us: null }),
       ],
     });
     render(<AdminMeasurementsPage />);
-    await screen.findByText(/Fewer than 20 eligible samples/);
-    expect(screen.getAllByText('Unavailable').length).toBeGreaterThanOrEqual(4);
-    expect(screen.queryByText('0 µs')).not.toBeInTheDocument();
+    const row = (
+      await within(await timings()).findByRole('rowheader', { name: 'File listing' })
+    ).closest('tr')!;
+    const dashes = within(row).getAllByText('—');
+    expect(dashes).toHaveLength(4);
+    expect(dashes[0]).toHaveAttribute('title', expect.stringMatching(/nothing to compute/));
+    expect(
+      screen.getByText(/fewer than 20 counted samples gives only a rough figure/),
+    ).toBeInTheDocument();
   });
 
-  it('says an experiment with no stored samples has nothing to compute, not zero', async () => {
-    search.value = 'run=run-1';
-    vi.mocked(summarizeProfilingRun).mockResolvedValue({ run_id: 'run-1', groups: [] });
-    render(<AdminMeasurementsPage />);
-    await screen.findByText(/returned no groups at all/);
-    expect(screen.getByText(/Percentiles are not zero/)).toBeInTheDocument();
-  });
-
-  it('applies filters, drops the cursor, and writes the selection to the address bar', async () => {
-    search.value = 'run=run-1&after=msm_9';
+  it('offers the other runs when there are several, and reads the one picked', async () => {
+    vi.mocked(listProfilingRuns).mockResolvedValue({
+      runs: [
+        run({ run_id: 'run-2', created_at: '2026-09-18T09:30:00Z', target: {} }),
+        run({ run_id: 'run-1' }),
+      ],
+      count: 2,
+      limit: 50,
+    });
     const replace = vi.spyOn(window.history, 'replaceState');
     render(<AdminMeasurementsPage />);
-    await screen.findByText('msm_1');
+    const picker = await within(await timings()).findByLabelText('Run');
+    expect(picker).toHaveDisplayValue('Sep 18, 09:30 UTC · all hosts');
+    expect(vi.mocked(summarizeProfilingRun).mock.calls[0][0]).toBe('run-2');
 
-    fireEvent.change(screen.getByLabelText('Operations'), {
-      target: { value: 'files.list, files.open' },
-    });
-    fireEvent.change(screen.getByLabelText('Collection'), { target: { value: 'false' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
-
-    await waitFor(() => expect(listMeasurements).toHaveBeenCalledTimes(2));
-    // A cursor is a position in one ordering; a new selection cannot resume it.
-    expect(vi.mocked(listMeasurements).mock.calls[1][0]).toMatchObject({
-      run_id: 'run-1',
-      operation: ['files.list', 'files.open'],
-      collection_complete: false,
-      after: undefined,
-    });
-    await waitFor(() => expect(replace).toHaveBeenCalled());
-    const written = String(replace.mock.calls.at(-1)?.[2]);
-    expect(written).toContain('operation=files.list');
-    expect(written).toContain('operation=files.open');
-    expect(written).toContain('collection_complete=false');
-    expect(written).not.toContain('after=');
+    fireEvent.change(picker, { target: { value: 'run-1' } });
+    await waitFor(() => expect(summarizeProfilingRun).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(summarizeProfilingRun).mock.calls[1][0]).toBe('run-1');
+    await waitFor(() =>
+      expect(vi.mocked(listMeasurements).mock.calls.at(-1)?.[0]).toMatchObject({ run_id: 'run-1' }),
+    );
+    await waitFor(() => expect(String(replace.mock.calls.at(-1)?.[2])).toBe('/?run=run-1'));
     replace.mockRestore();
   });
 
-  it('filters by an attempt and by an interaction as two distinct keys', async () => {
-    search.value = 'run=run-1';
-    const replace = vi.spyOn(window.history, 'replaceState');
-    render(<AdminMeasurementsPage />);
-    await screen.findByText('msm_1');
-
-    fireEvent.change(screen.getByLabelText('Attempt ID'), { target: { value: '42' } });
-    fireEvent.change(screen.getByLabelText('Interaction ID'), { target: { value: 'aint_1' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
-
-    await waitFor(() => expect(listMeasurements).toHaveBeenCalledTimes(2));
-    expect(vi.mocked(listMeasurements).mock.calls[1][0]).toMatchObject({
-      run_id: 'run-1',
-      attempt_id: 42,
-      interaction_id: 'aint_1',
+  it('shows lost samples only when this server lost some', async () => {
+    vi.mocked(getMeasurementWriterStatus).mockResolvedValue({
+      scope: 'this_control_plane_process',
+      running: true,
+      pending: 0,
+      in_flight: 0,
+      queued_bytes: 0,
+      counts: {
+        stored: 4,
+        duplicate: 0,
+        rejected: 0,
+        conflict: 0,
+        dropped_full: 2,
+        dropped_timeout: 1,
+        dropped_shutdown: 0,
+        failed: 0,
+        reasons: {},
+      },
     });
-    const written = String(replace.mock.calls.at(-1)?.[2]);
-    expect(written).toContain('attempt_id=42');
-    expect(written).toContain('interaction_id=aint_1');
-    replace.mockRestore();
-  });
-
-  it('refuses an attempt id that is not a number instead of reading every attempt', async () => {
-    search.value = 'run=run-1';
     render(<AdminMeasurementsPage />);
-    await screen.findByText('msm_1');
-
-    fireEvent.change(screen.getByLabelText('Attempt ID'), { target: { value: 'latest' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
-
-    await screen.findByText(/attempt_id=latest, which is not an attempt number/);
-    // Nothing was re-read: a widened page under the old heading would be the
-    // one outcome this page exists to avoid.
-    expect(listMeasurements).toHaveBeenCalledTimes(1);
-  });
-
-  it('refuses an attempt_id link it cannot serve, before reading anything', async () => {
-    search.value = 'run=run-1&attempt_id=latest';
-    render(<AdminMeasurementsPage />);
-    await screen.findByRole('alert');
-    expect(screen.getByText(/not an attempt number/)).toBeInTheDocument();
-    expect(listMeasurements).not.toHaveBeenCalled();
+    const lost = await screen.findByText(/3 samples were lost on this server/);
+    expect(lost).toHaveAttribute(
+      'title',
+      expect.stringMatching(/2 dropped with the queue full, 1 timed out.*not across every replica/),
+    );
   });
 
   it('reports a revoked session instead of keeping the records it already read', async () => {
     render(<AdminMeasurementsPage />);
-    await screen.findByText('msm_1');
+    await sampleButton('File listing');
     vi.mocked(listMeasurements).mockRejectedValueOnce(new APIError('INVALID_TOKEN', 'no', 403));
-    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+    fireEvent.change(within(samples()).getByLabelText('Operation'), {
+      target: { value: 'files.open' },
+    });
     await screen.findByText('Admin access required');
-    expect(screen.queryByText('msm_1')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'File listing' })).not.toBeInTheDocument();
   });
 
-  it('shows a failed read as an error and keeps the previous successful one', async () => {
+  it('shows a failed refresh as an error and keeps the previous read', async () => {
     render(<AdminMeasurementsPage />);
-    await screen.findByText('msm_1');
+    await sampleButton('File listing');
     vi.mocked(listMeasurements).mockRejectedValueOnce(new APIError('SERVER_ERROR', 'boom', 500));
-    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
-    await screen.findByRole('alert');
-    expect(screen.getByText(/last refresh failed/)).toBeInTheDocument();
-    expect(screen.getByText('msm_1')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await within(samples()).findByText(/showing the previous read/);
+    expect(await sampleButton('File listing')).toBeInTheDocument();
   });
 
-  it('reads nothing at all for a link it cannot serve, rather than widening it', async () => {
-    search.value = 'run=run-1&host=host-a';
-    const replace = vi.spyOn(window.history, 'replaceState');
+  it('drops the previous list when a new filter’s read fails, rather than showing it under the new one', async () => {
     render(<AdminMeasurementsPage />);
-    await screen.findByRole('alert');
-    expect(screen.getByText(/Unsupported filter: host/)).toBeInTheDocument();
-    expect(listProfilingRuns).not.toHaveBeenCalled();
-    expect(listMeasurements).not.toHaveBeenCalled();
-    // Writing the default selection back would replace the link being reported.
-    await act(async () => {});
-    expect(replace).not.toHaveBeenCalled();
-    expect(screen.getByRole('link', { name: 'Read all experiments instead' })).toHaveAttribute(
-      'href',
-      '/admin/measurements',
-    );
-    replace.mockRestore();
-  });
-
-  it('says when the selected experiment is not in the catalogue page it read', async () => {
-    search.value = 'run=run-not-listed';
-    render(<AdminMeasurementsPage />);
-    await screen.findByText(/is not among the 1 catalogue rows read here/);
-    expect(screen.getByText(/a wider catalogue would be a different question/)).toBeInTheDocument();
-  });
-
-  it('says which experiment its summary belongs to and reads the whole of it', async () => {
-    search.value = 'run=run-1';
-    render(<AdminMeasurementsPage />);
-    await screen.findByText('Distribution over the whole experiment');
-    expect(vi.mocked(summarizeProfilingRun).mock.calls[0][1]).toEqual([]);
+    await sampleButton('File listing');
+    vi.mocked(listMeasurements).mockRejectedValueOnce(new APIError('list_failed', 'boom', 500));
+    fireEvent.change(within(samples()).getByLabelText('Operation'), {
+      target: { value: 'files.open' },
+    });
+    await within(samples()).findByText('boom');
+    expect(
+      within(samples()).queryByRole('button', { name: 'File listing' }),
+    ).not.toBeInTheDocument();
+    expect(within(samples()).queryByText(/showing the previous read/)).not.toBeInTheDocument();
   });
 
   it('re-reads every panel on Refresh without losing the selection', async () => {
-    search.value = 'run=run-1&operation=files.list';
+    search.value = 'run=run-1&operation=files.list&measurement=msm_1';
     render(<AdminMeasurementsPage />);
-    await screen.findByText('msm_1');
-    expect(listProfilingRuns).toHaveBeenCalledTimes(1);
+    await screen.findByRole('table', { name: 'Where the time went' });
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(listProfilingRuns).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(summarizeProfilingRun).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(getMeasurement).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(getMeasurementWriterStatus).toHaveBeenCalledTimes(2));
     expect(vi.mocked(listMeasurements).mock.calls.at(-1)?.[0]).toMatchObject({
       run_id: 'run-1',
       operation: ['files.list'],
     });
-    await waitFor(() => expect(summarizeProfilingRun).toHaveBeenCalledTimes(2));
   });
 });
 
@@ -798,31 +939,31 @@ describe('measurement collection control', () => {
 
   /** Open the inline form and wait until the host menu it reads has arrived. */
   async function openForm(): Promise<void> {
-    fireEvent.click(await screen.findByRole('button', { name: 'Enable measurement' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Turn on' }));
     await screen.findByRole('option', { name: 'host-a' });
   }
 
   /** The form's own primary button; the toggle is gone while the form is open. */
   function submit(): void {
-    fireEvent.click(screen.getByRole('button', { name: 'Enable measurement' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on' }));
   }
 
-  it('says Off and offers exactly one button, labelled Enable measurement', async () => {
+  it('says off and offers exactly one button, labelled Turn on', async () => {
     render(<AdminMeasurementsPage />);
-    await screen.findByRole('button', { name: 'Enable measurement' });
+    await screen.findByRole('button', { name: 'Turn on' });
 
-    expect(within(card()).getByText('Disabled')).toBeInTheDocument();
+    expect(within(card()).getByText('Measurement off')).toBeInTheDocument();
     // One button, never two: nothing here offers to stop what is not running.
     expect(within(card()).getAllByRole('button')).toHaveLength(1);
     expect(within(card()).queryByRole('button', { name: /disable/i })).not.toBeInTheDocument();
   });
 
   it.each<[ProfilingControlStatus, string, RegExp]>([
-    ['unavailable', 'Unavailable', /This deployment is not configured for Admin control/],
+    ['unavailable', 'Measurement unavailable', /not set up for Admin control/],
     [
       'unmanaged',
-      'Managed by deployment configuration',
-      /set by this deployment's own configuration/,
+      'Measurement set by deployment configuration',
+      /own configuration decides what is measured/,
     ],
   ])('renders %s without a button at all, and explains why', async (status, line, explanation) => {
     // What the control plane answers for a deployment it cannot command: no
@@ -838,17 +979,14 @@ describe('measurement collection control', () => {
     render(<AdminMeasurementsPage />);
     await within(card()).findByText(explanation);
 
-    // The one-line status is configuration, and it is not "Disabled".
-    const header = within(card()).getByRole('heading', {
-      name: 'Measurement collection',
-    }).parentElement!;
-    expect(within(header).getByText(line)).toBeInTheDocument();
-    expect(within(card()).queryByText('Disabled')).not.toBeInTheDocument();
-    // Not one button: not "Enable measurement", and not a disabled one either.
+    // The one-line status is configuration, and it is not "off".
+    expect(within(card()).getByText(line)).toBeInTheDocument();
+    expect(within(card()).queryByText('Measurement off')).not.toBeInTheDocument();
+    // Not one button: not "Turn on", and not a disabled one either.
     expect(within(card()).queryAllByRole('button')).toHaveLength(0);
   });
 
-  it('opens the inline form on Enable measurement, with every group on and no host chosen', async () => {
+  it('opens the inline form on Turn on, with every group on and no host chosen', async () => {
     render(<AdminMeasurementsPage />);
     await openForm();
 
@@ -886,7 +1024,7 @@ describe('measurement collection control', () => {
     expect(screen.queryByRole('option', { name: 'not-enrolled' })).not.toBeInTheDocument();
   });
 
-  it('enables the chosen operations until Disable with the revision it read', async () => {
+  it('turns on the chosen operations until turned off, with the revision it read', async () => {
     vi.mocked(startProfilingRun).mockImplementation(async () => {
       live = control({
         revision: 4,
@@ -918,27 +1056,28 @@ describe('measurement collection control', () => {
     expect(body.request_id.length).toBeGreaterThan(0);
 
     // What is drawn is the snapshot the server returned, not a local guess.
-    expect(await screen.findByText('Enabled')).toBeInTheDocument();
-    expect(screen.getByText('Operations: Sandbox startup, File access')).toBeInTheDocument();
-    expect(screen.getByText('Host: host-a')).toBeInTheDocument();
-    expect(screen.getByText('Collecting until you disable measurement.')).toBeInTheDocument();
-    expect(screen.queryByText(/^Expires at: /)).not.toBeInTheDocument();
-    expect(screen.queryByText(/^Time left: /)).not.toBeInTheDocument();
-    expect(screen.getByText('Stored samples: 0')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Disable measurement' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Enable measurement' })).not.toBeInTheDocument();
+    expect(await within(card()).findByText('Measurement on')).toBeInTheDocument();
+    expect(within(card()).getByText('Sandbox startup, File access')).toBeInTheDocument();
+    expect(within(card()).getByText('host-a')).toBeInTheDocument();
+    expect(within(card()).getByText('since Sep 21, 10:00 UTC')).toBeInTheDocument();
+    // Collecting until turned off: no deadline and no countdown.
+    expect(within(card()).queryByText(/stops/)).not.toBeInTheDocument();
+    expect(within(card()).getByText('0 samples')).toBeInTheDocument();
+    // A change takes a while to reach every process, and right after one the
+    // card says so in the server's words instead of implying instant agreement.
+    expect(within(card()).getByText(/allow up to 30 seconds/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Turn off' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Turn on' })).not.toBeInTheDocument();
   });
 
-  it('flips the single button to Disable measurement once the run is in force', async () => {
+  it('flips the single button to Turn off once the run is in force', async () => {
     live = control({ status: 'on', run_active: true, run: controlRun() });
     render(<AdminMeasurementsPage />);
-    await screen.findByRole('button', { name: 'Disable measurement' });
+    await screen.findByRole('button', { name: 'Turn off' });
 
-    expect(within(card()).getByText('Enabled')).toBeInTheDocument();
+    expect(within(card()).getByText('Measurement on')).toBeInTheDocument();
     expect(within(card()).getAllByRole('button')).toHaveLength(1);
-    expect(
-      within(card()).queryByRole('button', { name: 'Enable measurement' }),
-    ).not.toBeInTheDocument();
+    expect(within(card()).queryByRole('button', { name: 'Turn on' })).not.toBeInTheDocument();
   });
 
   it('sends an all-hosts target as null when All hosts is the choice', async () => {
@@ -960,7 +1099,7 @@ describe('measurement collection control', () => {
 
     await waitFor(() => expect(startProfilingRun).toHaveBeenCalledTimes(1));
     expect(vi.mocked(startProfilingRun).mock.calls[0][0].target).toEqual({ host: null });
-    expect(await screen.findByText('Host: All hosts')).toBeInTheDocument();
+    expect(await within(card()).findByText('All hosts')).toBeInTheDocument();
   });
 
   it('refuses a submission with no host or no group instead of guessing one', async () => {
@@ -995,9 +1134,9 @@ describe('measurement collection control', () => {
     expect(screen.getByRole('checkbox', { name: 'File access' })).not.toBeChecked();
     expect(screen.getByLabelText('Host')).toHaveValue('host-b');
     expect(screen.queryByLabelText('Duration')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Enable measurement' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Turn on' })).toBeInTheDocument();
     // And nothing was drawn as though a run had begun.
-    expect(within(card()).getByText('Disabled')).toBeInTheDocument();
+    expect(within(card()).getByText('Measurement off')).toBeInTheDocument();
     expect(within(card()).queryByRole('button', { name: /disable/i })).not.toBeInTheDocument();
   });
 
@@ -1041,7 +1180,7 @@ describe('measurement collection control', () => {
     const confirm = vi.spyOn(window, 'confirm');
     try {
       render(<AdminMeasurementsPage />);
-      fireEvent.click(await screen.findByRole('button', { name: 'Disable measurement' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Turn off' }));
 
       await waitFor(() => expect(stopProfilingRun).toHaveBeenCalledTimes(1));
       expect(vi.mocked(stopProfilingRun).mock.calls[0][0]).toBe('prun-1');
@@ -1052,11 +1191,14 @@ describe('measurement collection control', () => {
       expect(confirm).not.toHaveBeenCalled();
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
-      expect(await screen.findByText('Disabled')).toBeInTheDocument();
-      expect(screen.getByText(/Last experiment: prun-1/)).toBeInTheDocument();
-      expect(screen.getByText(/Stop reason: stopped_by_admin/)).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Enable measurement' })).toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: 'Disable measurement' })).not.toBeInTheDocument();
+      expect(await within(card()).findByText('Measurement off')).toBeInTheDocument();
+      // An admin's stop is the ordinary one and needs no reason beside it.
+      expect(within(card()).getByText('last run stopped Sep 21, 10:03 UTC')).toHaveAttribute(
+        'title',
+        'prun-1',
+      );
+      expect(screen.getByRole('button', { name: 'Turn on' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Turn off' })).not.toBeInTheDocument();
     } finally {
       confirm.mockRestore();
     }
@@ -1073,37 +1215,54 @@ describe('measurement collection control', () => {
       return { control: live, run_id: 'prun-1', revision: 6 };
     });
     render(<AdminMeasurementsPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Disable measurement' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Turn off' }));
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Disabling…' })).toBeDisabled());
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Turning off…' })).toBeDisabled(),
+    );
     await act(async () => {
       release();
     });
-    await screen.findByRole('button', { name: 'Enable measurement' });
+    await screen.findByRole('button', { name: 'Turn on' });
   });
 
   it('hints that nothing has been stored yet while a live run has no samples', async () => {
     live = control({ status: 'on', run_active: true, run: controlRun(), stored_samples: 0 });
     render(<AdminMeasurementsPage />);
-    await screen.findByText('Stored samples: 0');
-
-    expect(screen.getByText(/No matching operation has happened yet/)).toBeInTheDocument();
-    expect(screen.getByText(/use a sandbox, open a terminal or browse files/)).toBeInTheDocument();
-    expect(screen.getByText(/A stored sample is one server-side record/)).toBeInTheDocument();
+    const count = await within(card()).findByText('0 samples');
+    // What one sample is, where the count is.
+    expect(count).toHaveAttribute('title', expect.stringMatching(/one server-side record/));
+    expect(
+      within(card()).getByText(/No samples yet\. Use a sandbox, open a terminal or browse files/),
+    ).toBeInTheDocument();
+    // A deadline, when the run has one, counts down on the same line.
+    expect(within(card()).getByText('stops in 10:00')).toBeInTheDocument();
 
     live = control({ status: 'on', run_active: true, run: controlRun(), stored_samples: 7 });
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    await screen.findByText('Stored samples: 7');
-    expect(screen.queryByText(/No matching operation has happened yet/)).not.toBeInTheDocument();
+    await within(card()).findByText('7 samples');
+    expect(within(card()).queryByText(/No samples yet/)).not.toBeInTheDocument();
   });
 
-  it('keeps the sync note without exposing internal diagnostics', async () => {
+  it('names an unusual stop reason beside the last run', async () => {
+    live = control({
+      last_stopped_run: controlRun({ stop_reason: 'expired', stopped_at: '2026-09-21T10:10:00Z' }),
+    });
     render(<AdminMeasurementsPage />);
-    await screen.findByRole('button', { name: 'Enable measurement' });
+    expect(
+      await within(card()).findByText('last run stopped Sep 21, 10:10 UTC (expired)'),
+    ).toBeInTheDocument();
+  });
 
-    // A change takes a few seconds to reach every process, and the card says
-    // so in the server's own words instead of implying instant agreement.
-    expect(within(card()).getByText(/allow up to 30 seconds/)).toBeInTheDocument();
+  it('keeps the sync note to a tooltip until a change is made here, and no diagnostics', async () => {
+    render(<AdminMeasurementsPage />);
+    await screen.findByRole('button', { name: 'Turn on' });
+
+    expect(within(card()).getByText('Measurement off')).toHaveAttribute(
+      'title',
+      expect.stringMatching(/^The configuration reaches .*allow up to 30 seconds.*\.$/),
+    );
+    expect(within(card()).queryByText(/allow up to 30 seconds/)).not.toBeInTheDocument();
 
     expect(card().querySelector('details')).toBeNull();
     expect(within(card()).queryByText('Mode')).not.toBeInTheDocument();
@@ -1116,7 +1275,7 @@ describe('measurement collection control', () => {
     render(<AdminMeasurementsPage />);
     await screen.findByText('Admin access required');
     expect(screen.queryByText('Measurement collection')).not.toBeInTheDocument();
-    expect(screen.queryByText('Disabled')).not.toBeInTheDocument();
+    expect(screen.queryByText('Measurement off')).not.toBeInTheDocument();
   });
 
   it('keeps the last successful read when a background poll fails, flagged as stale', async () => {
@@ -1125,19 +1284,17 @@ describe('measurement collection control', () => {
     // The first read failed and nothing has been shown yet, so the card says
     // so instead of inventing an Off state.
     await screen.findByRole('alert');
-    expect(
-      within(card()).queryByRole('button', { name: 'Enable measurement' }),
-    ).not.toBeInTheDocument();
+    expect(within(card()).queryByRole('button', { name: 'Turn on' })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    await within(card()).findByText('Disabled');
+    await within(card()).findByText('Measurement off');
 
     vi.mocked(getProfilingControl).mockRejectedValueOnce(new APIError('SERVER_ERROR', 'boom', 500));
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await screen.findByText(/showing the last successful read/);
     // The last good state is still on screen, and still says Off.
-    expect(within(card()).getByText('Disabled')).toBeInTheDocument();
-    expect(within(card()).getByRole('button', { name: 'Enable measurement' })).toBeEnabled();
+    expect(within(card()).getByText('Measurement off')).toBeInTheDocument();
+    expect(within(card()).getByRole('button', { name: 'Turn on' })).toBeEnabled();
   });
 
   it('re-reads a live run within five seconds and an idle one only at thirty', async () => {
@@ -1183,7 +1340,7 @@ describe('measurement collection control', () => {
   it('reads nothing while the tab is hidden, and reads at once when it returns', async () => {
     live = control({ status: 'on', run_active: true, run: controlRun() });
     render(<AdminMeasurementsPage />);
-    await screen.findByRole('button', { name: 'Disable measurement' });
+    await screen.findByRole('button', { name: 'Turn off' });
     const before = vi.mocked(getProfilingControl).mock.calls.length;
 
     Object.defineProperty(document, 'hidden', { configurable: true, value: true });

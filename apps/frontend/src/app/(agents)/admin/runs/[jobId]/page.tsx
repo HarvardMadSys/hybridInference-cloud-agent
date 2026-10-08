@@ -2,10 +2,11 @@
 
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
-import { Suspense, useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useState, type ReactNode } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
+import { listMeasurements, type MeasurementSummary } from '@/lib/api/adminMeasurements';
 import { getAdminRun, type AdminAttempt, type AdminRunDetail } from '@/lib/api/adminRuns';
 import { conversationHref } from '@/lib/api/adminConversations';
 import { conversationLink } from '../../conversations/filters';
@@ -15,7 +16,13 @@ import { AdminNavigation } from '../../AdminNavigation';
 import { LLMRequests } from '../LLMRequests';
 import { Resources } from '../Resources';
 import { SessionStatistics } from '../SessionStatistics';
-import { StartupMeasurement } from '../StartupMeasurement';
+import {
+  duration,
+  EMPTY_SELECTION,
+  MEASUREMENTS_PATH,
+  sampleResult,
+  selectionHref,
+} from '../../measurements/present';
 import {
   accessDenied,
   AdminRequired,
@@ -55,6 +62,60 @@ function restartNote(attempts: AdminAttempt[]): string | null {
   if (!earlier.length) return null;
   const times = earlier.length === 1 ? 'once' : `${earlier.length} times`;
   return `Restarted ${times}: ${earlier.map(earlierRun).join('; ')}.`;
+}
+
+/**
+ * The latest run's startup sample, when measurement recorded one.
+ *
+ * Only on while measurement is collecting, so its absence says nothing and the
+ * page shows nothing for it; the breakdown lives on the Measurements page.
+ */
+function useStartupSample(jobId: string, attemptId: number | null, revision: number) {
+  const [sample, setSample] = useState<MeasurementSummary | null>(null);
+  useEffect(() => {
+    setSample(null);
+    if (attemptId === null) return;
+    const controller = new AbortController();
+    listMeasurements(
+      { job_id: jobId, attempt_id: attemptId, operation: ['attempt.startup'], limit: 1 },
+      controller.signal,
+    )
+      .then((page) => {
+        if (!controller.signal.aborted) setSample(page.measurements[0] ?? null);
+      })
+      .catch(() => {
+        // A line the header can do without: no sample is shown, not an error.
+      });
+    return () => controller.abort();
+  }, [jobId, attemptId, revision]);
+  return sample;
+}
+
+/** "3.73 s", linked to the sample's breakdown, and its result when it did not succeed. */
+function startupValue(sample: MeasurementSummary): ReactNode {
+  const result = sampleResult(sample);
+  return (
+    <>
+      <Link
+        className="text-crimson hover:underline dark:text-crimson-light"
+        href={selectionHref(MEASUREMENTS_PATH, {
+          ...EMPTY_SELECTION,
+          measurement: sample.measurement_id,
+        })}
+        title="From the runner claiming the turn to the prompt reaching the agent. Opens where the time went."
+      >
+        {duration(sample.duration_us).display}
+      </Link>
+      {result.tone !== 'ok' && (
+        <span
+          className={`ml-2 ${result.tone === 'bad' ? 'text-red-700 dark:text-red-400' : 'text-amber-700 dark:text-amber-400'}`}
+          title={result.title}
+        >
+          {result.label}
+        </span>
+      )}
+    </>
+  );
 }
 
 export default function AdminRunPage() {
@@ -105,6 +166,7 @@ function RunDetails({ jobId }: { jobId: string }) {
   const latest = attempts[0];
   const first = attempts[attempts.length - 1];
   const restarted = restartNote(attempts);
+  const startup = useStartupSample(jobId, latest?.attempt_id ?? null, revision);
   if (denied) return <AdminRequired />;
   return (
     <div className="flex-1 overflow-y-auto">
@@ -154,22 +216,25 @@ function RunDetails({ jobId }: { jobId: string }) {
               {detail.run.id}
             </p>
             <dl className={`${CARD} mt-5 grid grid-cols-2 gap-5 p-5 text-sm lg:grid-cols-3`}>
-              {[
-                ['User ID', detail.run.user_id],
-                ['Repository', detail.run.repo],
-                ['Agent', detail.run.runtime],
-                ['Model', detail.run.model],
-                ['Effort', detail.run.reasoning_effort || 'Auto'],
-                ['Sandbox profile', detail.run.execution_profile],
-                ['Created', dateTime(detail.run.created_at)],
-                ...(first ? [['Started', dateTime(first.started_at)]] : []),
-                ...(latest?.finished_at && TERMINAL.has(detail.run.state)
-                  ? [['Finished', dateTime(latest.finished_at)]]
-                  : []),
-                ...(latest ? [['Server', latest.host || 'Unknown host']] : []),
-                ['Turn', String(detail.run.turn_no)],
-                ['Session', detail.run.thread_id || 'Unavailable'],
-              ].map(([label, value]) => (
+              {(
+                [
+                  ['User ID', detail.run.user_id],
+                  ['Repository', detail.run.repo],
+                  ['Agent', detail.run.runtime],
+                  ['Model', detail.run.model],
+                  ['Effort', detail.run.reasoning_effort || 'Auto'],
+                  ['Sandbox profile', detail.run.execution_profile],
+                  ['Created', dateTime(detail.run.created_at)],
+                  ...(first ? [['Started', dateTime(first.started_at)]] : []),
+                  ...(latest?.finished_at && TERMINAL.has(detail.run.state)
+                    ? [['Finished', dateTime(latest.finished_at)]]
+                    : []),
+                  ...(startup ? [['Startup', startupValue(startup)]] : []),
+                  ...(latest ? [['Server', latest.host || 'Unknown host']] : []),
+                  ['Turn', String(detail.run.turn_no)],
+                  ['Session', detail.run.thread_id || 'Unavailable'],
+                ] as [string, ReactNode][]
+              ).map(([label, value]) => (
                 <div key={label} className="min-w-0">
                   <dt className="text-xs text-gray-500 dark:text-gray-400">{label}</dt>
                   <dd className="mt-1 break-words text-gray-800 dark:text-gray-200">{value}</dd>
@@ -184,16 +249,6 @@ function RunDetails({ jobId }: { jobId: string }) {
             {latest && (
               <Resources
                 key={`resources:${latest.attempt_id}:${revision}`}
-                jobId={jobId}
-                attemptId={latest.attempt_id}
-                onAccessDenied={onAccessDenied}
-              />
-            )}
-            {latest && (
-              // Keyed by the run, so a restart remounts it: one run's startup
-              // must never sit under another's.
-              <StartupMeasurement
-                key={`startup:${latest.attempt_id}:${revision}`}
                 jobId={jobId}
                 attemptId={latest.attempt_id}
                 onAccessDenied={onAccessDenied}
