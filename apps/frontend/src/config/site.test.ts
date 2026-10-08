@@ -5,7 +5,7 @@
 //
 //   * an illegal value is refused rather than read as "unset", because the old
 //     reader turned a typo into a missing link and said nothing; and
-//   * the output is an allowlist, so no environment variable outside the six
+//   * the output is an allowlist, so no environment variable outside the
 //     named ones can reach the page.
 
 import { describe, expect, it } from 'vitest';
@@ -118,7 +118,9 @@ describe('parseRuntimeSiteConfig', () => {
     // Guards against a rename landing in the parser but not in the compose
     // file, which would leave the reader looking for a variable nothing sets.
     expect(Object.values(SITE_CONFIG_ENV).sort()).toEqual([
+      'AGENT_DEPLOYMENT_SHA',
       'AGENT_WEB_APP_NAME',
+      'AGENT_WEB_DEPLOYED_AT',
       'AGENT_WEB_FEATURE_RAG',
       'AGENT_WEB_GATEWAY_URL',
       'AGENT_WEB_ORG_NAME',
@@ -126,4 +128,22 @@ describe('parseRuntimeSiteConfig', () => {
       'AGENT_WEB_STATUS_URL',
     ]);
   });
+
+  it('normalizes the deployment timestamp to UTC and reads the release commit', () => {
+    expect(
+      parseRuntimeSiteConfig({
+        AGENT_DEPLOYMENT_SHA: ' abc1234 ',
+        AGENT_WEB_DEPLOYED_AT: '2026-08-07T23:30:00-04:00',
+      }).deployment,
+    ).toEqual({ version: 'abc1234', deployedAt: '2026-08-08T03:30:00.000Z' });
+  });
+
+  it.each(['not a date', '2026-08-07', '2026-08-07T12:00:00'])(
+    'rejects an invalid or ambiguous deployment date %s',
+    (date) => {
+      expect(() => parseRuntimeSiteConfig({ AGENT_WEB_DEPLOYED_AT: date })).toThrow(
+        'AGENT_WEB_DEPLOYED_AT',
+      );
+    },
+  );
 });

@@ -97,6 +97,8 @@ function deployment(spec) {
       AGENT_WEB_STATUS_URL: spec.statusUrl,
       AGENT_WEB_GATEWAY_URL: spec.gatewayUrl,
       AGENT_WEB_FEATURE_RAG: String(spec.rag),
+      AGENT_DEPLOYMENT_SHA: spec.version,
+      AGENT_WEB_DEPLOYED_AT: spec.deployedAt,
       // Not configuration. It is here to prove that an unrelated environment
       // value cannot ride along with the allowlisted ones.
       AGENT_SESSION_SECRET: SENTINEL,
@@ -107,6 +109,8 @@ function deployment(spec) {
 const DEPLOYMENTS = [
   deployment({
     name: 'alpha',
+    version: 'a'.repeat(40),
+    deployedAt: '2026-08-07T12:00:00.000Z',
     appName: 'Alpha Agents',
     orgName: 'Alpha Research',
     orgUrl: 'https://alpha.example',
@@ -116,6 +120,8 @@ const DEPLOYMENTS = [
   }),
   deployment({
     name: 'beta',
+    version: 'b'.repeat(40),
+    deployedAt: '2026-08-08T18:00:00.000Z',
     appName: 'Beta Agents',
     orgName: 'Beta Research',
     orgUrl: 'https://beta.example',
@@ -447,6 +453,19 @@ function assertRendered(variant, target, rendered) {
       `${where}: the rendered <h1> is ${JSON.stringify(heading)}, expected the ` +
         `configured name ${JSON.stringify(target.appName)}`,
     );
+  }
+
+  const footer = textOf(html, 'footer');
+  if (target.version) {
+    if (
+      !footer.includes(target.version.slice(0, 7)) ||
+      !footer.includes(`${target.deployedAt.slice(0, 10)} UTC`) ||
+      !html.includes(`dateTime="${target.deployedAt}"`)
+    ) {
+      fail(`${where}: the footer does not show this deployment's version and date`);
+    }
+  } else if (!footer.includes('Not available')) {
+    fail(`${where}: an unconfigured footer must not invent deployment metadata`);
   }
 
   // The one URL this app hands to another service, and the string the gateway

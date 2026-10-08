@@ -310,6 +310,8 @@ services:
       # not pass through the browser any more, so nothing here starts one.
       AGENT_WEB_GATEWAY_URL: ${AGENT_WEB_GATEWAY_URL:-}
       AGENT_WEB_FEATURE_RAG: ${AGENT_WEB_FEATURE_RAG:-}
+      AGENT_DEPLOYMENT_SHA: ${AGENT_DEPLOYMENT_SHA:-}
+      AGENT_WEB_DEPLOYED_AT: ${AGENT_WEB_DEPLOYED_AT:-}
     restart: unless-stopped
     ports:
       # Loopback, like the API: the reverse proxy in front of the host is what

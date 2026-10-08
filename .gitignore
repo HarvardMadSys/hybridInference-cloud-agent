@@ -41,6 +41,7 @@ next-env.d.ts
 
 # Written by deploy.sh on the deployment host: which commit is actually running.
 .deployed-sha
+.deployed-at
 # Host readiness is deployment metadata, written beside .deployed-sha.
 .shared-live-ready
 # The host stack's dedicated, read-only-bound storage attestation directory.

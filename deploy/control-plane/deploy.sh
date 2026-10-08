@@ -449,6 +449,13 @@ rm -f "${BOOTSTRAP_RECORD}"
 # state, which is what makes this idempotent. Compose may run the idempotent
 # migration service again; the API still waits on its successful completion.
 log "starting"
+# Keep the original activation time when retrying an already healthy release.
+if [[ "$(cat .deployed-sha 2>/dev/null || true)" == "${SHA}" && -s .deployed-at ]]; then
+  AGENT_WEB_DEPLOYED_AT="$(cat .deployed-at)"
+else
+  AGENT_WEB_DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+fi
+export AGENT_WEB_DEPLOYED_AT
 compose up -d --remove-orphans
 
 # The web app is mounted under a base path, so `/` is a 404 by design and a
@@ -466,8 +473,9 @@ if grep -qx edge <<<"${ACTIVE_SERVICES}"; then
   wait_for "edge API route" "http://127.0.0.1:${EDGE_PORT}/api/healthz"
 fi
 
-# Written last and only on success: this file is what an operator reads to
+# Written last and only on success: these files are what an operator reads to
 # answer "what is actually running here", and a value written before the health
 # check would answer it wrongly for every failed deploy.
 printf '%s\n' "${SHA}" > .deployed-sha
+printf '%s\n' "${AGENT_WEB_DEPLOYED_AT}" > .deployed-at
 log "deployed ${SHA} (was ${PREVIOUS})"

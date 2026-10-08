@@ -21,6 +21,7 @@ import { Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { signInUrl } from '@/lib/auth/signin';
+import { DeploymentFooter } from '@/components/DeploymentFooter';
 
 /** The sign-in authority, named by host so a self-hosted deployment reads true. */
 function authorityName(gatewayUrl: string): string {
@@ -49,53 +50,56 @@ function LoginContent() {
   const authority = authorityName(branding.gatewayUrl);
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center gap-6 px-6">
-      <div className="w-full max-w-sm text-center">
-        <h1 className="text-2xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
-          {branding.appName}
-        </h1>
-        <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
-          Run coding agents in sandboxed containers against your repositories.
-        </p>
-
-        {hasError && (
-          <p
-            role="alert"
-            className="mt-6 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200"
-          >
-            {expired
-              ? 'This sign-in has expired or is no longer valid. Please start again.'
-              : temporary
-                ? 'Sign-in is temporarily unavailable. Please try again shortly.'
-                : accountUnavailable
-                  ? 'This account cannot sign in. Contact the service administrator for help.'
-                  : 'Sign-in is not configured correctly for this deployment. Contact the service administrator.'}
+    <div className="flex min-h-screen flex-col">
+      <main className="flex flex-1 flex-col items-center justify-center gap-6 px-6">
+        <div className="w-full max-w-sm text-center">
+          <h1 className="text-2xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
+            {branding.appName}
+          </h1>
+          <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+            Run coding agents in sandboxed containers against your repositories.
           </p>
-        )}
-        {(!hasError || temporary || expired) && (
-          <>
-            {/* A plain link, not a button with a handler: the destination is a
-                server route that answers with a redirect, and a full
-                navigation is what it expects. */}
-            <a
-              href={signInUrl(returnTo)}
-              className="mt-6 inline-flex min-h-11 w-full items-center justify-center rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+
+          {hasError && (
+            <p
+              role="alert"
+              className="mt-6 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200"
             >
               {expired
-                ? 'Start again'
+                ? 'This sign-in has expired or is no longer valid. Please start again.'
                 : temporary
-                  ? 'Try again'
-                  : `Sign in${authority ? ` with ${authority}` : ''}`}
-            </a>
-            <p className="mt-4 text-xs text-gray-400 dark:text-gray-500">
-              {authority
-                ? `You will be sent to ${authority} to authorize this app. It never sees your password.`
-                : 'You will be sent to your identity provider to authorize this app.'}
+                  ? 'Sign-in is temporarily unavailable. Please try again shortly.'
+                  : accountUnavailable
+                    ? 'This account cannot sign in. Contact the service administrator for help.'
+                    : 'Sign-in is not configured correctly for this deployment. Contact the service administrator.'}
             </p>
-          </>
-        )}
-      </div>
-    </main>
+          )}
+          {(!hasError || temporary || expired) && (
+            <>
+              {/* A plain link, not a button with a handler: the destination is a
+                server route that answers with a redirect, and a full
+                navigation is what it expects. */}
+              <a
+                href={signInUrl(returnTo)}
+                className="mt-6 inline-flex min-h-11 w-full items-center justify-center rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+              >
+                {expired
+                  ? 'Start again'
+                  : temporary
+                    ? 'Try again'
+                    : `Sign in${authority ? ` with ${authority}` : ''}`}
+              </a>
+              <p className="mt-4 text-xs text-gray-400 dark:text-gray-500">
+                {authority
+                  ? `You will be sent to ${authority} to authorize this app. It never sees your password.`
+                  : 'You will be sent to your identity provider to authorize this app.'}
+              </p>
+            </>
+          )}
+        </div>
+      </main>
+      <DeploymentFooter />
+    </div>
   );
 }
 

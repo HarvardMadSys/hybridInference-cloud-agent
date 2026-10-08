@@ -10,6 +10,9 @@
  * Placeholders are `{name}` and are substituted by `translate()`.
  */
 export const en = {
+  'deployment.version': 'Version',
+  'deployment.date': 'Deployed',
+  'deployment.unavailable': 'Not available',
   'sideChat.tab': 'Side Chat',
   'sideChat.new': 'New Side Chat',
   'sideChat.close': 'Close {name}',

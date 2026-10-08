@@ -68,6 +68,7 @@ a = sys.argv[1:]
 log = pathlib.Path(os.environ["TEST_COMMAND_LOG"])
 with log.open("a") as f:
     f.write(json.dumps({"args": a, "sha": os.getenv("AGENT_DEPLOYMENT_SHA"),
+                       "deployed_at": os.getenv("AGENT_WEB_DEPLOYED_AT"),
                        "sandbox": os.getenv("AGENT_SANDBOX_IMAGE"),
                        "edge": os.getenv("AGENT_EDGE_CONFIG_FILE"),
                        "physical_host": os.getenv("AGENT_PHYSICAL_HOST"),
@@ -260,6 +261,17 @@ def test_packaged_deployers_run_without_source_and_preserve_state(tmp_path: Path
             assert call["args"][call["args"].index("-p") + 1] == "artifact-test"
             assert "--no-build" in call["args"]
             assert call["sha"] == COMMIT
+    if stack == "control-plane":
+        deployed_at = (state / ".deployed-at").read_text().strip()
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", deployed_at)
+        activation = next(c for c in calls if "--remove-orphans" in c["args"])
+        assert activation["deployed_at"] == deployed_at
+        preserved = "2026-08-07T12:00:00Z"
+        (state / ".deployed-at").write_text(preserved + "\n")
+        repeated, repeated_calls = run(script, env)
+        assert repeated.returncode == 0, repeated.stdout + repeated.stderr
+        assert (state / ".deployed-at").read_text().strip() == preserved
+        assert repeated_calls[-1]["deployed_at"] == preserved
     if stack == "host":
         assert (state / ".shared-live-ready").read_text().strip() == COMMIT
         sandbox = next(a["image"] for a in manifest()["artifacts"] if a["role"] == "sandbox")

@@ -33,6 +33,10 @@ export interface SiteBranding {
 
 export interface RuntimeSiteConfig {
   branding: SiteBranding;
+  deployment?: {
+    version: string;
+    deployedAt: string;
+  };
   features: {
     /** The gateway's docs assistant. Off unless a deployment says otherwise. */
     rag: boolean;
@@ -75,6 +79,8 @@ export const SITE_CONFIG_ENV = {
   statusUrl: 'AGENT_WEB_STATUS_URL',
   gatewayUrl: 'AGENT_WEB_GATEWAY_URL',
   featureRag: 'AGENT_WEB_FEATURE_RAG',
+  version: 'AGENT_DEPLOYMENT_SHA',
+  deployedAt: 'AGENT_WEB_DEPLOYED_AT',
 } as const;
 
 type EnvSource = Record<string, string | undefined>;
@@ -155,7 +161,7 @@ function optionalBoolean(env: EnvSource, name: string, fallback: boolean): boole
  * mutating `process.env` and hoping the module re-reads it.
  */
 export function parseRuntimeSiteConfig(env: EnvSource): RuntimeSiteConfig {
-  return {
+  const site: RuntimeSiteConfig = {
     branding: {
       appName: optionalName(env, SITE_CONFIG_ENV.appName) || NEUTRAL_SITE_CONFIG.branding.appName,
       orgName: optionalName(env, SITE_CONFIG_ENV.orgName),
@@ -167,4 +173,21 @@ export function parseRuntimeSiteConfig(env: EnvSource): RuntimeSiteConfig {
       rag: optionalBoolean(env, SITE_CONFIG_ENV.featureRag, NEUTRAL_SITE_CONFIG.features.rag),
     },
   };
+  const version = optionalName(env, SITE_CONFIG_ENV.version);
+  const rawDate = optionalName(env, SITE_CONFIG_ENV.deployedAt);
+  let deployedAt = '';
+  if (rawDate) {
+    const date = new Date(rawDate);
+    if (
+      !/^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})$/.test(rawDate) ||
+      !Number.isFinite(date.getTime())
+    ) {
+      throw new SiteConfigError(
+        `${SITE_CONFIG_ENV.deployedAt} must be an ISO timestamp with a timezone`,
+      );
+    }
+    deployedAt = date.toISOString();
+  }
+  if (version || deployedAt) site.deployment = { version, deployedAt };
+  return site;
 }

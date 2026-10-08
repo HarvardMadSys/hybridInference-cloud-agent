@@ -408,6 +408,12 @@ rebuild. Each must be a key under the `web` service's `environment:`;
 | `AGENT_WEB_STATUS_URL` | **MOVED** | Status page, opened in a new tab from the header. Empty hides the link — an empty `href` resolves to the current page, so a Status link that is rendered anyway reopens the page the user is standing on. |
 | `AGENT_WEB_GATEWAY_URL` | **MOVED** | `${GATEWAY_BASE_URL}`. The gateway's origin, for the links this app does not host itself — nothing to do with sign-in. It replaced `NEXT_PUBLIC_GATEWAY_AUTHORIZE_URL`, which the browser needed only while it built the authorize URL and redeemed the code itself; both are the control plane's job now (`GATEWAY_AUTHORIZE_URL`). A path in this value is ignored; empty hides the links. |
 | `AGENT_WEB_FEATURE_RAG` | **MOVED** | `true` shows the gateway's Docs Assistant link. `false` or empty hides it; any other value is refused. The page belongs to the gateway, not to this service. |
+| `AGENT_WEB_DEPLOYED_AT` | **NEW** | ISO timestamp with a timezone for the deployment footer. The control-plane deploy script sets the activation time in UTC and records it in `.deployed-at` after successful health checks; deploying the same release again preserves it. When starting Compose manually, supply the actual deployment time. Empty shows `Not available`. |
+
+The web service also receives the existing `AGENT_DEPLOYMENT_SHA` for the footer's
+version: the first seven commit characters are visible, with the full commit in
+the tooltip. Both values are resolved per request, independently of the image's
+build date.
 
 These moved out of the build: an operator renaming a deployment should not have
 to rebuild the same image. An illegal value — a non-URL, or a boolean that is

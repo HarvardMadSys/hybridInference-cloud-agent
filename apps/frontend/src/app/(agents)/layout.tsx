@@ -9,6 +9,7 @@ import { FirstRunProvider } from '@/components/features/agents/firstRun';
 import { useAuth, useT } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
+import { DeploymentFooter } from '@/components/DeploymentFooter';
 
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from './sidebarStorage';
 
@@ -248,6 +249,7 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
       <div className="fixed inset-0 z-50 flex flex-col bg-gray-50 dark:bg-gray-950">
         <AgentsHeader sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} />
         <AgentsShell sidebarCollapsed={sidebarCollapsed}>{children}</AgentsShell>
+        <DeploymentFooter />
       </div>
     </ProtectedRoute>
   );
