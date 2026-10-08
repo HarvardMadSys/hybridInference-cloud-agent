@@ -60,12 +60,15 @@ USER_AGENT = "hybridinference-cloud-agent"
 #: turn the intended bounded revocation window into an unbounded one.
 JWKS_CACHE_LIFESPAN_S = 5 * 60
 
-#: Our own identity session, with a fixed eight-hour expiry.
+#: Our own identity session, with a fixed thirty-day expiry.
 #:
 #: Every protected request resolves Agent permissions afresh at the Gateway.
-#: No role or permission in a session is an authorization cache. The expiry
-#: bounds the identity credential's lifetime and is never extended on use.
-SESSION_TTL_S = 8 * 60 * 60
+#: No role or permission in a session is an authorization cache, so revoking
+#: someone's Agent access takes effect on their next request however old the
+#: cookie is. The expiry bounds the identity credential's lifetime and is never
+#: extended on use. Nothing revokes a session before then: signing out drops
+#: only the browser's copy, and rotating ``AGENT_SESSION_SECRET`` ends them all.
+SESSION_TTL_S = 30 * 24 * 60 * 60
 SESSION_COOKIE = "cloud_agent_session"
 
 #: The parked half of a sign-in: the PKCE verifier and the CSRF ``state``,

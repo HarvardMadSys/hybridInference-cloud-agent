@@ -14,10 +14,12 @@ proxy failures or unreadable responses remain temporary failures.
 The Agent session contains only `sub`, `gateway_issuer`, `iat` and `exp`, signed
 with the Agent's own session secret. `gateway_issuer` identifies the upstream
 identity authority; it does not claim the Gateway signed this cookie. Sessions
-remain valid for eight hours and permissions are checked on each protected
+remain valid for thirty days and permissions are checked on each protected
 request. Cookies missing the new issuer field, carrying old profile fields, or
 belonging to another issuer are rejected. Users sign in again after upgrading.
-There is no session version, revocation table or copied account profile.
+There is no session version, revocation table or copied account profile: a
+copied cookie works until it expires unless the Gateway withdraws Agent access
+or `AGENT_SESSION_SECRET` is rotated, which ends every session.
 
 `/v1/session/me` returns only `id` and `agent_access`. The web settings contain
 theme and interface-language preferences; account profiles are managed on the

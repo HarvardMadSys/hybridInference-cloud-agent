@@ -20,8 +20,9 @@ The properties worth more than the rest, each with its own case:
   they may still use anything.
 - **An unreachable gateway mints nothing.** Fail-closed, per AGENTS.md rule 4:
   a status call that cannot be made is not a status call that said yes.
-- **The session is hours, not days.** It bounds the identity credential's
-  lifetime; admission is checked separately on every protected request.
+- **The session lasts thirty days, and no longer.** It bounds the identity
+  credential's lifetime; admission is checked separately on every protected
+  request.
 - **A 401 from ``/me`` means no session; a 503 means access cannot be checked**.
   Configuration failures carry a type distinct from temporary outages.
 - **Sign-in and ``/me`` answer the same thing about the same person.** They are
@@ -329,11 +330,14 @@ async def test_sign_in_sets_an_httponly_session_cookie(client_and_gateway):
     assert "samesite=lax" in lowered
     assert "secure" in lowered
     assert "path=/" in lowered
+    # The browser keeps the cookie exactly as long as the token inside verifies.
+    assert f"max-age={identity.SESSION_TTL_S}" in lowered
 
     # The cookie contains identity and expiry, never account profile claims.
     claims = identity.verify_session(client.cookies[identity.SESSION_COOKIE])
     assert claims["sub"] == _USER
     assert set(claims) == {"sub", "gateway_issuer", "iat", "exp"}
+    assert claims["exp"] - claims["iat"] == identity.SESSION_TTL_S
 
 
 async def test_the_code_is_exchanged_here_and_the_token_never_reaches_the_browser(
@@ -570,9 +574,9 @@ async def test_a_garbage_identity_token_is_a_401(key):
 # ── The session it buys ───────────────────────────────────────────────────
 
 
-async def test_the_session_is_hours_not_days():
-    """Keep identity credentials short-lived even though access is checked afresh."""
-    assert identity.SESSION_TTL_S <= 24 * 60 * 60
+async def test_the_session_lasts_at_most_thirty_days():
+    """Access is checked afresh, but nothing revokes a copied cookie before expiry."""
+    assert identity.SESSION_TTL_S <= 30 * 24 * 60 * 60
 
 
 async def test_me_returns_the_current_user(client_and_gateway):
