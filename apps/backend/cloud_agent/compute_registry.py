@@ -222,7 +222,8 @@ def build_registry(
                     {
                         "key": "name",
                         "label": "CloudLab experiment name",
-                        "description": "Generated automatically if left blank.",
+                        "description": "Up to 16 characters. Generated automatically if left blank.",
+                        "max_length": 16,
                         "type": "text",
                         "advanced": True,
                         "modes": ["provision"],

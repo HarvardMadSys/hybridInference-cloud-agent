@@ -216,6 +216,36 @@ async def test_cloudlab_validation_uses_canonical_collection_without_redirect():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["a", "a" * 16, "a" * 17])
+async def test_cloudlab_checks_experiment_name_limit_before_posting(name):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(201, json={"id": EXPERIMENT})
+
+    adapter = provider(respond)
+    request = AcquireRequest(
+        mode="provision",
+        config={
+            "credential_ref": "account-1",
+            "project": "research",
+            "name": name,
+            "profile_name": "one-node",
+            "profile_project": "PortalProfiles",
+        },
+    )
+    if len(name) > 16:
+        with pytest.raises(ValidationError):
+            await adapter.acquire(request, intent())
+        assert requests == []
+    else:
+        receipt = await adapter.acquire(request, intent())
+        assert receipt.resource.external_id == EXPERIMENT
+        assert json.loads(requests[0].content)["name"] == name
+
+
+@pytest.mark.asyncio
 async def test_cloudlab_provision_retains_returned_uuid_and_matches_create_contract():
     requests = []
 
@@ -238,6 +268,8 @@ async def test_cloudlab_provision_retains_returned_uuid_and_matches_create_contr
     assert receipt.resource.external_id == EXPERIMENT
     assert receipt.outcome == "pending"
     payload = json.loads(requests[0].content)
+    assert len(payload["name"]) == 16
+    assert payload["name"].startswith("ca-")
     assert payload["duration"] == 6
     assert payload["profile_project"] == "PortalProfiles"
     assert payload["bindings"] == {"hardware": "c220g2"}

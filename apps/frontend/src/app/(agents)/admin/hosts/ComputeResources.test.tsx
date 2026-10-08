@@ -314,6 +314,38 @@ describe('server acquisition UI', () => {
     );
   });
 
+  it('rejects an overlong experiment name before saving credentials or submitting', async () => {
+    const limited: ComputeCatalog = {
+      ...catalog,
+      providers: catalog.providers.map((provider) => ({
+        ...provider,
+        fields: [
+          ...provider.fields,
+          {
+            key: 'name',
+            label: 'CloudLab experiment name',
+            type: 'text' as const,
+            max_length: 16,
+            advanced: true,
+          },
+        ],
+      })),
+    };
+    renderAdd(vi.fn(), limited);
+    fillSshForm();
+    const input = screen.getByLabelText('CloudLab experiment name');
+    expect(input).toHaveAttribute('maxlength', '16');
+    fireEvent.change(input, { target: { value: 'cloud-agent-staging' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'CloudLab experiment name must be 16 characters or fewer.',
+    );
+    expect(input).toHaveFocus();
+    expect(input.closest('details')).toHaveAttribute('open');
+    expect(api.createComputeServer).not.toHaveBeenCalled();
+    expect(api.saveComputeConnection).not.toHaveBeenCalled();
+  });
+
   it('opens advanced options and focuses invalid JSON before saving credentials or creating a server', async () => {
     const withJson: ComputeCatalog = {
       ...catalog,

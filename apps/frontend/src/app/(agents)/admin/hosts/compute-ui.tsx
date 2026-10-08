@@ -137,6 +137,12 @@ export function parseFields(
       .filter((field) => values[field.key]?.trim())
       .map((field) => {
         const raw = values[field.key];
+        if (field.max_length !== undefined && raw.length > field.max_length) {
+          throw new ProviderFieldError(
+            field.key,
+            `${field.label} must be ${field.max_length} characters or fewer.`,
+          );
+        }
         if (field.type === 'json') {
           try {
             return [field.key, JSON.parse(raw)];
@@ -200,6 +206,7 @@ export function ProviderFields({
                   type={field.type === 'number' ? 'number' : 'text'}
                   min={field.min}
                   max={field.max}
+                  maxLength={field.max_length}
                   autoComplete="off"
                 />
               )}

@@ -43,7 +43,7 @@ class CloudLabConfig(ComputeValue):
     credential_ref: str = Field(min_length=1)
     project: str = Field(min_length=1, max_length=128)
     external_id: str | None = None
-    name: str | None = Field(default=None, pattern=r"^[a-zA-Z][a-zA-Z0-9-]{0,31}$")
+    name: str | None = Field(default=None, max_length=16, pattern=r"^[a-zA-Z][a-zA-Z0-9-]*$")
     profile_name: str | None = None
     profile_project: str | None = None
     group: str | None = None
@@ -202,7 +202,7 @@ class CloudLabProvider(ComputeProvider):
             return self._receipt(observation)
         # No vendor idempotency key exists. The orchestrator must call this
         # only on an unsent persisted intent; recovery must never re-POST it.
-        name = config.name or "ca-" + intent.allocation_id.replace("-", "")[:24]
+        name = config.name or "ca-" + intent.allocation_id.replace("-", "")[:13]
         payload = {
             "name": name,
             "project": config.project,

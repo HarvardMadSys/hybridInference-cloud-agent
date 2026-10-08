@@ -25,6 +25,7 @@ export interface ComputeField {
   modes?: ('attach' | 'provision')[];
   min?: number;
   max?: number;
+  max_length?: number;
 }
 
 export interface ComputeProvider {
