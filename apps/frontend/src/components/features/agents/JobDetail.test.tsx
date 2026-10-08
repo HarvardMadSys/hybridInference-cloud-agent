@@ -1770,6 +1770,23 @@ describe('JobDetail', () => {
     expect(screen.queryByRole('button', { name: 'Inspect raw events' })).not.toBeInTheDocument();
   });
 
+  it('does not suggest a follow-up when the repository is over the import limit', () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'failed',
+          stateNote:
+            'This repository is larger than this server allows (8.43 GiB; the limit is 1.00 GiB).',
+          failureCause: 'repository_too_large',
+        })}
+      />,
+    );
+    const outcome = screen.getByRole('region', { name: 'Task progress' });
+    expect(within(outcome).getByText(/larger than this server allows/)).toBeInTheDocument();
+    expect(within(outcome).getByText(/A follow-up would fail the same way/)).toBeInTheDocument();
+    expect(screen.queryByText(/send a follow-up to try again/)).not.toBeInTheDocument();
+  });
+
   it('keeps failure guidance and usage visible when no assistant reply was recorded', async () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(measuredUsage());
     render(<JobDetail job={makeJob({ state: 'failed', events: [], stateNote: undefined })} />);

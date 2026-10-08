@@ -286,6 +286,11 @@ export interface AgentJob {
   conversationState?: ConversationState;
   /** Short badge text next to the title, e.g. gate hold or failure reason. */
   stateNote?: string;
+  /**
+   * Why a failed turn failed, when the cause outlives the attempt: a follow-up
+   * would meet it again, so the run guidance must not suggest one.
+   */
+  failureCause?: 'repository_too_large';
   repo: string;
   baseRef?: string;
   baseSha: string;

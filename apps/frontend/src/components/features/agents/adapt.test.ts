@@ -59,6 +59,37 @@ describe('owner failure wording', () => {
     }
   });
 
+  it('names a repository over the import limit as such, with its size when known', () => {
+    const cases: [string, string][] = [
+      [
+        "source checkout (8.43 GiB including its Git objects) exceeds this host's 1.00 GiB retained import size limit",
+        'This repository is larger than this server allows (8.43 GiB; the limit is 1.00 GiB).',
+      ],
+      [
+        "source archive exceeds this host's 1.00 GiB retained import size limit",
+        'This repository is larger than this server allows (the limit is 1.00 GiB).',
+      ],
+      // A host older than the size report names neither.
+      [
+        'source checkout exceeds the retained import size limit',
+        'This repository is larger than this server allows.',
+      ],
+    ];
+    for (const [detail, expected] of cases) {
+      expect(ownerFailureMessage(detail)).toBe(expected);
+      expect(toDisplayEvent(event(1, 'error', { text: detail }))).toEqual({
+        kind: 'lifecycle',
+        text: expected,
+        sourceEventId: 1,
+      });
+      const job = toDisplayJob({ ...JOB, state: 'failed', detail }, {});
+      expect(job.stateNote).toBe(expected);
+      expect(job.failureCause).toBe('repository_too_large');
+    }
+    const other = toDisplayJob({ ...JOB, state: 'failed', detail: 'agent exited 1: boom' }, {});
+    expect(other.failureCause).toBeUndefined();
+  });
+
   it('distinguishes execution timeout and cancellation from connection failure', () => {
     expect(ownerFailureMessage('shared Agent CLI turn exceeded its execution timeout')).toBe(
       'This response took too long and was stopped.',

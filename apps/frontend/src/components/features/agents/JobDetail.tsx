@@ -158,7 +158,9 @@ function RunGuidance({ job }: { job: AgentJob }) {
   if (job.state === 'failed') {
     return (
       <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-        Review the failure details, then send a follow-up to try again.
+        {job.failureCause === 'repository_too_large'
+          ? 'A follow-up would fail the same way. Ask an admin to raise the repository import limit, or use a smaller repository.'
+          : 'Review the failure details, then send a follow-up to try again.'}
       </p>
     );
   }

@@ -381,10 +381,28 @@ const INFRASTRUCTURE_FAILURE_PATTERNS = [
   /shared (?:live|chat|supervisor|Agent CLI|member)/i,
 ];
 
+/** The runner measured the checkout against its server's import limit and
+ * refused it before the agent started. Every attempt measures the same
+ * repository, so a follow-up fails the same way. Hosts older than the size
+ * report name neither the size nor the limit.
+ */
+const REPOSITORY_TOO_LARGE =
+  /source (?:checkout|archive)(?: \((\S+ \S+) including its Git objects\))? exceeds (?:this host's (\S+ \S+)|the) retained import size limit/i;
+
+function isRepositoryTooLarge(detail: string | null | undefined): boolean {
+  return Boolean(detail && REPOSITORY_TOO_LARGE.test(detail));
+}
+
 /** Translate infrastructure failures only; keep task errors and transcripts intact.
  * The original detail remains in the API and operator logs for diagnosis.
  */
 export function ownerFailureMessage(detail: string): string {
+  const tooLarge = REPOSITORY_TOO_LARGE.exec(detail);
+  if (tooLarge) {
+    const [, size, limit] = tooLarge;
+    const sizes = [size, limit && `the limit is ${limit}`].filter(Boolean).join('; ');
+    return `This repository is larger than this server allows${sizes ? ` (${sizes})` : ''}.`;
+  }
   if (/^shared Agent CLI turn exceeded its execution timeout/i.test(detail)) {
     return 'This response took too long and was stopped.';
   }
@@ -765,6 +783,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     state: toDisplayState(job),
     conversationState: job.conversation_state ?? undefined,
     stateNote: job.detail ? ownerFailureMessage(job.detail) : undefined,
+    ...(isRepositoryTooLarge(job.detail) ? { failureCause: 'repository_too_large' as const } : {}),
     repo: job.repo,
     baseRef: job.base_ref ?? undefined,
     baseSha: (job.base_sha ?? '').slice(0, 7),
