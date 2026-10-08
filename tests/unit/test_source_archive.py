@@ -158,3 +158,90 @@ def test_base_bundle_requires_a_full_object_id(tmp_path):
 
     with pytest.raises(SandboxError, match="full Git object id"):
         build_base_bundle(str(root), commit="deadbee")
+    with pytest.raises(SandboxError, match="prerequisite must be a full Git object id"):
+        build_base_bundle(str(root), commit="a" * 40, prerequisite="deadbee")
+
+
+def _git(*args: str, cwd) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_AUTHOR_NAME": "T",
+            "GIT_AUTHOR_EMAIL": "t@example.com",
+            "GIT_COMMITTER_NAME": "T",
+            "GIT_COMMITTER_EMAIL": "t@example.com",
+        },
+    ).stdout.strip()
+
+
+def _prerequisites(payload: bytes) -> list[str]:
+    """The commits a bundle requires the receiving repository to hold."""
+    header = payload.split(b"\n\n", 1)[0].decode()
+    return [line[1:].split()[0] for line in header.splitlines() if line.startswith("-")]
+
+
+def test_base_bundle_after_a_prerequisite_carries_only_what_the_commit_adds(tmp_path):
+    # A large incompressible file the workspace already has, and a small change.
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git("init", "--quiet", ".", cwd=root)
+    _git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=root)
+    (root / "large.bin").write_bytes(os.urandom(512 * 1024))
+    (root / "app.py").write_text("print('one')\n")
+    _git("add", "-A", cwd=root)
+    _git("commit", "--quiet", "-m", "base", cwd=root)
+    base = _git("rev-parse", "HEAD", cwd=root)
+    (root / "app.py").write_text("print('two')\n")
+    _git("commit", "--quiet", "-am", "change", cwd=root)
+    commit = _git("rev-parse", "HEAD", cwd=root)
+
+    whole = build_base_bundle(str(root), commit=commit)
+    thin = build_base_bundle(str(root), commit=commit, prerequisite=base)
+
+    assert len(whole) > 512 * 1024
+    assert len(thin) < 4096
+    assert _prerequisites(whole) == []
+    assert _prerequisites(thin) == [base]
+
+    # The workspace: a shallow checkout of the base on its own branch. The
+    # bundle adds the commit's objects and nothing else.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git("init", "--quiet", ".", cwd=workspace)
+    _git("fetch", "--quiet", "--depth", "1", f"file://{root}", base, cwd=workspace)
+    _git("checkout", "--quiet", "-b", "agent/athr_x", "FETCH_HEAD", cwd=workspace)
+    bundle = tmp_path / "base.bundle"
+    bundle.write_bytes(thin)
+    assert _git("bundle", "list-heads", str(bundle), "HEAD", cwd=workspace) == f"{commit} HEAD"
+    _git("bundle", "verify", str(bundle), cwd=workspace)
+    _git("bundle", "unbundle", str(bundle), cwd=workspace)
+    _git("cat-file", "-e", f"{commit}^{{commit}}", cwd=workspace)
+    assert _git("rev-parse", "HEAD", cwd=workspace) == base
+    assert _git("branch", "--show-current", cwd=workspace) == "agent/athr_x"
+
+    # A workspace without the prerequisite refuses it rather than import a
+    # commit it cannot complete.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    _git("init", "--quiet", ".", cwd=empty)
+    with pytest.raises(subprocess.CalledProcessError):
+        _git("bundle", "verify", str(bundle), cwd=empty)
+
+
+def test_base_bundle_refusal_names_its_size(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git("init", "--quiet", ".", cwd=root)
+    (root / "file.txt").write_text("one\n")
+    _git("add", "file.txt", cwd=root)
+    _git("commit", "--quiet", "-m", "one", cwd=root)
+
+    with pytest.raises(SandboxError, match=r"base bundle \(\d+ B\) exceeds the 16 B import size"):
+        build_base_bundle(str(root), commit=_git("rev-parse", "HEAD", cwd=root), max_bytes=16)

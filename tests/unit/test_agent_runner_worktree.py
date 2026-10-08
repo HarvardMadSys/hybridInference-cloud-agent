@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import base64
 import subprocess
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
 
+from cloud_agent_host import runner as runner_mod
 from cloud_agent_host.runner import (
     WorktreeError,
     _assert_no_credential_on_disk,
     _auth_env,
+    _import_retained_base,
     checkout_output_branch,
     prepare_worktree,
     repo_clone_base_url,
@@ -183,3 +186,51 @@ def test_a_missing_pinned_commit_stops_initialization(tmp_path: Path, remote):
     workdir.mkdir()
     with pytest.raises(WorktreeError, match="could not fetch"):
         prepare_worktree(workdir=str(workdir), repo=repo, base_sha="0" * 40, remote_base=base)
+
+
+def test_a_deeper_fetch_brings_the_parent(tmp_path: Path, remote):
+    base, repo, first, head = remote
+    workdir = tmp_path / "job"
+    workdir.mkdir()
+
+    resolved = prepare_worktree(
+        workdir=str(workdir), repo=repo, base_sha=head, remote_base=base, depth=2
+    )
+
+    assert resolved == head
+    assert _git("rev-parse", "HEAD^1", cwd=workdir).strip() == first
+    with pytest.raises(ValueError, match="at least 1"):
+        prepare_worktree(workdir=str(workdir), repo=repo, base_sha=head, depth=0)
+
+
+def _prerequisites(bundle: bytes) -> list[str]:
+    header = bundle.split(b"\n\n", 1)[0].decode()
+    return [line[1:].split()[0] for line in header.splitlines() if line.startswith("-")]
+
+
+@pytest.mark.parametrize("parent_held", [True, False])
+def test_a_missing_follow_up_base_ships_only_what_it_adds_to_a_held_parent(
+    tmp_path: Path, remote, monkeypatch, parent_held: bool
+):
+    base, repo, first, head = remote
+    probed: list[str] = []
+    imported: dict[str, object] = {}
+
+    def has_commit(workdir: str, commit: str, backend: object) -> bool:
+        probed.append(commit)
+        return parent_held
+
+    class Manager:
+        def import_base_bundle(self, spec, bundle, *, commit, env):
+            imported.update(bundle=bundle, commit=commit)
+
+    monkeypatch.setattr(runner_mod, "repo_clone_base_url", lambda **_: base)
+    monkeypatch.setattr(runner_mod, "_sandbox_has_commit", has_commit)
+    job = SimpleNamespace(repo=repo, base_sha=head, clone_token=None)
+
+    resolved = _import_retained_base(job=job, manager=Manager(), spec=None, backend=None)
+
+    assert resolved == imported["commit"] == head
+    assert probed == [first]
+    # A workspace that lacks the parent gets the whole tree, as it always did.
+    assert _prerequisites(imported["bundle"]) == ([first] if parent_held else [])

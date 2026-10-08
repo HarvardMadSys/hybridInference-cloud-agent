@@ -138,6 +138,7 @@ def build_base_bundle(
     workdir: str,
     *,
     commit: str,
+    prerequisite: str | None = None,
     max_bytes: int = DEFAULT_MAX_BASE_BUNDLE_BYTES,
 ) -> bytes:
     """Build a bounded credential-free Git bundle for one resolved base commit.
@@ -147,6 +148,14 @@ def build_base_bundle(
     index and working tree. Shipping only this object's bundle lets the
     sandbox resolve the new diff base without cloning in the sandbox or
     rewriting any of that owner-visible Git state.
+
+    ``prerequisite`` names a commit the receiving workspace already holds. The
+    bundle then carries only what ``commit`` adds on top of it — for a
+    published turn, the agent's own change — instead of the whole tree a
+    second time, which for a large repository is gigabytes against a limit of
+    one. Git refuses to unbundle it into a workspace that lacks the
+    prerequisite, so a wrong guess fails closed. Without one the bundle holds
+    everything ``commit`` reaches in this checkout.
     """
     root = pathlib.Path(workdir).resolve()
     if max_bytes <= 0:
@@ -155,6 +164,9 @@ def build_base_bundle(
         raise SandboxError("source preparer produced no Git checkout")
     if not _FULL_OBJECT_ID.fullmatch(commit):
         raise SandboxError("base bundle commit must be a full Git object id")
+    if prerequisite is not None and not _FULL_OBJECT_ID.fullmatch(prerequisite):
+        raise SandboxError("base bundle prerequisite must be a full Git object id")
+    revisions = "HEAD" if prerequisite is None else f"{prerequisite}..HEAD"
 
     bundle_path: pathlib.Path | None = None
     try:
@@ -172,7 +184,7 @@ def build_base_bundle(
         if resolved.returncode != 0 or resolved.stdout.decode().strip().lower() != commit.lower():
             raise SandboxError("source checkout HEAD does not match retained base commit")
         result = subprocess.run(
-            ["git", "-C", str(root), "bundle", "create", str(bundle_path), "HEAD"],
+            ["git", "-C", str(root), "bundle", "create", str(bundle_path), revisions],
             env={**os.environ, **_GIT_ENV},
             capture_output=True,
             timeout=300,
@@ -181,8 +193,12 @@ def build_base_bundle(
         if result.returncode != 0:
             detail = result.stderr.decode("utf-8", "replace").strip()
             raise SandboxError(f"could not build retained base bundle: {detail[-300:]}")
-        if bundle_path.stat().st_size > max_bytes:
-            raise SandboxError("retained base bundle exceeds the import size limit")
+        size = bundle_path.stat().st_size
+        if size > max_bytes:
+            raise SandboxError(
+                f"retained base bundle ({_human_size(size)}) exceeds the "
+                f"{_human_size(max_bytes)} import size limit"
+            )
         payload = bundle_path.read_bytes()
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise SandboxError(f"could not build retained base bundle: {exc}") from exc
@@ -190,7 +206,10 @@ def build_base_bundle(
         if bundle_path is not None:
             bundle_path.unlink(missing_ok=True)
     if len(payload) > max_bytes:
-        raise SandboxError("retained base bundle exceeds the import size limit")
+        raise SandboxError(
+            f"retained base bundle ({_human_size(len(payload))}) exceeds the "
+            f"{_human_size(max_bytes)} import size limit"
+        )
     return payload
 
 

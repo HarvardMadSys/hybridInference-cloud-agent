@@ -266,7 +266,9 @@ def publish_patch(
         _run_git(["commit", "--quiet", "--no-verify", "-m", commit_message], cwd=repo)
         commit_sha = _run_git(["rev-parse", "HEAD"], cwd=repo).strip()
         base_bundle = (
-            build_base_bundle(str(repo), commit=commit_sha) if include_base_bundle else None
+            build_base_bundle(str(repo), commit=commit_sha, prerequisite=_head_parent(repo))
+            if include_base_bundle
+            else None
         )
 
         # Pinned refspec: this process can only ever write the one branch, and
@@ -294,8 +296,20 @@ def publish_patch(
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _head_parent(repo: Path) -> str:
+    """The commit a published one was made on: the base its workspace holds.
+
+    The snapshot's patch was diffed against this commit inside the workspace,
+    so a base bundle needs to carry only what the published commit adds to it.
+    """
+    return _run_git(["rev-parse", "--verify", "HEAD^1"], cwd=repo).strip()
+
+
 def fetch_base_bundle(*, clone_url: str, commit_sha: str) -> bytes:
-    """Fetch one published commit and return its bounded credential-free bundle."""
+    """Fetch one published commit and return its bounded credential-free bundle.
+
+    Two commits deep, so the parent is at hand to leave out of the bundle.
+    """
     if not _COMMIT_SHA.fullmatch(commit_sha or ""):
         raise PublishError(f"commit_sha must be a full commit hash, got {commit_sha!r}")
     workdir = Path(tempfile.mkdtemp(prefix="agent-base-import-"))
@@ -304,12 +318,12 @@ def fetch_base_bundle(*, clone_url: str, commit_sha: str) -> bytes:
         _run_git(["init", "--quiet", str(repo)])
         _run_git(["remote", "add", "origin", clone_url], cwd=repo)
         _run_git(
-            ["fetch", "--quiet", "--depth", "1", "origin", "--end-of-options", commit_sha],
+            ["fetch", "--quiet", "--depth", "2", "origin", "--end-of-options", commit_sha],
             cwd=repo,
         )
         _run_git(["checkout", "--quiet", "--detach", "FETCH_HEAD"], cwd=repo)
         try:
-            return build_base_bundle(str(repo), commit=commit_sha)
+            return build_base_bundle(str(repo), commit=commit_sha, prerequisite=_head_parent(repo))
         except Exception as exc:
             raise PublishError(f"could not build the retained base bundle: {exc}") from exc
     finally:

@@ -913,6 +913,7 @@ def prepare_worktree(
     base_sha: str | None,
     clone_token: str | None = None,
     remote_base: str = "https://github.com",
+    depth: int = 1,
 ) -> str:
     """Materialize the job's repository in ``workdir`` and return its commit.
 
@@ -923,7 +924,11 @@ def prepare_worktree(
     A shallow single-commit fetch, with no remote recorded. Not adding a remote
     is the point — it is what keeps the credential out of ``.git/config``, and
     the runner has no reason to offer the agent a push path it must not use.
+    ``depth`` 2 also brings the commit's parent, for a caller that bundles only
+    what the commit adds to it.
     """
+    if depth < 1:
+        raise ValueError("fetch depth must be at least 1")
     parts = repo.split("/") if repo else []
     if (
         not _REPO_SLUG.fullmatch(repo or "")
@@ -945,7 +950,7 @@ def prepare_worktree(
     # cannot be parsed as an option by a git version we did not anticipate.
     ref = base_sha or "HEAD"
     fetch = _run_git(
-        ["fetch", "--quiet", "--depth", "1", url, "--end-of-options", ref],
+        ["fetch", "--quiet", "--depth", str(depth), url, "--end-of-options", ref],
         cwd=workdir,
         env_extra=auth,
     )
@@ -1096,11 +1101,16 @@ def _resident_base_ready(workdir: str, job: ClaimedJob, backend: SandboxBackend)
     """
     if not job.base_sha:
         return True
-    if not _COMMIT_SHA.fullmatch(job.base_sha):
+    return _sandbox_has_commit(workdir, job.base_sha, backend)
+
+
+def _sandbox_has_commit(workdir: str, commit: str, backend: SandboxBackend) -> bool:
+    """Does the retained workspace resolve ``commit``? Asked inside the sandbox."""
+    if not _COMMIT_SHA.fullmatch(commit):
         return False
     process = backend.spawn(
         SandboxSpec(
-            argv=["git", "cat-file", "-e", f"{job.base_sha}^{{commit}}"],
+            argv=["git", "cat-file", "-e", f"{commit}^{{commit}}"],
             workdir=workdir,
             env=dict(_SAFE_DIRECTORY_ENV),
         )
@@ -1496,8 +1506,16 @@ def _import_retained_base(
     job: ClaimedJob,
     manager: ChatSandboxManager,
     spec: ChatSandboxSpec,
+    backend: SandboxBackend,
 ) -> str:
-    """Fetch a follow-up base outside the sandbox and import objects only."""
+    """Fetch a follow-up base outside the sandbox and import objects only.
+
+    A base missing here is usually a published commit whose own import was
+    missed, and its parent is the base the workspace already had. Then the
+    bundle carries only what the commit adds; the whole tree, which for a
+    large repository does not fit a bundle, goes only to a workspace that
+    lacks the parent too.
+    """
     with tempfile.TemporaryDirectory(prefix="freeinference-base-") as source:
         resolved = prepare_worktree(
             workdir=source,
@@ -1505,8 +1523,13 @@ def _import_retained_base(
             base_sha=job.base_sha,
             clone_token=job.clone_token,
             remote_base=repo_clone_base_url(clone_token=job.clone_token),
+            depth=2,
         )
-        bundle = build_base_bundle(source, commit=resolved)
+        parent = _run_git(["rev-parse", "--verify", "--quiet", "HEAD^1"], cwd=source)
+        held = (parent.stdout.strip() or None) if parent.returncode == 0 else None
+        if held and not _sandbox_has_commit(CHAT_WORKDIR, held, backend):
+            held = None
+        bundle = build_base_bundle(source, commit=resolved, prerequisite=held)
         manager.import_base_bundle(
             spec,
             bundle,
@@ -2106,7 +2129,9 @@ def _run_shared_live_attempt(
                 context_invalid = True
                 raise SandboxError("shared chat has no native Agent CLI session locator")
             if not _resident_base_ready(CHAT_WORKDIR, job, retained):
-                imported_base = _import_retained_base(job=job, manager=manager, spec=spec)
+                imported_base = _import_retained_base(
+                    job=job, manager=manager, spec=spec, backend=retained
+                )
                 if not _resident_base_ready(CHAT_WORKDIR, job, retained):
                     context_invalid = True
                     raise SandboxError("shared chat cannot resolve its pinned base commit")

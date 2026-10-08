@@ -16,7 +16,7 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
-from cloud_agent.publisher import PublishError, publish_patch
+from cloud_agent.publisher import PublishError, fetch_base_bundle, publish_patch
 
 pytestmark = pytest.mark.integration
 
@@ -396,6 +396,52 @@ def test_follow_up_fast_forwards_its_own_branch(origin):
     )
 
     assert second.branch == first.branch == "agent/athr_thread1"
+
+
+def _prerequisites(bundle: bytes) -> list[str]:
+    """The commits a bundle requires the receiving repository to hold."""
+    header = bundle.split(b"\n\n", 1)[0].decode()
+    return [line[1:].split()[0] for line in header.splitlines() if line.startswith("-")]
+
+
+def test_base_bundle_carries_only_what_the_published_commit_adds(origin, tmp_path):
+    """The workspace already holds the base its patch was taken against.
+
+    Both bundles name that base as a prerequisite, so neither ships the
+    repository a second time, and each imports into a shallow checkout of the
+    base without moving its HEAD — the retry from the remote as much as the
+    one built at publish time.
+    """
+    clone_url, base_sha = origin
+
+    result = publish_patch(
+        job_id="ajob_bundle",
+        branch_id="athr_bundle",
+        patch=_PATCH_APP,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: turn 1",
+        include_base_bundle=True,
+    )
+    retried = fetch_base_bundle(clone_url=f"file://{clone_url}", commit_sha=result.commit_sha)
+
+    assert result.base_bundle is not None
+    assert _prerequisites(result.base_bundle) == [base_sha]
+    assert _prerequisites(retried) == [base_sha]
+
+    workspace = tmp_path / "workspace"
+    _git(["init", "--quiet", str(workspace)], cwd=tmp_path)
+    _git(["fetch", "--quiet", "--depth", "1", f"file://{clone_url}", base_sha], cwd=workspace)
+    _git(["checkout", "--quiet", "--detach", "FETCH_HEAD"], cwd=workspace)
+    bundle = tmp_path / "base.bundle"
+    for payload in (result.base_bundle, retried):
+        bundle.write_bytes(payload)
+        listed = _git(["bundle", "list-heads", str(bundle), "HEAD"], cwd=workspace).strip()
+        assert listed == f"{result.commit_sha} HEAD"
+        _git(["bundle", "verify", str(bundle)], cwd=workspace)
+        _git(["bundle", "unbundle", str(bundle)], cwd=workspace)
+    _git(["cat-file", "-e", f"{result.commit_sha}^{{commit}}"], cwd=workspace)
+    assert _git(["rev-parse", "HEAD"], cwd=workspace).strip() == base_sha
 
 
 def test_branch_moved_by_someone_else_is_refused_with_the_reason(origin, tmp_path):
