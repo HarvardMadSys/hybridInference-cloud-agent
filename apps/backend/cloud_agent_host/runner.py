@@ -152,6 +152,12 @@ FIRST_SETTINGS_WAIT_S = 30.0
 # Idempotent lifecycle receipts reuse the same short retry interval.
 _CONTROL_RETRY_INTERVAL_S = 5.0
 _HEARTBEAT_TIMEOUT_S = 10.0
+#: How long a host polls before asking again for the wait endpoint a control
+#: plane did not have. Hosts deploy first, so this is the rest of a rollout.
+WORK_WAIT_RETRY_S = 300.0
+#: Added to a wait's own timeout for the client's, so the control plane always
+#: answers first.
+_WORK_WAIT_GRACE_S = 10.0
 #: One upload is capped at 5 MB by the control plane, but the connection can be
 #: slow; the default 30 s client timeout is too tight for a file transfer.
 _ATTACHMENT_TIMEOUT_S = 120.0
@@ -256,6 +262,10 @@ class ClaimUnreachable(Exception):
     attempt running until its lease expires, and an operator needs to be sent
     to the job rather than told nothing was claimed.
     """
+
+
+class WorkWaitUnsupported(Exception):
+    """The control plane has no wait endpoint, so an idle host polls instead."""
 
 
 class WorktreeError(Exception):
@@ -800,6 +810,72 @@ def claim_payload(
     response.raise_for_status()
     body = response.json()
     return body if body else None
+
+
+def wait_for_work(
+    *, base_url: str, host_credential: str, since: str | None, timeout_s: float
+) -> str:
+    """Wait until the control plane says there may be work, and return its token.
+
+    Answers at once when ``since`` is stale and at the latest after
+    ``timeout_s``; the host claims after either. Raises
+    :class:`WorkWaitUnsupported` for a control plane without the endpoint.
+    """
+    try:
+        response = httpx.post(
+            f"{base_url.rstrip('/')}/v1/agent/worker/wait",
+            json={"since": since, "timeout_seconds": timeout_s},
+            headers={"Authorization": f"Bearer {host_credential}"},
+            timeout=timeout_s + _WORK_WAIT_GRACE_S,
+        )
+    except httpx.TransportError as exc:
+        raise ClaimUnreachable(str(exc)) from exc
+    if response.status_code == 404:
+        raise WorkWaitUnsupported(response.text[:200])
+    response.raise_for_status()
+    return str(response.json()["token"])
+
+
+class _WorkWaiter:
+    """Parks an idle host until the control plane says the queue changed.
+
+    Each wait passes the token the previous one returned, which predates the
+    claim that just found nothing; anything queued since has advanced it, so
+    nothing that claim missed waits out an interval. Waits no longer than the
+    poll it replaces, so what the control plane cannot signal is found as soon
+    as before. Sleeps that same interval instead when the control plane has no
+    wait endpoint, asking again after :data:`WORK_WAIT_RETRY_S`, or when a
+    wait fails.
+    """
+
+    def __init__(self, *, base_url: str, interval_s: float) -> None:
+        self._base_url = base_url
+        self._interval_s = interval_s
+        self._token: str | None = None
+        self._poll_until = 0.0
+
+    def wait(self, host_credential: str) -> None:
+        """Return when the host should claim again."""
+        if self._interval_s <= 0 or time.monotonic() < self._poll_until:
+            time.sleep(self._interval_s)
+            return
+        try:
+            self._token = wait_for_work(
+                base_url=self._base_url,
+                host_credential=host_credential,
+                since=self._token,
+                timeout_s=self._interval_s,
+            )
+        except WorkWaitUnsupported:
+            self._poll_until = time.monotonic() + WORK_WAIT_RETRY_S
+            time.sleep(self._interval_s)
+        except Exception as exc:
+            self._token = None
+            logger.warning(
+                "agent_work_wait_failed",
+                extra={"event": "agent_work_wait_failed", "error": str(exc)[:300]},
+            )
+            time.sleep(self._interval_s)
 
 
 def release_turn(*, base_url: str, worker_token: str, job_id: str, reason: str) -> bool:
@@ -3500,6 +3576,7 @@ def run_forever(
     )
 
     idle_wait = tick_s if tick_s is not None else idle_sleep_s
+    work = _WorkWaiter(base_url=base_url, interval_s=idle_wait)
     immediate = False
     claims = 0
     try:
@@ -3645,7 +3722,7 @@ def run_forever(
                 # Nothing was claimed, so there is no startup to measure and
                 # the poll must not spend a slot.
                 operation_profiling.discard(measurement)
-                time.sleep(idle_wait)
+                work.wait(pool.credential)
                 continue
 
             _hand_over_turn(

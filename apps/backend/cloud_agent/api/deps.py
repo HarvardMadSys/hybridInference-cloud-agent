@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     from cloud_agent.grants import GrantClient
     from cloud_agent.ports import AuditRepository
     from cloud_agent.storage.assembly import Storage
+    from cloud_agent.workers.work_signal import WorkSignal
 
 
 class _Audited(Protocol):
@@ -133,6 +134,15 @@ def get_grant_client(request: Request) -> GrantClient:
         client = _GrantClient()
         request.app.state.grants = client
     return client
+
+
+def get_work_signal(request: Request) -> WorkSignal | None:
+    """Dependency to obtain the signal idle hosts wait on.
+
+    ``None`` in a process that does not listen for work: the MCP relay, and a
+    test application that has not set one.
+    """
+    return getattr(request.app.state, "work_signal", None)
 
 
 def get_source_control(request: Request) -> SourceControlRuntime | None:

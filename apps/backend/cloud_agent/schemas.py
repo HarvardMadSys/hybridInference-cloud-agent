@@ -1430,6 +1430,35 @@ class WorkerClaimRequest(BaseModel):
     )
 
 
+#: The longest an idle host may park a wait. Hosts ask for their poll interval;
+#: this only bounds how long a request can hold a connection open.
+MAX_WORK_WAIT_SECONDS = 30.0
+
+
+class WorkerWaitRequest(BaseModel):
+    """An idle host asking to be answered when there may be work to claim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    since: str | None = Field(
+        None,
+        max_length=64,
+        description="The token from this host's previous wait, taken before its last claim.",
+    )
+    timeout_seconds: float = Field(
+        5.0,
+        gt=0,
+        le=MAX_WORK_WAIT_SECONDS,
+        description="How long to wait for a change before answering anyway.",
+    )
+
+
+class WorkerWaitResponse(BaseModel):
+    """The token to pass back on the next wait; the host claims either way."""
+
+    token: str
+
+
 class WorkerSandboxMember(BaseModel):
     """One native chat session inside a shared retained sandbox group."""
 

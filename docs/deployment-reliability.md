@@ -52,8 +52,18 @@ one command, rereads after mutations and verifies the final bridge identity,
 membership and relay addresses. Every subsequent command still checks again.
 Unchanged guest hosts/resolver files avoid writes while retaining their file
 ownership, mode and symlink checks. Network policy and guard freshness remain
-unchanged. A full host checks for completed children every second; empty-queue
-polling retains its five-second interval.
+unchanged. A full host checks for completed children every second.
+
+A host whose claim finds nothing waits on `/v1/agent/worker/wait` instead of
+sleeping five seconds. The control plane answers as soon as Postgres notifies
+that a job was queued, requeued or ended (triggers added by migration `0029`),
+and after five seconds otherwise, so what the triggers cannot see, such as a
+moved host pin or a finished fork, is found no later than before. The host
+claims after either answer; the wait never hands out work. Its listener has its
+own database connection, reconnects on its own, and wakes every waiting host
+whenever it connects or loses the connection. A control plane without the
+endpoint answers 404; the host then polls as before and asks again after five
+minutes, so hosts can deploy first.
 
 Selected startup measurements now attribute this work to a `preflight` stage;
 the total remains claim request to prompt dispatch, excluding queue wait and

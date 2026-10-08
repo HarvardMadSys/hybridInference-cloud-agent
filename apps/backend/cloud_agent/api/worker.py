@@ -32,6 +32,7 @@ from cloud_agent.api.deps import (
     get_grant_client,
     get_source_control,
     get_storage,
+    get_work_signal,
     require_store,
 )
 from cloud_agent.application.job_admission import ENV_SANDBOX_MCP_URL
@@ -85,6 +86,8 @@ from cloud_agent.schemas import (
     WorkerTerminalSuspendRequest,
     WorkerThreadSandbox,
     WorkerTurnResourcesRequest,
+    WorkerWaitRequest,
+    WorkerWaitResponse,
 )
 from cloud_agent.skills.selection import prompt_with_skills
 from cloud_agent.source_control_runtime import (
@@ -100,6 +103,7 @@ from cloud_agent.tokens import (
     parse_host_token,
     parse_worker_token,
 )
+from cloud_agent.workers.work_signal import WorkSignal  # noqa: TC001 — FastAPI resolves it.
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 from cloud_agent.workspace_errors import _workspace_broker_http_error
 from cloud_agent_host.runtimes import runtimes_supporting_mcp
@@ -793,6 +797,37 @@ async def worker_claim(
             sandbox_token=sandbox_token,
         )
     return response
+
+
+@router.post("/worker/wait", response_model=WorkerWaitResponse)
+async def worker_wait(
+    body: WorkerWaitRequest,
+    _claiming_host: dict[str, str] = Depends(verify_claiming_host),
+    signal: WorkSignal | None = Depends(get_work_signal),
+) -> WorkerWaitResponse:
+    """Hold an idle host's request until there may be work, then answer.
+
+    A host whose claim found nothing asks here instead of sleeping out its poll
+    interval, and claims again when this answers: at once if the token it
+    passes is stale, when a job is queued, requeued or ends, or after
+    ``timeout_seconds`` regardless. The answer is the token for its next wait
+    and never a job; the claim stays the only way to take one.
+
+    Enrolled hosts only, like the claim it precedes. 404 where nothing listens
+    for work, which is also what a control plane predating this answers, so a
+    host treats both the same way and polls.
+    """
+    if signal is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": {
+                    "type": "not_found",
+                    "message": "This listener does not signal work; poll the claim instead.",
+                }
+            },
+        )
+    return WorkerWaitResponse(token=await signal.wait(body.since, body.timeout_seconds))
 
 
 @router.post("/worker/jobs/{job_id}/heartbeat", response_model=WorkerHeartbeatResponse)

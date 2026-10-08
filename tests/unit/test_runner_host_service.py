@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import pytest
 
 from cloud_agent_host import runner as runner_mod
@@ -93,6 +94,10 @@ class FakeHeartbeat:
         self.wakes += 1
 
 
+def _no_wait_endpoint(**_kwargs: Any) -> str:
+    raise runner_mod.WorkWaitUnsupported("404")
+
+
 @pytest.fixture
 def service(monkeypatch):
     """``run_forever`` with its enrollment, heartbeat and attestation stubbed."""
@@ -121,6 +126,9 @@ def service(monkeypatch):
             runner_mod._STOPPING.set()
 
     monkeypatch.setattr(runner_mod.time, "sleep", sleep)
+    # A control plane without the wait endpoint, so an idle host sleeps its
+    # interval as these tests expect. The waiting itself is tested below.
+    monkeypatch.setattr(runner_mod, "wait_for_work", _no_wait_endpoint)
     backend = ProcessBackend(acknowledged_unsafe=True)
     monkeypatch.setattr(backend, "preflight", lambda **_kw: None)
 
@@ -917,6 +925,147 @@ def test_a_bad_default_limit_is_a_startup_error_naming_the_variable(service, mon
             host="host-a",
             spawn_turn=lambda _p: LaunchResult(LAUNCH_STARTED, FakeHandle()),
             tick_s=0.0,
+        )
+
+
+# ── Waiting for work ───────────────────────────────────────────────────
+
+
+def test_an_idle_host_waits_for_work_instead_of_sleeping(service, monkeypatch):
+    """Each wait hands back the token the last one returned, taken before the claim.
+
+    That is what makes a message queued during the claim answer the next wait
+    at once, and the credential is read per wait so a rotated one is used.
+    """
+    identity, backend, _released = service
+    order: list[str] = []
+    waits: list[dict[str, Any]] = []
+
+    def claim(**_kwargs: Any) -> None:
+        order.append("claim")
+        if len(waits) == 2:
+            runner_mod._STOPPING.set()
+
+    def wait(**kwargs: Any) -> str:
+        order.append("wait")
+        waits.append(kwargs)
+        identity.credential = f"rotated-{len(waits)}"
+        return f"token-{len(waits)}"
+
+    monkeypatch.setattr(runner_mod, "claim_payload", claim)
+    monkeypatch.setattr(runner_mod, "wait_for_work", wait)
+    monkeypatch.setattr(runner_mod.time, "sleep", lambda seconds: order.append(f"sleep {seconds}"))
+
+    assert (
+        runner_mod.run_forever(
+            base_url="http://control",
+            worker_id="runner-a",
+            backend=backend,
+            host="host-a",
+            spawn_turn=lambda _p: LaunchResult(LAUNCH_STARTED, FakeHandle()),
+        )
+        == 0
+    )
+    assert order == ["claim", "wait"] * 3, "the wait takes the place of the sleep"
+    assert [(w["since"], w["host_credential"]) for w in waits] == [
+        (None, "host-cred"),
+        ("token-1", "rotated-1"),
+        ("token-2", "rotated-2"),
+    ]
+    assert {w["timeout_s"] for w in waits} == {5.0}, "never longer than the poll it replaces"
+    assert {w["base_url"] for w in waits} == {"http://control"}
+
+
+def test_a_control_plane_without_the_wait_is_polled_and_asked_again_later(monkeypatch):
+    clock = {"now": 1000.0}
+    sleeps: list[float] = []
+    asked: list[str | None] = []
+
+    def unsupported(**kwargs: Any) -> str:
+        asked.append(kwargs["since"])
+        raise runner_mod.WorkWaitUnsupported("404")
+
+    monkeypatch.setattr(runner_mod.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(runner_mod.time, "sleep", sleeps.append)
+    monkeypatch.setattr(runner_mod, "wait_for_work", unsupported)
+    waiter = runner_mod._WorkWaiter(base_url="http://control", interval_s=5.0)
+
+    for _ in range(3):
+        waiter.wait("cred")
+        clock["now"] += 5.0
+    assert asked == [None], "a rolling deploy does not cost a 404 per poll"
+    assert sleeps == [5.0] * 3
+
+    clock["now"] += runner_mod.WORK_WAIT_RETRY_S
+    waiter.wait("cred")
+    assert asked == [None, None], "the endpoint is tried again once the control plane may have it"
+
+
+def test_a_failed_wait_sleeps_its_interval_and_starts_over(monkeypatch):
+    sleeps: list[float] = []
+    asked: list[str | None] = []
+    answers: list[Any] = ["token-1", runner_mod.ClaimUnreachable("connection reset"), "token-2"]
+
+    def wait(**kwargs: Any) -> str:
+        asked.append(kwargs["since"])
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(runner_mod.time, "sleep", sleeps.append)
+    monkeypatch.setattr(runner_mod, "wait_for_work", wait)
+    waiter = runner_mod._WorkWaiter(base_url="http://control", interval_s=5.0)
+
+    for _ in range(3):
+        waiter.wait("cred")
+    # The token is dropped with the failure: a control plane that restarted
+    # meanwhile answers a missing one at once rather than waiting it out.
+    assert asked == [None, "token-1", None]
+    assert sleeps == [5.0], "only the failure falls back to sleeping"
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "outcome"),
+    [
+        (200, {"token": "abc:3"}, "abc:3"),
+        (404, {"detail": "Not Found"}, runner_mod.WorkWaitUnsupported),
+        (401, {"detail": "unauthorized"}, httpx.HTTPStatusError),
+    ],
+)
+def test_the_wait_request_and_how_its_answers_are_read(monkeypatch, status, body, outcome):
+    sent: dict[str, Any] = {}
+
+    def post(url: str, **kwargs: Any) -> httpx.Response:
+        sent.update(url=url, **kwargs)
+        return httpx.Response(status, json=body, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(runner_mod.httpx, "post", post)
+
+    def call() -> str:
+        return runner_mod.wait_for_work(
+            base_url="http://control/", host_credential="aht.cred", since="abc:2", timeout_s=5.0
+        )
+
+    if isinstance(outcome, str):
+        assert call() == outcome
+    else:
+        with pytest.raises(outcome):
+            call()
+    assert sent["url"] == "http://control/v1/agent/worker/wait"
+    assert sent["json"] == {"since": "abc:2", "timeout_seconds": 5.0}
+    assert sent["headers"] == {"Authorization": "Bearer aht.cred"}
+    assert sent["timeout"] > 5.0, "the control plane answers before the client gives up"
+
+
+def test_an_unreachable_control_plane_is_reported_as_one(monkeypatch):
+    def post(url: str, **_kwargs: Any) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(runner_mod.httpx, "post", post)
+    with pytest.raises(runner_mod.ClaimUnreachable):
+        runner_mod.wait_for_work(
+            base_url="http://control", host_credential="aht.cred", since=None, timeout_s=5.0
         )
 
 

@@ -14,6 +14,7 @@ honest about *this* surface while saying nothing about the gate.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
@@ -1149,6 +1150,139 @@ async def test_a_host_credential_for_an_unknown_host_cannot_claim(claim_client):
 
     assert response.status_code == 401
     assert store.claims == []
+
+
+# ── An idle host waits for work ────────────────────────────────────────
+
+
+@pytest_asyncio.fixture()
+async def wait_client(monkeypatch):
+    """The worker router with the work signal the main listener has."""
+    from cloud_agent.api import routes
+    from cloud_agent.workers.work_signal import WorkSignal
+
+    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "unit-test-control-secret")
+    store = ClaimRecorder()
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[get_storage] = lambda: store
+    app.state.work_signal = WorkSignal()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as async_client:
+        yield async_client, store, app
+
+
+def _enrolled_host(store: ClaimRecorder) -> dict[str, str]:
+    from cloud_agent.tokens import mint_host_token
+
+    credential = mint_host_token(host="runner-a")
+    store.seed("runner-a", credential_hash=hash_secret(credential), enrolled=True)
+    return {"Authorization": f"Bearer {credential}"}
+
+
+async def test_waiting_for_work_takes_an_enrolled_host_credential(wait_client):
+    """It reveals nothing a claim would not, but it holds a connection open."""
+    async_client, store, _app = wait_client
+    from cloud_agent.tokens import mint_host_token
+
+    store.seed("runner-a", credential_hash=None, status=HOST_DISABLED)
+    for headers in (
+        {},
+        {"Authorization": "Bearer pool-wide-token"},
+        {"Authorization": f"Bearer {mint_host_token(host='runner-a')}"},
+    ):
+        response = await async_client.post("/v1/agent/worker/wait", json={}, headers=headers)
+        assert response.status_code == 401
+
+
+async def test_a_wait_with_a_stale_token_is_answered_at_once(wait_client):
+    async_client, store, app = wait_client
+    headers = _enrolled_host(store)
+    signal = app.state.work_signal
+
+    first = await asyncio.wait_for(
+        async_client.post("/v1/agent/worker/wait", json={"timeout_seconds": 30}, headers=headers),
+        5,
+    )
+    assert first.json() == {"token": signal.token}
+
+    # Work queued while the host was claiming with that token.
+    signal.notify()
+    second = await asyncio.wait_for(
+        async_client.post(
+            "/v1/agent/worker/wait",
+            json={"since": first.json()["token"], "timeout_seconds": 30},
+            headers=headers,
+        ),
+        5,
+    )
+    assert second.json() == {"token": signal.token} != first.json()
+
+
+async def test_a_parked_wait_is_answered_when_work_is_queued(wait_client):
+    async_client, store, app = wait_client
+    headers = _enrolled_host(store)
+    signal = app.state.work_signal
+    held = signal.token
+
+    parked = asyncio.create_task(
+        async_client.post(
+            "/v1/agent/worker/wait",
+            json={"since": held, "timeout_seconds": 30},
+            headers=headers,
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert not parked.done()
+
+    signal.notify()
+
+    response = await asyncio.wait_for(parked, 5)
+    assert response.status_code == 200
+    assert response.json() == {"token": signal.token} != {"token": held}
+    assert store.claims == [], "the wait never claims; the host does that next"
+
+
+async def test_with_nothing_queued_a_wait_ends_at_its_timeout(wait_client):
+    async_client, store, app = wait_client
+    held = app.state.work_signal.token
+
+    response = await async_client.post(
+        "/v1/agent/worker/wait",
+        json={"since": held, "timeout_seconds": 0.05},
+        headers=_enrolled_host(store),
+    )
+
+    assert response.json() == {"token": held}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"timeout_seconds": 0},
+        {"timeout_seconds": 31},
+        {"since": "x" * 65},
+        {"host": "runner-b"},
+    ],
+)
+async def test_a_wait_is_bounded(wait_client, body):
+    async_client, store, _app = wait_client
+    response = await async_client.post(
+        "/v1/agent/worker/wait", json=body, headers=_enrolled_host(store)
+    )
+    assert response.status_code == 422
+
+
+async def test_a_listener_that_does_not_signal_work_sends_hosts_back_to_polling(wait_client):
+    """The same 404 a control plane predating the wait gives, which hosts poll after."""
+    async_client, store, app = wait_client
+    app.state.work_signal = None
+
+    response = await async_client.post(
+        "/v1/agent/worker/wait", json={}, headers=_enrolled_host(store)
+    )
+
+    assert response.status_code == 404
 
 
 # ── Drain, undrain, remove ─────────────────────────────────────────────

@@ -13977,6 +13977,49 @@
         ],
         "title": "WorkerTurnResourcesRequest",
         "type": "object"
+      },
+      "WorkerWaitRequest": {
+        "additionalProperties": false,
+        "description": "An idle host asking to be answered when there may be work to claim.",
+        "properties": {
+          "since": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The token from this host's previous wait, taken before its last claim.",
+            "title": "Since"
+          },
+          "timeout_seconds": {
+            "default": 5.0,
+            "description": "How long to wait for a change before answering anyway.",
+            "exclusiveMinimum": 0.0,
+            "maximum": 30.0,
+            "title": "Timeout Seconds",
+            "type": "number"
+          }
+        },
+        "title": "WorkerWaitRequest",
+        "type": "object"
+      },
+      "WorkerWaitResponse": {
+        "description": "The token to pass back on the next wait; the host claims either way.",
+        "properties": {
+          "token": {
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "WorkerWaitResponse",
+        "type": "object"
       }
     }
   },
@@ -25636,6 +25679,63 @@
           }
         },
         "summary": "Worker Report Turn Resources"
+      }
+    },
+    "/v1/agent/worker/wait": {
+      "post": {
+        "description": "Hold an idle host's request until there may be work, then answer.\n\nA host whose claim found nothing asks here instead of sleeping out its poll\ninterval, and claims again when this answers: at once if the token it\npasses is stale, when a job is queued, requeued or ends, or after\n``timeout_seconds`` regardless. The answer is the token for its next wait\nand never a job; the claim stays the only way to take one.\n\nEnrolled hosts only, like the claim it precedes. 404 where nothing listens\nfor work, which is also what a control plane predating this answers, so a\nhost treats both the same way and polls.",
+        "operationId": "worker_wait_v1_agent_worker_wait_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkerWaitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerWaitResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Worker Wait"
       }
     },
     "/v1/session/callback": {
