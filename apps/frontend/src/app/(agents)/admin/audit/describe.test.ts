@@ -155,6 +155,17 @@ describe('requests and refusals', () => {
     expect(auditOutcome(applied)).toBe('done');
     expect(auditOutcome({ ...applied, success: false })).toBe('failed');
   });
+
+  it('reads a replayed Start or Stop as a repeat that changed nothing', () => {
+    // A retried request id, or a Stop with nothing running: the control did
+    // not move, and an experiment started since may still be running.
+    const stop = entry('agent.profiling.stop', { outcome: 'replayed', run_id: 'admin-1' });
+    const start = entry('agent.profiling.start', { outcome: 'replayed', run_id: 'admin-2' });
+    expect(describeAuditEntry(stop)).toBe('Asked to turn measurements off again; nothing changed');
+    expect(describeAuditEntry(start)).toBe('Asked to turn measurements on again; nothing changed');
+    expect(auditOutcome(stop)).toBe('replayed');
+    expect(auditOutcome(start)).toBe('replayed');
+  });
 });
 
 describe('describeActor', () => {

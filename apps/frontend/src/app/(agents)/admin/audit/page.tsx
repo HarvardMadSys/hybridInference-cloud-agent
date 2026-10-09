@@ -241,7 +241,7 @@ function AuditRow({
           {actor.label}
         </span>
         <span className="min-w-0 flex-1 text-sm text-gray-800 dark:text-gray-200">
-          {outcome !== 'done' && (
+          {(outcome === 'refused' || outcome === 'failed') && (
             <span className="mr-2 font-medium text-red-600 dark:text-red-400">
               {outcome === 'refused' ? 'Refused' : 'Failed'}
             </span>

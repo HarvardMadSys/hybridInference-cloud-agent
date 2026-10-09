@@ -76,18 +76,40 @@ const FIXED: Record<string, string> = {
 /**
  * Whether a recorded action took effect.
  *
- * ``refused`` comes from the details, not from ``success``: Start and Stop
- * refusals were recorded with ``success`` true before that was fixed, and
- * those rows must not read as measurements turned on or off.
+ * Measurement Start and Stop record an ``outcome``: ``applied`` changed the
+ * control, ``replayed`` answered a repeat without changing anything, and
+ * ``refused`` changed nothing either. ``refused`` comes from the details, not
+ * from ``success``: refusals were recorded with ``success`` true before that
+ * was fixed, and those rows must not read as measurements turned on or off.
  */
-export function auditOutcome(entry: AdminAuditLogEntry): 'done' | 'refused' | 'failed' {
-  if (record(entry.details).outcome === 'refused') return 'refused';
-  return entry.success ? 'done' : 'failed';
+export function auditOutcome(
+  entry: AdminAuditLogEntry,
+): 'done' | 'replayed' | 'refused' | 'failed' {
+  const outcome = record(entry.details).outcome;
+  if (outcome === 'refused') return 'refused';
+  if (!entry.success) return 'failed';
+  return outcome === 'replayed' ? 'replayed' : 'done';
 }
 
-function refusal(attempt: string, details: Details): string {
-  const reason = text(details.reason);
-  return reason ? `Tried to ${attempt} (refused: ${reason})` : `Tried to ${attempt} (refused)`;
+/**
+ * A measurement Start or Stop, by what it did.
+ *
+ * ``replayed`` is a retried request id, or a Stop with nothing running (a
+ * double click): either way the control did not change, so it must not read
+ * as measurements turned on or off — an experiment started since may still
+ * be running.
+ */
+function measurementChange(state: 'on' | 'off', details: Details): string {
+  if (details.outcome === 'refused') {
+    const reason = text(details.reason);
+    return reason
+      ? `Tried to turn measurements ${state} (refused: ${reason})`
+      : `Tried to turn measurements ${state} (refused)`;
+  }
+  if (details.outcome === 'replayed') {
+    return `Asked to turn measurements ${state} again; nothing changed`;
+  }
+  return `Turned measurements ${state}`;
 }
 
 /** An action this page has no sentence for, readable rather than dotted. */
@@ -142,14 +164,8 @@ const SENTENCES: Record<string, Sentence> = {
   'agent.runner_host.forget': (_details, host) => `Forgot ${host}`,
   'agent.runner_host.enroll_token_issued': (_details, host) =>
     `Issued an enrollment token for ${host}`,
-  'agent.profiling.start': (details) =>
-    details.outcome === 'refused'
-      ? refusal('turn measurements on', details)
-      : 'Turned measurements on',
-  'agent.profiling.stop': (details) =>
-    details.outcome === 'refused'
-      ? refusal('turn measurements off', details)
-      : 'Turned measurements off',
+  'agent.profiling.start': (details) => measurementChange('on', details),
+  'agent.profiling.stop': (details) => measurementChange('off', details),
   'agent.run.event_content.read': (details) => {
     const turn = text(details.job_id);
     return turn ? `Viewed a step's content in turn ${turn}` : "Viewed a step's content";

@@ -170,6 +170,27 @@ describe('admin Audit log', () => {
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
   });
 
+  it('shows a replayed Stop as a repeat, not as measurements turned off', async () => {
+    list.mockResolvedValue(
+      page([
+        entry(1, {
+          action: 'agent.profiling.stop',
+          category: 'measurements',
+          details: { outcome: 'replayed', run_id: 'admin-1', revision: 2 },
+        }),
+      ]),
+    );
+    render(<AdminAuditLogPage />);
+
+    const row = await screen.findByRole('button', {
+      name: /Asked to turn measurements off again; nothing changed/,
+    });
+    expect(screen.queryByText('Turned measurements off')).not.toBeInTheDocument();
+    // A repeat is not a failure; the sentence says what happened.
+    expect(within(row).queryByText('Refused')).not.toBeInTheDocument();
+    expect(within(row).queryByText('Failed')).not.toBeInTheDocument();
+  });
+
   it('marks a refused Stop as refused, even on a row recorded as successful', async () => {
     list.mockResolvedValue(
       page([
