@@ -66,6 +66,8 @@ class HostSetting:
         )
 
 
+#: In the order the admin pages list them: the session's own limits, then the
+#: sandbox's, then the terminals'.
 HOST_SETTINGS: tuple[HostSetting, ...] = (
     HostSetting(
         key="agent_timeout_s",
@@ -79,6 +81,21 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         default=3600,
         minimum=60,
         maximum=86400,
+        scope="runner",
+    ),
+    HostSetting(
+        key="source_import_max_mib",
+        env="AGENT_SOURCE_IMPORT_MAX_MIB",
+        label="Repository size limit",
+        description=(
+            "Largest repository a session's first turn may import, counting the "
+            "checkout's files and the fetched commit's Git objects. A larger "
+            "repository fails before the agent starts."
+        ),
+        unit="MiB",
+        default=1024,
+        minimum=1,
+        maximum=65536,
         scope="runner",
     ),
     HostSetting(
@@ -96,21 +113,6 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         minimum=60,
         maximum=604800,
         scope="both",
-    ),
-    HostSetting(
-        key="source_import_max_mib",
-        env="AGENT_SOURCE_IMPORT_MAX_MIB",
-        label="Repository size limit",
-        description=(
-            "Largest repository a session's first turn may import, counting the "
-            "checkout's files and the fetched commit's Git objects. A larger "
-            "repository fails before the agent starts."
-        ),
-        unit="MiB",
-        default=1024,
-        minimum=1,
-        maximum=65536,
-        scope="runner",
     ),
     HostSetting(
         key="shared_resident_capacity",

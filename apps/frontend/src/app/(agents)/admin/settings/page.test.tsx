@@ -172,13 +172,14 @@ describe('admin Settings', () => {
     expect(list).not.toHaveBeenCalled();
   });
 
-  it('admits a free account with admin permission and separates settings by purpose', async () => {
+  it('admits a free account with admin permission and shows versions and limits', async () => {
     render(<AdminSettingsPage />);
     await screen.findByLabelText('Claude Code');
     expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('aria-current', 'page');
-    for (const name of ['Agent versions', 'Sessions', 'Sandboxes', 'Terminals']) {
-      expect(screen.getByRole('heading', { name })).toBeInTheDocument();
-    }
+    expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual([
+      'Agent versions',
+      'Limits',
+    ]);
     expect(screen.queryByLabelText('New sandbox location')).not.toBeInTheDocument();
     expect(screen.queryByText('Runtime settings')).not.toBeInTheDocument();
     expect(
@@ -199,17 +200,19 @@ describe('admin Settings', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('does not hide a new setting that this frontend has not grouped yet', async () => {
+  it('lists a setting this frontend has never heard of with the others', async () => {
     list.mockResolvedValue(
       pool({
         host_setting_definitions: [
+          ...definitions,
           { ...definitions[0], key: 'future_limit', label: 'Future limit' },
         ],
       }),
     );
     render(<AdminSettingsPage />);
     await screen.findByLabelText('Future limit for all servers');
-    expect(screen.getByRole('heading', { name: 'Other settings' })).toBeInTheDocument();
+    const card = screen.getByRole('heading', { name: 'Limits' }).parentElement!;
+    expect(within(card).getByLabelText('Future limit for all servers')).toBeInTheDocument();
   });
 });
 

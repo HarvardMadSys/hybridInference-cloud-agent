@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
-import type { AgentRunnerHostPool, HostSettingDefinition } from '@/lib/api/admin';
+import type { AgentRunnerHostPool } from '@/lib/api/admin';
 import { getAgentRunnerHosts, setAgentHostSettings, setAgentRuntimeVersion } from '@/lib/api/admin';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
@@ -13,28 +13,6 @@ import AgentVersions, { agentName } from './AgentVersions';
 import { AdminNavigation } from '../AdminNavigation';
 import { GlobalSettingsCard, type NamedHost } from '../hosts/HostSettings';
 import { runtimeMenu, serverInventory } from '../hosts/format';
-
-const SETTING_GROUPS = [
-  { title: 'Sessions', keys: ['agent_timeout_s', 'source_import_max_mib'] },
-  { title: 'Sandboxes', keys: ['chat_idle_timeout_s', 'shared_resident_capacity'] },
-  {
-    title: 'Terminals',
-    keys: ['terminal_idle_ttl_s', 'terminal_hard_ttl_s', 'terminal_max_sessions'],
-  },
-];
-
-function groupSettings(definitions: HostSettingDefinition[]) {
-  const groups = SETTING_GROUPS.map(({ title, keys }) => ({
-    title,
-    definitions: definitions.filter((definition) => keys.includes(definition.key)),
-  }));
-  const known = new Set(SETTING_GROUPS.flatMap(({ keys }) => keys));
-  groups.push({
-    title: 'Other settings',
-    definitions: definitions.filter(({ key }) => !known.has(key)),
-  });
-  return groups.filter((group) => group.definitions.length > 0);
-}
 
 export default function AdminSettingsPage() {
   const { state } = useAuth();
@@ -207,11 +185,14 @@ function SettingsView() {
                   )
                 }
               />
-              {groupSettings(definitions).map(({ title, definitions: group }) => (
+              {/* One card, named and ordered like each server's own Limits
+                  table: seven rows whose labels already say what they limit
+                  need no sub-headings, and a setting this page has never
+                  heard of still lands in the list. */}
+              {definitions.length > 0 && (
                 <GlobalSettingsCard
-                  key={title}
-                  title={title}
-                  definitions={group}
+                  title="Limits"
+                  definitions={definitions}
                   values={pool.host_settings ?? {}}
                   servers={servers}
                   busy={busy}
@@ -221,7 +202,7 @@ function SettingsView() {
                     void save(() => setAgentHostSettings({ [key]: value }), null)
                   }
                 />
-              ))}
+              )}
             </>
           )}
         </div>
