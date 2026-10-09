@@ -8,6 +8,7 @@
 // a level, ending at the server's own `.env` or built-in default. Nothing here
 // claims a value is in force until the server reports applying it.
 
+import Link from 'next/link';
 import { useState } from 'react';
 
 import type { AgentRunnerHost, HostSettingDefinition, HostSettingValues } from '@/lib/api/admin';
@@ -25,7 +26,7 @@ import {
 type OnChange = (key: string, value: number | null) => void;
 
 const INPUT_CLASS =
-  'w-24 rounded-md border border-gray-200 bg-white px-1.5 py-0.5 text-xs tabular-nums text-gray-700 shadow-sm disabled:opacity-40 aria-[invalid=true]:border-red-400 dark:border-white/10 dark:bg-gray-900 dark:text-gray-200';
+  'w-24 shrink-0 rounded-md border border-gray-200 bg-white px-1.5 py-0.5 text-xs tabular-nums text-gray-700 shadow-sm disabled:opacity-40 aria-[invalid=true]:border-red-400 dark:border-white/10 dark:bg-gray-900 dark:text-gray-200';
 const BUTTON_CLASS =
   'rounded-md border border-gray-200 bg-white px-1.5 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 dark:border-white/10 dark:bg-transparent dark:text-gray-200 dark:hover:bg-white/5';
 const CLEAR_CLASS =
@@ -58,12 +59,13 @@ function SettingForm({
   onChange: OnChange;
 }) {
   const [error, setError] = useState<string | null>(null);
+  const [dirty, setDirty] = useState(false);
   const unit = unitLabel(definition);
   const errorId = `setting-error-${label.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
   return (
     <div>
       <form
-        className="flex flex-nowrap items-center justify-end gap-1.5 whitespace-nowrap"
+        className="flex flex-wrap items-center justify-end gap-1.5 whitespace-nowrap"
         onSubmit={(event) => {
           event.preventDefault();
           const parsed = parseSettingInput(
@@ -87,6 +89,10 @@ function SettingForm({
           max={definition.maximum}
           step={1}
           defaultValue={saved ?? ''}
+          onChange={(event) => {
+            setDirty(event.target.value !== String(saved ?? ''));
+            setError(null);
+          }}
           placeholder={placeholder === null ? undefined : String(placeholder)}
           aria-label={label}
           aria-invalid={error !== null}
@@ -99,7 +105,7 @@ function SettingForm({
             a value to clear. A row with nothing to clear holds an inert,
             hidden button rather than none. */}
         <span className="w-7 text-xs text-gray-500 dark:text-gray-400">{unit}</span>
-        <button type="submit" disabled={busy || disabled} className={BUTTON_CLASS}>
+        <button type="submit" disabled={busy || disabled || !dirty} className={BUTTON_CLASS}>
           Save
         </button>
         <button
@@ -111,7 +117,7 @@ function SettingForm({
             setError(null);
             onChange(definition.key, null);
           }}
-          className={`${CLEAR_CLASS} ${saved === null ? 'invisible' : ''}`}
+          className={`${CLEAR_CLASS} ${saved === null ? 'hidden sm:block sm:invisible' : ''}`}
         >
           {clearLabel}
         </button>
@@ -131,12 +137,14 @@ function SettingForm({
 
 /** The values set for every server, each with how far it has reached. */
 export function GlobalSettingsCard({
+  title,
   definitions,
   values,
   hosts,
   busy,
   onChange,
 }: {
+  title: string;
   definitions: HostSettingDefinition[];
   values: HostSettingValues;
   hosts: AgentRunnerHost[];
@@ -145,11 +153,7 @@ export function GlobalSettingsCard({
 }) {
   return (
     <div className="mt-8 rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/10 dark:bg-gray-900">
-      <h2 className="text-base font-semibold text-gray-900 dark:text-gray-50">Runtime settings</h2>
-      <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-        For every server. A value set on one server wins; a cleared value falls back to each
-        server&apos;s own .env.
-      </p>
+      <h2 className="text-base font-semibold text-gray-900 dark:text-gray-50">{title}</h2>
       <div className="mt-2">
         {definitions.map((definition, index) => {
           const saved = values[definition.key] ?? null;
@@ -178,11 +182,12 @@ export function GlobalSettingsCard({
               </div>
               <div className="shrink-0">
                 <SettingForm
+                  key={`${definition.key}:${saved ?? 'unset'}`}
                   definition={definition}
                   saved={saved}
                   placeholder={definition.default}
                   label={`${definition.label} for all servers`}
-                  clearLabel="Use each server's own"
+                  clearLabel="Use server defaults"
                   busy={busy}
                   onChange={onChange}
                 />
@@ -213,8 +218,18 @@ export function ServerSettingsPanel({
 }) {
   const supported = supportsSettings(host);
   return (
-    <section aria-label={`Runtime settings for ${name}`} className="mt-6">
-      <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Runtime settings</h3>
+    <section aria-label={`Limits for ${name}`} className="mt-6">
+      <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Limits</h3>
+      <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+        Values set here override the global defaults in{' '}
+        <Link
+          href="/admin/settings"
+          className="underline hover:text-gray-700 dark:hover:text-gray-200"
+        >
+          Settings
+        </Link>
+        .
+      </p>
       {!supported && (
         <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
           This server&apos;s runner predates settings from this page and keeps its .env values.
@@ -261,11 +276,12 @@ export function ServerSettingsPanel({
                 </td>
                 <td className="py-2 align-top">
                   <SettingForm
+                    key={`${definition.key}:${override ?? 'unset'}`}
                     definition={definition}
                     saved={override}
                     placeholder={fact.admin ?? fact.own ?? definition.default}
                     label={`${definition.label} for ${name}`}
-                    clearLabel="Clear"
+                    clearLabel="Use default"
                     busy={busy}
                     disabled={!supported}
                     onChange={onChange}

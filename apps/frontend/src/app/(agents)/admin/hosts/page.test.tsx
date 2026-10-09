@@ -38,13 +38,11 @@ vi.mock('@/lib/api/admin', () => ({
   undrainAgentRunnerHost: vi.fn(),
   removeAgentRunnerHost: vi.fn(),
   setAgentRunnerHostSlots: vi.fn(),
-  setAgentHostSettings: vi.fn(),
   setAgentRunnerHostSettings: vi.fn(),
   HOST_CONCURRENCY_CAPABILITY: 'host-concurrency-v1',
   HOST_SETTINGS_CAPABILITY: 'host-settings-v1',
   MIN_HOST_SLOTS: 2,
   MAX_HOST_SLOTS: 128,
-  setAgentRuntimeVersion: vi.fn(),
 }));
 
 import {
@@ -54,10 +52,8 @@ import {
   getAgentRunnerHosts,
   removeAgentRunnerHost,
   setActiveAgentRunnerHost,
-  setAgentHostSettings,
   setAgentRunnerHostSettings,
   setAgentRunnerHostSlots,
-  setAgentRuntimeVersion,
 } from '@/lib/api/admin';
 
 import { reasonLabel } from './capacity';
@@ -93,8 +89,6 @@ const mocked = {
   forget: forgetAgentRunnerHost as unknown as ReturnType<typeof vi.fn>,
   remove: removeAgentRunnerHost as unknown as ReturnType<typeof vi.fn>,
   slots: setAgentRunnerHostSlots as unknown as ReturnType<typeof vi.fn>,
-  setVersion: setAgentRuntimeVersion as unknown as ReturnType<typeof vi.fn>,
-  globalSettings: setAgentHostSettings as unknown as ReturnType<typeof vi.fn>,
   serverSettings: setAgentRunnerHostSettings as unknown as ReturnType<typeof vi.fn>,
 };
 
@@ -279,17 +273,22 @@ describe('AdminHostsPage', () => {
     expect(mocked.list).not.toHaveBeenCalled();
   });
 
-  it('keeps placement inside Servers with harness controls below', async () => {
+  it('keeps placement inside Servers and puts global configuration in Settings', async () => {
     renderPage();
     const servers = screen.getByRole('region', { name: 'Servers' });
     const location = within(servers).getByLabelText('New sandbox location');
     expect(screen.queryByRole('heading', { name: 'Global settings' })).not.toBeInTheDocument();
     const server = await screen.findByRole('rowheader', { name: 'runner-a' });
-    const harness = screen.getByLabelText('claude-code');
+    expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute(
+      'href',
+      '/admin/settings',
+    );
+    expect(screen.queryByLabelText('Claude Code')).not.toBeInTheDocument();
+    expect(screen.queryByText('Harness version')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Turn time limit for all servers')).not.toBeInTheDocument();
     expect(
       location.compareDocumentPosition(server) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    expect(server.compareDocumentPosition(harness) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('admits a free account granted Agent administration', async () => {
@@ -1503,120 +1502,6 @@ describe('formatting', () => {
   });
 });
 
-describe('harness version selection', () => {
-  beforeEach(() => {
-    auth.role = 'admin';
-    Object.values(mocked).forEach((m) => m.mockReset());
-    mocked.list.mockResolvedValue(pool([host()]));
-    mocked.history.mockResolvedValue(history());
-  });
-
-  afterEach(cleanup);
-
-  it('offers every version the pool holds, with the image default first', async () => {
-    renderPage();
-
-    const select = (await screen.findByLabelText('claude-code')) as HTMLSelectElement;
-    expect([...select.options].map((o) => o.textContent)).toEqual([
-      'Image default',
-      '2.1.220',
-      '2.1.235',
-    ]);
-    // Nothing selected means the image default — not "2.1.220 happens to be
-    // first". The two differ the moment a host is rebuilt.
-    expect(select.value).toBe('');
-  });
-
-  it('shows the deployment-wide selection, not a per-host value', async () => {
-    mocked.list.mockResolvedValue(pool([host()], null, { 'claude-code': '2.1.235' }));
-    renderPage();
-
-    const select = (await screen.findByLabelText('claude-code')) as HTMLSelectElement;
-    await waitFor(() => expect(select.value).toBe('2.1.235'));
-  });
-
-  it('sends the choice and takes the whole pool back', async () => {
-    mocked.setVersion.mockResolvedValue(pool([host()], null, { 'claude-code': '2.1.235' }));
-    renderPage();
-
-    const select = await screen.findByLabelText('claude-code');
-    fireEvent.change(select, { target: { value: '2.1.235' } });
-
-    await waitFor(() => expect(mocked.setVersion).toHaveBeenCalledWith('claude-code', '2.1.235'));
-    // The wording is the contract with the operator: this is not retroactive,
-    // and a page that implied otherwise would be the bug.
-    expect(
-      await screen.findByText(/New claude-code threads will run 2\.1\.235/),
-    ).toBeInTheDocument();
-  });
-
-  it('clears back to the image default with null, not an empty string', async () => {
-    mocked.list.mockResolvedValue(pool([host()], null, { 'claude-code': '2.1.235' }));
-    mocked.setVersion.mockResolvedValue(pool([host()]));
-    renderPage();
-
-    const select = await screen.findByLabelText('claude-code');
-    fireEvent.change(select, { target: { value: '' } });
-
-    await waitFor(() => expect(mocked.setVersion).toHaveBeenCalledWith('claude-code', null));
-  });
-
-  it('explains an unavailable harness menu without hiding the setting', async () => {
-    mocked.list.mockResolvedValue(pool([host({ runtime_versions_available: null })]));
-    renderPage();
-
-    await screen.findByRole('rowheader', { name: 'runner-a' });
-    expect(screen.getByText('Harness version')).toBeInTheDocument();
-    expect(screen.getByText('No server has reported available versions yet.')).toBeInTheDocument();
-    expect(screen.queryByLabelText('claude-code')).not.toBeInTheDocument();
-  });
-});
-
-describe('the harness section reads as a choice, not a list', () => {
-  beforeEach(() => {
-    auth.role = 'admin';
-    Object.values(mocked).forEach((m) => m.mockReset());
-    mocked.list.mockResolvedValue(pool([host()]));
-    mocked.history.mockResolvedValue(history());
-  });
-
-  afterEach(cleanup);
-
-  it('is the runtimes and their controls, and no prose', async () => {
-    // Everything this section could explain is already said elsewhere: the
-    // versions on offer are in the select, what each host holds is in the
-    // table below, that a running conversation keeps its version is in the
-    // confirmation after the change, and how to add a version is deployment
-    // documentation. Written here it was a third telling every time.
-    renderPage();
-
-    await screen.findByLabelText('claude-code');
-    expect(screen.queryByText(/also built in/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/The image holds only/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/EXTRA_VERSIONS/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Applies to new threads/)).not.toBeInTheDocument();
-  });
-
-  it('still offers a fixed runtime, compressed but not removed', async () => {
-    // Pinning a single-version runtime is a weak choice, not an absent one:
-    // the control stays, it just stops taking three lines to say nothing.
-    mocked.list.mockResolvedValue(
-      pool([
-        host({
-          runtime_versions_available: {
-            'claude-code': ['2.1.220', '2.1.235'],
-            codex: ['0.145.0'],
-          },
-        }),
-      ]),
-    );
-    renderPage();
-
-    const codex = (await screen.findByLabelText('codex')) as HTMLSelectElement;
-    expect([...codex.options].map((o) => o.textContent)).toEqual(['Image default', '0.145.0']);
-  });
-});
-
 describe('version and image cells', () => {
   it('unions menus across hosts without losing the default ordering', () => {
     const menu = runtimeMenu([
@@ -1688,53 +1573,7 @@ describe('runtime settings', () => {
     renderPage();
 
     await screen.findByRole('rowheader', { name: 'runner-a' });
-    expect(screen.queryByRole('heading', { name: 'Runtime settings' })).not.toBeInTheDocument();
-  });
-
-  it('saves one global value and says how far it has reached', async () => {
-    mocked.list.mockResolvedValue(settingsPool([settingsHost()]));
-    mocked.globalSettings.mockResolvedValue(
-      settingsPool([settingsHost()], { agent_timeout_s: 7200 }),
-    );
-    renderPage();
-
-    const input = await screen.findByLabelText('Turn time limit for all servers');
-    expect(screen.getAllByText('Each server uses its own .env value, or 1 h')).toHaveLength(1);
-    fireEvent.change(input, { target: { value: '7200' } });
-    fireEvent.submit(input.closest('form')!);
-
-    await waitFor(() =>
-      expect(mocked.globalSettings).toHaveBeenCalledWith({ agent_timeout_s: 7200 }),
-    );
-    // Saved is not applied: the host still reports its own hour.
-    expect(await screen.findByText('Applied on 0 of 1 server')).toBeInTheDocument();
-    expect(screen.getByText('2 h')).toBeInTheDocument();
-  });
-
-  it('refuses a value outside its bounds without asking the control plane', async () => {
-    mocked.list.mockResolvedValue(settingsPool([settingsHost()]));
-    renderPage();
-
-    const input = await screen.findByLabelText('Turn time limit for all servers');
-    fireEvent.change(input, { target: { value: '30' } });
-    fireEvent.submit(input.closest('form')!);
-
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Enter a whole number from 60 to 86400 s.',
-    );
-    expect(mocked.globalSettings).not.toHaveBeenCalled();
-  });
-
-  it('clears a global value so each server falls back to its own', async () => {
-    mocked.list.mockResolvedValue(settingsPool([settingsHost()], { terminal_max_sessions: 16 }));
-    mocked.globalSettings.mockResolvedValue(settingsPool([settingsHost()]));
-    renderPage();
-
-    fireEvent.click(await screen.findByRole('button', { name: "Use each server's own" }));
-
-    await waitFor(() =>
-      expect(mocked.globalSettings).toHaveBeenCalledWith({ terminal_max_sessions: null }),
-    );
+    expect(screen.queryByRole('heading', { name: 'Limits' })).not.toBeInTheDocument();
   });
 
   it('shows what a server uses and where from, and sets a value for it alone', async () => {
@@ -1752,7 +1591,12 @@ describe('runtime settings', () => {
     renderPage();
     await openPanel();
 
-    const panel = screen.getByRole('region', { name: 'Runtime settings for runner-a' });
+    const panel = screen.getByRole('region', { name: 'Limits for runner-a' });
+    expect(within(panel).getByRole('link', { name: 'Settings' })).toHaveAttribute(
+      'href',
+      '/admin/settings',
+    );
+    expect(screen.queryByLabelText('Turn time limit for all servers')).not.toBeInTheDocument();
     const timeout = within(panel)
       .getByRole('rowheader', { name: 'Turn time limit' })
       .closest('tr')!;
@@ -1786,9 +1630,8 @@ describe('runtime settings', () => {
     renderPage();
     await openPanel();
 
-    const panel = screen.getByRole('region', { name: 'Runtime settings for runner-a' });
+    const panel = screen.getByRole('region', { name: 'Limits for runner-a' });
     expect(within(panel).getByText(/Redeploy it to manage them here/)).toBeInTheDocument();
     expect(within(panel).getByLabelText('Turn time limit for runner-a')).toBeDisabled();
-    expect(screen.getAllByText(/1 server needs a redeploy/)).toHaveLength(2);
   });
 });
