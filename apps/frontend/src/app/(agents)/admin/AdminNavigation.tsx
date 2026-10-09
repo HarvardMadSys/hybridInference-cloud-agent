@@ -6,7 +6,7 @@ import { useEffect, useRef } from 'react';
 export function AdminNavigation({
   current,
 }: {
-  current: 'servers' | 'runs' | 'activity' | 'usage' | 'measurements' | 'settings';
+  current: 'servers' | 'runs' | 'activity' | 'usage' | 'measurements' | 'settings' | 'audit';
 }) {
   const section = current === 'runs' ? 'activity' : current;
   const selected = useRef<HTMLAnchorElement>(null);
@@ -24,6 +24,7 @@ export function AdminNavigation({
         { key: 'usage', label: 'Usage', href: '/admin/usage' },
         { key: 'measurements', label: 'Measurements', href: '/admin/measurements' },
         { key: 'settings', label: 'Settings', href: '/admin/settings' },
+        { key: 'audit', label: 'Audit log', href: '/admin/audit' },
       ].map((item) => (
         <Link
           key={item.key}

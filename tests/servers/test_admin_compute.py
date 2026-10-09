@@ -278,6 +278,8 @@ async def test_credentials_are_encrypted_and_never_returned_or_audited(compute_a
     assert "credential-canary" not in str(repo.audit_rows)
     assert repo.audit_rows[0]["actor_id"] == "admin-token"
     assert repo.audit_rows[0]["details"] == {"connection_id": connection_id}
+    # The list read itself is not an action: the Servers page polls it.
+    assert [row["action"] for row in repo.audit_rows] == ["agent.compute.connection.create"]
     assert response.headers["cache-control"] == "no-store"
 
 

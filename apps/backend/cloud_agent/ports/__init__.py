@@ -11,6 +11,7 @@ from __future__ import annotations
 from cloud_agent.ports.attachments import AttachmentRepository
 from cloud_agent.ports.attempt_commands import AttemptCommands
 from cloud_agent.ports.audit import AuditRepository
+from cloud_agent.ports.audit_log import AuditLogQueries
 from cloud_agent.ports.compute_resources import ComputeResourceRepository
 from cloud_agent.ports.conversation_commands import ConversationCommands
 from cloud_agent.ports.conversation_queries import ConversationQueries
@@ -40,6 +41,7 @@ from cloud_agent.ports.source_control import SourceControlRepository
 __all__ = [
     "AttachmentRepository",
     "AttemptCommands",
+    "AuditLogQueries",
     "AuditRepository",
     "ComputeResourceRepository",
     "ConversationCommands",

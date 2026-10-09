@@ -12,6 +12,9 @@ the rows it is handed. Three things only Postgres can settle:
   the actions that worked is not a trail.
 - **The actor and the target are different columns.** An audit row that blurs
   who acted with whom they acted on cannot answer the question it exists for.
+- **The Audit log reads it back newest first, filtered in SQL.** Action names
+  hold ``_``, which ``LIKE`` reads as a wildcard, and paging by ``id`` must
+  neither repeat nor skip a row.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from tests.support.migrations import apply_migrations
 
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage.repositories.audit import PostgresAuditRepository
+from cloud_agent.storage.repositories.audit_log import PostgresAuditLogRepository
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -74,6 +78,12 @@ async def pool():
 async def store(pool):
     """The capability under test, on the repository that owns it."""
     return PostgresAuditRepository(pool)
+
+
+@pytest_asyncio.fixture
+async def log(pool):
+    """The trail read back, on the repository the Audit log page uses."""
+    return PostgresAuditLogRepository(pool)
 
 
 async def _record(store: PostgresAuditRepository, **overrides) -> int:
@@ -165,4 +175,79 @@ async def test_recording_twice_appends_rather_than_replaces(
     assert [row["action"] for row in actions] == [
         "agent.runner_host.drain",
         "agent.runner_host.forget",
+    ]
+
+
+async def _actions(log: PostgresAuditLogRepository, **query) -> list[str]:
+    rows = await log.list_admin_actions(limit=query.pop("limit", 50), **query)
+    return [row["action"] for row in rows]
+
+
+async def test_the_trail_reads_back_newest_first_with_decoded_details(
+    store: PostgresAuditRepository, log: PostgresAuditLogRepository
+) -> None:
+    """The page shows the latest change at the top, details as an object."""
+    await _record(store, action="agent.runner_host.drain")
+    await _record(store, action="agent.runner_host.undrain", details={"host": "runner-b"})
+
+    rows = await log.list_admin_actions(limit=10)
+
+    assert [row["action"] for row in rows] == [
+        "agent.runner_host.undrain",
+        "agent.runner_host.drain",
+    ]
+    assert rows[0]["details"] == {"host": "runner-b"}
+    assert rows[0]["actor_id"] == _ACTOR
+    assert rows[0]["created_at"] is not None
+
+
+async def test_pages_follow_one_another_without_repeating_a_row(
+    store: PostgresAuditRepository, log: PostgresAuditLogRepository
+) -> None:
+    """``before_id`` continues exactly where the previous page ended."""
+    ids = [await _record(store, details={"n": n}) for n in range(5)]
+
+    first = await log.list_admin_actions(limit=2)
+    second = await log.list_admin_actions(limit=2, before_id=first[-1]["id"])
+    third = await log.list_admin_actions(limit=2, before_id=second[-1]["id"])
+
+    seen = [row["id"] for row in first + second + third]
+    assert seen == sorted(ids, reverse=True)
+
+
+async def test_prefixes_and_exact_names_filter_and_underscore_is_literal(
+    store: PostgresAuditRepository, log: PostgresAuditLogRepository
+) -> None:
+    """A prefix keeps its family, an exact name only itself, ``_`` matches ``_``."""
+    await _record(store, action="agent.runner_host.drain")
+    await _record(store, action="agent.runner_host.set_settings")
+    await _record(store, action="agent.compute.server.add")
+    await _record(store, action="agent.profiling.start")
+    # Would match ``agent.runner_host.%`` if ``_`` were the wildcard it is in LIKE.
+    await _record(store, action="agent.runnerXhost.drain")
+
+    assert await _actions(log, actions=("agent.runner_host.",)) == [
+        "agent.runner_host.set_settings",
+        "agent.runner_host.drain",
+    ]
+    assert await _actions(
+        log,
+        actions=("agent.runner_host.", "agent.compute."),
+        excluded_actions=("agent.runner_host.set_settings",),
+    ) == ["agent.compute.server.add", "agent.runner_host.drain"]
+    assert await _actions(log, actions=("agent.runner_host.set_settings",)) == [
+        "agent.runner_host.set_settings"
+    ]
+
+
+async def test_excluded_actions_stay_out_of_an_unfiltered_read(
+    store: PostgresAuditRepository, log: PostgresAuditLogRepository
+) -> None:
+    """Polling reads written by older releases never reach the page."""
+    await _record(store, action="agent.compute.servers.list")
+    await _record(store, action="agent.runner_host.drain")
+    await _record(store, action="agent.compute.servers.list")
+
+    assert await _actions(log, excluded_actions=("agent.compute.servers.list",)) == [
+        "agent.runner_host.drain"
     ]

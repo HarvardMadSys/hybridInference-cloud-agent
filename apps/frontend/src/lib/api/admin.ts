@@ -565,3 +565,44 @@ export async function issueHostEnrollToken(
   });
   return jsonOrThrow<HostEnrollToken>(resp);
 }
+
+/** What an Audit log entry is about; the page filters by it. */
+export type AdminAuditCategory = 'settings' | 'servers' | 'measurements' | 'content';
+
+/** One recorded admin action (`GET /admin/agent/audit-log`). */
+export interface AdminAuditLogEntry {
+  id: number;
+  /** Dotted action name, e.g. `agent.runner_host.drain`. */
+  action: string;
+  /** The filter this action falls under, or null for none. */
+  category: AdminAuditCategory | null;
+  /** The administrator who acted; null on rows older than the column. */
+  actor_id: string | null;
+  admin_ip: string;
+  /** The user acted upon, such as the owner of content an admin read. */
+  target_user_id: string | null;
+  details: Record<string, unknown> | null;
+  success: boolean;
+  created_at: string;
+}
+
+export interface AdminAuditLogResponse {
+  entries: AdminAuditLogEntry[];
+  /** Pass as `before` for the next, older page; null when there is none. */
+  next_before: number | null;
+}
+
+/** Recorded admin actions, newest first; polling reads are never included. */
+export async function listAdminAuditLog(
+  { category, before }: { category?: AdminAuditCategory | null; before?: number | null } = {},
+  signal?: AbortSignal,
+): Promise<AdminAuditLogResponse> {
+  const query = new URLSearchParams();
+  if (category) query.set('category', category);
+  if (before) query.set('before', String(before));
+  const qs = query.toString();
+  const suffix = qs ? `?${qs}` : '';
+  return jsonOrThrow<AdminAuditLogResponse>(
+    await fetchWithAuth(API_BASE, `/admin/agent/audit-log${suffix}`, { signal }),
+  );
+}

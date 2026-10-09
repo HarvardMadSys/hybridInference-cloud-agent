@@ -39,6 +39,7 @@ logger = get_logger(__name__)
 #: The admin observation reads. Their bodies are time-varying and describe
 #: other users' runs, so no intermediary may store one.
 ADMIN_READ_PREFIXES = (
+    "/admin/agent/audit-log",
     "/admin/agent/runs",
     "/admin/agent/steps",
     "/admin/agent/measurements",
@@ -102,6 +103,7 @@ def create_app() -> FastAPI:
     configure_process_logging()
 
     from cloud_agent.api import (
+        admin_audit,
         admin_compute,
         admin_conversations,
         admin_hosts,
@@ -160,6 +162,9 @@ def create_app() -> FastAPI:
     # Steps read the same gateway detail across a page of turns, so they sit
     # beside it rather than in the runs list's module.
     app.include_router(admin_steps.router)
+    # Read-only, and its own module: the audit trail is written by every admin
+    # handler and read by this one page.
+    app.include_router(admin_audit.router)
     install_admin_no_store(app)
     # The gateway alert relay's way in: machine-to-machine on-call jobs, pinned
     # to one configured service account. Its own module because its caller is a

@@ -1,6 +1,7 @@
 """Port: the admin audit trail.
 
-Admin actions are recorded, never read back through this port.
+Admin actions are recorded through this port and read back only through
+:mod:`cloud_agent.ports.audit_log`, for the admin Audit log page.
 
 Declared here, beside the code that calls it, so a caller depends on the
 operations it needs rather than on the whole persistence surface.

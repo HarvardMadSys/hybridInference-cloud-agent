@@ -133,6 +133,8 @@ def get_compute_commands(request: Request) -> ComputeCommands:
 async def _audit(request: Request, actor: str, action: str, **identifiers: str) -> None:
     # Never audit request bodies, provider parameters, secret material or user
     # supplied connection names. IDs are enough to correlate durable intent.
+    # Only changes are audited: the Servers page polls the reads below every
+    # 30 seconds, and recording each one buried every change on the Audit log.
     await log_admin_action(
         get_storage(request),
         get_client_ip(request),
@@ -144,26 +146,20 @@ async def _audit(request: Request, actor: str, action: str, **identifiers: str) 
 
 @router.get("/compute-providers")
 async def providers(
-    request: Request,
-    actor: str = Depends(verify_admin_access),
+    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """List enabled resource providers and public deployment choices."""
-    result = commands.catalog()
-    await _audit(request, actor, "providers.list")
-    return result
+    return commands.catalog()
 
 
 @router.get("/compute-connections")
 async def connections(
-    request: Request,
-    actor: str = Depends(verify_admin_access),
+    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """List connection metadata without plaintext credentials or ciphertext."""
-    result = await commands.connections()
-    await _audit(request, actor, "connections.list")
-    return result
+    return await commands.connections()
 
 
 @router.post("/compute-connections", status_code=201)
@@ -208,14 +204,11 @@ async def validate_connection(
 
 @router.get("/servers")
 async def servers(
-    request: Request,
-    actor: str = Depends(verify_admin_access),
+    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """Read current allocations, Host bindings, and global placement from storage."""
-    result = await commands.servers()
-    await _audit(request, actor, "servers.list")
-    return result
+    return await commands.servers()
 
 
 @router.post("/servers", status_code=202)
@@ -314,27 +307,21 @@ async def retire(
 @router.get("/compute-allocations/{allocation_id}/retirement-impact")
 async def retirement_impact(
     allocation_id: str,
-    request: Request,
-    actor: str = Depends(verify_admin_access),
+    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """Read the full resource scope and blockers before requesting retirement."""
-    result = await commands.retirement_impact(allocation_id)
-    await _audit(request, actor, "allocation.retirement_impact", allocation_id=allocation_id)
-    return result
+    return await commands.retirement_impact(allocation_id)
 
 
 @router.get("/compute-operations")
 async def operations(
-    request: Request,
     request_id: str | None = Query(default=None, max_length=128),
-    actor: str = Depends(verify_admin_access),
+    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """Recover recent operations or one request whose response was lost."""
-    result = await commands.operations(request_id=request_id)
-    await _audit(request, actor, "operations.list")
-    return result
+    return await commands.operations(request_id=request_id)
 
 
 async def _operation(commands: ComputeCommands, operation_id: str) -> dict[str, Any]:
@@ -347,14 +334,11 @@ async def _operation(commands: ComputeCommands, operation_id: str) -> dict[str, 
 @router.get("/compute-operations/{operation_id}")
 async def operation(
     operation_id: str,
-    request: Request,
-    actor: str = Depends(verify_admin_access),
+    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """Read safe durable progress for a resource operation."""
-    result = await _operation(commands, operation_id)
-    await _audit(request, actor, "operation.read", operation_id=operation_id)
-    return {"operation": result}
+    return {"operation": await _operation(commands, operation_id)}
 
 
 @router.post("/compute-operations/{operation_id}/retry", status_code=202)

@@ -283,6 +283,125 @@
         "title": "AdminAttempt",
         "type": "object"
       },
+      "AdminAuditLogEntry": {
+        "description": "One recorded admin action, as the Audit log page shows it.",
+        "properties": {
+          "action": {
+            "description": "Dotted action name, e.g. ``agent.runner_host.drain``.",
+            "title": "Action",
+            "type": "string"
+          },
+          "actor_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The administrator who acted; null on rows older than the column.",
+            "title": "Actor Id"
+          },
+          "admin_ip": {
+            "title": "Admin Ip",
+            "type": "string"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "enum": [
+                  "settings",
+                  "servers",
+                  "measurements",
+                  "content"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The Audit log filter this action falls under, or null for none.",
+            "title": "Category"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Details"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          },
+          "target_user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The user acted upon, such as the owner of content an admin read.",
+            "title": "Target User Id"
+          }
+        },
+        "required": [
+          "id",
+          "action",
+          "admin_ip",
+          "success",
+          "created_at"
+        ],
+        "title": "AdminAuditLogEntry",
+        "type": "object"
+      },
+      "AdminAuditLogResponse": {
+        "description": "A page of the admin audit trail, newest first.",
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/AdminAuditLogEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "next_before": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pass as ``before`` for the next, older page; null when there is none.",
+            "title": "Next Before"
+          }
+        },
+        "required": [
+          "entries"
+        ],
+        "title": "AdminAuditLogResponse",
+        "type": "object"
+      },
       "AdminCapabilities": {
         "description": "Declare which admin read surfaces this build serves.\n\nA boolean capability says the read surface exists. Whether one particular\nexecution can be read is answered per source by the source list, so a run\nlist never probes the gateway to compute a column.",
         "properties": {
@@ -14030,6 +14149,106 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/admin/agent/audit-log": {
+      "get": {
+        "description": "Return recorded admin actions, newest first, a page at a time.",
+        "operationId": "list_admin_audit_log_admin_agent_audit_log_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "settings",
+                    "servers",
+                    "measurements",
+                    "content"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          },
+          {
+            "description": "Return entries older than this id.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Return entries older than this id.",
+              "title": "Before"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAuditLogResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Admin Audit Log"
+      }
+    },
     "/admin/agent/compute-allocations/import": {
       "post": {
         "description": "Record an existing resource for observation without deploying a Host.",

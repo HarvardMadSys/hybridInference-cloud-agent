@@ -303,6 +303,16 @@ is the situation the content route exists to prevent. If reading events one at
 a time through the API is too awkward for a real investigation, that is a
 reason to improve the tooling, not a reason to go around the audit.
 
+**Reading the trail.** _Admin → Audit log_ (`GET /admin/agent/audit-log`)
+lists what administrators did, newest first: settings and agent-version
+changes, server actions (pause, remove, placement, adding or releasing a
+server), measurement runs, and the content reads above. It filters by
+`category` (`settings`, `servers`, `measurements`, `content`) and pages with
+`before`, the oldest `id` of the previous page. The Servers page's polling
+reads are not recorded; rows they left before that changed stay in
+`agent_admin_audit_log` and are never listed. The page names an administrator
+by user id only, because identity tokens carry no display name.
+
 ## MCP servers
 
 An agent uses the MCP ecosystem without holding a single upstream credential,

@@ -24,6 +24,7 @@ from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
 from cloud_agent.storage.repositories import (
     PostgresAttachmentRepository,
     PostgresAttemptCommands,
+    PostgresAuditLogRepository,
     PostgresAuditRepository,
     PostgresComputeResourceRepository,
     PostgresConversationCommands,
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
     from cloud_agent.ports import (
         AttachmentRepository,
         AttemptCommands,
+        AuditLogQueries,
         AuditRepository,
         ComputeResourceRepository,
         ConversationCommands,
@@ -96,6 +98,7 @@ class Storage:
 
         self.attempt_commands: AttemptCommands = PostgresAttemptCommands(pool)
         self.audit: AuditRepository = PostgresAuditRepository(pool)
+        self.audit_log: AuditLogQueries = PostgresAuditLogRepository(pool)
         self.compute_resources: ComputeResourceRepository = PostgresComputeResourceRepository(pool)
         self.conversation_commands: ConversationCommands = PostgresConversationCommands(pool)
         self.conversation_queries: ConversationQueries = PostgresConversationQueries(pool)
