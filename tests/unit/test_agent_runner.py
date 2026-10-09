@@ -8,6 +8,7 @@ import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import httpx
@@ -475,7 +476,7 @@ def _run_shared_boundary_case(
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = True
     monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: manager)
-    monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args: retained)
+    monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args, **_kwargs: retained)
     monkeypatch.setattr(runner_mod, "_resident_base_ready", lambda *_args: True)
     monkeypatch.setattr(runner_mod, "runtime_version_unavailable", lambda *_args: None)
     control = Mock()
@@ -585,6 +586,46 @@ def test_only_the_runner_creating_a_group_reports_its_fork_helper_version(monkey
     assert reservation["fork_helper_version"] == (
         None if follow_up else runner_mod.SHARED_SANDBOX_HELPER_PINS[runner_mod.FORK_HELPER]
     )
+
+
+@pytest.mark.parametrize("verified", [True, False, None])
+def test_a_turn_relies_on_the_bridge_proof_its_broker_states(monkeypatch, verified):
+    """One bridge check per turn: the broker's, when its lease says the call made one.
+
+    ``None`` is a broker from before the field, whose turn checks as it always
+    did. The check before the CLI starts goes through the turn's backend either
+    way, which is what decides whether that proof still stands.
+    """
+    built: list[tuple[dict[str, Any], Any]] = []
+
+    def configure(_control, supervisor, _finish):
+        answer = supervisor.acquire_shared.side_effect
+
+        def acquire_shared(*args, **kwargs):
+            lease = answer(*args, **kwargs)
+            if verified is not None:
+                lease["network_verified"] = verified
+            return lease
+
+        supervisor.acquire_shared.side_effect = acquire_shared
+        stub = runner_mod.RetainedChatBackend
+
+        def backend(*args, **kwargs):
+            retained = stub(*args, **kwargs)
+            built.append((kwargs, retained))
+            return retained
+
+        monkeypatch.setattr(runner_mod, "RetainedChatBackend", backend)
+
+    _run_shared_boundary_case(monkeypatch, 0, None, "claude-code", configure=configure)
+
+    [(kwargs, retained)] = built
+    if verified is True:
+        assert isinstance(kwargs["network_proved_at"], float)
+    else:
+        assert kwargs["network_proved_at"] is None
+    assert retained.require_network.call_count == 1
+    assert set(retained.require_network.call_args.kwargs) == {"observer"}
 
 
 @pytest.mark.parametrize(

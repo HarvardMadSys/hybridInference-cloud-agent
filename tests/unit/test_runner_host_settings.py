@@ -154,7 +154,7 @@ def _run_new_chat(monkeypatch, host_settings: dict[str, float] | None) -> Simple
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = True
     monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: Mock())
-    monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args: retained)
+    monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args, **_kwargs: retained)
     monkeypatch.setattr(runner_mod, "_resident_base_ready", lambda *_args: True)
     monkeypatch.setattr(runner_mod, "runtime_version_unavailable", lambda *_args: None)
     checkouts: list[dict[str, Any]] = []

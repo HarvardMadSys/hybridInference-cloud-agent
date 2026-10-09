@@ -49,10 +49,20 @@ avoiding a second VM boot.
 Network rule reads share a disposable helper; route reads keep their separate,
 capability-free helper. Group reconciliation reuses inspections only within
 one command, rereads after mutations and verifies the final bridge identity,
-membership and relay addresses. Every subsequent command still checks again.
-Unchanged guest hosts/resolver files avoid writes while retaining their file
-ownership, mode and symlink checks. Network policy and guard freshness remain
-unchanged. A full host checks for completed children every second.
+membership and relay addresses. Unchanged guest hosts/resolver files avoid
+writes while retaining their file ownership, mode and symlink checks. Network
+policy and guard freshness remain unchanged. A full host checks for completed
+children every second.
+
+A turn proves its group bridge once. The broker does it when it acquires the
+turn's activation and says so in its answer (`network_verified`). The runner's
+commands for that turn rely on that proof for up to a minute, the freshness the
+guard already accepts for its own verification, instead of repeating the same
+check before its Git probe and again before the CLI starts. A command after that
+minute, as after a long setup script or at the end of a long turn, checks again.
+So does every terminal and every broker workspace operation, and so does each
+command of a turn whose broker did not say it checked. The host's rules are
+still installed and read back by the turn's own child before it accepts a turn.
 
 A host whose claim finds nothing waits on `/v1/agent/worker/wait` instead of
 sleeping five seconds. The control plane answers as soon as Postgres notifies

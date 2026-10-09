@@ -2107,6 +2107,9 @@ def _run_shared_live_attempt(
             acquire_call = operation_profiling.expect_fragment(
                 measurement, "broker", "supervisor_acquire"
             )
+            # Before the call, so a proof the broker makes during it is never
+            # taken for younger than it is.
+            acquire_started = time.monotonic()
             lease = supervisor.acquire_shared(
                 spec,
                 thread_id=job.thread_id,
@@ -2146,7 +2149,14 @@ def _run_shared_live_attempt(
             container_id=str(lease["container_id"]),
             context_status=context_status,
         )
-        retained = RetainedChatBackend(manager, spec)
+        # The broker proved the group bridge inside that call, the same check
+        # the turn's commands would repeat. A broker that does not say so leaves
+        # every command to check for itself, as before.
+        retained = RetainedChatBackend(
+            manager,
+            spec,
+            network_proved_at=acquire_started if lease.get("network_verified") is True else None,
+        )
         control.append_event(
             NormalizedEvent(
                 "lifecycle",
@@ -2277,9 +2287,10 @@ def _run_shared_live_attempt(
         # This manager runs in the runner's own process, so its sub-stages are
         # timed directly onto the measurement. Setup ran on this same group
         # bridge; nothing is switched here, only proved still in place before
-        # the CLI starts.
+        # the CLI starts, which the activation's proof already does unless
+        # setup ran past a minute.
         network_observer = operation_profiling.stage_observer(measurement)
-        manager.require_network(spec, observer=network_observer)
+        retained.require_network(observer=network_observer)
         stage = _stage(measurement, "terminal_resume")
         control.resume_terminals()
         terminals_suspended = False

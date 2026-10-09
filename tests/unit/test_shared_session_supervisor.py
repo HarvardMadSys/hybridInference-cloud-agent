@@ -34,6 +34,7 @@ from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
 from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
     SharedMemberManifest,
+    SharedSessionLease,
 )
 from cloud_agent_host.tool_windows import ToolMark
 from cloud_agent_host.workspace_broker import SharedSandboxIdentityRequest, create_app
@@ -375,6 +376,34 @@ def test_acquire_starts_a_settled_context_on_its_group():
     )
 
     assert manager.starts == [_spec().container_name]
+
+
+def test_a_lease_claims_a_bridge_proof_only_for_a_call_that_made_one():
+    """The runner's commands rely on it for their turn, so a repeat must not claim it."""
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+
+    def acquire() -> SharedSessionLease:
+        return supervisor.acquire(
+            _spec(),
+            thread_id="athr_source",
+            owner="attempt:1",
+            activation_generation=1,
+            has_settled_context=True,
+            manifest=_members(),
+            expected_container_id="container-shared",
+        )
+
+    first = acquire()
+    repeat = acquire()
+
+    assert first.network_verified is True
+    assert asdict(first)["network_verified"] is True, "what the broker endpoint sends"
+    # The same owner is handed its existing lease without touching the group.
+    assert repeat.token == first.token
+    assert manager.starts == [_spec().container_name]
+    assert repeat.network_verified is False
 
 
 def _running_group() -> tuple[_Manager, SharedChatSessionSupervisor]:

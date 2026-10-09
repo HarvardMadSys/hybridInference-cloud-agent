@@ -125,7 +125,7 @@ def _run_terminal_turn(
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = True
     monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: manager)
-    monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args: retained)
+    monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args, **_kwargs: retained)
     monkeypatch.setattr(runner_mod, "_resident_base_ready", lambda *_args: True)
     monkeypatch.setattr(runner_mod, "_prepare_retained_checkout", lambda **_kwargs: "b" * 40)
     monkeypatch.setattr(runner_mod, "runtime_version_unavailable", lambda *_args: None)

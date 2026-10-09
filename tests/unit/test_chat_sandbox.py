@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from cloud_agent_host import chat_sandbox as chat_sandbox_mod
 from cloud_agent_host.chat_sandbox import (
     ACTIVATION_TMPFS,
     ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S,
@@ -22,6 +23,7 @@ from cloud_agent_host.chat_sandbox import (
     CHAT_WORKDIR,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
+    TURN_NETWORK_PROOF_S,
     ChatSandboxInspection,
     ChatSandboxManager,
     ChatSandboxSpec,
@@ -41,7 +43,7 @@ from cloud_agent_host.guest_observer import (
     GuestObserverSnapshot,
     GuestObserverStatus,
 )
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
+from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError, SandboxSpec
 
 
 def _spec() -> ChatSandboxSpec:
@@ -1254,6 +1256,78 @@ def test_retained_backend_reports_the_cli_version_pinned_in_its_container(monkey
     assert stamp["runtime_versions"]["claude-code"] == "2.1.220"
     assert stamp["runtime_versions_available"]["claude-code"] == ["2.1.220"]
     assert stamp["sandbox_image_digest"] == "sha256:image-pinned"
+
+
+def _proving_backend(
+    monkeypatch, *, proved_at: float | None, failures: list[Exception] | None = None
+) -> tuple[RetainedChatBackend, list[object]]:
+    """A retained backend whose bridge checks are recorded, and fail if told to."""
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    checks: list[object] = []
+
+    def require_network(_spec: ChatSandboxSpec, *, observer: object = None) -> None:
+        checks.append(observer)
+        if failures:
+            raise failures.pop(0)
+
+    monkeypatch.setattr(manager, "require_network", require_network)
+    monkeypatch.setattr(manager, "spawn", lambda *_args, **_kwargs: "process")
+    return RetainedChatBackend(manager, _spec(), network_proved_at=proved_at), checks
+
+
+def _git_probe() -> SandboxSpec:
+    return SandboxSpec(argv=["git", "cat-file", "-e", "HEAD"], workdir=CHAT_WORKDIR)
+
+
+def test_a_backend_without_a_proof_checks_the_bridge_before_every_command(monkeypatch):
+    """The broker's own backends, and a turn whose broker did not say it checked."""
+    backend, checks = _proving_backend(monkeypatch, proved_at=None)
+
+    for _ in range(3):
+        assert backend.spawn(_git_probe()) == "process"
+
+    assert len(checks) == 3
+
+
+def test_a_turn_relies_on_its_activation_proof_for_a_minute(monkeypatch):
+    """The broker proved the bridge when it acquired the turn; repeating it adds nothing."""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(chat_sandbox_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+    backend, checks = _proving_backend(monkeypatch, proved_at=1000.0)
+
+    clock["now"] = 1000.0 + TURN_NETWORK_PROOF_S - 1
+    backend.spawn(_git_probe())
+    backend.require_network(observer="agent_network")
+    assert checks == []
+
+    # A minute on, as after a long setup script, the turn checks for itself.
+    clock["now"] = 1000.0 + TURN_NETWORK_PROOF_S
+    backend.require_network(observer="agent_network")
+    assert checks == ["agent_network"]
+
+    # That check stands for the next minute in turn.
+    clock["now"] += TURN_NETWORK_PROOF_S - 1
+    backend.spawn(_git_probe())
+    assert checks == ["agent_network"]
+    clock["now"] += 1
+    backend.spawn(_git_probe())
+    assert checks == ["agent_network", None]
+
+
+def test_a_failed_check_is_no_proof(monkeypatch):
+    """Fail closed: nothing runs, and the next command checks again."""
+    clock = {"now": 1000.0 + TURN_NETWORK_PROOF_S}
+    monkeypatch.setattr(chat_sandbox_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+    backend, checks = _proving_backend(
+        monkeypatch,
+        proved_at=1000.0,
+        failures=[SandboxError("relay endpoint changed during group network reconciliation")],
+    )
+
+    with pytest.raises(SandboxError, match="relay endpoint changed"):
+        backend.spawn(_git_probe())
+    assert backend.spawn(_git_probe()) == "process"
+    assert len(checks) == 2
 
 
 @pytest.mark.parametrize(

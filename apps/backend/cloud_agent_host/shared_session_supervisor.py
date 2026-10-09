@@ -144,6 +144,11 @@ class SharedSessionLease:
     #: is false -- otherwise it means the stages were skipped and never
     #: measured, which must not pass for a complete fragment.
     profiling_truncated: bool = False
+    #: Whether this call proved the group bridge, as ``ChatSandboxManager.start``
+    #: does before answering. The runner's commands for the turn rely on that
+    #: proof for a minute instead of repeating it. False when the same owner
+    #: acquires again and is handed its existing lease untouched.
+    network_verified: bool = False
 
 
 @dataclass(frozen=True)
@@ -715,7 +720,14 @@ class SharedChatSessionSupervisor:
             group.idle_deadline = None
 
         with self._lock:
-            return self._lease(group, member, facts=facts, recorder=recorder, call_id=call_id)
+            return self._lease(
+                group,
+                member,
+                facts=facts,
+                recorder=recorder,
+                call_id=call_id,
+                network_verified=True,
+            )
 
     def ensure_resident(
         self,
@@ -2382,6 +2394,7 @@ class SharedChatSessionSupervisor:
         facts: SandboxActionFacts | None = None,
         recorder: StageRecorder | None = None,
         call_id: str | None = None,
+        network_verified: bool = False,
     ) -> SharedSessionLease:
         """Build the caller's receipt, including what this call did to the container."""
         assert member.lease_token is not None
@@ -2402,6 +2415,7 @@ class SharedChatSessionSupervisor:
             profiling_call_id=call_id,
             profiling_recorded=recorder is not None,
             profiling_truncated=recorder is not None and recorder.stopped_early(),
+            network_verified=network_verified,
         )
 
     def _descriptors(self, group: _Group) -> builtins.list[SharedSessionDescriptor]:

@@ -48,6 +48,7 @@ from cloud_agent_host.guest_observer import (
     GuestObserverRuntimeError,
     GuestObserverSnapshot,
 )
+from cloud_agent_host.network_guard import GUARD_RECHECK_S
 from cloud_agent_host.sandbox import (
     KATA_RUNTIME,
     ContainerBackend,
@@ -1986,9 +1987,10 @@ class ChatSandboxManager:
     ) -> None:
         """Prove this container is on exactly its guarded group bridge.
 
-        Called before every command and terminal, so it is cheap: the guard's
-        last verification is reused for a minute, and the relays and their
-        host exceptions are reconciled against what Docker reports now.
+        Called before every terminal and broker workspace operation, and by a
+        turn's commands once its last proof is a minute old, so it is cheap: the
+        guard's last verification is reused for a minute, and the relays and
+        their host exceptions are reconciled against what Docker reports now.
         """
         snapshot = _GroupNetworkSnapshot()
         with substage(observer, "network_ensure"):
@@ -4064,6 +4066,12 @@ class _RetainedTerminalProcess(TerminalProcess):
             self._close_input()
 
 
+#: How long a turn's commands rely on a proof that the group bridge is in
+#: place before checking again: the minute the host guard already trusts its
+#: own last verification for.
+TURN_NETWORK_PROOF_S = GUARD_RECHECK_S
+
+
 class RetainedChatBackend(SandboxBackend):
     """Present one retained container through the runner's sandbox contract.
 
@@ -4075,11 +4083,20 @@ class RetainedChatBackend(SandboxBackend):
 
     name = "retained-container"
 
-    def __init__(self, manager: ChatSandboxManager, spec: ChatSandboxSpec) -> None:
+    def __init__(
+        self,
+        manager: ChatSandboxManager,
+        spec: ChatSandboxSpec,
+        *,
+        network_proved_at: float | None = None,
+    ) -> None:
         self.manager = manager
         self.spec = spec
         self.image = spec.sandbox_image_digest or manager.backend.image
         self.runtime = manager.backend.runtime
+        # Monotonic time the group bridge was last proved, for a turn's backend
+        # only; ``None`` checks before every command.
+        self._network_proved_at = network_proved_at
 
     @property
     def provides_isolation(self) -> bool:
@@ -4134,9 +4151,27 @@ class RetainedChatBackend(SandboxBackend):
         )
         return result.returncode == 0
 
+    def require_network(self, *, observer: StageObserver | None = None) -> None:
+        """Prove the container is on its guarded group bridge before running anything.
+
+        A turn's backend starts from the proof its activation made: the broker
+        checked exactly this when it acquired the turn, moments before. That
+        proof, and each one this backend makes itself, stands for
+        :data:`TURN_NETWORK_PROOF_S`; a command after that, such as one after a
+        long setup script or at the end of a long turn, checks again. A backend
+        built without a proof checks before every command.
+        """
+        proved_at = self._network_proved_at
+        if proved_at is not None and time.monotonic() - proved_at < TURN_NETWORK_PROOF_S:
+            return
+        started = time.monotonic()
+        self.manager.require_network(self.spec, observer=observer)
+        if proved_at is not None:
+            self._network_proved_at = started
+
     def spawn(self, spec: SandboxSpec) -> SandboxProcess:
         """Execute one Agent CLI or bounded command in the retained container."""
-        self.manager.require_network(self.spec)
+        self.require_network()
         return self.manager.spawn(
             self.spec,
             spec.argv,
@@ -4188,6 +4223,7 @@ __all__ = [
     "MEMBER_TMPFS_ROOT",
     "MEMBER_UID_BASE",
     "MEMBER_UID_LIMIT",
+    "TURN_NETWORK_PROOF_S",
     "ChatSandboxInspection",
     "ChatSandboxManager",
     "ChatSandboxSpec",
