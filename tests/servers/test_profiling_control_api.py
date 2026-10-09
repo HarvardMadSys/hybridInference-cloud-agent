@@ -379,6 +379,13 @@ def test_a_stale_revision_is_refused_with_the_number_to_re_read() -> None:
     assert error["type"] == CONTROL_REFUSED_ALREADY_ACTIVE
     assert error["revision"] == 1
     assert error["run_id"] == first.json()["run_id"]
+    # The refused Start is recorded as one: not successful, and with why.
+    refused = storage.audit.entries[-1]
+    assert refused["action"] == "agent.profiling.start"
+    assert refused["success"] is False
+    assert refused["details"]["outcome"] == "refused"
+    assert refused["details"]["reason"] == CONTROL_REFUSED_ALREADY_ACTIVE
+    assert storage.audit.entries[0]["success"] is True
 
 
 def test_invalid_requests_are_refused_without_touching_the_control_row() -> None:
@@ -505,6 +512,12 @@ def test_a_page_open_on_an_old_experiment_cannot_stop_the_new_one() -> None:
         )
     assert refusal.status_code == 409, refusal.text
     assert refusal.json()["detail"]["error"]["type"] == "run_already_finished"
+    # Measurements are still on, so the audit row must not read as a Stop.
+    refused = storage.audit.entries[-1]
+    assert refused["action"] == "agent.profiling.stop"
+    assert refused["success"] is False
+    assert refused["details"]["outcome"] == "refused"
+    assert refused["details"]["reason"] == "run_already_finished"
 
 
 def test_a_deployment_without_admin_control_says_so() -> None:

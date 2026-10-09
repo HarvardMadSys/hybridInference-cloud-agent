@@ -48,6 +48,7 @@ from cloud_agent.domain.profiling_control import (
     CONTROL_REFUSED_NOT_ADMIN_MODE,
     CONTROL_REFUSED_STALE_REVISION,
     CONTROL_REFUSED_UNKNOWN_RUN,
+    ControlCommandResult,
 )
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.profiling_control_config import (
@@ -227,6 +228,7 @@ async def start_profiling_run(
             "agent.profiling.start",
             None,
             {"outcome": "refused", "reason": validated.reason},
+            success=False,
             actor_id=_admin_id,
         )
         raise _refusal(validated, revision=await _revision(capability))
@@ -243,7 +245,11 @@ async def start_profiling_run(
             "operations": list(validated.operations),
             "host": validated.host,
             "duration_seconds": validated.duration_seconds,
+            **_refusal_reason(result),
         },
+        # A refused Start changed nothing; the Audit log must not read it as
+        # measurements having been turned on.
+        success=result.accepted,
         actor_id=_admin_id,
     )
     if not result.accepted:
@@ -303,6 +309,7 @@ async def stop_profiling_run(
             "agent.profiling.stop",
             None,
             {"outcome": "refused", "reason": validated.reason, "run_id": run_id},
+            success=False,
             actor_id=_admin_id,
         )
         raise _refusal(validated, revision=await _revision(capability))
@@ -312,7 +319,15 @@ async def stop_profiling_run(
         get_client_ip(request),
         "agent.profiling.stop",
         None,
-        {"outcome": result.kind, "run_id": run_id, "revision": result.revision},
+        {
+            "outcome": result.kind,
+            "run_id": run_id,
+            "revision": result.revision,
+            **_refusal_reason(result),
+        },
+        # Stopping an experiment that already ended leaves measurements as
+        # they were; it is not a Stop that took effect.
+        success=result.accepted,
         actor_id=_admin_id,
     )
     if not result.accepted:
@@ -325,6 +340,11 @@ async def stop_profiling_run(
     snapshot["mode"] = MODE_ADMIN
     response.headers["Cache-Control"] = "no-store"
     return {"control": snapshot, "run_id": run_id, "revision": result.revision}
+
+
+def _refusal_reason(result: ControlCommandResult) -> dict[str, str]:
+    """Why a Start or Stop was refused, for its audit row; nothing when it was not."""
+    return {} if result.accepted else {"reason": result.reason}
 
 
 async def _revision(capability: _ControlStorage) -> int:

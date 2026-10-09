@@ -50,21 +50,45 @@ function settingChanges(
   });
 }
 
+/**
+ * Sentences that need nothing from the details.
+ *
+ * Most server actions are recorded when the request is queued (the route
+ * answers 202), long before the provider has done anything, and the operation
+ * can still fail. Those read as requests, never as outcomes. Connection
+ * changes and the lease policy are applied before they are recorded.
+ */
 const FIXED: Record<string, string> = {
-  'agent.profiling.stop': 'Turned measurements off',
   'agent.compute.connection.create': 'Added a server connection',
   'agent.compute.connection.update': 'Updated a server connection',
   'agent.compute.connection.validate': 'Checked a server connection',
-  'agent.compute.server.add': 'Started adding a server',
-  'agent.compute.server.preflight': 'Checked a server before adding it',
-  'agent.compute.allocation.import': 'Imported an existing server',
   'agent.compute.allocation.policy': "Changed a server's lease policy",
-  'agent.compute.allocation.extend': "Extended a server's lease",
-  'agent.compute.allocation.retire': 'Started releasing a server',
-  'agent.compute.operation.retry': 'Retried a server operation',
-  'agent.compute.operation.cancel': 'Cancelled a server operation',
-  'agent.compute.operation.resolve': 'Resolved a server operation by hand',
+  'agent.compute.server.add': 'Requested a new server',
+  'agent.compute.server.preflight': 'Requested a check of a server before adding it',
+  'agent.compute.allocation.import': 'Requested importing an existing server',
+  'agent.compute.allocation.extend': 'Requested a lease extension',
+  'agent.compute.allocation.retire': 'Requested releasing a server',
+  'agent.compute.operation.retry': 'Requested a retry of a server operation',
+  'agent.compute.operation.cancel': 'Requested cancelling a server operation',
+  'agent.compute.operation.resolve': 'Requested resolving a server operation by hand',
 };
+
+/**
+ * Whether a recorded action took effect.
+ *
+ * ``refused`` comes from the details, not from ``success``: Start and Stop
+ * refusals were recorded with ``success`` true before that was fixed, and
+ * those rows must not read as measurements turned on or off.
+ */
+export function auditOutcome(entry: AdminAuditLogEntry): 'done' | 'refused' | 'failed' {
+  if (record(entry.details).outcome === 'refused') return 'refused';
+  return entry.success ? 'done' : 'failed';
+}
+
+function refusal(attempt: string, details: Details): string {
+  const reason = text(details.reason);
+  return reason ? `Tried to ${attempt} (refused: ${reason})` : `Tried to ${attempt} (refused)`;
+}
 
 /** An action this page has no sentence for, readable rather than dotted. */
 function fallback(action: string): string {
@@ -118,13 +142,14 @@ const SENTENCES: Record<string, Sentence> = {
   'agent.runner_host.forget': (_details, host) => `Forgot ${host}`,
   'agent.runner_host.enroll_token_issued': (_details, host) =>
     `Issued an enrollment token for ${host}`,
-  'agent.profiling.start': (details) => {
-    if (details.outcome !== 'refused') return 'Turned measurements on';
-    const reason = text(details.reason);
-    return reason
-      ? `Tried to turn measurements on (refused: ${reason})`
-      : 'Tried to turn measurements on (refused)';
-  },
+  'agent.profiling.start': (details) =>
+    details.outcome === 'refused'
+      ? refusal('turn measurements on', details)
+      : 'Turned measurements on',
+  'agent.profiling.stop': (details) =>
+    details.outcome === 'refused'
+      ? refusal('turn measurements off', details)
+      : 'Turned measurements off',
   'agent.run.event_content.read': (details) => {
     const turn = text(details.job_id);
     return turn ? `Viewed a step's content in turn ${turn}` : "Viewed a step's content";

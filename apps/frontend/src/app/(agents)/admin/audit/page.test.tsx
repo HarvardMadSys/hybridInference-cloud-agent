@@ -169,4 +169,38 @@ describe('admin Audit log', () => {
     expect(await screen.findByText('Nothing recorded here yet.')).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
   });
+
+  it('marks a refused Stop as refused, even on a row recorded as successful', async () => {
+    list.mockResolvedValue(
+      page([
+        entry(1, {
+          action: 'agent.profiling.stop',
+          category: 'measurements',
+          success: true,
+          details: { outcome: 'refused', reason: 'run_already_finished', run_id: 'admin-1' },
+        }),
+      ]),
+    );
+    render(<AdminAuditLogPage />);
+
+    const row = await screen.findByRole('button', {
+      name: /Tried to turn measurements off \(refused: run_already_finished\)/,
+    });
+    expect(within(row).getByText('Refused')).toBeInTheDocument();
+    expect(screen.queryByText('Turned measurements off')).not.toBeInTheDocument();
+  });
+
+  it('never pages a new filter with the cursor of the old one', async () => {
+    list.mockResolvedValueOnce(page([entry(5)], 5));
+    list.mockRejectedValueOnce(new Error('Service unavailable'));
+    render(<AdminAuditLogPage />);
+    expect(await screen.findByRole('button', { name: 'Show older' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Content views' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Service unavailable');
+    // All's cursor would skip the newer content views; it must not be offered.
+    expect(screen.queryByRole('button', { name: 'Show older' })).not.toBeInTheDocument();
+    expect(list).toHaveBeenCalledTimes(2);
+  });
 });

@@ -21,7 +21,7 @@ import { getAgentRunnerHosts, listAdminAuditLog } from '@/lib/api/admin';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../AdminNavigation';
-import { describeActor, describeAuditEntry, describeWhen } from './describe';
+import { auditOutcome, describeActor, describeAuditEntry, describeWhen } from './describe';
 
 const FILTERS: { key: AdminAuditCategory | null; label: string }[] = [
   { key: null, label: 'All' },
@@ -80,7 +80,10 @@ function AuditLogView({ userId }: { userId: string | null }) {
       request.current = controller;
       setError(null);
       if (before === null) {
+        // A cursor belongs to the list it came from; a new first page, or a
+        // failed one, must not offer the old list's next page.
         setEntries(null);
+        setNextBefore(null);
         setOpen(null);
         setLoadingMore(false);
       } else {
@@ -221,6 +224,7 @@ function AuditRow({
   onToggle: () => void;
 }) {
   const actor = describeActor(entry.actor_id, userId);
+  const outcome = auditOutcome(entry);
   const exact = new Date(entry.created_at).toLocaleString();
   return (
     <li className="first:rounded-t-2xl last:rounded-b-2xl">
@@ -237,8 +241,10 @@ function AuditRow({
           {actor.label}
         </span>
         <span className="min-w-0 flex-1 text-sm text-gray-800 dark:text-gray-200">
-          {!entry.success && (
-            <span className="mr-2 font-medium text-red-600 dark:text-red-400">Failed</span>
+          {outcome !== 'done' && (
+            <span className="mr-2 font-medium text-red-600 dark:text-red-400">
+              {outcome === 'refused' ? 'Refused' : 'Failed'}
+            </span>
           )}
           {describeAuditEntry(entry, definitions)}
         </span>

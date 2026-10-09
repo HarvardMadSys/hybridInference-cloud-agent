@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { AdminAuditLogEntry, HostSettingDefinition } from '@/lib/api/admin';
 
-import { describeActor, describeAuditEntry, describeWhen } from './describe';
+import { auditOutcome, describeActor, describeAuditEntry, describeWhen } from './describe';
 
 const TIMEOUT: HostSettingDefinition = {
   key: 'agent_timeout_s',
@@ -100,8 +100,8 @@ describe('describeAuditEntry', () => {
         entry('agent.runner_host.set_active', { old_host: null, new_host: 'gpu-2' }),
       ),
     ).toBe('Sent new sandboxes to gpu-2');
-    expect(describeAuditEntry(entry('agent.compute.allocation.extend'))).toBe(
-      "Extended a server's lease",
+    expect(describeAuditEntry(entry('agent.compute.allocation.policy'))).toBe(
+      "Changed a server's lease policy",
     );
   });
 
@@ -115,6 +115,45 @@ describe('describeAuditEntry', () => {
     expect(describeAuditEntry(entry('agent.something_new.happened'))).toBe(
       'Something new happened',
     );
+  });
+});
+
+describe('requests and refusals', () => {
+  it('reads a queued server operation as a request, not as its result', () => {
+    // These are recorded when the route answers 202; the provider has not
+    // acted yet and the operation can still fail.
+    const queued: Record<string, string> = {
+      'agent.compute.allocation.extend': 'Requested a lease extension',
+      'agent.compute.allocation.retire': 'Requested releasing a server',
+      'agent.compute.allocation.import': 'Requested importing an existing server',
+      'agent.compute.server.add': 'Requested a new server',
+      'agent.compute.server.preflight': 'Requested a check of a server before adding it',
+      'agent.compute.operation.retry': 'Requested a retry of a server operation',
+      'agent.compute.operation.cancel': 'Requested cancelling a server operation',
+      'agent.compute.operation.resolve': 'Requested resolving a server operation by hand',
+    };
+    for (const [action, sentence] of Object.entries(queued)) {
+      expect(describeAuditEntry(entry(action))).toBe(sentence);
+    }
+  });
+
+  it('never reads a refused Stop as measurements turned off', () => {
+    const refused = entry('agent.profiling.stop', {
+      outcome: 'refused',
+      reason: 'run_already_finished',
+      run_id: 'admin-1',
+    });
+    expect(describeAuditEntry(refused)).toBe(
+      'Tried to turn measurements off (refused: run_already_finished)',
+    );
+    // Rows written before refusals were recorded as unsuccessful still say
+    // success: true; the outcome in the details decides.
+    expect(auditOutcome(refused)).toBe('refused');
+    expect(auditOutcome({ ...refused, success: false })).toBe('refused');
+    const applied = entry('agent.profiling.stop', { outcome: 'applied', run_id: 'admin-1' });
+    expect(describeAuditEntry(applied)).toBe('Turned measurements off');
+    expect(auditOutcome(applied)).toBe('done');
+    expect(auditOutcome({ ...applied, success: false })).toBe('failed');
   });
 });
 
