@@ -16,12 +16,14 @@ import pytest
 from cloud_agent_host.runtimes import (
     MAX_INIT_TOOLS,
     MERGED_MCP_SERVER_NAME,
+    REPLY_PREVIEW,
     ClaudeCodeRuntime,
     CodexRuntime,
     GenericRuntime,
     KiloRuntime,
     OpencodeRuntime,
     PiRuntime,
+    ReplyPreview,
     RuntimeEffortUnsupportedError,
     RuntimeMCPConfig,
     RuntimeMCPUnavailableError,
@@ -165,7 +167,7 @@ def _partial_stream_lines() -> list[str]:
 
 
 class _Clock:
-    """A monotonic clock that moves only when told to."""
+    """A monotonic clock that moves only when read, by ``step``."""
 
     def __init__(self, step: float = 0.0) -> None:
         self.now = 0.0
@@ -176,15 +178,48 @@ class _Clock:
         return self.now
 
 
-def _stream_pieces(events) -> list[tuple[str, int, str]]:
+def _pieces(events) -> list[tuple[str, str]]:
     return [
-        (event.payload["message_id"], event.payload["block"], event.payload["delta"])
+        (event.payload["preview_id"], event.payload["delta"])
         for event in events
-        if event.event_type == "raw" and event.payload.get("protocol") == "claude-code-stream"
+        if event.event_type == "raw" and event.payload.get("protocol") == REPLY_PREVIEW
     ]
 
 
-def test_claude_asks_for_the_reply_while_it_is_written():
+def test_a_preview_reports_the_first_piece_at_once_and_then_batches():
+    clock = _Clock()
+    preview = ReplyPreview(clock)
+    assert preview.add("a", "Hel") == {"protocol": REPLY_PREVIEW, "preview_id": "a", "delta": "Hel"}
+    clock.now = 0.1
+    assert preview.add("a", "lo ") is None
+    clock.now = 0.2
+    assert preview.add("a", "there")["delta"] == "lo there"
+    # Each answer has its own interval; another one starts at once.
+    assert preview.add("b", "x")["delta"] == "x"
+    assert preview.add("a", "!") is None
+    # Text that is complete goes out without waiting.
+    assert preview.flush("a")["delta"] == "!"
+    assert preview.flush("a") is None
+
+
+def test_a_preview_follows_a_harness_that_resends_the_whole_text():
+    preview = ReplyPreview(_Clock(step=1.0))
+    assert preview.grow_to("p", "Hello")["delta"] == "Hello"
+    assert preview.grow_to("p", "Hello world")["delta"] == " world"
+    assert preview.grow_to("p", "Hello world") is None
+    # Rewritten instead of extended: the preview starts again from the new text.
+    reset = preview.grow_to("p", "Goodbye")
+    assert reset == {
+        "protocol": REPLY_PREVIEW,
+        "preview_id": "p",
+        "delta": "Goodbye",
+        "reset": True,
+    }
+    preview.finish("p")
+    assert preview.grow_to("p", "Goodbye now")["delta"] == "Goodbye now"
+
+
+def test_claude_asks_for_the_answer_while_it_is_written():
     """Both transports carry the flag that makes the CLI stream its text."""
     runtime = ClaudeCodeRuntime()
     common = {
@@ -199,23 +234,23 @@ def test_claude_asks_for_the_reply_while_it_is_written():
     assert "--include-partial-messages" in live
 
 
-def test_partial_stream_reports_the_reply_text_and_nothing_else():
-    """Only the answer streams; the complete blocks still arrive as before."""
+def test_claude_previews_the_answer_text_and_nothing_else():
+    """Only the answer streams; the complete blocks arrive as before and name it."""
     runtime = ClaudeCodeRuntime(clock=_Clock(step=1.0))
     events = [
         event
         for line in _partial_stream_lines()
         if (event := runtime.parse_event(line)) is not None
     ]
-    assert _stream_pieces(events) == [
-        ("msg_1", 1, "Let me "),
-        ("msg_1", 1, "look at "),
-        ("msg_1", 1, "the workspace."),
-        ("msg_2", 0, "The "),
-        ("msg_2", 0, "workspace "),
-        ("msg_2", 0, "is "),
-        ("msg_2", 0, "here. "),
-        ("msg_2", 0, "Done."),
+    assert _pieces(events) == [
+        ("msg_1:1", "Let me "),
+        ("msg_1:1", "look at "),
+        ("msg_1:1", "the workspace."),
+        ("msg_2:0", "The "),
+        ("msg_2:0", "workspace "),
+        ("msg_2:0", "is "),
+        ("msg_2:0", "here. "),
+        ("msg_2:0", "Done."),
     ]
     # Thinking, a tool call's input and the message frame are consumed, not
     # stored: the normalized transcript is the one the CLI gave without the flag.
@@ -227,38 +262,27 @@ def test_partial_stream_reports_the_reply_text_and_nothing_else():
         "message",
         "lifecycle",
     ]
-    final = [event.payload["text"] for event in events if event.event_type == "message"]
-    assert final == ["Let me look at the workspace.", "The workspace is here. Done."]
+    messages = [event.payload for event in events if event.event_type == "message"]
+    assert [(m["text"], m["preview_id"], m["usage_id"]) for m in messages] == [
+        ("Let me look at the workspace.", "msg_1:1", "msg_1"),
+        ("The workspace is here. Done.", "msg_2:0", "msg_2"),
+    ]
 
 
-def test_partial_stream_is_reported_in_batches():
-    """Pieces inside the interval wait; the complete line drops the remainder."""
+def test_claude_batches_pieces_and_drops_the_rest_at_the_complete_block():
     runtime = ClaudeCodeRuntime(clock=_Clock(step=0.0))
     events = [
         event
         for line in _partial_stream_lines()
         if (event := runtime.parse_event(line)) is not None
     ]
-    # The first piece of each block goes out at once; with the clock standing
-    # still the rest is held, and the complete message makes it unnecessary.
-    assert _stream_pieces(events) == [("msg_1", 1, "Let me "), ("msg_2", 0, "The ")]
-
-    # 0.125 s per piece (exact in binary): every second piece is past 0.2 s.
-    runtime = ClaudeCodeRuntime(clock=_Clock(step=0.125))
-    events = [
-        event
-        for line in _partial_stream_lines()
-        if (event := runtime.parse_event(line)) is not None
-    ]
-    assert [piece for message, _, piece in _stream_pieces(events) if message == "msg_2"] == [
-        "The ",
-        "workspace is ",
-        "here. Done.",
-    ]
+    # With the clock standing still only the first piece of each block is due;
+    # the complete message carries the rest.
+    assert _pieces(events) == [("msg_1:1", "Let me "), ("msg_2:0", "The ")]
 
 
-def test_a_streamed_piece_is_not_a_model_response():
-    """The preview carries no usage or ``usage_id`` for accounting to count."""
+def test_a_preview_piece_is_not_a_model_response():
+    """A piece carries no usage or ``usage_id`` for accounting to count."""
     runtime = ClaudeCodeRuntime(clock=_Clock(step=1.0))
     pieces = [
         event
@@ -267,11 +291,11 @@ def test_a_streamed_piece_is_not_a_model_response():
     ]
     assert pieces
     for event in pieces:
-        assert set(event.payload) == {"protocol", "message_id", "block", "delta"}
+        assert set(event.payload) == {"protocol", "preview_id", "delta"}
 
 
-def test_a_subagents_stream_is_not_the_conversations():
-    """A subagent's reply is reported by its complete lines only."""
+def test_a_claude_subagents_text_is_not_previewed():
+    """A subagent's answer is reported by its complete lines only."""
     runtime = ClaudeCodeRuntime(clock=_Clock(step=1.0))
     for line in _partial_stream_lines():
         record = json.loads(line)
@@ -290,14 +314,19 @@ def test_pi_contract_stream_maps_to_the_normalized_kinds():
 
     The fixture's 27 lines carry one thinking block, one tool call, its
     result, and one answer. Anything that emits per delta — or that emits the
-    same block again from ``turn_end`` — shows up here as extra events.
+    same block again from ``turn_end`` — shows up here as extra events. The
+    answer's own deltas only feed its preview, under the id its block names.
     """
-    runtime = PiRuntime()
-    kinds = [
-        event.event_type
-        for line in _pi_contract_lines()
-        if (event := runtime.parse_event(line)) is not None
+    runtime = PiRuntime(clock=_Clock(step=1.0))
+    events = [
+        event for line in _pi_contract_lines() if (event := runtime.parse_event(line)) is not None
     ]
+    answer = next(event for event in events if event.event_type == "message")
+    assert _pieces(events) == [
+        (answer.payload["preview_id"], "PWD_OK: "),
+        (answer.payload["preview_id"], "synthetic agent loop round trip complete."),
+    ]
+    kinds = [event.event_type for event in events if event.payload.get("protocol") != REPLY_PREVIEW]
     assert kinds == [
         "lifecycle",  # session
         "thinking",

@@ -56,8 +56,6 @@ export interface AssistantBlock {
   type: 'thinking' | 'text';
   text: string;
   channel?: string;
-  /** Built from Claude reply pieces; the complete block replaces it. */
-  streamed?: boolean;
 }
 
 /**
@@ -507,7 +505,6 @@ export function buildTrajectorySteps(
     const payload = asRecord(event.payload);
     const streaming = typeof payload.stream_state === 'string';
     if (block && streaming) block.channel = asText(payload.stream_channel) || 'summary';
-    if (block && streaming && typeof payload.native_item_id !== 'string') block.streamed = true;
     const step: TrajectoryStep = {
       key,
       kind: 'assistant',
@@ -627,13 +624,46 @@ export function buildTrajectorySteps(
       continue;
     }
 
+    // An answer still being written: one step per answer, grown by its pieces,
+    // until the complete message with the same preview id takes its place.
+    const previewId = event.event_type === 'message' ? asText(payload.preview_id) : '';
+    const previewKey = `preview:${scopeOf(event)}:${previewId}`;
+    if (previewId && typeof payload.stream_state === 'string') {
+      const current = byKey.get(previewKey);
+      if (current?.blocks) {
+        const text =
+          payload.stream_state === 'reset'
+            ? asText(payload.text)
+            : (current.blocks[0]?.text ?? '') + asText(payload.text);
+        current.sourceEvents.push(event);
+        current.blocks = [{ type: 'text', text, channel: 'summary' }];
+        current.detail = preview(text);
+        continue;
+      }
+      const step = pushAssistant(event, '');
+      byKey.delete(step.key);
+      step.key = previewKey;
+      byKey.set(previewKey, step);
+      continue;
+    }
+    let previewSources: StoredEvent[] = [];
+    let previewIndex = -1;
+    const previewStep = previewId ? byKey.get(previewKey) : undefined;
+    if (previewStep) {
+      // Its pieces stay reachable through the step that has the whole text.
+      previewIndex = steps.indexOf(previewStep);
+      steps.splice(previewIndex, 1);
+      byKey.delete(previewKey);
+      previewSources = previewStep.sourceEvents;
+    }
+
     if (event.event_type === 'message' || event.event_type === 'thinking') {
       const messageId = messageIdOf(payload);
       const key = assistantKeyOf(event, messageId);
       const current = byKey.get(key);
       if (current && current.kind === 'assistant') {
         const block = blockOf(event);
-        current.sourceEvents.push(event);
+        current.sourceEvents.push(...previewSources, event);
         if (block) {
           if (typeof payload.native_item_id === 'string') {
             const channel = asText(payload.stream_channel) || 'summary';
@@ -649,33 +679,8 @@ export function buildTrajectorySteps(
               block,
             ];
             current.streaming = typeof payload.stream_state === 'string';
-          } else if (payload.stream_state === 'delta') {
-            // A piece of a Claude reply grows the preview of its block.
-            const channel = asText(payload.stream_channel);
-            const previous = current.blocks?.find(
-              (item) => item.streamed && item.type === block.type && item.channel === channel,
-            );
-            const grown = {
-              ...block,
-              text: (previous?.text ?? '') + block.text,
-              channel,
-              streamed: true,
-            };
-            current.blocks = previous
-              ? (current.blocks ?? []).map((item) => (item === previous ? grown : item))
-              : [...(current.blocks ?? []), grown];
-            current.streaming = true;
           } else {
-            // A complete block replaces the earliest preview still waiting for
-            // one: the CLI completes a message's blocks in order.
-            const blocks = current.blocks ?? [];
-            const preview = blocks.findIndex((item) => item.streamed && item.type === block.type);
-            if (preview >= 0) {
-              current.blocks = blocks.map((item, index) => (index === preview ? block : item));
-              current.streaming = current.blocks.some((item) => item.streamed);
-            } else {
-              current.blocks = [...blocks, block];
-            }
+            current.blocks = [...(current.blocks ?? []), block];
           }
           current.detail = preview(
             (current.blocks ?? [])
@@ -697,7 +702,12 @@ export function buildTrajectorySteps(
         current.truncated = current.truncated || isTruncatedPayload(payload);
         continue;
       }
-      pushAssistant(event, messageId);
+      const step = pushAssistant(event, messageId);
+      if (previewSources.length) {
+        step.sourceEvents.unshift(...previewSources);
+        // Where the answer was being written, not after what followed it.
+        steps.splice(previewIndex, 0, steps.pop() as TrajectoryStep);
+      }
       continue;
     }
 

@@ -85,29 +85,30 @@ export function isRuntimeNotification(notification: Record<string, unknown>): bo
   );
 }
 
-/** A piece of Claude Code's reply, reported while the model was writing it. */
-export interface ClaudeStreamPiece {
-  messageId: string;
-  block: number;
+/** A piece of an answer, reported while the model was still writing it. */
+export interface ReplyPreviewPiece {
+  previewId: string;
   text: string;
+  /** The text replaces what was shown so far instead of extending it. */
+  reset: boolean;
 }
 
 /**
- * Read a stored Claude reply preview. The host batches the CLI's text deltas
- * into `raw` records; the complete `message` for the same block replaces them.
+ * Read a stored answer preview. Every harness's host batches the answer text
+ * into these `raw` records; the complete `message` with the same `preview_id`
+ * replaces them.
  */
-export function claudeStreamPiece(event: StoredEvent): ClaudeStreamPiece | null {
+export function replyPreviewPiece(event: StoredEvent): ReplyPreviewPiece | null {
   if (event.event_type !== 'raw') return null;
   const payload = record(event.payload);
   if (
-    payload.protocol !== 'claude-code-stream' ||
-    typeof payload.message_id !== 'string' ||
-    typeof payload.block !== 'number' ||
+    payload.protocol !== 'reply-preview' ||
+    typeof payload.preview_id !== 'string' ||
     typeof payload.delta !== 'string'
   ) {
     return null;
   }
-  return { messageId: payload.message_id, block: payload.block, text: payload.delta };
+  return { previewId: payload.preview_id, text: payload.delta, reset: payload.reset === true };
 }
 
 function scope(event: StoredEvent, id: string): string {
@@ -123,17 +124,15 @@ export function projectProtocolEvents(events: StoredEvent[]): StoredEvent[] {
     }),
   );
   return events.map((event) => {
-    const piece = claudeStreamPiece(event);
+    const piece = replyPreviewPiece(event);
     if (piece) {
-      // Keyed like the complete message (`usage_id`), which then replaces it.
       return {
         ...event,
         event_type: 'message',
         payload: {
           text: piece.text,
-          usage_id: piece.messageId,
-          stream_state: 'delta',
-          stream_channel: `block:${piece.block}`,
+          preview_id: piece.previewId,
+          stream_state: piece.reset ? 'reset' : 'delta',
         },
       };
     }

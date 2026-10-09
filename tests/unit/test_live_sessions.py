@@ -711,6 +711,40 @@ def test_every_bundled_driver_only_advertises_shared_live_after_wiring():
         assert capabilities.fork == "at_anchor"
 
 
+def test_codex_previews_its_answer_in_batches_under_the_item_id(tmp_path):
+    process = _LiveProcess()
+    context, _spawned = _protocol_context(process, tmp_path)
+    process.feed = _turn_lines(
+        {"id": "initialize-1", "result": {"userAgent": "codex"}},
+        {"id": "thread-2", "result": {"thread": {"id": "thread-a"}}},
+    )
+    session = CodexDriver(CodexRuntime()).launch_live(context)
+    session.ensure_started(model="gpt", reasoning_effort=None)
+    process.feed = _turn_lines({"id": "turn-3", "result": {"turn": {"id": "turn-a"}}})
+    turn = session.start_turn(TurnInput(prompt="read", model="gpt"))
+    words = ["Hel", "lo ", "the", "re."]
+    process.feed = _turn_lines(
+        *(
+            {"method": "item/agentMessage/delta", "params": {"itemId": "m", "delta": word}}
+            for word in words
+        ),
+        {
+            "method": "item/completed",
+            "params": {"item": {"type": "agentMessage", "id": "m", "text": "Hello there."}},
+        },
+        {"method": "turn/completed", "params": {"turn": {"id": "turn-a", "status": "completed"}}},
+    )
+    events = list(turn.iter_events())
+    pieces = [event.payload for event in events if event.payload.get("protocol") == "reply-preview"]
+    # The first piece goes out at once; later ones are gathered, so a burst of
+    # deltas is fewer stored rows, and whatever was shown is the answer's start.
+    assert pieces[0] == {"protocol": "reply-preview", "preview_id": "m", "delta": "Hel"}
+    assert len(pieces) < len(words)
+    assert "Hello there.".startswith("".join(piece["delta"] for piece in pieces))
+    answer = next(event for event in events if event.event_type == "message")
+    assert answer.payload["preview_id"] == "m"
+
+
 def test_codex_trajectory_keeps_native_identity_and_structured_streams(tmp_path):
     process = _LiveProcess()
     context, _spawned = _protocol_context(process, tmp_path)
@@ -742,12 +776,17 @@ def test_codex_trajectory_keeps_native_identity_and_structured_streams(tmp_path)
     events = list(turn.iter_events())
     messages = [event for event in events if event.event_type == "message"]
     assert len(messages) == 1
-    assert messages[0].payload == {"text": "Done", "native_item_id": "m"}
+    assert messages[0].payload == {"text": "Done", "native_item_id": "m", "preview_id": "m"}
     fragments = [event for event in events if event.event_type == "raw"]
     assert len(fragments) == 2
-    assert fragments[1].payload["notification"] == delta
-    assert fragments[1].payload["protocol"] == "codex-app-server"
-    assert len(fragments[1].payload["text"]) == 4000
+    assert fragments[0].payload["protocol"] == "codex-app-server"
+    # The answer's delta is a preview piece of the item the message names,
+    # whole rather than a stored notification clipped at 4000 characters.
+    assert fragments[1].payload == {
+        "protocol": "reply-preview",
+        "preview_id": "m",
+        "delta": delta["params"]["delta"],
+    }
     call = next(event for event in events if event.event_type == "tool_use")
     assert "usage_id" not in call.payload
     assert call.payload["id"] == "c"

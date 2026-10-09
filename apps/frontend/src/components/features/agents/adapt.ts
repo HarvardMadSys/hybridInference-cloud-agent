@@ -32,7 +32,7 @@ import type {
   ProcessObservation,
   TurnResources,
 } from './types';
-import { claudeStreamPiece } from './trajectoryProtocol';
+import { replyPreviewPiece } from './trajectoryProtocol';
 
 /**
  * Preserve a server result as a per-turn display state.
@@ -122,12 +122,12 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
   // this as a compact reasoning status, not as model-authored hidden text.
   if (type === 'thinking') return { kind: 'thinking', text: '', sourceEventId };
   if (type === 'message') {
-    const messageId = asText(payload, 'usage_id');
+    const previewId = asText(payload, 'preview_id');
     return {
       kind: 'message',
       text: asText(payload, 'text'),
       sourceEventId,
-      ...(messageId ? { messageId } : {}),
+      ...(previewId ? { previewId } : {}),
     };
   }
   if (type === 'usage') return { kind: 'usage', text: asText(payload, 'text'), sourceEventId };
@@ -215,15 +215,15 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
       : null;
   }
   if (type === 'raw') {
-    // Claude's reply while it is being written: shown, then replaced by the
+    // An answer while it is being written: shown, then replaced by the
     // complete message (see `displayEvents`).
-    const piece = claudeStreamPiece(event);
+    const piece = replyPreviewPiece(event);
     if (piece) {
       return {
         kind: 'message',
         text: piece.text,
         sourceEventId,
-        messageId: piece.messageId,
+        previewId: piece.previewId,
         streaming: true,
       };
     }
@@ -481,17 +481,16 @@ function displayEvents(events: AgentJobEventApi[]): AgentEvent[] {
       }
     }
 
-    if (row.kind === 'message' && row.messageId) {
-      // Pieces of a reply grow one row, and the complete message takes that
-      // row's place. The CLI completes a block before the next one streams, so
-      // the newest unfinished row of the same response is the one it belongs to.
+    if (row.kind === 'message' && row.previewId) {
+      // Pieces of an answer grow one row, and the complete message takes that
+      // row's place, between whatever came before and after it.
       let previewIndex = rows.length - 1;
       for (; previewIndex >= 0; previewIndex -= 1) {
         const item = rows[previewIndex];
         if (
           item.kind === 'message' &&
           item.streaming === true &&
-          item.messageId === row.messageId &&
+          item.previewId === row.previewId &&
           item.attemptNo === row.attemptNo
         ) {
           break;
@@ -500,10 +499,12 @@ function displayEvents(events: AgentJobEventApi[]): AgentEvent[] {
       const preview = rows[previewIndex];
       if (preview?.kind === 'message') {
         // The first piece's id stays the row's identity, live and on reload,
-        // so completing the reply never moves the reading anchor.
-        rows[previewIndex] = row.streaming
-          ? { ...preview, text: preview.text + row.text }
-          : { ...row, sourceEventId: preview.sourceEventId };
+        // so completing the answer never moves the reading anchor.
+        rows[previewIndex] = !row.streaming
+          ? { ...row, sourceEventId: preview.sourceEventId }
+          : replyPreviewPiece(event)?.reset
+            ? { ...preview, text: row.text }
+            : { ...preview, text: preview.text + row.text };
         continue;
       }
     }

@@ -19,6 +19,7 @@ _IDENTITY = frozenset(
         "usage_id",
         "usage_scope",
         "native_item_id",
+        "preview_id",
     }
 )
 _TEXT_FIELDS = frozenset({"text", "content", "output", "detail", "input"})

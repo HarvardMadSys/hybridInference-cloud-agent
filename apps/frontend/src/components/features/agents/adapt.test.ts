@@ -638,56 +638,73 @@ describe('toDisplayJob', () => {
     ]);
   });
 
-  it("grows Claude's reply while it is written, then shows the complete message in its place", () => {
-    const piece = (id: number, message_id: string, block: number, delta: string) =>
-      event(id, 'raw', { protocol: 'claude-code-stream', message_id, block, delta });
+  const piece = (id: number, preview_id: string, delta: string, extra = {}) =>
+    event(id, 'raw', { protocol: 'reply-preview', preview_id, delta, ...extra });
+
+  it('grows an answer while it is written, then shows the complete message in its place', () => {
     const streaming = [
       event(1, 'thinking', { text: 'plan', usage_id: 'msg_1' }),
-      piece(2, 'msg_1', 1, 'Let me '),
-      piece(3, 'msg_1', 1, 'look.'),
+      piece(2, 'msg_1:1', 'Let me '),
+      piece(3, 'msg_1:1', 'look.'),
     ];
 
     expect(toDisplayJob(JOB, { events: streaming }).events).toEqual([
       expect.objectContaining({ kind: 'thinking' }),
-      expect.objectContaining({
+      {
         kind: 'message',
         text: 'Let me look.',
-        messageId: 'msg_1',
+        previewId: 'msg_1:1',
         streaming: true,
         sourceEventId: 2,
-      }),
+        attemptNo: 1,
+      },
     ]);
 
-    const settled = [
-      ...streaming,
-      event(4, 'message', { text: 'Let me look.', usage_id: 'msg_1' }),
-      event(5, 'tool_use', { id: 'toolu_1', name: 'Bash', input: { command: 'pwd' } }),
-      event(6, 'tool_result', { tool_use_id: 'toolu_1', content: '/workspace' }),
-      piece(7, 'msg_2', 0, 'Done'),
-      event(8, 'message', { text: 'Done.', usage_id: 'msg_2' }),
-    ];
-    const rows = toDisplayJob(JOB, { events: settled }).events;
-    expect(rows.map((row) => row.kind)).toEqual(['thinking', 'message', 'tool_use', 'message']);
-    // Each complete message keeps the row's first id and drops the preview flag.
+    const rows = toDisplayJob(JOB, {
+      events: [
+        ...streaming,
+        event(4, 'message', { text: 'Let me look.', usage_id: 'msg_1', preview_id: 'msg_1:1' }),
+      ],
+    }).events;
+    // The complete message keeps the row's first id and is no longer a preview.
     expect(rows[1]).toEqual({
       kind: 'message',
       text: 'Let me look.',
-      messageId: 'msg_1',
+      previewId: 'msg_1:1',
       sourceEventId: 2,
       attemptNo: 1,
     });
-    expect(rows[3]).toEqual(
-      expect.objectContaining({ kind: 'message', text: 'Done.', sourceEventId: 7 }),
-    );
-    expect(rows[3]).not.toHaveProperty('streaming');
   });
 
-  it('shows a complete message on its own when nothing streamed before it', () => {
+  it('completes each answer where it was written, even when it arrives after later activity', () => {
+    // OpenCode and Kilo report their complete parts only when the turn settles.
+    const rows = toDisplayJob(JOB, {
+      events: [
+        piece(1, 'first', 'Let me'),
+        piece(2, 'first', ' check.'),
+        event(3, 'tool_use', { id: 'call_1', name: 'bash', input: { command: 'pwd' } }),
+        event(4, 'tool_result', { tool_use_id: 'call_1', content: '/workspace' }),
+        piece(5, 'second', 'Al'),
+        piece(6, 'second', 'All done.', { reset: true }),
+        event(7, 'message', { text: 'Let me check.', preview_id: 'first' }),
+        event(8, 'message', { text: 'All done.', preview_id: 'second' }),
+      ],
+    }).events;
+
+    expect(rows.map((row) => [row.kind, 'text' in row ? row.text : row.detail])).toEqual([
+      ['message', 'Let me check.'],
+      ['tool_use', 'pwd'],
+      ['message', 'All done.'],
+    ]);
+    expect(rows.some((row) => row.kind === 'message' && row.streaming)).toBe(false);
+  });
+
+  it('shows a complete message on its own when nothing was previewed before it', () => {
     const job = toDisplayJob(JOB, {
       events: [event(1, 'message', { text: 'Hello.', usage_id: 'msg_1' })],
     });
     expect(job.events).toEqual([
-      { kind: 'message', text: 'Hello.', messageId: 'msg_1', sourceEventId: 1, attemptNo: 1 },
+      { kind: 'message', text: 'Hello.', sourceEventId: 1, attemptNo: 1 },
     ]);
   });
 

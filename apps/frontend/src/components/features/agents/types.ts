@@ -42,11 +42,11 @@ export type AgentEvent =
       text: string;
       attemptNo?: number;
       sourceEventId?: number;
-      /** The model response this text belongs to, when the runtime names it. */
-      messageId?: string;
+      /** The answer this text completes or previews, when the host previewed it. */
+      previewId?: string;
       /**
-       * Still being written: Claude's reply pieces so far. The complete message
-       * for the same response replaces the row in place.
+       * Still being written: the answer's pieces so far. The complete message
+       * with the same `previewId` replaces the row in place.
        */
       streaming?: boolean;
     }

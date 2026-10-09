@@ -51,6 +51,7 @@ from cloud_agent_host.runtimes import (
     NormalizedEvent,
     OpencodeRuntime,
     PiRuntime,
+    ReplyPreview,
     RuntimeMCPConfig,
     get_runtime,
 )
@@ -610,6 +611,8 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
         # Several native protocols publish mutable updates for one tool item.
         # Keep this turn-scoped: item identifiers may be reused on later turns.
         self.reported_tools: set[str] = set()
+        #: Batches the answer text the model is writing, for the same reason.
+        self.preview = ReplyPreview()
         # Answers to requests sent while the turn runs. Only the stream reads
         # stdout, so it hands each one over instead of the sender reading it.
         self._replies: dict[str, _ProtocolReply] = {}
@@ -635,16 +638,20 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
             yield from self.events_for_line(line)
         yield self.finish_event()
 
-    def event_for_line(self, line: str) -> HarnessEvent:
+    def events_for_line(self, line: str) -> list[HarnessEvent]:
         reply = self._reply_event(line)
         if reply is not None:
-            return reply
-        event = self._session.event_for_protocol_line(line, self)
-        if event.event_type == MESSAGE:
-            text = str(event.payload.get("text", ""))
-            if text.strip():
-                self._final_messages.append(text)
-        return event
+            return [reply]
+        events = self._session.events_for_protocol_line(line, self)
+        for event in events:
+            if event.event_type == MESSAGE:
+                text = str(event.payload.get("text", ""))
+                if text.strip():
+                    self._final_messages.append(text)
+        return events
+
+    def event_for_line(self, line: str) -> HarnessEvent:
+        return self.events_for_line(line)[0]
 
     def expect_reply(self, request_id: str) -> _ProtocolReply:
         """Register a request whose answer this turn's stream will hand over."""
@@ -710,7 +717,7 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
         if self._result is None:
             if not self._saw_result:
                 for line in self.raw_lines():
-                    self.event_for_line(line)
+                    self.events_for_line(line)
             if self._saw_result:
                 exit_code = 1 if self._protocol_failed else 0
             else:
@@ -893,6 +900,12 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
             return HarnessEvent(LINE, raw_line=line)
         return HarnessEvent(event.event_type, dict(event.payload or {}), raw_line=line)
 
+    def events_for_protocol_line(
+        self, line: str, turn: _JsonResidentTurn[_LiveRuntimeT]
+    ) -> list[HarnessEvent]:
+        """Every event one protocol line stands for; usually exactly one."""
+        return [self.event_for_protocol_line(line, turn)]
+
     def interrupt_turn(self, turn: _JsonResidentTurn[_LiveRuntimeT]) -> None:
         raise NotImplementedError
 
@@ -1053,10 +1066,20 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
             {"text": line[:4000], "protocol": "codex-app-server", "notification": value},
             raw_line=line,
         )
+        if method == "item/agentMessage/delta" and params.get("itemId"):
+            # Batched rather than one stored notification per token.
+            piece = turn.preview.add(str(params["itemId"]), str(params.get("delta") or ""))
+            return (
+                HarnessEvent(RAW, piece, raw_line=line)
+                if piece
+                else HarnessEvent(LINE, raw_line=line)
+            )
         if method == "item/completed" and item_type == "agentMessage":
+            preview = {"preview_id": str(item["id"])} if item.get("id") else {}
+            turn.preview.finish(preview.get("preview_id", ""))
             return HarnessEvent(
                 MESSAGE,
-                {"text": str(item.get("text") or ""), **identity},
+                {"text": str(item.get("text") or ""), **identity, **preview},
                 raw_line=line,
             )
         if method == "item/completed" and item_type == "reasoning":
@@ -1412,6 +1435,9 @@ class HttpAgentLiveTurn(_JsonResidentTurn[ResidentLiveRuntime]):
         super().__init__(session, process)
         self.text_parts: dict[str, tuple[str, str]] = {}
         self.message_roles: dict[str, str] = {}
+        #: Each part's kind, from its first update: a ``message.part.delta``
+        #: does not say whether it extends answer text or reasoning.
+        self.part_types: dict[str, str] = {}
 
 
 class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
@@ -1480,16 +1506,32 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
                 info = properties.get("info")
                 if isinstance(info, dict) and info.get("id"):
                     turn.message_roles[str(info["id"])] = str(info.get("role") or "")
+            if event_type == "message.part.updated" and part_id and part_type:
+                turn.part_types[part_id] = str(part_type)
             if event_type == "message.part.updated" and part_type == "text":
-                if part_id:
-                    # User prompts also emit text parts. Resolve ownership at
-                    # settlement so even a part preceding its message metadata
-                    # cannot turn the user's input into an assistant reply.
-                    turn.text_parts[part_id] = (
-                        str(part.get("messageID") or ""),
-                        str(part.get("text") or ""),
-                    )
-                return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
+                if not part_id:
+                    return HarnessEvent(LINE, raw_line=line)
+                # User prompts also emit text parts. Resolve ownership at
+                # settlement so even a part preceding its message metadata
+                # cannot turn the user's input into an assistant reply.
+                message_id = str(part.get("messageID") or "")
+                turn.text_parts[part_id] = (message_id, str(part.get("text") or ""))
+                timing = part.get("time")
+                ended = isinstance(timing, dict) and bool(timing.get("end"))
+                return self._answer_preview(turn, part_id, ended=ended, line=line)
+            if (
+                event_type == "message.part.delta"
+                and properties.get("field") == "text"
+                and turn.part_types.get(str(properties.get("partID") or "")) == "text"
+            ):
+                # The pinned 1.18.9 (and Kilo) send a text part as an empty
+                # update, then one delta per token, then the complete update.
+                delta_part = str(properties["partID"])
+                owner, text = turn.text_parts.get(
+                    delta_part, (str(properties.get("messageID") or ""), "")
+                )
+                turn.text_parts[delta_part] = (owner, text + str(properties.get("delta") or ""))
+                return self._answer_preview(turn, delta_part, ended=False, line=line)
             if event_type == "message.part.updated" and part_type == "reasoning":
                 text = str(part.get("text") or "")
                 if part.get("time", {}).get("end") if isinstance(part.get("time"), dict) else False:
@@ -1529,19 +1571,58 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
                 )
             return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
         if bridge == "settled":
-            final = "\n\n".join(
-                text
-                for message_id, text in turn.text_parts.values()
-                if text.strip() and turn.message_roles.get(message_id) == "assistant"
-            )
-            if final:
-                return HarnessEvent(MESSAGE, {"text": final}, raw_line=line)
+            # Reported by events_for_protocol_line, one message per part.
             return HarnessEvent(LIFECYCLE, {"phase": "result"}, raw_line=line)
         if bridge in {"fatal", "command_error"}:
             return HarnessEvent(
                 ERROR, {"text": str(value.get("detail") or "")[:2000]}, raw_line=line
             )
         return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
+
+    @staticmethod
+    def _answer_preview(
+        turn: HttpAgentLiveTurn, part_id: str, *, ended: bool, line: str
+    ) -> HarnessEvent:
+        """Preview a text part, if it is already known to be the assistant's.
+
+        A part whose message metadata arrives later is previewed from its next
+        update on, with all the text it has by then.
+        """
+        message_id, text = turn.text_parts[part_id]
+        if turn.message_roles.get(message_id) != "assistant":
+            return HarnessEvent(LINE, raw_line=line)
+        piece = turn.preview.grow_to(part_id, text)
+        if piece is None and ended:
+            # A finished part may sit before a long tool call; show all of it.
+            piece = turn.preview.flush(part_id)
+        if piece is None:
+            return HarnessEvent(LINE, raw_line=line)
+        return HarnessEvent(RAW, piece, raw_line=line)
+
+    def events_for_protocol_line(
+        self, line: str, turn: _JsonResidentTurn[ResidentLiveRuntime]
+    ) -> list[HarnessEvent]:
+        """At settlement, the assistant's answer: one message per text part.
+
+        Each carries its part's ``preview_id``, so the complete text takes the
+        place of its preview, between the tool calls it was written around.
+        The turn's final output is still every part joined, as before.
+        """
+        assert isinstance(turn, HttpAgentLiveTurn)
+        value = self._object(line)
+        if (
+            value is None
+            or value.get("bridge") != "settled"
+            or value.get("turn_id") != turn.protocol_turn_id
+        ):
+            return [self.event_for_protocol_line(line, turn)]
+        turn.preview.clear()
+        answer = [
+            HarnessEvent(MESSAGE, {"text": text, "preview_id": part_id}, raw_line=line)
+            for part_id, (message_id, text) in turn.text_parts.items()
+            if text.strip() and turn.message_roles.get(message_id) == "assistant"
+        ]
+        return answer or [self.event_for_protocol_line(line, turn)]
 
     def interrupt_turn(self, turn: _JsonResidentTurn[ResidentLiveRuntime]) -> None:
         """Interrupt only the active bridge turn on the resident session."""

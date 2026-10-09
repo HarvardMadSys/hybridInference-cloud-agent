@@ -97,6 +97,79 @@ class NormalizedEvent:
         object.__setattr__(self, "payload", bound_event_payload(self.payload))
 
 
+#: Marks the ``raw`` events that carry an answer's text while the model writes
+#: it. They are a preview: each harness still reports the complete text as the
+#: ``message`` it always did, with the same ``preview_id``, and that replaces it.
+REPLY_PREVIEW = "reply-preview"
+
+
+@dataclass
+class _PreviewStream:
+    shown: str = ""
+    pending: str = ""
+    reported_at: float | None = None
+
+
+class ReplyPreview:
+    """Batch an answer's text into preview pieces while the model writes it.
+
+    The CLIs report text a few tokens at a time, and every piece reported is an
+    HTTP write and a stored row. So pieces are gathered: the first piece of an
+    answer goes out at once, the rest at most once per :attr:`INTERVAL_S`. A
+    piece's payload is ``{protocol, preview_id, delta}``, plus ``reset`` when its
+    delta replaces the text shown so far instead of extending it.
+    """
+
+    INTERVAL_S = 0.2
+
+    def __init__(self, clock: Callable[[], float] | None = None) -> None:
+        """``clock`` is for tests; it defaults to ``time.monotonic``."""
+        self._clock = clock or time.monotonic
+        self._streams: dict[str, _PreviewStream] = {}
+
+    def add(self, preview_id: str, delta: str) -> dict[str, Any] | None:
+        """Gather ``delta``; return a piece when one is due."""
+        stream = self._streams.setdefault(preview_id, _PreviewStream())
+        stream.pending += delta
+        if not stream.pending:
+            return None
+        now = self._clock()
+        if stream.reported_at is not None and now - stream.reported_at < self.INTERVAL_S:
+            return None
+        return self._report(preview_id, stream, now)
+
+    def grow_to(self, preview_id: str, text: str) -> dict[str, Any] | None:
+        """The same, for a harness that resends the whole text so far."""
+        stream = self._streams.setdefault(preview_id, _PreviewStream())
+        known = stream.shown + stream.pending
+        if text.startswith(known):
+            return self.add(preview_id, text[len(known) :])
+        # Rewritten rather than extended: start the preview again from here.
+        stream.shown, stream.pending, stream.reported_at = text, "", self._clock()
+        return {"protocol": REPLY_PREVIEW, "preview_id": preview_id, "delta": text, "reset": True}
+
+    def flush(self, preview_id: str) -> dict[str, Any] | None:
+        """Report what is still gathered now, for text that is complete."""
+        stream = self._streams.get(preview_id)
+        if stream is None or not stream.pending:
+            return None
+        return self._report(preview_id, stream, self._clock())
+
+    def finish(self, preview_id: str) -> None:
+        """Forget a preview: its complete message has arrived."""
+        self._streams.pop(preview_id, None)
+
+    def clear(self) -> None:
+        """Forget every preview, at a turn's end."""
+        self._streams.clear()
+
+    def _report(self, preview_id: str, stream: _PreviewStream, now: float) -> dict[str, Any]:
+        delta, stream.pending = stream.pending, ""
+        stream.shown += delta
+        stream.reported_at = now
+        return {"protocol": REPLY_PREVIEW, "preview_id": preview_id, "delta": delta}
+
+
 @dataclass(frozen=True)
 class RuntimeCapabilities:
     """What a runtime can do, so the platform does not assume.
@@ -399,16 +472,7 @@ class ClaudeCodeRuntime(AgentRuntime):
     # heard of it yet.
     MILESTONE_SUBTYPES = frozenset({"init", "compact_boundary"})
 
-    #: Marks the ``raw`` events that carry reply text while the model writes it.
-    #: They are a preview: the CLI's complete ``assistant`` line for the same
-    #: block still arrives as the ``message`` it always was, and replaces them.
-    STREAM_PROTOCOL = "claude-code-stream"
-    #: How long reply text is gathered before it is reported. The CLI writes one
-    #: line every few tokens, and each reported piece is an HTTP write and a
-    #: stored row, so it is batched: about five updates a second.
-    STREAM_INTERVAL_S = 0.2
-
-    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, *, clock: Callable[[], float] | None = None) -> None:
         """Track which unclassified subtypes this run has already reported."""
         # One adapter instance per job (see get_runtime), so this is per-run
         # state — the suppression below cannot leak across jobs.
@@ -417,13 +481,10 @@ class ClaudeCodeRuntime(AgentRuntime):
         #: retained container resumes this native locator directly; ``None``
         #: until the CLI has announced itself.
         self.session_id: str | None = None
-        self._clock = clock
-        # The text block being streamed: its message, its index in that
-        # message, the text not yet reported, and when a piece last went out.
-        self._stream_message_id: str | None = None
-        self._stream_block: int | None = None
-        self._stream_pending = ""
-        self._stream_reported_at: float | None = None
+        self._preview = ReplyPreview(clock)
+        # The text block being written: ``<message id>:<block index>``.
+        self._message_id: str | None = None
+        self._text_block: str | None = None
 
     def prepare(
         self,
@@ -464,11 +525,11 @@ class ClaudeCodeRuntime(AgentRuntime):
             "--output-format",
             "stream-json",
             "--verbose",
-            # Without it the CLI writes a reply only once the model has finished
-            # it, so the owner watched nothing happen and then a whole answer.
-            # With it the model's text also arrives as it is written, as
+            # Without it the CLI writes an answer only once the model has
+            # finished it, so the owner watched nothing happen and then a whole
+            # answer. With it the text also arrives as it is written, as
             # ``stream_event`` lines; ``_from_stream`` turns those into a
-            # preview the complete reply then replaces.
+            # preview that the complete block then replaces.
             "--include-partial-messages",
             # A repository can commit .mcp.json and Claude otherwise starts
             # its stdio commands before the model's first turn. Reproduced
@@ -637,19 +698,20 @@ class ClaudeCodeRuntime(AgentRuntime):
                 LIFECYCLE, {"phase": "rate_limit", "info": event.get("rate_limit_info")}
             )
         if kind == "result":
-            self._end_stream()
+            self._preview.clear()
+            self._message_id = self._text_block = None
             return self._from_result(event)
         return self._raw(line, f"unknown type {kind!r}")
 
     def _from_stream(self, event: dict[str, Any]) -> NormalizedEvent | None:
-        """Report the reply text the model is writing, a batch at a time.
+        """Preview the answer text the model is writing.
 
-        Only text is streamed. Thinking stays a single status in the chat, and
-        a tool call's input is shown once it is complete; a file the model
-        writes would otherwise arrive as thousands of fragments. A subagent's
-        reply is not the conversation's, so its stream is left out too. Every
-        other line is consumed here and stored nowhere, which is safe because
-        the CLI repeats the complete content in its ``assistant`` lines.
+        Only answer text is previewed. Thinking stays a single status in the
+        chat, and a tool call's input is shown once it is complete; a file the
+        model writes would otherwise arrive as thousands of fragments. A
+        subagent's text is not the conversation's answer, so it is left out
+        too. Every other line is consumed here and stored nowhere, which is
+        safe because the CLI repeats the complete content in ``assistant`` lines.
         """
         if event.get("parent_tool_use_id"):
             return None
@@ -661,66 +723,32 @@ class ClaudeCodeRuntime(AgentRuntime):
         if kind == "message_start":
             message = stream.get("message")
             message_id = message.get("id") if isinstance(message, dict) else None
-            self._end_stream()
-            self._stream_message_id = str(message_id) if message_id else None
+            self._message_id = str(message_id) if message_id else None
+            self._text_block = None
             return None
         if kind == "content_block_start":
             block = stream.get("content_block")
             is_text = isinstance(block, dict) and block.get("type") == "text"
-            self._stream_block = index if is_text and isinstance(index, int) else None
-            self._stream_pending = ""
-            self._stream_reported_at = None
-            return None
-        if kind == "content_block_stop":
-            if index == self._stream_block:
-                self._stream_block = None
-                self._stream_pending = ""
+            self._text_block = (
+                f"{self._message_id}:{index}"
+                if is_text and self._message_id and isinstance(index, int)
+                else None
+            )
             return None
         delta = stream.get("delta")
         if (
             kind != "content_block_delta"
-            or self._stream_message_id is None
-            or self._stream_block is None
-            or index != self._stream_block
+            or self._text_block is None
+            or self._text_block != f"{self._message_id}:{index}"
             or not isinstance(delta, dict)
             or delta.get("type") != "text_delta"
         ):
             return None
-        self._stream_pending += str(delta.get("text") or "")
-        now = self._clock()
-        if not self._stream_pending or (
-            self._stream_reported_at is not None
-            and now - self._stream_reported_at < self.STREAM_INTERVAL_S
-        ):
-            return None
-        text, self._stream_pending = self._stream_pending, ""
-        self._stream_reported_at = now
-        return NormalizedEvent(
-            RAW,
-            {
-                "protocol": self.STREAM_PROTOCOL,
-                # Deliberately not ``usage_id``: usage accounting reads that
-                # key, and a preview must not count as a model response.
-                "message_id": self._stream_message_id,
-                "block": self._stream_block,
-                "delta": text,
-            },
-        )
-
-    def _end_stream(self) -> None:
-        """Forget the streamed block; its complete content has arrived or never will."""
-        self._stream_message_id = None
-        self._stream_block = None
-        self._stream_pending = ""
-        self._stream_reported_at = None
+        piece = self._preview.add(self._text_block, str(delta.get("text") or ""))
+        return NormalizedEvent(RAW, piece) if piece else None
 
     def _from_assistant(self, event: dict[str, Any]) -> NormalizedEvent:
         """Map an assistant turn to its most significant block."""
-        if not event.get("parent_tool_use_id"):
-            # The CLI writes a block's complete line before that block's stop
-            # event (the pinned 2.1.220), so text still waiting to be reported
-            # is already in this message.
-            self._stream_pending = ""
         message = event.get("message") or {}
         blocks = message.get("content") or []
         usage = message.get("usage") or {}
@@ -749,7 +777,19 @@ class ClaudeCodeRuntime(AgentRuntime):
             for block in blocks
             if isinstance(block, dict) and block.get("type") == "text"
         )
-        return NormalizedEvent(MESSAGE, {"text": text, **usage_fields})
+        payload: dict[str, Any] = {"text": text, **usage_fields}
+        preview_id = self._text_block
+        if (
+            preview_id is not None
+            and not event.get("parent_tool_use_id")
+            and preview_id.startswith(f"{message.get('id')}:")
+        ):
+            # The pinned 2.1.220 writes a block's complete line before that
+            # block's stop event, so this is the block that was previewed.
+            payload["preview_id"] = preview_id
+            self._preview.finish(preview_id)
+            self._text_block = None
+        return NormalizedEvent(MESSAGE, payload)
 
     def _from_user(self, event: dict[str, Any]) -> NormalizedEvent | None:
         """Map a tool result echoed back into the conversation."""
@@ -1196,10 +1236,11 @@ class PiRuntime(GenericRuntime):
 
     name = "pi"
 
-    # pi streams a completed block twice: once as deltas, then whole. Only the
-    # ``*_end`` sub-events are mapped — the recorded run's 300 ``message_update``
-    # lines carry 4 completed blocks between them, and emitting per delta would
-    # be the thinking_tokens flood again with a different name.
+    # pi streams a completed block twice: once as deltas, then whole. The
+    # ``*_end`` sub-events are what is mapped — the recorded run's 300
+    # ``message_update`` lines carry 4 completed blocks between them, and
+    # emitting per delta would be the thinking_tokens flood again with a
+    # different name. Answer text deltas only feed the batched preview.
     _BLOCK_END_KINDS = frozenset({"thinking_end", "text_end", "toolcall_end"})
 
     # Recognized and deliberately not emitted. ``turn_end`` and ``agent_end``
@@ -1218,7 +1259,7 @@ class PiRuntime(GenericRuntime):
         }
     )
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], float] | None = None) -> None:
         """Fix the wrapper invocation and remember pi's native session id."""
         super().__init__(
             "pi-freeinference --provider freeinference --model {model} "
@@ -1237,6 +1278,10 @@ class PiRuntime(GenericRuntime):
         # in _from_message_update is per-run and cannot leak across jobs.
         self._reported_subtypes: set[str] = set()
         self.session_id: str | None = None
+        self._preview = ReplyPreview(clock)
+        # pi's messages carry no id on the wire; counting them gives each text
+        # block a preview id that its ``text_end`` can name again.
+        self._message_no = 0
 
     def prepare(
         self,
@@ -1360,7 +1405,11 @@ class PiRuntime(GenericRuntime):
             return self._from_message_update(event, line)
         if kind == "message_end":
             return self._from_message_end(event, line)
+        if kind == "message_start":
+            self._message_no += 1
+            return None
         if kind == "agent_end":
+            self._preview.clear()
             failure = self.agent_error(event)
             if failure is not None:
                 return NormalizedEvent(ERROR, {"text": failure})
@@ -1388,6 +1437,9 @@ class PiRuntime(GenericRuntime):
         if not isinstance(update, dict):
             return self._raw(line, "message_update without an assistantMessageEvent")
         subtype = str(update.get("type") or "")
+        if subtype == "text_delta":
+            piece = self._preview.add(self._preview_id(update), str(update.get("delta") or ""))
+            return NormalizedEvent(RAW, piece) if piece else None
         if subtype.endswith(("_start", "_delta")):
             return None
         if subtype not in self._BLOCK_END_KINDS:
@@ -1405,11 +1457,14 @@ class PiRuntime(GenericRuntime):
             # The one event the owner is actually waiting for: `message` is
             # what the control plane copies into agent_thread_messages, which
             # is both the visible reply and the next turn's context.
+            preview_id = self._preview_id(update)
+            self._preview.finish(preview_id)
             return NormalizedEvent(
                 MESSAGE,
                 {
                     "text": _truncate(update.get("content")),
                     "truncated": _clipped(update.get("content")),
+                    "preview_id": preview_id,
                 },
             )
         tool_call = update.get("toolCall")
@@ -1425,6 +1480,9 @@ class PiRuntime(GenericRuntime):
                 "input": tool_call.get("arguments"),
             },
         )
+
+    def _preview_id(self, update: dict[str, Any]) -> str:
+        return f"message-{self._message_no}:{update.get('contentIndex')}"
 
     def _from_message_end(self, event: dict[str, Any], line: str) -> NormalizedEvent | None:
         """Map the end of a message: a tool result, or a turn's token usage."""
