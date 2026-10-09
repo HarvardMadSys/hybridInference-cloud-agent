@@ -151,7 +151,7 @@ user-added connection may dial.
 | `AGENT_MCP_SERVERS` | **NEW** | **Not operator-set — listed so nobody provisions it.** The name the runner publishes the relay endpoints under for the image-shipped wrappers, as one JSON object of `{alias: url}`. The wrappers merge it into the CLI config they already write, under whichever key their CLI spells MCP with, and add the token reference in that CLI's own syntax — which is not portable between them. A value put here by hand would point a sandbox at servers nobody connected. |
 | `AGENT_MCP_TOKEN` | **NEW** | **Not operator-set — listed so nobody provisions it.** The name the generated sandbox runtime config *references* (`${AGENT_MCP_TOKEN}`) for the per-attempt relay credential the runner injects at launch. A value put here by hand would be a static tool credential shared by every job, which is the thing the per-attempt token exists to avoid. |
 
-### Limits set from the admin pages
+### Sandbox settings from the admin pages
 
 Seven host settings can be set from the admin pages instead of in each host's
 `.env`: `AGENT_TIMEOUT_S`, `AGENT_CHAT_IDLE_TIMEOUT_S`,

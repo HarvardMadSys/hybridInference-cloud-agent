@@ -172,13 +172,13 @@ describe('admin Settings', () => {
     expect(list).not.toHaveBeenCalled();
   });
 
-  it('admits a free account with admin permission and shows versions and limits', async () => {
+  it('admits a free account with admin permission and shows versions and sandbox settings', async () => {
     render(<AdminSettingsPage />);
     await screen.findByLabelText('Claude Code');
     expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('aria-current', 'page');
     expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual([
       'Agent versions',
-      'Limits',
+      'Sandbox',
     ]);
     expect(screen.queryByLabelText('New sandbox location')).not.toBeInTheDocument();
     expect(screen.queryByText('Runtime settings')).not.toBeInTheDocument();
@@ -211,7 +211,7 @@ describe('admin Settings', () => {
     );
     render(<AdminSettingsPage />);
     await screen.findByLabelText('Future limit for all servers');
-    const card = screen.getByRole('heading', { name: 'Limits' }).parentElement!;
+    const card = screen.getByRole('heading', { name: 'Sandbox' }).parentElement!;
     expect(within(card).getByLabelText('Future limit for all servers')).toBeInTheDocument();
   });
 });

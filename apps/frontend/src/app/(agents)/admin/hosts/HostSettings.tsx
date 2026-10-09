@@ -1,8 +1,8 @@
 'use client';
 
-// Limits — the turn time limit, the repository size limit, sessions per
-// sandbox, idle timeouts and terminal limits — set from the admin pages
-// instead of in each server's `.env`.
+// Sandbox settings — the turn time limit, the repository size limit,
+// sessions per sandbox, idle timeouts and terminal limits — set from the admin
+// pages instead of in each server's `.env`.
 //
 // Two places, one precedence: the Settings page sets a value for every server,
 // and a server's own panel on the Servers page can set one that wins over it.
@@ -265,8 +265,8 @@ export function ServerSettingsPanel({
 }) {
   const supported = supportsSettings(host);
   return (
-    <section aria-label={`Limits for ${name}`} className="mt-6">
-      <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Limits</h3>
+    <section aria-label={`Sandbox settings for ${name}`} className="mt-6">
+      <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Sandbox</h3>
       <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
         Values set here override the global defaults in{' '}
         <Link

@@ -133,8 +133,7 @@ function SettingsView() {
         <AdminNavigation current="settings" />
         <div className="max-w-4xl">
           <p className="mt-6 text-sm text-gray-500 dark:text-gray-400">
-            Default agent versions and limits for all servers. Set limits for an individual server
-            in{' '}
+            Default agent versions and sandbox settings for all servers. Set them for one server in{' '}
             <Link
               href="/admin/hosts"
               className="underline hover:text-gray-700 dark:hover:text-gray-200"
@@ -185,13 +184,13 @@ function SettingsView() {
                   )
                 }
               />
-              {/* One card, named and ordered like each server's own Limits
+              {/* One card, named and ordered like each server's own Sandbox
                   table: seven rows whose labels already say what they limit
                   need no sub-headings, and a setting this page has never
                   heard of still lands in the list. */}
               {definitions.length > 0 && (
                 <GlobalSettingsCard
-                  title="Limits"
+                  title="Sandbox"
                   definitions={definitions}
                   values={pool.host_settings ?? {}}
                   servers={servers}

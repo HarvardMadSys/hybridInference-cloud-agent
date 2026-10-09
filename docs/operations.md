@@ -1610,16 +1610,16 @@ can carry — the CPU and memory on the same page are. The saved number survives
 heartbeats, restarts and re-enrolment: it is a decision about the named
 machine, and only _Host default_ returns it to the environment.
 
-**Limits are set from the admin pages too.** The turn time limit, the
-repository size limit, the sandbox idle timeout, sessions per sandbox and the
-three terminal limits sit on the _Settings_ page, once for every server, and in
-the _Limits_ table of each server's details on the _Servers_ page for that
-server alone; the API is `PUT /admin/agent/host-settings` and
+**Sandbox settings are set from the admin pages too.** The turn time limit,
+the repository size limit, the sandbox idle timeout, sessions per sandbox and
+the three terminal limits sit in the _Sandbox_ card on the _Settings_ page, once
+for every server, and in the _Sandbox_ table of each server's details on the
+_Servers_ page for that server alone; the API is `PUT /admin/agent/host-settings` and
 `PUT /admin/agent/runner-hosts/<host>/settings` with
 `{"settings": {"<key>": N}}`, where `null` clears a key. A server's own value
 wins over the global one, and a setting set in neither place keeps the host's
-`.env` value or built-in default — `ENVIRONMENT.md` §_Limits set from the
-admin pages_ lists the precedence and the variables. They ride the heartbeat
+`.env` value or built-in default — `ENVIRONMENT.md` §_Sandbox settings from
+the admin pages_ lists the precedence and the variables. They ride the heartbeat
 answer like the slot limit, so nothing is redeployed, and the same rule holds:
 saving is not applying. Each host reports what it applies, the runner's share
 as it hands each turn over and the workspace broker's as the broker confirms

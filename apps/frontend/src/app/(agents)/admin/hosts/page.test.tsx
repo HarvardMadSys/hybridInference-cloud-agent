@@ -1573,7 +1573,7 @@ describe('runtime settings', () => {
     renderPage();
 
     await screen.findByRole('rowheader', { name: 'runner-a' });
-    expect(screen.queryByRole('heading', { name: 'Limits' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Sandbox' })).not.toBeInTheDocument();
   });
 
   it('shows what a server uses and where from, and sets a value for it alone', async () => {
@@ -1591,7 +1591,7 @@ describe('runtime settings', () => {
     renderPage();
     await openPanel();
 
-    const panel = screen.getByRole('region', { name: 'Limits for runner-a' });
+    const panel = screen.getByRole('region', { name: 'Sandbox settings for runner-a' });
     expect(within(panel).getByRole('link', { name: 'Settings' })).toHaveAttribute(
       'href',
       '/admin/settings',
@@ -1630,7 +1630,7 @@ describe('runtime settings', () => {
     renderPage();
     await openPanel();
 
-    const panel = screen.getByRole('region', { name: 'Limits for runner-a' });
+    const panel = screen.getByRole('region', { name: 'Sandbox settings for runner-a' });
     expect(within(panel).getByText(/Redeploy it to manage them here/)).toBeInTheDocument();
     expect(within(panel).getByLabelText('Turn time limit for runner-a')).toBeDisabled();
   });

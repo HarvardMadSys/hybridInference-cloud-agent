@@ -1,4 +1,4 @@
-// Limits set from the admin pages: which value a server should use, and whether it does.
+// Sandbox settings from the admin pages: which value a server should use, and whether it does.
 //
 // Precedence is the control plane's (`cloud_agent_shared/host_settings.py`): a
 // value set for one server, then the value set for all servers, then the
