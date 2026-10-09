@@ -151,14 +151,15 @@ user-added connection may dial.
 | `AGENT_MCP_SERVERS` | **NEW** | **Not operator-set — listed so nobody provisions it.** The name the runner publishes the relay endpoints under for the image-shipped wrappers, as one JSON object of `{alias: url}`. The wrappers merge it into the CLI config they already write, under whichever key their CLI spells MCP with, and add the token reference in that CLI's own syntax — which is not portable between them. A value put here by hand would point a sandbox at servers nobody connected. |
 | `AGENT_MCP_TOKEN` | **NEW** | **Not operator-set — listed so nobody provisions it.** The name the generated sandbox runtime config *references* (`${AGENT_MCP_TOKEN}`) for the per-attempt relay credential the runner injects at launch. A value put here by hand would be a static tool credential shared by every job, which is the thing the per-attempt token exists to avoid. |
 
-### Runtime settings from the admin page
+### Limits set from the admin pages
 
-Seven host settings can be set on the admin **Servers** page instead of in each
-host's `.env`: `AGENT_TIMEOUT_S`, `AGENT_CHAT_IDLE_TIMEOUT_S`,
+Seven host settings can be set from the admin pages instead of in each host's
+`.env`: `AGENT_TIMEOUT_S`, `AGENT_CHAT_IDLE_TIMEOUT_S`,
 `AGENT_SOURCE_IMPORT_MAX_MIB`, `AGENT_SHARED_RESIDENT_CAPACITY`,
 `AGENT_TERMINAL_IDLE_TTL_SECONDS`, `AGENT_TERMINAL_HARD_TTL_SECONDS` and
-`AGENT_TERMINAL_MAX_SESSIONS`. The page sets a value for every server
-(`PUT /admin/agent/host-settings`) or for one
+`AGENT_TERMINAL_MAX_SESSIONS`. The **Settings** page sets a value for every
+server (`PUT /admin/agent/host-settings`), and a server's details on the
+**Servers** page set one for that server alone
 (`PUT /admin/agent/runner-hosts/<host>/settings`). For each setting the host
 applies, highest first:
 
@@ -174,8 +175,8 @@ typo guards, not capacity statements.
 
 The values ride the heartbeat answer, so a host applies a change within one
 heartbeat (about 30 seconds) with no redeploy. Nothing running is interrupted:
-a turn keeps the time limit it started with, an existing sandbox keeps the chat
-capacity it was created with, and the broker's terminal limits apply from its
+a turn keeps the time limit it started with, an existing sandbox keeps the
+session capacity it was created with, and the broker's terminal limits apply from its
 next sweep. Each host reports what it applies and what its own `.env` gives,
 and the page shows a value as *applying* until the host confirms it. A runner
 that predates this (it does not advertise `host-settings-v1`) keeps its `.env`
@@ -360,8 +361,8 @@ labels cannot claim a different binary than the image actually contains.
 Each runtime takes a `*_EXTRA_VERSIONS` deployment setting — comma-separated,
 blank by default — naming **additional** versions the same image carries beside
 the reviewed default. That list is the *menu*: build time decides what the image
-holds, and an admin picks which item new work runs from the runner-hosts page
-(`agent_runner_policy.runtime_versions`). Blank leaves an image holding exactly
+holds, and an admin picks which item new sandboxes run under _Agent versions_
+on the admin Settings page (`agent_runner_policy.runtime_versions`). Blank leaves an image holding exactly
 its defaults, which is where every deployment starts.
 
 The same exactness rule applies, and so does the parser one, harder: putting a

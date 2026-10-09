@@ -1,9 +1,13 @@
 """Runtime settings an admin sets from the dashboard rather than a host's ``.env``.
 
 Each setting here used to be read only from the host's environment, so changing
-one meant editing ``.env`` on every machine and redeploying. The admin Servers
-page now sets them, either once for every server or for one server, and each
-host picks the values up from its next heartbeat answer.
+one meant editing ``.env`` on every machine and redeploying. The admin pages
+now set them: the Settings page once for every server, and a server's details
+on the Servers page for that server alone. Each host picks the values up from
+its next heartbeat answer.
+
+``label`` and ``description`` are what those pages show, so a description says
+when a new value takes effect where that is not the next turn.
 
 Precedence, highest first:
 
@@ -80,11 +84,12 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
     HostSetting(
         key="chat_idle_timeout_s",
         env="AGENT_CHAT_IDLE_TIMEOUT_S",
-        label="Idle sandbox stop",
+        label="Sandbox idle timeout",
         description=(
-            "How long a chat's sandbox keeps running with no turn, file, Git or "
-            "terminal activity before it is stopped. A stopped sandbox is kept "
-            "and restarts on the next turn."
+            "How long a session's sandbox keeps running with no turn, file, Git "
+            "or terminal activity before it is stopped. A stopped sandbox is kept "
+            "and restarts on the next turn. A new value applies from each "
+            "sandbox's next idle period."
         ),
         unit="seconds",
         default=1800,
@@ -95,11 +100,11 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
     HostSetting(
         key="source_import_max_mib",
         env="AGENT_SOURCE_IMPORT_MAX_MIB",
-        label="Repository import limit",
+        label="Repository size limit",
         description=(
-            "Largest repository checkout a chat's first turn may import, counting "
-            "the files and the fetched commit's Git objects. A larger repository "
-            "fails before the agent starts."
+            "Largest repository a session's first turn may import, counting the "
+            "checkout's files and the fetched commit's Git objects. A larger "
+            "repository fails before the agent starts."
         ),
         unit="MiB",
         default=1024,
@@ -110,11 +115,11 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
     HostSetting(
         key="shared_resident_capacity",
         env="AGENT_SHARED_RESIDENT_CAPACITY",
-        label="Chats per sandbox",
+        label="Sessions per sandbox",
         description=(
-            "How many chats — a conversation and its forks — one new sandbox can "
-            "hold. Sandboxes that already exist keep the number they were "
-            "created with."
+            "How many sessions — a conversation and its forks — one new sandbox "
+            "can hold; Fork is refused once it is full. Sandboxes that already "
+            "exist keep the number they were created with."
         ),
         unit="count",
         default=8,
@@ -125,8 +130,11 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
     HostSetting(
         key="terminal_idle_ttl_s",
         env="AGENT_TERMINAL_IDLE_TTL_SECONDS",
-        label="Terminal idle close",
-        description="How long an interactive terminal may sit with no input or output before it is closed.",
+        label="Terminal idle timeout",
+        description=(
+            "How long an interactive terminal may sit with no input or output "
+            "before it is closed. Applies to open terminals too."
+        ),
         unit="seconds",
         default=1800,
         minimum=60,
@@ -136,8 +144,12 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
     HostSetting(
         key="terminal_hard_ttl_s",
         env="AGENT_TERMINAL_HARD_TTL_SECONDS",
-        label="Terminal lifetime",
-        description="The longest one interactive terminal may stay open, even while it is in use.",
+        label="Terminal max lifetime",
+        description=(
+            "The longest one interactive terminal may stay open, even while it is "
+            "in use. Applies to open terminals too: a shorter value closes those "
+            "already past it."
+        ),
         unit="seconds",
         default=28800,
         minimum=60,
@@ -151,7 +163,11 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         key="terminal_max_sessions",
         env="AGENT_TERMINAL_MAX_SESSIONS",
         label="Terminals per server",
-        description="How many interactive terminals one server may hold open at once, across all chats.",
+        description=(
+            "How many interactive terminals one server may hold open at once, "
+            "across all sessions. A lower value refuses new terminals and closes "
+            "none."
+        ),
         unit="count",
         default=64,
         minimum=1,

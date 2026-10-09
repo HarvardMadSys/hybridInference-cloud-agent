@@ -11,11 +11,11 @@ import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import AgentVersions, { agentName } from './AgentVersions';
 import { AdminNavigation } from '../AdminNavigation';
-import { GlobalSettingsCard } from '../hosts/HostSettings';
+import { GlobalSettingsCard, type NamedHost } from '../hosts/HostSettings';
 import { runtimeMenu, serverInventory } from '../hosts/format';
 
 const SETTING_GROUPS = [
-  { title: 'Task limits', keys: ['agent_timeout_s', 'source_import_max_mib'] },
+  { title: 'Sessions', keys: ['agent_timeout_s', 'source_import_max_mib'] },
   { title: 'Sandboxes', keys: ['chat_idle_timeout_s', 'shared_resident_capacity'] },
   {
     title: 'Terminals',
@@ -116,7 +116,7 @@ function SettingsView() {
     };
   }, [load]);
 
-  const save = async (action: () => Promise<AgentRunnerHostPool>, message: string) => {
+  const save = async (action: () => Promise<AgentRunnerHostPool>, message: string | null) => {
     if (writing.current || revoked.current) return;
     writing.current = true;
     setBusy(true);
@@ -140,10 +140,10 @@ function SettingsView() {
 
   if (denied) return <AccessDenied />;
 
-  const hosts = serverInventory(
+  const servers: NamedHost[] = serverInventory(
     pool?.hosts ?? [],
     pool?.execution_profile ?? 'untrusted-kata-v1',
-  ).flatMap(({ host }) => (host && host.status !== 'disabled' ? [host] : []));
+  ).flatMap(({ name, host }) => (host && host.status !== 'disabled' ? [{ name, host }] : []));
   const definitions = pool?.host_setting_definitions ?? [];
 
   return (
@@ -194,13 +194,16 @@ function SettingsView() {
           {pool && (
             <>
               <AgentVersions
-                menu={runtimeMenu(hosts)}
+                menu={runtimeMenu(servers.map(({ host }) => host))}
+                servers={servers}
                 selected={pool.runtime_versions ?? {}}
                 busy={busy}
                 onChange={(runtime, version) =>
                   void save(
                     () => setAgentRuntimeVersion(runtime, version || null),
-                    `${agentName(runtime)} preference saved for new sandboxes. Existing chats keep their version.`,
+                    version
+                      ? `New ${agentName(runtime)} sandboxes use ${version}. Existing sessions keep their version.`
+                      : `New ${agentName(runtime)} sandboxes use each server's default version.`,
                   )
                 }
               />
@@ -210,13 +213,12 @@ function SettingsView() {
                   title={title}
                   definitions={group}
                   values={pool.host_settings ?? {}}
-                  hosts={hosts}
+                  servers={servers}
                   busy={busy}
+                  // No notice: each setting's own line says how far a saved
+                  // value has reached, and keeps saying it as servers take it up.
                   onChange={(key, value) =>
-                    void save(
-                      () => setAgentHostSettings({ [key]: value }),
-                      `${definitions.find((definition) => definition.key === key)?.label ?? 'Setting'} saved. Server application status is shown below.`,
-                    )
+                    void save(() => setAgentHostSettings({ [key]: value }), null)
                   }
                 />
               ))}

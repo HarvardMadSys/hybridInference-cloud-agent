@@ -48,7 +48,7 @@ const definitions: HostSettingDefinition[] = [
   {
     key: 'source_import_max_mib',
     env: 'AGENT_SOURCE_IMPORT_MAX_MIB',
-    label: 'Repository import limit',
+    label: 'Repository size limit',
     description: 'Maximum checkout size.',
     unit: 'MiB',
     default: 1024,
@@ -59,7 +59,7 @@ const definitions: HostSettingDefinition[] = [
   {
     key: 'chat_idle_timeout_s',
     env: 'AGENT_CHAT_IDLE_TIMEOUT_S',
-    label: 'Idle sandbox stop',
+    label: 'Sandbox idle timeout',
     description: 'When an idle sandbox stops.',
     unit: 'seconds',
     default: 1800,
@@ -70,7 +70,7 @@ const definitions: HostSettingDefinition[] = [
   {
     key: 'shared_resident_capacity',
     env: 'AGENT_SHARED_RESIDENT_CAPACITY',
-    label: 'Chats per sandbox',
+    label: 'Sessions per sandbox',
     description: 'Capacity of a new sandbox. Existing sandboxes keep theirs.',
     unit: 'count',
     default: 8,
@@ -81,7 +81,7 @@ const definitions: HostSettingDefinition[] = [
   {
     key: 'terminal_idle_ttl_s',
     env: 'AGENT_TERMINAL_IDLE_TTL_SECONDS',
-    label: 'Terminal idle close',
+    label: 'Terminal idle timeout',
     description: 'When an idle terminal closes.',
     unit: 'seconds',
     default: 1800,
@@ -92,7 +92,7 @@ const definitions: HostSettingDefinition[] = [
   {
     key: 'terminal_hard_ttl_s',
     env: 'AGENT_TERMINAL_HARD_TTL_SECONDS',
-    label: 'Terminal lifetime',
+    label: 'Terminal max lifetime',
     description: 'Maximum terminal lifetime.',
     unit: 'seconds',
     default: 28800,
@@ -176,13 +176,13 @@ describe('admin Settings', () => {
     render(<AdminSettingsPage />);
     await screen.findByLabelText('Claude Code');
     expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('aria-current', 'page');
-    for (const name of ['Agent versions', 'Task limits', 'Sandboxes', 'Terminals']) {
+    for (const name of ['Agent versions', 'Sessions', 'Sandboxes', 'Terminals']) {
       expect(screen.getByRole('heading', { name })).toBeInTheDocument();
     }
     expect(screen.queryByLabelText('New sandbox location')).not.toBeInTheDocument();
     expect(screen.queryByText('Runtime settings')).not.toBeInTheDocument();
     expect(
-      screen.getByText(/Existing chats and their forks keep their version/),
+      screen.getByText(/Existing sessions and their forks keep their version/),
     ).toBeInTheDocument();
     expect(screen.queryByText(/EXTRA_VERSIONS/)).not.toBeInTheDocument();
   });
@@ -218,7 +218,7 @@ describe('agent versions', () => {
     render(<AdminSettingsPage />);
     const select = await screen.findByLabelText<HTMLSelectElement>('Claude Code');
     expect([...select.options].map((option) => option.textContent)).toEqual([
-      'Server default',
+      'Server default (2.1.220)',
       '2.1.220',
       '2.1.235',
     ]);
@@ -241,7 +241,7 @@ describe('agent versions', () => {
     submit(select);
     await waitFor(() => expect(setVersion).toHaveBeenCalledWith('claude-code', '2.1.235'));
     expect(await screen.findByRole('status')).toHaveTextContent(
-      'Claude Code preference saved for new sandboxes. Existing chats keep their version.',
+      'New Claude Code sandboxes use 2.1.235. Existing sessions keep their version.',
     );
     expect(screen.getByLabelText('Claude Code')).toHaveValue('2.1.235');
     expect(
@@ -292,6 +292,39 @@ describe('agent versions', () => {
     submit(select);
     await waitFor(() => expect(setVersion).toHaveBeenCalledWith('claude-code', null));
   });
+
+  it('names a server that lacks the chosen version, before and after Save', async () => {
+    const lacking = host({
+      host: 'runner-b',
+      runtime_versions_available: { 'claude-code': ['2.1.220'] },
+    });
+    list.mockResolvedValue(pool({ hosts: [host(), lacking] }));
+    setVersion.mockResolvedValue(
+      pool({ hosts: [host(), lacking], runtime_versions: { 'claude-code': '2.1.235' } }),
+    );
+    render(<AdminSettingsPage />);
+    const select = await screen.findByLabelText('Claude Code');
+    expect(screen.queryByText(/Not on runner-b/)).not.toBeInTheDocument();
+    fireEvent.change(select, { target: { value: '2.1.235' } });
+    expect(
+      screen.getByText('Not on runner-b: new sandboxes there would use 2.1.220.'),
+    ).toBeInTheDocument();
+    submit(select);
+    expect(
+      await screen.findByText('Not on runner-b: new sandboxes there use 2.1.220.'),
+    ).toBeInTheDocument();
+  });
+
+  it('says when the servers do not agree on a default', async () => {
+    list.mockResolvedValue(
+      pool({
+        hosts: [host(), host({ host: 'runner-b', runtime_versions: { 'claude-code': '2.1.235' } })],
+      }),
+    );
+    render(<AdminSettingsPage />);
+    const select = await screen.findByLabelText<HTMLSelectElement>('Claude Code');
+    expect(select.options[0]).toHaveTextContent('Server default (varies by server)');
+  });
 });
 
 describe('global limits', () => {
@@ -307,7 +340,8 @@ describe('global limits', () => {
     render(<AdminSettingsPage />);
     const input = await screen.findByLabelText('Turn time limit for all servers');
     expect(screen.getAllByText('Each server uses its own .env value, or 1 h')).toHaveLength(1);
-    fireEvent.change(input, { target: { value: '7200' } });
+    expect(screen.getByLabelText('Turn time limit for all servers unit')).toHaveValue('h');
+    fireEvent.change(input, { target: { value: '2' } });
     submit(input);
     await waitFor(() => expect(setLimit).toHaveBeenCalledWith({ agent_timeout_s: 7200 }));
     expect(await screen.findByText('Applied on 0 of 1 server')).toBeInTheDocument();
@@ -319,9 +353,7 @@ describe('global limits', () => {
     const input = await screen.findByLabelText('Turn time limit for all servers');
     fireEvent.change(input, { target: { value: '30' } });
     submit(input);
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Enter a whole number from 60 to 86400 s.',
-    );
+    expect(await screen.findByRole('alert')).toHaveTextContent('Enter a value from 1 min to 1 d.');
     expect(setLimit).not.toHaveBeenCalled();
   });
 
@@ -342,7 +374,7 @@ describe('global limits', () => {
     );
     render(<AdminSettingsPage />);
     await screen.findByLabelText('Turn time limit for all servers');
-    expect(screen.getAllByText(/1 server needs a redeploy/)).toHaveLength(2);
+    expect(screen.getAllByText(/runner-a needs a redeploy/)).toHaveLength(2);
   });
 
   it('retains a draft after a rejected save so it can be retried', async () => {
@@ -350,13 +382,43 @@ describe('global limits', () => {
     setLimit.mockResolvedValueOnce(pool({ host_settings: { agent_timeout_s: 7200 } }));
     render(<AdminSettingsPage />);
     const input = await screen.findByLabelText('Turn time limit for all servers');
-    fireEvent.change(input, { target: { value: '7200' } });
+    fireEvent.change(input, { target: { value: '2' } });
     submit(input);
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not save');
-    expect(input).toHaveValue(7200);
+    expect(input).toHaveValue(2);
     submit(input);
     expect(await screen.findByText('Applied on 0 of 1 server')).toBeInTheDocument();
     expect(setLimit).toHaveBeenCalledTimes(2);
+  });
+
+  it('takes an amount in the unit the admin picks', async () => {
+    setLimit.mockResolvedValue(pool({ host_settings: { agent_timeout_s: 5400 } }));
+    render(<AdminSettingsPage />);
+    const input = await screen.findByLabelText('Turn time limit for all servers');
+    fireEvent.change(screen.getByLabelText('Turn time limit for all servers unit'), {
+      target: { value: 'min' },
+    });
+    expect(input).toHaveAttribute('placeholder', '60');
+    fireEvent.change(input, { target: { value: '90' } });
+    submit(input);
+    await waitFor(() => expect(setLimit).toHaveBeenCalledWith({ agent_timeout_s: 5400 }));
+  });
+
+  it('warns before a shorter terminal lifetime closes open terminals', async () => {
+    render(<AdminSettingsPage />);
+    const input = await screen.findByLabelText('Terminal max lifetime for all servers');
+    fireEvent.change(input, { target: { value: '4' } });
+    expect(screen.getByText('Open terminals older than 4 h will close.')).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: '12' } });
+    expect(screen.queryByText(/Open terminals older than/)).not.toBeInTheDocument();
+  });
+
+  it('names the server that sets its own value', async () => {
+    list.mockResolvedValue(
+      pool({ hosts: [host({ settings_desired: { terminal_max_sessions: 128 } })] }),
+    );
+    render(<AdminSettingsPage />);
+    expect(await screen.findByText(/runner-a sets its own \(128\)/)).toBeInTheDocument();
   });
 });
 
@@ -367,11 +429,11 @@ describe('polling and account boundaries', () => {
     await vi.waitFor(() => expect(screen.getByLabelText('Claude Code')).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText('Claude Code'), { target: { value: '2.1.235' } });
     fireEvent.change(screen.getByLabelText('Turn time limit for all servers'), {
-      target: { value: '7200' },
+      target: { value: '2' },
     });
     await vi.advanceTimersByTimeAsync(30_000);
     expect(screen.getByLabelText('Claude Code')).toHaveValue('2.1.235');
-    expect(screen.getByLabelText('Turn time limit for all servers')).toHaveValue(7200);
+    expect(screen.getByLabelText('Turn time limit for all servers')).toHaveValue(2);
 
     setLimit.mockResolvedValue(pool({ host_settings: { agent_timeout_s: 7200 } }));
     submit(screen.getByLabelText('Turn time limit for all servers'));
@@ -405,7 +467,7 @@ describe('polling and account boundaries', () => {
     fireEvent.change(select, { target: { value: '2.1.235' } });
     submit(select);
     await vi.waitFor(() =>
-      expect(screen.getByRole('status')).toHaveTextContent('preference saved'),
+      expect(screen.getByRole('status')).toHaveTextContent('sandboxes use 2.1.235'),
     );
     finishPoll(pool());
     await vi.advanceTimersByTimeAsync(0);
@@ -451,6 +513,6 @@ describe('polling and account boundaries', () => {
     expect(await screen.findByLabelText('Claude Code')).toHaveValue('');
     finishSave(pool({ runtime_versions: { 'claude-code': '2.1.235' } }));
     await waitFor(() => expect(screen.getByLabelText('Claude Code')).toHaveValue(''));
-    expect(screen.queryByText(/preference saved/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/sandboxes use/)).not.toBeInTheDocument();
   });
 });

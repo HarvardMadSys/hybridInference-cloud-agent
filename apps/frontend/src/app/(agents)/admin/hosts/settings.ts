@@ -1,4 +1,4 @@
-// Runtime settings: which value a server should use, and whether it does.
+// Limits set from the admin pages: which value a server should use, and whether it does.
 //
 // Precedence is the control plane's (`cloud_agent_shared/host_settings.py`): a
 // value set for one server, then the value set for all servers, then the
@@ -114,37 +114,113 @@ export function formatSettingValue(definition: HostSettingDefinition, value: num
   return String(value);
 }
 
-/** The unit a typed number is in, as the input's suffix. */
-export function unitLabel(definition: HostSettingDefinition): string {
-  return definition.unit === 'count' ? '' : definition.unit === 'seconds' ? 's' : 'MiB';
+/** A unit a value can be typed in. The API always takes seconds or MiB. */
+export type InputUnit = 's' | 'min' | 'h' | 'd' | 'MiB' | 'GiB';
+
+const UNIT_SIZE: Record<InputUnit, number> = {
+  s: 1,
+  min: 60,
+  h: 3_600,
+  d: 86_400,
+  MiB: 1,
+  GiB: 1024,
+};
+
+/**
+ * The units a setting can be typed in, smallest first; none for a count.
+ *
+ * Typing eight hours as 28800 was the old field's main complaint. Seconds stay
+ * on the list so any stored value can still be shown exactly, and days appear
+ * only where the bound allows more than one.
+ */
+export function inputUnits(definition: HostSettingDefinition): InputUnit[] {
+  if (definition.unit === 'seconds') {
+    return definition.maximum >= 2 * 86_400 ? ['s', 'min', 'h', 'd'] : ['s', 'min', 'h'];
+  }
+  if (definition.unit === 'MiB') return ['MiB', 'GiB'];
+  return [];
 }
 
-/** Read a typed value: a whole number inside the setting's bounds, or why not. */
+/** The largest unit a value is a whole number of, so 7200 s opens as 2 h. */
+export function unitFor(definition: HostSettingDefinition, value: number): InputUnit | null {
+  const units = inputUnits(definition);
+  if (units.length === 0) return null;
+  const whole = [...units].reverse().find((unit) => Number.isInteger(value / UNIT_SIZE[unit]));
+  return value > 0 && whole !== undefined ? whole : units[0];
+}
+
+/** A value as it is typed in a unit: 7200 s in h is "2". */
+export function amountIn(value: number, unit: InputUnit | null): string {
+  return String(unit === null ? value : value / UNIT_SIZE[unit]);
+}
+
+/**
+ * Read a typed amount in a unit: a whole number of the setting's own unit
+ * inside its bounds, or why not. A decimal amount is fine when it lands on a
+ * whole second or MiB, so 1.5 h is 5400 s.
+ */
 export function parseSettingInput(
   definition: HostSettingDefinition,
   raw: string,
+  unit: InputUnit | null = null,
 ): { value: number } | { error: string } {
   const text = raw.trim();
-  const value = Number(text);
+  const amount = Number(text);
+  const value = unit === null ? amount : amount * UNIT_SIZE[unit];
+  // Multiplying a decimal amount can leave float noise (1.1 h); a real
+  // fraction of a second or MiB is still refused.
+  const whole = Math.round(value);
   if (
     text === '' ||
-    !Number.isInteger(value) ||
-    value < definition.minimum ||
-    value > definition.maximum
+    !Number.isFinite(value) ||
+    Math.abs(value - whole) > 1e-6 ||
+    whole < definition.minimum ||
+    whole > definition.maximum
   ) {
-    const unit = unitLabel(definition);
     return {
-      error: `Enter a whole number from ${definition.minimum} to ${definition.maximum}${unit ? ` ${unit}` : ''}.`,
+      error:
+        definition.unit === 'count'
+          ? `Enter a whole number from ${definition.minimum} to ${definition.maximum}.`
+          : `Enter a value from ${formatSettingValue(definition, definition.minimum)} to ${formatSettingValue(definition, definition.maximum)}.`,
     };
   }
-  return { value };
+  return { value: whole };
 }
 
-/** A one-line account of a global value's reach, for under its control. */
+/**
+ * What saving a shorter value does to terminals already open, or null.
+ *
+ * The broker judges open terminals by the new limits from its next sweep
+ * (`_TerminalManager.configure`), so a shorter one closes those already past
+ * it. The other settings take effect for later turns, imports or sandboxes,
+ * which their descriptions say.
+ */
+export function shorteningEffect(definition: HostSettingDefinition, value: number): string | null {
+  const shown = formatSettingValue(definition, value);
+  if (definition.key === 'terminal_idle_ttl_s') {
+    return `Open terminals idle longer than ${shown} will close.`;
+  }
+  if (definition.key === 'terminal_hard_ttl_s') {
+    return `Open terminals older than ${shown} will close.`;
+  }
+  return null;
+}
+
+/** Name up to two servers, or count more, so the line stays one line. */
+const NAMED_SERVERS = 2;
+
+/**
+ * A one-line account of a global value's reach, for under its control.
+ *
+ * A server that sets its own value is named with it — "rtx6000b sets its own
+ * (128)" — because a count alone sent the admin through every server's details
+ * to find which one differs.
+ */
 export function rolloutText(
   definition: HostSettingDefinition,
   globalValues: HostSettingValues,
   hosts: AgentRunnerHost[],
+  nameOf: (host: AgentRunnerHost) => string = (host) => host.host,
 ): string {
   const rollout = globalRollout(definition, globalValues, hosts);
   const parts: string[] = [];
@@ -160,11 +236,22 @@ export function rolloutText(
         : `Applied on ${rollout.applied} of ${plural(following, 'server', 'servers')}`,
     );
   }
-  if (rollout.overridden > 0) {
-    parts.push(plural(rollout.overridden, 'server sets its own', 'servers set their own'));
+  const own = hosts.filter(
+    (host) => supportsSettings(host) && valueOf(host.settings_desired, definition.key) !== null,
+  );
+  if (own.length > NAMED_SERVERS) {
+    parts.push(plural(own.length, 'server sets its own', 'servers set their own'));
+  } else {
+    for (const host of own) {
+      const value = valueOf(host.settings_desired, definition.key) as number;
+      parts.push(`${nameOf(host)} sets its own (${formatSettingValue(definition, value)})`);
+    }
   }
-  if (rollout.unsupported > 0) {
-    parts.push(`${plural(rollout.unsupported, 'server needs', 'servers need')} a redeploy`);
+  const old = hosts.filter((host) => !supportsSettings(host));
+  if (old.length > NAMED_SERVERS) {
+    parts.push(`${plural(old.length, 'server needs', 'servers need')} a redeploy`);
+  } else {
+    for (const host of old) parts.push(`${nameOf(host)} needs a redeploy`);
   }
   return parts.join(' · ');
 }

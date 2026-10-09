@@ -3,12 +3,16 @@ import { describe, expect, it } from 'vitest';
 import type { AgentRunnerHost, HostSettingDefinition } from '@/lib/api/admin';
 
 import {
+  amountIn,
   factNote,
   formatSettingValue,
   globalRollout,
+  inputUnits,
   parseSettingInput,
   rolloutText,
   settingFact,
+  shorteningEffect,
+  unitFor,
 } from './settings';
 
 const TIMEOUT: HostSettingDefinition = {
@@ -27,7 +31,7 @@ const IMPORT: HostSettingDefinition = {
   ...TIMEOUT,
   key: 'source_import_max_mib',
   env: 'AGENT_SOURCE_IMPORT_MAX_MIB',
-  label: 'Repository import limit',
+  label: 'Repository size limit',
   unit: 'MiB',
   default: 1024,
   minimum: 1,
@@ -140,7 +144,22 @@ describe('globalRollout', () => {
       unsupported: 1,
     });
     expect(rolloutText(TIMEOUT, { agent_timeout_s: 7200 }, hosts)).toBe(
-      'Applied on 1 of 2 servers · 1 server sets its own · 1 server needs a redeploy',
+      'Applied on 1 of 2 servers · c sets its own (15 min) · d needs a redeploy',
+    );
+  });
+
+  it('names the servers that differ by the name the page gives them, and counts many', () => {
+    const own = (name: string) => host({ host: name, settings_desired: { agent_timeout_s: 900 } });
+    const names: Record<string, string> = { a: 'rtx6000b' };
+    expect(rolloutText(TIMEOUT, {}, [own('a')], (h) => names[h.host] ?? h.host)).toBe(
+      'Each server uses its own .env value, or 1 h · rtx6000b sets its own (15 min)',
+    );
+    expect(rolloutText(TIMEOUT, {}, [own('a'), own('b'), own('c')])).toBe(
+      'Each server uses its own .env value, or 1 h · 3 servers set their own',
+    );
+    const old = (name: string) => host({ host: name, capabilities: [] });
+    expect(rolloutText(TIMEOUT, {}, [old('a'), old('b'), old('c')])).toBe(
+      'Each server uses its own .env value, or 1 h · 3 servers need a redeploy',
     );
   });
 
@@ -170,11 +189,57 @@ describe('parseSettingInput', () => {
     expect(parseSettingInput(TIMEOUT, ' 7200 ')).toEqual({ value: 7200 });
     for (const raw of ['', '59', '86401', '90.5', 'abc']) {
       expect(parseSettingInput(TIMEOUT, raw)).toEqual({
-        error: 'Enter a whole number from 60 to 86400 s.',
+        error: 'Enter a value from 1 min to 1 d.',
       });
     }
     expect(parseSettingInput(SESSIONS, '0')).toEqual({
       error: 'Enter a whole number from 1 to 4096.',
     });
+  });
+
+  it('reads an amount in the unit it was typed in', () => {
+    expect(parseSettingInput(TIMEOUT, '2', 'h')).toEqual({ value: 7200 });
+    expect(parseSettingInput(TIMEOUT, '1.5', 'h')).toEqual({ value: 5400 });
+    // 1.1 h is 3960 s; the float product is not, and must not be refused for it.
+    expect(parseSettingInput(TIMEOUT, '1.1', 'h')).toEqual({ value: 3960 });
+    expect(parseSettingInput(TIMEOUT, '90', 'min')).toEqual({ value: 5400 });
+    expect(parseSettingInput(IMPORT, '10', 'GiB')).toEqual({ value: 10240 });
+    expect(parseSettingInput(TIMEOUT, '25', 'h')).toEqual({
+      error: 'Enter a value from 1 min to 1 d.',
+    });
+    expect(parseSettingInput(IMPORT, '0.3', 'GiB')).toEqual({
+      error: 'Enter a value from 1 MiB to 64 GiB.',
+    });
+  });
+});
+
+describe('input units', () => {
+  it('offers days only where the bound allows more than one', () => {
+    expect(inputUnits(TIMEOUT)).toEqual(['s', 'min', 'h']);
+    expect(inputUnits({ ...TIMEOUT, maximum: 604800 })).toEqual(['s', 'min', 'h', 'd']);
+    expect(inputUnits(IMPORT)).toEqual(['MiB', 'GiB']);
+    expect(inputUnits(SESSIONS)).toEqual([]);
+  });
+
+  it('opens a value in the largest unit it is a whole number of', () => {
+    expect(unitFor(TIMEOUT, 28800)).toBe('h');
+    expect(unitFor(TIMEOUT, 86400)).toBe('h');
+    expect(unitFor(TIMEOUT, 1800)).toBe('min');
+    expect(unitFor(TIMEOUT, 90)).toBe('s');
+    expect(unitFor(IMPORT, 10240)).toBe('GiB');
+    expect(unitFor(IMPORT, 1500)).toBe('MiB');
+    expect(unitFor(SESSIONS, 64)).toBeNull();
+    expect(amountIn(28800, 'h')).toBe('8');
+    expect(amountIn(64, null)).toBe('64');
+  });
+});
+
+describe('shorteningEffect', () => {
+  it('warns only for the terminal limits that close open terminals', () => {
+    const idle = { ...TIMEOUT, key: 'terminal_idle_ttl_s' };
+    const lifetime = { ...TIMEOUT, key: 'terminal_hard_ttl_s' };
+    expect(shorteningEffect(idle, 600)).toBe('Open terminals idle longer than 10 min will close.');
+    expect(shorteningEffect(lifetime, 14400)).toBe('Open terminals older than 4 h will close.');
+    expect(shorteningEffect(TIMEOUT, 600)).toBeNull();
   });
 });
