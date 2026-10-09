@@ -127,7 +127,8 @@ def _run_terminal_turn(
     monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: manager)
     monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args: retained)
     monkeypatch.setattr(runner_mod, "_resident_base_ready", lambda *_args: True)
-    monkeypatch.setattr(runner_mod, "_prepare_retained_checkout", lambda **_kwargs: "b" * 40)
+    prepared = SimpleNamespace(import_into=lambda *_args, **_kwargs: "b" * 40, discard=lambda: None)
+    monkeypatch.setattr(runner_mod, "_prefetch_retained_source", lambda **_kwargs: prepared)
     monkeypatch.setattr(runner_mod, "runtime_version_unavailable", lambda *_args: None)
     if control is None:
         control = Mock(spec=ControlPlane)

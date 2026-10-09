@@ -69,6 +69,12 @@ Selected startup measurements now attribute this work to a `preflight` stage;
 the total remains claim request to prompt dispatch, excluding queue wait and
 model response time. Declined children do not publish a successful startup.
 
+A new chat's repository is cloned, scrubbed and archived on the host while its
+container is created and started, since only the import needs the container.
+Its `checkout` stage therefore holds what is left of the clone (`source_wait`)
+and the import (`source_import`). A failed clone still fails the turn at that
+stage, and a turn that stops earlier removes what was prepared.
+
 CI additionally runs the same candidate check on the real Kata host for
 reviewed commits on `dev`, before `CI Gate` can release the staging workflow.
 It builds uniquely tagged candidate images and never invokes Compose on the

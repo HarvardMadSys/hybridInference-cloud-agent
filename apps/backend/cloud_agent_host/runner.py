@@ -1503,41 +1503,115 @@ def _handle_host_residencies_lost(lost: list[dict[str, Any]]) -> None:
             client.close()
 
 
-def _prepare_retained_checkout(
-    *,
-    job: ClaimedJob,
-    manager: ChatSandboxManager,
-    spec: ChatSandboxSpec,
-    max_bytes: int | None = None,
-) -> str:
-    """Clone outside the chat, scrub credentials, then stream a normalized tar.
+class _SourcePrefetch:
+    """A new chat's source, cloned and archived while its container starts.
+
+    Cloning outside the chat, scrubbing credentials and building the
+    normalized tar all happen on the host and need nothing from the container,
+    so they run on a thread of their own beside the activation, which creates
+    and boots the guest, instead of after it. Only the import waits for both.
+    A failure is raised where the checkout always failed, in the checkout
+    stage; a turn that stops before then discards whatever was prepared.
+
+    The thread is not a daemon: a turn that ends while the clone is still
+    running waits for it at exit, so its temporary directory is always removed.
+    """
+
+    def __init__(self, job: ClaimedJob, *, uid: int, gid: int, max_bytes: int | None) -> None:
+        self._job = job
+        self._uid = uid
+        self._gid = gid
+        self._max_bytes = source_import_max_bytes() if max_bytes is None else max_bytes
+        self._lock = threading.Lock()
+        self._done = threading.Event()
+        self._discarded = False
+        self._base_sha = ""
+        self._archive: Any = None
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(target=self._prepare, name="source-prefetch")
+        self._thread.start()
+
+    def _prepare(self) -> None:
+        archive: Any = None
+        try:
+            with tempfile.TemporaryDirectory(prefix="freeinference-source-") as source:
+                base_sha = prepare_worktree(
+                    workdir=source,
+                    repo=self._job.repo,
+                    base_sha=self._job.base_sha,
+                    clone_token=self._job.clone_token,
+                    remote_base=repo_clone_base_url(clone_token=self._job.clone_token),
+                )
+                checkout_output_branch(source, self._job.thread_id)
+                # Unnamed and outside the checkout: the archive is spooled to
+                # disk, not held in this process, and gone when it is closed,
+                # which import_into or discard does once the clone is done.
+                archive = tempfile.TemporaryFile(  # noqa: SIM115 — outlives this thread.
+                    prefix="freeinference-source-", suffix=".tar"
+                )
+                build_source_archive(
+                    source,
+                    archive,
+                    uid=self._uid,
+                    gid=self._gid,
+                    max_bytes=self._max_bytes,
+                )
+                archive.flush()
+                archive.seek(0)
+        except BaseException as exc:
+            if archive is not None:
+                archive.close()
+            self._error = exc
+        else:
+            with self._lock:
+                if self._discarded:
+                    archive.close()
+                else:
+                    self._base_sha, self._archive = base_sha, archive
+        finally:
+            self._done.set()
+
+    def import_into(
+        self,
+        manager: ChatSandboxManager,
+        spec: ChatSandboxSpec,
+        *,
+        observer: operation_profiling.StageObserver | None = None,
+    ) -> str:
+        """Import the prepared archive into the chat and return its base commit."""
+        with operation_profiling.substage(observer, "source_wait"):
+            self._done.wait()
+        if self._error is not None:
+            raise self._error
+        with self._lock:
+            archive, self._archive = self._archive, None
+        if archive is None:
+            raise SandboxError("the prepared source was already discarded")
+        try:
+            with operation_profiling.substage(observer, "source_import"):
+                manager.import_archive(spec, CHAT_WORKDIR, archive)
+        finally:
+            archive.close()
+        return self._base_sha
+
+    def discard(self) -> None:
+        """Release the archive now, or as soon as a clone still running finishes."""
+        with self._lock:
+            self._discarded = True
+            archive, self._archive = self._archive, None
+        if archive is not None:
+            archive.close()
+
+
+def _prefetch_retained_source(
+    *, job: ClaimedJob, uid: int, gid: int, max_bytes: int | None = None
+) -> _SourcePrefetch:
+    """Start preparing a new chat's source; see :class:`_SourcePrefetch`.
 
     ``max_bytes`` is the import limit this turn runs with; ``None`` reads this
     host's own, for a turn started without the runner's settings.
     """
-    with tempfile.TemporaryDirectory(prefix="freeinference-source-") as source:
-        base_sha = prepare_worktree(
-            workdir=source,
-            repo=job.repo,
-            base_sha=job.base_sha,
-            clone_token=job.clone_token,
-            remote_base=repo_clone_base_url(clone_token=job.clone_token),
-        )
-        checkout_output_branch(source, job.thread_id)
-        # Unnamed and outside the checkout: the archive is spooled to disk, not
-        # held in this process, and gone when the file is closed.
-        with tempfile.TemporaryFile(prefix="freeinference-source-", suffix=".tar") as archive:
-            build_source_archive(
-                source,
-                archive,
-                uid=manager.backend.uid,
-                gid=manager.backend.gid,
-                max_bytes=source_import_max_bytes() if max_bytes is None else max_bytes,
-            )
-            archive.flush()
-            archive.seek(0)
-            manager.import_archive(spec, CHAT_WORKDIR, archive)
-    return base_sha
+    return _SourcePrefetch(job, uid=uid, gid=gid, max_bytes=max_bytes)
 
 
 def _import_uploads(
@@ -2056,6 +2130,7 @@ def _run_shared_live_attempt(
     native_session_id = str(reservation.get("native_session_id") or "").strip() or None
     manifest = _shared_group_manifest(reservation, thread_id=job.thread_id)
     supervisor: SessionSupervisorClient | None = None
+    source: _SourcePrefetch | None = None
     lease_token: str | None = None
     settled = False
     abandoned = False
@@ -2102,6 +2177,16 @@ def _run_shared_live_attempt(
             _log_control_failure("finish", job.job_id, exc)
 
     try:
+        if not has_context:
+            # Cloned on the host while the activation below creates and boots
+            # the guest; only the import, at the checkout stage, waits for both.
+            import_mib = settings.get("source_import_max_mib")
+            source = _prefetch_retained_source(
+                job=job,
+                uid=manager.backend.uid,
+                gid=manager.backend.gid,
+                max_bytes=None if import_mib is None else int(import_mib) * 1024 * 1024,
+            )
         supervisor = _session_supervisor_from_env()
         try:
             acquire_call = operation_profiling.expect_fragment(
@@ -2172,12 +2257,10 @@ def _run_shared_live_attempt(
             stage = _stage(measurement, "workspace_reset")
             manager.reset_unsettled_state(spec)
             stage = _stage(measurement, "checkout")
-            import_mib = settings.get("source_import_max_mib")
-            base_sha = _prepare_retained_checkout(
-                job=job,
-                manager=manager,
-                spec=spec,
-                max_bytes=None if import_mib is None else int(import_mib) * 1024 * 1024,
+            if source is None:
+                raise SandboxError("a new chat's source was never prepared")
+            base_sha = source.import_into(
+                manager, spec, observer=operation_profiling.stage_observer(measurement)
             )
             reused_workspace = False
             if job.setup_script:
@@ -2583,6 +2666,8 @@ def _run_shared_live_attempt(
         )
         if not settled and not abandoned:
             abandon_before_finish(lost=turn_admitted or context_invalid, detail=failure_detail)
+        if source is not None:
+            source.discard()
         if supervisor is not None:
             supervisor.close()
         if terminals_suspended:

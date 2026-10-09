@@ -158,10 +158,11 @@ def _run_new_chat(monkeypatch, host_settings: dict[str, float] | None) -> Simple
     monkeypatch.setattr(runner_mod, "_resident_base_ready", lambda *_args: True)
     monkeypatch.setattr(runner_mod, "runtime_version_unavailable", lambda *_args: None)
     checkouts: list[dict[str, Any]] = []
+    prepared = SimpleNamespace(import_into=lambda *_args, **_kwargs: "b" * 40, discard=lambda: None)
     monkeypatch.setattr(
         runner_mod,
-        "_prepare_retained_checkout",
-        lambda **kwargs: checkouts.append(kwargs) or "b" * 40,
+        "_prefetch_retained_source",
+        lambda **kwargs: checkouts.append(kwargs) or prepared,
     )
     control = Mock(spec=runner_mod.ControlPlane)
     control.mark_chat_sandbox_running.return_value = {}
