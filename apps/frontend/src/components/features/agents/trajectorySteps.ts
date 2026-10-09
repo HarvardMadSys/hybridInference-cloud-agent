@@ -56,6 +56,8 @@ export interface AssistantBlock {
   type: 'thinking' | 'text';
   text: string;
   channel?: string;
+  /** Built from Claude reply pieces; the complete block replaces it. */
+  streamed?: boolean;
 }
 
 /**
@@ -505,6 +507,7 @@ export function buildTrajectorySteps(
     const payload = asRecord(event.payload);
     const streaming = typeof payload.stream_state === 'string';
     if (block && streaming) block.channel = asText(payload.stream_channel) || 'summary';
+    if (block && streaming && typeof payload.native_item_id !== 'string') block.streamed = true;
     const step: TrajectoryStep = {
       key,
       kind: 'assistant',
@@ -646,8 +649,33 @@ export function buildTrajectorySteps(
               block,
             ];
             current.streaming = typeof payload.stream_state === 'string';
+          } else if (payload.stream_state === 'delta') {
+            // A piece of a Claude reply grows the preview of its block.
+            const channel = asText(payload.stream_channel);
+            const previous = current.blocks?.find(
+              (item) => item.streamed && item.type === block.type && item.channel === channel,
+            );
+            const grown = {
+              ...block,
+              text: (previous?.text ?? '') + block.text,
+              channel,
+              streamed: true,
+            };
+            current.blocks = previous
+              ? (current.blocks ?? []).map((item) => (item === previous ? grown : item))
+              : [...(current.blocks ?? []), grown];
+            current.streaming = true;
           } else {
-            current.blocks = [...(current.blocks ?? []), block];
+            // A complete block replaces the earliest preview still waiting for
+            // one: the CLI completes a message's blocks in order.
+            const blocks = current.blocks ?? [];
+            const preview = blocks.findIndex((item) => item.streamed && item.type === block.type);
+            if (preview >= 0) {
+              current.blocks = blocks.map((item, index) => (index === preview ? block : item));
+              current.streaming = current.blocks.some((item) => item.streamed);
+            } else {
+              current.blocks = [...blocks, block];
+            }
           }
           current.detail = preview(
             (current.blocks ?? [])

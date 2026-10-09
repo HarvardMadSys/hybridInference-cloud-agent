@@ -155,6 +155,131 @@ def test_claude_result_keeps_the_completed_turn_usage(is_error):
     assert event.payload["usage_scope"] == "attempt"
 
 
+def _partial_stream_lines() -> list[str]:
+    """The pinned 2.1.220 with ``--include-partial-messages``, sanitized.
+
+    Captured against a fake gateway: one response streams a thinking block, a
+    text block and a Bash call; the next streams a five-piece answer.
+    """
+    return (_FIXTURES / "claude_code_partial_stream_contract.jsonl").read_text().splitlines()
+
+
+class _Clock:
+    """A monotonic clock that moves only when told to."""
+
+    def __init__(self, step: float = 0.0) -> None:
+        self.now = 0.0
+        self.step = step
+
+    def __call__(self) -> float:
+        self.now += self.step
+        return self.now
+
+
+def _stream_pieces(events) -> list[tuple[str, int, str]]:
+    return [
+        (event.payload["message_id"], event.payload["block"], event.payload["delta"])
+        for event in events
+        if event.event_type == "raw" and event.payload.get("protocol") == "claude-code-stream"
+    ]
+
+
+def test_claude_asks_for_the_reply_while_it_is_written():
+    """Both transports carry the flag that makes the CLI stream its text."""
+    runtime = ClaudeCodeRuntime()
+    common = {
+        "workdir": "/tmp/x",
+        "model": "glm-5.1",
+        "gateway_base_url": "https://gateway.example.com/v1",
+        "credential": "ajt.a.b",
+    }
+    argv, _ = runtime.prepare(task_prompt="do the thing", **common)
+    live, _ = runtime.prepare_live(**common)
+    assert "--include-partial-messages" in argv
+    assert "--include-partial-messages" in live
+
+
+def test_partial_stream_reports_the_reply_text_and_nothing_else():
+    """Only the answer streams; the complete blocks still arrive as before."""
+    runtime = ClaudeCodeRuntime(clock=_Clock(step=1.0))
+    events = [
+        event
+        for line in _partial_stream_lines()
+        if (event := runtime.parse_event(line)) is not None
+    ]
+    assert _stream_pieces(events) == [
+        ("msg_1", 1, "Let me "),
+        ("msg_1", 1, "look at "),
+        ("msg_1", 1, "the workspace."),
+        ("msg_2", 0, "The "),
+        ("msg_2", 0, "workspace "),
+        ("msg_2", 0, "is "),
+        ("msg_2", 0, "here. "),
+        ("msg_2", 0, "Done."),
+    ]
+    # Thinking, a tool call's input and the message frame are consumed, not
+    # stored: the normalized transcript is the one the CLI gave without the flag.
+    assert [event.event_type for event in events if event.event_type != "raw"] == [
+        "thinking",
+        "message",
+        "tool_use",
+        "tool_result",
+        "message",
+        "lifecycle",
+    ]
+    final = [event.payload["text"] for event in events if event.event_type == "message"]
+    assert final == ["Let me look at the workspace.", "The workspace is here. Done."]
+
+
+def test_partial_stream_is_reported_in_batches():
+    """Pieces inside the interval wait; the complete line drops the remainder."""
+    runtime = ClaudeCodeRuntime(clock=_Clock(step=0.0))
+    events = [
+        event
+        for line in _partial_stream_lines()
+        if (event := runtime.parse_event(line)) is not None
+    ]
+    # The first piece of each block goes out at once; with the clock standing
+    # still the rest is held, and the complete message makes it unnecessary.
+    assert _stream_pieces(events) == [("msg_1", 1, "Let me "), ("msg_2", 0, "The ")]
+
+    # 0.125 s per piece (exact in binary): every second piece is past 0.2 s.
+    runtime = ClaudeCodeRuntime(clock=_Clock(step=0.125))
+    events = [
+        event
+        for line in _partial_stream_lines()
+        if (event := runtime.parse_event(line)) is not None
+    ]
+    assert [piece for message, _, piece in _stream_pieces(events) if message == "msg_2"] == [
+        "The ",
+        "workspace is ",
+        "here. Done.",
+    ]
+
+
+def test_a_streamed_piece_is_not_a_model_response():
+    """The preview carries no usage or ``usage_id`` for accounting to count."""
+    runtime = ClaudeCodeRuntime(clock=_Clock(step=1.0))
+    pieces = [
+        event
+        for line in _partial_stream_lines()
+        if (event := runtime.parse_event(line)) is not None and event.event_type == "raw"
+    ]
+    assert pieces
+    for event in pieces:
+        assert set(event.payload) == {"protocol", "message_id", "block", "delta"}
+
+
+def test_a_subagents_stream_is_not_the_conversations():
+    """A subagent's reply is reported by its complete lines only."""
+    runtime = ClaudeCodeRuntime(clock=_Clock(step=1.0))
+    for line in _partial_stream_lines():
+        record = json.loads(line)
+        if record["type"] == "stream_event":
+            record["parent_tool_use_id"] = "toolu_task"
+            assert runtime.parse_event(json.dumps(record)) is None
+
+
 def _pi_contract_lines() -> list[str]:
     """Return the sanitized pi ``--mode json`` stream, line by line."""
     return (_FIXTURES / "pi_stream_contract.jsonl").read_text().splitlines()

@@ -180,6 +180,9 @@ class ClaudeCli:
             "--output-format",
             "stream-json",
             "--verbose",
+            # Production passes it (runtimes.py), so the conformance suite
+            # must read the stream events it adds.
+            "--include-partial-messages",
             "--model",
             model,
             "--strict-mcp-config",

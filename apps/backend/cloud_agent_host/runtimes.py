@@ -31,10 +31,14 @@ from __future__ import annotations
 
 import json
 import shlex
+import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cloud_agent_shared.event_payloads import bound_event_payload
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # Normalized event kinds. Kept in lockstep with agent_job_events.event_type and
 # the frontend's types.ts; anything else must be reported as ``raw``.
@@ -395,7 +399,16 @@ class ClaudeCodeRuntime(AgentRuntime):
     # heard of it yet.
     MILESTONE_SUBTYPES = frozenset({"init", "compact_boundary"})
 
-    def __init__(self) -> None:
+    #: Marks the ``raw`` events that carry reply text while the model writes it.
+    #: They are a preview: the CLI's complete ``assistant`` line for the same
+    #: block still arrives as the ``message`` it always was, and replaces them.
+    STREAM_PROTOCOL = "claude-code-stream"
+    #: How long reply text is gathered before it is reported. The CLI writes one
+    #: line every few tokens, and each reported piece is an HTTP write and a
+    #: stored row, so it is batched: about five updates a second.
+    STREAM_INTERVAL_S = 0.2
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         """Track which unclassified subtypes this run has already reported."""
         # One adapter instance per job (see get_runtime), so this is per-run
         # state — the suppression below cannot leak across jobs.
@@ -404,6 +417,13 @@ class ClaudeCodeRuntime(AgentRuntime):
         #: retained container resumes this native locator directly; ``None``
         #: until the CLI has announced itself.
         self.session_id: str | None = None
+        self._clock = clock
+        # The text block being streamed: its message, its index in that
+        # message, the text not yet reported, and when a piece last went out.
+        self._stream_message_id: str | None = None
+        self._stream_block: int | None = None
+        self._stream_pending = ""
+        self._stream_reported_at: float | None = None
 
     def prepare(
         self,
@@ -444,6 +464,12 @@ class ClaudeCodeRuntime(AgentRuntime):
             "--output-format",
             "stream-json",
             "--verbose",
+            # Without it the CLI writes a reply only once the model has finished
+            # it, so the owner watched nothing happen and then a whole answer.
+            # With it the model's text also arrives as it is written, as
+            # ``stream_event`` lines; ``_from_stream`` turns those into a
+            # preview the complete reply then replaces.
+            "--include-partial-messages",
             # A repository can commit .mcp.json and Claude otherwise starts
             # its stdio commands before the model's first turn. Reproduced
             # against the real CLI in this exact configuration: without this
@@ -600,6 +626,8 @@ class ClaudeCodeRuntime(AgentRuntime):
             if harness is not None:
                 payload["harness"] = harness
             return NormalizedEvent(LIFECYCLE, payload)
+        if kind == "stream_event":
+            return self._from_stream(event)
         if kind == "assistant":
             return self._from_assistant(event)
         if kind == "user":
@@ -609,11 +637,90 @@ class ClaudeCodeRuntime(AgentRuntime):
                 LIFECYCLE, {"phase": "rate_limit", "info": event.get("rate_limit_info")}
             )
         if kind == "result":
+            self._end_stream()
             return self._from_result(event)
         return self._raw(line, f"unknown type {kind!r}")
 
+    def _from_stream(self, event: dict[str, Any]) -> NormalizedEvent | None:
+        """Report the reply text the model is writing, a batch at a time.
+
+        Only text is streamed. Thinking stays a single status in the chat, and
+        a tool call's input is shown once it is complete; a file the model
+        writes would otherwise arrive as thousands of fragments. A subagent's
+        reply is not the conversation's, so its stream is left out too. Every
+        other line is consumed here and stored nowhere, which is safe because
+        the CLI repeats the complete content in its ``assistant`` lines.
+        """
+        if event.get("parent_tool_use_id"):
+            return None
+        stream = event.get("event")
+        if not isinstance(stream, dict):
+            return None
+        kind = stream.get("type")
+        index = stream.get("index")
+        if kind == "message_start":
+            message = stream.get("message")
+            message_id = message.get("id") if isinstance(message, dict) else None
+            self._end_stream()
+            self._stream_message_id = str(message_id) if message_id else None
+            return None
+        if kind == "content_block_start":
+            block = stream.get("content_block")
+            is_text = isinstance(block, dict) and block.get("type") == "text"
+            self._stream_block = index if is_text and isinstance(index, int) else None
+            self._stream_pending = ""
+            self._stream_reported_at = None
+            return None
+        if kind == "content_block_stop":
+            if index == self._stream_block:
+                self._stream_block = None
+                self._stream_pending = ""
+            return None
+        delta = stream.get("delta")
+        if (
+            kind != "content_block_delta"
+            or self._stream_message_id is None
+            or self._stream_block is None
+            or index != self._stream_block
+            or not isinstance(delta, dict)
+            or delta.get("type") != "text_delta"
+        ):
+            return None
+        self._stream_pending += str(delta.get("text") or "")
+        now = self._clock()
+        if not self._stream_pending or (
+            self._stream_reported_at is not None
+            and now - self._stream_reported_at < self.STREAM_INTERVAL_S
+        ):
+            return None
+        text, self._stream_pending = self._stream_pending, ""
+        self._stream_reported_at = now
+        return NormalizedEvent(
+            RAW,
+            {
+                "protocol": self.STREAM_PROTOCOL,
+                # Deliberately not ``usage_id``: usage accounting reads that
+                # key, and a preview must not count as a model response.
+                "message_id": self._stream_message_id,
+                "block": self._stream_block,
+                "delta": text,
+            },
+        )
+
+    def _end_stream(self) -> None:
+        """Forget the streamed block; its complete content has arrived or never will."""
+        self._stream_message_id = None
+        self._stream_block = None
+        self._stream_pending = ""
+        self._stream_reported_at = None
+
     def _from_assistant(self, event: dict[str, Any]) -> NormalizedEvent:
         """Map an assistant turn to its most significant block."""
+        if not event.get("parent_tool_use_id"):
+            # The CLI writes a block's complete line before that block's stop
+            # event (the pinned 2.1.220), so text still waiting to be reported
+            # is already in this message.
+            self._stream_pending = ""
         message = event.get("message") or {}
         blocks = message.get("content") or []
         usage = message.get("usage") or {}

@@ -37,7 +37,19 @@ export interface AgentAttempt {
 export type AgentEvent =
   | { kind: 'lifecycle'; text: string; attemptNo?: number; sourceEventId?: number }
   | { kind: 'thinking'; text: string; attemptNo?: number; sourceEventId?: number }
-  | { kind: 'message'; text: string; attemptNo?: number; sourceEventId?: number }
+  | {
+      kind: 'message';
+      text: string;
+      attemptNo?: number;
+      sourceEventId?: number;
+      /** The model response this text belongs to, when the runtime names it. */
+      messageId?: string;
+      /**
+       * Still being written: Claude's reply pieces so far. The complete message
+       * for the same response replaces the row in place.
+       */
+      streaming?: boolean;
+    }
   | {
       kind: 'tool_use';
       tool: string;

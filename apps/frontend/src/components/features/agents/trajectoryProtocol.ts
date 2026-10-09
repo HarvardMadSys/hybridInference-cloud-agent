@@ -85,6 +85,31 @@ export function isRuntimeNotification(notification: Record<string, unknown>): bo
   );
 }
 
+/** A piece of Claude Code's reply, reported while the model was writing it. */
+export interface ClaudeStreamPiece {
+  messageId: string;
+  block: number;
+  text: string;
+}
+
+/**
+ * Read a stored Claude reply preview. The host batches the CLI's text deltas
+ * into `raw` records; the complete `message` for the same block replaces them.
+ */
+export function claudeStreamPiece(event: StoredEvent): ClaudeStreamPiece | null {
+  if (event.event_type !== 'raw') return null;
+  const payload = record(event.payload);
+  if (
+    payload.protocol !== 'claude-code-stream' ||
+    typeof payload.message_id !== 'string' ||
+    typeof payload.block !== 'number' ||
+    typeof payload.delta !== 'string'
+  ) {
+    return null;
+  }
+  return { messageId: payload.message_id, block: payload.block, text: payload.delta };
+}
+
 function scope(event: StoredEvent, id: string): string {
   return `${'job_id' in event ? event.job_id : ''}:${event.attempt_id}:${id}`;
 }
@@ -98,6 +123,20 @@ export function projectProtocolEvents(events: StoredEvent[]): StoredEvent[] {
     }),
   );
   return events.map((event) => {
+    const piece = claudeStreamPiece(event);
+    if (piece) {
+      // Keyed like the complete message (`usage_id`), which then replaces it.
+      return {
+        ...event,
+        event_type: 'message',
+        payload: {
+          text: piece.text,
+          usage_id: piece.messageId,
+          stream_state: 'delta',
+          stream_channel: `block:${piece.block}`,
+        },
+      };
+    }
     const notification = rawNotification(event);
     if (!notification || notificationHasError(notification)) return event;
     const payload = record(event.payload);

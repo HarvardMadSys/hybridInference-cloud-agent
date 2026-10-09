@@ -579,6 +579,70 @@ describe('buildTrajectorySteps', () => {
     expect(steps[2].label).toBe('mystery');
   });
 
+  it("shows Claude's reply growing in its message step until the complete block replaces it", () => {
+    const piece = (id: number, delta: string) =>
+      event({
+        id,
+        job_id: 'a',
+        turn_no: 1,
+        event_type: 'raw',
+        payload: { protocol: 'claude-code-stream', message_id: 'msg_1', block: 1, delta },
+      });
+    const streaming = [
+      event({
+        id: 1,
+        job_id: 'a',
+        turn_no: 1,
+        event_type: 'thinking',
+        payload: { text: 'plan', usage_id: 'msg_1' },
+      }),
+      piece(2, 'Let me '),
+      piece(3, 'look.'),
+    ];
+    const live = buildTrajectorySteps(streaming, { isAttemptActive: () => true });
+
+    expect(live).toHaveLength(1);
+    expect(live[0]).toMatchObject({ kind: 'assistant', streaming: true, status: 'waiting' });
+    expect(live[0].blocks).toEqual([
+      { type: 'thinking', text: 'plan' },
+      { type: 'text', text: 'Let me look.', channel: 'block:1', streamed: true },
+    ]);
+    // Raw and export still read the stored pieces, not the projection.
+    expect(live[0].sourceEvents.map((source) => source.event_type)).toEqual([
+      'thinking',
+      'raw',
+      'raw',
+    ]);
+
+    const settled = buildTrajectorySteps(
+      [
+        ...streaming,
+        event({
+          id: 4,
+          job_id: 'a',
+          turn_no: 1,
+          payload: { text: 'Let me look.', usage_id: 'msg_1' },
+        }),
+        event({
+          id: 5,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'tool_use',
+          payload: { id: 'toolu_1', name: 'Bash', input: { command: 'pwd' }, usage_id: 'msg_1' },
+        }),
+      ],
+      idle,
+    );
+
+    expect(settled.map((step) => step.kind)).toEqual(['assistant', 'tool']);
+    expect(settled[0]).toMatchObject({ status: 'completed', streaming: false });
+    expect(settled[0].blocks).toEqual([
+      { type: 'thinking', text: 'plan' },
+      { type: 'text', text: 'Let me look.' },
+    ]);
+    expect(settled[0].toolKeys).toHaveLength(1);
+  });
+
   it('counts hundreds of Codex streaming notifications as one inspectable log', () => {
     const notifications = Array.from({ length: 400 }, (_, index) =>
       event({

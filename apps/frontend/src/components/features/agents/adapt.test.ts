@@ -638,6 +638,59 @@ describe('toDisplayJob', () => {
     ]);
   });
 
+  it("grows Claude's reply while it is written, then shows the complete message in its place", () => {
+    const piece = (id: number, message_id: string, block: number, delta: string) =>
+      event(id, 'raw', { protocol: 'claude-code-stream', message_id, block, delta });
+    const streaming = [
+      event(1, 'thinking', { text: 'plan', usage_id: 'msg_1' }),
+      piece(2, 'msg_1', 1, 'Let me '),
+      piece(3, 'msg_1', 1, 'look.'),
+    ];
+
+    expect(toDisplayJob(JOB, { events: streaming }).events).toEqual([
+      expect.objectContaining({ kind: 'thinking' }),
+      expect.objectContaining({
+        kind: 'message',
+        text: 'Let me look.',
+        messageId: 'msg_1',
+        streaming: true,
+        sourceEventId: 2,
+      }),
+    ]);
+
+    const settled = [
+      ...streaming,
+      event(4, 'message', { text: 'Let me look.', usage_id: 'msg_1' }),
+      event(5, 'tool_use', { id: 'toolu_1', name: 'Bash', input: { command: 'pwd' } }),
+      event(6, 'tool_result', { tool_use_id: 'toolu_1', content: '/workspace' }),
+      piece(7, 'msg_2', 0, 'Done'),
+      event(8, 'message', { text: 'Done.', usage_id: 'msg_2' }),
+    ];
+    const rows = toDisplayJob(JOB, { events: settled }).events;
+    expect(rows.map((row) => row.kind)).toEqual(['thinking', 'message', 'tool_use', 'message']);
+    // Each complete message keeps the row's first id and drops the preview flag.
+    expect(rows[1]).toEqual({
+      kind: 'message',
+      text: 'Let me look.',
+      messageId: 'msg_1',
+      sourceEventId: 2,
+      attemptNo: 1,
+    });
+    expect(rows[3]).toEqual(
+      expect.objectContaining({ kind: 'message', text: 'Done.', sourceEventId: 7 }),
+    );
+    expect(rows[3]).not.toHaveProperty('streaming');
+  });
+
+  it('shows a complete message on its own when nothing streamed before it', () => {
+    const job = toDisplayJob(JOB, {
+      events: [event(1, 'message', { text: 'Hello.', usage_id: 'msg_1' })],
+    });
+    expect(job.events).toEqual([
+      { kind: 'message', text: 'Hello.', messageId: 'msg_1', sourceEventId: 1, attemptNo: 1 },
+    ]);
+  });
+
   it('keeps a message sent into a running turn where it arrived, marked as such', () => {
     expect(
       toDisplayEvent(
