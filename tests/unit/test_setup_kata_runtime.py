@@ -37,7 +37,7 @@ def _fake_bin(tmp_path: Path) -> Path:
 
     Only `uname` and `curl` are faked. Everything else the script calls (tar,
     zstd, shasum, grep) is the real thing, so the archive really is unpacked and
-    the digest really is computed.
+    the digest really is computed. `_host_path` covers a host with no zstd.
     """
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(exist_ok=True)
@@ -60,6 +60,37 @@ def _fake_bin(tmp_path: Path) -> Path:
         "exit 0\n",
     )
     return fake_bin
+
+
+def _host_path(tmp_path: Path, *, zstd: bool) -> str:
+    """This machine's PATH, with zstd present or absent as the test needs.
+
+    Every test that unpacks needs the real zstd and is skipped without it. The
+    refusals that come after the tool check only need the script to find one,
+    so a host without zstd gets a stand-in that fails if anything runs it.
+    Absent means every other command on PATH, linked one by one: this host
+    minus zstd, whatever else it has.
+    """
+    if zstd:
+        if _HAS_ZSTD:
+            return os.environ["PATH"]
+        stand_in = tmp_path / "zstd-stand-in"
+        stand_in.mkdir(exist_ok=True)
+        _write_executable(
+            stand_in / "zstd", "#!/bin/sh\necho 'stand-in zstd: this host has none' >&2\nexit 1\n"
+        )
+        return f"{stand_in}:{os.environ['PATH']}"
+    mirror = tmp_path / "path-without-zstd"
+    mirror.mkdir(exist_ok=True)
+    for directory in os.environ["PATH"].split(os.pathsep):
+        if not os.path.isdir(directory):
+            continue
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                link = mirror / entry.name
+                if entry.name != "zstd" and not os.path.lexists(link):
+                    link.symlink_to(os.path.abspath(entry.path))
+    return str(mirror)
 
 
 def _cpuinfo(tmp_path: Path, *, virtualized: bool = True) -> Path:
@@ -123,6 +154,7 @@ def _run(
     tarball: Path | None = None,
     virtualized: bool = True,
     kvm: bool = True,
+    zstd: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     fake_bin = _fake_bin(tmp_path)
     install_root = tmp_path / "root"
@@ -132,7 +164,7 @@ def _run(
 
     env = {
         **os.environ,
-        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "PATH": f"{fake_bin}:{_host_path(tmp_path, zstd=zstd)}",
         "KATA_EXTRACT_ROOT": str(install_root),
         "KATA_LINK_DIR": str(link_dir),
         "KATA_CPUINFO": str(_cpuinfo(tmp_path, virtualized=virtualized)),
@@ -211,6 +243,20 @@ def test_a_cpu_without_virtualization_extensions_is_refused(tmp_path: Path) -> N
     assert result.returncode != 0
     assert "vmx/svm" in result.stderr
     assert _download_count(tmp_path) == 0
+
+
+def test_a_host_without_zstd_is_refused_before_downloading(tmp_path: Path) -> None:
+    """A tar that lists --zstd cannot unpack the release without the zstd program.
+
+    GNU tar's --zstd runs that program. Taking the flag as enough downloaded
+    1.5 GB and marked the runtime as updating before tar failed.
+    """
+    result = _run(tmp_path, zstd=False)
+
+    assert result.returncode != 0
+    assert "missing on this host: zstd" in result.stderr
+    assert _download_count(tmp_path) == 0
+    assert not (tmp_path / "root/var/lib/freeinference/kata-runtime/epoch.json").exists()
 
 
 def test_check_refuses_a_host_that_has_no_kata(tmp_path: Path) -> None:
