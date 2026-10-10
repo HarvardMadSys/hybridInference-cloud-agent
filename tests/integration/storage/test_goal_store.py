@@ -1014,7 +1014,7 @@ async def test_sweep_pauses_a_goal_it_cannot_explain(store, pool):
 async def test_get_goal_for_job_reads_across_the_join(store):
     """The one joined goal read. Unqualified, ``goal_revision`` is ambiguous here.
 
-    ``0017`` puts that column on ``agent_jobs`` as well — the revision a turn
+    ``0019`` puts that column on ``agent_jobs`` as well — the revision a turn
     was created for — so Postgres refuses the statement outright (42702) rather
     than picking one. This read is on the path of *every* turn's continuation,
     and the exception was swallowed into a warning, so a missing test here meant

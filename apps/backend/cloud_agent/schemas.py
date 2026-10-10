@@ -2275,7 +2275,7 @@ class McpIntegrationResponse(BaseModel):
     """One catalogue MCP server, and whether this user has connected it.
 
     Carries no credential and no upstream URL — the same rule as
-    :class:`McpServerSummary`, for the same reason, and enforced the same way:
+    :class:`McpConnectionSummary`, for the same reason, and enforced the same way:
     there is no field either could occupy. ``account_label`` is what the
     provider calls the connected account, which is the user's own name for it
     and the only way to tell two connections apart in the UI.

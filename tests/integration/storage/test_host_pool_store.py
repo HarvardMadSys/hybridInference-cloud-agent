@@ -6,8 +6,8 @@ single-use token is a statement about an UPDATE's predicate; "capabilities
 superset" is a jsonb containment operator. None of those can be tested against
 a fake without testing the fake.
 
-The fixture applies Alembic — including `0002_host_pool`, `0003_attempt_host`
-and `0004_enroll_token_host` — exactly as a deploy does, so a migration that
+The fixture applies Alembic — the host pool's tables are in
+`0001_schema_baseline` — exactly as a deploy does, so a migration that
 produces a nearly-right schema fails here rather than at cutover.
 """
 

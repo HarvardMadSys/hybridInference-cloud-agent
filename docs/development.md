@@ -39,7 +39,7 @@ Within the control plane:
 
 | Area | Responsibility |
 |---|---|
-| [`api/`](../apps/backend/cloud_agent/api/) | HTTP routes, request dependencies, authorization, and response mapping. `routes.py` mounts the eight agent surfaces; handlers live in their surface modules. Other surfaces, such as admin and MCP, have their own routers. |
+| [`api/`](../apps/backend/cloud_agent/api/) | HTTP routes, request dependencies, authorization, and response mapping. `routes.py` mounts the nine agent surfaces; handlers live in their surface modules. Other surfaces, such as admin and MCP, have their own routers. |
 | [`application/`](../apps/backend/cloud_agent/application/) | Reusable flows and rules: task creation/admission, native-session Fork materialization, and residency credentials. |
 | [`ports/`](../apps/backend/cloud_agent/ports/) | `Protocol` interfaces describing the persistence capabilities callers need. |
 | [`storage/`](../apps/backend/cloud_agent/storage/) | Database implementations and the `Storage` object that assembles the capabilities. |
@@ -159,7 +159,7 @@ uv run pytest -q tests/unit/test_api_surface_contract.py tests/unit/test_contrac
 ```
 
 The surface checks also reject duplicate registrations and overlaps between
-the eight agent routers. A failed snapshot comparison needs an explanation of
+the nine agent routers. A failed snapshot comparison needs an explanation of
 the API change; regenerating the file alone does not establish compatibility.
 See the [contract guide](../gateway_contracts/README.md) for the limits of these
 checks.

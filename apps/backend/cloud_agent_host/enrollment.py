@@ -92,7 +92,7 @@ CLAIMABLE_STATUSES: tuple[str, ...] = ("online",)
 #: predates enrollment.
 #:
 #: Optimistic on purpose, and safe because the control plane gates claims on
-#: the same status independently (``AgentJobStore.claim_job``): the worst a
+#: the same status independently (``PostgresAttemptCommands.claim_job``): the worst a
 #: wrong guess costs is one refused claim, while guessing ``enrolling`` would
 #: idle every restarted host for a whole heartbeat interval.
 DEFAULT_STATUS = "online"

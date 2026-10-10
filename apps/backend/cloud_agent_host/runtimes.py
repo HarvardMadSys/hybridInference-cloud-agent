@@ -912,10 +912,9 @@ class CodexRuntime(AgentRuntime):
         root-owned system requirements before the CLI starts, for both exec
         and app-server. Repository configuration cannot admit another server.
 
-        Mirrors the invocation this repository already runs in production
-        (.github/workflows/codex-oncall.yml), because that one is known to work
-        against this gateway. Three things it gets right that the first pass
-        here did not:
+        Mirrors the invocation the gateway's Codex on-call workflow ran in
+        production, because that one was known to work against this gateway.
+        Three things it gets right that the first pass here did not:
 
         - the model rides ``--model``. The previous version set ``CODEX_MODEL``,
           which is not a variable the CLI reads, so the owner's model choice was

@@ -784,7 +784,7 @@ def test_a_reset_connection_is_an_enrollment_error(monkeypatch) -> None:
     could not be *made*. A control plane restarting mid-request resets one that
     already exists, and http.client raises `ConnectionResetError` from under
     urlopen — an OSError, not a URLError. It escaped this wrapper and therefore
-    escaped `_HostHeartbeat._run`'s `except EnrollmentError`, ending the thread.
+    escaped `HostHeartbeat._run`'s `except EnrollmentError`, ending the thread.
 
     The existing retry test could not have caught it: it patches `_post`, which
     is the layer the gap was in.

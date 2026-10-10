@@ -28,7 +28,7 @@ dependencies they asked for there. Three kinds arrive at this module:
   **Both were deleted on 2026-08-04.** A dependency that answers 503 in every
   real deployment is dead code that looks alive, and the only way to "fix" it
   from inside this repository is to reach back into the gateway's database.
-  Resolving a key to a user needs a gateway contract in ``contracts/`` and a
+  Resolving a key to a user needs a gateway contract in ``gateway_contracts/`` and a
   ``GatewayClient`` method; until one exists the session is the only owner
   credential. See MIGRATION.md's deferred register and its discarded-test row.
 

@@ -148,7 +148,7 @@ async def _bounded_json(
 # call refused inside a sandbox, far from either constant.
 #
 # So the cadence is defined here, next to the lifetime derived from it, and
-# ``cloud_agent.app.REAP_INTERVAL_S`` **is** this value rather than a second
+# ``cloud_agent.workers.attempts.REAP_INTERVAL_S`` **is** this value rather than a second
 # copy of it. ``tests/unit/test_grant_lifecycle.py`` fails if the two stop
 # agreeing, if the headroom is spent, or if either number leaves the bounds the
 # gateway enforces.

@@ -19,7 +19,7 @@ session-shaped key that opens every owner route. This door instead:
 - pins every job to **one configured service account**
   (``AGENT_ONCALL_USER_ID``), a gateway user whose role decides which models
   the grant may carry. The caller cannot choose whose quota it spends.
-- creates jobs through :func:`cloud_agent.api.routes._create_job_as` — the
+- creates jobs through :func:`cloud_agent.application.job_admission._create_job_as` — the
   owner route's own checks (model resolution, repo entitlement, ref pinning),
   not a parallel path that drifts.
 

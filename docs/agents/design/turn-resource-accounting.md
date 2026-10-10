@@ -4,8 +4,8 @@ Status: implementation contract. This file is the single source of truth for
 the interfaces used by the collector, the control plane, and the admin
 dashboard. The product rationale, the rejected alternatives, and the full
 acceptance matrix live in the design document
-`2026-09-11-admin-turn-resource-accounting-design.zh.md`; this file fixes only
-what code must agree on.
+`2026-09-11-admin-turn-resource-accounting-design.zh.md`, which was never
+committed to this repository; this file fixes only what code must agree on.
 
 ## 1. Scope
 
@@ -259,7 +259,7 @@ TurnResourceSummary
   storage_io: status, method, read_bytes, write_bytes, reason_codes[]
 ```
 
-`AgentRunSummary` gains a flat scalar `resource_summary` for the Runs list:
+`AdminRun` gains a flat scalar `resource_summary` for the Runs list:
 CPU usec, memory peak bytes, a per-metric status triple, and the observation
 cut-off. It holds no lists, so listing 50 runs stays one query over the
 current page.

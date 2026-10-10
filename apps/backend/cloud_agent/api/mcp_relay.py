@@ -973,7 +973,7 @@ async def _proxy(
         #
         # Logged, not converted: the status belongs to the agent's own request
         # and rewriting it would hide a real answer from the CLI. Feeding this
-        # back into `connection_states()`, so Integrations says "connect it
+        # back into the connection's status, so Integrations says "connect it
         # again" before the next job fails, needs a place to record it and
         # belongs with the connect flow that writes the row.
         logger.warning(

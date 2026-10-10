@@ -291,7 +291,7 @@ class GatewayClient:
         away from handing it to somebody else, along with the verifier it was
         redeemed with.
 
-        ``contracts/identity.openapi.yaml`` specifies 400 for an unusable code,
+        ``gateway_contracts/identity.openapi.yaml`` specifies 400 for an unusable code,
         403 for an unavailable account, and 404 when identity is not configured.
         These statuses are preserved in ``GatewayError`` for the session
         callback. A 401 is outside that contract: this PKCE endpoint requires
@@ -356,6 +356,6 @@ class GatewayClient:
     # The ownership amendment moved the registry, its credentials and its proxy
     # to this service, and the gateway's endpoint went with them — so the
     # method could only ever 404, while its docstring still said a sandbox
-    # reaches MCP through the gateway's proxy. Read `registry_for_user()` from
-    # `cloud_agent.mcp_registry` instead; nothing here asks the gateway about
-    # tools, which is the whole point of the amendment.
+    # reaches MCP through the gateway's proxy. A thread's servers come from
+    # `cloud_agent.mcp.registry.resolve_for_thread()` instead; nothing here asks
+    # the gateway about tools, which is the whole point of the amendment.

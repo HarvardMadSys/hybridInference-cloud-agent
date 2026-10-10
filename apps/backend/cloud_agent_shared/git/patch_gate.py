@@ -61,11 +61,6 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("private_key_block", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----")),
 )
 
-# ops/release/public_export.py reads the tuple above by file path, so the two
-# scanners cannot drift: a shape added for the agent sandbox is a shape the
-# release audit rejects too. That module imports this file directly rather than
-# as a package, so nothing here may grow an import beyond the standard library.
-
 # ── Diff parsing ───────────────────────────────────────────────────────
 
 _DIFF_HEADER = re.compile(r"^diff --git (?P<a>.+?) (?P<b>.+)$")

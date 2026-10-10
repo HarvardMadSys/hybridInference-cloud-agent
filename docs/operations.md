@@ -695,7 +695,7 @@ AGENT_GITHUB_APP_PRIVATE_KEY_FILE=/etc/cloud-agent/github-app.pem
 
 `AGENT_GITHUB_APP_PRIVATE_KEY_PATH` names the location **inside** the
 container and already defaults to that mounted path
-(`docker-compose.yml:142`), so the Compose deployment sets only
+(`docker-compose.yml:164`), so the Compose deployment sets only
 `AGENT_GITHUB_APP_PRIVATE_KEY_FILE`. Overriding the path variable without
 mounting anything there produces a service that starts with GitHub
 unavailable — see below. Put the file on the host, owned by the service user
@@ -985,7 +985,7 @@ After those checks pass and existing runc groups have been accounted for, drop
 
 The control plane independently enforces the same fact at scheduling time.
 `AGENT_DEFAULT_EXECUTION_PROFILE` is already `untrusted-kata-v1` in the
-control-plane compose (`docker-compose.yml:117`), so this is the default rather
+control-plane compose (`docker-compose.yml:139`), so this is the default rather
 than an opt-in — and the consequence of that default is that **a deployment
 whose hosts have not been through Kata provisioning claims no secure work at
 all**, rather than falling back to a shared kernel. Set it explicitly
@@ -1302,7 +1302,7 @@ a 401, the runner logs `agent_host_credential_rejected` and stops claiming, and
 the control-plane deploy waits for a fresh heartbeat that never comes. The
 compose-effective location is
 `${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/credential`
-(`docker-compose.sandbox.yml:307`); the code default
+(`docker-compose.sandbox.yml:294`); the code default
 `AGENT_HOST_CREDENTIAL_FILE=/var/lib/hybridinference/agent-host-credential`
 (`enrollment.py`) applies only to a runner started outside that compose file,
 and `AGENT_HOST_STATE_ROOT` becomes mandatory once `SIBLING_COMPOSE_PROJECTS`
@@ -1685,7 +1685,7 @@ AGENT_HOST_SLOTS=4 \
 ```
 
 `AGENT_SANDBOX_IMAGE` is required by the host compose rather than defaulted
-(`docker-compose.sandbox.yml:236,345`), so name it explicitly; deployments tag
+(`docker-compose.sandbox.yml:211,332`), so name it explicitly; deployments tag
 it per environment (`…-job:staging`, `…-job:prod`) so a rebuild on one side
 cannot replace the other's image.
 

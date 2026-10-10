@@ -64,7 +64,7 @@ _GOAL_COLUMN_NAMES = (
 #: not introduce.
 _GOAL_COLUMNS = ", ".join(_GOAL_COLUMN_NAMES)
 
-#: For reads that join. ``0017`` put ``goal_revision`` on ``agent_jobs`` as well
+#: For reads that join. ``0019`` put ``goal_revision`` on ``agent_jobs`` as well
 #: — the revision *that turn* was created for — so an unqualified name is
 #: ambiguous there, and Postgres refuses the whole statement (42702) rather than
 #: picking one.

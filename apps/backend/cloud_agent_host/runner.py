@@ -1168,13 +1168,13 @@ def _read_bounded(process: Any, *, deadline_s: float, max_bytes: int) -> str:
 def _resident_base_ready(workdir: str, job: ClaimedJob, backend: SandboxBackend) -> bool:
     """Is the turn's pinned base resolvable in the retained workspace?
 
-    Probed **inside the sandbox**, exactly like ``build_patch`` and for the
-    same reason: this tree — ``.git/config`` included — has belonged to the
-    agent since import, and trusted-runner git against it would execute
-    whatever the agent left in ``diff.external`` or ``core.fsmonitor`` with
-    the runner's privileges. A missing object is imported as a credential-free
-    Git bundle built in a temporary trusted clone; clone credentials never
-    enter the retained container or its agent-controlled filesystem.
+    Probed **inside the sandbox** because this tree — ``.git/config``
+    included — has belonged to the agent since import, and trusted-runner git
+    against it would execute whatever the agent left in ``diff.external`` or
+    ``core.fsmonitor`` with the runner's privileges. A missing object is
+    imported as a credential-free Git bundle built in a temporary trusted
+    clone; clone credentials never enter the retained container or its
+    agent-controlled filesystem.
     """
     if not job.base_sha:
         return True

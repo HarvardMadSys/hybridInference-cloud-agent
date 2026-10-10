@@ -360,7 +360,7 @@ class PostgresAttemptCommands:
             )
             # Nothing is charged here. What this goal has spent is *derived*
             # from the rounds that have actually started — see
-            # ``PostgresGoalRepository._ROUNDS_USED_SQL`` — so a round costs
+            # ``storage._sql.goals.ROUNDS_USED_SQL`` — so a round costs
             # nothing until this INSERT runs and costs once however often it is
             # retried. Keeping a counter here meant this statement also had to
             # update ``agent_threads`` while already holding this job's row
@@ -1610,10 +1610,10 @@ class PostgresAttemptCommands:
                 if action in TERMINAL_STATES:
                     # Every terminal reaper outcome is a turn that did not end
                     # workably from the goal's point of view. The ordinary
-                    # finish path decides the goal in ``maybe_continue_goal``;
-                    # a reaped turn never reaches it, so it is decided here —
-                    # and the only safe decision is to stop and wait for the
-                    # owner.
+                    # finish path arms the goal's next step in
+                    # ``arm_finish_wakeup``; a reaped turn never reaches it,
+                    # so it is decided here — and the only safe decision is
+                    # to stop and wait for the owner.
                     await goal_after_terminal(
                         conn, job_id=job_id, thread_id=row["thread_id"], state=action
                     )

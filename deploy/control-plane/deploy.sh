@@ -14,7 +14,7 @@
 # Usage:  deploy.sh [--phase prepare|prepare-database|activate] <sha>
 #
 # With no `--phase` this runs all three in order, which is what every caller
-# before the split invoked and what the repository's own workflows still do.
+# before the split invoked.
 #
 # The phases exist because the release design sequences them across two
 # machines (#270): both sides prepare, *then* this side prepares the database

@@ -60,7 +60,7 @@ async def authenticate_agent_owner(
     back into the gateway's database — the coupling this split exists to
     remove. Its ported test is recorded in MIGRATION.md's discarded register.
     Restoring a programmatic owner credential means adding a gateway contract
-    under ``contracts/``, not resurrecting this.
+    under ``gateway_contracts/``, not resurrecting this.
 
     One namespace is still refused **before** the session verifier sees it: a
     worker capability token (``ajt.*``) is the sandbox's credential, and a

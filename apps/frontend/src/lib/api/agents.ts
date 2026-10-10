@@ -6,7 +6,7 @@ import type { SelectedSkillApi } from './skills';
 //
 // 1. **The event stream is read with fetch + ReadableStream, not EventSource.**
 //    EventSource cannot set an Authorization header, and these endpoints are
-//    authenticated. This mirrors the streaming-chat client in `chat.ts`.
+//    authenticated.
 // 2. **Every frame carries a global event id, and reconnects resume from it.**
 //    The gateway applies a finite cap to long-lived SSE, so a job that outlives
 //    one connection is normal, not exceptional — resuming by cursor is how the

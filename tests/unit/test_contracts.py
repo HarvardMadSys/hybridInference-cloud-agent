@@ -1,4 +1,4 @@
-"""The gateway contracts under `contracts/` are real documents.
+"""The gateway contracts under `gateway_contracts/` are real documents.
 
 A cross-repo contract that nobody checks is a comment in a language nobody
 reads. Three things are checked here, in increasing order of how easily they
@@ -49,7 +49,7 @@ def _load(path: Path) -> dict:
 
 def test_there_is_at_least_one_contract() -> None:
     """A glob that matches nothing passes every parametrised test below."""
-    assert DOCUMENTS, "contracts/ has no documents; every check here would vacuously pass"
+    assert DOCUMENTS, "gateway_contracts/ has no documents; every check here would vacuously pass"
 
 
 @pytest.mark.parametrize("path", DOCUMENTS, ids=lambda p: p.name)
@@ -111,6 +111,6 @@ def test_every_gateway_call_this_service_makes_is_described() -> None:
     undescribed = sorted(p for p in called if normalise(p) not in described_shapes)
     assert not undescribed, (
         "these gateway calls are made but described by no contract: "
-        f"{undescribed}. Add them to contracts/, or the dependency exists "
+        f"{undescribed}. Add them to gateway_contracts/, or the dependency exists "
         "only in code."
     )

@@ -208,7 +208,7 @@ COHORT_DESCRIPTIONS: dict[str, str] = {
 }
 
 #: Headroom over ``warmup + iterations`` so a run can never quietly run out of
-#: budget mid-cohort and degrade into the ``off`` cost.  ``_verify_selected``
+#: budget mid-cohort and degrade into the ``off`` cost.  ``verify_selected``
 #: fails loudly if it ever does.
 BUDGET_SLACK = 1000
 

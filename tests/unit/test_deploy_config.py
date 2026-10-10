@@ -1022,10 +1022,6 @@ def test_an_unparsable_bound_falls_back_rather_than_crash_looping(monkeypatch):
     assert args.lease_ttl > 0
 
 
-_STAGING_DEPLOY = Path(__file__).resolve().parents[2] / "ops/deploy/deploy_staging.sh"
-_MAKEFILE = Path(__file__).resolve().parents[2] / "Makefile"
-
-
 # `test_staging_deploy_owns_the_runner_when_the_host_opts_in` is not ported.
 # It drives `ops/deploy/deploy_staging.sh`, which deploys the gateway and stays
 # in that repository; there is nothing here for it to assert against. Its

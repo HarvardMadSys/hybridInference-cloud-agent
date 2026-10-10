@@ -136,7 +136,7 @@ async def get_agent_config(
             gateway, user_id=user["user_id"]
         ),
         # This user's connected servers, not the deployment's: same reason the
-        # repository list above is theirs. Public fields only — McpServerSummary
+        # repository list above is theirs. Public fields only — McpConnectionSummary
         # has nowhere to put a URL or a credential, which is how it stays that
         # way.
         mcp_connections=[

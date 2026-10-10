@@ -2,7 +2,7 @@
 
 `cloud_agent/grants.py` cannot read these numbers off the wire — neither appears
 in a response body — so it copies them.
-`contracts/inference-grants.openapi.yaml` declares them under `x-constants`, and
+`gateway_contracts/inference-grants.openapi.yaml` declares them under `x-constants`, and
 **nothing read that field** before this file: the same number lived in three
 places (the gateway's `serving/grants.py`, the document, and this client) with
 nothing comparing any two of them. This compares the client to the document.

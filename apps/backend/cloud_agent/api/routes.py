@@ -1,10 +1,11 @@
-"""The agent API's single mount point: eight surface routers behind one prefix.
+"""The agent API's single mount point: nine surface routers behind one prefix.
 
 The handlers live in the surface modules this mounts — ``jobs``, ``turns``,
-``threads``, ``workspace``, ``worker``, ``source_control``, ``catalog`` and
-``config`` — each of which owns its own prefix, its own dependencies and the
-capabilities it reaches the store for. This module exists so that ``app.py``
-mounts one router, and so that the surfaces have a fixed order.
+``threads``, ``changes``, ``workspace``, ``worker``, ``source_control``,
+``catalog`` and ``config`` — each of which owns its own prefix, its own
+dependencies and the capabilities it reaches the store for. This module
+exists so that ``app.py`` mounts one router, and so that the surfaces have a
+fixed order.
 
 The prefix is composed by FastAPI rather than by string concatenation: this
 router carries none and each surface carries ``/v1/agent``, so the effective

@@ -5,11 +5,10 @@ nothing else checks them: a Dockerfile that `COPY`s a path from the source
 repo's layout fails at build time on a runner host, long after review. These
 tests read the files and assert every path they name is real.
 
-They deliberately do not re-test *behaviour* the source repo already covers
-(egress network internal, socket read-only, non-root sandbox). Those
-assertions live in `test_agent_deploy_config.py`, which is still in the source
-repo because it asserts on the co-located overlay compose — see MIGRATION.md's
-open-decisions register.
+They deliberately do not re-test *behaviour* (egress network internal, socket
+read-only, non-root sandbox). Those assertions live in `test_deploy_config.py`,
+the source repo's `test_agent_deploy_config.py` ported here, and in
+`test_deploy_security.py`.
 """
 
 from __future__ import annotations
@@ -188,7 +187,7 @@ def test_every_own_path_reference_resolves(path: Path) -> None:
 
 @pytest.mark.parametrize("path", _text_files(), ids=lambda p: str(p.relative_to(REPO)))
 def test_no_file_references_a_source_repo_only_directory(path: Path) -> None:
-    """`apps/`, `ops/`, `distributions/`, … do not exist here at all.
+    """`ops/`, `config/`, `distributions/`, … do not exist here at all.
 
     Separate from the check above because these can never resolve: they are
     concepts of the repository we migrated *from*. A reference to one means a

@@ -1,4 +1,4 @@
-"""The owner credential dispatch (``routes.authenticate_agent_owner``).
+"""The owner credential dispatch (``_owner_auth.authenticate_agent_owner``).
 
 The dispatch used to choose between two authenticators: this service's session,
 and the gateway's ``api_keys`` table. **The API-key branch was deleted on
