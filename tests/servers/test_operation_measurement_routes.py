@@ -965,13 +965,18 @@ def _parent_models() -> dict[str, Any]:
     drift into agreeing with whatever the current code happens to emit. The
     parent is the commit that had no profiling fields at all, which makes it
     the contract a switched-off deployment must still honour.
+
+    It is the parent of the squash commit that landed the profiling fields
+    (#258), not ``e77e3e6^`` on the feature branch: the three models are
+    byte-identical in both, and only the first stays reachable from ``dev``
+    once that branch is deleted.
     """
     import subprocess
     import sys
     import types
 
     source = subprocess.run(
-        ["git", "show", "e77e3e6^:cloud_agent/schemas.py"],
+        ["git", "show", "6556746e5a99:apps/backend/cloud_agent/schemas.py"],
         check=True,
         capture_output=True,
         text=True,

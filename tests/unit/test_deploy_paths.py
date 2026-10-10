@@ -30,9 +30,7 @@ CONTROL_PLANE = REPO / "deploy/control-plane"
 #: arrived — so the control plane's compose and Dockerfiles were the one part
 #: of the deployment whose paths nothing checked.
 DEPLOY_FILES = sorted(
-    p
-    for p in (*HOST.iterdir(), *SANDBOX.iterdir(), *CONTROL_PLANE.iterdir())
-    if p.is_file() and p.name != ".gitkeep"
+    p for p in (*HOST.iterdir(), *SANDBOX.iterdir(), *CONTROL_PLANE.iterdir()) if p.is_file()
 )
 
 # `COPY <src> <dst>` / `COPY --from=x <src> <dst>` — src is repo-relative.

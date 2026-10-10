@@ -1,4 +1,4 @@
-.PHONY: help setup-dev format lint test test-db test-all check clean
+.PHONY: help setup-dev format lint typecheck test test-db test-all check clean
 
 .DEFAULT_GOAL := help
 

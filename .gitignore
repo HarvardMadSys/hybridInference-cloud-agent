@@ -23,11 +23,12 @@ htmlcov/
 *.key
 .compute-secrets/
 
-# Node / Next.js (web/)
+# Node / Next.js (apps/frontend/)
 node_modules/
 .next/
 out/
 *.tsbuildinfo
+next-env.d.ts
 
 # Editors / OS
 .DS_Store
@@ -37,7 +38,6 @@ out/
 
 # Local agent workspaces
 /workspaces/
-next-env.d.ts
 
 # Written by deploy.sh on the deployment host: which commit is actually running.
 .deployed-sha

@@ -17,7 +17,6 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import asyncpg
-from cloud_agent.storage.store import TERMINAL_STATES
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
@@ -34,6 +33,7 @@ from cloud_agent.admin_usage import (
     prepare_jobs,
     resolve_usage_window,
 )
+from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.storage.admin_usage_queries import (
     _BUDGET_SQL,
     _COHORT_SQL,
