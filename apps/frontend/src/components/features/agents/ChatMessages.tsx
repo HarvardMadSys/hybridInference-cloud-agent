@@ -315,16 +315,22 @@ export function EventList({
   events,
   jobId,
   renderEvent,
+  showActivityDetails = true,
 }: {
   events: AgentEvent[];
   jobId: string;
   renderEvent: (event: AgentEvent, index: number, blockKey: string) => ReactNode;
+  /** Keep task/delegation calls compact when their overview is shown elsewhere. */
+  showActivityDetails?: boolean;
 }) {
   const rows: ReactNode[] = [];
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index];
     const blockKey = eventBlockKey(jobId, event, index);
-    if (event.kind !== 'tool_use' || parseToolActivity(event.tool, event.input)) {
+    if (
+      event.kind !== 'tool_use' ||
+      (showActivityDetails && parseToolActivity(event.tool, event.input))
+    ) {
       rows.push(<Fragment key={blockKey}>{renderEvent(event, index, blockKey)}</Fragment>);
       continue;
     }
@@ -335,7 +341,7 @@ export function EventList({
         next.kind !== 'tool_use' ||
         next.attemptNo !== event.attemptNo ||
         next.parentToolUseId !== event.parentToolUseId ||
-        parseToolActivity(next.tool, next.input)
+        (showActivityDetails && parseToolActivity(next.tool, next.input))
       )
         break;
       index += 1;
@@ -705,6 +711,7 @@ export function HistoryTurn({
   onFork,
   onRewind,
   onOpenRun,
+  showActivityDetails = true,
 }: {
   turn: ConversationTurnDescription;
   rewindAnchorJobId?: string;
@@ -712,6 +719,7 @@ export function HistoryTurn({
   onFork?: (jobId: string) => void;
   onRewind?: (jobId: string, prompt: string) => void;
   onOpenRun?: (jobId: string, turnNo: number) => void;
+  showActivityDetails?: boolean;
 }) {
   // What the transcript renders is decided once, by the turn description the
   // navigation rail also reads.
@@ -748,6 +756,7 @@ export function HistoryTurn({
         <EventList
           events={turn.events}
           jobId={jobId}
+          showActivityDetails={showActivityDetails}
           renderEvent={(event, index, blockKey) => (
             <EventRow
               event={event}

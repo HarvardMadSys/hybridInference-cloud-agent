@@ -2130,6 +2130,327 @@ describe('JobDetail', () => {
     expect(screen.getByText(stateNote)).toHaveClass('[overflow-wrap:anywhere]');
   });
 
+  describe('the tasks and subagents overview', () => {
+    function viewport(desktop: boolean) {
+      vi.stubGlobal(
+        'matchMedia',
+        vi.fn((query: string) => ({
+          matches: desktop && query === '(min-width: 1024px)',
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        })),
+      );
+    }
+
+    function changeViewport(desktop: boolean) {
+      const query = vi
+        .mocked(window.matchMedia)
+        .mock.results.map((result) => result.value)
+        .find((result) => result.media === '(min-width: 1024px)');
+      if (!query) throw new Error('The activity breakpoint was not observed');
+      const listener = vi.mocked(query.addEventListener).mock.calls[0]?.[1];
+      if (typeof listener !== 'function') throw new Error('No breakpoint change listener');
+      Object.defineProperty(query, 'matches', { value: desktop, configurable: true });
+      act(() => listener.call(query, new Event('change') as MediaQueryListEvent));
+    }
+
+    function activityEvents(
+      subject = 'Implement the activity overview',
+      attemptNo = 1,
+    ): AgentJob['events'] {
+      return [
+        {
+          kind: 'tool_use',
+          tool: 'update_plan',
+          detail: 'Update the plan',
+          input: {
+            plan: [
+              { step: 'Inspect the transcript events', status: 'completed' },
+              { step: subject, status: 'in_progress' },
+            ],
+          },
+          resultState: 'received',
+          output: ['Plan updated'],
+          attemptNo,
+          sourceEventId: attemptNo * 10 + 1,
+        },
+        {
+          kind: 'tool_use',
+          tool: 'spawn_agent',
+          id: `spawn-review-${attemptNo}`,
+          detail: 'Review sidebar interactions',
+          input: {
+            task_name: 'Review sidebar interactions',
+            message: 'Check focus restoration and narrow-screen layout.',
+          },
+          output: [
+            JSON.stringify({
+              agent_id: `agent-ui-review-${attemptNo}`,
+              agents_states: { [`agent-ui-review-${attemptNo}`]: { status: 'running' } },
+            }),
+          ],
+          resultState: 'received',
+          attemptNo,
+          sourceEventId: attemptNo * 10 + 2,
+        },
+      ];
+    }
+
+    beforeEach(() => viewport(true));
+    afterEach(() => vi.unstubAllGlobals());
+
+    it('opens on desktop with the selected turn task list and explicit agent state', async () => {
+      render(<JobDetail job={makeJob({ events: activityEvents() })} />);
+
+      const pane = await screen.findByRole('region', { name: 'Tasks and subagents' });
+      const toggle = screen.getByRole('button', { name: 'Hide tasks and subagents' });
+      expect(pane).toHaveAttribute('id', 'job-activity-pane');
+      expect(toggle).toHaveAttribute('aria-controls', 'job-activity-pane');
+      expect(toggle).toHaveAttribute('aria-expanded', 'true');
+      expect(within(pane).getByText('Implement the activity overview')).toBeInTheDocument();
+      expect(within(pane).getByText('Inspect the transcript events')).toBeInTheDocument();
+      expect(within(pane).getByText('Review sidebar interactions')).toBeInTheDocument();
+      expect(pane).toHaveTextContent('agent-ui-review-1');
+      expect(within(pane).getByText('Running')).toBeInTheDocument();
+      expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
+    });
+
+    it('opens explicitly on mobile and returns focus on close or Escape without stopping', async () => {
+      viewport(false);
+      render(<JobDetail job={makeJob({ events: activityEvents() })} />);
+
+      expect(screen.queryByRole('region', { name: 'Tasks and subagents' })).not.toBeInTheDocument();
+      const toggle = screen.getByRole('button', { name: 'Show tasks and subagents' });
+      expect(toggle).toHaveAttribute('aria-expanded', 'false');
+      toggle.focus();
+      fireEvent.click(toggle);
+      const pane = await screen.findByRole('region', { name: 'Tasks and subagents' });
+      const close = within(pane).getByRole('button', { name: 'Close tasks and subagents' });
+      close.focus();
+      fireEvent.click(close);
+      expect(screen.queryByRole('region', { name: 'Tasks and subagents' })).not.toBeInTheDocument();
+      expect(toggle).toHaveFocus();
+
+      fireEvent.click(toggle);
+      const reopened = screen.getByRole('region', { name: 'Tasks and subagents' });
+      const reopenedClose = within(reopened).getByRole('button', {
+        name: 'Close tasks and subagents',
+      });
+      reopenedClose.focus();
+      fireEvent.keyDown(reopenedClose, { key: 'Escape' });
+      expect(screen.queryByRole('region', { name: 'Tasks and subagents' })).not.toBeInTheDocument();
+      expect(toggle).toHaveFocus();
+      expect(cancelAgentJob).not.toHaveBeenCalled();
+      expect(submitThreadMessage).not.toHaveBeenCalled();
+    });
+
+    it('returns focus when the desktop overview is hidden by a narrow breakpoint', async () => {
+      render(<JobDetail job={makeJob({ events: activityEvents() })} />);
+      const pane = await screen.findByRole('region', { name: 'Tasks and subagents' });
+      within(pane).getByRole('button', { name: 'Close tasks and subagents' }).focus();
+
+      changeViewport(false);
+      const toggle = screen.getByRole('button', { name: 'Show tasks and subagents' });
+      expect(screen.queryByRole('region', { name: 'Tasks and subagents' })).not.toBeInTheDocument();
+      expect(toggle).toHaveFocus();
+
+      // Desktop preference survives; mobile still requires an explicit opening.
+      changeViewport(true);
+      expect(screen.getByRole('region', { name: 'Tasks and subagents' })).toBeInTheDocument();
+      changeViewport(false);
+      expect(screen.queryByRole('region', { name: 'Tasks and subagents' })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Show tasks and subagents' }));
+      expect(screen.getByRole('region', { name: 'Tasks and subagents' })).toBeInTheDocument();
+      expect(cancelAgentJob).not.toHaveBeenCalled();
+    });
+
+    it("keeps a desktop reader's close preference until the overview is explicitly reopened", async () => {
+      const job = makeJob({ events: activityEvents() });
+      const view = render(<JobDetail job={job} />);
+      const pane = await screen.findByRole('region', { name: 'Tasks and subagents' });
+      fireEvent.click(within(pane).getByRole('button', { name: 'Close tasks and subagents' }));
+      const toggle = screen.getByRole('button', { name: 'Show tasks and subagents' });
+      expect(toggle).toHaveFocus();
+
+      view.rerender(
+        <JobDetail job={{ ...job, events: activityEvents('Updated implementation') }} />,
+      );
+      expect(screen.queryByRole('region', { name: 'Tasks and subagents' })).not.toBeInTheDocument();
+      fireEvent.click(toggle);
+      const reopened = screen.getByRole('region', { name: 'Tasks and subagents' });
+      expect(within(reopened).getByText('Updated implementation')).toBeInTheDocument();
+    });
+
+    it('keeps the open workspace through incoming updates and restores the updated overview', async () => {
+      const job = makeJob({ events: activityEvents() });
+      const view = render(<JobDetail job={job} />);
+      await screen.findByRole('region', { name: 'Tasks and subagents' });
+
+      openWorkspace();
+      expect(screen.queryByRole('region', { name: 'Tasks and subagents' })).not.toBeInTheDocument();
+      expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
+      view.rerender(
+        <JobDetail job={{ ...job, events: activityEvents('Verify the completed overview') }} />,
+      );
+      expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
+      expect(screen.queryByRole('region', { name: 'Tasks and subagents' })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close workspace' }));
+      const pane = await screen.findByRole('region', { name: 'Tasks and subagents' });
+      expect(within(pane).getByText('Verify the completed overview')).toBeInTheDocument();
+      expect(within(pane).queryByText('Implement the activity overview')).not.toBeInTheDocument();
+    });
+
+    it('filters by the selected attempt and resets to the next turn instead of retaining old activity', async () => {
+      const job = makeJob({
+        state: 'done',
+        currentAttemptNo: 2,
+        attempts: [
+          { no: 1, status: 'superseded' },
+          { no: 2, status: 'finished' },
+        ],
+        events: [
+          ...activityEvents('Superseded implementation plan', 1),
+          ...activityEvents('Current implementation plan', 2),
+        ],
+      });
+      const view = render(<JobDetail job={job} />);
+      let pane = await screen.findByRole('region', { name: 'Tasks and subagents' });
+      expect(within(pane).getByText('Current implementation plan')).toBeInTheDocument();
+      expect(within(pane).queryByText('Superseded implementation plan')).not.toBeInTheDocument();
+      expect(pane).toHaveTextContent('agent-ui-review-2');
+      expect(within(pane).queryByText('agent-ui-review-1')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByText('Execution history (2)'));
+      fireEvent.click(screen.getByRole('button', { name: '1 · superseded' }));
+      pane = screen.getByRole('region', { name: 'Tasks and subagents' });
+      expect(within(pane).getByText('Superseded implementation plan')).toBeInTheDocument();
+      expect(within(pane).queryByText('Current implementation plan')).not.toBeInTheDocument();
+      expect(pane).toHaveTextContent('agent-ui-review-1');
+
+      view.rerender(
+        <JobDetail
+          job={makeJob({
+            id: 'ajob_2',
+            turnNo: 2,
+            state: 'done',
+            events: activityEvents('Plan for the next conversation turn'),
+          })}
+        />,
+      );
+      pane = await screen.findByRole('region', { name: 'Tasks and subagents' });
+      expect(within(pane).getByText('Plan for the next conversation turn')).toBeInTheDocument();
+      expect(within(pane).queryByText('Superseded implementation plan')).not.toBeInTheDocument();
+      expect(within(pane).queryByText('Current implementation plan')).not.toBeInTheDocument();
+    });
+
+    it('restores the desktop overview after closing a selected trajectory step', async () => {
+      const stored = [
+        {
+          id: 42,
+          job_id: 'ajob_1',
+          turn_no: 1,
+          attempt_id: 1,
+          seq: 1,
+          event_type: 'tool_use',
+          payload: { id: 't1', name: 'Bash', input: { command: 'pytest -q' } },
+          created_at: null,
+        },
+      ] as never;
+      render(<JobDetail job={makeJob({ events: activityEvents() })} events={stored} />);
+      await screen.findByRole('region', { name: 'Tasks and subagents' });
+
+      fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+      fireEvent.click(screen.getByText('Bash'));
+      expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
+      expect(screen.queryByRole('region', { name: 'Tasks and subagents' })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Close details' }));
+      expect(
+        await screen.findByRole('region', { name: 'Tasks and subagents' }),
+      ).toBeInTheDocument();
+      expect(screen.queryByRole('region', { name: 'Step details' })).not.toBeInTheDocument();
+      expect(cancelAgentJob).not.toHaveBeenCalled();
+    });
+
+    it('opens a subagent source in trajectory and returns focus to its overview link on close', async () => {
+      const stored = [
+        {
+          id: 12,
+          job_id: 'ajob_1',
+          turn_no: 1,
+          attempt_id: 1,
+          seq: 1,
+          event_type: 'tool_use',
+          payload: {
+            id: 'spawn-review-1',
+            name: 'spawn_agent',
+            input: {
+              task_name: 'Review sidebar interactions',
+              message: 'Check focus restoration and narrow-screen layout.',
+            },
+          },
+          created_at: null,
+        },
+      ] as never;
+      render(<JobDetail job={makeJob({ events: activityEvents() })} events={stored} />);
+      const pane = await screen.findByRole('region', { name: 'Tasks and subagents' });
+      const sourceLink = within(pane).getByRole('button', { name: 'View subagent execution' });
+      sourceLink.focus();
+      fireEvent.click(sourceLink);
+
+      expect(screen.getByLabelText('Search steps')).toBeInTheDocument();
+      const inspector = screen.getByRole('region', { name: 'Step details' });
+      expect(inspector).toHaveTextContent('spawn_agent');
+      expect(inspector).toHaveTextContent('Check focus restoration and narrow-screen layout.');
+      expect(screen.queryByRole('region', { name: 'Tasks and subagents' })).not.toBeInTheDocument();
+      fireEvent.click(within(inspector).getByRole('button', { name: 'Close details' }));
+      expect(
+        await screen.findByRole('region', { name: 'Tasks and subagents' }),
+      ).toBeInTheDocument();
+      expect(sourceLink).toHaveFocus();
+      expect(cancelAgentJob).not.toHaveBeenCalled();
+    });
+
+    it('returns inspector focus to the toggle when breakpoint changes keep the overview closed', async () => {
+      viewport(false);
+      const stored = [
+        {
+          id: 12,
+          job_id: 'ajob_1',
+          turn_no: 1,
+          attempt_id: 1,
+          seq: 1,
+          event_type: 'tool_use',
+          payload: { id: 'spawn-review-1', name: 'spawn_agent', input: { prompt: 'Review' } },
+          created_at: null,
+        },
+      ] as never;
+      render(<JobDetail job={makeJob({ events: activityEvents() })} events={stored} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Show tasks and subagents' }));
+      const pane = screen.getByRole('region', { name: 'Tasks and subagents' });
+      const sourceLink = within(pane).getByRole('button', { name: 'View subagent execution' });
+      sourceLink.focus();
+      fireEvent.click(sourceLink);
+
+      changeViewport(true);
+      changeViewport(false);
+      const inspector = screen.getByRole('region', { name: 'Step details' });
+      const close = within(inspector).getByRole('button', { name: 'Close details' });
+      close.focus();
+      fireEvent.click(close);
+
+      expect(screen.queryByRole('region', { name: 'Step details' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('region', { name: 'Tasks and subagents' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Show tasks and subagents' })).toHaveFocus();
+      expect(cancelAgentJob).not.toHaveBeenCalled();
+    });
+  });
+
   it('keeps the task as the default view behind an icon-only, accessible workspace toggle', () => {
     render(<JobDetail job={makeJob()} />);
 

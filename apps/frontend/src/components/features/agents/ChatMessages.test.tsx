@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { EventList, EventRow, ThreadTurn } from './ChatMessages';
+import { EventList, EventRow, HistoryTurn, ThreadTurn } from './ChatMessages';
 import type { AgentEvent, AgentThreadMessage, GoalTurn } from './types';
 
 // The round marker is rendered directly: what it says about a report is the
@@ -133,6 +133,93 @@ describe('grouped tool calls', () => {
   const renderEvent = (event: AgentEvent, _index: number, blockKey: string) => (
     <EventRow event={event} blockKey={blockKey} />
   );
+
+  it('keeps activity calls compact with inspectable arguments and results when their overview is elsewhere', () => {
+    const events: AgentEvent[] = [
+      {
+        kind: 'tool_use',
+        tool: 'Task',
+        detail: 'Review',
+        sourceEventId: 1,
+        activityKey: '1:delegate',
+        input: { description: 'Review', prompt: 'Inspect coverage.' },
+        output: ['Started in background.'],
+      },
+      {
+        kind: 'tool_use',
+        tool: 'update_plan',
+        detail: 'Plan',
+        sourceEventId: 2,
+        input: { plan: [{ step: 'Review tests', status: 'pending' }] },
+        output: ['Plan recorded.'],
+      },
+    ];
+    const { rerender } = render(
+      <EventList
+        events={events}
+        jobId={jobId}
+        renderEvent={renderEvent}
+        showActivityDetails={false}
+      />,
+    );
+
+    const calls = screen.getByRole('list', { name: 'Tool calls' });
+    const chips = within(calls).getAllByRole('listitem');
+    expect(chips).toHaveLength(2);
+    expect(chips.map((chip) => chip.getAttribute('data-block-key'))).toEqual([
+      'ajob_1:activity:1:delegate',
+      'ajob_1:e2',
+    ]);
+    expect(screen.queryByRole('region', { name: 'Task activity' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Subagent activity' })).not.toBeInTheDocument();
+    expect(screen.getByText('Started in background.')).not.toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Show tool calls' }));
+    const hide = screen.getByRole('button', { name: 'Hide tool calls' });
+    const details = document.getElementById(hide.getAttribute('aria-controls')!)!;
+    expect(details).toHaveTextContent('"prompt": "Inspect coverage."');
+    expect(details).toHaveTextContent('"status": "pending"');
+    expect(screen.getByText('Started in background.')).toBeVisible();
+    expect(screen.getByText('Plan recorded.')).toBeVisible();
+    expect(details.querySelectorAll('[data-block-key]')).toHaveLength(0);
+
+    rerender(<EventList events={events} jobId={jobId} renderEvent={renderEvent} />);
+    expect(screen.getByRole('region', { name: 'Task activity' })).toBeVisible();
+    expect(screen.getByRole('region', { name: 'Subagent activity' })).toBeVisible();
+  });
+
+  it('forwards compact activity rendering through historical turns', () => {
+    render(
+      <HistoryTurn
+        busy={false}
+        showActivityDetails={false}
+        turn={{
+          key: 'history',
+          jobId: 'history',
+          displayNo: 1,
+          messages: [],
+          fallbackResponses: [],
+          promptCard: null,
+          forkable: false,
+          toolCalls: 1,
+          prompt: '',
+          lastResponse: '',
+          isCurrent: false,
+          events: [
+            {
+              kind: 'tool_use',
+              tool: 'Task',
+              detail: 'Review',
+              input: { description: 'Review' },
+              sourceEventId: 1,
+            },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByRole('list', { name: 'Tool calls' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Show tool call' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Subagent activity' })).not.toBeInTheDocument();
+  });
 
   it('keeps task and delegation cards visible between ordinary tool groups', () => {
     const events: AgentEvent[] = [

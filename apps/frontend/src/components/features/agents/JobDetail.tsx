@@ -58,10 +58,12 @@ import { BackToBottom, TurnRail } from './TurnNavigator';
 import { TerminalWorkspace } from './TerminalWorkspace';
 import { ThreadStatsBar } from './ThreadStatsBar';
 import { LiveAgentStatus } from './LiveAgentStatus';
+import { ActivityIcon, ActivitySidebar } from './ActivitySidebar';
+import { buildActivityOverview } from './activityOverview';
 import { ThreadActions } from './ThreadActions';
 import { McpSessionPanel } from './mcp/McpSessionPanel';
 import { NativeQuestionPrompt } from './NativeQuestionPrompt';
-import type { AgentJob } from './types';
+import type { AgentEvent, AgentJob } from './types';
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { AttemptTurnFooter } from './AttemptTurnFooter';
 import { TrajectoryView } from './TrajectoryView';
@@ -125,6 +127,11 @@ const INSPECTOR_DEFAULT_WIDTH = 400;
 const INSPECTOR_MIN_WIDTH = 320;
 const INSPECTOR_MAX_WIDTH = 640;
 const TRAJECTORY_MIN_WIDTH = 420;
+
+export const ACTIVITY_WIDTH_STORAGE_KEY = 'agents.activity.width';
+const ACTIVITY_DEFAULT_WIDTH = 340;
+const ACTIVITY_MIN_WIDTH = 280;
+const ACTIVITY_MAX_WIDTH = 520;
 
 const DIFF_LINE_CLASS = {
   hunk: 'bg-gray-50 dark:bg-gray-950 py-1 text-gray-400 dark:text-gray-500',
@@ -620,10 +627,31 @@ export function JobDetail({
   useEffect(() => setTitle(job.title), [job.title, job.threadId]);
   const [tab, setTab] = useState<'chat' | 'trajectory'>('chat');
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [activityOpen, setActivityOpen] = useState(true);
+  const [activityMobileOpen, setActivityMobileOpen] = useState(false);
+  const [wideLayout, setWideLayout] = useState(false);
+  const activityToggleRef = useRef<HTMLButtonElement>(null);
+  const activityPaneRef = useRef<HTMLElement>(null);
+  const activityReturnFocusRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const query = window.matchMedia('(min-width: 1024px)');
+    const sync = () => {
+      if (!query.matches && activityPaneRef.current?.contains(document.activeElement)) {
+        activityToggleRef.current?.focus();
+      }
+      setWideLayout(query.matches);
+      // Crossing the breakpoint must never replace Chat with an unrequested
+      // narrow-screen pane. The desktop preference remains independent.
+      setActivityMobileOpen(false);
+    };
+    sync();
+    query.addEventListener('change', sync);
+    return () => query.removeEventListener('change', sync);
+  }, []);
   const workspaceTabs = useWorkspaceTabs(userId, job, threadJobs);
   const workspaceTab = workspaceTabs.selected;
-  // The right region holds either the workspace or one selected step, never
-  // both: two panels would hide the trajectory that explains either of them.
+  // Activity, workspace, and step details take turns in the same right region.
   const [inspector, setInspector] = useState<InspectorSelection | null>(null);
   const [trajectoryQuery, setTrajectoryQuery] = useState('');
   const [focusJobId, setFocusJobId] = useState<string | null>(null);
@@ -721,20 +749,25 @@ export function JobDetail({
     maxViewportFraction: 0.6,
     siblingMinWidth: TRAJECTORY_MIN_WIDTH,
   });
-  // Both panes size themselves against the region that holds them: only that
-  // element knows how much is left once the sidebar has taken its share. The
-  // workspace and the inspector never open together, but they share the
-  // container, so both refs are attached to it. Without the inspector's, its
-  // floor for the list has nothing to measure against, and a drag can squeeze
-  // the list past the width it needs to stay readable.
+  const activityPane = useResizablePane({
+    storageKey: ACTIVITY_WIDTH_STORAGE_KEY,
+    defaultWidth: ACTIVITY_DEFAULT_WIDTH,
+    minWidth: ACTIVITY_MIN_WIDTH,
+    maxWidth: ACTIVITY_MAX_WIDTH,
+    side: 'end',
+    siblingMinWidth: TRANSCRIPT_MIN_WIDTH,
+  });
+  // Measure every pane against the space remaining after the task sidebar.
   const { containerRef: workspaceContainerRef } = workspacePane;
   const { containerRef: inspectorContainerRef } = inspectorPane;
+  const { containerRef: activityContainerRef } = activityPane;
   const layoutContainerRef = useCallback(
     (node: HTMLElement | null) => {
       workspaceContainerRef(node);
       inspectorContainerRef(node);
+      activityContainerRef(node);
     },
-    [inspectorContainerRef, workspaceContainerRef],
+    [activityContainerRef, inspectorContainerRef, workspaceContainerRef],
   );
 
   useEffect(() => setAttemptNo(liveAttempt), [liveAttempt]);
@@ -865,6 +898,7 @@ export function JobDetail({
     workspaceTabs.select(tab);
     setWorkspaceOpen(true);
     setInspector(null);
+    setActivityMobileOpen(false);
   }
 
   const toggleWorkspace = useCallback(() => {
@@ -872,6 +906,7 @@ export function JobDetail({
       if (!current) setInspector(null);
       return !current;
     });
+    setActivityMobileOpen(false);
   }, []);
 
   const closeInspector = useCallback(() => {
@@ -880,9 +915,65 @@ export function JobDetail({
     setFocusJobId(null);
     const trigger = inspectorTriggerRef.current;
     inspectorTriggerRef.current = null;
+    if (trigger?.closest('#job-activity-pane')) {
+      if (wideLayout ? activityOpen : activityMobileOpen) {
+        // Its pane becomes visible in the next commit, so restore focus then.
+        activityReturnFocusRef.current = trigger;
+      } else {
+        activityReturnFocusRef.current = null;
+        activityToggleRef.current?.focus();
+      }
+      return;
+    }
     // Escape closes the panel, not the reader's place in it.
     if (trigger && document.contains(trigger)) trigger.focus();
-  }, []);
+  }, [activityMobileOpen, activityOpen, wideLayout]);
+
+  const activityVisible =
+    !workspaceOpen && inspector === null && (wideLayout ? activityOpen : activityMobileOpen);
+  const closeActivity = useCallback(() => {
+    if (wideLayout) setActivityOpen(false);
+    setActivityMobileOpen(false);
+    activityToggleRef.current?.focus();
+  }, [wideLayout]);
+  const toggleActivity = useCallback(() => {
+    setWorkspaceOpen(false);
+    setInspector(null);
+    if (wideLayout) {
+      setActivityOpen(!activityVisible);
+      setActivityMobileOpen(false);
+    } else {
+      setActivityMobileOpen(!activityVisible);
+    }
+  }, [activityVisible, wideLayout]);
+  useEffect(() => {
+    if (!activityVisible) return;
+    const trigger = activityReturnFocusRef.current;
+    activityReturnFocusRef.current = null;
+    if (trigger && document.contains(trigger)) trigger.focus();
+    else if (trigger) activityToggleRef.current?.focus();
+    else if (!wideLayout) activityPaneRef.current?.focus();
+  }, [activityVisible, wideLayout]);
+
+  useEffect(() => {
+    if (!activityVisible) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (
+        event.key !== 'Escape' ||
+        event.repeat ||
+        event.defaultPrevented ||
+        (wideLayout && !target?.closest('#job-activity-pane')) ||
+        target?.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')
+      )
+        return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeActivity();
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [activityVisible, closeActivity, wideLayout]);
 
   // Remember what opened the panel so closing it can hand focus back.
   const rememberInspectorTrigger = useCallback(() => {
@@ -1201,6 +1292,18 @@ export function JobDetail({
   const currentTurn = describeCurrentTurn(job, { attemptNo, currentAttemptNo });
   const threadMessages = currentTurn.messages;
   const visibleEvents = currentTurn.events;
+  const activityOverview = useMemo(() => buildActivityOverview(visibleEvents), [visibleEvents]);
+  const activityStepKey = useCallback(
+    (event: Extract<AgentEvent, { kind: 'tool_use' }>) =>
+      trajectorySteps.find(
+        (step) =>
+          step.kind === 'tool' &&
+          step.jobId === job.id &&
+          event.sourceEventId !== undefined &&
+          step.sourceEvents.some((source) => source.id === event.sourceEventId),
+      )?.key,
+    [job.id, trajectorySteps],
+  );
   const currentRewindAnchor = job.historyTurns
     ? [...job.historyTurns].reverse().find((turn) => turn.forkable)?.jobId
     : undefined;
@@ -1308,9 +1411,8 @@ export function JobDetail({
     (last, event, index) => (event.kind === 'message' ? index : last),
     -1,
   );
-  // The workspace and the inspector share one right-hand region, so either of
-  // them narrows the transcript in exactly the same way.
-  const panelOpen = workspaceOpen || inspector !== null;
+  // Only explicitly opened panes replace the transcript on narrow screens.
+  const panelOpen = workspaceOpen || inspector !== null || (activityVisible && !wideLayout);
   return (
     <section className="flex h-full min-h-0 flex-col bg-gray-50/40 dark:bg-gray-950">
       <header className="relative z-20 shrink-0 border-b border-gray-200/80 dark:border-white/10 bg-white/95 dark:bg-gray-900/95 px-6 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur">
@@ -1326,8 +1428,8 @@ export function JobDetail({
             <span>{t('sessionArchive.badge')}</span>
           </div>
         ) : null}
-        <div className="flex w-full items-center gap-3 py-3.5 pr-14">
-          <div className="min-w-0 flex-1">
+        <div className="flex w-full flex-wrap items-center gap-2 py-3.5 pr-14 sm:flex-nowrap sm:gap-3">
+          <div className="min-w-0 basis-full flex-1 sm:basis-auto">
             <h1 className="truncate text-base font-semibold tracking-[-0.01em] text-gray-950 dark:text-gray-50">
               {title}
             </h1>
@@ -1374,6 +1476,22 @@ export function JobDetail({
               </button>
             ))}
           </nav>
+          <button
+            ref={activityToggleRef}
+            type="button"
+            onClick={toggleActivity}
+            aria-label={activityVisible ? 'Hide tasks and subagents' : 'Show tasks and subagents'}
+            aria-expanded={activityVisible}
+            aria-controls="job-activity-pane"
+            title="Tasks and subagents"
+            className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border transition-colors focus-visible:outline-crimson ${
+              activityVisible
+                ? 'border-gray-300 bg-gray-100 text-gray-900 dark:border-white/20 dark:bg-white/10 dark:text-gray-100'
+                : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-100 dark:border-white/10 dark:bg-gray-900 dark:text-gray-400 dark:hover:bg-white/5'
+            }`}
+          >
+            <ActivityIcon />
+          </button>
           {job.diffFiles.length ? (
             <button
               type="button"
@@ -1491,6 +1609,7 @@ export function JobDetail({
                       <HistoryTurn
                         key={turn.key}
                         turn={turn}
+                        showActivityDetails={false}
                         rewindAnchorJobId={rewindAnchorJobId}
                         busy={forking}
                         onFork={
@@ -1633,6 +1752,7 @@ export function JobDetail({
                     <div aria-label="Agent activity" className="mt-2">
                       <EventList
                         events={visibleEvents}
+                        showActivityDetails={false}
                         jobId={job.id}
                         renderEvent={(event, index, blockKey) => (
                           <EventRow
@@ -2027,6 +2147,38 @@ export function JobDetail({
             </div>
           ) : null}
         </div>
+
+        {activityVisible ? (
+          <PaneResizer
+            pane={activityPane}
+            label="Resize tasks and subagents"
+            controls="job-activity-pane"
+            className="hidden lg:block"
+          />
+        ) : null}
+
+        <aside
+          ref={activityPaneRef}
+          id="job-activity-pane"
+          role="region"
+          aria-label="Tasks and subagents"
+          tabIndex={-1}
+          hidden={!activityVisible}
+          style={{ '--job-activity-width': `${activityPane.width}px` } as CSSProperties}
+          className={`${activityVisible ? 'flex' : 'hidden'} h-full min-h-0 min-w-0 flex-col overflow-hidden border-l border-gray-200 bg-white focus:outline-none dark:border-white/10 dark:bg-gray-900 lg:w-[var(--job-activity-width)] lg:shrink-0`}
+        >
+          <ActivitySidebar
+            overview={activityOverview}
+            turnNo={currentTurn.displayNo}
+            attemptNo={attemptNo}
+            onClose={closeActivity}
+            stepKeyForEvent={activityStepKey}
+            onSelectStep={(stepKey) => {
+              setTab('trajectory');
+              selectStep(stepKey);
+            }}
+          />
+        </aside>
 
         {workspaceOpen ? (
           <PaneResizer
