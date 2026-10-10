@@ -26,6 +26,12 @@ import { toDisplayJob } from './adapt';
 import { SideChat } from './SideChat';
 import { conversationReadStorageKey } from './useConversationReadState';
 import { sideChatStorageKey } from './useSideChatSession';
+import { answerThreadQuestion, listThreadQuestions } from '@/lib/api/questions';
+
+vi.mock('@/lib/api/questions', () => ({
+  listThreadQuestions: vi.fn(),
+  answerThreadQuestion: vi.fn(),
+}));
 
 vi.mock('@/lib/api/agents', () => ({
   cancelAgentJob: vi.fn(),
@@ -108,6 +114,11 @@ const userId = 'side-test-user';
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(listThreadQuestions).mockResolvedValue({
+    questions: [],
+    job_id: 'side-3',
+    attempt_id: 12,
+  });
   sessionStorage.clear();
   localStorage.clear();
   installSideChatLocks();
@@ -203,6 +214,66 @@ async function send() {
 }
 
 describe('Side Chat', () => {
+  it('opens and answers the child agent question without sending a chat message or stopping the child', async () => {
+    vi.mocked(listThreadQuestions).mockResolvedValue({
+      job_id: next.id,
+      attempt_id: next.current_attempt_id!,
+      questions: [
+        {
+          request_id: 'side-question',
+          questions: [
+            {
+              id: 'files',
+              header: 'Files',
+              question: 'Keep the files?',
+              multiple: false,
+              allow_custom: false,
+              options: [{ label: 'Keep files', description: '' }],
+            },
+          ],
+        },
+      ],
+    });
+    vi.mocked(answerThreadQuestion).mockImplementation(async () => {
+      vi.mocked(listThreadQuestions).mockResolvedValue({
+        job_id: next.id,
+        attempt_id: 12,
+        questions: [],
+      });
+      return { accepted: true, reason: null };
+    });
+    render(<SideChat {...props()} />);
+    await send();
+    expect(
+      await screen.findByRole('dialog', { name: 'The agent has a question' }),
+    ).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Answer later' }), { key: 'Escape' });
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Review question' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Keep files' }));
+    const visibility = vi.spyOn(document, 'visibilityState', 'get');
+    visibility.mockReturnValue('hidden');
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(screen.getByRole('radio', { name: 'Keep files' })).toBeChecked();
+    visibility.mockReturnValue('visible');
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(screen.getByRole('radio', { name: 'Keep files' })).toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
+    await waitFor(() =>
+      expect(answerThreadQuestion).toHaveBeenCalledWith('side', {
+        job_id: next.id,
+        attempt_id: 12,
+        request_id: 'side-question',
+        answers: { files: ['Keep files'] },
+      }),
+    );
+    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
+  });
+
   it('stops the child with Escape without interrupting a focused draft', async () => {
     render(<SideChat {...props()} />);
     await send();

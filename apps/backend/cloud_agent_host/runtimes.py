@@ -623,6 +623,10 @@ class ClaudeCodeRuntime(AgentRuntime):
         prompt_at = argv.index("-p")
         del argv[prompt_at : prompt_at + 2]
         argv[1:1] = ["-p", "--input-format", "stream-json", "--replay-user-messages"]
+        # AskUserQuestion requires user interaction even in bypassPermissions.
+        # The pinned CLI sends its can_use_tool request over this control
+        # channel, and the live turn answers it with the owner's choices.
+        argv += ["--permission-prompt-tool", "stdio"]
         return argv, env
 
     @staticmethod

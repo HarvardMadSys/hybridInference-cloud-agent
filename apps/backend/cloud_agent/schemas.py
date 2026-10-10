@@ -1140,6 +1140,63 @@ class AgentPendingMessageSendNow(BaseModel):
     revision: int = Field(..., ge=1)
 
 
+class AgentQuestionOption(BaseModel):
+    """One choice in a native agent question."""
+
+    label: str
+    description: str = ""
+
+
+class AgentQuestion(BaseModel):
+    """A native question rendered without exposing its transport dialect."""
+
+    id: str
+    header: str = ""
+    question: str
+    multiple: bool = False
+    options: list[AgentQuestionOption] = Field(default_factory=list)
+    allow_custom: bool = True
+
+
+class AgentQuestionRequest(BaseModel):
+    """The correlated questions one native tool is waiting to have answered."""
+
+    request_id: str
+    questions: list[AgentQuestion]
+
+
+class AgentThreadQuestionsResponse(BaseModel):
+    """Pending native questions and the exact attempt that asked them."""
+
+    job_id: str
+    attempt_id: int | None = None
+    questions: list[AgentQuestionRequest] = Field(default_factory=list)
+
+
+class AgentQuestionAnswer(BaseModel):
+    """Answer a native request only on the job and attempt the owner read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str = Field(..., min_length=1, max_length=128)
+    attempt_id: int = Field(..., ge=1)
+    request_id: str = Field(..., min_length=1, max_length=128)
+    answers: dict[
+        Annotated[str, Field(min_length=1, max_length=128)],
+        Annotated[
+            list[Annotated[str, Field(min_length=1, max_length=10_000)]], Field(max_length=20)
+        ],
+    ] = Field(default_factory=dict, max_length=10)
+    reject: bool = False
+
+
+class AgentQuestionAnswerResponse(BaseModel):
+    """Whether the live native request accepted the answer."""
+
+    accepted: bool
+    reason: str | None = None
+
+
 class AgentThreadMessageResult(BaseModel):
     """What a queue action left behind.
 

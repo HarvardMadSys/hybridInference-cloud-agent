@@ -44,6 +44,52 @@ def _shared_snapshot() -> dict:
 
 
 @pytest.mark.asyncio
+async def test_native_question_client_keeps_read_and_response_scoped_to_the_owner(monkeypatch):
+    broker = WorkspaceBrokerClient("http://broker", "secret")
+    calls: list[tuple] = []
+
+    async def request(method, thread_id, action, *, params=None, json=None, timeout=None):
+        calls.append((method, thread_id, action, params, json, timeout))
+        return {"questions": []} if method == "GET" else {"accepted": True, "reason": None}
+
+    monkeypatch.setattr(broker, "_shared_sandbox_request", request)
+    answers = {"approach": ["First", "Custom answer"]}
+    assert await broker.pending_shared_questions("athr_source", owner="attempt:4") == {
+        "questions": []
+    }
+    assert await broker.answer_shared_question(
+        "athr_source", owner="attempt:4", request_id="request-one", answers=answers
+    ) == {"accepted": True, "reason": None}
+    await broker.answer_shared_question(
+        "athr_source", owner="attempt:4", request_id="request-two", answers={}, reject=True
+    )
+    assert calls == [
+        ("GET", "athr_source", "questions", {"owner": "attempt:4"}, None, 30),
+        (
+            "POST",
+            "athr_source",
+            "questions",
+            None,
+            {
+                "owner": "attempt:4",
+                "request_id": "request-one",
+                "answers": answers,
+                "reject": False,
+            },
+            30,
+        ),
+        (
+            "POST",
+            "athr_source",
+            "questions",
+            None,
+            {"owner": "attempt:4", "request_id": "request-two", "answers": {}, "reject": True},
+            30,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_cancelled_terminal_connect_closes_its_dedicated_http_client(monkeypatch):
     """Cancelling during ``send`` must not leak the unowned streaming client."""
 

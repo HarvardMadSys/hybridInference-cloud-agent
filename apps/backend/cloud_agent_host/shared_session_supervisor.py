@@ -67,6 +67,7 @@ from cloud_agent_shared.operation_profiling import (
     start_stage_recording,
     substage,
 )
+from cloud_agent_shared.shared_protocol import INPUT_TURN_ENDED
 from cloud_agent_shared.turn_resources import parse_cpu_capacity
 
 if TYPE_CHECKING:
@@ -1470,6 +1471,52 @@ class SharedChatSessionSupervisor:
                 self._held_inputs[thread_id] = held
                 return InputOutcome(True)
         return turn.inject(text, message_id=message_id)
+
+    def _question_turn(self, thread_id: str, owner: str) -> ResidentTurn[DialectRuntime] | None:
+        """Find the owner's active turn while the lifecycle lock is held."""
+        group = self._members.get(thread_id)
+        member = group.members.get(thread_id) if group is not None else None
+        if (
+            group is None
+            or group.stopping
+            or member is None
+            or not member.lease_token
+            or member.lease_owner != owner
+            or not owner.startswith("attempt:")
+            or not owner.removeprefix("attempt:")
+            or member.transport is None
+            or not member.transport.alive
+        ):
+            return None
+        return member.current_turn
+
+    def pending_questions(self, thread_id: str, *, owner: str) -> builtins.list[dict[str, Any]]:
+        """Read only questions belonging to the control plane's active attempt."""
+        with self._lock:
+            turn = self._question_turn(thread_id, owner)
+            return [] if turn is None else turn.pending_questions()
+
+    def answer_question(
+        self,
+        thread_id: str,
+        *,
+        owner: str,
+        request_id: str,
+        answers: dict[str, builtins.list[str]],
+        reject: bool = False,
+    ) -> InputOutcome:
+        """Answer the owner's current turn; never retain replies for another turn.
+
+        Keep the lifecycle lock through delivery so settlement, expiry, or a
+        replacement activation cannot invalidate the owner check before the
+        native transport sees the response. The driver's request id check
+        fences questions that have already completed within that same turn.
+        """
+        with self._lock:
+            turn = self._question_turn(thread_id, owner)
+            if turn is None:
+                return InputOutcome(False, INPUT_TURN_ENDED)
+            return turn.answer_question(request_id, answers, reject=reject)
 
     def abort_turn(
         self,

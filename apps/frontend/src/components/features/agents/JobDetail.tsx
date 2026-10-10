@@ -60,6 +60,7 @@ import { TerminalWorkspace } from './TerminalWorkspace';
 import { ThreadStatsBar } from './ThreadStatsBar';
 import { ThreadActions } from './ThreadActions';
 import { McpSessionPanel } from './mcp/McpSessionPanel';
+import { NativeQuestionPrompt } from './NativeQuestionPrompt';
 import type { AgentJob } from './types';
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { AttemptTurnFooter } from './AttemptTurnFooter';
@@ -84,7 +85,7 @@ import {
   ComposerTextarea,
   ComposerSendButton,
 } from './ConversationComposer';
-import { hasLostContext, ownerRunNote } from './conversationJob';
+import { hasLostContext, latestJob, ownerRunNote } from './conversationJob';
 import { useFirstRun } from './firstRun';
 import { SideChat } from './SideChat';
 import { WorkspaceTabBar } from './WorkspaceTabBar';
@@ -809,6 +810,24 @@ export function JobDetail({
   // current membership truth, so it also closes the composer when someone is
   // viewing an older successful turn after a later admitted turn was lost.
   const contextLost = hasLostContext(job);
+  const latestQuestionTurn = latestJob(
+    threadJobs.filter((turn) => !turn.thread_id || turn.thread_id === threadId),
+  );
+  let questionTurn = {
+    id: job.id,
+    attemptId: job.currentAttemptId,
+    active: job.state === 'running' && !contextLost,
+  };
+  if (latestQuestionTurn && (latestQuestionTurn.turn_no ?? 1) > (job.turnNo ?? 1)) {
+    questionTurn = {
+      id: latestQuestionTurn.id,
+      attemptId: latestQuestionTurn.current_attempt_id,
+      active:
+        latestQuestionTurn.state === 'running' &&
+        !latestQuestionTurn.cancel_requested &&
+        latestQuestionTurn.native_state !== 'lost',
+    };
+  }
   const latestTerminalEvent = [...job.events]
     .reverse()
     .find(
@@ -935,6 +954,8 @@ export function JobDetail({
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('[role="dialog"]')) return;
       const hasOnePrimaryModifier = event.metaKey !== event.ctrlKey;
       if (
         event.key.toLowerCase() !== 'j' ||
@@ -1682,6 +1703,12 @@ export function JobDetail({
                     {goalHint}
                   </p>
                 ) : null}
+                <NativeQuestionPrompt
+                  threadId={threadId}
+                  jobId={questionTurn.id}
+                  attemptId={questionTurn.attemptId}
+                  active={questionTurn.active && !isArchived}
+                />
                 <McpSessionPanel
                   jobId={job.id}
                   threadId={job.threadId ?? job.id}

@@ -57,6 +57,14 @@ import {
 } from '@/lib/api/pendingMessages';
 
 import { APIError } from '@/lib/utils/errors';
+import { listThreadQuestions } from '@/lib/api/questions';
+
+vi.mock('@/lib/api/questions', () => ({
+  listThreadQuestions: vi
+    .fn()
+    .mockResolvedValue({ questions: [], job_id: 'ajob_1', attempt_id: 1 }),
+  answerThreadQuestion: vi.fn(),
+}));
 
 import { installSideChatLocks } from './sideChatTestSupport';
 import { FirstRunProvider } from './firstRun';
@@ -327,6 +335,88 @@ const HISTORY = [
 ];
 
 describe('JobDetail', () => {
+  it('opens the latest live question while an older completed turn is being viewed', async () => {
+    const job = makeJob({
+      state: 'done',
+      turnNo: 1,
+      threadId: 'thread-questions',
+      currentAttemptId: 1,
+    });
+    const latest = {
+      id: 'newer-live-job',
+      thread_id: 'thread-questions',
+      turn_no: 2,
+      state: 'running',
+      current_attempt_id: 2,
+      cancel_requested: false,
+      native_state: 'ready',
+      task_prompt: 'Next task',
+    } as AgentJobApi;
+    vi.mocked(listThreadQuestions).mockResolvedValue({
+      job_id: latest.id,
+      attempt_id: 2,
+      questions: [
+        {
+          request_id: 'latest-question',
+          questions: [
+            {
+              id: 'latest-choice',
+              header: '',
+              question: 'Ready to continue?',
+              multiple: false,
+              allow_custom: true,
+              options: [],
+            },
+          ],
+        },
+      ],
+    });
+    const { rerender } = render(<JobDetail job={job} threadJobs={[latest]} />);
+    expect(
+      await screen.findByRole('dialog', { name: 'The agent has a question' }),
+    ).toHaveTextContent('Ready to continue?');
+    rerender(<JobDetail job={job} threadJobs={[{ ...latest, state: 'succeeded' }]} />);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('opens the active turn question and removes it when that turn settles', async () => {
+    const job = makeJob({ threadId: 'thread-questions', currentAttemptId: 1 });
+    vi.mocked(listThreadQuestions).mockResolvedValue({
+      job_id: job.id,
+      attempt_id: 1,
+      questions: [
+        {
+          request_id: 'main-question',
+          questions: [
+            {
+              id: 'main-choice',
+              header: 'Choice',
+              question: 'Which change should we make?',
+              multiple: false,
+              allow_custom: true,
+              options: [],
+            },
+          ],
+        },
+      ],
+    });
+    const { rerender } = render(<JobDetail job={job} />);
+    expect(
+      await screen.findByRole('dialog', { name: 'The agent has a question' }),
+    ).toBeInTheDocument();
+    expect(listThreadQuestions).toHaveBeenCalledWith('thread-questions', expect.any(AbortSignal));
+    const field = screen.getByRole('textbox', { name: 'Your answer' });
+    fireEvent.change(field, { target: { value: 'Keep the current behavior.' } });
+    fireEvent.keyDown(field, { key: 'j', ctrlKey: true });
+    expect(screen.getByRole('button', { name: 'Open workspace' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    expect(field).toHaveValue('Keep the current behavior.');
+    rerender(<JobDetail job={{ ...job, state: 'done' }} />);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
   it('creates independent side chats, preserves drafts and sends to the selected child', async () => {
     const { source, job, userId } = sideChatFixture();
     const props = { job, userId, threadJobs: [source] };
@@ -602,6 +692,9 @@ describe('JobDetail', () => {
   );
 
   beforeEach(() => {
+    vi.mocked(listThreadQuestions)
+      .mockReset()
+      .mockResolvedValue({ questions: [], job_id: 'ajob_1', attempt_id: 1 });
     vi.mocked(getAgentJob).mockReset();
     vi.mocked(getAgentJobThread).mockReset();
     vi.mocked(listAllAgentThreadEvents).mockReset();

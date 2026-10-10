@@ -26,7 +26,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -191,6 +191,18 @@ class SharedResidencyLostRequest(BaseModel):
     """Control-plane rejection of one exact member residency generation."""
 
     generation: int = Field(..., ge=1)
+
+
+class SharedQuestionAnswerRequest(BaseModel):
+    """A bounded native-question reply for one exact activation owner."""
+
+    owner: str = Field(..., min_length=1, max_length=128)
+    request_id: str = Field(..., min_length=1, max_length=128)
+    answers: dict[
+        Annotated[str, Field(min_length=1, max_length=128)],
+        Annotated[list[Annotated[str, Field(max_length=10_000)]], Field(max_length=20)],
+    ] = Field(default_factory=dict, max_length=10)
+    reject: bool = False
 
 
 class SharedAbandonRequest(SharedLeaseRequest):
@@ -1834,6 +1846,43 @@ def create_app(
                 text=body.text,
             )
         except SandboxError as exc:
+            raise supervisor_error(exc) from exc
+        return {"accepted": outcome.accepted, "reason": outcome.reason}
+
+    @app.get("/shared-sandboxes/{thread_id}/questions")
+    async def pending_shared_questions(
+        thread_id: str,
+        owner: str = Query(..., min_length=1, max_length=128),
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        """List native questions raised by the named running attempt."""
+        supervisor = require_shared_supervisor()
+        try:
+            questions = await asyncio.to_thread(
+                supervisor.pending_questions, thread_id, owner=owner
+            )
+        except (SandboxError, DriverError) as exc:
+            raise supervisor_error(exc) from exc
+        return {"questions": questions}
+
+    @app.post("/shared-sandboxes/{thread_id}/questions")
+    async def answer_shared_question(
+        thread_id: str,
+        body: SharedQuestionAnswerRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        """Deliver a response only to the native request that raised it."""
+        supervisor = require_shared_supervisor()
+        try:
+            outcome = await asyncio.to_thread(
+                supervisor.answer_question,
+                thread_id,
+                owner=body.owner,
+                request_id=body.request_id,
+                answers=body.answers,
+                reject=body.reject,
+            )
+        except (SandboxError, DriverError) as exc:
             raise supervisor_error(exc) from exc
         return {"accepted": outcome.accepted, "reason": outcome.reason}
 

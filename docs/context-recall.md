@@ -77,7 +77,7 @@ at settlement, and excludes events attributed to a previous bridge turn. This
 fixes user prompts being copied into the visible assistant reply; native model
 history was already separate from that incorrect display text.
 
-The sandbox advertises `http-agent-live-bridge=2`, required by host attestation.
+The sandbox advertises `http-agent-live-bridge=3`, required by host attestation.
 Deploy the broker/runner and sandbox image together. An image without this
 helper version must not advertise readiness for the new host. This is not an
 automatic migration or repair of legacy retained transcripts.

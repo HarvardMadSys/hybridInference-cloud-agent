@@ -18,6 +18,7 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
 from cloud_agent_host.chat_sandbox import RetainedChatBackend
+from cloud_agent_host.drivers import InputOutcome
 from cloud_agent_host.guest_observer import GuestObservation, GuestProcess
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.runtimes import RuntimeEffortUnsupportedError, RuntimeMCPUnavailableError
@@ -243,6 +244,30 @@ class _SharedSupervisor:
         self.calls.append(("snapshot", thread_id))
         return {"patch": "diff --git a/a.txt b/a.txt\n"}
 
+    def pending_questions(self, thread_id: str, *, owner: str):
+        self.calls.append(("questions", thread_id, owner))
+        return [
+            {
+                "request_id": "request-one",
+                "questions": [
+                    {
+                        "id": "approach",
+                        "header": "Approach",
+                        "question": "Choose an approach",
+                        "multiple": False,
+                        "options": [{"label": "First", "description": "First option"}],
+                        "allow_custom": True,
+                    }
+                ],
+            }
+        ]
+
+    def answer_question(self, thread_id: str, **kwargs):
+        self.calls.append(("answer_question", thread_id, kwargs))
+        return InputOutcome(
+            kwargs["owner"] == "attempt:1", None if kwargs["owner"] == "attempt:1" else "turn_ended"
+        )
+
 
 def _launch() -> dict[str, object]:
     """The minimum resident launch the broker's request model accepts."""
@@ -341,6 +366,87 @@ async def test_health_and_sandbox_inventory_are_authenticated_and_shared_only():
         "athr_source",
         "athr_child",
     }
+
+
+@pytest.mark.asyncio
+async def test_native_question_routes_require_authentication_and_forward_exact_answers():
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    path = "/shared-sandboxes/athr_source/questions"
+    payload = {
+        "owner": "attempt:1",
+        "request_id": "request-one",
+        "answers": {"approach": ["First", "A custom answer"]},
+        "reject": False,
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        denied_read = await client.get(path, params={"owner": "attempt:1"})
+        denied_reply = await client.post(path, json=payload)
+        assert supervisor.calls == []
+        pending = await client.get(path, headers=headers, params={"owner": "attempt:1"})
+        answer = await client.post(path, headers=headers, json=payload)
+        reject = await client.post(
+            path, headers=headers, json={**payload, "answers": {}, "reject": True}
+        )
+        stale = await client.post(path, headers=headers, json={**payload, "owner": "attempt:2"})
+
+    assert denied_read.status_code == denied_reply.status_code == 401
+    assert pending.status_code == 200
+    assert pending.json()["questions"][0]["request_id"] == "request-one"
+    assert pending.json()["questions"][0]["questions"][0]["allow_custom"] is True
+    assert answer.json() == reject.json() == {"accepted": True, "reason": None}
+    assert stale.json() == {"accepted": False, "reason": "turn_ended"}
+    assert supervisor.calls == [
+        ("questions", "athr_source", "attempt:1"),
+        ("answer_question", "athr_source", payload),
+        ("answer_question", "athr_source", {**payload, "answers": {}, "reject": True}),
+        ("answer_question", "athr_source", {**payload, "owner": "attempt:2"}),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"owner": ""},
+        {"owner": "a" * 129},
+        {"request_id": ""},
+        {"request_id": "r" * 129},
+        {"answers": {"": ["answer"]}},
+        {"answers": {"q" * 129: ["answer"]}},
+        {"answers": {str(i): ["answer"] for i in range(11)}},
+        {"answers": {"question": ["answer"] * 21}},
+        {"answers": {"question": ["a" * 10_001]}},
+        {"answers": {"question": "answer"}},
+    ],
+)
+async def test_native_question_answers_are_bounded_before_transport(invalid):
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.post(
+            "/shared-sandboxes/athr_source/questions",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            json={"owner": "attempt:1", "request_id": "request-one", "answers": {}, **invalid},
+        )
+    assert response.status_code == 422
+    assert supervisor.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("params", [{}, {"owner": ""}, {"owner": "o" * 129}])
+async def test_native_question_reads_require_a_bounded_owner(params):
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.get(
+            "/shared-sandboxes/athr_source/questions",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            params=params,
+        )
+    assert response.status_code == 422
+    assert supervisor.calls == []
 
 
 @pytest.mark.asyncio

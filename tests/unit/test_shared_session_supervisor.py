@@ -19,6 +19,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     ChatSandboxStatus,
 )
+from cloud_agent_host.drivers import InputOutcome
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_SOURCE,
     GuestObservation,
@@ -202,9 +203,25 @@ class _Manager:
 class _Turn:
     def __init__(self) -> None:
         self.interrupted = False
+        self.questions: list[dict[str, Any]] = []
+        self.question_answers: list[tuple[str, dict[str, list[str]], bool]] = []
 
     def interrupt(self) -> None:
         self.interrupted = True
+
+    def pending_questions(self) -> list[dict[str, Any]]:
+        return self.questions
+
+    def answer_question(
+        self, request_id: str, answers: dict[str, list[str]], *, reject: bool = False
+    ) -> InputOutcome:
+        if all(question["request_id"] != request_id for question in self.questions):
+            return InputOutcome(False, "refused")
+        self.question_answers.append((request_id, answers, reject))
+        self.questions = [
+            question for question in self.questions if question["request_id"] != request_id
+        ]
+        return InputOutcome(True)
 
 
 class _Transport:
@@ -298,6 +315,181 @@ def _members() -> list[SharedMemberManifest]:
             last_settled_job_id="ajob_peer",
         ),
     ]
+
+
+def _question_activation():
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    return manager, supervisor, lease
+
+
+def _pending_question() -> dict[str, Any]:
+    return {
+        "request_id": "native-request",
+        "questions": [
+            {
+                "id": "choice",
+                "header": "Approach",
+                "question": "Which approach should I use?",
+                "multiple": True,
+                "options": [
+                    {"label": "First", "description": "The first approach."},
+                    {"label": "Second", "description": "The second approach."},
+                ],
+                "allow_custom": True,
+            }
+        ],
+    }
+
+
+def test_native_questions_require_the_active_owner_and_running_turn():
+    _, supervisor, lease = _question_activation()
+    answers = {"choice": ["First", "Custom response"]}
+    for thread_id, owner in (
+        ("athr_source", "attempt:1"),
+        ("athr_peer", "attempt:1"),
+        ("athr_unknown", "attempt:1"),
+    ):
+        assert supervisor.pending_questions(thread_id, owner=owner) == []
+        assert supervisor.answer_question(
+            thread_id, owner=owner, request_id="native-request", answers=answers
+        ) == InputOutcome(False, "turn_ended")
+    assert supervisor._held_inputs == {}
+
+    turn = supervisor.start_turn(
+        "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+    turn.questions = [_pending_question()]
+    assert supervisor.pending_questions("athr_source", owner="attempt:2") == []
+    assert supervisor.answer_question(
+        "athr_source", owner="attempt:2", request_id="native-request", answers=answers
+    ) == InputOutcome(False, "turn_ended")
+    assert turn.question_answers == []
+    assert supervisor.pending_questions("athr_source", owner="attempt:1") == [_pending_question()]
+    assert supervisor.answer_question(
+        "athr_source", owner="attempt:1", request_id="native-request", answers=answers
+    ) == InputOutcome(True)
+    assert turn.question_answers == [("native-request", answers, False)]
+    assert turn.question_answers[0][1] is answers
+    assert supervisor.pending_questions("athr_source", owner="attempt:1") == []
+    assert supervisor._held_inputs == {}
+
+    supervisor.complete_turn("athr_source", lease.token, turn)
+    assert supervisor.answer_question(
+        "athr_source", owner="attempt:1", request_id="native-request", answers=answers
+    ) == InputOutcome(False, "turn_ended")
+
+
+def test_native_answers_and_rejections_never_reach_a_replacement_attempt():
+    _, supervisor, lease = _question_activation()
+    turn = supervisor.start_turn(
+        "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+    turn.questions = [_pending_question()]
+    assert supervisor.answer_question(
+        "athr_source", owner="attempt:1", request_id="native-request", answers={}, reject=True
+    ) == InputOutcome(True)
+    assert turn.question_answers == [("native-request", {}, True)]
+    supervisor.abandon("athr_source", lease.token, lost=False)
+    assert supervisor.pending_questions("athr_source", owner="attempt:1") == []
+    assert supervisor.answer_question(
+        "athr_source", owner="attempt:1", request_id="native-request", answers={"choice": ["First"]}
+    ) == InputOutcome(False, "turn_ended")
+
+    next_lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        next_lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    next_turn = supervisor.start_turn(
+        "athr_source", next_lease.token, prompt="continue", model="glm-5.1", reasoning_effort=None
+    )
+    next_turn.questions = [_pending_question()]
+    assert supervisor.answer_question(
+        "athr_source", owner="attempt:1", request_id="native-request", answers={}, reject=True
+    ) == InputOutcome(False, "turn_ended")
+    assert next_turn.question_answers == []
+    assert supervisor._held_inputs == {}
+
+
+def test_native_answer_delivery_holds_the_owner_fence_against_expiry(monkeypatch):
+    manager, supervisor, lease = _question_activation()
+    turn = supervisor.start_turn(
+        "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    stop_started = threading.Event()
+    outcomes: list[InputOutcome] = []
+    errors: list[BaseException] = []
+
+    def reply(request_id, answers, *, reject=False):
+        entered.set()
+        assert release.wait(timeout=2)
+        return InputOutcome(True)
+
+    monkeypatch.setattr(turn, "answer_question", reply)
+
+    def answer():
+        try:
+            outcomes.append(
+                supervisor.answer_question(
+                    "athr_source", owner="attempt:1", request_id="native-request", answers={}
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    def expire():
+        stop_started.set()
+        try:
+            supervisor.stop_if_idle("athr_source", generation=1, reason="orphaned_attempt")
+        except BaseException as exc:
+            errors.append(exc)
+
+    answering = threading.Thread(target=answer)
+    stopping = threading.Thread(target=expire)
+    answering.start()
+    try:
+        assert entered.wait(timeout=1)
+        stopping.start()
+        assert stop_started.wait(timeout=1)
+        assert manager.stop_count == 0
+    finally:
+        release.set()
+        answering.join(timeout=2)
+        if stopping.ident is not None:
+            stopping.join(timeout=2)
+    assert not answering.is_alive() and not stopping.is_alive()
+    assert errors == []
+    assert outcomes == [InputOutcome(True)]
+    assert manager.stop_count == 1
+    assert supervisor.pending_questions("athr_source", owner="attempt:1") == []
+    assert supervisor.answer_question(
+        "athr_source", owner="attempt:1", request_id="native-request", answers={}
+    ) == InputOutcome(False, "turn_ended")
 
 
 def test_broker_reconcile_stops_orphan_processes_before_accepting_requests():

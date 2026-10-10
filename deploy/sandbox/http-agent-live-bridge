@@ -81,9 +81,7 @@ def fork_payload(messages: Any, source_native_turn_no: int) -> dict[str, str]:
         raise BridgeError("fork source_native_turn_no must be positive")
     if not isinstance(messages, list):
         raise BridgeError("native message history has an invalid shape")
-    user_messages = [
-        message["info"] for message in messages if _is_platform_user(message)
-    ]
+    user_messages = [message["info"] for message in messages if _is_platform_user(message)]
     if source_native_turn_no > len(user_messages):
         raise BridgeError(
             "native history does not contain the requested fork turn "
@@ -129,6 +127,7 @@ class Bridge:
         self._turn_id: str | None = None
         self._turn_saw_busy = False
         self._turn_failed = False
+        self._questions: set[str] = set()
 
     @staticmethod
     def _available_port() -> int:
@@ -357,6 +356,10 @@ class Bridge:
             active = self._turn_id
             if active is None:
                 return
+            if event_type == "question.asked" and isinstance(properties.get("id"), str):
+                self._questions.add(properties["id"])
+            elif event_type in {"question.replied", "question.rejected"}:
+                self._questions.discard(str(properties.get("requestID") or ""))
             if event_type == "session.status":
                 status = properties.get("status")
                 if isinstance(status, dict) and status.get("type") != "idle":
@@ -381,6 +384,7 @@ class Bridge:
         self._turn_id = None
         self._turn_saw_busy = False
         self._turn_failed = False
+        self._questions.clear()
 
     def command(self, command: dict[str, Any]) -> None:
         command_id = str(command.get("id") or "")
@@ -420,6 +424,31 @@ class Bridge:
                 "POST", f"/session/{urllib.parse.quote(str(self.session_id), safe='')}/abort"
             )
             self.emit({"bridge": "interrupt_accepted", "id": command_id})
+            return
+        if kind == "question":
+            request_id = command.get("request_id")
+            with self._turn_lock:
+                if (
+                    self._turn_id != command.get("turn_id")
+                    or not isinstance(request_id, str)
+                    or request_id not in self._questions
+                ):
+                    raise BridgeError("question targets a stale request")
+            path = "/question/" + urllib.parse.quote(request_id, safe="")
+            if command.get("reject") is True:
+                self.request("POST", path + "/reject")
+            else:
+                answers = command.get("answers")
+                if not isinstance(answers, list) or any(
+                    not isinstance(answer, list)
+                    or any(not isinstance(value, str) for value in answer)
+                    for answer in answers
+                ):
+                    raise BridgeError("question answers must be lists of text")
+                self.request("POST", path + "/reply", {"answers": answers})
+            with self._turn_lock:
+                self._questions.discard(request_id)
+            self.emit({"bridge": "question_answered", "id": command_id})
             return
         if kind == "fork":
             with self._turn_lock:
