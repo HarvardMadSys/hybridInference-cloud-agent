@@ -314,3 +314,18 @@ def test_boot_script_stops_at_a_definite_refusal(tmp_path, status):
     result = boot_once(tmp_path, status)
     assert result.returncode == 1
     assert "refused" in (tmp_path / "state" / "registration").read_text()
+
+
+def test_profile_saved_or_used_by_hand_builds_a_node_that_does_not_register():
+    # The Portal runs the script with the empty defaults when the profile is saved.
+    profile = run_profile({})
+    assert profile.node is not None and profile.services == []
+
+
+@pytest.mark.parametrize(
+    "bindings",
+    [{"registrationUrl": URL}, {"registrationToken": TOKEN}],
+)
+def test_profile_refuses_half_a_registration(bindings):
+    with pytest.raises(SystemExit):
+        run_profile(bindings)

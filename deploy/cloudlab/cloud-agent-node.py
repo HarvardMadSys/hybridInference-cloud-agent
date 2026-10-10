@@ -110,12 +110,16 @@ pc.defineParameter(
 )
 params = pc.bindParameters()
 
-# Both values end up in a shell command line; accept only plain characters.
-if not re.match(r"^https://[A-Za-z0-9.:/_-]+$", params.registrationUrl):
+# The Portal also runs this script with the empty defaults (when the profile is
+# saved, or instantiated by hand): such a node simply does not register. Values
+# the control plane supplies end up in a shell command line, so accept only
+# plain characters.
+registering = bool(params.registrationUrl or params.registrationToken)
+if registering and not re.match(r"^https://[A-Za-z0-9.:/_-]+$", params.registrationUrl):
     pc.reportError(
         portal.ParameterError("Use the control plane's HTTPS address.", ["registrationUrl"])
     )
-if not re.match(r"^[A-Za-z0-9_-]{32,128}$", params.registrationToken):
+if registering and not re.match(r"^[A-Za-z0-9_-]{32,128}$", params.registrationToken):
     pc.reportError(
         portal.ParameterError("The registration token is malformed.", ["registrationToken"])
     )
@@ -136,17 +140,18 @@ disk.placement = "any"
 
 # Piped straight into root's shell: no file another user could swap in between.
 encoded = base64.b64encode(REGISTER.encode()).decode()
-node.addService(
-    pg.Execute(
-        shell="bash",
-        command="echo "
-        + encoded
-        + " | base64 -d | sudo bash -s -- '"
-        + params.registrationUrl
-        + "' '"
-        + params.registrationToken
-        + "'",
+if registering:
+    node.addService(
+        pg.Execute(
+            shell="bash",
+            command="echo "
+            + encoded
+            + " | base64 -d | sudo bash -s -- '"
+            + params.registrationUrl
+            + "' '"
+            + params.registrationToken
+            + "'",
+        )
     )
-)
 
 pc.printRequestRSpec(request)
