@@ -144,12 +144,21 @@ class FakeNodes:
         self.hosts = hosts
         self.calls: list[tuple[str, str]] = []
         self.fail_final_copy = False
+        self.fail_start_on: set[str] = set()
 
     async def preflight(self, node, profile):
         raise AssertionError("not used")
 
     async def deploy(self, node, profile, intent, token, *, prerequisites=None, reenroll=False):
-        self.calls.append(("deploy", node.display_name))
+        self.calls.append(("deploy-reenroll" if reenroll else "deploy", node.display_name))
+        if node.display_name in self.fail_start_on:
+            self.fail_start_on.discard(node.display_name)
+            return BootstrapResult(
+                ready=False,
+                host=intent.host,
+                deployment_sha=profile.deployment_sha,
+                blocked_reasons=("host_deployment_failed",),
+            )
         await self.hosts.register_host(
             host=intent.host,
             credential_hash=hash_secret("credential-" + node.display_name),
@@ -416,3 +425,262 @@ async def test_only_one_move_of_a_host_runs_at_a_time(db, store, hosts, monkeypa
             actor="admin",
         )
     assert refused.value.code == "rotation_in_progress"
+
+
+async def test_a_failed_start_hands_the_name_back_and_enrolls_the_original_again(
+    db, store, hosts, monkeypatch
+):
+    r = await rig(store, hosts, monkeypatch)
+    source, host = await ready_slot(r, db)
+    r.nodes.fail_start_on = {"t1-node"}
+    await r.commands.rotate(
+        r.allocation_id,
+        RotateComputeRequest(request_id="move-now", expected_revision=source["revision"]),
+        actor="admin",
+    )
+    await run_all(r, db)
+
+    rotation = await rotation_of(r, r.allocation_id)
+    assert rotation["state"] == "succeeded", rotation
+    [attempt] = rotation["result"]["attempts"]
+    assert (attempt["node_type"], attempt["class"]) == ("t1", "takeover_failed")
+    calls = r.nodes.calls
+    failed_start = calls.index(("deploy", "t1-node"))
+    # The replacement is stopped and the original enrolls again with a fresh
+    # token, because the replacement may already have taken the credential.
+    assert calls[failed_start + 1 : failed_start + 3] == [
+        ("stop", "t1-node"),
+        ("deploy-reenroll", "first-node"),
+    ]
+    failed, replacement = await successor_of(db, r.allocation_id)
+    assert failed["release_committed_at"] is not None
+    target = await r.repo.get_allocation(replacement["id"])
+    assert [h["host"] for h in target["hosts"]] == [host]
+
+
+async def test_running_turns_delay_the_switch_until_they_finish(db, store, hosts, monkeypatch):
+    r = await rig(store, hosts, monkeypatch)
+    source, _ = await ready_slot(r, db)
+    running = [2, 1, 1, 0, 0]
+    seen = []
+
+    async def running_attempts(*, host):
+        seen.append(running[0] if len(running) == 1 else running.pop(0))
+        return seen[-1]
+
+    monkeypatch.setattr(r.repo, "running_attempts", running_attempts)
+    await r.commands.rotate(
+        r.allocation_id,
+        RotateComputeRequest(request_id="move-now", expected_revision=source["revision"]),
+        actor="admin",
+    )
+    stopped_while_busy = []
+    original_stop = r.nodes.stop
+
+    async def stop(node, profile, intent):
+        stopped_while_busy.append(seen[-1])
+        await original_stop(node, profile, intent)
+
+    r.nodes.stop = stop
+    await run_all(r, db)
+    rotation = await rotation_of(r, r.allocation_id)
+    assert rotation["state"] == "succeeded", rotation
+    assert stopped_while_busy == [0]
+    assert seen[:3] == [2, 1, 1]
+
+
+async def test_a_busy_host_is_paused_at_the_deadline_and_then_drained(
+    db, store, hosts, monkeypatch
+):
+    r = await rig(store, hosts, monkeypatch)
+    source, _ = await ready_slot(r, db)
+    # Two hours left: a whole turn, the switch and a margin no longer fit, so
+    # claims pause at once while the running turn finishes.
+    r.cloud.experiments[source["external_id"]] = r.cloud.experiments[
+        source["external_id"]
+    ].model_copy(update={"expires_at": datetime.now(UTC) + timedelta(hours=1, minutes=30)})
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_compute_allocations SET expires_at=NOW()+interval '90 minutes' WHERE id=$1",
+            r.allocation_id,
+        )
+    running = [1, 1, 1, 0]
+    held_while_running = []
+
+    async def running_attempts(*, host):
+        value = running.pop(0) if len(running) > 1 else running[0]
+        if value:
+            async with db.acquire() as conn:
+                held_while_running.append(
+                    await conn.fetchval(
+                        "SELECT count(*) FROM agent_host_admission_holds WHERE host=$1 AND purpose='rotation'",
+                        host,
+                    )
+                )
+        return value
+
+    monkeypatch.setattr(r.repo, "running_attempts", running_attempts)
+    await r.commands.rotate(
+        r.allocation_id,
+        RotateComputeRequest(request_id="move-now", expected_revision=source["revision"]),
+        actor="admin",
+    )
+    await run_all(r, db)
+    rotation = await rotation_of(r, r.allocation_id)
+    assert rotation["state"] == "succeeded", rotation
+    # The first check ran before the pause; every later one saw it in place.
+    assert held_while_running[0] == 0 and set(held_while_running[1:]) == {1}
+    assert "compute_rotation_lead_time_short" in rotation["result"]["alerts"]
+
+
+async def test_store_guards_the_host_name_and_the_candidate_release(db, store, hosts, monkeypatch):
+    r = await rig(store, hosts, monkeypatch)
+    source, host = await ready_slot(r, db)
+    await r.commands.rotate(
+        r.allocation_id,
+        RotateComputeRequest(request_id="move-now", expected_revision=source["revision"]),
+        actor="admin",
+    )
+    # Run until the replacement is staged and the old node is about to stop.
+    original_stop = r.nodes.stop
+
+    async def refuse_stop(node, profile, intent):
+        raise AssertionError("stop is not reached in this test")
+
+    r.nodes.stop = refuse_stop
+    for _ in range(10):
+        claimed = await r.repo.claim_operation(worker_id="rotation-test")
+        if claimed is None:
+            async with db.acquire() as conn:
+                await conn.execute(
+                    "UPDATE agent_compute_operations SET next_attempt_at=NOW() WHERE state='waiting'"
+                )
+            continue
+        if claimed["kind"] == "rotate" and claimed["step"] in {"draining", "waiting_for_idle"}:
+            break
+        if claimed["kind"] == "rotate" and claimed["result"].get("candidate"):
+            candidate = await r.repo.get_allocation(claimed["result"]["candidate"]["id"])
+            if candidate["observed_state"] == "ready" and candidate["nodes"]:
+                break
+        await r.worker.execute_claimed(claimed)
+    r.nodes.stop = original_stop
+    rotation = await rotation_of(r, r.allocation_id)
+    [replacement] = await successor_of(db, r.allocation_id)
+    target = await r.repo.get_allocation(replacement["id"])
+    fence = {
+        "operation_id": claimed["id"],
+        "generation": claimed["generation"],
+        "worker_id": "rotation-test",
+    }
+
+    # Only the rotation's own successor may take the name; nobody else's node.
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_compute_allocations (id,name,provider_id,mode)
+            VALUES ('stranger','stranger','cloudlab','provision')"""
+        )
+        await conn.execute(
+            """INSERT INTO agent_compute_nodes (id,allocation_id,provider_node_id,instance_identity,name)
+            VALUES ('stranger-node','stranger','node0','stranger:node0','stranger')"""
+        )
+    with pytest.raises(ValueError, match="host_identity_conflict"):
+        await r.repo.rebind_slot_host(
+            host=host,
+            from_node_id=source["nodes"][0]["id"],
+            to_node_id="stranger-node",
+            **fence,
+        )
+    # Hand it over, then the candidate can no longer be released without guards.
+    await r.repo.rebind_slot_host(
+        host=host,
+        from_node_id=source["nodes"][0]["id"],
+        to_node_id=target["nodes"][0]["id"],
+        **fence,
+    )
+    discard = await r.repo.create_operation(
+        request_id="discard-check",
+        fingerprint="discard-check",
+        kind="discard",
+        allocation_id=replacement["id"],
+        parameters={},
+        requested_by="test",
+    )
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_compute_operations SET state='running',worker_id='w',generation=7,lease_expires_at=NOW()+interval '1 minute' WHERE id=$1",
+            discard["id"],
+        )
+    with pytest.raises(ValueError, match="candidate_bound"):
+        await r.repo.commit_candidate_release(
+            allocation_id=replacement["id"], operation_id=discard["id"], generation=7, worker_id="w"
+        )
+    # The operation's own allocation is fenced; an original node is no candidate.
+    own = await r.repo.create_operation(
+        request_id="discard-original",
+        fingerprint="discard-original",
+        kind="discard",
+        allocation_id=r.allocation_id,
+        parameters={},
+        requested_by="test",
+    )
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_compute_operations SET state='running',worker_id='w',generation=7,lease_expires_at=NOW()+interval '1 minute' WHERE id=$1",
+            own["id"],
+        )
+    with pytest.raises(ValueError, match="operation_lease_lost"):
+        await r.repo.commit_candidate_release(
+            allocation_id=r.allocation_id, operation_id=discard["id"], generation=7, worker_id="w"
+        )
+    with pytest.raises(ValueError, match="not_a_candidate"):
+        await r.repo.commit_candidate_release(
+            allocation_id=r.allocation_id, operation_id=own["id"], generation=7, worker_id="w"
+        )
+    # Hand the name back (the rollback direction) so cancelling is possible.
+    await r.repo.rebind_slot_host(
+        host=host,
+        from_node_id=target["nodes"][0]["id"],
+        to_node_id=source["nodes"][0]["id"],
+        **fence,
+    )
+    await r.repo.finish_operation(
+        **fence, state="waiting", step="draining", message="", retry_after_seconds=60
+    )
+    # A candidate with work in flight cannot be abandoned safely.
+    with pytest.raises(ValueError, match="operation_in_flight"):
+        await r.repo.cancel_operation(rotation["id"])
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_compute_operations SET state='cancelled' WHERE request_id LIKE 'discard-%'"
+        )
+    cancelled = await r.repo.cancel_operation(rotation["id"])
+    assert cancelled["state"] == "cancelled"
+    async with db.acquire() as conn:
+        holds = await conn.fetchval(
+            "SELECT count(*) FROM agent_host_admission_holds WHERE purpose='rotation'"
+        )
+        queued = await conn.fetchval(
+            "SELECT count(*) FROM agent_compute_operations WHERE kind='discard' AND allocation_id=$1 AND request_id=$2",
+            replacement["id"],
+            "discard:" + replacement["id"],
+        )
+    assert holds == 0 and queued == 1
+
+
+async def test_a_move_cannot_be_cancelled_once_the_old_node_stopped(db, store, hosts, monkeypatch):
+    r = await rig(store, hosts, monkeypatch)
+    source, _ = await ready_slot(r, db)
+    await r.commands.rotate(
+        r.allocation_id,
+        RotateComputeRequest(request_id="move-now", expected_revision=source["revision"]),
+        actor="admin",
+    )
+    rotation = await rotation_of(r, r.allocation_id)
+    async with db.acquire() as conn:
+        await conn.execute(
+            """UPDATE agent_compute_operations SET state='waiting',
+               result=result || '{"source_stopped": true}'::jsonb WHERE id=$1""",
+            rotation["id"],
+        )
+    with pytest.raises(ValueError, match="rotation_switching"):
+        await r.repo.cancel_operation(rotation["id"])
