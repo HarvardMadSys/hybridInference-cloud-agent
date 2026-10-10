@@ -29,6 +29,7 @@ Start with the task you need:
 | Protect workspaces and monitor disk use | [Retained Docker storage](#retained-docker-storage-on-a-host), [storage measurement](#how-full-is-the-sandbox-storage) |
 | Diagnose connectivity | [The sandbox network](#the-sandbox-network), [refusal messages](#when-something-is-refused) |
 | Configure or troubleshoot tools and repository access | [MCP servers](#mcp-servers), [repository entitlements](#who-may-run-a-job-against-which-repository) |
+| Answer a waiting agent question | [Native agent questions](#native-agent-questions) |
 | Investigate a task | [Recorded events and audit](#reading-a-tasks-recorded-events) |
 | Review test coverage and historical evidence | [Runtime verification](#runtime-verification), [verified](#verified), [not verified](#not-verified) |
 
@@ -119,6 +120,27 @@ attempts. Admin run details show the server and timestamps directly, with past
 attempts available for inspection. Selecting history changes the records being
 viewed; it does not restart a task or change its server. These display rules do
 not change task scheduling or retry behavior.
+
+### Native agent questions
+
+Claude Code `AskUserQuestion`, Codex user-input requests, and OpenCode/Kilo
+question requests open a question dialog while the turn waits. Choose an
+option or enter a custom answer when offered, then submit to continue the
+same native tool call. **Answer later** dismisses the dialog without answering;
+**Review question** reopens it. **Skip** explicitly declines the request.
+
+The page reads pending questions from the resident agent, so reloading the
+conversation rediscovers unanswered requests. An answer names the job,
+attempt, and request it was read from. The owner API and host both fence that
+identity; stopped, completed, or replaced attempts cannot take a stale answer,
+and question answers are never queued as follow-up turns.
+
+Deploy the broker/runner and rebuilt sandbox image together. The HTTP bridge
+helper pin is now `3`; helper `2` cannot execute native question replies and
+does not satisfy the current turn-time attestation. Before starting a
+replacement OpenCode/Kilo process, the host installs its trusted bridge into
+the retained container, including conversations without MCP connections. This
+updates the helper while preserving the workspace and native session state.
 
 ## Who may run a job against which repository
 

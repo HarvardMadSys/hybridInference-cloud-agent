@@ -148,6 +148,7 @@ class WorkspaceBrokerClient:
         thread_id: str,
         suffix: str = "",
         *,
+        params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
         timeout: float = 60,
     ) -> dict[str, Any]:
@@ -162,6 +163,7 @@ class WorkspaceBrokerClient:
                     method,
                     f"{self._base_url}{path}",
                     headers=self._headers,
+                    params=params,
                     json=json,
                     timeout=timeout,
                 )
@@ -471,6 +473,35 @@ class WorkspaceBrokerClient:
             thread_id,
             "input",
             json={"owner": owner, "message_id": message_id, "text": text},
+            timeout=30,
+        )
+
+    async def pending_shared_questions(self, thread_id: str, *, owner: str) -> dict[str, Any]:
+        """Read native requests waiting on one exact activation owner."""
+        return await self._shared_sandbox_request(
+            "GET", thread_id, "questions", params={"owner": owner}, timeout=30
+        )
+
+    async def answer_shared_question(
+        self,
+        thread_id: str,
+        *,
+        owner: str,
+        request_id: str,
+        answers: dict[str, list[str]],
+        reject: bool = False,
+    ) -> dict[str, Any]:
+        """Answer a native request without retaining a reply for later turns."""
+        return await self._shared_sandbox_request(
+            "POST",
+            thread_id,
+            "questions",
+            json={
+                "owner": owner,
+                "request_id": request_id,
+                "answers": answers,
+                "reject": reject,
+            },
             timeout=30,
         )
 

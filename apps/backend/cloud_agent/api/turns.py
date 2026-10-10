@@ -26,6 +26,7 @@ import time
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from pydantic import ValidationError
 
 from cloud_agent.api._job_views import (
     _job_response,
@@ -57,8 +58,11 @@ from cloud_agent.schemas import (
     AgentJobResponse,
     AgentPendingMessageSendNow,
     AgentPendingMessageUpdate,
+    AgentQuestionAnswer,
+    AgentQuestionAnswerResponse,
     AgentThreadMessageCreate,
     AgentThreadMessageResult,
+    AgentThreadQuestionsResponse,
     AgentThreadQueueResponse,
 )
 from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI resolves it.
@@ -192,6 +196,99 @@ async def _owned_latest_turn(
     if latest is None or latest["user_id"] != user["user_id"] or latest.get("deleted_at"):
         raise _no_such_thread_error(thread_id)
     return latest
+
+
+def _question_unreachable() -> HTTPException:
+    """Keep a transport failure distinct from an agent with no questions."""
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error": {
+                "type": "question_unreachable",
+                "message": "Could not reach the agent's questions. Try again.",
+            }
+        },
+    )
+
+
+@router.get("/threads/{thread_id}/questions", response_model=AgentThreadQuestionsResponse)
+async def get_thread_questions(
+    thread_id: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _TurnsStorage | None = Depends(get_storage),
+) -> AgentThreadQuestionsResponse:
+    """Read the live attempt's native questions, including after a page reload."""
+    job_store = _require_store(store)
+    latest = await _owned_latest_turn(job_store, thread_id, user)
+    attempt_id = latest.get("current_attempt_id")
+    result = AgentThreadQuestionsResponse(job_id=str(latest["id"]), attempt_id=attempt_id)
+    if latest.get("state") != RUNNING or latest.get("cancel_requested") or attempt_id is None:
+        return result
+    broker = await broker_for_attempt(job_store.host_pool, int(attempt_id))
+    if broker is None:
+        raise _question_unreachable()
+    try:
+        pending = await broker.pending_shared_questions(thread_id, owner=f"attempt:{attempt_id}")
+    except WorkspaceBrokerError as exc:
+        raise _question_unreachable() from exc
+    try:
+        return AgentThreadQuestionsResponse.model_validate(
+            {"job_id": result.job_id, "attempt_id": attempt_id, "questions": pending["questions"]}
+        )
+    except (KeyError, TypeError, ValidationError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": {
+                    "type": "invalid_question_response",
+                    "message": "The agent returned an invalid question. Try again.",
+                }
+            },
+        ) from exc
+
+
+@router.post("/threads/{thread_id}/questions", response_model=AgentQuestionAnswerResponse)
+async def answer_thread_question(
+    thread_id: str,
+    body: AgentQuestionAnswer,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _TurnsStorage | None = Depends(get_storage),
+) -> AgentQuestionAnswerResponse:
+    """Answer only the native request belonging to the attempt the owner saw."""
+    job_store = _require_store(store)
+    latest = await _owned_latest_turn(job_store, thread_id, user)
+    if (
+        latest.get("state") != RUNNING
+        or latest.get("cancel_requested")
+        or str(latest["id"]) != body.job_id
+        or latest.get("current_attempt_id") != body.attempt_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "question_expired",
+                    "message": "This question's turn has ended or changed. Refresh the questions.",
+                }
+            },
+        )
+    broker = await broker_for_attempt(job_store.host_pool, body.attempt_id)
+    if broker is None:
+        raise _question_unreachable()
+    try:
+        answer = await broker.answer_shared_question(
+            thread_id,
+            owner=f"attempt:{body.attempt_id}",
+            request_id=body.request_id,
+            answers=body.answers,
+            reject=body.reject,
+        )
+    except WorkspaceBrokerError as exc:
+        raise _question_unreachable() from exc
+    return AgentQuestionAnswerResponse(
+        accepted=answer.get("accepted") is True,
+        reason=answer.get("reason") if answer.get("accepted") is not True else None,
+    )
 
 
 async def _queue_result(

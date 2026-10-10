@@ -62,6 +62,9 @@ def observed(*, state="ready", expires=NOW + timedelta(hours=4)):
 
 
 def harness(monkeypatch, *, kind="acquire", identified=False):
+    # Fixture timestamps and readiness checks share a clock even when a full
+    # suite reaches these tests long after module collection.
+    monkeypatch.setattr(compute_reconcile, "_now", lambda: NOW)
     operation = {
         "id": "operation-a",
         "allocation_id": "allocation-a",

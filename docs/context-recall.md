@@ -59,7 +59,7 @@ The next turn resumes that same session in the same container. Successful turns
 without a retry keep the live process. This does not repair transcripts already
 damaged by the older behavior.
 
-The sandbox's `http-agent-live-bridge=2` helper pin is required by host
+The sandbox's `http-agent-live-bridge=3` helper pin is required by host
 attestation. Deploy the broker/runner and sandbox image together; an older helper
 image must not advertise readiness for the new host.
 

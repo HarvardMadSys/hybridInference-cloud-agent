@@ -1,0 +1,2 @@
+{"id":41,"method":"item/tool/requestUserInput","params":{"threadId":"thread-a","turnId":"turn-a","itemId":"item-question","questions":[{"id":"approach","header":"Approach","question":"Which approach?","isOther":true,"isSecret":false,"options":[{"label":"A","description":"First"},{"label":"B","description":"Second"}]}]}}
+{"id":41,"result":{"answers":{"approach":{"answers":["B"]}}}}

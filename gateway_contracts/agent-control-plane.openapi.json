@@ -4439,6 +4439,166 @@
         "title": "AgentProjectListResponse",
         "type": "object"
       },
+      "AgentQuestion": {
+        "description": "A native question rendered without exposing its transport dialect.",
+        "properties": {
+          "allow_custom": {
+            "default": true,
+            "title": "Allow Custom",
+            "type": "boolean"
+          },
+          "header": {
+            "default": "",
+            "title": "Header",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "multiple": {
+            "default": false,
+            "title": "Multiple",
+            "type": "boolean"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/AgentQuestionOption"
+            },
+            "title": "Options",
+            "type": "array"
+          },
+          "question": {
+            "title": "Question",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "question"
+        ],
+        "title": "AgentQuestion",
+        "type": "object"
+      },
+      "AgentQuestionAnswer": {
+        "additionalProperties": false,
+        "description": "Answer a native request only on the job and attempt the owner read.",
+        "properties": {
+          "answers": {
+            "additionalProperties": {
+              "items": {
+                "maxLength": 10000,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 20,
+              "type": "array"
+            },
+            "maxProperties": 10,
+            "propertyNames": {
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "title": "Answers",
+            "type": "object"
+          },
+          "attempt_id": {
+            "minimum": 1.0,
+            "title": "Attempt Id",
+            "type": "integer"
+          },
+          "job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Job Id",
+            "type": "string"
+          },
+          "reject": {
+            "default": false,
+            "title": "Reject",
+            "type": "boolean"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "attempt_id",
+          "request_id"
+        ],
+        "title": "AgentQuestionAnswer",
+        "type": "object"
+      },
+      "AgentQuestionAnswerResponse": {
+        "description": "Whether the live native request accepted the answer.",
+        "properties": {
+          "accepted": {
+            "title": "Accepted",
+            "type": "boolean"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "accepted"
+        ],
+        "title": "AgentQuestionAnswerResponse",
+        "type": "object"
+      },
+      "AgentQuestionOption": {
+        "description": "One choice in a native agent question.",
+        "properties": {
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "title": "AgentQuestionOption",
+        "type": "object"
+      },
+      "AgentQuestionRequest": {
+        "description": "The correlated questions one native tool is waiting to have answered.",
+        "properties": {
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/AgentQuestion"
+            },
+            "title": "Questions",
+            "type": "array"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "questions"
+        ],
+        "title": "AgentQuestionRequest",
+        "type": "object"
+      },
       "AgentRunnerHost": {
         "description": "One machine in the agent runner pool.\n\nEverything below ``seconds_since_seen`` arrived with the dynamic pool\n(phase G) and every one of those fields has a default. A host that joined\nby polling — the only way in before enrollment existed — has none of them\nset, and it must still render on the admin page rather than 500 it.",
         "properties": {
@@ -5446,6 +5606,38 @@
           "pinned"
         ],
         "title": "AgentThreadPinResponse",
+        "type": "object"
+      },
+      "AgentThreadQuestionsResponse": {
+        "description": "Pending native questions and the exact attempt that asked them.",
+        "properties": {
+          "attempt_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempt Id"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/AgentQuestionRequest"
+            },
+            "title": "Questions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "title": "AgentThreadQuestionsResponse",
         "type": "object"
       },
       "AgentThreadQueueResponse": {
@@ -24640,6 +24832,126 @@
           }
         },
         "summary": "Send Pending Message Now"
+      }
+    },
+    "/v1/agent/threads/{thread_id}/questions": {
+      "get": {
+        "description": "Read the live attempt's native questions, including after a page reload.",
+        "operationId": "get_thread_questions_v1_agent_threads__thread_id__questions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentThreadQuestionsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Thread Questions"
+      },
+      "post": {
+        "description": "Answer only the native request belonging to the attempt the owner saw.",
+        "operationId": "answer_thread_question_v1_agent_threads__thread_id__questions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentQuestionAnswer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentQuestionAnswerResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Answer Thread Question"
       }
     },
     "/v1/agent/threads/{thread_id}/queue/resume": {

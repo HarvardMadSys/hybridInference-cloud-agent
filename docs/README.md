@@ -35,6 +35,7 @@ guides run from the repository root unless the guide says otherwise.
 | [Agent admission policy](agent-access-policy.md) | Understand permissions, gateway checks, refusals, and compatible rollout |
 | [Minimal Agent identity](minimal-identity.md) | Configure the gateway issuer and safely bind an existing database to it |
 | [Native conversation recall](context-recall.md) | Understand retained sessions, runtime-specific behavior, and recall verification |
+| [Native agent questions](operations.md#native-agent-questions) | Answer a waiting agent request and understand reload, skip, and stale-answer handling |
 | [Conversation navigation](conversation-navigation.md) | Understand the turn rail, previews, jumps, and reading position |
 | [Sidebar navigation](sidebar-navigation.md) | Understand project grouping and conversation actions |
 

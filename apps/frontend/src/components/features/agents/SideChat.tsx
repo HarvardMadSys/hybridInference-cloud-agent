@@ -18,6 +18,7 @@ import { describeConversationTurns } from './conversationTurnNavigation';
 import { highestEffort, offeredEfforts } from './effort';
 import { McpApprovalNotice } from './mcp/McpApprovalNotice';
 import { McpSessionPanel } from './mcp/McpSessionPanel';
+import { NativeQuestionPrompt } from './NativeQuestionPrompt';
 import { PendingMessageQueue } from './PendingMessageQueue';
 import { Picker } from './Picker';
 import { BackToBottom } from './TurnNavigator';
@@ -342,6 +343,14 @@ function SideChatContent({
       }}
       className="flex h-full min-h-0 flex-col"
     >
+      {current ? (
+        <NativeQuestionPrompt
+          threadId={current.threadId ?? current.id}
+          jobId={current.id}
+          attemptId={current.currentAttemptId}
+          active={selected && current.state === 'running' && !unavailable}
+        />
+      ) : null}
       {toolsOpen && current ? (
         <div className="min-h-0 flex-1 overflow-y-auto p-5">
           <button

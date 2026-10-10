@@ -13,7 +13,7 @@ import hashlib
 import json
 import secrets
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 from cloud_agent_host.chat_sandbox import (
     CHAT_STATE_DIR,
@@ -120,6 +120,16 @@ class ResidentTurn(Generic[_RuntimeT_co]):
     def inject(self, text: str, *, message_id: str) -> InputOutcome:
         """Hand ``text`` to this activation mid-turn through the driver's seam."""
         return self._turn.inject(text, message_id=message_id)
+
+    def pending_questions(self) -> list[dict[str, Any]]:
+        """Return native questions still waiting on this exact activation."""
+        return self._turn.pending_questions()
+
+    def answer_question(
+        self, request_id: str, answers: dict[str, list[str]], *, reject: bool = False
+    ) -> InputOutcome:
+        """Reply to one native request through the activation that raised it."""
+        return self._turn.answer_question(request_id, answers, reject=reject)
 
     def stderr_text(self) -> str:
         """Return bounded diagnostic stderr from the resident process."""
@@ -517,7 +527,11 @@ class ResidentTransportFactory:
                     user_uid=uid,
                     user_gid=self._manager.backend.gid,
                 )
-                if launch.mcp_server_ids:
+                # HTTP dialects always use the trusted live bridge, including
+                # turns without MCP. Refresh it from the host when resuming a
+                # retained container so new native-question commands are
+                # available without replacing its persisted session state.
+                if launch.mcp_server_ids or runtime_id in {"opencode", "kilo"}:
                     self._manager.ensure_mcp_helpers(spec, runtime_id)
                 if runtime_id == "kilo":
                     self._manager.ensure_kilo_mcp_runtime(spec, launch.runtime_version or "7.4.17")
