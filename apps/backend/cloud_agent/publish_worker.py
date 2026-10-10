@@ -28,8 +28,10 @@ would either spam the repository or bury the rejection.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
@@ -39,6 +41,7 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.publisher import PublishError, fetch_base_bundle, publish_patch
 from cloud_agent.schemas import BASE_REF_METADATA_KEY
 from cloud_agent.source_control_runtime import SourceControlUnavailable
+from cloud_agent.workers.background_wake import PUBLISH
 from cloud_agent_shared.git.patch_gate import branch_name_for
 
 if TYPE_CHECKING:
@@ -48,6 +51,7 @@ if TYPE_CHECKING:
         SourceControlRepository,
     )
     from cloud_agent.source_control_runtime import GitHubAppSource
+    from cloud_agent.workers.background_wake import BackgroundWake
 
 
 class PublishStorage(Protocol):
@@ -67,6 +71,9 @@ logger = get_logger(__name__)
 
 GITHUB_API = "https://api.github.com"
 POLL_INTERVAL_S = 15.0
+#: The longest an idle publisher that is told about new work sleeps. It wakes
+#: sooner for a notification or the earliest base import retry.
+PUBLISH_IDLE_S = 30.0
 
 # Exactly what publishing does: push one branch, open one draft PR. Notably not
 # `workflows`, so a patch touching `.github/` cannot be pushed even if both
@@ -247,6 +254,42 @@ async def retry_snapshot_base_import(
     snapshot = await store.snapshot.pending_snapshot_base_import()
     if snapshot is None:
         return False
+    return await _retry_base_import(
+        store, snapshot, credential=credential, app_credentials=app_credentials
+    )
+
+
+async def _retry_due_base_imports(
+    store: PublishStorage,
+    *,
+    credential: GitHubCredential | None,
+    app_credentials: Any | None,
+) -> None:
+    """Retry every import that is due, past any that fails again.
+
+    A failure schedules that import's next try, so it is not handed out again
+    in this pass. Should its schedule not be recorded, it is left for the next
+    pass rather than retried in a loop.
+    """
+    tried: set[int] = set()
+    while (snapshot := await store.snapshot.pending_snapshot_base_import()) is not None:
+        snapshot_id = int(snapshot["snapshot_id"])
+        if snapshot_id in tried:
+            return
+        tried.add(snapshot_id)
+        await _retry_base_import(
+            store, snapshot, credential=credential, app_credentials=app_credentials
+        )
+
+
+async def _retry_base_import(
+    store: PublishStorage,
+    snapshot: dict[str, Any],
+    *,
+    credential: GitHubCredential | None,
+    app_credentials: Any | None,
+) -> bool:
+    """Import one published base again; a failure is recorded on its snapshot."""
     try:
         await require_entitled_repo(
             snapshot["repo"],
@@ -303,7 +346,48 @@ async def publish_one(
     job = await store.snapshot.claim_for_publish()
     if job is None:
         return None
+    return await _publish_claimed(
+        store,
+        job,
+        credential=credential,
+        app_credentials=app_credentials,
+        base_branch=base_branch,
+        allow_workflow_changes=allow_workflow_changes,
+    )
 
+
+async def _publish_due(
+    store: PublishStorage,
+    *,
+    credential: GitHubCredential | None,
+    app_credentials: Any | None,
+    base_branch: str,
+) -> None:
+    """Publish every captured snapshot, past any that fails.
+
+    A failure marks its snapshot failed, so it is not claimed again, and the
+    snapshots behind it still go out in this pass rather than at the next.
+    """
+    while (job := await store.snapshot.claim_for_publish()) is not None:
+        await _publish_claimed(
+            store,
+            job,
+            credential=credential,
+            app_credentials=app_credentials,
+            base_branch=base_branch,
+        )
+
+
+async def _publish_claimed(
+    store: PublishStorage,
+    job: dict[str, Any],
+    *,
+    credential: GitHubCredential | None,
+    app_credentials: Any | None,
+    base_branch: str,
+    allow_workflow_changes: bool = False,
+) -> str | None:
+    """Publish one claimed snapshot. Returns the PR URL, or ``None``."""
     job_id = job["job_id"]
     base_sha = job["base_sha"]
     pr_base = _pr_base_branch(job, base_branch)
@@ -433,8 +517,14 @@ async def publish_loop(
     github_app: GitHubAppSource | None = None,
     base_branch: str = "dev",
     interval_seconds: float = POLL_INTERVAL_S,
+    wake: BackgroundWake | None = None,
 ) -> None:
     """Drain the publish queue forever.
+
+    With ``wake`` a snapshot that is captured, published, or whose base is to
+    be imported is handled at once, and an idle publisher sleeps until it is
+    woken or the earliest failed base import may be retried. While the App or
+    a credential is missing, which nothing announces, it looks on its clock.
 
     ``credential_provider`` is called per job so a short-lived installation
     token is minted fresh rather than held for the lifetime of the process.
@@ -445,8 +535,15 @@ async def publish_loop(
     same reason: a loop that captured them at startup published nothing for
     the rest of the process after one failed load (issue #47).
     """
+    without_source = False
     while True:
-        await asyncio.sleep(interval_seconds)
+        if wake is None:
+            await asyncio.sleep(interval_seconds)
+        elif without_source or not wake.listening:
+            await wake.wait(PUBLISH, interval_seconds)
+        else:
+            await wake.wait(PUBLISH, await _next_look_s(store))
+        without_source = False
         try:
             try:
                 app_credentials = github_app.get() if github_app is not None else None
@@ -455,28 +552,39 @@ async def publish_loop(
                 # the queue keeps every snapshot and its retry record, and the
                 # static token is not a stand-in for an App the deployment
                 # chose — it would publish under a different identity.
+                without_source = True
                 continue
             credential = credential_provider() if credential_provider else None
             # Either source is enough. Skipping when only the App is
             # configured is what made an App-only deployment — the one this
             # module recommends — silently never publish anything.
             if credential is None and app_credentials is None:
+                without_source = True
                 continue
-            await retry_snapshot_base_import(
+            await _retry_due_base_imports(
                 store,
                 credential=credential,
                 app_credentials=app_credentials,
             )
-            while await publish_one(
+            # Drain rather than publishing one per tick, so a burst of
+            # finished jobs does not sit in the queue for minutes.
+            await _publish_due(
                 store,
                 credential=credential,
                 app_credentials=app_credentials,
                 base_branch=base_branch,
-            ):
-                # Drain rather than publishing one per tick, so a burst of
-                # finished jobs does not sit in the queue for minutes.
-                pass
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.warning("agent job publish loop iteration failed", exc_info=True)
+
+
+async def _next_look_s(store: PublishStorage) -> float:
+    """How long the publisher may sleep before it looks for work again."""
+    idle_s = PUBLISH_IDLE_S
+    with contextlib.suppress(Exception):
+        due = await store.snapshot.next_base_import_retry_due()
+        if due is not None:
+            idle_s = min(idle_s, (due - datetime.now(UTC)).total_seconds())
+    return max(idle_s, 0.0)

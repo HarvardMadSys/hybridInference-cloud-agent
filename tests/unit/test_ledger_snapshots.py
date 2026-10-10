@@ -141,6 +141,54 @@ def test_historical_attempts_stay_unknown_and_make_a_partial_job_explicit():
     assert summary.attempts[0].totals is None
 
 
+def test_an_attempt_still_binding_its_grant_is_counting_not_unavailable():
+    """Between claim and admission there is no ledger row yet; that is not a gap."""
+    starting = ledger_row(id=None, snapshot=None, queried_at=None, attempt_status="running")
+    summary = summarize_ledger([starting])
+    assert summary.status == "pending"
+    assert summary.attempts[0].status == "pending"
+    assert summary.attempts[0].reason == "pending"
+    assert summary.missing_attempts == 0
+
+
+def test_an_attempt_that_ended_before_calling_a_model_says_nothing_was_called():
+    """A turn that failed at checkout spent nothing; "unavailable" was untrue."""
+    never_started = ledger_row(
+        id=None,
+        snapshot=None,
+        queried_at=None,
+        attempt_status="finished",
+        model_usage_reported=False,
+    )
+    summary = summarize_ledger([never_started])
+    assert summary.status == "available"
+    assert summary.totals is None
+    assert summary.missing_attempts == 0
+    assert summary.attempts[0].status == "available"
+    assert summary.attempts[0].reason == "no_model_calls"
+
+    # Beside an attempt that did run, it neither adds to nor hides the total.
+    retried = summarize_ledger([never_started, ledger_row(attempt_id=11, attempt_no=2)])
+    assert retried.status == "available"
+    assert retried.totals.calls == 1
+    assert retried.missing_attempts == 0
+
+
+def test_an_unbound_attempt_that_reported_usage_stays_unattributed():
+    """Its agent called a model the ledger never saw: that is a real gap."""
+    untracked = ledger_row(
+        id=None,
+        snapshot=None,
+        queried_at=None,
+        attempt_status="finished",
+        model_usage_reported=True,
+    )
+    summary = summarize_ledger([untracked])
+    assert summary.status == "unavailable"
+    assert summary.attempts[0].reason == "attribution_unavailable"
+    assert summary.missing_attempts == 1
+
+
 def test_failed_refresh_keeps_cached_values_and_safe_reason():
     summary = summarize_ledger([ledger_row(last_error_code="usage_unavailable")])
     assert summary.status == "stale"

@@ -8,8 +8,9 @@ Snapshots are attribution by time window, never proof of final settlement.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import defaultdict
-from datetime import datetime  # noqa: TC003 — Pydantic resolves this at runtime.
+from datetime import UTC, datetime
 from decimal import Decimal, localcontext
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -27,18 +28,27 @@ from cloud_agent.grant_usage import (
 )
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.thread_stats import normalized_runtime_input_tokens, summarize_thread
+from cloud_agent.workers.background_wake import LEDGER
 
 if TYPE_CHECKING:
     from cloud_agent.ports import LedgerRepository
+    from cloud_agent.workers.background_wake import BackgroundWake
 
 logger = get_logger(__name__)
 
 REFRESH_POLL_SECONDS = 2.0
+#: Longest an idle collector waits on its wake-up before looking anyway.
+LEDGER_IDLE_S = 30.0
+#: Shortest wait, so a schedule a moment in the past cannot spin the loop.
+REFRESH_MIN_WAIT_S = 0.05
 REFRESH_CONCURRENCY = 4
 REFRESH_TIMEOUT_SECONDS = 15.0
 #: A stored or derived report this service will not add to a total. One reason
 #: covers every rejection so the browser and the stored error stay content-free.
 INVALID_REPORT = "usage_invalid_response"
+#: An attempt that ended before it bound a grant, and whose agent reported no
+#: model usage: nothing was called, so there is no usage to wait for or miss.
+NO_MODEL_CALLS = "no_model_calls"
 #: The width a derived amount may occupy. Reaching it needs more reports than a
 #: selection can hold, so it is a guard rather than a limit; keeping it in a
 #: module attribute lets its refusal path be tested without impossible inputs.
@@ -123,6 +133,13 @@ class JobUsageResponse(BaseModel):
     ledger: JobLedgerSummary
     runtime: RuntimeUsage
     conversation: ConversationUsage | None = None
+    version: str | None = Field(
+        default=None,
+        description=(
+            "Orders two reads of one job's usage, asked for or pushed: the one whose "
+            "version compares greater as a string saw everything the other did. Opaque."
+        ),
+    )
 
 
 def summarize_job_ledger(ledger_rows: list[dict[str, Any]], *, terminal: bool) -> JobLedgerSummary:
@@ -263,6 +280,7 @@ def summarize_ledger(rows: list[dict[str, Any]]) -> JobLedgerSummary:
     summaries: list[AttemptLedgerSummary] = []
     missing_attempts = 0
     unreadable_attempts = 0
+    no_call_attempts = 0
     any_failed = False
     any_refreshing = False
     for attempt_rows in grouped.values():
@@ -272,6 +290,7 @@ def summarize_ledger(rows: list[dict[str, Any]]) -> JobLedgerSummary:
         reasons: list[str] = []
         missing = False
         refreshing = False
+        no_model_calls = False
         for row in attempt_rows:
             refreshing |= bool(row.get("refreshing"))
             if row.get("next_refresh_at") is not None:
@@ -289,28 +308,44 @@ def summarize_ledger(rows: list[dict[str, Any]]) -> JobLedgerSummary:
                     pass
                 if report is None:
                     reasons.append(INVALID_REPORT)
-            if report is None:
-                missing = True
-                if row.get("id") is None:
+            if report is None and row.get("id") is None:
+                # No ledger row: the attempt never bound a grant to read.
+                status = row.get("attempt_status")
+                if status == "running":
+                    # Not bound *yet*: it is starting, and its usage pending.
+                    pass
+                elif status is not None and row.get("model_usage_reported") is False:
+                    # It ended before its agent could call a model.
+                    no_model_calls = True
+                else:
+                    missing = True
                     reasons.append("attribution_unavailable")
+            elif report is None:
+                missing = True
             else:
                 reports.append(report)
                 if row.get("queried_at") is not None:
                     queried.append(row["queried_at"])
         first = attempt_rows[0]
         attempt_sum = _sum_reports(reports, reasons)
+        quiet = no_model_calls and not reports and not reasons
+        no_call_attempts += int(quiet)
         summaries.append(
             AttemptLedgerSummary(
                 attempt_id=first["attempt_id"],
                 attempt_no=first["attempt_no"],
-                status=_status(
+                status="available"
+                if quiet
+                else _status(
                     reports,
                     missing=missing,
                     failed=bool(reasons),
                     refreshing=refreshing,
                     unreadable=attempt_sum is None,
                 ),
-                reason=reasons[0] if reasons else ("pending" if not reports else None),
+                reason=NO_MODEL_CALLS
+                if quiet
+                else (reasons[0] if reasons else ("pending" if not reports else None)),
                 windows=[report.window for report in reports],
                 queried_at=min(queried) if queried else None,
                 refreshing=refreshing,
@@ -326,8 +361,13 @@ def summarize_ledger(rows: list[dict[str, Any]]) -> JobLedgerSummary:
         any_failed |= bool(reasons) or attempt_sum is None
         any_refreshing |= refreshing
     job_sum = _sum_reports(all_reports, job_reasons)
+    # Every attempt ended before its agent could call a model: there is
+    # nothing to wait for, and nothing was spent. "available" with no totals.
+    nothing_called = bool(summaries) and no_call_attempts == len(summaries)
     return JobLedgerSummary(
-        status=_status(
+        status="available"
+        if nothing_called
+        else _status(
             all_reports,
             missing=bool(missing_attempts),
             failed=any_failed,
@@ -401,8 +441,16 @@ async def refresh_ledger_entry(store: LedgerRepository, grants: Any, row: dict[s
     )
 
 
-async def collect_usage_snapshots(store: LedgerRepository, grants: Any) -> None:
-    """Run ledger reads on their own bounded pool, separate from grant renewal."""
+async def collect_usage_snapshots(
+    store: LedgerRepository, grants: Any, *, wake: BackgroundWake | None = None
+) -> None:
+    """Run ledger reads on their own bounded pool, separate from grant renewal.
+
+    With ``wake`` an idle collector waits for an attempt to stop or a refresh
+    to be scheduled, and otherwise until the earliest scheduled one is due,
+    never longer than ``LEDGER_IDLE_S``. Without it, or while nothing listens,
+    it looks every ``REFRESH_POLL_SECONDS``.
+    """
     while True:
         try:
             rows = []
@@ -421,4 +469,14 @@ async def collect_usage_snapshots(store: LedgerRepository, grants: Any) -> None:
                 continue
         except Exception:
             logger.warning("agent_ledger_snapshot_pass_failed")
-        await asyncio.sleep(REFRESH_POLL_SECONDS)
+        if wake is None:
+            await asyncio.sleep(REFRESH_POLL_SECONDS)
+            continue
+        # While nothing listens, a refresh scheduled meanwhile announces
+        # nothing: look on the old clock until the listener is back.
+        idle_s = LEDGER_IDLE_S if wake.listening else REFRESH_POLL_SECONDS
+        with contextlib.suppress(Exception):
+            due = await store.next_ledger_refresh_due()
+            if due is not None:
+                idle_s = min(idle_s, (due - datetime.now(UTC)).total_seconds())
+        await wake.wait(LEDGER, max(idle_s, REFRESH_MIN_WAIT_S))

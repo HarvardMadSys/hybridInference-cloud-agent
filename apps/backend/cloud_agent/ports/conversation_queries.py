@@ -28,6 +28,17 @@ class ConversationQueries(Protocol):
         """Fetch one job by id."""
         ...
 
+    async def owner_changes(
+        self, *, user_id: str, job_ids: list[str], thread_ids: list[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """The current values an owner's tabs show for these jobs and threads.
+
+        ``jobs`` and ``threads``, each row with its ``revision``. Only rows the
+        owner holds are returned; an id that is missing was removed or is not
+        theirs, and the caller reports it as gone.
+        """
+        ...
+
     async def latest_terminal_turn(self, *, thread_id: str) -> dict[str, Any] | None:
         """The newest finished turn of this conversation, or ``None``.
 

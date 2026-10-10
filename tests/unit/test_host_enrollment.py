@@ -345,7 +345,7 @@ def test_each_heartbeat_recomputes_dynamic_host_capabilities(monkeypatch) -> Non
             advertised.append("shared-sandbox-deployment:target")
         else:
             beat._stop.set()
-        return {"status": "online", "heartbeat_interval_seconds": 0}
+        return {"status": "online", "heartbeat_interval_seconds": 0.001}
 
     monkeypatch.setattr(enrollment, "_post", record)
     beat._run()
@@ -676,7 +676,7 @@ def test_a_callable_slot_count_is_read_fresh_on_every_beat(monkeypatch) -> None:
             live[0] = 5
         else:
             beat._stop.set()
-        return {"status": "online", "heartbeat_interval_seconds": 0}
+        return {"status": "online", "heartbeat_interval_seconds": 0.001}
 
     monkeypatch.setattr(enrollment, "_post", record)
     beat._run()

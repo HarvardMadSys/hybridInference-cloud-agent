@@ -28,7 +28,7 @@ from cloud_agent.api._job_views import (
     _pending_response,
 )
 from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
-from cloud_agent.api.deps import get_storage, require_store
+from cloud_agent.api.deps import get_job_event_signal, get_storage, require_store
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
@@ -40,6 +40,9 @@ from cloud_agent.schemas import (
     AgentThreadStatsResponse,
 )
 from cloud_agent.thread_stats import summarize_thread
+from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI resolves it.
+    JobEventSignal,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -77,10 +80,15 @@ _SSE_HEADERS = {
 }
 
 
+#: How long a stream waits for its job's notification before it reads anyway: a
+#: backstop for a notification lost where the listener cannot see it.
+_IDLE_READ_S = 15.0
+#: The clock a stream reads on while nothing listens for job events: before the
+#: listener first connects, while it is lost, and where there is no signal.
 _POLL_INTERVAL_S = 1.0
-
-
-_KEEPALIVE_EVERY_N_POLLS = 15
+#: A comment frame after this long without one keeps proxies from reaping an
+#: idle connection.
+_KEEPALIVE_S = 15.0
 
 
 def _sse_frame(event: dict[str, Any]) -> str:
@@ -230,6 +238,7 @@ async def stream_agent_job_events(
     after: int = Query(0, ge=0),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _ThreadsStorage | None = Depends(get_storage),
+    signal: JobEventSignal | None = Depends(get_job_event_signal),
 ) -> StreamingResponse:
     """Stream a job's events as SSE, resumable via ``Last-Event-ID``.
 
@@ -248,58 +257,76 @@ async def stream_agent_job_events(
 
     async def event_source() -> AsyncIterator[Any]:
         nonlocal cursor
-        idle_polls = 0
+        clock = asyncio.get_running_loop().time
+        last_frame = clock()
+        # Between reads the stream waits for its job to notify that it stored
+        # an event or changed state, and reads again at once. The notification
+        # only says when to read; the cursor says what, so one that is lost
+        # costs a delay of at most _IDLE_READ_S and never an event. It is
+        # subscribed before the first read: a notification that arrives while
+        # a read is under way stays set, and the next wait returns at once.
+        subscription = signal.subscribe(job_id) if signal is not None else contextlib.nullcontext()
         try:
-            while True:
-                if await request.is_disconnected():
-                    return
-                events = await job_store.execution_queries.list_events_after(
-                    job_id=job_id, after_id=cursor, limit=_EVENT_PAGE_SIZE
-                )
-                if events:
-                    idle_polls = 0
-                    for event in events:
-                        cursor = event["id"]
-                        yield _sse_frame(event)
-                else:
-                    idle_polls += 1
-                    if idle_polls % _KEEPALIVE_EVERY_N_POLLS == 0:
+            with subscription as woken:
+                while True:
+                    if await request.is_disconnected():
+                        return
+                    events = await job_store.execution_queries.list_events_after(
+                        job_id=job_id, after_id=cursor, limit=_EVENT_PAGE_SIZE
+                    )
+                    if events:
+                        for event in events:
+                            cursor = event["id"]
+                            yield _sse_frame(event)
+                        last_frame = clock()
+                        if len(events) >= _EVENT_PAGE_SIZE:
+                            # A full page: more may already be stored. Catch
+                            # up before waiting to be told about anything new.
+                            continue
+                    elif clock() - last_frame >= _KEEPALIVE_S:
                         # Comment frame: keeps proxies from reaping an idle
                         # connection without polluting the event sequence.
                         yield ": keepalive\n\n"
+                        last_frame = clock()
 
-                job = await job_store.conversation_queries.get_job(job_id)
-                if job is None:
-                    return
-                if job["state"] in TERMINAL_STATES:
-                    # Drain to exhaustion before announcing the end. A single
-                    # extra page is not enough: a client attaching to a
-                    # finished job with more than two pages of backlog would
-                    # see job_finished, close, and lose the rest forever.
-                    while True:
-                        tail = await job_store.execution_queries.list_events_after(
-                            job_id=job_id, after_id=cursor, limit=_EVENT_PAGE_SIZE
+                    job = await job_store.conversation_queries.get_job(job_id)
+                    if job is None:
+                        return
+                    if job["state"] in TERMINAL_STATES:
+                        # Drain to exhaustion before announcing the end. A
+                        # single extra page is not enough: a client attaching
+                        # to a finished job with more than two pages of backlog
+                        # would see job_finished, close, and lose the rest.
+                        while True:
+                            tail = await job_store.execution_queries.list_events_after(
+                                job_id=job_id, after_id=cursor, limit=_EVENT_PAGE_SIZE
+                            )
+                            if not tail:
+                                break
+                            for event in tail:
+                                cursor = event["id"]
+                                yield _sse_frame(event)
+                        final = json.dumps(
+                            {
+                                "state": job["state"],
+                                "published_pr_url": job["published_pr_url"],
+                                "last_event_id": cursor,
+                            },
+                            separators=(",", ":"),
                         )
-                        if not tail:
-                            break
-                        for event in tail:
-                            cursor = event["id"]
-                            yield _sse_frame(event)
-                    final = json.dumps(
-                        {
-                            "state": job["state"],
-                            "published_pr_url": job["published_pr_url"],
-                            "last_event_id": cursor,
-                        },
-                        separators=(",", ":"),
-                    )
-                    yield f"event: job_finished\ndata: {final}\n\n"
-                    return
+                        yield f"event: job_finished\ndata: {final}\n\n"
+                        return
 
-                await asyncio.sleep(_POLL_INTERVAL_S)
+                    if signal is None or woken is None:
+                        await asyncio.sleep(_POLL_INTERVAL_S)
+                    else:
+                        await signal.wait(
+                            woken, _IDLE_READ_S if signal.listening else _POLL_INTERVAL_S
+                        )
         except asyncio.CancelledError:
-            # Client disconnect or the stream cap firing: nothing to clean up,
-            # the event log is durable and the client can resume by cursor.
+            # Client disconnect or the stream cap firing: the subscription ends
+            # with its block, the event log is durable and the client can
+            # resume by cursor.
             raise
 
     return StreamingResponse(

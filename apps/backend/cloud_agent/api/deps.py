@@ -73,6 +73,9 @@ if TYPE_CHECKING:
     from cloud_agent.grants import GrantClient
     from cloud_agent.ports import AuditRepository
     from cloud_agent.storage.assembly import Storage
+    from cloud_agent.workers.job_event_signal import JobEventSignal
+    from cloud_agent.workers.mcp_decision_signal import McpDecisionSignal
+    from cloud_agent.workers.owner_change_signal import OwnerChangeSignal
     from cloud_agent.workers.work_signal import WorkSignal
 
 
@@ -143,6 +146,34 @@ def get_work_signal(request: Request) -> WorkSignal | None:
     test application that has not set one.
     """
     return getattr(request.app.state, "work_signal", None)
+
+
+def get_job_event_signal(request: Request) -> JobEventSignal | None:
+    """Dependency to obtain the wake-ups owners' event streams wait on.
+
+    ``None`` where nothing listens for job events: the MCP relay, and a test
+    application that has not set one. Streams there read on a clock instead.
+    """
+    return getattr(request.app.state, "job_event_signal", None)
+
+
+def get_owner_change_signal(request: Request) -> OwnerChangeSignal | None:
+    """Dependency to obtain the per-owner change sets tabs' change streams read.
+
+    ``None`` where nothing listens for owner changes: the MCP relay, and a test
+    application that has not set one. Tabs there read on their own clocks.
+    """
+    return getattr(request.app.state, "owner_change_signal", None)
+
+
+def get_mcp_decision_signal(request: Request) -> McpDecisionSignal | None:
+    """The wake-ups for tool calls the MCP relay holds for their owner's decision.
+
+    ``None`` where nothing listens for decisions: the main listener, which holds
+    no calls, and a test application that has not set one. A held call there
+    reads its row on a clock instead.
+    """
+    return getattr(request.app.state, "mcp_decision_signal", None)
 
 
 def get_source_control(request: Request) -> SourceControlRuntime | None:

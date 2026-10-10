@@ -3,7 +3,8 @@
 A host that finds nothing to claim parks a request on ``/v1/agent/worker/wait``
 instead of sleeping. This process answers it the moment Postgres notifies
 ``agent_work_available``, which triggers on ``agent_jobs`` do when a job is
-queued, requeued or ends (migration ``0029``), and the host claims again.
+queued, requeued or ends (migration ``0029``), and the host claims again. The
+connection that hears it is the process's shared listener (``notifications``).
 
 The token a host passes back is this process's own, so it assumes what the
 lifespan already does: one main API process. Its reaper and publisher run once
@@ -15,25 +16,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import secrets
-from typing import TYPE_CHECKING, Any
-
-from cloud_agent.logging_utils import get_logger
-
-if TYPE_CHECKING:
-    import asyncpg
-
-logger = get_logger(__name__)
 
 CHANNEL = "agent_work_available"
-#: How often the idle listening connection is checked. One that died without
-#: closing would otherwise leave every wait to run out its timeout unnoticed.
-_PING_S = 30.0
-_PING_TIMEOUT_S = 10.0
-_RECONNECT_S = 5.0
 
 
 class WorkSignal:
-    """A token that changes whenever claimable work may have appeared."""
+    """A token that changes whenever claimable work may have appeared.
+
+    It is also the shared listener's receiver for ``agent_work_available``.
+    """
+
+    channel = CHANNEL
 
     def __init__(self) -> None:
         """Start at a token no earlier process could have handed out."""
@@ -67,63 +60,15 @@ class WorkSignal:
             await asyncio.wait_for(changed.wait(), timeout_s)
         return self.token
 
+    def notified(self, payload: str) -> None:
+        """Work may have appeared; the notification carries nothing else."""
+        _ = payload
+        self.notify()
 
-async def listen_for_work(dsn: str, signal: WorkSignal) -> None:
-    """Keep one connection listening on ``agent_work_available`` until cancelled.
+    def reset(self, *, listening: bool) -> None:
+        """A notification sent while nothing listened is gone: claim to find out.
 
-    A dedicated connection, because a pooled one is reset when released and
-    would stop listening. Each connect and each loss also wakes every waiting
-    host once: a notification sent while nothing listened is gone, so they
-    claim to find out, which costs a query where missing it costs a wait.
-    """
-    import asyncpg
-
-    healthy = True
-    while True:
-        connection: asyncpg.Connection | None = None
-        try:
-            connection = await asyncpg.connect(dsn)
-            lost = asyncio.Event()
-            # Bound now: a late callback from an old connection must not end
-            # the next one.
-            connection.add_termination_listener(lambda _connection, lost=lost: lost.set())
-
-            def _notified(*_args: Any) -> None:
-                signal.notify()
-
-            await connection.add_listener(CHANNEL, _notified)
-            signal.notify()
-            if not healthy:
-                healthy = True
-                logger.info(
-                    "agent_work_listener_recovered",
-                    extra={"event": "agent_work_listener_recovered"},
-                )
-            while not lost.is_set():
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(lost.wait(), _PING_S)
-                if not lost.is_set():
-                    await asyncio.wait_for(connection.fetchval("SELECT 1"), _PING_TIMEOUT_S)
-            raise ConnectionError("the listening connection closed")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            # Once per outage: hosts keep claiming on their own timeout meanwhile,
-            # so a report every reconnect would say nothing new.
-            if healthy:
-                healthy = False
-                logger.warning(
-                    "agent_work_listener_failed",
-                    extra={
-                        "event": "agent_work_listener_failed",
-                        "error_type": type(exc).__name__,
-                        "error": str(exc)[:300],
-                    },
-                )
-        finally:
-            if connection is not None and not connection.is_closed():
-                # Not close(): that waits on the server, and the server may be
-                # what stopped answering.
-                connection.terminate()
-        signal.notify()
-        await asyncio.sleep(_RECONNECT_S)
+        That costs every waiting host a query, where missing it costs a wait.
+        """
+        _ = listening
+        self.notify()

@@ -26,6 +26,7 @@ from fastapi import APIRouter
 
 from cloud_agent.api import (
     catalog,
+    changes,
     config,
     jobs,
     source_control,
@@ -48,6 +49,7 @@ SURFACE_ROUTERS = (
     catalog.router,
     turns.router,
     threads.router,
+    changes.router,
     workspace.router,
     worker.router,
 )

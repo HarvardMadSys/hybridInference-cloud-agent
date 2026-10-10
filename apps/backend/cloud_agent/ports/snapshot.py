@@ -9,7 +9,10 @@ operations it needs rather than on the whole persistence surface.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 class SnapshotRepository(Protocol):
@@ -54,7 +57,11 @@ class SnapshotRepository(Protocol):
         detail: str,
         dirty: bool = False,
     ) -> bool:
-        """Release a failed host capture; busy retries, unsafe census dirties."""
+        """Release a failed host capture; busy retries, unsafe census dirties.
+
+        A capture handed back for a retry is not claimed again before its
+        ``retry_at``, so a busy host is asked on that clock, not in a loop.
+        """
         ...
 
     async def reap_stalled_sandbox_snapshot_captures(
@@ -98,7 +105,26 @@ class SnapshotRepository(Protocol):
         ...
 
     async def record_snapshot_base_import_failure(self, *, snapshot_id: int, detail: str) -> None:
-        """Keep an idempotent import retry visible without losing the commit."""
+        """Keep an idempotent import retry visible without losing the commit.
+
+        The import is not retried before the snapshot's ``retry_at``.
+        """
+        ...
+
+    async def next_snapshot_retry_due(self) -> datetime | None:
+        """When the earliest capture handed back for a retry may be claimed again.
+
+        ``None`` when none waits. Everything else that makes a capture due is
+        announced by a notification.
+        """
+        ...
+
+    async def next_base_import_retry_due(self) -> datetime | None:
+        """When the earliest failed base import may be retried.
+
+        ``None`` when none waits; a workspace that starts importing is announced
+        by a notification.
+        """
         ...
 
     async def reap_stalled_snapshot_publishes(self, *, stall_seconds: float = 900.0) -> list[int]:

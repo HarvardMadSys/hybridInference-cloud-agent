@@ -915,7 +915,14 @@ function usageOf(events: StoredEvent[]): AssistantUsage {
   const snapshots = events
     .filter((event) => asRecord(event.payload).usage_scope !== 'attempt')
     .sort((left, right) => right.seq - left.seq)
-    .map((event) => asRecord(asRecord(event.payload).usage));
+    .map((event) => {
+      const payload = asRecord(event.payload);
+      // pi reports a response's counters as a usage event whose payload is
+      // the usage itself; the other runtimes nest it under `usage`.
+      return event.event_type === 'usage' && payload.usage === undefined
+        ? payload
+        : asRecord(payload.usage);
+    });
   const latestCount = (keys: string[]): number | null =>
     snapshots.map((usage) => firstCount(usage, keys)).find((count) => count !== null) ?? null;
   return {

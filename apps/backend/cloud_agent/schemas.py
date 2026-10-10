@@ -635,6 +635,11 @@ class AgentJobResponse(BaseModel):
     published_pr_url: str | None = None
     published_commit_sha: str | None = None
     detail: str | None = None
+    # Raised by one each time the row changes. A tab that also receives this
+    # row from the owner's change stream keeps whichever revision is higher;
+    # the conversation's fields (title, pin) follow ``thread_revision``.
+    revision: int = 0
+    thread_revision: int = 0
     # Set on turns created by a fork: the original turn this row copies.
     forked_from_job_id: str | None = None
     metadata: dict[str, Any] | None = None

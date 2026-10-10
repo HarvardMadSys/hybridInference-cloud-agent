@@ -27,7 +27,7 @@ JOB_OWN_COLUMNS = (
     "turn_source, goal_round, goal_round_kind, goal_revision, goal_id, "
     "goal_report_parse, goal_report_outcome, goal_report_reason, goal_report_detail, "
     "goal_repair_round, "
-    "input_seq_at_create, created_at, updated_at"
+    "input_seq_at_create, created_at, updated_at, revision"
 )
 
 # What a conversation shares with every one of its turns: where it runs, and —
@@ -47,7 +47,10 @@ THREAD_CONFIG_COLUMNS = (
     "t.goal_created_at, t.goal_updated_at, "
     # The conversation's input counter, carried on every turn so that "has the
     # owner spoken since this turn was created?" is answerable from one read.
-    "t.user_input_seq AS thread_user_input_seq"
+    "t.user_input_seq AS thread_user_input_seq, "
+    # Aliased for the same reason as the goal revision: the job has its own.
+    # Owners' tabs order pushed titles against the thread's counter.
+    "t.revision AS thread_revision"
 )
 
 # Probe the unfinished-turn index before the latest-turn index: a cancelled

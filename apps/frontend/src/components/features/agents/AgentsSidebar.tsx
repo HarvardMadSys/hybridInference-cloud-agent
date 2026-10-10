@@ -14,6 +14,7 @@ import {
 import { CONVERSATION_RESTORED_EVENT, type ConversationRestoredDetail } from './conversationEvents';
 import { latestJob } from './conversationJob';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
+import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from './agentPush';
 import { GettingStarted } from './GettingStarted';
 import { PaneResizer } from './PaneResizer';
 import { useAgentProjects } from './useAgentJobs';
@@ -218,14 +219,28 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
     reload();
     reloadProjects();
   }, [pathname, reload, reloadProjects]);
+  // The owner's change stream says when a conversation or turn changed; the
+  // clock below is the backstop for when it is not flowing.
+  useEffect(
+    () =>
+      onAgentRecordsChanged(() => {
+        reload();
+        reloadProjects();
+      }),
+    [reload, reloadProjects],
+  );
+  const pushLive = useAgentPushLive();
   useEffect(() => {
     if (!projects.some((project) => project.active_count > 0)) return;
-    const timer = setInterval(() => {
-      reload();
-      reloadProjects();
-    }, 10000);
+    const timer = setInterval(
+      () => {
+        reload();
+        reloadProjects();
+      },
+      pushLive ? PUSH_FALLBACK_POLL_MS : 10000,
+    );
     return () => clearInterval(timer);
-  }, [projects, reload, reloadProjects]);
+  }, [projects, pushLive, reload, reloadProjects]);
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
     setQuery('');

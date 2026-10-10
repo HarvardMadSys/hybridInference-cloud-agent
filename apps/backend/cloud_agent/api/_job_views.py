@@ -170,6 +170,8 @@ def _job_response(
         cancel_requested=job["cancel_requested"],
         current_attempt_id=job["current_attempt_id"],
         published_pr_url=job["published_pr_url"],
+        revision=job.get("revision") or 0,
+        thread_revision=job.get("thread_revision") or 0,
         published_commit_sha=job.get("published_commit_sha"),
         detail=job["detail"],
         forked_from_job_id=job.get("fork_source_job_id"),

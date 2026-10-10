@@ -6,24 +6,33 @@ name: Publish
 # distribution that deploys pins the sha256 of the manifest's bytes
 # (deploy/release/README.md) and goes and looks at the registry itself.
 #
-# Two ways in, and both end at the same check: the commit is on dev, and CI
-# concluded success for that exact commit. `workflow_run` is CI finishing on a
-# dev push, which is the routine path; `workflow_dispatch` names a commit by
-# hand — for the first release, or for a commit whose own push run was
-# cancelled by the push that followed it. A pull request cannot reach this
-# file: there is no `pull_request` trigger, and a `workflow_run` executes the
-# copy of this file on the default branch, never a pull request's copy. That is
-# what keeps a publishing credential out of the path that runs unreviewed code.
+# Three ways in, and all end at the same two checks: the commit is on dev, and
+# CI concluded success for that exact commit.
+#
+# - `push` to dev is the routine path. It starts building and deploy-testing
+#   the release at once, alongside CI, and publishes only once that commit's
+#   own CI has passed (the `ci` job); a commit whose CI fails or is cancelled is
+#   built but never published. Waiting for CI before building cost every
+#   release the two minutes the images and the acceptance take.
+# - `workflow_run` is CI finishing green on a dev push. It publishes a commit
+#   whose CI passed only on a re-run; for any other it finds the release the
+#   push already published, and does nothing.
+# - `workflow_dispatch` names a commit by hand: for a commit whose own push run
+#   was cancelled by the push that followed it.
+#
+# A pull request cannot reach this file: there is no `pull_request` trigger, a
+# `push` runs only for commits on dev, and a `workflow_run` executes the copy of
+# this file on the default branch, which is dev. Each runs code that was merged,
+# never a pull request's copy. That is what keeps a publishing credential out of
+# the path that runs unreviewed code.
 #
 # Publishing is idempotent per commit. A release that already exists is left
 # exactly as it is: a manifest that could be overwritten is one whose sha256 a
 # distribution cannot rely on.
-#
-# `workflow_run` fires only for a workflow file that is on the default branch,
-# which is main. Until this file has been synced there, dev pushes do not
-# publish on their own, and a dispatch on dev is how a release is produced.
 
 on:
+  push:
+    branches: [dev]
   workflow_run:
     workflows: ["CI"]
     branches: [dev]
@@ -58,11 +67,13 @@ jobs:
   # ------------------------------------------------------------------ commit
   commit:
     name: Vet the commit
-    # Both triggers end here. For `workflow_run` the event itself says what
-    # finished: CI, on a push, to dev, in this repository, green. A dispatch
-    # names a commit, and the steps below prove the same facts about it.
+    # All three triggers end here. A push is to dev, and its CI is checked by the
+    # `ci` job before anything is published. For `workflow_run` the event itself
+    # says what finished: CI, on a push, to dev, in this repository, green. A
+    # dispatch names a commit, and the steps below prove the same facts about it.
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/dev') ||
       (github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'dev' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
@@ -117,6 +128,8 @@ jobs:
       # when the next push arrives, so a commit on dev may never have finished
       # its own run — and that commit is not releasable, the next one is.
       - name: Require the commit's own CI to be green
+        # A push's CI is still running; the `ci` job waits for its verdict.
+        if: github.event_name != 'push'
         uses: actions/github-script@v7
         env:
           SHA: ${{ steps.target.outputs.sha }}
@@ -574,14 +587,72 @@ jobs:
           done
           rm -rf "${WORKDIR}" || true
 
-  # ----------------------------------------------------------------- publish
-  # Runs only when every cell succeeded — `needs` skips it otherwise, and it
-  # has no `if: always()` to bring it back. A release with five images is not a
-  # smaller release; it is one that leaves a machine half updated.
-  publish:
-    name: Publish the release
+  # ---------------------------------------------------------------------- ci
+  # A push started building alongside its own CI; this is where the release
+  # waits for CI's verdict on that exact commit. It starts only once the
+  # acceptance is done, so it holds a runner for the end of CI and not all of
+  # it. For `workflow_run` and a dispatch CI already passed, and it answers at
+  # once. A run CI did not pass -- failed, or cancelled by the next push -- is
+  # never published: `green` stays false and `publish` is skipped. CI passing
+  # on a re-run later reaches this file again through `workflow_run`.
+  ci:
+    name: Wait for the commit's own CI
     needs: [commit, acceptance]
     if: needs.commit.outputs.existing == ''
+    runs-on: [self-hosted, Linux, ci-general]
+    timeout-minutes: 60
+    permissions:
+      actions: read
+    outputs:
+      green: ${{ steps.verdict.outputs.green }}
+    steps:
+      - name: Wait for CI to conclude on this commit
+        id: verdict
+        uses: actions/github-script@v7
+        env:
+          SHA: ${{ needs.commit.outputs.sha }}
+        with:
+          script: |
+            const sha = process.env.SHA;
+            const deadline = Date.now() + 55 * 60 * 1000;
+            for (;;) {
+              // The newest run CI started for this commit on a push. A re-run
+              // is another attempt of the same run, and reports its last one.
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'ci.yml',
+                head_sha: sha,
+                event: 'push',
+                per_page: 20,
+              });
+              const run = data.workflow_runs.sort((a, b) => b.id - a.id)[0];
+              if (run && run.status === 'completed') {
+                const green = run.conclusion === 'success';
+                core.setOutput('green', green ? 'true' : 'false');
+                if (green) {
+                  core.info(`CI is green for ${sha}: ${run.html_url}`);
+                } else {
+                  core.notice(`CI ended ${run.conclusion} for ${sha}; nothing is published: ${run.html_url}`);
+                }
+                return;
+              }
+              if (Date.now() > deadline) {
+                core.setFailed(`CI for ${sha} did not conclude within the wait`);
+                return;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 10000));
+            }
+
+  # ----------------------------------------------------------------- publish
+  # Runs only when every cell succeeded and CI passed this commit — `needs`
+  # skips it otherwise, and it has no `if: always()` to bring it back. A
+  # release with five images is not a smaller release; it is one that leaves a
+  # machine half updated.
+  publish:
+    name: Publish the release
+    needs: [commit, acceptance, ci]
+    if: needs.commit.outputs.existing == '' && needs.ci.outputs.green == 'true'
     runs-on: [self-hosted, Linux, ci-general]
     permissions:
       contents: write

@@ -13,6 +13,7 @@ import json
 from typing import TYPE_CHECKING
 
 from cloud_agent.storage._sql.jobs import (
+    CONVERSATION_STATE_SQL,
     JOB_SELECT,
     JOB_SUMMARY_SELECT,
     QUALIFIED_JOB_SUMMARY_COLUMNS,
@@ -124,6 +125,42 @@ class PostgresConversationQueries:
                 job_id,
             )
         return job_row_to_dict(row) if row else None
+
+    async def owner_changes(
+        self, *, user_id: str, job_ids: list[str], thread_ids: list[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """The current values an owner's tabs show for these jobs and threads.
+
+        ``jobs`` and ``threads``, each row with its ``revision``. Only rows the
+        owner holds are returned; an id that is missing was removed or is not
+        theirs, and the caller reports it as gone.
+        """
+        jobs: list[asyncpg.Record] = []
+        threads: list[asyncpg.Record] = []
+        async with self._pool.acquire() as conn:
+            if job_ids:
+                jobs = await conn.fetch(
+                    f"""
+                    SELECT j.id, j.thread_id, j.revision, j.state, j.published_pr_url,
+                           {CONVERSATION_STATE_SQL} AS conversation_state
+                    FROM agent_jobs j
+                    WHERE j.user_id = $1 AND j.id = ANY($2::text[])
+                    """,
+                    user_id,
+                    job_ids,
+                )
+            if thread_ids:
+                threads = await conn.fetch(
+                    """
+                    SELECT id, revision, title, title_source, pinned_at, archived_at,
+                           deleted_at, updated_at
+                    FROM agent_threads
+                    WHERE user_id = $1 AND id = ANY($2::text[])
+                    """,
+                    user_id,
+                    thread_ids,
+                )
+        return {"jobs": [dict(row) for row in jobs], "threads": [dict(row) for row in threads]}
 
     async def latest_turn(self, *, thread_id: str) -> dict[str, Any] | None:
         """The newest turn of this conversation, whatever state it is in.

@@ -15,7 +15,16 @@ from cloud_agent.storage._sql.events import insert_event
 from cloud_agent.storage._sql.rows import load_json
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     import asyncpg
+
+#: How long a capture handed back by a busy or unreachable host waits before it
+#: is claimed again. Until then the coordinator captures the workspaces behind
+#: it, and sleeps when there are none.
+CAPTURE_RETRY_S = 5.0
+#: How long a published base whose import failed waits before it is retried.
+BASE_IMPORT_RETRY_S = 15.0
 
 
 class PostgresSnapshotRepository:
@@ -63,6 +72,7 @@ class PostgresSnapshotRepository:
                 FROM agent_sandbox_snapshots s
                 JOIN agent_sandboxes g ON g.id = s.sandbox_id
                 WHERE s.state = 'pending'
+                  AND (s.retry_at IS NULL OR s.retry_at <= NOW())
                   AND g.state IN ('running', 'stopped')
                   AND g.snapshot_state = 'pending'
                   AND g.active_operation_count = 0
@@ -94,7 +104,7 @@ class PostgresSnapshotRepository:
             captured = await conn.fetchval(
                 """
                 UPDATE agent_sandbox_snapshots
-                SET state = 'capturing', last_error = NULL, updated_at = NOW()
+                SET state = 'capturing', last_error = NULL, retry_at = NULL, updated_at = NOW()
                 WHERE id = $1 AND state = 'pending'
                 RETURNING id
                 """,
@@ -228,7 +238,11 @@ class PostgresSnapshotRepository:
         detail: str,
         dirty: bool = False,
     ) -> bool:
-        """Release a failed host capture; busy retries, unsafe census dirties."""
+        """Release a failed host capture; busy retries, unsafe census dirties.
+
+        A capture handed back for a retry is not claimed again before its
+        ``retry_at``, so a busy host is asked on that clock, not in a loop.
+        """
         next_state = "failed" if dirty else "pending"
         group_state = "dirty" if dirty else "pending"
         async with self._pool.acquire() as conn, conn.transaction():
@@ -273,12 +287,15 @@ class PostgresSnapshotRepository:
             await conn.execute(
                 """
                 UPDATE agent_sandbox_snapshots
-                SET state = $2, last_error = $3, updated_at = NOW()
+                SET state = $2, last_error = $3, updated_at = NOW(),
+                    retry_at = CASE WHEN $2 = 'pending'
+                                    THEN NOW() + make_interval(secs => $4) END
                 WHERE id = $1 AND state = 'capturing'
                 """,
                 snapshot_id,
                 next_state,
                 detail[:2000],
+                CAPTURE_RETRY_S,
             )
             await conn.execute(
                 """
@@ -639,7 +656,7 @@ class PostgresSnapshotRepository:
                 FROM agent_sandboxes g
                 JOIN LATERAL (
                     SELECT s.id, s.sandbox_id, s.anchor_job_id,
-                           s.published_commit_sha
+                           s.published_commit_sha, s.retry_at
                     FROM agent_sandbox_snapshots s
                     WHERE s.sandbox_id = g.id AND s.state = 'published'
                       AND s.published_commit_sha = g.published_base_sha
@@ -649,6 +666,7 @@ class PostgresSnapshotRepository:
                 JOIN agent_jobs j ON j.id = latest.anchor_job_id
                 JOIN agent_threads t ON t.id = j.thread_id
                 WHERE g.snapshot_state = 'importing'
+                  AND (latest.retry_at IS NULL OR latest.retry_at <= NOW())
                 ORDER BY g.updated_at
                 LIMIT 1
                 """
@@ -701,20 +719,63 @@ class PostgresSnapshotRepository:
                 sandbox_id,
                 commit_sha,
             )
+            if updated is not None:
+                await conn.execute(
+                    "UPDATE agent_sandbox_snapshots SET retry_at = NULL "
+                    "WHERE id = $1 AND retry_at IS NOT NULL",
+                    snapshot_id,
+                )
         return updated is not None
 
     async def record_snapshot_base_import_failure(self, *, snapshot_id: int, detail: str) -> None:
-        """Keep an idempotent import retry visible without losing the commit."""
+        """Keep an idempotent import retry visible without losing the commit.
+
+        The import is not retried before the snapshot's ``retry_at``.
+        """
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
                 UPDATE agent_sandbox_snapshots
-                SET last_error = $2, updated_at = NOW()
+                SET last_error = $2, updated_at = NOW(),
+                    retry_at = NOW() + make_interval(secs => $3)
                 WHERE id = $1 AND state = 'published'
                 """,
                 snapshot_id,
                 detail[:2000],
+                BASE_IMPORT_RETRY_S,
             )
+
+    async def next_snapshot_retry_due(self) -> datetime | None:
+        """When the earliest capture handed back for a retry may be claimed again.
+
+        ``None`` when none waits. Everything else that makes a capture due is
+        announced by a notification.
+        """
+        async with self._pool.acquire() as conn:
+            due: datetime | None = await conn.fetchval(
+                "SELECT MIN(retry_at) FROM agent_sandbox_snapshots "
+                "WHERE state = 'pending' AND retry_at > NOW()"
+            )
+        return due
+
+    async def next_base_import_retry_due(self) -> datetime | None:
+        """When the earliest failed base import may be retried.
+
+        ``None`` when none waits; a workspace that starts importing is announced
+        by a notification.
+        """
+        async with self._pool.acquire() as conn:
+            due: datetime | None = await conn.fetchval(
+                """
+                SELECT MIN(s.retry_at)
+                FROM agent_sandbox_snapshots s
+                JOIN agent_sandboxes g ON g.id = s.sandbox_id
+                WHERE s.state = 'published' AND s.retry_at > NOW()
+                  AND g.snapshot_state = 'importing'
+                  AND s.published_commit_sha = g.published_base_sha
+                """
+            )
+        return due
 
     async def reap_stalled_snapshot_publishes(self, *, stall_seconds: float = 900.0) -> list[int]:
         """Fail ambiguous shared publishes without changing Agent turn state."""

@@ -3830,6 +3830,11 @@
               }
             ]
           },
+          "revision": {
+            "default": 0,
+            "title": "Revision",
+            "type": "integer"
+          },
           "runtime": {
             "title": "Runtime",
             "type": "string"
@@ -3903,6 +3908,11 @@
               }
             ],
             "title": "Thread Id"
+          },
+          "thread_revision": {
+            "default": 0,
+            "title": "Thread Revision",
+            "type": "integer"
           },
           "title": {
             "anyOf": [
@@ -9384,6 +9394,18 @@
           },
           "runtime": {
             "$ref": "#/components/schemas/RuntimeUsage"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Orders two reads of one job's usage, asked for or pushed: the one whose version compares greater as a string saw everything the other did. Opaque.",
+            "title": "Version"
           }
         },
         "required": [
@@ -18366,6 +18388,51 @@
           }
         },
         "summary": "List Repo Branches"
+      }
+    },
+    "/v1/agent/changes": {
+      "get": {
+        "description": "Stream the caller's changed jobs and conversations as SSE.\n\nEvents: ``hello`` and ``resync`` carry ``{\"live\": bool}``; ``job`` and\n``thread`` carry the row's current values and its ``revision``, or\n``{\"id\": ..., \"deleted\": true}`` once it is gone; ``usage`` carries the\njob's ``{\"id\": ..., \"usage\": ...}`` as ``GET /v1/agent/jobs/{id}/usage``\nreturns it; ``mcp`` (a job) and ``queue``, ``publication`` (a\nconversation) carry only ``{\"id\": ...}``: read that again. 404 where this\nprocess pushes nothing, which a tab treats as \"keep reading on a clock\".",
+        "operationId": "stream_owner_changes_v1_agent_changes_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stream Owner Changes"
       }
     },
     "/v1/agent/config": {

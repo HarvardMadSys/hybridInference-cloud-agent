@@ -95,6 +95,10 @@ def job_row_to_dict(row: Any) -> dict[str, Any]:
         "published_pr_url": row["published_pr_url"],
         "published_commit_sha": row["published_commit_sha"],
         "detail": row["detail"],
+        # Every change raises them (migration 0031); a read that does not
+        # select them reports the counter at its start.
+        "revision": row.get("revision") or 0,
+        "thread_revision": row.get("thread_revision") or 0,
         "metadata": load_json(row["metadata"]),
         "skills": load_json(row.get("skills")),
         "attachments": load_json(row.get("attachments")),

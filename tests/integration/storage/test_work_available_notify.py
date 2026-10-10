@@ -24,7 +24,8 @@ from tests.integration.storage.test_agent_job_store import (
 from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.migrations import apply_migrations, downgrade_to
 
-from cloud_agent.workers.work_signal import CHANNEL, WorkSignal, listen_for_work
+from cloud_agent.workers.notifications import listen
+from cloud_agent.workers.work_signal import CHANNEL, WorkSignal
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -109,6 +110,9 @@ async def test_the_triggers_go_with_a_downgrade_and_come_back_with_the_upgrade(s
         return {row["tgname"] for row in rows} | ({"function"} if function else set())
 
     assert {"agent_jobs_work_queued", "agent_jobs_work_released", "function"} <= await triggers()
+    # Created at head: the store reads columns a downgraded schema lacks, so
+    # once downgraded the queued follow-up is written the way the schema allows.
+    job = await _create_job(store)
     try:
         downgrade_to(config, "0028_host_settings")
         assert not {"agent_jobs_work_queued", "agent_jobs_work_released", "function"} & (
@@ -116,7 +120,16 @@ async def test_the_triggers_go_with_a_downgrade_and_come_back_with_the_upgrade(s
         )
         heard = await _listen()
         try:
-            await _create_job(store)
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO agent_jobs (id, thread_id, user_id, turn_no, parent_job_id, "
+                    "task_prompt, runtime, model, state) "
+                    "VALUES ($1, $2, $3, 2, $4, 'a follow-up', 'claude-code', 'glm-5.1', 'queued')",
+                    f"{job['id']}_next",
+                    job["thread_id"],
+                    job["user_id"],
+                    job["id"],
+                )
             assert await _nothing_heard_since(heard, pool)
         finally:
             await heard.connection.close()
@@ -134,7 +147,7 @@ async def test_a_queued_job_wakes_a_waiting_host_through_the_listener(store):
     )
     signal = WorkSignal()
     before_listening = signal.token
-    listener = asyncio.create_task(listen_for_work(dsn, signal))
+    listener = asyncio.create_task(listen(dsn, (signal,)))
     try:
         # The listener announces itself once it is listening.
         await asyncio.wait_for(signal.wait(before_listening, 10), 10)

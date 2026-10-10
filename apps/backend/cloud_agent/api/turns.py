@@ -20,6 +20,7 @@ without an HTTP request. What stays is the anchor validation, the store's
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import secrets
 import time
 from typing import TYPE_CHECKING, Any, Protocol
@@ -36,6 +37,7 @@ from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
     get_grant_client,
+    get_job_event_signal,
     get_storage,
     require_store,
 )
@@ -58,6 +60,9 @@ from cloud_agent.schemas import (
     AgentThreadMessageCreate,
     AgentThreadMessageResult,
     AgentThreadQueueResponse,
+)
+from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI resolves it.
+    JobEventSignal,
 )
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 from cloud_agent_shared.shared_protocol import (
@@ -567,6 +572,9 @@ def _mid_turn_input_unsupported() -> HTTPException:
 #: keeps the message in line, and it goes as the next turn.
 HAND_OVER_WAIT_S = 600.0
 HAND_OVER_POLL_S = 0.5
+#: With the job's change notification to wait on, the clock is only a backstop
+#: for what does not notify: the owner editing or deleting the message.
+HAND_OVER_IDLE_S = 5.0
 
 #: Hand-overs waiting for a host, kept so they are not collected mid-wait.
 _hand_overs: set[asyncio.Task[None]] = set()
@@ -612,52 +620,85 @@ async def _hand_over_once_claimed(
     message: dict[str, Any],
     gateway: Any,
     app_credentials: Any | None,
+    signal: JobEventSignal | None = None,
 ) -> None:
     """Wait for a host to take the turn, then give it the message.
 
     The message stays ``sending`` meanwhile, tied to the turn. A turn that ends
     first puts it back in line with the rest of its ending, and one that is
     still waiting at the deadline leaves it there too: either way it goes as
-    the next turn.
+    the next turn. With ``signal`` the wait ends when the job's state changes,
+    which is when a host claims it; without, it looks every ``HAND_OVER_POLL_S``.
     """
     deadline = time.monotonic() + HAND_OVER_WAIT_S
+    subscription = signal.subscribe(job_id) if signal is not None else contextlib.nullcontext()
     try:
-        while time.monotonic() < deadline:
-            job = await job_store.conversation_queries.get_job(job_id)
-            if job is None or job.get("state") in TERMINAL_STATES:
-                return
-            queue = await job_store.pending_messages.queue_state(
-                thread_id=thread_id, user_id=str(message["user_id"])
+        with subscription as woken:
+            await _hand_over_when_claimed(
+                job_store,
+                thread_id=thread_id,
+                job_id=job_id,
+                message=message,
+                gateway=gateway,
+                app_credentials=app_credentials,
+                deadline=deadline,
+                signal=signal,
+                woken=woken,
             )
-            current = next(
-                (row for row in (queue or {}).get("messages", []) if row["id"] == message["id"]),
-                None,
-            )
-            if current is None or current["state"] != "sending":
-                return
-            attempt_id = job.get("current_attempt_id")
-            if job.get("state") == RUNNING and attempt_id is not None:
-                reason = await _hand_over(
-                    job_store, thread_id=thread_id, attempt_id=int(attempt_id), message=message
-                )
-                if reason is not None:
-                    await job_store.pending_messages.return_to_queue(
-                        message_id=str(message["id"]), revision=int(message["revision"])
-                    )
-                    await _settle(
-                        job_store,
-                        thread_id=thread_id,
-                        gateway=gateway,
-                        app_credentials=app_credentials,
-                    )
-                return
-            await asyncio.sleep(HAND_OVER_POLL_S)
     except Exception:
         logger.warning(
             "agent_send_now_hand_over_failed",
             extra={"event": "agent_send_now_hand_over_failed", "thread_id": thread_id},
             exc_info=True,
         )
+
+
+async def _hand_over_when_claimed(
+    job_store: _TurnsStorage,
+    *,
+    thread_id: str,
+    job_id: str,
+    message: dict[str, Any],
+    gateway: Any,
+    app_credentials: Any | None,
+    deadline: float,
+    signal: JobEventSignal | None,
+    woken: asyncio.Event | None,
+) -> None:
+    """The waiting loop of :func:`_hand_over_once_claimed`, subscribed or not."""
+    while time.monotonic() < deadline:
+        job = await job_store.conversation_queries.get_job(job_id)
+        if job is None or job.get("state") in TERMINAL_STATES:
+            return
+        queue = await job_store.pending_messages.queue_state(
+            thread_id=thread_id, user_id=str(message["user_id"])
+        )
+        current = next(
+            (row for row in (queue or {}).get("messages", []) if row["id"] == message["id"]),
+            None,
+        )
+        if current is None or current["state"] != "sending":
+            return
+        attempt_id = job.get("current_attempt_id")
+        if job.get("state") == RUNNING and attempt_id is not None:
+            reason = await _hand_over(
+                job_store, thread_id=thread_id, attempt_id=int(attempt_id), message=message
+            )
+            if reason is not None:
+                await job_store.pending_messages.return_to_queue(
+                    message_id=str(message["id"]), revision=int(message["revision"])
+                )
+                await _settle(
+                    job_store,
+                    thread_id=thread_id,
+                    gateway=gateway,
+                    app_credentials=app_credentials,
+                )
+            return
+        if signal is None or woken is None:
+            await asyncio.sleep(HAND_OVER_POLL_S)
+        else:
+            await signal.wait(woken, HAND_OVER_IDLE_S if signal.listening else HAND_OVER_POLL_S)
 
 
 @router.post(
@@ -672,6 +713,7 @@ async def send_pending_message_now(
     store: _TurnsStorage | None = Depends(get_storage),
     gateway: Any = Depends(get_gateway_client),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
+    signal: JobEventSignal | None = Depends(get_job_event_signal),
 ) -> AgentThreadMessageResult:
     """Send one waiting message into the live turn.
 
@@ -714,6 +756,7 @@ async def send_pending_message_now(
                 message=message,
                 gateway=gateway,
                 app_credentials=app_credentials,
+                signal=signal,
             )
         )
         _hand_overs.add(task)

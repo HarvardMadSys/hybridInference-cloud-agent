@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
+import { useAgentChangeStream } from '@/components/features/agents/agentPush';
 import { FirstRunProvider } from '@/components/features/agents/firstRun';
 import { useAuth, useT } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
@@ -152,6 +153,12 @@ function AgentsHeader({
   );
 }
 
+/** The owner's change stream, held once per tab for every list and page in it. */
+function AgentChangeStream({ userId }: { userId: string | undefined }) {
+  useAgentChangeStream(userId);
+  return null;
+}
+
 function AgentsShell({
   children,
   sidebarCollapsed,
@@ -187,6 +194,7 @@ function AgentsShell({
   // rather than by each of them. Keyed by account, so another one starts over.
   return (
     <FirstRunProvider key={state.user?.id} userId={state.user?.id}>
+      <AgentChangeStream userId={state.user?.id} />
       <div className="flex min-h-0 flex-1">
         <AgentsSidebar collapsed={sidebarCollapsed} />
         <main className="min-w-0 flex-1 overflow-y-auto bg-gray-50/40 dark:bg-gray-950">

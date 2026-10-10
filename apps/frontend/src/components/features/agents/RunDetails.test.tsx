@@ -13,6 +13,7 @@ import {
 } from '@/lib/api/agents';
 
 import { RunDetails } from './RunDetails';
+import { PUSH_BATCH_MS, receiveHint, resetAgentPush } from './agentPush';
 import type { AgentJob } from './types';
 
 vi.mock('@/lib/api/agents', () => ({
@@ -210,6 +211,108 @@ describe('RunDetails', () => {
     await waitFor(() => expect(screen.getByText('1,000')).toBeInTheDocument());
     expect(screen.queryByText('$0')).toBeNull();
     expect(screen.getAllByText('Not recorded').length).toBeGreaterThan(0);
+  });
+
+  it('shows usage the change stream sent without reading it again', async () => {
+    vi.useFakeTimers();
+    vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
+    await act(async () => {
+      render(
+        <RunDetails
+          jobId="ajob_pushed"
+          turnNo={2}
+          tab="usage"
+          job={HISTORY_JOB}
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />,
+      );
+    });
+    expect(screen.getByText('1,000')).toBeInTheDocument();
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+
+    const pushed = usage();
+    pushed.ledger.totals = { ...pushed.ledger.totals!, tokens_in: 4321 };
+    act(() => receiveHint('usage', 'ajob_pushed', pushed));
+    await act(async () => vi.advanceTimersByTimeAsync(PUSH_BATCH_MS));
+
+    expect(screen.getByText('4,321')).toBeInTheDocument();
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+    resetAgentPush();
+  });
+
+  it('keeps the newer of the usage it read and the usage it was pushed', async () => {
+    vi.useFakeTimers();
+    const read = usage();
+    read.version = '0005';
+    read.ledger.totals = { ...read.ledger.totals!, tokens_in: 5555 };
+    vi.mocked(getAgentJobUsage).mockResolvedValue(read);
+    await act(async () => {
+      render(
+        <RunDetails
+          jobId="ajob_versions"
+          turnNo={2}
+          tab="usage"
+          job={HISTORY_JOB}
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />,
+      );
+    });
+    expect(screen.getByText('5,555')).toBeInTheDocument();
+
+    // Computed before that read, delivered after it.
+    const older = usage();
+    older.version = '0004';
+    older.ledger.totals = { ...older.ledger.totals!, tokens_in: 4444 };
+    act(() => receiveHint('usage', 'ajob_versions', older));
+    await act(async () => vi.advanceTimersByTimeAsync(PUSH_BATCH_MS));
+    expect(screen.getByText('5,555')).toBeInTheDocument();
+    expect(screen.queryByText('4,444')).toBeNull();
+    resetAgentPush();
+  });
+
+  it("keeps a newer pushed usage over the answer to the reader's refresh", async () => {
+    vi.useFakeTimers();
+    const before = usage();
+    before.version = '0002';
+    before.ledger.totals = { ...before.ledger.totals!, tokens_in: 2000 };
+    vi.mocked(getAgentJobUsage)
+      .mockResolvedValueOnce(before)
+      // Later reads are slow: only the refresh's answer can change what is shown.
+      .mockImplementation(() => new Promise(() => undefined));
+    await act(async () => {
+      render(
+        <RunDetails
+          jobId="ajob_refreshed"
+          turnNo={2}
+          tab="usage"
+          job={HISTORY_JOB}
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />,
+      );
+    });
+    expect(screen.getByText('2,000')).toBeInTheDocument();
+
+    const pushed = usage();
+    pushed.version = '0003';
+    pushed.ledger.totals = { ...pushed.ledger.totals!, tokens_in: 3000 };
+    act(() => receiveHint('usage', 'ajob_refreshed', pushed));
+    await act(async () => vi.advanceTimersByTimeAsync(PUSH_BATCH_MS));
+    expect(screen.getByText('3,000')).toBeInTheDocument();
+
+    // The refresh answers with the cached usage as it was before that push.
+    let answer!: (value: AgentJobUsageApi) => void;
+    vi.mocked(refreshAgentJobUsage).mockImplementation(
+      () => new Promise((resolve) => (answer = resolve)),
+    );
+    fireEvent.click(screen.getAllByRole('button', { name: 'Refresh' })[0]);
+    await act(async () => answer(before));
+
+    expect(screen.getByText('3,000')).toBeInTheDocument();
+    expect(screen.queryByText('2,000')).toBeNull();
+    resetAgentPush();
   });
 
   it('says the deployment has no ledger instead of showing nothing', async () => {

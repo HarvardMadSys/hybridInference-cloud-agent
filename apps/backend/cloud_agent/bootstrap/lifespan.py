@@ -18,8 +18,13 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.workers.attempts import reap_expired_attempts
+from cloud_agent.workers.background_wake import BackgroundWake
+from cloud_agent.workers.job_event_signal import JobEventSignal
+from cloud_agent.workers.mcp_decision_signal import McpDecisionSignal
+from cloud_agent.workers.notifications import listen
+from cloud_agent.workers.owner_change_signal import OwnerChangeSignal
 from cloud_agent.workers.snapshots import coordinate_shared_snapshots
-from cloud_agent.workers.work_signal import WorkSignal, listen_for_work
+from cloud_agent.workers.work_signal import WorkSignal
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -83,6 +88,7 @@ def _start_publisher(app: FastAPI, store: PublishStorage) -> None:
             credential_provider=credential_provider,
             github_app=app.state.source_control.github,
             base_branch=os.getenv(ENV_PUBLISH_BASE_BRANCH, "dev"),
+            wake=getattr(app.state, "background_wake", None),
         )
     )
     _BACKGROUND_TASKS.add(task)
@@ -190,9 +196,16 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                 gateway=app.state.gateway,
             )
         )
-        snapshot_coordinator = asyncio.create_task(coordinate_shared_snapshots(storage))
+        # The workers below wait on this as well as their clocks; the shared
+        # listener started further down is what sets it.
+        app.state.background_wake = BackgroundWake()
+        snapshot_coordinator = asyncio.create_task(
+            coordinate_shared_snapshots(storage, wake=app.state.background_wake)
+        )
         ledger_collector = asyncio.create_task(
-            collect_usage_snapshots(storage.ledger, app.state.grants)
+            collect_usage_snapshots(
+                storage.ledger, app.state.grants, wake=app.state.background_wake
+            )
         )
         # Host capacity history keeps filling whether or not anybody has the
         # admin page open — that is the whole reason it is stored at all rather
@@ -232,14 +245,30 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         app.state.queue_monitor_task = asyncio.create_task(monitor_queue(storage.host_pool))
         _BACKGROUND_TASKS.add(app.state.queue_monitor_task)
         app.state.queue_monitor_task.add_done_callback(_BACKGROUND_TASKS.discard)
-        # Idle hosts park on the worker wait endpoint, and this connection to
-        # Postgres is what answers them when a job is queued, requeued or ends.
+        # One connection to Postgres answers what waits on a change: idle hosts
+        # parked on the worker wait endpoint (a job was queued, requeued or
+        # ended), owners' event streams (their job stored an event or changed
+        # state), owners' change streams (one of their jobs, conversations,
+        # usage, queue, tool approvals or publications changed), and this
+        # process's own snapshot, publish and usage workers.
         app.state.work_signal = WorkSignal()
-        app.state.work_listener_task = asyncio.create_task(
-            listen_for_work(dsn, app.state.work_signal)
+        app.state.job_event_signal = JobEventSignal()
+        app.state.owner_change_signal = OwnerChangeSignal()
+        app.state.notification_listener_task = asyncio.create_task(
+            listen(
+                dsn,
+                (
+                    app.state.work_signal,
+                    app.state.job_event_signal,
+                    app.state.owner_change_signal,
+                    app.state.background_wake,
+                ),
+            )
         )
-        _BACKGROUND_TASKS.add(app.state.work_listener_task)
-        app.state.work_listener_task.add_done_callback(_BACKGROUND_TASKS.discard)
+        _BACKGROUND_TASKS.add(app.state.notification_listener_task)
+        app.state.notification_listener_task.add_done_callback(_BACKGROUND_TASKS.discard)
+        # This listener holds no tool call for its owner's decision.
+        app.state.mcp_decision_signal = None
         _start_publisher(app, storage)
         logger.info("cloud agent control plane started")
     else:
@@ -255,7 +284,18 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         app.state.queue_monitor_task = None
         app.state.publish_task = None
         app.state.work_signal = None
-        app.state.work_listener_task = None
+        app.state.job_event_signal = None
+        app.state.owner_change_signal = None
+        app.state.background_wake = None
+        # The relay holds tool calls for their owners' decisions, and a
+        # decision wakes the call it names: its own connection, on that one
+        # channel.
+        app.state.mcp_decision_signal = McpDecisionSignal()
+        app.state.notification_listener_task = asyncio.create_task(
+            listen(dsn, (app.state.mcp_decision_signal,))
+        )
+        _BACKGROUND_TASKS.add(app.state.notification_listener_task)
+        app.state.notification_listener_task.add_done_callback(_BACKGROUND_TASKS.discard)
         logger.info("cloud agent relay listener started")
 
     # Each listener owns upstream sockets in its own process, even when it
@@ -292,7 +332,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.publish_task,
             app.state.profiling_policy_task,
             app.state.compute_resource_task,
-            app.state.work_listener_task,
+            app.state.notification_listener_task,
         ):
             if task is None:
                 continue

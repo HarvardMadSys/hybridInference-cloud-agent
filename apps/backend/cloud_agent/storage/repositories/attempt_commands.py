@@ -42,6 +42,10 @@ from cloud_agent.storage._sql.jobs import (
     fail_unrunnable_follow_ups,
     lock_conversation_by_job,
 )
+from cloud_agent.storage._sql.ledger import (
+    REQUEST_ATTEMPT_LEDGER_REFRESH_SQL,
+    carries_model_usage,
+)
 from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
@@ -839,7 +843,7 @@ class PostgresAttemptCommands:
                     "UPDATE agent_attempts SET terminal_ready = FALSE WHERE id = $1",
                     attempt_id,
                 )
-            return await insert_event(
+            event_id = await insert_event(
                 conn,
                 job_id=attempt["job_id"],
                 attempt_id=attempt_id,
@@ -847,6 +851,11 @@ class PostgresAttemptCommands:
                 payload=payload,
                 client_seq=event_seq,
             )
+            if carries_model_usage(event_type, payload):
+                # A model call just finished: read its usage now rather than
+                # when a page next asks, so every open tab is pushed the total.
+                await conn.execute(REQUEST_ATTEMPT_LEDGER_REFRESH_SQL, attempt_id)
+            return event_id
 
     async def record_continuity_mode(
         self,

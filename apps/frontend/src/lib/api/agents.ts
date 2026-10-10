@@ -342,6 +342,11 @@ export interface AgentJobUsageApi {
     /** Cache-inclusive input, null when the harness counters cannot establish it. */
     normalized_input_tokens?: number | null;
   };
+  /**
+   * Orders two reads of this job's usage, asked for or pushed: the one whose
+   * version compares greater saw everything the other did. Opaque.
+   */
+  version?: string | null;
   conversation?: {
     totals: AgentLedgerTotalsApi | null;
     unknown_rows: AgentLedgerUnknownRowsApi | null;
@@ -399,6 +404,10 @@ export interface AgentJobApi {
   published_pr_url: string | null;
   published_commit_sha?: string | null;
   detail: string | null;
+  /** Raised by one on every change to this turn's row (absent on older servers). */
+  revision?: number;
+  /** The same counter for the conversation's row: title, pin, archive. */
+  thread_revision?: number;
   metadata: Record<string, unknown> | null;
   /** Names only; optional so a pre-MCP deployment stays readable. */
   mcp_servers?: string[];
@@ -1805,13 +1814,14 @@ export interface StreamAgentJobOptions {
   signal?: AbortSignal;
 }
 
-interface ParsedFrame {
+export interface ParsedFrame {
   event: string;
   data: string;
   id?: number;
 }
 
-function parseFrame(raw: string): ParsedFrame | null {
+/** One SSE frame's fields; `null` for a comment-only frame such as a keepalive. */
+export function parseFrame(raw: string): ParsedFrame | null {
   let event = 'message';
   let id: number | undefined;
   const dataLines: string[] = [];

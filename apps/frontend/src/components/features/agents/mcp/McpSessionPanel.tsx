@@ -16,6 +16,8 @@ import {
   type McpPolicy,
 } from '@/lib/api/mcp';
 
+import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from '../agentPush';
+
 /** The three answers a capability can carry, in escalating order. */
 const POLICIES: Array<{ value: McpPolicy; label: string }> = [
   { value: 'deny', label: 'Deny' },
@@ -316,12 +318,19 @@ function McpSessionPanelContent({
   // A held call has a deadline, and the agent is blocked on the answer: a
   // panel that only refreshes when the user clicks would show a stale queue
   // for exactly as long as the call is waiting.
+  // While the owner's change stream flows, each change to this job's calls is
+  // pushed and read at once, and the clock is only the backstop.
+  const pushLive = useAgentPushLive();
   useEffect(() => {
     if (!active) return;
     let disposed = false;
     let loading = false;
+    let again = false;
     const refresh = async () => {
-      if (loading) return;
+      if (loading) {
+        again = true;
+        return;
+      }
       loading = true;
       try {
         // Follow approved calls through dispatch and completion as well.
@@ -333,14 +342,22 @@ function McpSessionPanelContent({
         // Keep the last known state through transient polling failures.
       } finally {
         loading = false;
+        if (again && !disposed) {
+          again = false;
+          void refresh();
+        }
       }
     };
-    const timer = setInterval(refresh, 3000);
+    const timer = setInterval(refresh, pushLive ? PUSH_FALLBACK_POLL_MS : 3000);
+    const unsubscribe = onAgentRecordsChanged((change) => {
+      if (change.resync || change.mcp.includes(jobId)) void refresh();
+    });
     return () => {
       disposed = true;
       clearInterval(timer);
+      unsubscribe();
     };
-  }, [active, jobId]);
+  }, [active, jobId, pushLive]);
 
   function setPolicy(
     connectionId: number,

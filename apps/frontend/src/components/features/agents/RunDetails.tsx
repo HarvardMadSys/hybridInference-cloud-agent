@@ -32,6 +32,7 @@ import {
 } from './StepDetailParts';
 import { formatDuration } from './TurnFooter';
 import type { AgentJob } from './types';
+import { isOlderUsage, onAgentRecordsChanged } from './agentPush';
 
 export type RunTab = 'overview' | 'usage' | 'raw';
 
@@ -68,6 +69,18 @@ const LEDGER_LABEL: Record<AgentJobUsageApi['ledger']['status'], string> = {
  * panel repeatedly is free.
  */
 const usageCache = new Map<string, AgentJobUsageApi | null>();
+
+/**
+ * Cache `next` for a job unless what is cached is newer, and return what is
+ * kept. Every write goes through here: a read, a refresh's answer and a push
+ * can arrive in any order, and their versions say which is newer.
+ */
+function rememberUsage(jobId: string, next: AgentJobUsageApi | null): AgentJobUsageApi | null {
+  const known = usageCache.get(jobId);
+  const kept = next && known && isOlderUsage(next, known) ? known : next;
+  usageCache.set(jobId, kept);
+  return kept;
+}
 
 /** How long to wait before reading a ledger whose work has not finished. */
 const LEDGER_POLL_MS = 15_000;
@@ -139,6 +152,9 @@ function useJobUsage(jobId: string): {
   const retries = useRef(0);
   const waits = useRef(0);
   const currentJob = useRef(jobId);
+  // Raised by each usage pushed for this job without a version: a read that
+  // left before it is taken to be older, and is dropped.
+  const pushes = useRef(0);
 
   useEffect(() => {
     if (currentJob.current !== jobId) {
@@ -156,10 +172,12 @@ function useJobUsage(jobId: string): {
     if (!mustRead) return undefined;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const pushesBefore = pushes.current;
     getAgentJobUsage(jobId, controller.signal)
-      .then((result) => {
-        if (controller.signal.aborted) return;
-        usageCache.set(jobId, result);
+      .then((read) => {
+        if (controller.signal.aborted || pushes.current !== pushesBefore) return;
+        // A usage pushed while this read was on its way may be the newer one.
+        const result = rememberUsage(jobId, read);
         setUsage(result);
         setError(null);
         const next = ledgerNextRead(result, Date.now());
@@ -173,7 +191,7 @@ function useJobUsage(jobId: string): {
         }
       })
       .catch((cause: unknown) => {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && pushes.current === pushesBefore) {
           setError(cause instanceof Error ? cause.message : 'Could not load usage');
         }
       })
@@ -186,6 +204,27 @@ function useJobUsage(jobId: string): {
     };
   }, [jobId, read]);
 
+  // A pushed change to this job's usage is shown as sent, or read at once when
+  // it came without a value, outside the budget above: it is the server saying
+  // there is something new, not a guess.
+  useEffect(
+    () =>
+      onAgentRecordsChanged((change) => {
+        const pushed = change.usageValues[jobId];
+        if (pushed && !change.resync) {
+          if (!pushed.version) pushes.current += 1;
+          // A read that left after this was computed may already show more.
+          setUsage(rememberUsage(jobId, pushed));
+          setError(null);
+          setLoaded(true);
+        } else if (change.resync || change.usage.includes(jobId)) {
+          requested.current = true;
+          setRead((value) => value + 1);
+        }
+      }),
+    [jobId],
+  );
+
   const refresh = useCallback(() => {
     setRefreshing(true);
     // A reader who asks for fresh accounting restarts the panel's own budget.
@@ -193,8 +232,9 @@ function useJobUsage(jobId: string): {
     waits.current = 0;
     refreshAgentJobUsage(jobId)
       .then((result) => {
-        usageCache.set(jobId, result);
-        setUsage(result);
+        // The answer is cached usage as it was; a push may already be newer.
+        const kept = rememberUsage(jobId, result);
+        if (currentJob.current === jobId) setUsage(kept);
       })
       .catch((cause: unknown) => {
         setError(cause instanceof Error ? cause.message : 'Could not refresh usage');

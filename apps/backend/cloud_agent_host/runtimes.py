@@ -1279,8 +1279,9 @@ class PiRuntime(GenericRuntime):
         self._reported_subtypes: set[str] = set()
         self.session_id: str | None = None
         self._preview = ReplyPreview(clock)
-        # pi's messages carry no id on the wire; counting them gives each text
-        # block a preview id that its ``text_end`` can name again.
+        # pi gives its messages no id of its own, and the provider's
+        # ``responseId`` is absent from ``message_start``; counting messages
+        # gives each text block a preview id that its ``text_end`` can name again.
         self._message_no = 0
 
     def prepare(
@@ -1451,8 +1452,9 @@ class PiRuntime(GenericRuntime):
             self._reported_subtypes.add(subtype)
             return self._raw(line, f"unclassified message_update subtype {subtype!r}")
 
+        response = self._response_identity(event)
         if subtype == "thinking_end":
-            return NormalizedEvent(THINKING, {"text": _truncate(update.get("content"))})
+            return NormalizedEvent(THINKING, {"text": _truncate(update.get("content")), **response})
         if subtype == "text_end":
             # The one event the owner is actually waiting for: `message` is
             # what the control plane copies into agent_thread_messages, which
@@ -1465,6 +1467,7 @@ class PiRuntime(GenericRuntime):
                     "text": _truncate(update.get("content")),
                     "truncated": _clipped(update.get("content")),
                     "preview_id": preview_id,
+                    **response,
                 },
             )
         tool_call = update.get("toolCall")
@@ -1478,8 +1481,23 @@ class PiRuntime(GenericRuntime):
                 # Keyed `input` like every other adapter, because that is what
                 # the UI reads to render the command.
                 "input": tool_call.get("arguments"),
+                **response,
             },
         )
+
+    @staticmethod
+    def _response_identity(event: dict[str, Any]) -> dict[str, str]:
+        """Name the provider response a message belongs to, when pi recorded it.
+
+        pi copies the first stream chunk's id into ``responseId`` and repeats
+        the message on every ``message_update`` and ``message_end``. Against
+        the gateway that is the chat-completion id it logs for the request, so
+        ``usage_id`` joins a message to its measured request, as Claude Code's
+        native ``message.id`` does.
+        """
+        message = event.get("message")
+        response_id = message.get("responseId") if isinstance(message, dict) else None
+        return {"usage_id": response_id} if isinstance(response_id, str) and response_id else {}
 
     def _preview_id(self, update: dict[str, Any]) -> str:
         return f"message-{self._message_no}:{update.get('contentIndex')}"
@@ -1517,6 +1535,7 @@ class PiRuntime(GenericRuntime):
                     "total_tokens": usage.get("totalTokens"),
                     "model": message.get("model"),
                     "text": (f"{usage.get('input', 0)} in / {usage.get('output', 0)} out tokens"),
+                    **self._response_identity(event),
                 },
             )
         # role="user" is the prompt echoed back; the owner wrote it, and the

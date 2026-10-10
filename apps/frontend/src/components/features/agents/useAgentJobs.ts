@@ -28,6 +28,16 @@ import { getConversationState } from './conversationState';
 import { isActiveJobState, isActiveConversationState } from './conversationJob';
 import { hasActiveGoal } from './goal/liveWork';
 import { preserveResolvedTaskTitle, taskTitleNeedsGeneration } from './taskTitles';
+import {
+  onAgentRecordsChanged,
+  overlayPushed,
+  PUSH_FALLBACK_POLL_MS,
+  useAgentPushLive,
+} from './agentPush';
+
+/** First and largest pause before a turn's event stream is opened again. */
+export const STREAM_RETRY_MIN_MS = 1_000;
+export const STREAM_RETRY_MAX_MS = 30_000;
 
 const ACTIVE_ATTEMPT_PHASES = new Set([
   'started',
@@ -316,6 +326,19 @@ export function useProjectJobs(limit = 200): {
 }
 
 /** One job, its event log, and its patch — kept live over SSE. */
+/**
+ * Whether a read of the turn's row says that the turn on screen, still active
+ * here, has ended. Such a read is not applied: the turn's own event stream ends
+ * it, after delivering its last events and `job_finished`, which reloads the
+ * conversation. Applying the read would close that stream before them. While
+ * that stream is down, such a read reloads the conversation instead.
+ */
+function endsStreamingTurn(current: AgentJobApi | null, latest: AgentJobApi): boolean {
+  return (
+    current?.id === latest.id && isActiveJobState(current.state) && !isActiveJobState(latest.state)
+  );
+}
+
 export function useAgentJob(
   jobId: string,
   {
@@ -384,11 +407,19 @@ export function useAgentJob(
     setPatch(null);
     setLoading(true);
 
-    Promise.all([getAgentJob(jobId), getAgentJobThread(jobId), listAllAgentThreadEvents(jobId)])
+    // The turn's row is read before its events. A turn stores every event
+    // before it ends, so events read after a row that says it ended are all
+    // of them; read alongside, they could predate an end the row then reports,
+    // and the turn would end on screen without its last events.
+    Promise.all([getAgentJob(jobId), getAgentJobThread(jobId)])
+      .then(
+        async ([job, foundThread]) =>
+          [job, foundThread, await listAllAgentThreadEvents(jobId)] as const,
+      )
       .then(([job, foundThread, foundEvents]) => {
         if (cancelled || requestGeneration !== generation.current) return;
         const ownEvents = foundEvents.filter((event) => event.job_id === jobId);
-        setApi((current) => preserveResolvedTaskTitle(current, job));
+        setApi((current) => preserveResolvedTaskTitle(current, overlayPushed(job)));
         setEvents(ownEvents);
         setThreadEvents(foundEvents);
         setThread(foundThread);
@@ -435,12 +466,25 @@ export function useAgentJob(
   const isLive = isActiveJobState(state);
   const currentTurnNo =
     api?.turn_no ?? thread?.jobs.find((threadJob) => threadJob.id === jobId)?.turn_no ?? 1;
+  // Whether this turn's own stream is open or opening. Only then is the end of
+  // the turn left to it; while it is down, a read saying the turn ended reads
+  // the conversation whole, which ends it with every event it stored.
+  const streaming = useRef(false);
+  const streamFailures = useRef(0);
+  const [streamAttempt, setStreamAttempt] = useState(0);
+  useEffect(() => {
+    streamFailures.current = 0;
+  }, [jobId]);
   useEffect(() => {
     if (!active || !jobId || !isLive) return undefined;
     const controller = new AbortController();
+    let finished = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    streaming.current = true;
     void streamAgentJob(jobId, {
       signal: controller.signal,
       onEvent: (event) => {
+        streamFailures.current = 0;
         // The stream can replay across a reconnect, so dedupe on the global id
         // the server assigns rather than assuming each frame is new.
         if (seen.current.has(event.id)) return;
@@ -454,23 +498,93 @@ export function useAgentJob(
         // becoming active; keep the status pill in step without polling.
         setApi((current) => (current ? applyAgentLifecycleEvent(current, event) : current));
       },
-      onFinished: () => reload(),
-    }).catch(() => {
-      // A dropped stream is the expected shape when the server's cap fires;
-      // the reload picks up anything missed.
-      if (!controller.signal.aborted) reload();
+      onFinished: () => {
+        finished = true;
+        streamFailures.current = 0;
+        reload();
+      },
+    })
+      .catch(() => undefined)
+      .then(() => {
+        if (controller.signal.aborted || finished) return;
+        // The stream could not connect, or failed (it reconnects by itself
+        // after a drop mid-stream). Read the conversation again, which ends
+        // the turn if it has ended, and open the stream again after a pause.
+        streaming.current = false;
+        reload();
+        const pause = Math.min(
+          STREAM_RETRY_MAX_MS,
+          STREAM_RETRY_MIN_MS * 2 ** streamFailures.current,
+        );
+        streamFailures.current += 1;
+        retry = setTimeout(() => setStreamAttempt((attempt) => attempt + 1), pause);
+      });
+    return () => {
+      streaming.current = false;
+      controller.abort();
+      clearTimeout(retry);
+    };
+  }, [active, currentTurnNo, jobId, isLive, reload, streamAttempt]);
+
+  // The turn on screen, for the reads below that decide outside a state update.
+  const shownApi = useRef<AgentJobApi | null>(null);
+  useEffect(() => {
+    shownApi.current = api;
+  }, [api]);
+
+  // The owner's change stream reports this conversation's title, and any turn
+  // of it changing. What it sends is patched in at once; the turn's own row is
+  // then read for the fields a push does not carry (detail, goal, attempt).
+  const pushLive = useAgentPushLive();
+  const pushThreadId = api?.id === jobId ? api.thread_id : undefined;
+  useEffect(() => {
+    if (!active || !jobId) return undefined;
+    let cancelled = false;
+    let latestRead = 0;
+    const unsubscribe = onAgentRecordsChanged((change) => {
+      const touched =
+        change.resync ||
+        change.jobs.some(
+          (job) =>
+            job.id === jobId || (pushThreadId !== undefined && job.thread_id === pushThreadId),
+        ) ||
+        change.threads.some((thread) => thread.id === pushThreadId) ||
+        (pushThreadId != null && change.publications.includes(pushThreadId));
+      if (!touched) return;
+      setApi((current) => (current?.id === jobId ? overlayPushed(current) : current));
+      const read = ++latestRead;
+      void getAgentJob(jobId)
+        .then((latest) => {
+          if (cancelled || read !== latestRead) return;
+          if (!streaming.current && endsStreamingTurn(shownApi.current, latest)) {
+            reload();
+            return;
+          }
+          setApi((current) =>
+            endsStreamingTurn(current, latest)
+              ? current
+              : preserveResolvedTaskTitle(current, overlayPushed(latest)),
+          );
+        })
+        .catch(() => {
+          // The next change, or the fallback clock below, reads it again.
+        });
     });
-    return () => controller.abort();
-  }, [active, currentTurnNo, jobId, isLive, reload]);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [active, jobId, pushThreadId, reload]);
 
   // A claim may recover an earlier failed title, including on a follow-up.
   // Outlast the server's bounded 120s retry window without waiting for SSE to end.
+  // While pushes flow, the generated title arrives with its conversation's row.
   const awaitingTitle =
     api?.id === jobId &&
     taskTitleNeedsGeneration(api) &&
     (state === 'running' || state === 'publishing' || state === 'succeeded');
   useEffect(() => {
-    if (!active || !awaitingTitle) return;
+    if (!active || !awaitingTitle || pushLive) return;
     let cancelled = false;
     let requests = 0;
     let pending = false;
@@ -515,7 +629,7 @@ export function useAgentJob(
       cancelled = true;
       clearInterval(timer);
     };
-  }, [active, awaitingTitle, jobId, tick]);
+  }, [active, awaitingTitle, jobId, pushLive, tick]);
 
   // A queued or terminal turn's stream cannot report another turn finishing.
   // Refresh shared activity until this turn takes over or the conversation
@@ -532,6 +646,7 @@ export function useAgentJob(
     (publicationActive ||
       goalActive ||
       (state !== 'running' && state !== 'publishing' && conversationActive));
+  const metadataInterval = pushLive ? PUSH_FALLBACK_POLL_MS : 5_000;
   useEffect(() => {
     if (!active || !jobId || !metadataActive) return undefined;
     let cancelled = false;
@@ -545,8 +660,16 @@ export function useAgentJob(
       // briefly reset unrelated UI state for no benefit.
       void getAgentJob(jobId)
         .then((latest) => {
-          if (!cancelled && generation.current === version)
-            setApi((current) => preserveResolvedTaskTitle(current, latest));
+          if (cancelled || generation.current !== version) return;
+          if (!streaming.current && endsStreamingTurn(shownApi.current, latest)) {
+            reload();
+            return;
+          }
+          setApi((current) =>
+            endsStreamingTurn(current, latest)
+              ? current
+              : preserveResolvedTaskTitle(current, overlayPushed(latest)),
+          );
         })
         .catch(() => {
           // This is a background freshness aid. Keep the last good terminal
@@ -555,12 +678,12 @@ export function useAgentJob(
         .finally(() => {
           pending = false;
         });
-    }, 5_000);
+    }, metadataInterval);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [active, jobId, metadataActive, tick]);
+  }, [active, jobId, metadataActive, metadataInterval, reload, tick]);
 
   const visibleThread = useMemo(() => {
     if (!hideForkedHistory || !thread) return thread;

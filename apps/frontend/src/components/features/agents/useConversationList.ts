@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { listAgentConversations, type AgentConversationApi } from '@/lib/api/agents';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
+import { onAgentRecordsChanged } from './agentPush';
 import { toDisplayJob } from './adapt';
 import type { ConversationRow } from './conversations';
 
@@ -82,6 +83,34 @@ export function useConversationList({
         reload();
       }),
     [includeArchived, reload],
+  );
+  // A pushed title or pin shows at once; the list owner's refresh then reads
+  // the page again for order and activity.
+  useEffect(
+    () =>
+      onAgentRecordsChanged((change) => {
+        const threads = new Map(change.threads.map((thread) => [thread.id, thread]));
+        if (threads.size === 0) return;
+        setData((current) => ({
+          ...current,
+          rows: current.rows.map((row) => {
+            const thread = threads.get(row.key);
+            if (!thread || thread.deleted) return row;
+            return {
+              ...row,
+              job: {
+                ...row.job,
+                title: thread.title ?? row.job.title,
+                pinnedAt:
+                  thread.pinned_at !== undefined
+                    ? (thread.pinned_at ?? undefined)
+                    : row.job.pinnedAt,
+              },
+            };
+          }),
+        }));
+      }),
+    [],
   );
   const fetchPage = useCallback(
     async (next?: string, version = generation.current) => {
