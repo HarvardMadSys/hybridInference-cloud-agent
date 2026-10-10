@@ -79,7 +79,10 @@ async def test_gateway_allowed_owners_work_independently_of_role(role, method):
     assert response.status_code == 200
     assert response.json()["agent_access"] == {"allowed": True, "permissions": ["agent.use"]}
     assert response.json()["role"] == role
-    assert response.json()["is_admin"] is False
+    # No admin flag rides along with the owner identity: admin authority is
+    # answered by verify_admin_access on the admin surface, never by a field
+    # an owner route could branch on.
+    assert "is_admin" not in response.json()
     assert gateway.asked == [_OWNER]
 
 

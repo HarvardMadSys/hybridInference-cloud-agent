@@ -60,7 +60,15 @@ def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
 
 
-router = APIRouter(prefix="/admin/agent/runs", dependencies=[Depends(_no_store)])
+# The guard is on the router, not only on each route: a route added to this
+# surface inherits it, so the next runs read cannot ship without one by
+# omission. Routes that audit keep their per-route ``admin`` parameter —
+# FastAPI runs a shared dependency once per request, so the two do not double-
+# ask the gateway.
+router = APIRouter(
+    prefix="/admin/agent/runs",
+    dependencies=[Depends(_no_store), Depends(verify_admin_access)],
+)
 
 
 def get_admin_run_queries(
