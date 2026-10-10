@@ -13,6 +13,7 @@ afterwards is the next one heard, nothing was sent before it.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -30,6 +31,7 @@ from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.migrations import apply_migrations, downgrade_to
 
 from cloud_agent.workers.background_wake import CHANNEL as BACKGROUND
+from cloud_agent.workers.mcp_decision_signal import CHANNEL as DECISIONS
 from cloud_agent.workers.owner_change_signal import CHANNEL as OWNER
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -283,6 +285,41 @@ async def test_the_queue_and_tool_approvals_tell_their_owner(store, pool):
         await owner.connection.close()
 
 
+async def test_a_held_call_leaving_pending_wakes_the_relay_holding_it(store, pool):
+    """Approved, denied or expired, the relay's request for that call is told.
+
+    What follows an approval is the relay's own doing, and is not announced.
+    """
+    job = await _create_job(store)
+    connection = await _connect(store, job["user_id"])
+    approved = await _invocation(store, job, connection)
+    denied = await _invocation(store, job, connection)
+    expired = await _invocation(store, job, connection)
+    decisions = await _listen(DECISIONS)
+    try:
+        assert await store.mcp.decide_mcp_invocation(
+            invocation_id=int(approved["id"]), approve=True, decided_by=job["user_id"]
+        )
+        assert await store.mcp.decide_mcp_invocation(
+            invocation_id=int(denied["id"]), approve=False, decided_by=job["user_id"]
+        )
+        assert await store.mcp.expire_mcp_invocation(invocation_id=int(expired["id"]))
+        assert await decisions.until_quiet(pool) == [
+            str(approved["id"]),
+            str(denied["id"]),
+            str(expired["id"]),
+        ]
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_mcp_invocations SET status = 'dispatching' WHERE id = $1",
+                int(approved["id"]),
+            )
+        assert await decisions.until_quiet(pool) == []
+    finally:
+        await decisions.connection.close()
+
+
 async def test_publication_progress_tells_every_conversation_in_the_workspace_and_wakes_workers(
     store, pool
 ):
@@ -365,12 +402,21 @@ async def _ended_shared_turn(store) -> dict:
     return sandbox
 
 
+async def _retry_now(pool, snapshot_id: int) -> None:
+    """Let a scheduled retry come due."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandbox_snapshots SET retry_at = NOW() WHERE id = $1", snapshot_id
+        )
+
+
 async def test_a_deferred_or_stalled_capture_leaves_the_coordinator_asleep(store, pool):
     """The real claim, deferral and stall reaper: a capture handed back wakes nothing.
 
-    Both return the workspace from ``snapshotting`` to ``pending``. The
-    coordinator retries it on its own clock; a wake-up would claim it again at
-    once, and a busy host would be asked in a loop.
+    Both return the workspace from ``snapshotting`` to ``pending``. A deferred
+    capture waits out its retry time, which is when the coordinator looks
+    again; a wake-up would claim it again at once, and a busy host would be
+    asked in a loop.
     """
     sandbox = await _ended_shared_turn(store)
     background = await _listen(BACKGROUND)
@@ -387,14 +433,94 @@ async def test_a_deferred_or_stalled_capture_leaves_the_coordinator_asleep(store
             detail="a turn entered the workspace",
         )
         assert await background.until_quiet(pool) == [], "a deferral must not wake it"
+        assert await store.snapshot.claim_due_sandbox_snapshot() is None, "not before its retry"
+        due = await store.snapshot.next_snapshot_retry_due()
+        assert due is not None
+        assert 3 < (due - datetime.now(UTC)).total_seconds() <= 5, "its retry is when it is due"
 
+        await _retry_now(pool, capture["snapshot_id"])
+        assert await store.snapshot.next_snapshot_retry_due() is None
         capture = await store.snapshot.claim_due_sandbox_snapshot()
-        assert capture is not None, "its own clock finds the capture again"
+        assert capture is not None, "at its retry time the coordinator finds it again"
         assert await store.snapshot.reap_stalled_sandbox_snapshot_captures(stall_seconds=0) == [
             capture["snapshot_id"]
         ]
         assert await background.until_quiet(pool) == [], "nor must a reaped stall"
-        assert await store.snapshot.claim_due_sandbox_snapshot() is not None
+        assert await store.snapshot.claim_due_sandbox_snapshot() is not None, (
+            "a stall the reaper returned is due at once"
+        )
+    finally:
+        await background.connection.close()
+
+
+async def test_a_failed_base_import_waits_out_its_retry(store, pool):
+    """Not handed out again before its retry time, which is when the publisher wakes."""
+    await _ended_shared_turn(store)
+    capture = await store.snapshot.claim_due_sandbox_snapshot()
+    assert capture is not None
+    patch = "diff --git a/answer.txt b/answer.txt\nnew file mode 100644\n"
+    assert (
+        await store.snapshot.record_sandbox_snapshot_capture(
+            snapshot_id=capture["snapshot_id"],
+            sandbox_id=capture["sandbox_id"],
+            sandbox_generation=capture["generation"],
+            container_id=capture["container_id"],
+            workspace_epoch=capture["workspace_epoch"],
+            base_sha=capture["base_sha"],
+            patch=patch,
+            content_sha256=hashlib.sha256(patch.encode()).hexdigest(),
+        )
+        == "captured"
+    )
+    assert await store.snapshot.claim_for_publish() is not None
+    commit_sha = "b" * 40
+    assert await store.snapshot.record_snapshot_publish(
+        snapshot_id=capture["snapshot_id"],
+        pr_url="https://example.test/pull/1",
+        commit_sha=commit_sha,
+    )
+    assert (await store.snapshot.pending_snapshot_base_import())["snapshot_id"] == capture[
+        "snapshot_id"
+    ]
+    assert await store.snapshot.next_base_import_retry_due() is None
+
+    await store.snapshot.record_snapshot_base_import_failure(
+        snapshot_id=capture["snapshot_id"], detail="the broker is unavailable"
+    )
+    assert await store.snapshot.pending_snapshot_base_import() is None, "not before its retry"
+    due = await store.snapshot.next_base_import_retry_due()
+    assert due is not None
+    assert 13 < (due - datetime.now(UTC)).total_seconds() <= 15
+
+    await _retry_now(pool, capture["snapshot_id"])
+    assert await store.snapshot.pending_snapshot_base_import() is not None
+    assert await store.snapshot.complete_snapshot_base_import(
+        snapshot_id=capture["snapshot_id"], commit_sha=commit_sha
+    )
+    async with pool.acquire() as conn:
+        retry_at = await conn.fetchval(
+            "SELECT retry_at FROM agent_sandbox_snapshots WHERE id = $1", capture["snapshot_id"]
+        )
+    assert retry_at is None
+
+
+async def test_a_workspace_back_with_a_snapshot_pending_wakes_the_coordinator(store, pool):
+    sandbox = await _ended_shared_turn(store)
+    background = await _listen(BACKGROUND)
+    try:
+        async with pool.acquire() as conn:
+
+            async def state(new: str) -> list[str]:
+                await conn.execute(
+                    "UPDATE agent_sandboxes SET state = $2 WHERE id = $1",
+                    sandbox["sandbox_id"],
+                    new,
+                )
+                return await background.until_quiet(pool)
+
+            assert await state("stopping") == []
+            assert await state("stopped") == ["snapshot"]
+            assert await state("stopped") == [], "only a change of state"
     finally:
         await background.connection.close()
 
@@ -442,11 +568,12 @@ async def test_the_hints_and_wake_ups_go_with_a_downgrade_and_come_back(store, p
                 "'agent_notify_owner', 'agent_notify_usage_changed', "
                 "'agent_notify_queue_changed', 'agent_notify_mcp_changed', "
                 "'agent_notify_publication_changed', 'agent_notify_background', "
-                "'agent_notify_background_snapshot_state', 'agent_wake_background_from_trigger')"
+                "'agent_notify_background_snapshot_state', 'agent_wake_background_from_trigger', "
+                "'agent_notify_mcp_decided')"
             )
         return {row["proname"] for row in rows}
 
-    assert len(await functions()) == 8
+    assert len(await functions()) == 9
     try:
         downgrade_to(config, "0031_owner_change_notify")
         assert await functions() == set()
@@ -462,4 +589,4 @@ async def test_the_hints_and_wake_ups_go_with_a_downgrade_and_come_back(store, p
             await background.connection.close()
     finally:
         apply_migrations(config)
-    assert len(await functions()) == 8
+    assert len(await functions()) == 9

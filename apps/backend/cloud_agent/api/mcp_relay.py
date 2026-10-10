@@ -35,6 +35,7 @@ tools it is spending.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -44,7 +45,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from cloud_agent.api.deps import get_storage
+from cloud_agent.api.deps import get_mcp_decision_signal, get_storage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import protocol
 from cloud_agent.mcp.authorization import decide, visible_capabilities
@@ -85,6 +86,7 @@ if TYPE_CHECKING:
         CredentialQueries,
         McpConnectionRepository,
     )
+    from cloud_agent.workers.mcp_decision_signal import McpDecisionSignal
 
 
 logger = get_logger(__name__)
@@ -108,6 +110,14 @@ router = APIRouter(prefix="/v1/agent/mcp")
 # hung upstream is a job burning its wall-clock timeout for nothing.
 _DEFAULT_UPSTREAM_TIMEOUT_S = 120.0
 _CONNECT_TIMEOUT_S = 10.0
+
+#: A held call waits for its owner's decision, which wakes it, and looks again
+#: at least this often anyway: its caller leaving, its attempt being superseded
+#: and its connection changing announce nothing.
+_APPROVAL_IDLE_S = 5.0
+#: How often it looks where nothing would wake it: no listener in this process,
+#: or the listening connection lost.
+_APPROVAL_POLL_S = 1.0
 
 # Forwarded from the agent to the upstream. Everything else -- Authorization
 # above all, but equally Cookie, X-Forwarded-*, and whatever else the CLI or an
@@ -626,69 +636,92 @@ async def _wait_for_approval(
     """Keep the original CLI call open and dispatch it once its owner approves.
 
     Waiting owns no transaction. The normal attempt heartbeat continues, and
-    each poll checks whether the attempt or selected connection changed. A
-    disconnected caller leaves no reusable approval behind.
+    each look checks whether the attempt or selected connection changed. A
+    disconnected caller leaves no reusable approval behind. The owner's
+    decision wakes the wait; otherwise it looks again on a clock.
     """
     invocation_id = int(invocation["id"])
-    try:
-        while True:
-            if request is not None and await request.is_disconnected():
-                raise asyncio.CancelledError
-            if datetime.now(timezone.utc) >= invocation["expires_at"]:
-                break
-            attempt_id = fence["attempt_id"]
-            if attempt_id is None:
-                break
-            identity = await store.credential_queries.resolve_model_credential(
-                job_id=authorized.job_id,
-                attempt_id=attempt_id,
-                lease_generation=int(fence["lease_generation"] or 0),
-            )
-            if identity is None:
-                break
-            try:
-                current = await _resolve_live_binding(
-                    identity,
-                    authorized.alias,
-                    store,
+    signal = get_mcp_decision_signal(request) if request is not None else None
+    subscription = (
+        signal.subscribe(str(invocation_id)) if signal is not None else contextlib.nullcontext()
+    )
+    with subscription as woken:
+        try:
+            while True:
+                if request is not None and await request.is_disconnected():
+                    raise asyncio.CancelledError
+                if datetime.now(timezone.utc) >= invocation["expires_at"]:
+                    break
+                attempt_id = fence["attempt_id"]
+                if attempt_id is None:
+                    break
+                identity = await store.credential_queries.resolve_model_credential(
+                    job_id=authorized.job_id,
                     attempt_id=attempt_id,
                     lease_generation=int(fence["lease_generation"] or 0),
                 )
-            except HTTPException:
-                break
-            if (
-                not current.binding.enabled
-                or current.connection_id != authorized.connection_id
-                or current.connection.config_revision != fence["config_revision"]
-                or current.connection.authorization_epoch != fence["authorization_epoch"]
-                or current.connection.capability_revision != fence["capability_revision"]
-                or current.binding.policy_revision != fence["policy_revision"]
-            ):
-                break
-            row = await store.mcp.get_mcp_invocation(invocation_id=invocation_id)
-            if row is None:
-                break
-            if row["status"] == "approved":
-                claimed = await store.mcp.claim_mcp_invocation(invocation_id=invocation_id, **fence)
-                if claimed is not None:
-                    # OAuth may have refreshed while the user was deciding.
-                    # Use the checked connection's current credential for dispatch.
-                    authorized.server = current.server
-                    authorized.connection = current.connection
-                    authorized.secret = current.secret
-                    authorized.dispatches.append(
-                        (invocation_id, int(claimed["dispatch_generation"]))
+                if identity is None:
+                    break
+                try:
+                    current = await _resolve_live_binding(
+                        identity,
+                        authorized.alias,
+                        store,
+                        attempt_id=attempt_id,
+                        lease_generation=int(fence["lease_generation"] or 0),
                     )
-                    return None
-                break
-            if row["status"] != "pending":
-                return _error_reply(request_id, f"MCP call {row['status']}; it was not dispatched.")
-            await asyncio.sleep(1)
-    except asyncio.CancelledError:
-        await asyncio.shield(store.mcp.expire_mcp_invocation(invocation_id=invocation_id))
-        raise
+                except HTTPException:
+                    break
+                if (
+                    not current.binding.enabled
+                    or current.connection_id != authorized.connection_id
+                    or current.connection.config_revision != fence["config_revision"]
+                    or current.connection.authorization_epoch != fence["authorization_epoch"]
+                    or current.connection.capability_revision != fence["capability_revision"]
+                    or current.binding.policy_revision != fence["policy_revision"]
+                ):
+                    break
+                row = await store.mcp.get_mcp_invocation(invocation_id=invocation_id)
+                if row is None:
+                    break
+                if row["status"] == "approved":
+                    claimed = await store.mcp.claim_mcp_invocation(
+                        invocation_id=invocation_id, **fence
+                    )
+                    if claimed is not None:
+                        # OAuth may have refreshed while the user was deciding.
+                        # Use the checked connection's current credential for dispatch.
+                        authorized.server = current.server
+                        authorized.connection = current.connection
+                        authorized.secret = current.secret
+                        authorized.dispatches.append(
+                            (invocation_id, int(claimed["dispatch_generation"]))
+                        )
+                        return None
+                    break
+                if row["status"] != "pending":
+                    return _error_reply(
+                        request_id, f"MCP call {row['status']}; it was not dispatched."
+                    )
+                await _until_decided(signal, woken, expires_at=invocation["expires_at"])
+        except asyncio.CancelledError:
+            await asyncio.shield(store.mcp.expire_mcp_invocation(invocation_id=invocation_id))
+            raise
     await store.mcp.expire_mcp_invocation(invocation_id=invocation_id)
     return _error_reply(request_id, "MCP approval expired or the session authorization changed.")
+
+
+async def _until_decided(
+    signal: McpDecisionSignal | None, woken: asyncio.Event | None, *, expires_at: datetime
+) -> None:
+    """Wait for the held call's decision, its expiry, or the next look anyway."""
+    look = _APPROVAL_IDLE_S if signal is not None and signal.listening else _APPROVAL_POLL_S
+    remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+    timeout_s = max(0.0, min(look, remaining))
+    if signal is None or woken is None:
+        await asyncio.sleep(timeout_s)
+    else:
+        await signal.wait(woken, timeout_s)
 
 
 async def _finish_dispatches(

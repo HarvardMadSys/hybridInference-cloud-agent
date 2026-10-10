@@ -1,9 +1,9 @@
 """One connection per process that listens for Postgres notifications.
 
 Triggers notify when something a request is waiting on may have changed: a job
-became claimable (``agent_work_available``, migration ``0029``), or a job stored
-an event or changed state (``agent_job_events``, migration ``0030``). Each
-channel has a receiver in this process that wakes whoever waits on it.
+became claimable (``agent_work_available``, migration ``0029``), a job stored
+an event or changed state (``agent_job_events``, migration ``0030``), and so on.
+Each channel has a receiver in this process that wakes whoever waits on it.
 
 A notification is only a hint to read again; the rows stay the record. One sent
 while nothing listened is gone, so every connect and every loss resets each
@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from cloud_agent.logging_utils import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
     import asyncpg
 
@@ -42,6 +42,68 @@ class Receiver(Protocol):
 
     def reset(self, *, listening: bool) -> None:
         """The connection opened or was lost: wake every waiter to read once."""
+
+
+class KeyedSignal:
+    """Wake-ups by key, for a channel whose notifications name one.
+
+    A waiter subscribes *before* it reads and consumes its wake-up *after* it
+    waits, so a notification that arrives while it is reading is still waiting
+    for it: nothing stored between a read and the next wait is left for the
+    timeout.
+    """
+
+    channel: str
+
+    def __init__(self) -> None:
+        """Start with nobody waiting and no connection listening yet."""
+        self._waiting: dict[str, set[asyncio.Event]] = {}
+        #: Whether a connection is listening now. Until it is, and after it is
+        #: lost, nothing would wake a waiter, so waiters look on a short clock.
+        self.listening = False
+
+    @contextlib.contextmanager
+    def subscribe(self, key: str) -> Iterator[asyncio.Event]:
+        """Register a wake-up for ``key`` for as long as the block runs."""
+        woken = asyncio.Event()
+        self._waiting.setdefault(key, set()).add(woken)
+        try:
+            yield woken
+        finally:
+            waiting = self._waiting.get(key)
+            if waiting is not None:
+                waiting.discard(woken)
+                if not waiting:
+                    del self._waiting[key]
+
+    @staticmethod
+    async def wait(woken: asyncio.Event, timeout_s: float) -> bool:
+        """Wait for a wake-up or the timeout; report which, and consume it."""
+        try:
+            # A zero timeout must still see a wake-up that already came.
+            if not woken.is_set():
+                await asyncio.wait_for(woken.wait(), timeout_s)
+        except TimeoutError:
+            return False
+        finally:
+            woken.clear()
+        return True
+
+    def notified(self, payload: str) -> None:
+        """Something changed for the key ``payload`` names."""
+        for woken in self._waiting.get(payload, ()):
+            woken.set()
+
+    def reset(self, *, listening: bool) -> None:
+        """The connection opened or was lost: every waiter reads once to catch up."""
+        self.listening = listening
+        for waiting in self._waiting.values():
+            for woken in waiting:
+                woken.set()
+
+    def subscribers(self, key: str) -> int:
+        """How many wait on ``key``; for tests and diagnostics."""
+        return len(self._waiting.get(key, ()))
 
 
 async def listen(dsn: str, receivers: Sequence[Receiver]) -> None:

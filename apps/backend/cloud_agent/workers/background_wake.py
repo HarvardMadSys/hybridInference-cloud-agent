@@ -4,8 +4,9 @@ The snapshot coordinator, the publisher and the usage collector each looked for
 work on a clock. Triggers now notify ``agent_background_work`` with the name of
 the worker that has something new (migration ``0032``), and the process's shared
 listener (``notifications``) hands it here. Each worker waits for its name or
-its own clock, whichever comes first; the clock stays as the backstop for
-anything no trigger announces, such as a deferred capture's retry.
+for the earliest retry it scheduled itself, with a long clock as the backstop
+for anything no trigger announces; while nothing listens, it looks on its old
+short clock instead.
 """
 
 from __future__ import annotations
@@ -25,8 +26,11 @@ class BackgroundWake:
     channel = CHANNEL
 
     def __init__(self) -> None:
-        """Start with nothing pending."""
+        """Start with nothing pending and no connection listening yet."""
         self._woken = {kind: asyncio.Event() for kind in KINDS}
+        #: Whether a connection is listening now. Until it is, and after it is
+        #: lost, nothing announces new work, so workers look on their old clocks.
+        self.listening = False
 
     def notified(self, payload: str) -> None:
         """Work may be waiting for the worker ``payload`` names."""
@@ -36,7 +40,7 @@ class BackgroundWake:
 
     def reset(self, *, listening: bool) -> None:
         """A notification sent while nothing listened is gone: every worker looks."""
-        _ = listening
+        self.listening = listening
         for woken in self._woken.values():
             woken.set()
 

@@ -441,8 +441,8 @@ async def collect_usage_snapshots(
 
     With ``wake`` an idle collector waits for an attempt to stop or a refresh
     to be scheduled, and otherwise until the earliest scheduled one is due,
-    never longer than ``LEDGER_IDLE_S``. Without it, it looks every
-    ``REFRESH_POLL_SECONDS``.
+    never longer than ``LEDGER_IDLE_S``. Without it, or while nothing listens,
+    it looks every ``REFRESH_POLL_SECONDS``.
     """
     while True:
         try:
@@ -465,7 +465,9 @@ async def collect_usage_snapshots(
         if wake is None:
             await asyncio.sleep(REFRESH_POLL_SECONDS)
             continue
-        idle_s = LEDGER_IDLE_S
+        # While nothing listens, a refresh scheduled meanwhile announces
+        # nothing: look on the old clock until the listener is back.
+        idle_s = LEDGER_IDLE_S if wake.listening else REFRESH_POLL_SECONDS
         with contextlib.suppress(Exception):
             due = await store.next_ledger_refresh_due()
             if due is not None:

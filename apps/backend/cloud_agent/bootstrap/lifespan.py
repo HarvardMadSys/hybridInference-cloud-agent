@@ -20,6 +20,7 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.workers.attempts import reap_expired_attempts
 from cloud_agent.workers.background_wake import BackgroundWake
 from cloud_agent.workers.job_event_signal import JobEventSignal
+from cloud_agent.workers.mcp_decision_signal import McpDecisionSignal
 from cloud_agent.workers.notifications import listen
 from cloud_agent.workers.owner_change_signal import OwnerChangeSignal
 from cloud_agent.workers.snapshots import coordinate_shared_snapshots
@@ -266,6 +267,8 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         )
         _BACKGROUND_TASKS.add(app.state.notification_listener_task)
         app.state.notification_listener_task.add_done_callback(_BACKGROUND_TASKS.discard)
+        # This listener holds no tool call for its owner's decision.
+        app.state.mcp_decision_signal = None
         _start_publisher(app, storage)
         logger.info("cloud agent control plane started")
     else:
@@ -284,7 +287,15 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         app.state.job_event_signal = None
         app.state.owner_change_signal = None
         app.state.background_wake = None
-        app.state.notification_listener_task = None
+        # The relay holds tool calls for their owners' decisions, and a
+        # decision wakes the call it names: its own connection, on that one
+        # channel.
+        app.state.mcp_decision_signal = McpDecisionSignal()
+        app.state.notification_listener_task = asyncio.create_task(
+            listen(dsn, (app.state.mcp_decision_signal,))
+        )
+        _BACKGROUND_TASKS.add(app.state.notification_listener_task)
+        app.state.notification_listener_task.add_done_callback(_BACKGROUND_TASKS.discard)
         logger.info("cloud agent relay listener started")
 
     # Each listener owns upstream sockets in its own process, even when it
