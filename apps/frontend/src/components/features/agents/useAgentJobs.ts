@@ -407,7 +407,15 @@ export function useAgentJob(
     setPatch(null);
     setLoading(true);
 
-    Promise.all([getAgentJob(jobId), getAgentJobThread(jobId), listAllAgentThreadEvents(jobId)])
+    // The turn's row is read before its events. A turn stores every event
+    // before it ends, so events read after a row that says it ended are all
+    // of them; read alongside, they could predate an end the row then reports,
+    // and the turn would end on screen without its last events.
+    Promise.all([getAgentJob(jobId), getAgentJobThread(jobId)])
+      .then(
+        async ([job, foundThread]) =>
+          [job, foundThread, await listAllAgentThreadEvents(jobId)] as const,
+      )
       .then(([job, foundThread, foundEvents]) => {
         if (cancelled || requestGeneration !== generation.current) return;
         const ownEvents = foundEvents.filter((event) => event.job_id === jobId);

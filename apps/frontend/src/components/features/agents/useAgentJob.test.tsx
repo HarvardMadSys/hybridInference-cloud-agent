@@ -516,6 +516,68 @@ describe('useAgentJob with the owner change stream', () => {
       expect(streamAgentJob).toHaveBeenCalledTimes(1);
     });
 
+    it('ends a turn that ends during the read that recovers it only with its last events', async () => {
+      vi.useFakeTimers();
+      serve(running);
+      vi.mocked(streamAgentJob).mockResolvedValue(undefined);
+      // What the database holds: the last message and the end commit together.
+      const stored = { ended: false };
+      let answerRow!: () => void;
+      vi.mocked(getAgentJob)
+        .mockResolvedValueOnce(running)
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              answerRow = () => resolve((stored.ended ? ended : running) as AgentJobApi);
+            }),
+        )
+        .mockResolvedValue(ended as AgentJobApi);
+      vi.mocked(listAllAgentThreadEvents).mockImplementation(async () =>
+        stored.ended ? [lastWords] : [],
+      );
+      const { result } = renderHook(() => useAgentJob(settled.id));
+      await act(async () => {});
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      expect(getAgentJob).toHaveBeenCalledTimes(2);
+
+      // The turn stores its last message and ends while that read is under way.
+      stored.ended = true;
+      await act(async () => answerRow());
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+
+      expect(result.current.job?.state).not.toBe('running');
+      expect(result.current.events.map((item) => item.payload?.text)).toContain('The last words');
+      await act(async () => vi.advanceTimersByTimeAsync(120_000));
+      expect(result.current.events.map((item) => item.payload?.text)).toContain('The last words');
+    });
+
+    it('shows the last events of a turn that ends as the conversation opens', async () => {
+      vi.useFakeTimers();
+      serve(running);
+      vi.mocked(streamAgentJob).mockImplementation(stayOpen);
+      const stored = { ended: false };
+      let answerRow!: () => void;
+      vi.mocked(getAgentJob).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            answerRow = () => resolve((stored.ended ? ended : running) as AgentJobApi);
+          }),
+      );
+      vi.mocked(listAllAgentThreadEvents).mockImplementation(async () =>
+        stored.ended ? [lastWords] : [],
+      );
+      const { result } = renderHook(() => useAgentJob(settled.id));
+      await act(async () => {});
+
+      stored.ended = true;
+      await act(async () => answerRow());
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+
+      expect(result.current.job?.state).not.toBe('running');
+      expect(result.current.events.map((item) => item.payload?.text)).toContain('The last words');
+      expect(streamAgentJob).not.toHaveBeenCalled();
+    });
+
     it('opens it again after a growing pause while the turn runs', async () => {
       vi.useFakeTimers();
       serve(running);

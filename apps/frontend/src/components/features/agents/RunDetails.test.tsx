@@ -272,6 +272,49 @@ describe('RunDetails', () => {
     resetAgentPush();
   });
 
+  it("keeps a newer pushed usage over the answer to the reader's refresh", async () => {
+    vi.useFakeTimers();
+    const before = usage();
+    before.version = '0002';
+    before.ledger.totals = { ...before.ledger.totals!, tokens_in: 2000 };
+    vi.mocked(getAgentJobUsage)
+      .mockResolvedValueOnce(before)
+      // Later reads are slow: only the refresh's answer can change what is shown.
+      .mockImplementation(() => new Promise(() => undefined));
+    await act(async () => {
+      render(
+        <RunDetails
+          jobId="ajob_refreshed"
+          turnNo={2}
+          tab="usage"
+          job={HISTORY_JOB}
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />,
+      );
+    });
+    expect(screen.getByText('2,000')).toBeInTheDocument();
+
+    const pushed = usage();
+    pushed.version = '0003';
+    pushed.ledger.totals = { ...pushed.ledger.totals!, tokens_in: 3000 };
+    act(() => receiveHint('usage', 'ajob_refreshed', pushed));
+    await act(async () => vi.advanceTimersByTimeAsync(PUSH_BATCH_MS));
+    expect(screen.getByText('3,000')).toBeInTheDocument();
+
+    // The refresh answers with the cached usage as it was before that push.
+    let answer!: (value: AgentJobUsageApi) => void;
+    vi.mocked(refreshAgentJobUsage).mockImplementation(
+      () => new Promise((resolve) => (answer = resolve)),
+    );
+    fireEvent.click(screen.getAllByRole('button', { name: 'Refresh' })[0]);
+    await act(async () => answer(before));
+
+    expect(screen.getByText('3,000')).toBeInTheDocument();
+    expect(screen.queryByText('2,000')).toBeNull();
+    resetAgentPush();
+  });
+
   it('says the deployment has no ledger instead of showing nothing', async () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(null);
     render(

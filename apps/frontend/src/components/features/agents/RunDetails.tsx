@@ -70,6 +70,18 @@ const LEDGER_LABEL: Record<AgentJobUsageApi['ledger']['status'], string> = {
  */
 const usageCache = new Map<string, AgentJobUsageApi | null>();
 
+/**
+ * Cache `next` for a job unless what is cached is newer, and return what is
+ * kept. Every write goes through here: a read, a refresh's answer and a push
+ * can arrive in any order, and their versions say which is newer.
+ */
+function rememberUsage(jobId: string, next: AgentJobUsageApi | null): AgentJobUsageApi | null {
+  const known = usageCache.get(jobId);
+  const kept = next && known && isOlderUsage(next, known) ? known : next;
+  usageCache.set(jobId, kept);
+  return kept;
+}
+
 /** How long to wait before reading a ledger whose work has not finished. */
 const LEDGER_POLL_MS = 15_000;
 /** Floor for an overdue read, so a timestamp in the past cannot spin. */
@@ -165,9 +177,7 @@ function useJobUsage(jobId: string): {
       .then((read) => {
         if (controller.signal.aborted || pushes.current !== pushesBefore) return;
         // A usage pushed while this read was on its way may be the newer one.
-        const shown = usageCache.get(jobId);
-        const result = read && shown && isOlderUsage(read, shown) ? shown : read;
-        usageCache.set(jobId, result);
+        const result = rememberUsage(jobId, read);
         setUsage(result);
         setError(null);
         const next = ledgerNextRead(result, Date.now());
@@ -202,11 +212,9 @@ function useJobUsage(jobId: string): {
       onAgentRecordsChanged((change) => {
         const pushed = change.usageValues[jobId];
         if (pushed && !change.resync) {
-          // A read that left after this was computed may already show more.
-          if (isOlderUsage(pushed, usageCache.get(jobId))) return;
           if (!pushed.version) pushes.current += 1;
-          usageCache.set(jobId, pushed);
-          setUsage(pushed);
+          // A read that left after this was computed may already show more.
+          setUsage(rememberUsage(jobId, pushed));
           setError(null);
           setLoaded(true);
         } else if (change.resync || change.usage.includes(jobId)) {
@@ -224,8 +232,9 @@ function useJobUsage(jobId: string): {
     waits.current = 0;
     refreshAgentJobUsage(jobId)
       .then((result) => {
-        usageCache.set(jobId, result);
-        setUsage(result);
+        // The answer is cached usage as it was; a push may already be newer.
+        const kept = rememberUsage(jobId, result);
+        if (currentJob.current === jobId) setUsage(kept);
       })
       .catch((cause: unknown) => {
         setError(cause instanceof Error ? cause.message : 'Could not refresh usage');
