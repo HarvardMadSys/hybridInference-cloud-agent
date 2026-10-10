@@ -7,9 +7,11 @@ import {
   getComputeOperations,
   getRetirementImpact,
   retireComputeAllocation,
+  rotateComputeAllocation,
   setComputePolicy,
   type ComputeAllocation,
   type ComputeOperation,
+  type ComputeRotation,
   type RenewalPolicy,
   type RetirementImpact,
 } from '@/lib/api/compute';
@@ -38,6 +40,8 @@ export default function ComputeResourcePanel({
   section?: 'all' | 'lease' | 'retire' | 'details';
 }) {
   const [policy, setPolicy] = useState(allocation.policy);
+  // Typed separately so commas and spaces can be entered before they parse.
+  const [nodeTypes, setNodeTypes] = useState(allocation.policy.node_types.join(', '));
   const [adoptManagement, setAdoptManagement] = useState(false);
   const [revision, setRevision] = useState(allocation.revision);
   const [target, setTarget] = useState('');
@@ -46,12 +50,12 @@ export default function ComputeResourcePanel({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const requestIds = useRef<{ extend?: string; retire?: string }>({});
+  const requestIds = useRef<{ extend?: string; retire?: string; rotate?: string }>({});
   const allows = (action: string) => allocation.allowed_actions.includes(action);
   const needsDeployment =
     allocation.management_mode === 'observe' && !allocation.nodes.some((node) => node.hosts.length);
 
-  async function intent(kind: 'extend' | 'retire') {
+  async function intent(kind: 'extend' | 'retire' | 'rotate') {
     if (busy) return;
     setBusy(kind);
     setError(null);
@@ -64,6 +68,11 @@ export default function ComputeResourcePanel({
           request_id: requestId,
           target_expires_at: new Date(target).toISOString(),
           reason,
+        });
+      } else if (kind === 'rotate') {
+        result = await rotateComputeAllocation(allocation.id, {
+          request_id: requestId,
+          expected_revision: allocation.revision,
         });
       } else {
         result = await retireComputeAllocation(allocation.id, {
@@ -108,6 +117,7 @@ export default function ComputeResourcePanel({
               {absoluteTime(allocation.expires_at)}
             </p>
           )}
+          {allocation.rotation && <RotationSummary rotation={allocation.rotation} />}
         </div>
       )}
       {(section === 'all' || section === 'details') && (
@@ -186,6 +196,7 @@ export default function ComputeResourcePanel({
               );
               setRevision(result.allocation.revision);
               setPolicy(result.allocation.policy);
+              setNodeTypes(result.allocation.policy.node_types.join(', '));
               onSaved(result.allocation);
               setNotice(
                 'Policy saved. The expiry updates after the provider confirms an extension.',
@@ -213,7 +224,13 @@ export default function ComputeResourcePanel({
             <input
               type="checkbox"
               checked={policy.enabled}
-              onChange={(event) => setPolicy({ ...policy, enabled: event.target.checked })}
+              onChange={(event) =>
+                setPolicy({
+                  ...policy,
+                  enabled: event.target.checked,
+                  rotation_enabled: event.target.checked && policy.rotation_enabled,
+                })
+              }
             />
             Request renewal automatically
           </label>
@@ -242,6 +259,68 @@ export default function ComputeResourcePanel({
               onChange={(event) => setPolicy({ ...policy, reason: event.target.value })}
             />
           </Field>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={policy.rotation_enabled}
+              disabled={!policy.enabled}
+              onChange={(event) =>
+                setPolicy({
+                  ...policy,
+                  rotation_enabled: event.target.checked,
+                  renew_before_seconds: event.target.checked
+                    ? Math.max(policy.renew_before_seconds, 3 * 3600)
+                    : policy.renew_before_seconds,
+                  extend_to_horizon_seconds: event.target.checked
+                    ? Math.max(policy.extend_to_horizon_seconds, 4 * 3600)
+                    : policy.extend_to_horizon_seconds,
+                })
+              }
+            />
+            Move to a new node when renewal is refused or the node gets old
+          </label>
+          {policy.rotation_enabled && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="Replace a node after (days)">
+                <input
+                  className={inputClass}
+                  type="number"
+                  min={1}
+                  max={30}
+                  step={1}
+                  required
+                  value={policy.max_node_age_seconds / 86400}
+                  onChange={(event) =>
+                    setPolicy({
+                      ...policy,
+                      max_node_age_seconds: Number(event.target.value) * 86400,
+                    })
+                  }
+                />
+              </Field>
+              <Field label="Node types to use, newest first">
+                <input
+                  className={inputClass}
+                  required
+                  placeholder="r6615, c6620, d6515"
+                  value={nodeTypes}
+                  onChange={(event) => {
+                    setNodeTypes(event.target.value);
+                    setPolicy({
+                      ...policy,
+                      node_types: event.target.value.split(/[\s,]+/).filter(Boolean),
+                    });
+                  }}
+                />
+              </Field>
+            </div>
+          )}
+          {policy.rotation_enabled && (
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              Renewal is tried first. Sessions and sandboxes move together if a replacement is
+              needed. New work queues while running turns finish and the server moves.
+            </p>
+          )}
           <details>
             <summary className="cursor-pointer text-sm">Advanced timing</summary>
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
@@ -257,6 +336,16 @@ export default function ComputeResourcePanel({
                 policy={policy}
                 onChange={setPolicy}
               />
+              <Field label="Node type parameter of the provider profile">
+                <input
+                  className={inputClass}
+                  required
+                  value={policy.node_type_binding}
+                  onChange={(event) =>
+                    setPolicy({ ...policy, node_type_binding: event.target.value })
+                  }
+                />
+              </Field>
             </div>
             <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
               Renewal starts before sandbox admission closes. The extension horizon must exceed the
@@ -277,6 +366,7 @@ export default function ComputeResourcePanel({
                 onClick={() => {
                   setRevision(allocation.revision);
                   setPolicy(allocation.policy);
+                  setNodeTypes(allocation.policy.node_types.join(', '));
                   setError(null);
                 }}
               >
@@ -328,6 +418,27 @@ export default function ComputeResourcePanel({
               Request extension
             </button>
           </form>
+        </details>
+      )}
+
+      {(section === 'all' || section === 'lease') && allows('rotate') && (
+        <details className="border-t border-gray-200 pt-4 dark:border-white/10">
+          <summary className="cursor-pointer text-sm font-medium">Replace node now</summary>
+          <div className="mt-4 space-y-3">
+            <p className="text-sm">
+              Moves this server&apos;s Host, with every session and sandbox, to a newly allocated
+              node of the first available type, then releases this node. New work queues while
+              running turns finish and the server moves.
+            </p>
+            <button
+              type="button"
+              className={buttonClass}
+              disabled={busy !== null}
+              onClick={() => void intent('rotate')}
+            >
+              Start replacement
+            </button>
+          </div>
         </details>
       )}
 
@@ -404,6 +515,38 @@ export default function ComputeResourcePanel({
         </p>
       )}
       <ErrorNotice error={error} />
+    </div>
+  );
+}
+
+const ROTATION_STATES: Record<string, string> = {
+  pending: 'queued',
+  running: 'in progress',
+  waiting: 'in progress',
+  blocked: 'needs attention',
+  unknown: 'needs attention',
+  failed: 'failed',
+  succeeded: 'completed',
+  cancelled: 'cancelled',
+};
+
+function RotationSummary({ rotation }: { rotation: ComputeRotation }) {
+  const { last } = rotation;
+  if (!rotation.enabled && !last) return null;
+  return (
+    <div className="mt-3 space-y-1 text-sm text-gray-500 dark:text-gray-400">
+      {rotation.enabled && rotation.decide_at && (
+        <p>Renewed or moved to a new node from {absoluteTime(rotation.decide_at)}</p>
+      )}
+      {rotation.enabled && rotation.replace_after && (
+        <p>Moved to a new node after {absoluteTime(rotation.replace_after)}</p>
+      )}
+      {last && (
+        <p>
+          Last move {ROTATION_STATES[last.state] ?? last.state}
+          {last.message ? ` · ${last.message}` : ''}
+        </p>
+      )}
     </div>
   );
 }

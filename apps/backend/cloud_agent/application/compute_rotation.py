@@ -49,9 +49,9 @@ _PRECOPY_FRESHNESS = timedelta(minutes=15)
 # Expected duration of stop, final copy, handover and start, plus a margin.
 _SWITCH_ALLOWANCE = timedelta(minutes=10)
 _DRAIN_MARGIN = timedelta(minutes=30)
-# This close to expiry the old node stops even with turns still running:
-# losing those turns beats losing every retained chat.
-_LAST_CHANCE = timedelta(minutes=20)
+# Alert urgently if turns still run this close to expiry. Never kill an
+# active native turn as a migration shortcut: that can lose its session.
+_LATE_DRAIN = timedelta(minutes=20)
 _VERIFY_TIMEOUT = timedelta(minutes=10)
 _CLOCK_TOLERANCE = timedelta(seconds=2)
 _FINAL_REMINDER = timedelta(hours=1)
@@ -262,12 +262,26 @@ class ComputeRotation:
         if slot is None:
             return
         if not result.get("source_stopped"):
+            # Node setup can be slow. Start draining by the source deadline
+            # even while the replacement's acquisition is still in progress.
+            expires = _moment(allocation.get("expires_at"))
+            if (
+                not operation["result"].get("hold_set")
+                and expires is not None
+                and _now() >= await self._drain_deadline(slot["host"], expires)
+            ):
+                await self._pause_claims(operation, allocation, slot)
             candidate = await self._prepared_candidate(operation, allocation, slot)
-            if candidate is None or not await self._drained(operation, allocation, slot, candidate):
+            if candidate is None or not await self._drained(operation, allocation, slot):
                 return
             try:
                 await self._refresh_copy(operation, allocation, slot, candidate)
-                await self.reconciler._checkpoint(operation, "stopping_source")
+                # A failed SSH acknowledgement does not mean the node stayed
+                # running. Recovery and cancellation must treat it as stopped
+                # from the moment we send the stop, until it is restarted.
+                await self.reconciler._checkpoint(
+                    operation, "stopping_source", {"source_stopping": True}
+                )
                 await self.bootstrap.stop(*self._source(operation, allocation, slot))
             except ProviderError as exc:
                 await self._start_rollback(operation, allocation, "switch_failed", exc.code)
@@ -401,6 +415,24 @@ class ComputeRotation:
         result = operation["result"]
         policy = RenewalPolicy.model_validate(allocation.get("policy") or {})
         attempts = list(result.get("attempts") or [])
+        request_id = f"rotate:{operation['id']}:{len(attempts) + 1}"
+        # The allocation and its profile reservation commit before the parent
+        # checkpoint. Recover that reservation before looking for a free one.
+        existing = await self.repository.list_operations(request_id=request_id)
+        if existing:
+            acquire = existing[0]
+            candidate = await self.reconciler._allocation(acquire["allocation_id"])
+            current = {
+                "id": candidate["id"],
+                "operation_id": acquire["id"],
+                "node_type": acquire["parameters"]["node_type"],
+                "profile": candidate["deployment_profile"]["id"],
+                "created_at": candidate["created_at"].isoformat(),
+            }
+            await self.reconciler._checkpoint(
+                operation, "preparing_candidate", {"candidate": current}
+            )
+            return current
         # An administrator's retry of a blocked move starts the list afresh.
         node_type, stop = next_node_type(policy, attempts[result.get("attempt_floor", 0) :])
         if node_type is None:
@@ -445,7 +477,7 @@ class ComputeRotation:
                     "slot_host": slot["host"],
                     "slot_namespace": slot["namespace"],
                 },
-                request_id=f"rotate:{operation['id']}:{len(attempts) + 1}",
+                request_id=request_id,
                 fingerprint=fingerprint("acquire", parameters),
                 parameters=parameters,
                 **self.reconciler._fence(operation),
@@ -479,7 +511,12 @@ class ComputeRotation:
             if row.get("observed_state") not in {"terminated", "absent"}
         }
         for profile in self.commands.configuration.profiles.values():
-            if profile.id not in occupied and profile.id != exclude.get("id"):
+            if (
+                profile.id not in occupied
+                and profile.id != exclude.get("id")
+                and profile.deployment_sha == exclude.get("deployment_sha")
+                and profile.source_sha256 == exclude.get("source_sha256")
+            ):
                 return profile
         return None
 
@@ -593,7 +630,6 @@ class ComputeRotation:
         operation: dict[str, Any],
         allocation: dict[str, Any],
         slot: dict[str, Any],
-        candidate: dict[str, Any],
     ) -> bool:
         """Pause claims at a quiet moment, or at the deadline, and wait for running turns.
 
@@ -604,11 +640,7 @@ class ComputeRotation:
         host = slot["host"]
         now = _now()
         expires = _moment(allocation.get("expires_at"))
-        deadline = (
-            expires - await self._turn_limit(host) - _SWITCH_ALLOWANCE - _DRAIN_MARGIN
-            if expires is not None
-            else now
-        )
+        deadline = await self._drain_deadline(host, expires) if expires is not None else now
         running = await self.repository.running_attempts(host=host)
         if not result.get("hold_set"):
             if running and now < deadline:
@@ -620,32 +652,16 @@ class ComputeRotation:
                     retry=15,
                 )
                 return False
-            started = _moment(result.get("started_at")) or now
-            if deadline <= started:
-                # The renewal lead time cannot fit a whole turn plus the switch.
-                await self._alert(
-                    operation, "compute_rotation_lead_time_short", host=host, reason="forced_drain"
-                )
-            await self.repository.set_rotation_hold(
-                host=host,
-                allocation_id=allocation["id"],
-                source_id=operation["id"],
-                scope="all_claims",
-                **self.reconciler._fence(operation),
-            )
-            await self.reconciler._checkpoint(
-                operation, "draining", {"hold_set": True, "hold_set_at": now.isoformat()}
-            )
+            await self._pause_claims(operation, allocation, slot)
             running = await self.repository.running_attempts(host=host)
         if running:
-            if expires is not None and expires - now <= _LAST_CHANCE:
+            if expires is not None and expires - now <= _LATE_DRAIN:
                 await self._alert(
                     operation,
-                    "compute_rotation_interrupted_turns",
+                    "compute_rotation_drain_overdue",
                     host=host,
                     reason=f"{running}_running",
                 )
-                return True
             await self.reconciler._finish(
                 operation,
                 "waiting",
@@ -655,6 +671,35 @@ class ComputeRotation:
             )
             return False
         return True
+
+    async def _drain_deadline(self, host: str, expires: datetime) -> datetime:
+        """Leave time for one whole running turn, the switch and a safety margin."""
+        return expires - await self._turn_limit(host) - _SWITCH_ALLOWANCE - _DRAIN_MARGIN
+
+    async def _pause_claims(
+        self, operation: dict[str, Any], allocation: dict[str, Any], slot: dict[str, Any]
+    ) -> None:
+        """Pause new work even when a replacement is not ready by the drain deadline."""
+        now = _now()
+        expires = _moment(allocation.get("expires_at"))
+        started = _moment(operation["result"].get("started_at")) or now
+        if expires is not None and await self._drain_deadline(slot["host"], expires) <= started:
+            await self._alert(
+                operation,
+                "compute_rotation_lead_time_short",
+                host=slot["host"],
+                reason="forced_drain",
+            )
+        await self.repository.set_rotation_hold(
+            host=slot["host"],
+            allocation_id=allocation["id"],
+            source_id=operation["id"],
+            scope="all_claims",
+            **self.reconciler._fence(operation),
+        )
+        await self.reconciler._checkpoint(
+            operation, "draining", {"hold_set": True, "hold_set_at": now.isoformat()}
+        )
 
     async def _refresh_copy(
         self,
@@ -749,13 +794,9 @@ class ComputeRotation:
                 retry=15,
             )
             return
-        await self.repository.set_rotation_hold(
-            host=slot["host"],
-            allocation_id=candidate["id"],
-            source_id=operation["id"],
-            scope=None,
-            **self.reconciler._fence(operation),
-        )
+        # Persist the point of no return before claims resume: the new node
+        # may write state as soon as the hold is lifted. A restarted worker
+        # must only finish cleanup from then on, never roll back to the old copy.
         await self.reconciler._checkpoint(
             operation, "cleaning_up", {"verified": True, "verified_at": _now().isoformat()}
         )
@@ -801,16 +842,21 @@ class ComputeRotation:
         result = operation["result"]
         slot = result["slot"]
         candidate = await self.reconciler._allocation(result["candidate"]["id"])
+        await self.repository.set_rotation_hold(
+            host=slot["host"],
+            allocation_id=candidate["id"],
+            source_id=operation["id"],
+            scope=None,
+            **self.reconciler._fence(operation),
+        )
         source, profile, intent = self._source(operation, allocation, slot)
         target, _, _ = self._target(operation, candidate)
         if not result.get("transfer_revoked"):
             try:
                 await self.bootstrap.revoke_transfer(source, target)
             except ProviderError as exc:
-                logger.warning(
-                    "compute_rotation_transfer_key_left",
-                    extra={"operation_id": operation["id"], "reason": exc.code},
-                )
+                await self._defer_cleanup(operation, slot["host"], exc.code)
+                return
             await self.reconciler._checkpoint(operation, "cleaning_up", {"transfer_revoked": True})
         released = "The old server is being released."
         if not result.get("retire_requested"):
@@ -821,11 +867,21 @@ class ComputeRotation:
                         operation, "cleaning_up", {"source_wiped": True}
                     )
                 current = await self.reconciler._allocation(allocation["id"])
+                request_id = f"retire:{operation['id']}"
+                existing = await self.repository.list_operations(request_id=request_id)
+                # A crash may lose the acknowledgement after retirement was
+                # persisted. Replay its original revision, not an allocation
+                # revision that changed while this worker was down.
+                revision = (
+                    existing[0]["parameters"]["expected_revision"]
+                    if existing
+                    else current["revision"]
+                )
                 await self.commands.retire(
                     allocation["id"],
                     RetireComputeRequest(
-                        request_id=f"retire:{operation['id']}",
-                        expected_revision=current["revision"],
+                        request_id=request_id,
+                        expected_revision=revision,
                     ),
                     actor="compute-rotation",
                 )
@@ -833,13 +889,13 @@ class ComputeRotation:
                     operation, "cleaning_up", {"retire_requested": True}
                 )
             except (ProviderError, ComputeRefusal, ValueError) as exc:
-                # The Host already runs on its new node. The old one is left to
-                # end with its lease, which also wipes its disks.
+                if isinstance(exc, ValueError) and str(exc) == "operation_lease_lost":
+                    raise
+                # The new Host is serving already; keep retrying the old copy's
+                # cleanup without repeating a handover or claiming it succeeded.
                 code = getattr(exc, "code", None) or str(exc)
-                await self._alert(
-                    operation, "compute_rotation_cleanup_failed", host=slot["host"], reason=code
-                )
-                released = "The old server could not be cleaned and will end with its lease."
+                await self._defer_cleanup(operation, slot["host"], code)
+                return
         await self.reconciler._finish(
             operation,
             "succeeded",
@@ -850,6 +906,18 @@ class ComputeRotation:
         logger.warning(
             "compute_rotation_completed",
             extra={"operation_id": operation["id"], "host": slot["host"]},
+        )
+
+    async def _defer_cleanup(self, operation: dict[str, Any], host: str, code: str) -> None:
+        """Keep serving on the new node while cleanup retries from its checkpoint."""
+        await self._alert(operation, "compute_rotation_cleanup_failed", host=host, reason=code)
+        await self.reconciler._finish(
+            operation,
+            "waiting",
+            "cleaning_up",
+            "The Host is serving on its new node; retrying cleanup of the old node.",
+            result={"blocked_reasons": [{"code": code, "message": "Cleanup needs a retry."}]},
+            retry=30,
         )
 
     # ---- rolling back ----------------------------------------------------
@@ -886,8 +954,16 @@ class ComputeRotation:
             target, profile, intent = self._target(operation, candidate)
             try:
                 await self.bootstrap.stop(target, profile, intent)
-            except ProviderError as exc:
-                rollback["target_stop_failed"] = exc.code
+            except ProviderError:
+                await self._block(
+                    operation,
+                    slot,
+                    "rotation_rollback_target_running",
+                    "The replacement node could not be stopped. Claims remain paused until "
+                    "it is stopped, so two copies of the Host cannot run together.",
+                    critical=True,
+                )
+                return
             await self.repository.rebind_slot_host(
                 host=slot["host"],
                 from_node_id=candidate["nodes"][0]["id"],
@@ -898,8 +974,8 @@ class ComputeRotation:
             await self.reconciler._checkpoint(
                 operation, "rolling_back", {"rebound": False, "rollback": rollback}
             )
-        if result.get("source_stopped"):
-            if not rollback.get("restarted_at"):
+        if result.get("source_stopping") or result.get("source_stopped"):
+            if not rollback.get("restart_completed"):
                 token: SecretStr | None = None
                 if rollback.get("reenroll"):
                     issued, _ = await HostCommands(self.host_pool).enroll_token(
@@ -927,6 +1003,8 @@ class ComputeRotation:
                         critical=True,
                     )
                     return
+                rollback["restart_completed"] = True
+                await self.reconciler._checkpoint(operation, "rolling_back", {"rollback": rollback})
             restarted = _moment(rollback["restarted_at"]) or _now()
             if not await self._serving(
                 slot["host"], source, source_profile, source_intent, since=restarted
@@ -961,6 +1039,7 @@ class ComputeRotation:
             {
                 "rollback": None,
                 "hold_set": False,
+                "source_stopping": False,
                 "source_stopped": False,
                 "final_copied": False,
                 "target_started": False,
@@ -1071,7 +1150,12 @@ class ComputeRotation:
     ) -> None:
         """Stop for an administrator, first letting the original node serve again."""
         result = operation.get("result") or {}
-        if slot is not None and result.get("hold_set") and not result.get("source_stopped"):
+        if (
+            slot is not None
+            and result.get("hold_set")
+            and not result.get("source_stopping")
+            and not result.get("source_stopped")
+        ):
             await self.repository.set_rotation_hold(
                 host=slot["host"],
                 allocation_id=operation["allocation_id"],

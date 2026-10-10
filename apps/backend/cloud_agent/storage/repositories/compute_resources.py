@@ -799,7 +799,7 @@ class PostgresComputeResourceRepository:
                 LEFT JOIN agent_compute_allocations a ON a.id=o.allocation_id
                 WHERE ((o.state IN ('pending','waiting') AND o.next_attempt_at<=NOW())
                        OR (o.state='running' AND o.lease_expires_at<=NOW()))
-                  AND (a.release_committed_at IS NULL OR o.kind IN ('retire','inspect'))
+                  AND (a.release_committed_at IS NULL OR o.kind IN ('retire','inspect','discard'))
                   AND NOT EXISTS (SELECT 1 FROM agent_compute_operations busy
                     WHERE busy.allocation_id=o.allocation_id AND busy.id<>o.id
                       AND (busy.state='running' OR busy.state='unknown' OR (busy.state='waiting' AND busy.result->>'external_pending'='true'))
@@ -1517,7 +1517,7 @@ class PostgresComputeResourceRepository:
         result = load_json(row["result"]) or {}
         if row["state"] not in ("pending", "waiting", "blocked"):
             raise ValueError("operation_not_cancellable")
-        if result.get("source_stopped") or result.get("rebound"):
+        if result.get("source_stopping") or result.get("source_stopped") or result.get("rebound"):
             # The old node is stopped or the name has moved: only the worker's
             # own rollback can bring the Host back.
             raise ValueError("rotation_switching")

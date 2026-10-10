@@ -10013,7 +10013,7 @@
       },
       "RenewalPolicy": {
         "additionalProperties": false,
-        "description": "Independent resource deadlines, expressed in seconds.",
+        "description": "Independent resource deadlines, expressed in seconds.\n\nWith rotation, ``renew_before_seconds`` is also when a node is replaced:\nan extension is tried first; a refused one, or a node at its maximum age,\nstarts a move of the whole Host to a newly allocated node instead.",
         "properties": {
           "enabled": {
             "default": false,
@@ -10027,6 +10027,28 @@
             "title": "Extend To Horizon Seconds",
             "type": "integer"
           },
+          "max_node_age_seconds": {
+            "default": 604800,
+            "maximum": 2592000.0,
+            "minimum": 3600.0,
+            "title": "Max Node Age Seconds",
+            "type": "integer"
+          },
+          "node_type_binding": {
+            "default": "phystype",
+            "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$",
+            "title": "Node Type Binding",
+            "type": "string"
+          },
+          "node_types": {
+            "items": {
+              "pattern": "^[A-Za-z0-9_-]{1,32}$",
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Node Types",
+            "type": "array"
+          },
           "reason": {
             "default": "",
             "maxLength": 2000,
@@ -10039,6 +10061,11 @@
             "minimum": 60.0,
             "title": "Renew Before Seconds",
             "type": "integer"
+          },
+          "rotation_enabled": {
+            "default": false,
+            "title": "Rotation Enabled",
+            "type": "boolean"
           },
           "stop_claims_before_seconds": {
             "default": 300,
@@ -10331,6 +10358,29 @@
           "expected_revision"
         ],
         "title": "RetireComputeRequest",
+        "type": "object"
+      },
+      "RotateComputeRequest": {
+        "additionalProperties": false,
+        "description": "Move the Host to a replacement node now, before its lease forces it.",
+        "properties": {
+          "expected_revision": {
+            "minimum": 0.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "expected_revision"
+        ],
+        "title": "RotateComputeRequest",
         "type": "object"
       },
       "RunResourceSummary": {
@@ -14619,6 +14669,74 @@
           }
         },
         "summary": "Retirement Impact"
+      }
+    },
+    "/admin/agent/compute-allocations/{allocation_id}/rotate": {
+      "post": {
+        "description": "Queue a move of the server's Host to a replacement node now.",
+        "operationId": "rotate_admin_agent_compute_allocations__allocation_id__rotate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "allocation_id",
+            "required": true,
+            "schema": {
+              "title": "Allocation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RotateComputeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Rotate Admin Agent Compute Allocations  Allocation Id  Rotate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rotate"
       }
     },
     "/admin/agent/compute-connections": {

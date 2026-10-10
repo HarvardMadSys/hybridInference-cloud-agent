@@ -276,6 +276,11 @@ operation. Do not bypass the release fence or edit database state to infer
 deletion from absence. The public API provides no project-permission query that
 would establish stronger evidence from that `404`.
 
+One additional recovery case uses a previously recorded, known lease deadline:
+after that deadline plus a ten-minute grace period, the reconciler treats a
+missing experiment as expired (`expired_not_found`). A missing experiment with
+an unknown or unexpired lease remains ambiguous.
+
 The worker continues an already enabled renewal policy while retirement waits
 on retained state. Manual Drain and resource-owned admission holds remain
 separate. A successful renewal does not clear an administrator's Drain or a
@@ -291,6 +296,84 @@ and fresh broker plus machine inventory. Stopped Docker containers, orphan
 networks/volumes, unrecognized containers, offline brokers and incomplete
 inventory block release. There is no force bypass. Existing SSH resources do
 not have a cloud-destruction capability.
+
+## Automatic CloudLab node replacement
+
+Replacement moves one entire Host, including its stopped sandboxes and native
+sessions. It does not reconstruct sessions from transcripts. The Host name and
+sandbox namespace stay the same; the replacement enrolls with a fresh Host
+credential. The control plane and database stay on stable infrastructure.
+
+Before enabling it:
+
+1. Use a **provisioned, managed** CloudLab allocation running exactly one Host,
+   with `host_key_source=registration` and the private Cloud Agent profile above.
+2. Prepare **two deployment profiles** for the alternating nodes, with different
+   tunnel authorizations and reverse broker ports. Both must pin the same
+   `deployment_sha` and `source_sha256`; replacement never selects a spare
+   profile from another release. Keep Docker/containerd versions compatible on
+   both nodes. Configure `data_mount` to the profile's local disk (for example
+   `/mydata`); Docker and containerd both use that disk through bind mounts.
+3. In Servers → renewal settings, enable renewal and replacement, provide a
+   renewal reason, and enter candidate hardware types in preference order. The
+   UI initially gives replacement a **180-minute lead time** and a **7-day maximum
+   age**. Save the policy; saving does not itself request an immediate move.
+4. Configure `AGENT_ALERT_WEBHOOK_URL` if operations need external alerts. Without
+   it, events remain in structured logs and the Servers operation status.
+
+Inside the renewal window, the scheduler tries extension first. A refused or
+unconfirmed extension starts replacement; a node at its maximum age moves
+instead of extending. A failed candidate is released before the next type is
+tried. Configuration or credential errors stop immediately; the same failure
+class on three types stops with an alert. Retry resumes the saved operation.
+
+The replacement installs the host recipe and receives a live pre-copy without
+enrolling or claiming work. Once prepared, the old Host waits for an idle moment.
+If the drain deadline arrives first, it pauses new claims **even if the new
+node is still preparing**. Running turns finish; newly submitted messages queue.
+With the default one-hour turn limit, the deadline is 100 minutes before expiry.
+An urgent move never kills a running turn to make migration progress.
+
+The worker then stops the old Host and container daemons, copies the final
+changes, transfers the Host's database binding, starts the replacement, and
+checks its deployment, fresh heartbeat and broker. Only after recording that
+successful takeover durably does it resume claims. From that point recovery
+only cleans up; it cannot restore the stale old copy over new user work.
+
+Before takeover is confirmed, failures restore the old Host. If the replacement
+cannot be confirmed stopped, claims stay paused and the operation blocks for
+attention rather than running two copies. Cancellation is available before the
+stop begins; afterward use the operation's recovery/retry path. Cleanup failures
+retry without interrupting the replacement. The operation does not report a
+failed cleanup as success. Source release still passes the existing retained
+state and allocation checks.
+
+### Acceptance before enabling production traffic
+
+Use disposable staging conversations and a dedicated pair of profiles. Record
+the operation IDs, source/replacement node identities, release revision, and the
+observed pause; never put credentials in the record.
+
+- Create a node through the **deployed** registration endpoint and verify that
+  its pinned key is used for SSH. A boot-script-only probe is insufficient.
+- Run Claude Code, its Fork and Codex; write files and distinct context markers.
+  Select **Replace node now** and verify native continuation, Fork separation,
+  files and container IDs after the move. Repeat across CloudLab sites.
+- Submit a message while claims are paused; it must queue and run once after
+  takeover. Check the old Host cannot authenticate after re-enrollment.
+- Exercise refused renewal, an unavailable first hardware type, failed final
+  copy, failed target startup, and a control-plane restart during a move. Verify
+  rollback or continuation from the saved step, and no duplicate allocations
+  or simultaneous serving copies. Confirm failed candidates are released.
+- Leave the policy running for **two weeks with at least two automatic moves**.
+  Check alerts, release cleanup and retained chats throughout. Automated tests
+  and a manual migration do not substitute for this elapsed-time acceptance.
+
+The 2026-10-10 manual staging drill moved real sessions from Clemson to Utah
+with a 161-second pause; see the [record](specs/2026-10-10-cloudlab-node-rotation-design.zh-CN.md#验证二结果2026-10-10staging).
+That drill preceded the automatic workflow. Abrupt loss of the only source
+disk, or no replacement capacity before expiry, can still lose sessions; this
+feature is not an off-node backup.
 
 Automatic renewal and successful unit tests do not establish that a particular
 CloudLab profile supports the required virtualization and network environment.

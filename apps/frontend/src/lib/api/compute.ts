@@ -63,6 +63,28 @@ export interface RenewalPolicy {
   stop_new_groups_before_seconds: number;
   stop_claims_before_seconds: number;
   reason: string;
+  /** Move the Host to a new node when an extension is refused or the node is old. */
+  rotation_enabled: boolean;
+  max_node_age_seconds: number;
+  /** Hardware a replacement node may use, newest first. */
+  node_types: string[];
+  /** The provider profile parameter that selects the hardware. */
+  node_type_binding: string;
+}
+
+/** When the node is next renewed or replaced, and how its last move went. */
+export interface ComputeRotation {
+  enabled: boolean;
+  decide_at: string | null;
+  replace_after: string | null;
+  last: {
+    id: string;
+    state: string;
+    step: string;
+    message: string;
+    updated_at: string;
+    completed_at: string | null;
+  } | null;
 }
 
 export interface ComputeNode {
@@ -89,6 +111,9 @@ export interface ComputeAllocation {
   policy: RenewalPolicy;
   revision: number;
   management_mode?: 'observe' | 'manage';
+  rotation?: ComputeRotation;
+  /** Set when this node took its Host over from that allocation. */
+  predecessor_id?: string | null;
   allowed_actions: string[];
   blocked_reasons: BlockedReason[];
   nodes: ComputeNode[];
@@ -234,6 +259,14 @@ export const retireComputeAllocation = (
 ) =>
   write<{ operation: ComputeOperation }>(
     `/compute-allocations/${encodeURIComponent(id)}/retire`,
+    body,
+  );
+export const rotateComputeAllocation = (
+  id: string,
+  body: { request_id: string; expected_revision: number },
+) =>
+  write<{ operation: ComputeOperation }>(
+    `/compute-allocations/${encodeURIComponent(id)}/rotate`,
     body,
   );
 export const actOnComputeOperation = (id: string, action: 'retry' | 'cancel') =>

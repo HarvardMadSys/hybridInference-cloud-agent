@@ -5,6 +5,7 @@ import {
   extendComputeAllocation,
   getComputeOperations,
   importComputeResource,
+  rotateComputeAllocation,
   saveComputeConnection,
   setComputePolicy,
   type RenewalPolicy,
@@ -17,6 +18,10 @@ const policy: RenewalPolicy = {
   extend_to_horizon_seconds: 14400,
   stop_new_groups_before_seconds: 1800,
   stop_claims_before_seconds: 300,
+  rotation_enabled: false,
+  max_node_age_seconds: 604800,
+  node_types: [],
+  node_type_binding: 'phystype',
   reason: 'Finish evaluation',
 };
 
@@ -32,6 +37,15 @@ function stub(status = 200, body: unknown = {}) {
 afterEach(() => vi.restoreAllMocks());
 
 describe('compute API contracts', () => {
+  it('requests replacement with a revision and stable intent ID', async () => {
+    const fetch = stub();
+    const intent = { request_id: 'move-once', expected_revision: 4 };
+    await rotateComputeAllocation('resource/one', intent);
+    expect(fetch.mock.calls[0][1]).toBe('/admin/agent/compute-allocations/resource%2Fone/rotate');
+    expect(fetch.mock.calls[0][2]?.method).toBe('POST');
+    expect(JSON.parse(String(fetch.mock.calls[0][2]?.body))).toEqual(intent);
+  });
+
   it('writes secrets only in an authenticated connection body and omits provider on update', async () => {
     const fetch = stub();
     await saveComputeConnection(

@@ -9,8 +9,8 @@ from tests.support.migrations import apply_migrations, downgrade_to
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
-_BEFORE = "0029_work_available_notify"
-_THIS = "0030_compute_node_rotation"
+_BEFORE = "0032_push_usage_and_workers"
+_THIS = "0033_compute_node_rotation"
 
 
 async def _tables(conn) -> set[str]:

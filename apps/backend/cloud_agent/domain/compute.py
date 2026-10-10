@@ -153,6 +153,7 @@ def public_operation(record: dict[str, Any], *, release_committed: bool = False)
         record.get("kind") == "rotate"
         and record.get("state") in {"pending", "waiting", "blocked"}
         # Once the old node stops, only the worker's rollback restores service.
+        and not internal.get("source_stopping")
         and not internal.get("source_stopped")
         and not internal.get("rebound")
         and not release_committed

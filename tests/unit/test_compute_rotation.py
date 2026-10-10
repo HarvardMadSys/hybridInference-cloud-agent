@@ -240,3 +240,28 @@ async def test_an_unfinished_move_alerts_once_in_the_final_hour(monkeypatch):
     assert delivered == [
         ("compute_rotation_unfinished", {"host": "compute-a", "reason": "draining"})
     ]
+
+
+async def test_replacement_profile_keeps_the_source_release_and_bundle():
+    mover = rotation()
+    mover.repository.list_allocations = AsyncMock(return_value=[])
+    compatible = SimpleNamespace(id="same", deployment_sha="a", source_sha256="b")
+    mover.commands = SimpleNamespace(
+        configuration=SimpleNamespace(
+            profiles={
+                "different-release": SimpleNamespace(
+                    id="different-release", deployment_sha="c", source_sha256="b"
+                ),
+                "different-bundle": SimpleNamespace(
+                    id="different-bundle", deployment_sha="a", source_sha256="c"
+                ),
+                "same": compatible,
+            }
+        )
+    )
+    assert (
+        await mover._free_profile(
+            exclude={"id": "source", "deployment_sha": "a", "source_sha256": "b"}
+        )
+        is compatible
+    )

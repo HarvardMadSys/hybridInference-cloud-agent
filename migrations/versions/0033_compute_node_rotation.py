@@ -24,8 +24,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0030_compute_node_rotation"
-down_revision = "0029_work_available_notify"
+revision = "0033_compute_node_rotation"
+down_revision = "0032_push_usage_and_workers"
 branch_labels = None
 depends_on = None
 

@@ -32,6 +32,7 @@ vi.mock('@/lib/api/compute', () => ({
   getRetirementImpact: vi.fn(),
   extendComputeAllocation: vi.fn(),
   retireComputeAllocation: vi.fn(),
+  rotateComputeAllocation: vi.fn(),
   actOnComputeOperation: vi.fn(),
   resolveComputeOperation: vi.fn(),
 }));
@@ -130,6 +131,10 @@ function allocation(over: Partial<ComputeAllocation> = {}): ComputeAllocation {
       extend_to_horizon_seconds: 14400,
       stop_new_groups_before_seconds: 1800,
       stop_claims_before_seconds: 300,
+      rotation_enabled: false,
+      max_node_age_seconds: 604800,
+      node_types: [],
+      node_type_binding: 'phystype',
       reason: '',
     },
     ...over,
@@ -678,6 +683,119 @@ describe('resource management', () => {
       expect(api.setComputePolicy).toHaveBeenCalledWith('resource-a', observed.policy, 2, 'manage'),
     );
     expect(api.retireComputeAllocation).not.toHaveBeenCalled();
+  });
+
+  it('saves replacement timing and ordered node types without moving a node', async () => {
+    const resource = allocation();
+    vi.mocked(api.setComputePolicy).mockImplementation(async (_id, policy) => ({
+      allocation: { ...resource, policy, revision: 3 },
+    }));
+    render(<ComputeResourcePanel allocation={resource} onSaved={vi.fn()} onOperation={vi.fn()} />);
+    fireEvent.click(screen.getByLabelText('Request renewal automatically'));
+    fireEvent.click(screen.getByLabelText(/Move to a new node when renewal/));
+    fireEvent.change(screen.getByLabelText('Node types to use, newest first'), {
+      target: { value: 'r6615, c6620  d6515' },
+    });
+    fireEvent.change(screen.getByLabelText('Renewal reason'), {
+      target: { value: 'Keep evaluation sessions' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save renewal policy' }));
+    await waitFor(() =>
+      expect(api.setComputePolicy).toHaveBeenCalledWith(
+        resource.id,
+        expect.objectContaining({
+          enabled: true,
+          rotation_enabled: true,
+          renew_before_seconds: 10800,
+          max_node_age_seconds: 604800,
+          node_types: ['r6615', 'c6620', 'd6515'],
+        }),
+        2,
+        undefined,
+      ),
+    );
+    expect(api.rotateComputeAllocation).not.toHaveBeenCalled();
+  });
+
+  it('disables replacement together with automatic renewal', async () => {
+    const resource = allocation();
+    resource.policy = {
+      ...resource.policy,
+      enabled: true,
+      rotation_enabled: true,
+      node_types: ['r6615'],
+      reason: 'Keep evaluation sessions',
+    };
+    vi.mocked(api.setComputePolicy).mockImplementation(async (_id, policy) => ({
+      allocation: { ...resource, policy, revision: 3 },
+    }));
+    render(<ComputeResourcePanel allocation={resource} onSaved={vi.fn()} onOperation={vi.fn()} />);
+    fireEvent.click(screen.getByLabelText('Request renewal automatically'));
+    expect(screen.getByLabelText(/Move to a new node when renewal/)).not.toBeChecked();
+    expect(screen.getByLabelText(/Move to a new node when renewal/)).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save renewal policy' }));
+    await waitFor(() =>
+      expect(api.setComputePolicy).toHaveBeenCalledWith(
+        resource.id,
+        expect.objectContaining({ enabled: false, rotation_enabled: false }),
+        2,
+        undefined,
+      ),
+    );
+  });
+
+  it('recovers a submitted replacement after the response is lost', async () => {
+    vi.mocked(api.rotateComputeAllocation).mockRejectedValue(new Error('Connection lost'));
+    const moved = operation({ kind: 'rotate', state: 'waiting' });
+    vi.mocked(api.getComputeOperations).mockImplementation(async (requestId) => ({
+      operations: [{ ...moved, request_id: requestId! }],
+    }));
+    const onOperation = vi.fn();
+    render(
+      <ComputeResourcePanel
+        allocation={allocation({ allowed_actions: ['rotate'] })}
+        onSaved={vi.fn()}
+        onOperation={onOperation}
+      />,
+    );
+    fireEvent.click(screen.getByText('Replace node now'));
+    fireEvent.click(screen.getByRole('button', { name: 'Start replacement' }));
+    await waitFor(() => expect(onOperation).toHaveBeenCalled());
+    const request = vi.mocked(api.rotateComputeAllocation).mock.calls[0][1];
+    expect(request.expected_revision).toBe(2);
+    expect(api.getComputeOperations).toHaveBeenCalledWith(request.request_id);
+    expect(onOperation).toHaveBeenCalledWith({ ...moved, request_id: request.request_id });
+    expect(api.rotateComputeAllocation).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('shows the replacement status and suppresses unsupported actions', () => {
+    render(
+      <ComputeResourcePanel
+        allocation={allocation({
+          allowed_actions: [],
+          rotation: {
+            enabled: true,
+            decide_at: '2026-10-10T10:00:00Z',
+            replace_after: '2026-10-15T10:00:00Z',
+            last: {
+              id: 'move-a',
+              state: 'blocked',
+              step: 'selecting_candidate',
+              message: 'No replacement node could be prepared.',
+              updated_at: '2026-10-10T11:00:00Z',
+              completed_at: null,
+            },
+          },
+        })}
+        onSaved={vi.fn()}
+        onOperation={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/Last move needs attention/)).toHaveTextContent(
+      'No replacement node could be prepared.',
+    );
+    expect(screen.queryByRole('button', { name: 'Start replacement' })).not.toBeInTheDocument();
   });
 
   it('does not show unsupported lease actions for an SSH resource', () => {

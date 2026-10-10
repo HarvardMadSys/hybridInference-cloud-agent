@@ -145,6 +145,7 @@ class FakeNodes:
         self.calls: list[tuple[str, str]] = []
         self.fail_final_copy = False
         self.fail_start_on: set[str] = set()
+        self.stopped: set[str] = set()
 
     async def preflight(self, node, profile):
         raise AssertionError("not used")
@@ -165,10 +166,15 @@ class FakeNodes:
             slots_total=2,
         )
         await self.hosts.record_host_heartbeat(host=intent.host)
+        self.stopped.discard(node.display_name)
         return BootstrapResult(ready=True, host=intent.host, deployment_sha=profile.deployment_sha)
 
     async def readiness(self, node, profile, intent):
-        return BootstrapResult(ready=True, host=intent.host, deployment_sha=profile.deployment_sha)
+        return BootstrapResult(
+            ready=node.display_name not in self.stopped,
+            host=intent.host,
+            deployment_sha=profile.deployment_sha,
+        )
 
     async def inventory(self, node, profile, intent):
         self.calls.append(("inventory", node.display_name))
@@ -181,6 +187,7 @@ class FakeNodes:
 
     async def stop(self, node, profile, intent):
         self.calls.append(("stop", node.display_name))
+        self.stopped.add(node.display_name)
 
     async def transfer(self, source, target, profile, intent, *, final, first=False):
         kind = "final" if final else ("first" if first else "again")
@@ -528,8 +535,9 @@ async def test_a_busy_host_is_paused_at_the_deadline_and_then_drained(
     await run_all(r, db)
     rotation = await rotation_of(r, r.allocation_id)
     assert rotation["state"] == "succeeded", rotation
-    # The first check ran before the pause; every later one saw it in place.
-    assert held_while_running[0] == 0 and set(held_while_running[1:]) == {1}
+    # The deadline pauses claims before even preparing the replacement, so
+    # all checks of running turns see the pause in place.
+    assert held_while_running and set(held_while_running) == {1}
     assert "compute_rotation_lead_time_short" in rotation["result"]["alerts"]
 
 
