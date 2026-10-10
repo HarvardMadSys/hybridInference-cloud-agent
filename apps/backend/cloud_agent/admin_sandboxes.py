@@ -1,0 +1,116 @@
+"""Metadata-only inventory of running retained sandbox groups."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from cloud_agent.admin_observability import cursor_scope
+from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
+
+SANDBOX_CURSOR_SCOPE = cursor_scope(["sandboxes", "running"])
+RESOURCE_STALE_SECONDS = 90.0
+
+
+class AdminSandboxResourceUsage(BaseModel):
+    """Docker container totals across every member, with explicit sample freshness."""
+
+    source: Literal["docker-stats"] = "docker-stats"
+    scope: Literal["container"] = "container"
+    sample_id: str
+    sampled_at: datetime
+    received_at: datetime
+    age_seconds: float = Field(ge=0)
+    stale: bool
+    cpu_cores: float | None = None
+    cpu_window_seconds: float | None = None
+    memory_bytes: int | None = None
+    memory_limit_bytes: int | None = None
+    pids: int | None = None
+    io_read_bytes: int | None = None
+    io_write_bytes: int | None = None
+    net_rx_bytes: int | None = None
+    net_tx_bytes: int | None = None
+    io_read_bytes_per_second: float | None = None
+    io_write_bytes_per_second: float | None = None
+    net_rx_bytes_per_second: float | None = None
+    net_tx_bytes_per_second: float | None = None
+
+
+def resource_usage_view(
+    snapshot: Any,
+    *,
+    sampled_at: datetime | None,
+    received_at: datetime | None,
+    now: datetime,
+) -> AdminSandboxResourceUsage | None:
+    """Revalidate optional persisted counters and retain the original sampling age."""
+    sample = parse_sandbox_resource_sample(snapshot)
+    if sample is None or sampled_at is None or received_at is None:
+        return None
+    if sampled_at.tzinfo is None:
+        sampled_at = sampled_at.replace(tzinfo=UTC)
+    if received_at.tzinfo is None:
+        received_at = received_at.replace(tzinfo=UTC)
+    age = max(0.0, (now - sampled_at).total_seconds())
+    metrics = sample.model_dump(exclude={"schema_version", "sample_age_ms"})
+    return AdminSandboxResourceUsage(
+        **metrics,
+        sampled_at=sampled_at,
+        received_at=received_at,
+        age_seconds=age,
+        stale=age > RESOURCE_STALE_SECONDS,
+    )
+
+
+class AdminSandbox(BaseModel):
+    """One container shared by its current chat members, including idle groups."""
+
+    id: str
+    origin_thread_id: str
+    title: str | None = None
+    repo: str
+    user_id: str
+    host: str
+    container_id: str | None = None
+    container_name: str
+    runtime_id: str
+    runtime_version: str | None = None
+    execution_profile: str
+    state: Literal["running"] = "running"
+    memory_limit: str
+    cpu_limit: str
+    member_count: int = Field(ge=0)
+    active_attempt_count: int = Field(ge=0)
+    resident_slot_capacity: int = Field(8, ge=1)
+    active_operation_count: int = Field(0, ge=0)
+    snapshot_state: str = "none"
+    terminal_count: int | None = Field(None, ge=0)
+    terminal_count_observed_at: datetime | None = None
+    resource_usage: AdminSandboxResourceUsage | None = None
+    created_at: datetime
+    last_activity_at: datetime
+    idle_deadline: datetime | None = None
+    updated_at: datetime
+    host_last_heartbeat_at: datetime | None = None
+
+
+class AdminSandboxList(BaseModel):
+    """A bounded page of the current inventory, ordered by sandbox identity."""
+
+    sandboxes: list[AdminSandbox]
+    total_count: int = Field(ge=0)
+    observed_at: datetime
+    next_cursor: str | None = None
+
+
+class SandboxCursor(BaseModel):
+    """Continue a running-container inventory after one sandbox identity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = 1
+    scope: str
+    after_id: str = Field(min_length=1, max_length=256)

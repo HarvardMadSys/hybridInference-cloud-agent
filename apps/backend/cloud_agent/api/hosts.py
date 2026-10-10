@@ -310,6 +310,11 @@ async def heartbeat_host(
     # recording that STOPPED transition.
     retained_stops: list[RetainedSandboxStop] = []
     for retained in body.retained_sandboxes or []:
+        diagnostics: dict[str, Any] = {}
+        if retained.resource_usage is not None:
+            diagnostics["resource_usage"] = retained.resource_usage.model_dump(mode="json")
+        if retained.terminal_count is not None:
+            diagnostics["terminal_count"] = retained.terminal_count
         await job_store.sandbox.reconcile_thread_sandbox_observation(
             thread_id=retained.thread_id,
             host=updated["host"],
@@ -320,6 +325,7 @@ async def heartbeat_host(
             activity_active=retained.activity_active,
             idle_remaining_seconds=retained.idle_remaining_seconds,
             members=[member.model_dump() for member in retained.members],
+            **diagnostics,
         )
         for member in retained.members:
             if member.residency_generation <= 0:

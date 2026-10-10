@@ -1,0 +1,565 @@
+// @vitest-environment jsdom
+import '@testing-library/jest-dom/vitest';
+
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import type { AdminSandbox, AdminSandboxResourceUsage } from '@/lib/api/adminSandboxes';
+import { getAdminSandboxes } from '@/lib/api/adminSandboxes';
+import type { AgentAccessApi } from '@/lib/api/session';
+import { APIError } from '@/lib/utils/errors';
+
+const auth = vi.hoisted(() => ({
+  id: 'admin-one',
+  access: undefined as AgentAccessApi | undefined,
+}));
+vi.mock('@/components/providers', () => ({
+  useAuth: () => ({ state: { user: { id: auth.id, agent_access: auth.access } } }),
+}));
+vi.mock('@/lib/api/adminSandboxes', () => ({ getAdminSandboxes: vi.fn() }));
+
+import AdminSandboxesPage from './page';
+
+type InventoryPage = Awaited<ReturnType<typeof getAdminSandboxes>>;
+const observedAt = '2026-10-10T10:00:00Z';
+function sandbox(overrides: Partial<AdminSandbox> = {}): AdminSandbox {
+  return {
+    id: 'sandbox-one',
+    state: 'running',
+    origin_thread_id: 'thread/one',
+    title: 'Fix login',
+    repo: 'org/repo-one',
+    user_id: 'owner-one',
+    host: 'host-one',
+    container_id: 'container-one-id',
+    container_name: 'container-one',
+    runtime_id: 'codex',
+    runtime_version: '1.2.3',
+    execution_profile: 'trusted-v1',
+    memory_limit: '4g',
+    cpu_limit: '2',
+    member_count: 3,
+    active_attempt_count: 1,
+    created_at: '2026-10-10T09:00:00Z',
+    last_activity_at: '2026-10-10T09:59:00Z',
+    idle_deadline: '2026-10-10T10:15:00Z',
+    updated_at: '2026-10-10T09:59:50Z',
+    host_last_heartbeat_at: observedAt,
+    ...overrides,
+  };
+}
+function usage(overrides: Partial<AdminSandboxResourceUsage> = {}): AdminSandboxResourceUsage {
+  return {
+    source: 'docker-stats',
+    scope: 'container',
+    sample_id: 'sample-one',
+    sampled_at: '2026-10-10T09:59:55Z',
+    received_at: observedAt,
+    age_seconds: 5,
+    stale: false,
+    cpu_cores: 0.25,
+    cpu_window_seconds: 30,
+    memory_bytes: 1024 ** 2,
+    memory_limit_bytes: 4 * 1024 ** 3,
+    pids: 2,
+    io_read_bytes: 0,
+    io_write_bytes: 1024,
+    net_rx_bytes: 2048,
+    net_tx_bytes: 4096,
+    io_read_bytes_per_second: 0,
+    io_write_bytes_per_second: 1,
+    net_rx_bytes_per_second: 2,
+    net_tx_bytes_per_second: 4,
+    ...overrides,
+  };
+}
+
+function statValue(label: string, scope: HTMLElement = document.body): HTMLElement {
+  const term = within(scope).getByText(label, { selector: 'dt' });
+  const value = term.nextElementSibling;
+  expect(value).not.toBeNull();
+  return value as HTMLElement;
+}
+
+function page(rows = [sandbox()], next: string | null = null, total = rows.length): InventoryPage {
+  return { sandboxes: rows, next_cursor: next, total_count: total, observed_at: observedAt };
+}
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+beforeEach(() => {
+  vi.resetAllMocks();
+  auth.id = 'admin-one';
+  auth.access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
+  vi.mocked(getAdminSandboxes).mockResolvedValue(page());
+});
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+describe('running sandbox inventory', () => {
+  it.each<AgentAccessApi | undefined>([
+    undefined,
+    { allowed: false, permissions: ['agent.admin'] },
+    { allowed: true, permissions: ['agent.use'] },
+  ])('does not read inventory without a current admin permission: %j', (access) => {
+    auth.access = access;
+    render(<AdminSandboxesPage />);
+    expect(screen.getByText('Admin access required')).toBeInTheDocument();
+    expect(getAdminSandboxes).not.toHaveBeenCalled();
+  });
+
+  it('automatically loads every page, including idle containers and other owners', async () => {
+    const rest = deferred<InventoryPage>();
+    vi.mocked(getAdminSandboxes)
+      .mockResolvedValueOnce(page([sandbox()], 'next+page', 2))
+      .mockReturnValueOnce(rest.promise);
+    render(<AdminSandboxesPage />);
+    await waitFor(() => expect(getAdminSandboxes).toHaveBeenCalledTimes(2));
+    const first = vi.mocked(getAdminSandboxes).mock.calls[0];
+    const second = vi.mocked(getAdminSandboxes).mock.calls[1];
+    expect(first[0]).not.toHaveProperty('user_id');
+    expect(second[0]).toMatchObject({ cursor: 'next+page' });
+    expect(second[1]).toBe(first[1]);
+    expect(first[1]).toBeInstanceOf(AbortSignal);
+    expect(screen.getByText('Loading running sandboxes…')).toBeInTheDocument();
+    await act(async () => {
+      rest.resolve(
+        page([
+          sandbox({
+            id: 'sandbox-two',
+            origin_thread_id: 'thread-two',
+            title: 'Second session',
+            user_id: 'owner-two',
+            host: 'host-two',
+            active_attempt_count: 0,
+            member_count: 1,
+          }),
+        ]),
+      );
+    });
+    const table = screen.getByRole('table');
+    expect(within(table).getAllByRole('row')).toHaveLength(3);
+    expect(within(table).getByText('owner-one')).toBeInTheDocument();
+    expect(within(table).getByText('owner-two')).toBeInTheDocument();
+    expect(within(table).getByText('Executing')).toBeInTheDocument();
+    expect(within(table).getByText('Retained')).toBeInTheDocument();
+    expect(screen.queryByText('Loading running sandboxes…')).not.toBeInTheDocument();
+    expect(
+      within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('link', {
+        name: 'Sandboxes',
+      }),
+    ).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('keeps sandbox groups separate and links the origin session and host', async () => {
+    vi.mocked(getAdminSandboxes).mockResolvedValue(
+      page([
+        sandbox(),
+        sandbox({ id: 'sandbox-two', origin_thread_id: 'thread-two', member_count: 1 }),
+      ]),
+    );
+    render(<AdminSandboxesPage />);
+    const sessions = await screen.findAllByRole('link', { name: 'Fix login' });
+    expect(sessions.map((link) => link.getAttribute('href'))).toEqual([
+      '/admin/sessions/thread%2Fone',
+      '/admin/sessions/thread-two',
+    ]);
+    const table = screen.getByRole('table');
+    expect(within(table).getByText('sandbox-one')).toBeInTheDocument();
+    expect(within(table).getByText('sandbox-two')).toBeInTheDocument();
+    const firstRow = sessions[0].closest('tr')!;
+    expect(within(firstRow).getByRole('link', { name: 'host-one' })).toHaveAttribute(
+      'href',
+      '/admin/hosts',
+    );
+    expect(firstRow).toHaveTextContent('container-one');
+    expect(firstRow).toHaveTextContent('codex');
+    expect(firstRow).toHaveTextContent('1.2.3');
+    expect(firstRow).toHaveTextContent('4g');
+    expect(firstRow).toHaveTextContent('3');
+  });
+
+  it('shows stale and unknown host heartbeats without hiding their sandboxes', async () => {
+    vi.mocked(getAdminSandboxes).mockResolvedValue(
+      page([
+        sandbox({ host_last_heartbeat_at: '2026-10-10T09:57:00Z' }),
+        sandbox({ id: 'sandbox-two', title: null, host_last_heartbeat_at: null }),
+      ]),
+    );
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-one');
+    expect(screen.getByText('Stale')).toBeInTheDocument();
+    expect(screen.getByText('Unknown')).toBeInTheDocument();
+    expect(screen.getByRole('table')).toHaveTextContent('sandbox-two');
+  });
+
+  it('marks a host heartbeat stale after three missed thirty-second heartbeats', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(new Date(observedAt));
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-one');
+    vi.mocked(getAdminSandboxes).mockRejectedValue(new APIError('SERVER_ERROR', 'boom', 500));
+    expect(screen.queryByText('Stale')).not.toBeInTheDocument();
+    await act(async () => vi.advanceTimersByTimeAsync(90_000));
+    expect(screen.queryByText('Stale')).not.toBeInTheDocument();
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    expect(screen.getByText('Stale')).toBeInTheDocument();
+  });
+
+  it('uses server observation time for freshness when the browser system clock is skewed', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(new Date('2046-10-10T10:00:00Z'));
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-one');
+    expect(screen.queryByText('Stale')).not.toBeInTheDocument();
+    const row = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
+    expect(row).toHaveTextContent('just now');
+    vi.setSystemTime(new Date('2056-10-10T10:00:00Z'));
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    expect(screen.queryByText('Stale')).not.toBeInTheDocument();
+    expect(row).toHaveTextContent('just now');
+  });
+
+  it('includes the time spent loading later pages in the first page’s heartbeat age', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(new Date(observedAt));
+    const rest = deferred<InventoryPage>();
+    vi.mocked(getAdminSandboxes)
+      .mockResolvedValueOnce(page([sandbox()], 'next', 2))
+      .mockReturnValueOnce(rest.promise);
+    render(<AdminSandboxesPage />);
+    await act(async () => {});
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTimeAsync(100_000));
+    const laterObservation = '2026-10-10T10:01:40Z';
+    await act(async () =>
+      rest.resolve({
+        ...page([
+          sandbox({
+            id: 'sandbox-two',
+            title: 'Second session',
+            origin_thread_id: 'thread-two',
+            host_last_heartbeat_at: laterObservation,
+          }),
+        ]),
+        observed_at: laterObservation,
+      }),
+    );
+    const firstRow = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
+    const secondRow = screen.getByRole('link', { name: 'Second session' }).closest('tr')!;
+    expect(within(firstRow).getByText('Stale')).toBeInTheDocument();
+    expect(within(secondRow).queryByText('Stale')).not.toBeInTheDocument();
+  });
+
+  it('states a successful empty inventory', async () => {
+    vi.mocked(getAdminSandboxes).mockResolvedValue(page([]));
+    render(<AdminSandboxesPage />);
+    expect(await screen.findByText('No running sandboxes.')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('reports an initial read failure without claiming that no sandboxes are running', async () => {
+    vi.mocked(getAdminSandboxes).mockRejectedValue(new APIError('SERVER_ERROR', 'boom', 500));
+    render(<AdminSandboxesPage />);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(screen.queryByText('No running sandboxes.')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled();
+  });
+
+  it('reports a repeated pagination cursor instead of displaying an incomplete inventory', async () => {
+    vi.mocked(getAdminSandboxes).mockResolvedValue(page([sandbox()], 'repeated-cursor', 10));
+    render(<AdminSandboxesPage />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('complete sandbox list');
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('sandbox-one')).not.toBeInTheDocument();
+    expect(screen.queryByText('No running sandboxes.')).not.toBeInTheDocument();
+  });
+
+  it('refreshes manually and replaces the complete inventory when containers disappear', async () => {
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-one');
+    vi.mocked(getAdminSandboxes).mockResolvedValueOnce(page([]));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await screen.findByText('No running sandboxes.');
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('sandbox-one')).not.toBeInTheDocument();
+    expect(vi.mocked(getAdminSandboxes).mock.calls[1][0]).not.toHaveProperty('cursor');
+  });
+
+  it('retains the last complete inventory if a later page of a refresh fails', async () => {
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-one');
+    vi.mocked(getAdminSandboxes)
+      .mockResolvedValueOnce(page([sandbox({ id: 'new-sandbox' })], 'next', 2))
+      .mockRejectedValueOnce(new APIError('SERVER_ERROR', 'boom', 500));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Refresh failed.');
+    expect(screen.getByText('sandbox-one')).toBeInTheDocument();
+    expect(screen.queryByText('new-sandbox')).not.toBeInTheDocument();
+    expect(screen.queryByText('No running sandboxes.')).not.toBeInTheDocument();
+  });
+
+  it.each([401, 403])('clears previously loaded inventory on HTTP %i', async (status) => {
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-one');
+    vi.mocked(getAdminSandboxes).mockRejectedValue(new APIError('INVALID_TOKEN', 'no', status));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await screen.findByText('Admin access required');
+    expect(screen.queryByText('sandbox-one')).not.toBeInTheDocument();
+    expect(screen.queryByText('owner-one')).not.toBeInTheDocument();
+  });
+
+  it('polls every thirty seconds and stops polling on unmount', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const view = render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-one');
+    await act(async () => vi.advanceTimersByTimeAsync(29_999));
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(2);
+    view.unmount();
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not start overlapping polling requests while a complete inventory is loading', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const pending = deferred<InventoryPage>();
+    vi.mocked(getAdminSandboxes).mockReturnValueOnce(pending.promise);
+    render(<AdminSandboxesPage />);
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
+    await act(async () => pending.resolve(page()));
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled();
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears inventory immediately when the current user loses admin permission', async () => {
+    const view = render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-one');
+    auth.access = { allowed: true, permissions: ['agent.use'] };
+    view.rerender(<AdminSandboxesPage />);
+    expect(screen.getByText('Admin access required')).toBeInTheDocument();
+    expect(screen.queryByText('sandbox-one')).not.toBeInTheDocument();
+  });
+
+  it('aborts an old user’s read and ignores its late result after a user switch', async () => {
+    const oldRead = deferred<InventoryPage>();
+    const newRead = deferred<InventoryPage>();
+    vi.mocked(getAdminSandboxes)
+      .mockReturnValueOnce(oldRead.promise)
+      .mockReturnValueOnce(newRead.promise);
+    const view = render(<AdminSandboxesPage />);
+    await waitFor(() => expect(getAdminSandboxes).toHaveBeenCalledTimes(1));
+    const oldSignal = vi.mocked(getAdminSandboxes).mock.calls[0][1];
+    auth.id = 'admin-two';
+    view.rerender(<AdminSandboxesPage />);
+    await waitFor(() => expect(getAdminSandboxes).toHaveBeenCalledTimes(2));
+    expect(oldSignal?.aborted).toBe(true);
+    await act(async () => newRead.resolve(page([sandbox({ id: 'new-user-sandbox' })])));
+    await screen.findByText('new-user-sandbox');
+    await act(async () => oldRead.resolve(page()));
+    expect(screen.queryByText('sandbox-one')).not.toBeInTheDocument();
+    expect(screen.getByText('new-user-sandbox')).toBeInTheDocument();
+  });
+
+  it('does not expose the previous user’s snapshot while a new user’s read is pending', async () => {
+    const view = render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-one');
+    const newRead = deferred<InventoryPage>();
+    vi.mocked(getAdminSandboxes).mockReturnValueOnce(newRead.promise);
+    auth.id = 'admin-two';
+    view.rerender(<AdminSandboxesPage />);
+    expect(screen.getByText('Loading running sandboxes…')).toBeInTheDocument();
+    expect(screen.queryByText('sandbox-one')).not.toBeInTheDocument();
+    await act(async () => newRead.resolve(page([])));
+    await screen.findByText('No running sandboxes.');
+  });
+
+  it('expands container resource and lifecycle stats without turning unknown values into zero', async () => {
+    vi.mocked(getAdminSandboxes).mockResolvedValue(
+      page([
+        sandbox({
+          resource_usage: usage({
+            cpu_cores: 0,
+            memory_bytes: 0,
+            pids: 0,
+            net_rx_bytes: 0,
+            net_tx_bytes: null,
+            io_read_bytes: null,
+            io_write_bytes: 0,
+          }),
+          resident_slot_capacity: 6,
+          active_operation_count: 0,
+          snapshot_state: 'ready',
+          terminal_count: 0,
+        }),
+      ]),
+    );
+    render(<AdminSandboxesPage />);
+    const button = await screen.findByRole('button', { name: 'Show stats for Fix login' });
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByLabelText('Stats for Fix login')).not.toBeInTheDocument();
+    const row = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
+    expect(row).toHaveTextContent('0.00 cores');
+    expect(row).toHaveTextContent('0 B');
+    expect(within(row).getByRole('meter', { name: 'CPU quota for Fix login' })).toHaveAttribute(
+      'max',
+      '2',
+    );
+    expect(within(row).getByRole('meter', { name: 'Memory limit for Fix login' })).toHaveAttribute(
+      'max',
+      String(4 * 1024 ** 3),
+    );
+    fireEvent.click(button);
+    const stats = screen.getByLabelText('Stats for Fix login');
+    expect(button).toHaveAttribute('aria-expanded', 'true');
+    expect(statValue('Network received', stats)).toHaveTextContent('0 B');
+    expect(statValue('Network sent', stats)).toHaveTextContent('Unavailable');
+    expect(statValue('Disk read', stats)).toHaveTextContent('Unavailable');
+    expect(statValue('Disk written', stats)).toHaveTextContent('0 B');
+    expect(statValue('Processes', stats)).toHaveTextContent('0');
+    expect(statValue('Sessions / capacity', stats)).toHaveTextContent('3 / 6');
+    expect(statValue('Terminals', stats)).toHaveTextContent('0');
+    expect(statValue('Active operations', stats)).toHaveTextContent('0');
+    expect(statValue('Snapshot', stats)).toHaveTextContent('ready');
+    fireEvent.click(button);
+    expect(screen.queryByLabelText('Stats for Fix login')).not.toBeInTheDocument();
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('shows fleet resource totals only for fresh measurements and states their coverage', async () => {
+    vi.mocked(getAdminSandboxes).mockResolvedValue(
+      page([
+        sandbox({ resource_usage: usage() }),
+        sandbox({
+          id: 'sandbox-two',
+          title: 'Old sample',
+          host: 'host-two',
+          resource_usage: usage({ cpu_cores: 99, memory_bytes: 99 * 1024 ** 3, stale: true }),
+        }),
+        sandbox({ id: 'sandbox-three', title: 'Old host' }),
+      ]),
+    );
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-one');
+    expect(statValue('Measured CPU')).toHaveTextContent('0.25 cores');
+    expect(statValue('Measured memory')).toHaveTextContent('1 MiB');
+    expect(screen.getAllByText('1 / 3 sandboxes · fresh samples only')).toHaveLength(2);
+    expect(statValue('Running sandboxes')).toHaveTextContent('3');
+    expect(statValue('Active turns')).toHaveTextContent('3');
+    expect(statValue('Sessions')).toHaveTextContent('9');
+    expect(statValue('Hosts')).toHaveTextContent('2');
+    const oldRow = screen.getByRole('link', { name: 'Old sample' }).closest('tr')!;
+    expect(oldRow).toHaveTextContent('Stale sample');
+  });
+
+  it('preserves resource sample age from each page while waiting for the complete inventory', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(new Date(observedAt));
+    const rest = deferred<InventoryPage>();
+    vi.mocked(getAdminSandboxes)
+      .mockResolvedValueOnce(
+        page([sandbox({ resource_usage: usage({ age_seconds: 0, cpu_cores: 8 }) })], 'next', 2),
+      )
+      .mockReturnValueOnce(rest.promise);
+    render(<AdminSandboxesPage />);
+    await act(async () => {});
+    expect(getAdminSandboxes).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTimeAsync(100_000));
+    const laterObservation = '2026-10-10T10:01:40Z';
+    await act(async () =>
+      rest.resolve({
+        ...page([
+          sandbox({
+            id: 'sandbox-two',
+            title: 'Second session',
+            host_last_heartbeat_at: laterObservation,
+            resource_usage: usage({ age_seconds: 0, cpu_cores: 0, memory_bytes: 0 }),
+          }),
+        ]),
+        observed_at: laterObservation,
+      }),
+    );
+    expect(statValue('Measured CPU')).toHaveTextContent('0.00 cores');
+    expect(statValue('Measured memory')).toHaveTextContent('0 B');
+    expect(screen.getAllByText('1 / 2 sandboxes · fresh samples only')).toHaveLength(2);
+    const firstRow = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
+    const secondRow = screen.getByRole('link', { name: 'Second session' }).closest('tr')!;
+    expect(firstRow).toHaveTextContent('Stale sample');
+    expect(secondRow).not.toHaveTextContent('Stale sample');
+  });
+
+  it('keeps older host responses usable and displays missing telemetry as unavailable', async () => {
+    render(<AdminSandboxesPage />);
+    const button = await screen.findByRole('button', { name: 'Show stats for Fix login' });
+    expect(statValue('Measured CPU')).toHaveTextContent('Unavailable');
+    expect(statValue('Measured memory')).toHaveTextContent('Unavailable');
+    fireEvent.click(button);
+    const stats = screen.getByLabelText('Stats for Fix login');
+    for (const label of [
+      'Network received',
+      'Network sent',
+      'Disk read',
+      'Disk written',
+      'Processes',
+      'Sample age',
+    ]) {
+      expect(statValue(label, stats)).toHaveTextContent('Unavailable');
+    }
+    expect(statValue('Terminals', stats)).toHaveTextContent('Unknown');
+    expect(statValue('Active operations', stats)).toHaveTextContent('Unavailable');
+    expect(statValue('Snapshot', stats)).toHaveTextContent('Unavailable');
+  });
+
+  it('marks an older terminal count stale even when the host heartbeat and resource sample are fresh', async () => {
+    vi.mocked(getAdminSandboxes).mockResolvedValue(
+      page([
+        sandbox({
+          terminal_count: 0,
+          terminal_count_observed_at: '2026-10-10T09:57:00Z',
+          resource_usage: usage(),
+        }),
+      ]),
+    );
+    render(<AdminSandboxesPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show stats for Fix login' }));
+    const stats = screen.getByRole('region', { name: 'Stats for Fix login' });
+    expect(statValue('Terminals', stats)).toHaveTextContent('0 · Stale count');
+    expect(statValue('Sample age', stats)).toHaveTextContent('Fresh');
+    expect(statValue('Measured CPU')).toHaveTextContent('0.25 cores');
+  });
+
+  it('ages retained resource measurements out of totals while a refresh fails', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(new Date(observedAt));
+    vi.mocked(getAdminSandboxes).mockResolvedValueOnce(
+      page([sandbox({ resource_usage: usage({ age_seconds: 89 }) })]),
+    );
+    render(<AdminSandboxesPage />);
+    await screen.findByText('sandbox-one');
+    expect(statValue('Measured CPU')).toHaveTextContent('0.25 cores');
+    vi.mocked(getAdminSandboxes).mockRejectedValue(new APIError('SERVER_ERROR', 'boom', 500));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await act(async () => {});
+    expect(screen.getByRole('alert')).toHaveTextContent('Refresh failed.');
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(screen.getByText('sandbox-one')).toBeInTheDocument();
+    expect(statValue('Measured CPU')).toHaveTextContent('Unavailable');
+    expect(statValue('Measured memory')).toHaveTextContent('Unavailable');
+    expect(screen.getAllByText('0 / 1 sandboxes · fresh samples only')).toHaveLength(2);
+    const row = screen.getByRole('link', { name: 'Fix login' }).closest('tr')!;
+    expect(row).toHaveTextContent('Stale sample');
+    expect(row).toHaveTextContent('0.25 cores');
+  });
+});

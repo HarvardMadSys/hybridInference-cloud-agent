@@ -6,7 +6,15 @@ import { useEffect, useRef } from 'react';
 export function AdminNavigation({
   current,
 }: {
-  current: 'servers' | 'runs' | 'activity' | 'usage' | 'measurements' | 'settings' | 'audit';
+  current:
+    | 'servers'
+    | 'sandboxes'
+    | 'runs'
+    | 'activity'
+    | 'usage'
+    | 'measurements'
+    | 'settings'
+    | 'audit';
 }) {
   const section = current === 'runs' ? 'activity' : current;
   const selected = useRef<HTMLAnchorElement>(null);
@@ -20,6 +28,7 @@ export function AdminNavigation({
     >
       {[
         { key: 'servers', label: 'Servers', href: '/admin/hosts' },
+        { key: 'sandboxes', label: 'Sandboxes', href: '/admin/sandboxes' },
         { key: 'activity', label: 'Activity', href: '/admin/activity' },
         { key: 'usage', label: 'Usage', href: '/admin/usage' },
         { key: 'measurements', label: 'Measurements', href: '/admin/measurements' },

@@ -154,6 +154,8 @@ class SandboxRepository(Protocol):
         activity_active: bool | None = None,
         idle_remaining_seconds: float | None = None,
         members: list[dict[str, Any]] | None = None,
+        resource_usage: dict[str, Any] | None = None,
+        terminal_count: int | None = None,
     ) -> str | None:
         """Reconcile one authenticated shared-group Docker observation."""
         ...

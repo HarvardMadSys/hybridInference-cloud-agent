@@ -54,6 +54,10 @@ from cloud_agent_shared.host_settings import (
     SettingUnit,
     validate_admin_change,
 )
+from cloud_agent_shared.sandbox_resources import (
+    SandboxResourceSample,
+    parse_sandbox_resource_sample,
+)
 from cloud_agent_shared.shared_protocol import (
     HOST_CONCURRENCY_MAX_SLOTS,
     HOST_CONCURRENCY_MIN_SLOTS,
@@ -2863,6 +2867,24 @@ class RetainedSandboxBeat(BaseModel):
     )
     shared_live: Literal[True] = True
     members: list[WorkerSandboxMember] = Field(default_factory=list, max_length=128)
+    resource_usage: SandboxResourceSample | None = None
+    terminal_count: StrictInt | None = Field(None, ge=0, le=4096)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_unusable_resources(cls, data: Any) -> Any:
+        """Optional diagnostics must never refuse a valid lifecycle heartbeat."""
+        if not isinstance(data, dict):
+            return data
+        result = dict(data)
+        if result.get("resource_usage") is not None:
+            result["resource_usage"] = parse_sandbox_resource_sample(result["resource_usage"])
+        count = result.get("terminal_count")
+        if count is not None and (
+            isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 4096
+        ):
+            result["terminal_count"] = None
+        return result
 
 
 class RetainedSandboxStop(BaseModel):

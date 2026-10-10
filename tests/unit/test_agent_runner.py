@@ -242,6 +242,50 @@ def test_reconstructed_running_group_reports_unknown_activity(monkeypatch):
     assert rows[0]["idle_remaining_seconds"] is None
 
 
+@pytest.mark.parametrize("invalid_usage", [False, True])
+@pytest.mark.parametrize("terminal_count", [2, 4096, 4097])
+def test_retained_heartbeat_passes_group_resources_and_terminal_count(
+    monkeypatch, invalid_usage, terminal_count
+):
+    sample = {
+        "sample_id": "resource-sample",
+        "sample_age_ms": 4000,
+        "memory_bytes": "invalid" if invalid_usage else 1024,
+        "cpu_cores": 1.5,
+    }
+    supervisor = SimpleNamespace(
+        list=lambda: [
+            {
+                "thread_id": "athr_source",
+                "sandbox_id": "asbx_source",
+                "container_id": "container-source",
+                "generation": 1,
+                "activation_generation": 1,
+                "running": True,
+                "shared_live": True,
+                "terminal_count": terminal_count,
+                "members": [],
+                "resource_usage": sample,
+            }
+        ],
+        close=Mock(),
+    )
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
+    rows = runner_mod._retained_sandbox_heartbeat_rows()
+    assert rows is not None
+    assert rows[0]["container_id"] == "container-source"
+    assert rows[0]["activity_active"] is True
+    assert rows[0]["terminal_count"] == (terminal_count if terminal_count <= 4096 else None)
+    if invalid_usage:
+        assert rows[0]["resource_usage"] is None
+    else:
+        assert rows[0]["resource_usage"]["sample_id"] == "resource-sample"
+        assert rows[0]["resource_usage"]["sample_age_ms"] == 4000
+        assert rows[0]["resource_usage"]["memory_bytes"] == 1024
+        assert rows[0]["resource_usage"]["scope"] == "container"
+    supervisor.close.assert_called_once()
+
+
 def test_resume_requires_the_exact_native_session():
     assert (
         runner_mod._verified_native_session_id(

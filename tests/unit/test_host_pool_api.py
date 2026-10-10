@@ -1548,6 +1548,40 @@ async def test_host_heartbeat_reconciles_exact_retained_docker_observations(resi
     ]
 
 
+async def test_host_heartbeat_forwards_optional_container_telemetry(residency_client):
+    from tests.unit.test_sandbox_resource_protocol import beat, sample
+
+    client, store, _grants = residency_client
+    credential = await _enroll(client, store)
+    measured = sample()
+    response = await client.post(
+        "/v1/agent/host/heartbeat",
+        json={"retained_sandboxes": [beat(resource_usage=measured, terminal_count=3)]},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+    assert response.status_code == 200, response.text
+    assert store.sandbox_observations[0]["resource_usage"] == measured
+    assert store.sandbox_observations[0]["terminal_count"] == 3
+    assert store.sandbox_observations[0]["host"] == "runner-a"
+
+
+async def test_host_heartbeat_drops_bad_telemetry_and_still_reports_lifecycle(residency_client):
+    from tests.unit.test_sandbox_resource_protocol import beat, sample
+
+    client, store, _grants = residency_client
+    credential = await _enroll(client, store)
+    response = await client.post(
+        "/v1/agent/host/heartbeat",
+        json={"retained_sandboxes": [beat(resource_usage=sample(pids=-1), terminal_count=-1)]},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+    assert response.status_code == 200, response.text
+    observation = store.sandbox_observations[0]
+    assert observation["running"] is True
+    assert observation.get("resource_usage") is None
+    assert observation.get("terminal_count") is None
+
+
 async def test_host_heartbeat_rejects_a_non_shared_sandbox_observation(residency_client):
     client, store, _grants = residency_client
     credential = await _enroll(client, store)

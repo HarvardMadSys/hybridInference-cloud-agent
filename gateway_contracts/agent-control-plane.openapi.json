@@ -1490,6 +1490,441 @@
         "title": "AdminRunList",
         "type": "object"
       },
+      "AdminSandbox": {
+        "description": "One container shared by its current chat members, including idle groups.",
+        "properties": {
+          "active_attempt_count": {
+            "minimum": 0.0,
+            "title": "Active Attempt Count",
+            "type": "integer"
+          },
+          "active_operation_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Active Operation Count",
+            "type": "integer"
+          },
+          "container_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Container Id"
+          },
+          "container_name": {
+            "title": "Container Name",
+            "type": "string"
+          },
+          "cpu_limit": {
+            "title": "Cpu Limit",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "execution_profile": {
+            "title": "Execution Profile",
+            "type": "string"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "host_last_heartbeat_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Host Last Heartbeat At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "idle_deadline": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idle Deadline"
+          },
+          "last_activity_at": {
+            "format": "date-time",
+            "title": "Last Activity At",
+            "type": "string"
+          },
+          "member_count": {
+            "minimum": 0.0,
+            "title": "Member Count",
+            "type": "integer"
+          },
+          "memory_limit": {
+            "title": "Memory Limit",
+            "type": "string"
+          },
+          "origin_thread_id": {
+            "title": "Origin Thread Id",
+            "type": "string"
+          },
+          "repo": {
+            "title": "Repo",
+            "type": "string"
+          },
+          "resident_slot_capacity": {
+            "default": 8,
+            "minimum": 1.0,
+            "title": "Resident Slot Capacity",
+            "type": "integer"
+          },
+          "resource_usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AdminSandboxResourceUsage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "runtime_id": {
+            "title": "Runtime Id",
+            "type": "string"
+          },
+          "runtime_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runtime Version"
+          },
+          "snapshot_state": {
+            "default": "none",
+            "title": "Snapshot State",
+            "type": "string"
+          },
+          "state": {
+            "const": "running",
+            "default": "running",
+            "title": "State",
+            "type": "string"
+          },
+          "terminal_count": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Terminal Count"
+          },
+          "terminal_count_observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Terminal Count Observed At"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "origin_thread_id",
+          "repo",
+          "user_id",
+          "host",
+          "container_name",
+          "runtime_id",
+          "execution_profile",
+          "memory_limit",
+          "cpu_limit",
+          "member_count",
+          "active_attempt_count",
+          "created_at",
+          "last_activity_at",
+          "updated_at"
+        ],
+        "title": "AdminSandbox",
+        "type": "object"
+      },
+      "AdminSandboxList": {
+        "description": "A bounded page of the current inventory, ordered by sandbox identity.",
+        "properties": {
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "sandboxes": {
+            "items": {
+              "$ref": "#/components/schemas/AdminSandbox"
+            },
+            "title": "Sandboxes",
+            "type": "array"
+          },
+          "total_count": {
+            "minimum": 0.0,
+            "title": "Total Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sandboxes",
+          "total_count",
+          "observed_at"
+        ],
+        "title": "AdminSandboxList",
+        "type": "object"
+      },
+      "AdminSandboxResourceUsage": {
+        "description": "Docker container totals across every member, with explicit sample freshness.",
+        "properties": {
+          "age_seconds": {
+            "minimum": 0.0,
+            "title": "Age Seconds",
+            "type": "number"
+          },
+          "cpu_cores": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Cores"
+          },
+          "cpu_window_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Window Seconds"
+          },
+          "io_read_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Io Read Bytes"
+          },
+          "io_read_bytes_per_second": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Io Read Bytes Per Second"
+          },
+          "io_write_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Io Write Bytes"
+          },
+          "io_write_bytes_per_second": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Io Write Bytes Per Second"
+          },
+          "memory_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Bytes"
+          },
+          "memory_limit_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Limit Bytes"
+          },
+          "net_rx_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Net Rx Bytes"
+          },
+          "net_rx_bytes_per_second": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Net Rx Bytes Per Second"
+          },
+          "net_tx_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Net Tx Bytes"
+          },
+          "net_tx_bytes_per_second": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Net Tx Bytes Per Second"
+          },
+          "pids": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pids"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "sample_id": {
+            "title": "Sample Id",
+            "type": "string"
+          },
+          "sampled_at": {
+            "format": "date-time",
+            "title": "Sampled At",
+            "type": "string"
+          },
+          "scope": {
+            "const": "container",
+            "default": "container",
+            "title": "Scope",
+            "type": "string"
+          },
+          "source": {
+            "const": "docker-stats",
+            "default": "docker-stats",
+            "title": "Source",
+            "type": "string"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sample_id",
+          "sampled_at",
+          "received_at",
+          "age_seconds",
+          "stale"
+        ],
+        "title": "AdminSandboxResourceUsage",
+        "type": "object"
+      },
       "AdminStep": {
         "description": "One model request, with the turn and the run of it that made it.",
         "properties": {
@@ -10451,6 +10886,16 @@
             "title": "Members",
             "type": "array"
           },
+          "resource_usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SandboxResourceSample"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "running": {
             "title": "Running",
             "type": "boolean"
@@ -10466,6 +10911,19 @@
             "default": true,
             "title": "Shared Live",
             "type": "boolean"
+          },
+          "terminal_count": {
+            "anyOf": [
+              {
+                "maximum": 4096.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Terminal Count"
           },
           "thread_id": {
             "maxLength": 128,
@@ -10704,6 +11162,205 @@
           }
         },
         "title": "RuntimeUsage",
+        "type": "object"
+      },
+      "SandboxResourceSample": {
+        "additionalProperties": false,
+        "description": "One Docker container reading, with rates over its preceding sample interval.\n\nNull counters mean Docker did not measure them. CPU is expressed in cores,\nso one fully occupied CPU reports ``1.0`` regardless of the host's size.\nNetwork and block I/O byte counters are cumulative Docker counters; their\nrates, and CPU, describe the interval between two usable observations.",
+        "properties": {
+          "cpu_cores": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Cores"
+          },
+          "cpu_window_seconds": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 300.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Window Seconds"
+          },
+          "io_read_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Io Read Bytes"
+          },
+          "io_read_bytes_per_second": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Io Read Bytes Per Second"
+          },
+          "io_write_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Io Write Bytes"
+          },
+          "io_write_bytes_per_second": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Io Write Bytes Per Second"
+          },
+          "memory_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Bytes"
+          },
+          "memory_limit_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Limit Bytes"
+          },
+          "net_rx_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Net Rx Bytes"
+          },
+          "net_rx_bytes_per_second": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Net Rx Bytes Per Second"
+          },
+          "net_tx_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Net Tx Bytes"
+          },
+          "net_tx_bytes_per_second": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Net Tx Bytes Per Second"
+          },
+          "pids": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pids"
+          },
+          "sample_age_ms": {
+            "maximum": 300000.0,
+            "minimum": 0.0,
+            "title": "Sample Age Ms",
+            "type": "number"
+          },
+          "sample_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Sample Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "scope": {
+            "const": "container",
+            "default": "container",
+            "title": "Scope",
+            "type": "string"
+          },
+          "source": {
+            "const": "docker-stats",
+            "default": "docker-stats",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sample_id",
+          "sample_age_ms"
+        ],
+        "title": "SandboxResourceSample",
         "type": "object"
       },
       "SecretRequest": {
@@ -18085,6 +18742,82 @@
           }
         },
         "summary": "Set Agent Runtime Version"
+      }
+    },
+    "/admin/agent/sandboxes": {
+      "get": {
+        "description": "List running containers, including retained groups between active turns.",
+        "operationId": "list_admin_sandboxes_admin_agent_sandboxes_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSandboxList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Admin Sandboxes"
       }
     },
     "/admin/agent/server-preflights": {

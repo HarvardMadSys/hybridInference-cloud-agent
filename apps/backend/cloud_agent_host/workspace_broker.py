@@ -67,6 +67,7 @@ from cloud_agent_host.sandbox import (
     TerminalProcess,
     build_backend_from_env,
 )
+from cloud_agent_host.sandbox_resources import SandboxResourceCollector
 from cloud_agent_host.session_lifecycle import (
     DEFAULT_CHAT_IDLE_TIMEOUT_S,
     SessionBusy,
@@ -1335,6 +1336,7 @@ def create_app(
             )
         shared_supervisor_started = False
         terminals_started = False
+        resource_collector: SandboxResourceCollector | None = None
         try:
             # Reconcile/reap retained Docker execs before this process starts
             # accepting new terminal sessions. Keep startup inside the cleanup
@@ -1344,8 +1346,14 @@ def create_app(
             shared_supervisor_started = True
             terminals.start()
             terminals_started = True
+            resource_collector = SandboxResourceCollector()
+            resource_collector.start()
+            _app.state.sandbox_resource_collector = resource_collector
             yield
         finally:
+            _app.state.sandbox_resource_collector = None
+            if resource_collector is not None:
+                resource_collector.close()
             if terminals_started:
                 terminals.close()
             if shared_supervisor_started:
@@ -1354,6 +1362,7 @@ def create_app(
     app = FastAPI(title="Agent workspace broker", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.terminal_manager = terminals
     app.state.shared_session_supervisor = shared_supervisor
+    app.state.sandbox_resource_collector = None
 
     async def runtime_refused(_request: Request, exc: Exception) -> JSONResponse:
         """Answer a runtime's deliberate refusal with the runtime's own reason.
@@ -2133,6 +2142,17 @@ def create_app(
                 for row in members
             ]
             rows.append(origin)
+        resource_collector = app.state.sandbox_resource_collector
+        if resource_collector is not None:
+            # The listing already proved each group's labels and exact ID.
+            # Synchronization and cache reads perform no Docker stats I/O.
+            resource_collector.sync_targets(rows)
+        for row in rows:
+            row["resource_usage"] = (
+                None
+                if resource_collector is None or not row["running"]
+                else resource_collector.latest(row["container_id"])
+            )
         return {"sandboxes": rows}
 
     @app.get("/workspaces/{workspace_id}/files")

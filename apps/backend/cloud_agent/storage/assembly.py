@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 from cloud_agent.storage.admin_conversation_queries import AdminConversationQueries
 from cloud_agent.storage.admin_queries import AdminRunQueries
+from cloud_agent.storage.admin_sandbox_queries import AdminSandboxQueries
 from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
 from cloud_agent.storage.repositories import (
     PostgresAttachmentRepository,
@@ -94,6 +95,7 @@ class Storage:
         #: stop reaching into another object's pool to build one.
         self.admin_conversations = AdminConversationQueries(pool)
         self.admin_runs = AdminRunQueries(pool)
+        self.admin_sandboxes = AdminSandboxQueries(pool)
         self.admin_usage = AdminUsageQueries(pool)
 
         self.attempt_commands: AttemptCommands = PostgresAttemptCommands(pool)

@@ -7,16 +7,21 @@ they were, and only the class holding them changed.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.domain.execution import TERMINAL_STATES
+from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.jobs import fail_unrunnable_follow_ups
 from cloud_agent.storage._sql.rows import load_json, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
+from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 
 if TYPE_CHECKING:
     import asyncpg
+
+logger = get_logger(__name__)
 
 
 class PostgresSandboxRepository:
@@ -633,6 +638,8 @@ class PostgresSandboxRepository:
         activity_active: bool | None = None,
         idle_remaining_seconds: float | None = None,
         members: list[dict[str, Any]] | None = None,
+        resource_usage: dict[str, Any] | None = None,
+        terminal_count: int | None = None,
     ) -> str | None:
         """Reconcile one authenticated shared-group Docker observation."""
         return await self._reconcile_shared_sandbox_observation(
@@ -645,6 +652,8 @@ class PostgresSandboxRepository:
             activity_active=activity_active,
             idle_remaining_seconds=idle_remaining_seconds,
             members=members or [],
+            resource_usage=resource_usage,
+            terminal_count=terminal_count,
         )
 
     async def due_thread_sandbox_stop(
@@ -979,10 +988,14 @@ class PostgresSandboxRepository:
             activation_generation,
             context_status,
         )
+        # Activation starts this member's process, not the group's container:
+        # an idle retained group is already running until Docker says otherwise.
+        # Newly created and stopped groups still await the startup confirmation.
         await conn.execute(
             """
             UPDATE agent_sandboxes
-            SET state = 'starting', idle_deadline = NULL,
+            SET state = CASE WHEN state = 'running' THEN 'running' ELSE 'starting' END,
+                idle_deadline = NULL,
                 last_activity_at = NOW(), updated_at = NOW()
             WHERE id = $1
             """,
@@ -1037,6 +1050,8 @@ class PostgresSandboxRepository:
         activity_active: bool | None,
         idle_remaining_seconds: float | None,
         members: list[dict[str, Any]],
+        resource_usage: dict[str, Any] | None,
+        terminal_count: int | None,
     ) -> str | None:
         """Join one Docker group observation with independently fenced members."""
         async with self._pool.acquire() as conn, conn.transaction():
@@ -1081,6 +1096,20 @@ class PostgresSandboxRepository:
                 sandbox_id,
                 container_id,
             )
+            # Diagnostics share the exact ownership fence above, but their
+            # savepoint cannot roll back the lifecycle observation if monitoring
+            # becomes unavailable during a rollout or a collector failure.
+            try:
+                async with conn.transaction():
+                    await self._record_resource_observation(
+                        conn,
+                        sandbox_id=sandbox_id,
+                        running=running,
+                        resource_usage=resource_usage,
+                        terminal_count=terminal_count,
+                    )
+            except Exception:
+                logger.warning("sandbox_resource_snapshot_unavailable", exc_info=True)
             for member in members[:128]:
                 member_thread = str(member.get("thread_id") or "")
                 if not member_thread:
@@ -1218,3 +1247,60 @@ class PostgresSandboxRepository:
                 sandbox_id,
             )
             return None if row is None else str(row["state"])
+
+    @staticmethod
+    async def _record_resource_observation(
+        conn: asyncpg.Connection,
+        *,
+        sandbox_id: str,
+        running: bool,
+        resource_usage: dict[str, Any] | None,
+        terminal_count: int | None,
+    ) -> None:
+        """Store only new, valid counters for an already fenced container."""
+        if not running:
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET resource_snapshot = NULL, resource_sampled_at = NULL,
+                    resource_received_at = NULL, terminal_count = NULL,
+                    terminal_count_observed_at = NULL
+                WHERE id = $1
+                """,
+                sandbox_id,
+            )
+            return
+        count = terminal_count
+        if count is not None and (
+            isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 4096
+        ):
+            count = None
+        await conn.execute(
+            """
+            UPDATE agent_sandboxes
+            SET terminal_count = $2,
+                terminal_count_observed_at = CASE WHEN $2::integer IS NULL THEN NULL ELSE NOW() END
+            WHERE id = $1
+            """,
+            sandbox_id,
+            count,
+        )
+        sample = parse_sandbox_resource_sample(resource_usage)
+        if sample is None:
+            return
+        await conn.execute(
+            """
+            UPDATE agent_sandboxes
+            SET resource_snapshot = $2::jsonb,
+                resource_sampled_at = NOW() - make_interval(secs => $3),
+                resource_received_at = NOW()
+            WHERE id = $1
+              AND resource_snapshot->>'sample_id' IS DISTINCT FROM $4
+              AND (resource_sampled_at IS NULL
+                   OR resource_sampled_at < NOW() - make_interval(secs => $3))
+            """,
+            sandbox_id,
+            json.dumps(sample.model_dump(mode="json")),
+            sample.sample_age_ms / 1000.0,
+            sample.sample_id,
+        )

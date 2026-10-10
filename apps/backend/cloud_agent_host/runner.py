@@ -134,6 +134,7 @@ from cloud_agent_shared.git.source_archive import (
     build_upload_archive,
 )
 from cloud_agent_shared.host_settings import RUNNER_SETTING_KEYS, reported_values
+from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.shared_protocol import (
     FORK_HELPER,
     HOST_SETTINGS_CAPABILITY,
@@ -1420,6 +1421,15 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
             idle_remaining = None
             if activity_known and deadline is not None:
                 idle_remaining = max(0.0, float(deadline) - now)
+            resource_usage = parse_sandbox_resource_sample(row.get("resource_usage"))
+            terminal_count = row.get("terminal_count")
+            if (
+                isinstance(terminal_count, bool)
+                or not isinstance(terminal_count, int)
+                or terminal_count < 0
+                or terminal_count > 4096
+            ):
+                terminal_count = None
             observations.append(
                 {
                     "thread_id": str(row["thread_id"]),
@@ -1430,6 +1440,10 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
                     "running": running,
                     "activity_active": active if activity_known else None,
                     "idle_remaining_seconds": idle_remaining,
+                    "terminal_count": terminal_count,
+                    "resource_usage": None
+                    if resource_usage is None
+                    else resource_usage.model_dump(),
                     "shared_live": True,
                     "members": members,
                 }

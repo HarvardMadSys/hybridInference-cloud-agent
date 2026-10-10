@@ -189,6 +189,33 @@ deletes the account, encrypted token, and installation grants and asks GitHub
 to withdraw the authorization. Uninstalling the App on GitHub revokes the
 platform's installation access.
 
+## Running sandbox inventory and resource usage
+
+The admin console's **Sandboxes** tab lists every group recorded as running,
+including containers retained between turns. Fork members share one container
+row. The inventory refreshes every 30 seconds and follows every page of
+`GET /admin/agent/sandboxes`, which requires admin access.
+
+CPU is measured in occupied cores over the interval between Docker samples;
+memory is current usage with inactive file cache removed. Network and block
+I/O show cumulative container counters and interval rates. All measurements
+cover the whole shared container. The details also show process and terminal
+counts, session capacity, active operations, snapshot state, and sandbox age.
+Sandbox age starts at group creation and does not measure container uptime.
+
+The workspace broker samples Docker in a bounded background worker, then sends
+cached observations with the host heartbeat. Each sample retains its original
+age through repeated heartbeats. Readings older than 90 seconds are marked
+stale and excluded from the fleet CPU and memory totals; those totals show
+their measured coverage. Counters Docker or Kata does not report remain
+unavailable. A current host heartbeat alone does not imply current resource
+measurements.
+
+Resource persistence requires migration `0034_sandbox_resource_usage` and a
+host running the updated workspace broker. Older hosts still appear in the
+inventory with resource usage unavailable. Only the latest observation is
+stored; this view does not provide resource history.
+
 ## Reading a task's recorded events
 
 The admin console shows tool-call measurements in Resources and model records

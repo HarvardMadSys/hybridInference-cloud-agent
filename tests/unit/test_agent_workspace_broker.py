@@ -9,6 +9,7 @@ import json
 import logging
 import threading
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 import httpx
@@ -17,6 +18,7 @@ from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
+from cloud_agent_host import workspace_broker as broker_mod
 from cloud_agent_host.chat_sandbox import RetainedChatBackend
 from cloud_agent_host.drivers import InputOutcome
 from cloud_agent_host.guest_observer import GuestObservation, GuestProcess
@@ -447,6 +449,64 @@ async def test_native_question_reads_require_a_bounded_owner(params):
         )
     assert response.status_code == 422
     assert supervisor.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("running", [True, False])
+async def test_inventory_syncs_one_group_and_reads_only_cached_resources(running):
+    supervisor = _SharedSupervisor()
+    supervisor.list = lambda: [
+        replace(_descriptor("athr_source"), running=running),
+        replace(_descriptor("athr_child"), running=running),
+    ]
+    app = _app(supervisor)
+    calls = []
+    sample = {"sample_id": "resource-sample", "sample_age_ms": 4000, "memory_bytes": 1024}
+    app.state.sandbox_resource_collector = SimpleNamespace(
+        sync_targets=lambda rows: calls.append(("sync", [dict(row) for row in rows])),
+        latest=lambda container: calls.append(("latest", container)) or sample,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.get(
+            "/sandboxes", headers={"X-Agent-Workspace-Token": "broker-secret"}
+        )
+    assert response.status_code == 200
+    assert len(calls[0][1]) == 1
+    assert calls[0][1][0]["container_id"] == "container-shared"
+    row = response.json()["sandboxes"][0]
+    if running:
+        assert calls[1:] == [("latest", "container-shared")]
+        assert row["resource_usage"] == sample
+    else:
+        assert len(calls) == 1
+        assert row["resource_usage"] is None
+
+
+@pytest.mark.asyncio
+async def test_resource_collector_is_owned_and_cleaned_up_by_broker_lifespan(monkeypatch):
+    calls = []
+    collector = SimpleNamespace(
+        start=lambda: calls.append("start"),
+        close=lambda: calls.append("close"),
+    )
+
+    def factory():
+        calls.append("construct")
+        return collector
+
+    monkeypatch.setattr(broker_mod, "SandboxResourceCollector", factory)
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    assert calls == []
+    assert app.state.sandbox_resource_collector is None
+    with pytest.raises(RuntimeError, match="request failure"):
+        async with app.router.lifespan_context(app):
+            assert calls == ["construct", "start"]
+            assert app.state.sandbox_resource_collector is collector
+            raise RuntimeError("request failure")
+    assert calls == ["construct", "start", "close"]
+    assert app.state.sandbox_resource_collector is None
+    assert supervisor.closed
 
 
 @pytest.mark.asyncio

@@ -111,6 +111,7 @@ def create_app() -> FastAPI:
         admin_measurements,
         admin_profiling_control,
         admin_runs,
+        admin_sandboxes,
         admin_steps,
         admin_usage,
         compute_registration,
@@ -154,6 +155,7 @@ def create_app() -> FastAPI:
     app.include_router(compute_registration.router)
     app.include_router(admin_conversations.router)
     app.include_router(admin_runs.router)
+    app.include_router(admin_sandboxes.router)
     app.include_router(admin_usage.router)
     app.include_router(admin_measurements.router)
     # Start/Stop for the same feature, in its own module so the write path's
