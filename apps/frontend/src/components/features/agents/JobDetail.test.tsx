@@ -511,6 +511,8 @@ describe('JobDetail', () => {
     expect(body.prompt).toContain(reviewed.baseSha);
     expect(body.prompt).toContain(reviewed.branch);
     expect(body.prompt).toContain(prUrl);
+    expect(body.prompt).toMatch(/no Git remote, GitHub CLI, or GitHub credentials/);
+    expect(body.prompt).toContain(`git diff ${reviewed.baseSha}`);
     expect(body.prompt).not.toContain(later.base_sha);
     expect(body.skill_ids).toEqual([]);
     expect(options).toEqual(expect.objectContaining({ requestId: expect.any(String) }));
