@@ -13,6 +13,7 @@ import {
 } from '@/lib/api/agents';
 
 import { RunDetails } from './RunDetails';
+import { PUSH_BATCH_MS, receiveHint, resetAgentPush } from './agentPush';
 import type { AgentJob } from './types';
 
 vi.mock('@/lib/api/agents', () => ({
@@ -210,6 +211,34 @@ describe('RunDetails', () => {
     await waitFor(() => expect(screen.getByText('1,000')).toBeInTheDocument());
     expect(screen.queryByText('$0')).toBeNull();
     expect(screen.getAllByText('Not recorded').length).toBeGreaterThan(0);
+  });
+
+  it('shows usage the change stream sent without reading it again', async () => {
+    vi.useFakeTimers();
+    vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
+    await act(async () => {
+      render(
+        <RunDetails
+          jobId="ajob_pushed"
+          turnNo={2}
+          tab="usage"
+          job={HISTORY_JOB}
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />,
+      );
+    });
+    expect(screen.getByText('1,000')).toBeInTheDocument();
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+
+    const pushed = usage();
+    pushed.ledger.totals = { ...pushed.ledger.totals!, tokens_in: 4321 };
+    act(() => receiveHint('usage', 'ajob_pushed', pushed));
+    await act(async () => vi.advanceTimersByTimeAsync(PUSH_BATCH_MS));
+
+    expect(screen.getByText('4,321')).toBeInTheDocument();
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+    resetAgentPush();
   });
 
   it('says the deployment has no ledger instead of showing nothing', async () => {

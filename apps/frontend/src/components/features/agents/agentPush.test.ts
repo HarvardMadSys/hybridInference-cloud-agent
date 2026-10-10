@@ -6,7 +6,7 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { AgentJobApi } from '@/lib/api/agents';
+import type { AgentJobApi, AgentJobUsageApi } from '@/lib/api/agents';
 import { streamAgentChanges, type StreamAgentChangesOptions } from '@/lib/api/agentChanges';
 
 import {
@@ -88,6 +88,20 @@ describe('pushed records', () => {
       publications: ['athr_1'],
       resync: false,
     });
+  });
+
+  it('keeps the newest usage sent for a job; a later bare hint asks for a read', () => {
+    const seen = collect();
+    const first = { ledger: { status: 'pending' } } as AgentJobUsageApi;
+    const second = { ledger: { status: 'available' } } as AgentJobUsageApi;
+    receiveHint('usage', 'ajob_1', first);
+    receiveHint('usage', 'ajob_1', second);
+    receiveHint('usage', 'ajob_2', first);
+    receiveHint('usage', 'ajob_2');
+    vi.advanceTimersByTime(PUSH_BATCH_MS);
+
+    expect(seen[0].usage).toEqual(['ajob_1', 'ajob_2']);
+    expect(seen[0].usageValues).toEqual({ ajob_1: second });
   });
 
   it('drops a push that is not newer than one already held', () => {

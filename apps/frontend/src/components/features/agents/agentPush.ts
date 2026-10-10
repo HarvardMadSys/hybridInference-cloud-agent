@@ -5,11 +5,12 @@
 // pushed job and conversation, and a batched "these records changed" signal.
 //
 // Lists answer the signal by reading their page again; an open conversation
-// patches the fields it was sent. Either way the clocks they used to read on
-// stay, much slower, for when pushes are not flowing.
+// patches the fields it was sent, and its usage line shows the usage it was
+// sent. Either way the clocks they used to read on stay, much slower, for when
+// pushes are not flowing.
 import { useEffect, useSyncExternalStore } from 'react';
 
-import type { AgentJobApi } from '@/lib/api/agents';
+import type { AgentJobApi, AgentJobUsageApi } from '@/lib/api/agents';
 import type {
   AgentChangeHint,
   AgentJobChangeApi,
@@ -29,6 +30,11 @@ export interface AgentRecordsChange {
   threads: AgentThreadChangeApi[];
   /** Jobs whose usage changed. */
   usage: string[];
+  /**
+   * The newest usage sent for those jobs, by job. A job in `usage` without one
+   * here is read again.
+   */
+  usageValues: Record<string, AgentJobUsageApi>;
   /** Conversations whose waiting messages changed. */
   queues: string[];
   /** Jobs whose tool calls awaiting approval changed. */
@@ -67,6 +73,7 @@ function queue(update: (change: AgentRecordsChange) => void): void {
     jobs: [],
     threads: [],
     usage: [],
+    usageValues: {},
     queues: [],
     mcp: [],
     publications: [],
@@ -125,10 +132,14 @@ export function receiveThreadChange(change: AgentThreadChangeApi): void {
   if (newer(latestThreads, change)) queue((batch) => batch.threads.push(change));
 }
 
-export function receiveHint(kind: AgentChangeHint, id: string): void {
+export function receiveHint(kind: AgentChangeHint, id: string, usage?: AgentJobUsageApi): void {
   queue((batch) => {
     const ids = batch[HINT_FIELD[kind]];
     if (!ids.includes(id)) ids.push(id);
+    if (kind !== 'usage') return;
+    // The last word wins: a later "read it again" replaces an earlier value.
+    if (usage) batch.usageValues[id] = usage;
+    else delete batch.usageValues[id];
   });
 }
 

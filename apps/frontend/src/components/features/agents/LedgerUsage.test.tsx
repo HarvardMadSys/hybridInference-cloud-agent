@@ -12,7 +12,13 @@ import {
 } from '@/lib/api/agents';
 
 import { LedgerUsage as UsageView, useLedgerUsage } from './LedgerUsage';
-import { PUSH_BATCH_MS, receiveHint, resetAgentPush, setAgentPushLive } from './agentPush';
+import {
+  PUSH_BATCH_MS,
+  receiveHint,
+  receiveJobChange,
+  resetAgentPush,
+  setAgentPushLive,
+} from './agentPush';
 import type { AgentJob } from './types';
 
 function LedgerUsage({ job: currentJob }: { job: AgentJob }) {
@@ -523,6 +529,43 @@ describe('LedgerUsage with the owner change stream', () => {
     expect(refreshAgentJobUsage).not.toHaveBeenCalled();
 
     act(() => receiveHint('usage', 'another_job'));
+    await advance(PUSH_BATCH_MS);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows usage the stream sent without reading it, over a read that left before it', async () => {
+    act(() => setAgentPushLive(true));
+    await mount({ ...job, state: 'running' } as AgentJob);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+
+    // A read is on its way when the stream sends newer usage.
+    let finishOlder!: (value: AgentJobUsageApi) => void;
+    vi.mocked(getAgentJobUsage).mockImplementationOnce(
+      () => new Promise((resolve) => (finishOlder = resolve)),
+    );
+    act(() => receiveHint('usage', 'ajob_1'));
+    await advance(PUSH_BATCH_MS);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+
+    const newer = usage();
+    newer.ledger.totals = { ...newer.ledger.totals!, calls: 7 };
+    act(() => receiveHint('usage', 'ajob_1', newer));
+    await advance(PUSH_BATCH_MS);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('7 model calls');
+
+    await act(async () => finishOlder(usage()));
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('7 model calls');
+    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+  });
+
+  it('reads a turn that changed in the same batch rather than trust the usage sent', async () => {
+    act(() => setAgentPushLive(true));
+    await mount({ ...job, state: 'running' } as AgentJob);
+    act(() => {
+      receiveJobChange({ id: 'ajob_1', revision: 9, state: 'succeeded' });
+      receiveHint('usage', 'ajob_1', usage());
+    });
     await advance(PUSH_BATCH_MS);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
   });

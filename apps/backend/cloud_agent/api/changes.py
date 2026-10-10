@@ -4,9 +4,12 @@ The chat list, the sidebar and an open conversation used to ask for state,
 title and pull request link every few seconds. A tab now holds this stream, and
 it sends each changed job or thread the moment Postgres says it changed
 (migration ``0031``): its id, its ``revision`` and the values the tab shows.
-Usage, the message queue, tool approvals and publication progress are named
-as hints (migration ``0032``), and the tab reads that one thing again. Lists
-still read their own pages; what they no longer do is ask on a clock.
+A job's usage is sent when it changes (migration ``0032``), as its usage read
+returns it. The message queue, tool approvals and publication progress are
+named as hints, and the tab reads that one thing again: the first two are
+lists, and the last is the newest snapshot of a workspace, which has no
+version a tab could order against the turn row it reads it with. Lists still
+read their own pages; what they no longer do is ask on a clock.
 
 The stream replays nothing. It says ``hello`` once it collects the owner's
 changes, so a tab that reads its lists after that misses none, and
@@ -26,6 +29,7 @@ from fastapi.responses import StreamingResponse
 from cloud_agent.api._job_views import _iso
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_owner_change_signal, get_storage, require_store
+from cloud_agent.api.usage import job_usage_response
 from cloud_agent.workers.owner_change_signal import (
     HINT_KINDS,
     OwnerChangeSignal,
@@ -34,7 +38,7 @@ from cloud_agent.workers.owner_change_signal import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from cloud_agent.ports import ConversationQueries
+    from cloud_agent.ports import ConversationQueries, ExecutionQueries, LedgerRepository
 
 
 router = APIRouter(prefix="/v1/agent")
@@ -51,9 +55,11 @@ _SSE_HEADERS = {
 
 
 class _ChangesStorage(Protocol):
-    """The one capability the change stream reads through."""
+    """The capabilities the change stream reads through: rows, and usage."""
 
     conversation_queries: ConversationQueries
+    execution_queries: ExecutionQueries
+    ledger: LedgerRepository
 
 
 def _frame(event: str, data: dict[str, Any]) -> str:
@@ -84,6 +90,15 @@ def _thread(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _usage(store: _ChangesStorage, user_id: str, job_id: str) -> dict[str, Any]:
+    """A job's usage as its usage read returns it; only its id if it is not theirs."""
+    job = await store.conversation_queries.get_job(job_id)
+    if job is None or str(job.get("user_id")) != user_id:
+        return {"id": job_id}
+    usage = await job_usage_response(store, job)
+    return {"id": job_id, "usage": usage.model_dump(mode="json")}
+
+
 @router.get("/changes")
 async def stream_owner_changes(
     request: Request,
@@ -95,10 +110,11 @@ async def stream_owner_changes(
 
     Events: ``hello`` and ``resync`` carry ``{"live": bool}``; ``job`` and
     ``thread`` carry the row's current values and its ``revision``, or
-    ``{"id": ..., "deleted": true}`` once it is gone; ``usage``, ``mcp`` (a
-    job) and ``queue``, ``publication`` (a conversation) carry only
-    ``{"id": ...}``: read that again. 404 where this process pushes nothing,
-    which a tab treats as "keep reading on a clock".
+    ``{"id": ..., "deleted": true}`` once it is gone; ``usage`` carries the
+    job's ``{"id": ..., "usage": ...}`` as ``GET /v1/agent/jobs/{id}/usage``
+    returns it; ``mcp`` (a job) and ``queue``, ``publication`` (a
+    conversation) carry only ``{"id": ...}``: read that again. 404 where this
+    process pushes nothing, which a tab treats as "keep reading on a clock".
     """
     job_store = require_store(store)
     if signal is None:
@@ -142,7 +158,10 @@ async def stream_owner_changes(
                         yield _frame("job", _job(row) if row else {"id": job_id, "deleted": True})
                 for kind in HINT_KINDS:
                     for row_id in sorted(changes.hints.get(kind, ())):
-                        yield _frame(kind, {"id": row_id})
+                        if kind == "usage":
+                            yield _frame(kind, await _usage(job_store, user_id, row_id))
+                        else:
+                            yield _frame(kind, {"id": row_id})
                 if not (woken or changes.resync):
                     yield ": keepalive\n\n"
 

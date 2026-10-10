@@ -140,6 +140,9 @@ function useJobUsage(jobId: string): {
   const retries = useRef(0);
   const waits = useRef(0);
   const currentJob = useRef(jobId);
+  // Raised by each usage pushed for this job: a read that left before it is
+  // older than what is shown, and is dropped.
+  const pushes = useRef(0);
 
   useEffect(() => {
     if (currentJob.current !== jobId) {
@@ -157,9 +160,10 @@ function useJobUsage(jobId: string): {
     if (!mustRead) return undefined;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const pushesBefore = pushes.current;
     getAgentJobUsage(jobId, controller.signal)
       .then((result) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || pushes.current !== pushesBefore) return;
         usageCache.set(jobId, result);
         setUsage(result);
         setError(null);
@@ -174,7 +178,7 @@ function useJobUsage(jobId: string): {
         }
       })
       .catch((cause: unknown) => {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && pushes.current === pushesBefore) {
           setError(cause instanceof Error ? cause.message : 'Could not load usage');
         }
       })
@@ -187,12 +191,20 @@ function useJobUsage(jobId: string): {
     };
   }, [jobId, read]);
 
-  // A pushed change to this job's usage is read at once, outside the budget
-  // above: it is the server saying there is something new, not a guess.
+  // A pushed change to this job's usage is shown as sent, or read at once when
+  // it came without a value, outside the budget above: it is the server saying
+  // there is something new, not a guess.
   useEffect(
     () =>
       onAgentRecordsChanged((change) => {
-        if (change.resync || change.usage.includes(jobId)) {
+        const pushed = change.usageValues[jobId];
+        if (pushed && !change.resync) {
+          pushes.current += 1;
+          usageCache.set(jobId, pushed);
+          setUsage(pushed);
+          setError(null);
+          setLoaded(true);
+        } else if (change.resync || change.usage.includes(jobId)) {
           requested.current = true;
           setRead((value) => value + 1);
         }

@@ -128,7 +128,8 @@ async def get_message_request(
     return MessageRequestDetail(status="available", request=next(iter(matches.values())))
 
 
-async def _usage_response(store: _UsageStorage, job: dict[str, Any]) -> JobUsageResponse:
+async def job_usage_response(store: _UsageStorage, job: dict[str, Any]) -> JobUsageResponse:
+    """An owned job's usage, as its owner reads it here and is pushed it on change."""
     job_id = job["id"]
     rows = await store.ledger.ledger_rows_for_job(job_id=job_id)
     inputs = await store.execution_queries.job_usage_inputs(job_id=job_id)
@@ -152,7 +153,7 @@ async def get_job_usage(
     """Read cached Gateway snapshots and runtime usage for the same job."""
     job_store = _require_store(store)
     job = await _owned_job(job_store.conversation_queries, job_id, user)
-    return await _usage_response(job_store, job)
+    return await job_usage_response(job_store, job)
 
 
 @router.post("/jobs/{job_id}/usage/refresh", response_model=JobUsageResponse)
@@ -165,4 +166,4 @@ async def refresh_job_usage(
     job_store = _require_store(store)
     job = await _owned_job(job_store.conversation_queries, job_id, user)
     await job_store.ledger.queue_job_ledger_refresh(job_id=job_id)
-    return await _usage_response(job_store, job)
+    return await job_usage_response(job_store, job)

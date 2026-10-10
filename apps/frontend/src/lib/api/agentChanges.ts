@@ -1,6 +1,7 @@
 // The signed-in owner's change stream: one connection per tab
 // (`GET /v1/agent/changes`). It pushes each of their jobs and conversations the
-// moment it changes, with the row's `revision` and the values the UI shows.
+// moment it changes, with the row's `revision` and the values the UI shows, and
+// a job's usage with its value.
 //
 // Read with fetch + ReadableStream for the same reason as the job stream: the
 // endpoint is authenticated. It replays nothing; `hello` and `resync` tell the
@@ -8,7 +9,7 @@
 // lost.
 import { config } from '@/config/env';
 
-import type { AgentJobApi } from './agents';
+import type { AgentJobApi, AgentJobUsageApi } from './agents';
 import { parseFrame } from './agents';
 import { fetchWithAuth } from './client';
 
@@ -43,8 +44,10 @@ export interface AgentThreadChangeApi {
 }
 
 /**
- * Things the stream only names: read that one thing again. `usage` and `mcp`
- * name a job; `queue` and `publication` name a conversation.
+ * Things that changed for a job or a conversation. `usage` and `mcp` name a job;
+ * `queue` and `publication` name a conversation. `usage` comes with the job's
+ * usage as its usage read returns it; the others, and a `usage` without one,
+ * mean: read that one thing again.
  */
 export const AGENT_CHANGE_HINTS = ['usage', 'queue', 'mcp', 'publication'] as const;
 export type AgentChangeHint = (typeof AGENT_CHANGE_HINTS)[number];
@@ -55,7 +58,8 @@ export interface StreamAgentChangesOptions {
   onSync: (live: boolean) => void;
   onJob: (change: AgentJobChangeApi) => void;
   onThread: (change: AgentThreadChangeApi) => void;
-  onHint: (kind: AgentChangeHint, id: string) => void;
+  /** `usage` is passed when the stream sent the job's usage with it. */
+  onHint: (kind: AgentChangeHint, id: string, usage?: AgentJobUsageApi) => void;
   /** The connection dropped; nothing is pushed until it is back. */
   onDisconnect: () => void;
 }
@@ -140,8 +144,12 @@ export async function streamAgentChanges(
             if (frame.event === 'job') opts.onJob(record as unknown as AgentJobChangeApi);
             else if (frame.event === 'thread')
               opts.onThread(record as unknown as AgentThreadChangeApi);
-            else if ((AGENT_CHANGE_HINTS as readonly string[]).includes(frame.event))
-              opts.onHint(frame.event as AgentChangeHint, record.id);
+            else if ((AGENT_CHANGE_HINTS as readonly string[]).includes(frame.event)) {
+              const usage = record.usage;
+              if (frame.event === 'usage' && usage && typeof usage === 'object')
+                opts.onHint('usage', record.id, usage as AgentJobUsageApi);
+              else opts.onHint(frame.event as AgentChangeHint, record.id);
+            }
           }
         }
       }

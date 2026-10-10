@@ -152,8 +152,8 @@ function UsageSummary({
 export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
   const [loaded, setLoaded] = useState<LoadedUsage | null>(null);
   // While the owner's change stream flows, the control plane reads usage when
-  // a model call finishes and pushes that it changed: no refresh request from
-  // here, and the clock below is only a backstop.
+  // a model call finishes and pushes what it read: no refresh request and no
+  // read from here, and the clock below is only a backstop.
   const pushLive = useAgentPushLive();
 
   useEffect(() => {
@@ -198,17 +198,7 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
           : getAgentJobUsage(job.id, signal));
         if (disposed || signal.aborted || requestGeneration !== generation) return;
         readFailures = 0;
-        setLoaded((previous) => {
-          const cached = previous?.jobId === job.id ? previous.data : null;
-          return {
-            jobId: job.id,
-            data: data ? preserveKnownUsage(cached, data) : cached,
-            loading: false,
-            requesting: false,
-            failed: false,
-            unsupported: data === null,
-          };
-        });
+        show(data);
         // A 404 means this API is unsupported or the job is no longer visible.
         if (!data) return;
 
@@ -254,14 +244,40 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
       }
     }
 
+    function show(data: AgentJobUsageApi | null) {
+      setLoaded((previous) => {
+        const cached = previous?.jobId === job.id ? previous.data : null;
+        return {
+          jobId: job.id,
+          data: data ? preserveKnownUsage(cached, data) : cached,
+          loading: false,
+          requesting: false,
+          failed: false,
+          unsupported: data === null,
+        };
+      });
+    }
+
+    // What the stream sent is newer than any read already on its way, which
+    // is therefore dropped; the clock goes on as a backstop.
+    function receive(data: AgentJobUsageApi) {
+      ++generation;
+      controller?.abort();
+      readFailures = 0;
+      sourceHasFailed = hasTransientError(data);
+      if (!sourceHasFailed) sourceFailures = 0;
+      show(data);
+      if (active || data.ledger.refreshing || data.ledger.next_refresh_at) schedule();
+      else clearTimeout(timer);
+    }
+
     void load();
     const unsubscribe = onAgentRecordsChanged((change) => {
-      if (
-        change.resync ||
-        change.usage.includes(job.id) ||
-        change.jobs.some((pushed) => pushed.id === job.id)
-      )
-        void load();
+      // A changed job (it may have ended) is read whole: its usage depends on it.
+      const reread = change.resync || change.jobs.some((pushed) => pushed.id === job.id);
+      const pushed = change.usageValues[job.id];
+      if (pushed && !reread) receive(pushed);
+      else if (reread || change.usage.includes(job.id)) void load();
     });
     return () => {
       disposed = true;

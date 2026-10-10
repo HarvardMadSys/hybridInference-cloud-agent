@@ -5,6 +5,8 @@ What has to hold:
 * a tab is told ``hello`` only once its changes are being collected, so a list
   it reads after that misses nothing;
 * a changed job or thread reaches it at once, with its revision and values;
+* a job's changed usage reaches it with its value; the queue, tool approvals and
+  publication progress as hints to read again;
 * a row that is gone is reported as deleted, not silently skipped;
 * another owner's change costs this stream nothing;
 * a reset of the listening connection tells it to resynchronise, and whether
@@ -22,6 +24,7 @@ import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -50,6 +53,9 @@ class Queries:
             "jobs": [self.jobs[i] for i in job_ids if i in self.jobs],
             "threads": [self.threads[i] for i in thread_ids if i in self.threads],
         }
+
+    async def get_job(self, job_id: str) -> dict[str, Any] | None:
+        return self.jobs.get(job_id)
 
 
 class Request:
@@ -158,27 +164,52 @@ async def test_a_changed_job_and_thread_reach_the_tab_at_once_with_their_revisio
     await stream.aclose()
 
 
-async def test_usage_queue_tool_approvals_and_publication_arrive_as_hints():
-    """Each names what to read again; the stream itself reads nothing for them."""
+async def test_usage_arrives_with_its_value_and_the_rest_as_hints(monkeypatch):
+    """Usage is read once by the stream and sent; the others name what to read again."""
+    usage = {"ledger": {"status": "available"}, "runtime": {"source": "runtime"}}
+    read_usage = AsyncMock(return_value=SimpleNamespace(model_dump=lambda **_: usage))
+    monkeypatch.setattr(changes, "job_usage_response", read_usage)
     queries = Queries()
+    queries.jobs["ajob_1"] = {"id": "ajob_1", "user_id": OWNER}
     signal = _listening()
     stream = await _open(queries, signal)
     await anext(stream)
 
     _notify(signal, "usage", "ajob_1")
+    _notify(signal, "usage", "ajob_gone")
     _notify(signal, "mcp", "ajob_1")
     _notify(signal, "queue", "athr_1")
     _notify(signal, "publication", "athr_1")
     _notify(signal, "something-new", "x")
 
-    frames = [_parse(await asyncio.wait_for(anext(stream), AT_ONCE_S)) for _ in range(4)]
+    frames = [_parse(await asyncio.wait_for(anext(stream), AT_ONCE_S)) for _ in range(5)]
     assert frames == [
-        ("usage", {"id": "ajob_1"}),
+        ("usage", {"id": "ajob_1", "usage": usage}),
+        ("usage", {"id": "ajob_gone"}),
         ("queue", {"id": "athr_1"}),
         ("mcp", {"id": "ajob_1"}),
         ("publication", {"id": "athr_1"}),
     ]
-    assert queries.reads == []
+    read_usage.assert_awaited_once()
+    assert read_usage.await_args.args[1] == {"id": "ajob_1", "user_id": OWNER}
+    assert queries.reads == [], "no row read for them"
+    await stream.aclose()
+
+
+async def test_another_owners_usage_is_never_sent(monkeypatch):
+    read_usage = AsyncMock()
+    monkeypatch.setattr(changes, "job_usage_response", read_usage)
+    queries = Queries()
+    queries.jobs["ajob_theirs"] = {"id": "ajob_theirs", "user_id": "u2"}
+    signal = _listening()
+    stream = await _open(queries, signal)
+    await anext(stream)
+    _notify(signal, "usage", "ajob_theirs")
+    assert _parse(await asyncio.wait_for(anext(stream), AT_ONCE_S)) == (
+        "usage",
+        {"id": "ajob_theirs"},
+    )
+    read_usage.assert_not_awaited()
     await stream.aclose()
 
 
