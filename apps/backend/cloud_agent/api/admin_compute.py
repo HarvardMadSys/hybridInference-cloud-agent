@@ -30,6 +30,7 @@ from cloud_agent.schemas_compute import (  # noqa: TC001 - FastAPI request model
     ImportComputeRequest,
     ResolveComputeOperation,
     RetireComputeRequest,
+    RotateComputeRequest,
     UpdateComputeConnection,
     UpdateComputePolicy,
 )
@@ -65,6 +66,11 @@ _STORAGE_ERRORS: dict[str, tuple[int, str]] = {
     "resource_identity_changed": (409, "The resource identity changed and requires review."),
     "host_identity_conflict": (409, "This Host identity is already bound to another resource."),
     "invalid_operation_state": (409, "The operation state no longer allows this action."),
+    "rotation_in_progress": (409, "This server is already moving to a replacement node."),
+    "rotation_switching": (
+        409,
+        "The old node is stopped or the Host already moved; wait for the move or its rollback.",
+    ),
 }
 
 
@@ -278,6 +284,26 @@ async def extend(
         request,
         actor,
         "allocation.extend",
+        allocation_id=allocation_id,
+        operation_id=operation["id"],
+    )
+    return {"operation": operation}
+
+
+@router.post("/compute-allocations/{allocation_id}/rotate", status_code=202)
+async def rotate(
+    allocation_id: str,
+    request: Request,
+    payload: RotateComputeRequest,
+    actor: str = Depends(verify_admin_access),
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """Queue a move of the server's Host to a replacement node now."""
+    operation = await commands.rotate(allocation_id, payload, actor=actor)
+    await _audit(
+        request,
+        actor,
+        "allocation.rotate",
         allocation_id=allocation_id,
         operation_id=operation["id"],
     )

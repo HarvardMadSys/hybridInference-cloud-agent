@@ -33,6 +33,11 @@ def fingerprint(kind: str, parameters: dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
+def discard_request_id(allocation_id: str) -> str:
+    """The one release request of an abandoned replacement node."""
+    return "discard:" + allocation_id
+
+
 def normalize_host_keys(keys: list[str]) -> list[str]:
     """Return a node's SSH host public keys as sorted, comment-free, parsed keys.
 
@@ -122,6 +127,14 @@ def public_operation(record: dict[str, Any], *, release_committed: bool = False)
             "target_expires_at",
             "actual_expires_at",
             "external_id",
+            # Node moves: which replacement types failed and how, and how long
+            # the copies took. Never node addresses, keys or remote output.
+            "attempts",
+            "precopy_bytes",
+            "precopy_seconds",
+            "final_copy_bytes",
+            "final_copy_seconds",
+            "verified_at",
         )
         if key in internal
     }
@@ -133,6 +146,15 @@ def public_operation(record: dict[str, Any], *, release_committed: bool = False)
         record.get("kind") == "retire"
         and record.get("state") in {"pending", "waiting", "blocked"}
         and not internal.get("external_pending")
+        and not release_committed
+    ):
+        result["allowed_actions"].append("cancel")
+    if (
+        record.get("kind") == "rotate"
+        and record.get("state") in {"pending", "waiting", "blocked"}
+        # Once the old node stops, only the worker's rollback restores service.
+        and not internal.get("source_stopped")
+        and not internal.get("rebound")
         and not release_committed
     ):
         result["allowed_actions"].append("cancel")

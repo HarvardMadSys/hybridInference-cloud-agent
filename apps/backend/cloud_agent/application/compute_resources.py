@@ -35,6 +35,7 @@ if TYPE_CHECKING:
         ExtendComputeRequest,
         ImportComputeRequest,
         RetireComputeRequest,
+        RotateComputeRequest,
         UpdateComputeConnection,
         UpdateComputePolicy,
     )
@@ -281,6 +282,8 @@ class ComputeCommands:
                     "unmanaged_scope",
                     "Review and adopt the complete allocation before enabling renewal.",
                 )
+        if request.policy.rotation_enabled:
+            self._require_movable(row, entry)
         updated = await self.repository.update_policy(
             allocation_id=allocation_id,
             expected_revision=request.expected_revision,
@@ -312,6 +315,74 @@ class ComputeCommands:
             requested_by=actor,
         )
         return await self.operation_view(operation)
+
+    async def rotate(
+        self, allocation_id: str, request: RotateComputeRequest, *, actor: str
+    ) -> dict[str, Any]:
+        """Queue a move of the server's Host to a replacement node now."""
+        parameters = {
+            "allocation_id": allocation_id,
+            **request.model_dump(mode="json"),
+            "trigger": "manual",
+        }
+        existing = await self._existing(request.request_id, "rotate", parameters)
+        if existing is not None:
+            return existing
+        row = await self._allocation(allocation_id)
+        self._require_managed(row, "release")
+        self._require_movable(row, self.registry.get(row["provider_id"]))
+        if len(row.get("hosts") or []) != 1 or len(row.get("nodes") or []) != 1:
+            raise ComputeRefusal(
+                "rotation_unsupported", "Only a server running exactly one Host can move."
+            )
+        if not RenewalPolicy.model_validate(row.get("policy") or {}).node_types:
+            raise ComputeRefusal(
+                "rotation_node_types_missing",
+                "List the node types a replacement may use in the renewal policy first.",
+                status=422,
+            )
+        if row["revision"] != request.expected_revision:
+            raise ComputeRefusal(
+                "revision_conflict", "The allocation changed; refresh it before moving its Host."
+            )
+        try:
+            operation = await self.repository.create_operation(
+                request_id=request.request_id,
+                fingerprint=fingerprint("rotate", parameters),
+                kind="rotate",
+                allocation_id=allocation_id,
+                parameters=parameters,
+                requested_by=actor,
+            )
+        except ValueError as exc:
+            if str(exc) == "rotation_in_progress":
+                raise ComputeRefusal(
+                    "rotation_in_progress", "This server is already moving to a replacement node."
+                ) from None
+            raise
+        return await self.operation_view(operation)
+
+    @staticmethod
+    def _require_movable(row: dict[str, Any], entry: ComputeProviderRegistration) -> None:
+        """A Host moves only between nodes this control plane creates and can trust unseen."""
+        caps = entry.provider.capabilities()
+        if (
+            row.get("mode") != "provision"
+            or "provision" not in caps.acquisition_modes
+            or not caps.can_extend
+            or not caps.can_release
+            or not row.get("deployment_profile")
+        ):
+            raise ComputeRefusal(
+                "rotation_unsupported",
+                "Only a server this control plane provisioned, with a deployment profile, can move.",
+            )
+        if (row.get("configuration") or {}).get("host_key_source") != "registration":
+            raise ComputeRefusal(
+                "rotation_needs_registration",
+                "Replacement nodes must register their own host keys; "
+                "set Node host keys to registration for this server.",
+            )
 
     async def retire(
         self, allocation_id: str, request: RetireComputeRequest, *, actor: str

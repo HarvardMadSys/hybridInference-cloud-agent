@@ -6,7 +6,7 @@ Secrets have their own write-only field and never enter operation requests.
 
 from __future__ import annotations
 
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr, model_validator
 
@@ -18,7 +18,12 @@ class ComputeRequest(BaseModel):
 
 
 class RenewalPolicy(ComputeRequest):
-    """Independent resource deadlines, expressed in seconds."""
+    """Independent resource deadlines, expressed in seconds.
+
+    With rotation, ``renew_before_seconds`` is also when a node is replaced:
+    an extension is tried first; a refused one, or a node at its maximum age,
+    starts a move of the whole Host to a newly allocated node instead.
+    """
 
     enabled: bool = False
     renew_before_seconds: int = Field(default=3600, ge=60, le=604800)
@@ -26,6 +31,14 @@ class RenewalPolicy(ComputeRequest):
     stop_new_groups_before_seconds: int = Field(default=1800, ge=0, le=604800)
     stop_claims_before_seconds: int = Field(default=300, ge=0, le=604800)
     reason: str = Field(default="", max_length=2000)
+    rotation_enabled: bool = False
+    max_node_age_seconds: int = Field(default=604800, ge=3600, le=2592000)
+    # Hardware for a replacement node, tried in order (newest first).
+    node_types: list[Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,32}$")]] = Field(
+        default_factory=list, max_length=20
+    )
+    # The profile parameter that selects a node's hardware type.
+    node_type_binding: str = Field(default="phystype", pattern=r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 
     @model_validator(mode="after")
     def ordered_deadlines(self) -> Self:
@@ -39,6 +52,10 @@ class RenewalPolicy(ComputeRequest):
             raise ValueError("require horizon > renew_before > stop_new_groups >= stop_claims")
         if self.enabled and not self.reason:
             raise ValueError("an actual reason is required to enable automatic renewal")
+        if self.rotation_enabled and (not self.enabled or not self.node_types):
+            raise ValueError("node replacement needs automatic renewal and candidate node types")
+        if len(set(self.node_types)) != len(self.node_types):
+            raise ValueError("candidate node types must be distinct")
         return self
 
 
@@ -98,6 +115,13 @@ class ExtendComputeRequest(ComputeRequest):
     request_id: str = Field(min_length=1, max_length=128)
     target_expires_at: AwareDatetime
     reason: str = Field(min_length=1, max_length=2000)
+
+
+class RotateComputeRequest(ComputeRequest):
+    """Move the Host to a replacement node now, before its lease forces it."""
+
+    request_id: str = Field(min_length=1, max_length=128)
+    expected_revision: int = Field(ge=0)
 
 
 class RetireComputeRequest(ComputeRequest):

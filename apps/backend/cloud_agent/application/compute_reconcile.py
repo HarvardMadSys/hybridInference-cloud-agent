@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import SecretStr
 
+from cloud_agent.application.compute_rotation import ComputeRotation
 from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.broker_routing import broker_for_host
 from cloud_agent.compute_secrets import ComputeSecretError
@@ -114,6 +115,7 @@ class ComputeReconciler:
         self.repository = commands.repository
         self.host_pool = host_pool
         self.bootstrap = bootstrap
+        self.rotation = ComputeRotation(self)
 
     async def schedule(self) -> None:
         """Observe leases and submit renewals even while retirement is blocked."""
@@ -150,6 +152,20 @@ class ComputeReconciler:
                 seconds=policy.renew_before_seconds
             ):
                 continue
+            lifecycle = await self.repository.list_operations(
+                allocation_id=row["id"], kinds=["extend", "rotate"]
+            )
+            trigger = self.rotation.due(row, policy, lifecycle, now, expires)
+            if trigger is not None:
+                await self.rotation.start(row, trigger, expires)
+            await self.rotation.remind(row, lifecycle, now, expires)
+            stalled = any(
+                op["kind"] == "rotate" and op["state"] in {"blocked", "failed"} for op in lifecycle
+            )
+            if self.rotation.replaces_renewal(row, policy, now) and not stalled:
+                # A node at its maximum age is replaced rather than extended,
+                # unless its replacement is stuck: then time still helps.
+                continue
             request_id = f"renew:{row['id']}:{int(expires.timestamp())}:{row['revision']}"
             if any(op["request_id"] == request_id for op in operations):
                 continue
@@ -183,12 +199,18 @@ class ComputeReconciler:
                 await self._extend(operation, allocation)
             elif kind == "retire":
                 await self._retire(operation, allocation)
+            elif kind == "rotate":
+                await self.rotation.rotate(operation, allocation)
+            elif kind == "discard":
+                await self.rotation.discard(operation, allocation)
             else:
                 raise ProviderError("unsupported_operation", "Unknown compute operation")
         except (ProviderError, ComputeRefusal, ComputeSecretError) as exc:
             code = getattr(exc, "code", "credential_unavailable")
             retryable = bool(getattr(exc, "retryable", False))
-            if operation.get("allocation_id"):
+            if operation.get("allocation_id") and operation["kind"] != "rotate":
+                # A failed move says nothing about the old node's lease; recording
+                # it would stop new chats there until the next observation.
                 await self.repository.record_observation_error(
                     allocation_id=operation["allocation_id"], message=code, **self._fence(operation)
                 )
@@ -387,6 +409,12 @@ class ComputeReconciler:
         observed_node = registered
         profile = DeploymentProfile.model_validate(allocation["deployment_profile"])
         intent = self._bootstrap_intent(operation, allocation, node)
+        if operation.get("parameters", {}).get("rotation_operation_id"):
+            # A replacement node: staged and filled with a copy, never started here.
+            await self.rotation.stage_candidate(
+                operation, allocation, observed_node, profile, intent
+            )
+            return
         await self.repository.prepare_bootstrap_binding(
             node_id=node["id"], host=intent.host, **self._fence(operation)
         )
@@ -596,6 +624,8 @@ class ComputeReconciler:
         provider = self.commands.registry.get(allocation["provider_id"]).provider
         if not provider.capabilities().can_release:
             return
+        # The caller's copy predates the identity this acquisition just saved.
+        allocation = await self._allocation(allocation["id"])
         await self._checkpoint(operation, "releasing_failed", {"external_pending": True})
         receipt = await provider.release(self._ref(allocation), self._intent(operation, allocation))
         observation = receipt.observation or await provider.inspect(self._ref(allocation))
@@ -1010,11 +1040,13 @@ class ComputeReconciler:
     def _bootstrap_intent(
         operation: dict[str, Any], allocation: dict[str, Any], node: dict[str, Any]
     ) -> BootstrapIntent:
+        # A node that took a Host over keeps that Host's name and namespace.
         return BootstrapIntent(
             operation_id=operation["id"],
             allocation_id=allocation["id"],
             node_id=node["id"],
-            host="compute-" + node["id"].replace("-", ""),
+            host=allocation.get("slot_host") or "compute-" + node["id"].replace("-", ""),
+            namespace=allocation.get("slot_namespace"),
         )
 
     @staticmethod

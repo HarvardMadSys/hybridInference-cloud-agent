@@ -8,15 +8,15 @@ rechecked in the same transaction as its irreversible commit point.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import uuid4
 
+import asyncpg
+
+from cloud_agent.domain.compute import discard_request_id, fingerprint as operation_fingerprint
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
 from cloud_agent.storage._sql.hosts import revoke_host_credentials
 from cloud_agent.storage._sql.rows import load_json
-
-if TYPE_CHECKING:
-    import asyncpg
 
 _JSON_FIELDS = {
     "configuration",
@@ -289,15 +289,21 @@ class PostgresComputeResourceRepository:
                     raise ValueError("revision_conflict")
                 if allocation["release_committed_at"] is not None:
                     raise ValueError("release_committed")
-            return await self._insert_operation(
-                conn,
-                request_id=request_id,
-                fingerprint=fingerprint,
-                kind=kind,
-                allocation_id=allocation_id,
-                parameters=parameters,
-                requested_by=requested_by,
-            )
+            try:
+                async with conn.transaction():
+                    return await self._insert_operation(
+                        conn,
+                        request_id=request_id,
+                        fingerprint=fingerprint,
+                        kind=kind,
+                        allocation_id=allocation_id,
+                        parameters=parameters,
+                        requested_by=requested_by,
+                    )
+            except asyncpg.UniqueViolationError as exc:
+                if exc.constraint_name == "idx_compute_one_active_rotation":
+                    raise ValueError("rotation_in_progress") from None
+                raise
 
     async def get_allocation(self, allocation_id: str) -> dict[str, Any] | None:
         """Read one allocation and its stable node and Host bindings."""
@@ -336,6 +342,14 @@ class PostgresComputeResourceRepository:
                     allocation_id,
                 )
             ]
+            result["rotation"] = _optional_row(
+                await conn.fetchrow(
+                    """SELECT id,state,step,message,result,created_at,updated_at,completed_at
+                    FROM agent_compute_operations WHERE allocation_id=$1 AND kind='rotate'
+                    ORDER BY created_at DESC LIMIT 1""",
+                    allocation_id,
+                )
+            )
         return result
 
     async def list_allocations(self) -> list[dict[str, Any]]:
@@ -448,7 +462,11 @@ class PostgresComputeResourceRepository:
             )
 
     async def list_operations(
-        self, *, allocation_id: str | None = None, request_id: str | None = None
+        self,
+        *,
+        allocation_id: str | None = None,
+        request_id: str | None = None,
+        kinds: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Find recent operation state, including recovery by request ID."""
         async with self._pool.acquire() as conn:
@@ -457,9 +475,11 @@ class PostgresComputeResourceRepository:
                 for r in await conn.fetch(
                     """SELECT * FROM agent_compute_operations
                 WHERE ($1::text IS NULL OR allocation_id=$1) AND ($2::text IS NULL OR request_id=$2)
+                  AND ($3::text[] IS NULL OR kind=ANY($3::text[]))
                 ORDER BY created_at DESC LIMIT 200""",
                     allocation_id,
                     request_id,
+                    kinds,
                 )
             ]
 
@@ -996,6 +1016,301 @@ class PostgresComputeResourceRepository:
                     scope,
                 )
 
+    async def running_attempts(self, *, host: str) -> int:
+        """Count the turns a Host is executing now."""
+        async with self._pool.acquire() as conn:
+            return int(
+                await conn.fetchval(
+                    "SELECT count(*) FROM agent_attempts WHERE host_id=$1 AND status='running'",
+                    host,
+                )
+            )
+
+    async def create_rotation_candidate(
+        self,
+        *,
+        source_allocation_id: str,
+        allocation: dict[str, Any],
+        request_id: str,
+        fingerprint: str,
+        parameters: dict[str, Any],
+        operation_id: str,
+        generation: int,
+        worker_id: str,
+    ) -> dict[str, Any]:
+        """Persist a replacement node's allocation and its staging acquisition together.
+
+        Only the rotation of a live allocation whose node runs the named Host
+        may create one. The replacement carries the Host identity it will take
+        over and never shares a deployment profile with a live allocation.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await lock_compute_entry(conn, exclusive=True)
+            await self._fence(conn, operation_id, generation, worker_id, source_allocation_id)
+            existing = await self._existing_request(conn, request_id, fingerprint)
+            if existing is not None:
+                return existing
+            source = await conn.fetchrow(
+                "SELECT desired_state,release_committed_at FROM agent_compute_allocations WHERE id=$1 FOR UPDATE",
+                source_allocation_id,
+            )
+            if (
+                source is None
+                or source["desired_state"] != "present"
+                or source["release_committed_at"] is not None
+            ):
+                raise ValueError("resource_retiring")
+            if not await conn.fetchval(
+                """SELECT 1 FROM agent_runner_hosts h JOIN agent_compute_nodes n ON n.id=h.compute_node_id
+                WHERE n.allocation_id=$1 AND h.host=$2""",
+                source_allocation_id,
+                allocation["slot_host"],
+            ):
+                raise ValueError("host_identity_conflict")
+            await self._check_profile_available(conn, allocation.get("deployment_profile", {}))
+            allocation_id = str(uuid4())
+            await conn.execute(
+                """INSERT INTO agent_compute_allocations
+                (id,name,provider_id,connection_id,ssh_connection_id,mode,management_mode,
+                 configuration,deployment_profile,policy,lease_managed,release_supported,
+                 slot_host,slot_namespace,predecessor_id)
+                VALUES ($1,$2,$3,$4,$5,'provision','manage',$6::jsonb,$7::jsonb,$8::jsonb,$9,$10,$11,$12,$13)""",
+                allocation_id,
+                allocation["name"],
+                allocation["provider_id"],
+                allocation.get("connection_id"),
+                allocation.get("ssh_connection_id"),
+                _json(allocation["configuration"]),
+                _json(allocation["deployment_profile"]),
+                _json(allocation.get("policy", {})),
+                allocation.get("lease_managed", False),
+                allocation.get("release_supported", False),
+                allocation["slot_host"],
+                allocation["slot_namespace"],
+                source_allocation_id,
+            )
+            return await self._insert_operation(
+                conn,
+                request_id=request_id,
+                fingerprint=fingerprint,
+                kind="acquire",
+                allocation_id=allocation_id,
+                parameters=parameters,
+                requested_by="compute-rotation",
+            )
+
+    async def abandon_candidate(
+        self,
+        *,
+        allocation_id: str,
+        request_id: str,
+        fingerprint: str,
+        operation_id: str,
+        generation: int,
+        worker_id: str,
+    ) -> dict[str, Any] | None:
+        """Stop a replacement node's pending work and queue its release.
+
+        Returns the release operation, or None while the candidate's own work is
+        executing or its outcome is unknown and it cannot be stopped safely.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await lock_compute_entry(conn, exclusive=True)
+            await self._fence(conn, operation_id, generation, worker_id)
+            rotation = await conn.fetchval(
+                "SELECT allocation_id FROM agent_compute_operations WHERE id=$1", operation_id
+            )
+            candidate = await conn.fetchrow(
+                "SELECT predecessor_id FROM agent_compute_allocations WHERE id=$1 FOR UPDATE",
+                allocation_id,
+            )
+            if candidate is None or candidate["predecessor_id"] != rotation:
+                raise ValueError("candidate_mismatch")
+            existing = await self._existing_request(conn, request_id, fingerprint)
+            if existing is not None:
+                return existing
+            if await conn.fetchval(
+                """SELECT 1 FROM agent_compute_operations
+                WHERE allocation_id=$1 AND state IN ('running','unknown') LIMIT 1""",
+                allocation_id,
+            ):
+                return None
+            await conn.execute(
+                """UPDATE agent_compute_operations
+                SET state='cancelled',message='candidate_abandoned',completed_at=NOW(),updated_at=NOW()
+                WHERE allocation_id=$1 AND state IN ('pending','waiting','blocked')""",
+                allocation_id,
+            )
+            return await self._insert_operation(
+                conn,
+                request_id=request_id,
+                fingerprint=fingerprint,
+                kind="discard",
+                allocation_id=allocation_id,
+                parameters={"allocation_id": allocation_id},
+                requested_by="compute-rotation",
+            )
+
+    async def commit_candidate_release(
+        self, *, allocation_id: str, operation_id: str, generation: int, worker_id: str
+    ) -> dict[str, Any]:
+        """Commit the release of a replacement node that never took its Host over.
+
+        It holds only a copy of a Host that still runs elsewhere, so release
+        needs no retained-state inventory — but only while no Host is bound to
+        its nodes. Once a Host is bound, the normal guarded retirement applies.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await lock_compute_entry(conn, exclusive=True)
+            await self._fence(conn, operation_id, generation, worker_id, allocation_id)
+            candidate = await conn.fetchrow(
+                "SELECT * FROM agent_compute_allocations WHERE id=$1 FOR UPDATE", allocation_id
+            )
+            if candidate is None:
+                raise ValueError("allocation_not_found")
+            if candidate["release_committed_at"] is not None:
+                return {"release_committed": True, "blocked_reasons": []}
+            if candidate["predecessor_id"] is None:
+                raise ValueError("not_a_candidate")
+            if await conn.fetchval(
+                """SELECT 1 FROM agent_runner_hosts h JOIN agent_compute_nodes n ON n.id=h.compute_node_id
+                WHERE n.allocation_id=$1""",
+                allocation_id,
+            ):
+                raise ValueError("candidate_bound")
+            if await conn.fetchval(
+                """SELECT 1 FROM agent_compute_operations
+                WHERE allocation_id=$1 AND id<>$2 AND (state IN ('running','unknown')
+                    OR (state='waiting' AND result->>'external_pending'='true')) LIMIT 1""",
+                allocation_id,
+                operation_id,
+            ):
+                return {
+                    "release_committed": False,
+                    "blocked_reasons": ["external_operation_unresolved"],
+                }
+            await conn.execute(
+                """UPDATE agent_compute_allocations
+                SET desired_state='absent',release_committed_at=NOW(),revision=revision+1,updated_at=NOW()
+                WHERE id=$1""",
+                allocation_id,
+            )
+            await conn.execute(
+                """UPDATE agent_compute_operations SET state='cancelled',message='release_committed',completed_at=NOW()
+                WHERE allocation_id=$1 AND id<>$2 AND state IN ('pending','waiting','blocked')""",
+                allocation_id,
+                operation_id,
+            )
+            return {"release_committed": True, "blocked_reasons": []}
+
+    async def set_rotation_hold(
+        self,
+        *,
+        host: str,
+        allocation_id: str,
+        source_id: str,
+        scope: str | None,
+        operation_id: str,
+        generation: int,
+        worker_id: str,
+    ) -> None:
+        """Pause, or with no scope resume, claims on a Host while it changes machine.
+
+        Keyed by the Host name: the hold moves with the Host between allocations.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await lock_compute_entry(conn, exclusive=True)
+            await self._fence(conn, operation_id, generation, worker_id)
+            if scope is None:
+                await conn.execute(
+                    "DELETE FROM agent_host_admission_holds WHERE host=$1 AND purpose='rotation' AND source_id=$2",
+                    host,
+                    source_id,
+                )
+                return
+            await conn.execute(
+                """INSERT INTO agent_host_admission_holds(host,allocation_id,purpose,source_id,scope)
+                VALUES ($1,$2,'rotation',$3,$4)
+                ON CONFLICT(host,purpose,source_id) DO UPDATE SET scope=EXCLUDED.scope,
+                    revision=agent_host_admission_holds.revision+1""",
+                host,
+                allocation_id,
+                source_id,
+                scope,
+            )
+
+    async def rebind_slot_host(
+        self,
+        *,
+        host: str,
+        from_node_id: str,
+        to_node_id: str,
+        operation_id: str,
+        generation: int,
+        worker_id: str,
+    ) -> None:
+        """Hand a Host name from one node to the node that now holds its state.
+
+        The one deliberate exception to "a Host name never changes node": the
+        caller copied the Host's complete container state to the target and
+        keeps claims paused. Only a rotation's own successor (or, to roll back,
+        its predecessor) may take the name. The previous node's lease, identity
+        and bootstrap holds stop applying; the rotation hold follows the Host.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await lock_compute_entry(conn, exclusive=True)
+            await self._fence(conn, operation_id, generation, worker_id)
+            current = await conn.fetchrow(
+                "SELECT compute_node_id FROM agent_runner_hosts WHERE host=$1 FOR UPDATE", host
+            )
+            if current is None:
+                raise ValueError("host_not_found")
+            if current["compute_node_id"] == to_node_id:
+                return  # Replayed after a lost acknowledgement.
+            if current["compute_node_id"] != from_node_id:
+                raise ValueError("host_identity_conflict")
+            source = await conn.fetchrow(
+                """SELECT a.id,a.predecessor_id FROM agent_compute_nodes n
+                JOIN agent_compute_allocations a ON a.id=n.allocation_id WHERE n.id=$1""",
+                from_node_id,
+            )
+            target = await conn.fetchrow(
+                """SELECT a.id,a.predecessor_id,a.desired_state,a.release_committed_at
+                FROM agent_compute_nodes n JOIN agent_compute_allocations a ON a.id=n.allocation_id
+                WHERE n.id=$1 FOR UPDATE OF a""",
+                to_node_id,
+            )
+            if (
+                source is None
+                or target is None
+                or target["desired_state"] != "present"
+                or target["release_committed_at"] is not None
+            ):
+                raise ValueError("resource_retiring")
+            if (
+                target["predecessor_id"] != source["id"]
+                and source["predecessor_id"] != target["id"]
+            ):
+                raise ValueError("host_identity_conflict")
+            if await conn.fetchval(
+                "SELECT 1 FROM agent_runner_hosts WHERE compute_node_id=$1 AND host<>$2",
+                to_node_id,
+                host,
+            ):
+                raise ValueError("host_identity_conflict")
+            await conn.execute(
+                "UPDATE agent_runner_hosts SET compute_node_id=$2 WHERE host=$1", host, to_node_id
+            )
+            await conn.execute(
+                "DELETE FROM agent_host_admission_holds WHERE host=$1 AND purpose<>'rotation'", host
+            )
+            await conn.execute(
+                """UPDATE agent_host_admission_holds SET allocation_id=$2,revision=revision+1
+                WHERE host=$1 AND purpose='rotation'""",
+                host,
+                target["id"],
+            )
+
     async def begin_retirement(
         self,
         *,
@@ -1150,7 +1465,11 @@ class PostgresComputeResourceRepository:
             return {**impact, "release_committed": True}
 
     async def cancel_operation(self, operation_id: str) -> dict[str, Any]:
-        """Cancel a safe retirement intent and remove only its own restriction."""
+        """Cancel a safe retirement or rotation intent and remove only its own restriction.
+
+        A rotation can be cancelled until the old node stops: its claim pause
+        is lifted and its replacement node, if any, is queued for release.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn, exclusive=True)
             row = await conn.fetchrow(
@@ -1166,6 +1485,8 @@ class PostgresComputeResourceRepository:
             )
             if committed:
                 raise ValueError("release_committed")
+            if row["kind"] == "rotate":
+                return await self._cancel_rotation(conn, row)
             if (load_json(row["result"]) or {}).get("external_pending"):
                 raise ValueError("external_operation_unresolved")
             if row["kind"] != "retire" or row["state"] not in ("pending", "waiting", "blocked"):
@@ -1191,6 +1512,56 @@ class PostgresComputeResourceRepository:
                     operation_id,
                 )
             )
+
+    async def _cancel_rotation(self, conn: Any, row: Any) -> dict[str, Any]:
+        result = load_json(row["result"]) or {}
+        if row["state"] not in ("pending", "waiting", "blocked"):
+            raise ValueError("operation_not_cancellable")
+        if result.get("source_stopped") or result.get("rebound"):
+            # The old node is stopped or the name has moved: only the worker's
+            # own rollback can bring the Host back.
+            raise ValueError("rotation_switching")
+        candidate = (result.get("candidate") or {}).get("id")
+        if candidate and await conn.fetchval(
+            """SELECT 1 FROM agent_compute_operations
+            WHERE allocation_id=$1 AND state IN ('running','unknown') LIMIT 1""",
+            candidate,
+        ):
+            raise ValueError("operation_in_flight")
+        await conn.execute(
+            "DELETE FROM agent_host_admission_holds WHERE purpose='rotation' AND source_id=$1",
+            row["id"],
+        )
+        if candidate and not await conn.fetchval(
+            "SELECT release_committed_at FROM agent_compute_allocations WHERE id=$1", candidate
+        ):
+            await conn.execute(
+                """UPDATE agent_compute_operations
+                SET state='cancelled',message='candidate_abandoned',completed_at=NOW(),updated_at=NOW()
+                WHERE allocation_id=$1 AND state IN ('pending','waiting','blocked')""",
+                candidate,
+            )
+            parameters = {"allocation_id": candidate}
+            request_id = discard_request_id(candidate)
+            if not await conn.fetchval(
+                "SELECT 1 FROM agent_compute_operations WHERE request_id=$1", request_id
+            ):
+                await self._insert_operation(
+                    conn,
+                    request_id=request_id,
+                    fingerprint=operation_fingerprint("discard", parameters),
+                    kind="discard",
+                    allocation_id=candidate,
+                    parameters=parameters,
+                    requested_by="compute-rotation",
+                )
+        return _row(
+            await conn.fetchrow(
+                """UPDATE agent_compute_operations SET state='cancelled',completed_at=NOW(),updated_at=NOW()
+                WHERE id=$1 RETURNING *""",
+                row["id"],
+            )
+        )
 
     async def resolve_acquisition(self, *, operation_id: str, external_id: str) -> dict[str, Any]:
         """Record explicit administrator identification of an unknown acquisition.

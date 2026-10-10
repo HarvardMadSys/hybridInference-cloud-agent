@@ -28,19 +28,35 @@ def queue_alarm(snapshot: dict[str, int]) -> str:
 
 async def deliver_alert(event: str, snapshot: dict[str, int]) -> None:
     """Deliver counts only to the operator-configured webhook, if present."""
+    await _post(
+        {
+            "text": f"Cloud Agent: {event}",
+            "event": event,
+            "deployment_sha": os.environ.get("AGENT_DEPLOYMENT_SHA", ""),
+            "queue": snapshot,
+        }
+    )
+
+
+async def deliver_event(event: str, details: dict[str, str]) -> None:
+    """Deliver one named event with identifiers and reason codes, never remote output."""
+    summary = ", ".join(f"{key}={value}" for key, value in details.items())
+    await _post(
+        {
+            "text": f"Cloud Agent: {event}" + (f" ({summary})" if summary else ""),
+            "event": event,
+            "deployment_sha": os.environ.get("AGENT_DEPLOYMENT_SHA", ""),
+            "details": details,
+        }
+    )
+
+
+async def _post(payload: dict[str, object]) -> None:
     url = os.environ.get(ENV_ALERT_WEBHOOK, "").strip()
     if not url:
         return
     async with httpx.AsyncClient(timeout=5, follow_redirects=False) as client:
-        response = await client.post(
-            url,
-            json={
-                "text": f"Cloud Agent: {event}",
-                "event": event,
-                "deployment_sha": os.environ.get("AGENT_DEPLOYMENT_SHA", ""),
-                "queue": snapshot,
-            },
-        )
+        response = await client.post(url, json=payload)
         response.raise_for_status()
 
 

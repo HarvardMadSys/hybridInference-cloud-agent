@@ -1,0 +1,418 @@
+"""Move a Host to a replacement node with the real worker, store and enrollment.
+
+Provider and SSH effects are inert fakes that record what was asked of them;
+everything the move decides — which node holds the Host's name, which claims
+are paused, what is released — is read back from Postgres.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from uuid import uuid4
+
+import pytest
+from tests.integration.storage.test_host_pool_store import db as db, hosts as hosts, store as store
+
+from cloud_agent.application.compute_reconcile import ComputeReconciler
+from cloud_agent.application.compute_resources import ComputeCommands
+from cloud_agent.compute_config import ComputeConfiguration
+from cloud_agent.compute_registry import ComputeProviderRegistration, ComputeProviderRegistry
+from cloud_agent.compute_secrets import ComputeSecretStore
+from cloud_agent.host_pool import hash_secret
+from cloud_agent.ports.external.compute_provider import (
+    NodeObservation,
+    ProviderCapabilities,
+    ProviderError,
+    ProviderReceipt,
+    ResourceObservation,
+    ResourceRef,
+    SshConnection,
+)
+from cloud_agent.ports.external.host_bootstrap import (
+    BootstrapResult,
+    DeploymentProfile,
+    HostInventory,
+    TransferResult,
+)
+from cloud_agent.schemas_compute import RenewalPolicy, RotateComputeRequest, UpdateComputePolicy
+from cloud_agent.storage._sql.compute_admission import host_compute_admission
+from cloud_agent.workers.compute_resources import ComputeResourceWorker
+
+pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
+
+HOST_KEY = "ssh-ed25519 " + "A" * 68
+
+
+def _profile(name: str) -> DeploymentProfile:
+    return DeploymentProfile(
+        id=name,
+        label=name,
+        source_bundle="/test/source.tar",
+        source_sha256="a" * 64,
+        deployment_sha="b" * 40,
+        environment_ref="deployment:env",
+        data_mount="/mydata",
+    )
+
+
+class FakeCloud:
+    """Experiments keyed by ID; the node registers its key the moment it is created."""
+
+    def __init__(self, repository) -> None:
+        self.repository = repository
+        self.experiments: dict[str, ResourceObservation] = {}
+        self.failing_types: set[str] = set()
+        self.created: list[str] = []
+        self.released: list[str] = []
+
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            acquisition_modes=("attach", "provision"), can_extend=True, can_release=True
+        )
+
+    def validate_config(self, mode, config):
+        return dict(config)
+
+    async def acquire(self, request, intent):
+        external_id = str(uuid4())
+        node_type = (request.config.get("bindings") or {}).get("phystype", "first")
+        self.created.append(node_type)
+        ref = ResourceRef(
+            external_id=external_id, config={**request.config, "external_id": external_id}
+        )
+        if node_type in self.failing_types:
+            observation = ResourceObservation(
+                ref=ref,
+                state="failed",
+                raw_state="failed",
+                observed_at=datetime.now(UTC),
+                scope_complete=False,
+            )
+        else:
+            node = NodeObservation(
+                provider_node_id="node0",
+                instance_identity=external_id + ":node0",
+                display_name=f"{node_type}-node",
+                connection=SshConnection(
+                    address=f"{node_type}.example.org", username="agent", credential_ref="ssh"
+                ),
+            )
+            observation = ResourceObservation(
+                ref=ref,
+                state="ready",
+                raw_state="ready",
+                observed_at=datetime.now(UTC),
+                expires_at=datetime.now(UTC) + timedelta(hours=16),
+                lease_known=True,
+                nodes=(node,),
+                scope_complete=True,
+            )
+            # The node's boot script registers its host key with the one-time token.
+            assert request.registration is not None
+            outcome = await self.repository.complete_node_registration(
+                token_hash=hash_secret(request.registration.token.get_secret_value()),
+                host_keys=[HOST_KEY],
+            )
+            assert outcome == "registered"
+        self.experiments[external_id] = observation
+        return ProviderReceipt(outcome="confirmed", resource=ref, observation=observation)
+
+    async def inspect(self, ref):
+        return self.experiments[ref.external_id]
+
+    async def recover_acquire(self, intent):
+        raise AssertionError("no acquisition is recovered in these tests")
+
+    async def release(self, ref, intent):
+        self.released.append(ref.external_id)
+        gone = self.experiments[ref.external_id].model_copy(
+            update={"state": "terminated", "raw_state": "terminated", "nodes": ()}
+        )
+        self.experiments[ref.external_id] = gone
+        return ProviderReceipt(outcome="confirmed", resource=ref, observation=gone)
+
+    async def extend(self, ref, request):
+        raise AssertionError("no extension is requested in these tests")
+
+
+class FakeNodes:
+    """SSH effects: deployment enrolls the Host the way a real runner would."""
+
+    def __init__(self, hosts) -> None:
+        self.hosts = hosts
+        self.calls: list[tuple[str, str]] = []
+        self.fail_final_copy = False
+
+    async def preflight(self, node, profile):
+        raise AssertionError("not used")
+
+    async def deploy(self, node, profile, intent, token, *, prerequisites=None, reenroll=False):
+        self.calls.append(("deploy", node.display_name))
+        await self.hosts.register_host(
+            host=intent.host,
+            credential_hash=hash_secret("credential-" + node.display_name),
+            slots_total=2,
+        )
+        await self.hosts.record_host_heartbeat(host=intent.host)
+        return BootstrapResult(ready=True, host=intent.host, deployment_sha=profile.deployment_sha)
+
+    async def readiness(self, node, profile, intent):
+        return BootstrapResult(ready=True, host=intent.host, deployment_sha=profile.deployment_sha)
+
+    async def inventory(self, node, profile, intent):
+        self.calls.append(("inventory", node.display_name))
+        return HostInventory(complete=True)
+
+    async def stage(self, node, profile, intent):
+        self.calls.append(("stage", node.display_name))
+        assert profile.data_mount == "/mydata"
+        return BootstrapResult(ready=True, host=intent.host, deployment_sha=profile.deployment_sha)
+
+    async def stop(self, node, profile, intent):
+        self.calls.append(("stop", node.display_name))
+
+    async def transfer(self, source, target, profile, intent, *, final, first=False):
+        kind = "final" if final else ("first" if first else "again")
+        self.calls.append((f"transfer-{kind}", f"{source.display_name}->{target.display_name}"))
+        if final and self.fail_final_copy:
+            self.fail_final_copy = False
+            raise ProviderError("transfer_failed", "copy broke", retryable=True)
+        return TransferResult(bytes_transferred=1024, seconds=1.5, streams=6)
+
+    async def revoke_transfer(self, source, target):
+        self.calls.append(("revoke", f"{source.display_name}->{target.display_name}"))
+
+    async def wipe(self, node, profile, intent):
+        self.calls.append(("wipe", node.display_name))
+
+
+async def rig(store, hosts, monkeypatch):
+    repository = store.compute_resources
+    cloud = FakeCloud(repository)
+    registry = ComputeProviderRegistry(
+        [ComputeProviderRegistration(id="cloudlab", label="Fixture", provider=cloud, fields=())]
+    )
+    commands = ComputeCommands(
+        repository=repository,
+        registry=registry,
+        secrets=ComputeSecretStore(repository, key="x" * 32),
+        configuration=ComputeConfiguration(
+            profiles={name: _profile(name) for name in ("slot-a", "slot-b")},
+            registration_url="https://control.example.org/v1/compute/node-registrations",
+        ),
+    )
+    nodes = FakeNodes(hosts)
+    broker = SimpleNamespace(
+        health=AsyncMock(return_value={}), list_sandboxes=AsyncMock(return_value=[])
+    )
+    for module in ("compute_reconcile", "compute_rotation"):
+        monkeypatch.setattr(
+            f"cloud_agent.application.{module}.broker_for_host", lambda host: broker
+        )
+    reconciler = ComputeReconciler(commands=commands, host_pool=hosts, bootstrap=nodes)
+    request_id = str(uuid4())
+    first = await repository.create_allocation_operation(
+        request_id=request_id,
+        fingerprint=request_id,
+        kind="acquire",
+        requested_by="admin",
+        parameters={},
+        allocation={
+            "name": "lab",
+            "provider_id": "cloudlab",
+            "mode": "provision",
+            "management_mode": "manage",
+            "lease_managed": True,
+            "release_supported": True,
+            "configuration": {
+                "project": "lab",
+                "host_key_source": "registration",
+                "bindings": {"phystype": "first"},
+            },
+            "deployment_profile": _profile("slot-a").model_dump(mode="json"),
+        },
+    )
+    r = SimpleNamespace(
+        db=None,
+        repo=repository,
+        hosts=hosts,
+        worker=ComputeResourceWorker(reconciler),
+        commands=commands,
+        cloud=cloud,
+        nodes=nodes,
+        allocation_id=first["allocation_id"],
+    )
+    return r
+
+
+async def run_all(r, db, *, limit: int = 80) -> None:
+    """Run due operations; only when none is due, let every wait elapse."""
+    for _ in range(limit):
+        claimed = await r.repo.claim_operation(worker_id="rotation-test")
+        if claimed is None:
+            async with db.acquire() as conn:
+                waited = await conn.execute(
+                    "UPDATE agent_compute_operations SET next_attempt_at=NOW() WHERE state='waiting'"
+                )
+            if waited == "UPDATE 0":
+                return
+            continue
+        await r.worker.execute_claimed(claimed)
+    raise AssertionError("operations did not settle")
+
+
+async def ready_slot(r, db) -> tuple[dict, str]:
+    """Bring the first server up and enable automatic moves for it."""
+    await run_all(r, db)
+    allocation = await r.repo.get_allocation(r.allocation_id)
+    assert allocation["observed_state"] == "ready", allocation
+    host = allocation["hosts"][0]["host"]
+    policy = RenewalPolicy(
+        enabled=True,
+        reason="Keep the evaluation sandboxes",
+        renew_before_seconds=3 * 3600,
+        extend_to_horizon_seconds=8 * 3600,
+        rotation_enabled=True,
+        node_types=["t1", "t2"],
+    )
+    await r.commands.update_policy(
+        r.allocation_id,
+        UpdateComputePolicy(expected_revision=allocation["revision"], policy=policy),
+    )
+    return await r.repo.get_allocation(r.allocation_id), host
+
+
+async def rotation_of(r, allocation_id: str) -> dict:
+    rows = await r.repo.list_operations(allocation_id=allocation_id, kinds=["rotate"])
+    assert rows, "no rotation"
+    return rows[0]
+
+
+async def successor_of(db, allocation_id: str) -> list[dict]:
+    async with db.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM agent_compute_allocations WHERE predecessor_id=$1 ORDER BY created_at",
+            allocation_id,
+        )
+    return [dict(row) for row in rows]
+
+
+async def test_host_moves_to_a_staged_replacement_and_the_old_node_is_released(
+    db, store, hosts, monkeypatch
+):
+    r = await rig(store, hosts, monkeypatch)
+    source, host = await ready_slot(r, db)
+    source_node = source["nodes"][0]["id"]
+
+    queued = await r.commands.rotate(
+        r.allocation_id,
+        RotateComputeRequest(request_id="move-now", expected_revision=source["revision"]),
+        actor="admin",
+    )
+    assert queued["kind"] == "rotate"
+    await run_all(r, db)
+
+    rotation = await rotation_of(r, r.allocation_id)
+    assert rotation["state"] == "succeeded", rotation
+    [replacement] = await successor_of(db, r.allocation_id)
+    assert replacement["slot_host"] == host
+    assert replacement["slot_namespace"] == "ca-" + source_node.replace("-", "").lower()
+    target = await r.repo.get_allocation(replacement["id"])
+    # The Host's name now belongs to the replacement node, enrolled again there.
+    host_row = await hosts.get_host(host=host)
+    assert host_row["enrolled"] and host_row["status"] == "online"
+    assert [h["host"] for h in target["hosts"]] == [host]
+    async with db.acquire() as conn:
+        holds = await conn.fetch("SELECT * FROM agent_host_admission_holds WHERE host=$1", host)
+        new_groups, claims = await host_compute_admission(conn, host)
+    assert not [hold for hold in holds if hold["purpose"] == "rotation"]
+    assert claims and new_groups
+    # Order of effects: stage and copy while the old node serves, stop, final
+    # copy, start on the new node, and only then clear the old node.
+    assert r.nodes.calls == [
+        ("deploy", "first-node"),
+        ("stage", "t1-node"),
+        ("transfer-first", "first-node->t1-node"),
+        ("stop", "first-node"),
+        ("transfer-final", "first-node->t1-node"),
+        ("deploy", "t1-node"),
+        ("revoke", "first-node->t1-node"),
+        ("wipe", "first-node"),
+        ("inventory", "first-node"),
+    ]
+    old = await r.repo.get_allocation(r.allocation_id)
+    assert old["release_committed_at"] is not None and old["observed_state"] == "terminated"
+    assert r.cloud.released == [old["external_id"]]
+    assert target["release_committed_at"] is None
+
+
+async def test_failed_node_type_is_released_and_the_next_type_takes_over(
+    db, store, hosts, monkeypatch
+):
+    r = await rig(store, hosts, monkeypatch)
+    source, host = await ready_slot(r, db)
+    r.cloud.failing_types = {"t1"}
+    await r.commands.rotate(
+        r.allocation_id,
+        RotateComputeRequest(request_id="move-now", expected_revision=source["revision"]),
+        actor="admin",
+    )
+    await run_all(r, db)
+
+    rotation = await rotation_of(r, r.allocation_id)
+    assert rotation["state"] == "succeeded", rotation
+    [attempt] = rotation["result"]["attempts"]
+    assert attempt["node_type"] == "t1" and attempt["class"] == "no_capacity"
+    failed, replacement = await successor_of(db, r.allocation_id)
+    assert failed["release_committed_at"] is not None
+    assert failed["observed_state"] == "terminated"
+    assert r.cloud.created == ["first", "t1", "t2"]
+    target = await r.repo.get_allocation(replacement["id"])
+    assert [h["host"] for h in target["hosts"]] == [host]
+
+
+async def test_a_failed_switch_rolls_back_to_the_original_node_first(db, store, hosts, monkeypatch):
+    r = await rig(store, hosts, monkeypatch)
+    source, host = await ready_slot(r, db)
+    r.nodes.fail_final_copy = True
+    await r.commands.rotate(
+        r.allocation_id,
+        RotateComputeRequest(request_id="move-now", expected_revision=source["revision"]),
+        actor="admin",
+    )
+    await run_all(r, db)
+
+    rotation = await rotation_of(r, r.allocation_id)
+    assert rotation["state"] == "succeeded", rotation
+    [attempt] = rotation["result"]["attempts"]
+    assert attempt == {**attempt, "node_type": "t1", "class": "switch_failed"}
+    calls = r.nodes.calls
+    # The original node restarted with its own credential before anything else.
+    rollback = calls.index(("deploy", "first-node"), 1)
+    assert calls[rollback - 1] == ("transfer-final", "first-node->t1-node")
+    assert calls[rollback + 1 :].count(("stage", "t2-node")) == 1
+    failed, replacement = await successor_of(db, r.allocation_id)
+    assert failed["release_committed_at"] is not None
+    target = await r.repo.get_allocation(replacement["id"])
+    assert [h["host"] for h in target["hosts"]] == [host]
+
+
+async def test_only_one_move_of_a_host_runs_at_a_time(db, store, hosts, monkeypatch):
+    r = await rig(store, hosts, monkeypatch)
+    source, _ = await ready_slot(r, db)
+    await r.commands.rotate(
+        r.allocation_id,
+        RotateComputeRequest(request_id="first", expected_revision=source["revision"]),
+        actor="admin",
+    )
+    from cloud_agent.domain.compute import ComputeRefusal
+
+    with pytest.raises(ComputeRefusal) as refused:
+        await r.commands.rotate(
+            r.allocation_id,
+            RotateComputeRequest(request_id="second", expected_revision=source["revision"]),
+            actor="admin",
+        )
+    assert refused.value.code == "rotation_in_progress"
