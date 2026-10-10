@@ -465,6 +465,169 @@ describe('JobDetail', () => {
     expect(cancelAgentJob).not.toHaveBeenCalled();
   });
 
+  it('starts a code review in a child tab for the displayed turn and reuses that review', async () => {
+    const { source, job, userId, jobs } = sideChatFixture();
+    const prUrl = 'https://github.com/owner/repository/pull/7';
+    const reviewed = {
+      ...job,
+      nativeState: 'ready' as const,
+      nativeForkAvailable: true,
+      baseRef: 'original-base',
+      baseSha: 'original-base-sha',
+      branch: 'agent/original-change',
+      prUrl,
+    };
+    const later = {
+      ...source,
+      id: 'tabs-later-main',
+      turn_no: 2,
+      base_ref: 'later-base',
+      base_sha: 'later-base-sha',
+      published_branch: 'agent/later-change',
+      published_pr_url: 'https://github.com/owner/repository/pull/8',
+    };
+    jobs.set(later.id, later);
+    render(<JobDetail job={reviewed} userId={userId} threadJobs={[source, later]} />);
+
+    const review = screen.getByRole('button', { name: 'Review' });
+    expect(review).toBeEnabled();
+    expect(review.parentElement).toContainElement(
+      screen.getByRole('link', { name: 'Open draft PR' }),
+    );
+    fireEvent.click(review);
+
+    const tab = await screen.findByRole('tab', { name: 'Review' });
+    expect(tab).toHaveAttribute('aria-selected', 'true');
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(1));
+    expect(forkAgentJob).toHaveBeenCalledExactlyOnceWith(
+      source.id,
+      expect.objectContaining({ requestId: expect.any(String) }),
+    );
+    const [threadId, body, options] = vi.mocked(submitThreadMessage).mock.calls[0];
+    expect(threadId).toBe('tabs-thread-1');
+    expect(body.prompt).toMatch(/review/i);
+    expect(body.prompt).toMatch(/read.only/i);
+    expect(body.prompt).toContain(reviewed.baseRef);
+    expect(body.prompt).toContain(reviewed.baseSha);
+    expect(body.prompt).toContain(reviewed.branch);
+    expect(body.prompt).toContain(prUrl);
+    expect(body.prompt).not.toContain(later.base_sha);
+    expect(body.skill_ids).toEqual([]);
+    expect(options).toEqual(expect.objectContaining({ requestId: expect.any(String) }));
+    expect(navigation.push).not.toHaveBeenCalled();
+
+    const childReads = vi.mocked(getAgentJobThread).mock.calls.length;
+    fireEvent.click(screen.getByRole('tab', { name: /^Git/ }));
+    fireEvent.click(review);
+    expect(tab).toHaveAttribute('aria-selected', 'true');
+    await waitFor(() =>
+      expect(vi.mocked(getAgentJobThread).mock.calls.length).toBeGreaterThan(childReads),
+    );
+    expect(forkAgentJob).toHaveBeenCalledTimes(1);
+    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+  });
+
+  it('reviews a later turn against the original PR baseline while forking the displayed turn', async () => {
+    const { source, job, userId, jobs } = sideChatFixture();
+    const selected = { ...source, turn_no: 2, base_sha: 'previous-published-pr-commit' };
+    const first = {
+      ...source,
+      id: 'tabs-original-turn',
+      turn_no: 1,
+      base_sha: 'original-pr-base-sha',
+    };
+    jobs.set(selected.id, selected);
+    jobs.set(first.id, first);
+    render(
+      <JobDetail
+        job={{
+          ...job,
+          turnNo: 2,
+          nativeState: 'ready',
+          nativeForkAvailable: true,
+          baseSha: selected.base_sha,
+          prUrl: 'https://github.com/owner/repository/pull/7',
+        }}
+        userId={userId}
+        threadJobs={[first, selected]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(1));
+    expect(forkAgentJob).toHaveBeenCalledExactlyOnceWith(
+      selected.id,
+      expect.objectContaining({ requestId: expect.any(String) }),
+    );
+    const [threadId, body] = vi.mocked(submitThreadMessage).mock.calls[0];
+    expect(threadId).toBe('tabs-thread-1');
+    expect(body.prompt).toContain(first.base_sha);
+    expect(body.prompt).not.toContain(selected.base_sha);
+    expect(navigation.push).not.toHaveBeenCalled();
+  });
+
+  it('starts code review beside the pull request link in the Git workspace', async () => {
+    const { source, job, userId } = sideChatFixture();
+    const prUrl = 'https://github.com/owner/repository/pull/7';
+    render(
+      <JobDetail
+        job={{ ...job, nativeState: 'ready', nativeForkAvailable: true, prUrl }}
+        userId={userId}
+        threadJobs={[source]}
+      />,
+    );
+    openWorkspace();
+    const git = screen.getByLabelText('Git workspace');
+    fireEvent.click(within(git).getByRole('tab', { name: 'review' }));
+    const review = within(git).getByRole('button', { name: 'Review' });
+    expect(review).toBeEnabled();
+    expect(review.parentElement).toContainElement(
+      within(git).getByRole('link', { name: 'Open pull request' }),
+    );
+    fireEvent.click(review);
+
+    expect(await screen.findByRole('tab', { name: 'Review' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(1));
+    expect(submitThreadMessage).toHaveBeenCalledWith(
+      'tabs-thread-1',
+      expect.objectContaining({ prompt: expect.stringContaining(prUrl) }),
+      expect.objectContaining({ requestId: expect.any(String) }),
+    );
+    expect(navigation.push).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['archived', { archivedAt: '2026-09-10T00:00:00Z' }, 'tabs-owner'],
+    ['lost', { nativeState: 'lost' }, 'tabs-owner'],
+    ['not forkable', { nativeForkAvailable: false }, 'tabs-owner'],
+    ['signed out', {}, undefined],
+  ] as const)('disables code review when the source is %s', (_reason, overrides, userId) => {
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          threadId: 'tabs-main-thread',
+          sandboxId: 'tabs-group',
+          workspaceShared: true,
+          nativeState: 'ready',
+          nativeForkAvailable: true,
+          prUrl: 'https://github.com/owner/repository/pull/7',
+          ...overrides,
+        })}
+        userId={userId}
+      />,
+    );
+    const review = screen.getByRole('button', { name: 'Review' });
+    expect(review).toBeDisabled();
+    fireEvent.click(review);
+    expect(forkAgentJob).not.toHaveBeenCalled();
+    expect(submitThreadMessage).not.toHaveBeenCalled();
+  });
+
   it('closes all side tabs, remembers closure after refresh and can create a fresh chat', async () => {
     const { source, job, userId } = sideChatFixture();
     const props = { job, userId, threadJobs: [source] };
@@ -1817,6 +1980,7 @@ describe('JobDetail', () => {
     expect(screen.getByText(/Reply below and the same PR is updated/)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Open draft PR' })).toHaveAttribute('href', prUrl);
     // Its milestones say what they mean, this once.
+    expect(screen.getByRole('button', { name: 'Review' })).toBeInTheDocument();
     expect(screen.getByText(/keeps going if you close this page/)).toBeInTheDocument();
   });
 

@@ -5,6 +5,7 @@ import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { forkAgentJob, getAgentJob, getAgentJobThread, type AgentJobApi } from '@/lib/api/agents';
+import { submitThreadMessage } from '@/lib/api/pendingMessages';
 import { APIError } from '@/lib/utils/errors';
 import type { AgentJob } from './types';
 import { sideChatStorageKey, useSideChatSession } from './useSideChatSession';
@@ -15,6 +16,7 @@ vi.mock('@/lib/api/agents', () => ({
   getAgentJob: vi.fn(),
   getAgentJobThread: vi.fn(),
 }));
+vi.mock('@/lib/api/pendingMessages', () => ({ submitThreadMessage: vi.fn() }));
 
 const source = {
   id: 'source-2',
@@ -55,6 +57,7 @@ beforeEach(() => {
     jobs: [copied],
     messages: [],
   });
+  vi.mocked(submitThreadMessage).mockResolvedValue({ pending: null, job: copied });
 });
 afterEach(() => {
   cleanup();
@@ -404,5 +407,134 @@ describe('side chat durable recovery', () => {
     await waitFor(() => expect(result.current.status).toBe('ready'));
     expect(forkAgentJob).toHaveBeenCalledWith(anchor.id, { requestId: 'original-operation' });
     expect(sessionStorage.getItem(legacy)).toBeNull();
+  });
+});
+
+describe('automatic code review', () => {
+  const tab = {
+    id: 'side-chat-review' as const,
+    number: 1,
+    anchor: { jobId: anchor.id, sandboxId: 'sandbox' },
+    reviewPrompt: 'Review these changes without editing files.',
+  };
+  const key = sideChatKeys(userId, 'main', tab.id).session;
+  const reviewJob = { ...copied, id: 'review-turn', forked_from_job_id: null, turn_no: 3 };
+
+  it('starts one child review across concurrent consumers and restores it without resending', async () => {
+    vi.mocked(submitThreadMessage).mockResolvedValue({ pending: null, job: reviewJob });
+    const first = renderHook(() => useSideChatSession(source, userId, true, [anchor], tab), {
+      wrapper: ({ children }: { children: ReactNode }) => <StrictMode>{children}</StrictMode>,
+    });
+    const second = renderHook(() => useSideChatSession(source, userId, true, [anchor], tab));
+    await waitFor(() => expect(second.result.current.status).toBe('ready'));
+    expect(forkAgentJob).toHaveBeenCalledTimes(1);
+    const operation = vi.mocked(forkAgentJob).mock.calls[0][1]?.requestId;
+    expect(submitThreadMessage).toHaveBeenCalledExactlyOnceWith(
+      'side',
+      { prompt: tab.reviewPrompt, skill_ids: [] },
+      { requestId: `review-${operation}` },
+    );
+    expect(first.result.current.session?.jobId).toBe(reviewJob.id);
+    expect(JSON.parse(localStorage.getItem(key)!)).toMatchObject({ reviewSent: true });
+    first.unmount();
+    second.unmount();
+    vi.mocked(getAgentJobThread).mockResolvedValue({
+      thread_id: 'side',
+      jobs: [copied, reviewJob],
+      messages: [],
+    });
+    const restored = renderHook(() => useSideChatSession(source, userId, true, [anchor], tab));
+    await waitFor(() => expect(restored.result.current.status).toBe('ready'));
+    expect(restored.result.current.session?.jobId).toBe(reviewJob.id);
+    expect(forkAgentJob).toHaveBeenCalledTimes(1);
+    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers a lost review reply using the same child and message key after remount', async () => {
+    vi.mocked(submitThreadMessage).mockRejectedValueOnce(new Error('Response lost'));
+    const first = renderHook(() => useSideChatSession(source, userId, true, [anchor], tab));
+    await waitFor(() => expect(first.result.current.error).toBe('Response lost'));
+    const request = vi.mocked(submitThreadMessage).mock.calls[0];
+    expect(JSON.parse(localStorage.getItem(key)!)).toMatchObject({ jobId: copied.id });
+    first.unmount();
+    // The server committed the first message even though its reply was lost.
+    vi.mocked(getAgentJobThread).mockResolvedValue({
+      thread_id: 'side',
+      jobs: [copied, reviewJob],
+      messages: [],
+    });
+    vi.mocked(submitThreadMessage).mockResolvedValue({ pending: null, job: reviewJob });
+    const retry = renderHook(() => useSideChatSession(source, userId, true, [anchor], tab));
+    await waitFor(() => expect(retry.result.current.status).toBe('ready'));
+    expect(submitThreadMessage).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(submitThreadMessage).mock.calls[1]).toEqual(request);
+    expect(forkAgentJob).toHaveBeenCalledTimes(1);
+    expect(retry.result.current.session?.jobId).toBe(reviewJob.id);
+  });
+
+  it('replays the same send if persisting the successful review receipt fails', async () => {
+    vi.mocked(submitThreadMessage).mockResolvedValue({ pending: null, job: reviewJob });
+    const write = Storage.prototype.setItem;
+    let fail = true;
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      storedKey: string,
+      value: string,
+    ) {
+      if (fail && storedKey === key && JSON.parse(value).reviewSent) {
+        fail = false;
+        throw new Error('Receipt write failed');
+      }
+      return write.call(this, storedKey, value);
+    });
+    try {
+      const { result } = renderHook(() => useSideChatSession(source, userId, true, [anchor], tab));
+      await waitFor(() => expect(result.current.error).toBe('Receipt write failed'));
+      act(() => result.current.retry());
+      await waitFor(() => expect(result.current.status).toBe('ready'));
+      expect(forkAgentJob).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(submitThreadMessage).mock.calls[1]).toEqual(
+        vi.mocked(submitThreadMessage).mock.calls[0],
+      );
+      expect(JSON.parse(localStorage.getItem(key)!)).toMatchObject({ reviewSent: true });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('marks a committed review before validating its job receipt, preventing a second send', async () => {
+    vi.mocked(submitThreadMessage).mockResolvedValueOnce({
+      pending: null,
+      job: { ...reviewJob, sandbox_id: 'wrong-workspace' },
+    });
+    const { result } = renderHook(() => useSideChatSession(source, userId, true, [anchor], tab));
+    await waitFor(() => expect(result.current.error).toBe('sideChat.invalidChild'));
+    expect(JSON.parse(localStorage.getItem(key)!)).toMatchObject({ reviewSent: true });
+    vi.mocked(getAgentJobThread).mockResolvedValue({
+      thread_id: 'side',
+      jobs: [copied, reviewJob],
+      messages: [],
+    });
+    act(() => result.current.retry());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.session?.jobId).toBe(reviewJob.id);
+    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits to send a review if its tab closes while the fork is being created', async () => {
+    let resolve!: (job: AgentJobApi) => void;
+    vi.mocked(forkAgentJob).mockReturnValueOnce(new Promise((r) => (resolve = r)));
+    const { result, rerender } = renderHook(
+      ({ active }) => useSideChatSession(source, userId, active, [anchor], tab),
+      { initialProps: { active: true } },
+    );
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1));
+    rerender({ active: false });
+    await act(async () => resolve(copied));
+    expect(submitThreadMessage).not.toHaveBeenCalled();
+    rerender({ active: true });
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
+    expect(forkAgentJob).toHaveBeenCalledTimes(1);
   });
 });

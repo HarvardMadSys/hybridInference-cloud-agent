@@ -25,11 +25,14 @@ export function WorkspaceTabBar({
     { key: 'git', label: 'Git' },
     { key: 'terminal', label: 'Terminal' },
     { key: 'files', label: 'Files' },
-    ...chats.map((chat) => ({
-      key: chat.id,
-      label: chat.number === 1 ? t('sideChat.tab') : `${t('sideChat.tab')} ${chat.number}`,
-      chat,
-    })),
+    ...chats.map((chat) => {
+      const label = t(chat.reviewPrompt ? 'review.tab' : 'sideChat.tab');
+      return {
+        key: chat.id,
+        label: chat.number === 1 ? label : `${label} ${chat.number}`,
+        chat,
+      };
+    }),
   ];
   useEffect(() => {
     if (!focusTab) return;

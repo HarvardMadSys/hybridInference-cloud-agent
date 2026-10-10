@@ -107,6 +107,13 @@ Fork creates another chat and native session in the same group. Parent and child
 share the workspace and can run concurrently, with separate member UIDs,
 credentials, and process control.
 
+For a completed chat with a draft PR, **Review** beside **Open draft PR** starts
+an independent code-review subagent in a workspace tab. It reviews all changes
+from the conversation's original base, including current workspace changes,
+and is instructed to return findings without editing files. Clicking Review
+again reopens that chat's review. Review requires an available native Fork;
+archived chats and chats with lost context cannot start one.
+
 | Context status | Meaning |
 |---|---|
 | `NEW` | No native turn has previously settled for this member |

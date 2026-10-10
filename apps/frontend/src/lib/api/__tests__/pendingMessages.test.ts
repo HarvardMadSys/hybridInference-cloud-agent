@@ -109,6 +109,89 @@ describe('pending messages api', () => {
     expect(second['Idempotency-Key']).not.toBe(first['Idempotency-Key']);
   });
 
+  it('keeps a caller-owned key across lost and successful responses', async () => {
+    fetchWithAuth
+      .mockRejectedValueOnce(new TypeError('network error'))
+      .mockResolvedValueOnce(jsonResponse({ pending: waiting, job: null }, 201))
+      .mockResolvedValueOnce(jsonResponse({ pending: waiting, job: null }, 201));
+    const options = { requestId: 'review-operation' };
+
+    await expect(
+      submitThreadMessage('athr_review', { prompt: 'review changes' }, options),
+    ).rejects.toThrow('network error');
+    await submitThreadMessage('athr_review', { prompt: 'review changes' }, options);
+    await submitThreadMessage('athr_review', { prompt: 'review changes' }, options);
+
+    expect(fetchWithAuth).toHaveBeenCalledTimes(3);
+    for (const call of fetchWithAuth.mock.calls) {
+      expect(call[2]?.headers).toMatchObject({ 'Idempotency-Key': 'review-operation' });
+    }
+  });
+
+  it('does not rotate a caller-owned key after an idempotency conflict', async () => {
+    fetchWithAuth
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { detail: { error: { type: 'idempotency_conflict', message: 'different content' } } },
+          409,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({ pending: waiting, job: null }, 201));
+    const options = { requestId: 'review-conflict-operation' };
+
+    await expect(
+      submitThreadMessage('athr_review_conflict', { prompt: 'review changes' }, options),
+    ).rejects.toMatchObject({ code: 'idempotency_conflict' });
+    expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+    await submitThreadMessage('athr_review_conflict', { prompt: 'review changes' }, options);
+
+    for (const call of fetchWithAuth.mock.calls) {
+      expect(call[2]?.headers).toMatchObject({ 'Idempotency-Key': 'review-conflict-operation' });
+    }
+  });
+
+  it('leaves an ordinary pending message key untouched by caller-owned sends', async () => {
+    fetchWithAuth
+      .mockRejectedValueOnce(new TypeError('network error'))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { detail: { error: { type: 'idempotency_conflict', message: 'different content' } } },
+          409,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({ pending: waiting, job: null }, 201))
+      .mockResolvedValueOnce(jsonResponse({ pending: waiting, job: null }, 201));
+
+    await expect(
+      submitThreadMessage('athr_separate_keys', { prompt: 'ordinary message' }),
+    ).rejects.toThrow('network error');
+    await expect(
+      submitThreadMessage(
+        'athr_separate_keys',
+        { prompt: 'review changes' },
+        { requestId: 'separate-review-operation' },
+      ),
+    ).rejects.toMatchObject({ code: 'idempotency_conflict' });
+    await submitThreadMessage(
+      'athr_separate_keys',
+      { prompt: 'review changes' },
+      { requestId: 'separate-review-operation' },
+    );
+    await submitThreadMessage('athr_separate_keys', { prompt: 'ordinary message' });
+
+    const keys = fetchWithAuth.mock.calls.map(
+      (call: Parameters<typeof client.fetchWithAuth>) =>
+        (call[2]?.headers as Record<string, string>)['Idempotency-Key'],
+    );
+    expect(keys[0]).not.toBe('separate-review-operation');
+    expect(keys).toEqual([
+      keys[0],
+      'separate-review-operation',
+      'separate-review-operation',
+      keys[0],
+    ]);
+  });
+
   it('edits at the revision read, and a refusal carries the message as it is now', async () => {
     const current = { ...waiting, revision: 2, prompt: 'from the other tab' };
     fetchWithAuth.mockResolvedValueOnce(

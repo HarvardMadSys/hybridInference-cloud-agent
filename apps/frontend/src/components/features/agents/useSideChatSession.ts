@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import { forkAgentJob, getAgentJob, getAgentJobThread, type AgentJobApi } from '@/lib/api/agents';
+import { submitThreadMessage } from '@/lib/api/pendingMessages';
 import { announceAgentSessionsChanged, onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { APIError } from '@/lib/utils/errors';
 import { useT } from '@/components/providers/LocaleProvider';
@@ -17,6 +18,7 @@ export interface SideChatSession {
   operation: { id: string; state: 'new' | 'unknown' | 'busy' | 'failed' };
   jobId?: string;
   threadId?: string;
+  reviewSent?: boolean;
 }
 type Status = 'preparing' | 'waiting' | 'ready' | 'error';
 export const sideChatStorageKey = (userId: string, threadId: string) =>
@@ -38,6 +40,8 @@ function read(key: string): SideChatSession | null {
       !['new', 'unknown', 'busy', 'failed'].includes(value.operation.state) ||
       (value.jobId !== undefined && typeof value.jobId !== 'string') ||
       (value.threadId !== undefined && typeof value.threadId !== 'string') ||
+      (value.reviewSent !== undefined && typeof value.reviewSent !== 'boolean') ||
+      (value.reviewSent && !value.threadId) ||
       Boolean(value.jobId) !== Boolean(value.threadId)
     )
       throw new Error();
@@ -112,6 +116,24 @@ export function useSideChatSession(
         if (!navigator.locks) throw new Error('sideChat.storageUnavailable');
         const result = await navigator.locks.request(key, async () => {
           if (!canStart()) return null;
+          async function startReview(child: SideChatSession) {
+            if (!snapshot.tab?.reviewPrompt || child.reviewSent || !canStart()) return child;
+            if (!child.threadId) throw new Error('sideChat.invalidChild');
+            // The fork's durable operation owns this send too. A lost response
+            // or receipt write must replay the same message, even after reload.
+            const result = await submitThreadMessage(
+              child.threadId,
+              { prompt: snapshot.tab.reviewPrompt, skill_ids: [] },
+              { requestId: `review-${child.operation.id}` },
+            );
+            const sent = { ...child, reviewSent: true };
+            save(key, sent);
+            if (!result.job) return sent;
+            const next = childSession(snapshot.source, sent, result.job);
+            if (!next) throw new Error('sideChat.invalidChild');
+            save(key, next);
+            return next;
+          }
           let saved = read(key);
           if (!saved && legacyKey && sessionStorage.getItem(legacyKey)) {
             // Preserve receipts and unknown operation IDs from the first UI
@@ -165,7 +187,7 @@ export function useSideChatSession(
                 : null;
             if (!restored) throw new Error('sideChat.invalidChild');
             save(key, restored);
-            return restored;
+            return startReview(restored);
           }
           const anchor = await getAgentJob(saved.anchorJobId);
           if (!canStart()) return null;
@@ -205,7 +227,7 @@ export function useSideChatSession(
             if (!validated) throw new Error('sideChat.invalidChild');
             announceAgentSessionsChanged({ threadIds: [child.thread_id!] });
             if (canStart()) toast.success(t('sideChat.created'));
-            return validated;
+            return startReview(validated);
           } catch (cause) {
             if (
               cause instanceof APIError &&

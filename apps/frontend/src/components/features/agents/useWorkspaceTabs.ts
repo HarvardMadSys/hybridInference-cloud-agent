@@ -10,6 +10,7 @@ export interface SideChatTab {
   id: 'side-chat' | `side-chat-${string}`;
   number: number;
   anchor?: { jobId: string; sandboxId: string };
+  reviewPrompt?: string;
 }
 interface TabsState {
   selected: WorkspaceTab;
@@ -44,7 +45,9 @@ function read(key: string): TabsState {
           chat.number < 1 ||
           chat.number >= value.nextNumber ||
           (chat.anchor &&
-            (typeof chat.anchor.jobId !== 'string' || typeof chat.anchor.sandboxId !== 'string')),
+            (typeof chat.anchor.jobId !== 'string' || typeof chat.anchor.sandboxId !== 'string')) ||
+          (chat.reviewPrompt !== undefined &&
+            (typeof chat.reviewPrompt !== 'string' || !chat.reviewPrompt.trim() || !chat.anchor)),
       ) ||
       new Set(value.chats.map((chat) => chat.id)).size !== value.chats.length
     )
@@ -92,6 +95,27 @@ export function useWorkspaceTabs(
         id: state.nextNumber === 1 ? 'side-chat' : `side-chat-${crypto.randomUUID()}`,
         number: state.nextNumber,
         anchor: sideChatAnchor(source, jobs),
+      };
+      update({
+        selected: chat.id,
+        chats: [...state.chats, chat],
+        nextNumber: state.nextNumber + 1,
+      });
+      return chat.id;
+    },
+    review(prompt: string) {
+      const existing = state.chats.find(
+        (chat) => chat.reviewPrompt && chat.anchor?.jobId === source.id,
+      );
+      if (existing) {
+        update({ ...state, selected: existing.id });
+        return existing.id;
+      }
+      const chat: SideChatTab = {
+        id: `side-chat-${crypto.randomUUID()}`,
+        number: state.nextNumber,
+        anchor: { jobId: source.id, sandboxId: source.sandboxId ?? '' },
+        reviewPrompt: prompt,
       };
       update({
         selected: chat.id,
