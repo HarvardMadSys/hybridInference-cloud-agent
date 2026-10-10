@@ -870,7 +870,10 @@ disconnect.
 
 GitHub repositories retain the complete Agent lifecycle: checkout, branch
 discovery, push, and draft PR publishing use short-lived GitHub App installation
-tokens. GitLab is intentionally narrower in this release: it verifies the
+tokens. New draft PR titles use a short excerpt from the included turns' closing
+summaries, with Markdown removed, and fall back to the changed files when no
+usable closing summary exists. The original task remains in the PR body.
+GitLab is intentionally narrower in this release: it verifies the
 authenticated GitLab user and shows their accessible projects for discovery.
 GitLab projects do not appear in the Agent task composer, and the control plane does
 not claim to read their source or publish GitLab merge requests yet.

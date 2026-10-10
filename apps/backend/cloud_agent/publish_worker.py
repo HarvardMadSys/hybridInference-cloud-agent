@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
@@ -42,6 +43,7 @@ from cloud_agent.publisher import PublishError, fetch_base_bundle, publish_patch
 from cloud_agent.schemas import BASE_REF_METADATA_KEY
 from cloud_agent.settings import number_setting, setting_env
 from cloud_agent.source_control_runtime import SourceControlUnavailable
+from cloud_agent.task_titles import is_warmup_title
 from cloud_agent.workers.background_wake import PUBLISH
 from cloud_agent_shared.git.patch_gate import branch_name_for
 
@@ -207,6 +209,67 @@ def _pr_body(job: dict[str, Any], changed_files: list[str]) -> str:
         "limits) before pushing. It is a draft on purpose — please review "
         "before merging."
     )
+
+
+def _summary_line(value: Any) -> str | None:
+    """Read the opening prose of a closing message, without Markdown scaffolding."""
+    if not isinstance(value, str) or is_warmup_title(value):
+        return None
+    in_code = False
+    for line in value[:4000].splitlines():
+        line = line.strip()
+        if line.startswith(("```", "~~~")):
+            in_code = not in_code
+            continue
+        if in_code or line.startswith("<"):
+            continue
+        if any(unicodedata.category(char).startswith("C") and char != "\t" for char in line):
+            continue
+        line = re.sub(r"^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s+)", "", line)
+        line = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", line)
+        line = line.replace("**", "").replace("__", "").replace("`", "")
+        line = " ".join(line.split()).strip(" *#")
+        if (
+            not any(char.isalnum() for char in line)
+            or line.endswith(":")
+            or line.casefold().rstrip(".!")
+            in {"summary", "changes", "what changed", "done", "completed"}
+            or line == "(the agent finished without a closing message)"
+        ):
+            continue
+        return line
+    return None
+
+
+def _pr_title(job: dict[str, Any], changed_files: list[str]) -> str:
+    """Name completed snapshot work from its included turns' closing summaries.
+
+    The task prompt describes requested work; a closing message describes what
+    the agent actually did. Shared snapshots can include several chats, so keep
+    a summary from each rather than naming only the anchor chat's instruction.
+    """
+    summaries = job.get("session_summaries")
+    lines = (
+        dict.fromkeys(line for summary in summaries if (line := _summary_line(summary)) is not None)
+        if isinstance(summaries, list)
+        else {}
+    )
+    # Share the title budget across summaries when several chats settle together.
+    fragments = list(lines)
+    if len(fragments) > 5:
+        fragments = [*fragments[:4], f"+{len(fragments) - 4} more"]
+    budget = (70 - 2 * (len(fragments) - 1)) // max(1, len(fragments))
+    summary = "; ".join(
+        line if len(line) <= budget else line[: budget - 1].rstrip() + "…" for line in fragments
+    )
+    if not summary:
+        summary = (
+            f"Update {', '.join(changed_files)}" if changed_files else "Update shared workspace"
+        )
+        summary = " ".join(summary.split())
+    if len(summary) > 70:
+        summary = summary[:69].rstrip() + "…"
+    return f"[agent] {summary}"
 
 
 async def _import_snapshot_base(
@@ -450,7 +513,7 @@ async def _publish_claimed(
                 repo=job["repo"],
                 head_branch=result.branch,
                 base_branch=pr_base,
-                title=f"[agent] {job['task_prompt'][:70]}".strip(),
+                title=_pr_title(job, result.changed_files),
                 body=_pr_body(job, result.changed_files),
                 credential=credential,
             )

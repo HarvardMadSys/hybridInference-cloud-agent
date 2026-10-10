@@ -382,6 +382,23 @@ class PostgresSnapshotRepository:
                            FROM agent_snapshot_jobs included
                            WHERE included.snapshot_id = s.id
                        ) AS included_job_ids,
+                       COALESCE((
+                           SELECT jsonb_agg(summary.content ORDER BY included.created_at, included.job_id)
+                           FROM agent_snapshot_jobs included
+                           JOIN agent_jobs included_job ON included_job.id = included.job_id
+                           JOIN LATERAL (
+                               SELECT LEFT(message.content, 4000) AS content
+                               FROM agent_thread_messages message
+                               JOIN agent_job_events event ON event.id = message.source_event_id
+                               WHERE message.job_id = included.job_id
+                                 AND message.thread_id = included_job.thread_id
+                                 AND message.role = 'assistant'
+                                 AND event.attempt_id = included_job.current_attempt_id
+                               ORDER BY message.id DESC
+                               LIMIT 1
+                           ) summary ON TRUE
+                           WHERE included.snapshot_id = s.id
+                       ), '[]'::jsonb) AS session_summaries,
                        g.origin_thread_id,
                        g.generation, g.container_id, g.runtime_id,
                        g.runtime_version, g.sandbox_image_digest,
@@ -467,6 +484,7 @@ class PostgresSnapshotRepository:
                     "sandbox_id": snapshot["sandbox_id"],
                     "workspace_epoch": int(snapshot["workspace_epoch"]),
                     "included_job_ids": load_json(snapshot["included_job_ids"]) or [],
+                    "session_summaries": load_json(snapshot["session_summaries"]) or [],
                     "job_id": snapshot["id"],
                     "anchor_job_id": snapshot["id"],
                     "thread_id": snapshot["thread_id"],

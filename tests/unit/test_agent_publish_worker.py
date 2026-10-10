@@ -50,6 +50,7 @@ _JOB = {
     "repo": "o/n",
     "base_sha": "abc123",
     "task_prompt": "fix the flaky test",
+    "session_summaries": ["Stabilize test retries"],
     "patch": "diff --git a/x b/x\n",
 }
 
@@ -138,6 +139,7 @@ async def test_successful_publish_records_the_pr(monkeypatch):
     assert store.snapshot_recorded == (9, url, "s")
     assert captured["head_branch"] == "agent/ajob_1"
     assert captured["base_branch"] == "dev"
+    assert captured["title"] == "[agent] Stabilize test retries"
     assert "ajob_1" in captured["body"]
 
 
@@ -155,6 +157,60 @@ async def test_default_publish_branch_uses_current_saved_setting(monkeypatch):
     values["AGENT_PUBLISH_BASE_BRANCH"] = "second"
     await publish_one(FakeStore(dict(_JOB)), credential=GitHubCredential("t"))
     assert captured["base_branch"] == "second"
+
+
+@pytest.mark.parametrize(
+    ("summaries", "expected"),
+    [
+        (
+            ["## Summary\n\n- **Fix** [`retry.py`](/workspace/retry.py) timeouts"],
+            "Fix retry.py timeouts",
+        ),
+        (
+            ["Changes:\n```python\nraise TimeoutError\n```\n\nFixed\t retry   timeouts"],
+            "Fixed retry timeouts",
+        ),
+        (["Fix retries", "Add retry docs", "Fix retries"], "Fix retries; Add retry docs"),
+        (
+            ["Fix retries " + "with backoff " * 20, "Add retry docs"],
+            "Fix retries with backoff with bac…; Add retry docs",
+        ),
+        (
+            [
+                "Fix retry",
+                "Add retry docs",
+                "Update API",
+                "Refresh cache",
+                "Fix exports",
+                "Add logging",
+            ],
+            "Fix retry; Add retry d…; Update API; Refresh cac…; +2 more",
+        ),
+        (["修复重试超时"], "修复重试超时"),
+        (["修" * 100], "修" * 69 + "…"),
+        (["## Summary\n\n"], "Update x"),
+        (["\x1bmalformed\u202e title", None, {"title": "bad"}], "Update x"),
+        (["(the agent finished without a closing message)"], "Update x"),
+        (["Done."], "Update x"),
+        (["⏳ The model is starting up — please wait"], "Update x"),
+        ([], "Update x"),
+        (None, "Update x"),
+    ],
+)
+async def test_pr_title_uses_readable_closing_summaries(monkeypatch, summaries, expected):
+    """Publication names completed work, even when the request differs or is long."""
+    prompt = "Please fix the problem I described " * 100
+    store = FakeStore({**_JOB, "task_prompt": prompt, "session_summaries": summaries})
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
+    )
+    captured = _patch_pr(monkeypatch)
+
+    await publish_one(store, credential=GitHubCredential("t"))
+
+    assert captured["title"] == f"[agent] {expected}"
+    assert len(captured["title"]) <= 78
+    assert "Please fix" not in captured["title"]
 
 
 async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(monkeypatch):
