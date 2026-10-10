@@ -500,5 +500,7 @@ export function messageBlockKey(jobId: string, messageId: number): string {
  * had one.
  */
 export function eventBlockKey(jobId: string, event: AgentEvent, index: number): string {
+  if (event.kind === 'tool_use' && event.activityKey)
+    return `${jobId}:activity:${event.activityKey}`;
   return `${jobId}:e${event.sourceEventId ?? `i${index}`}`;
 }

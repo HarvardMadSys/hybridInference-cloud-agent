@@ -146,6 +146,78 @@ def test_claude_assistant_blocks_keep_the_response_identity(kind):
     assert event.payload["usage"] == usage
 
 
+@pytest.mark.parametrize("kind", ["text", "thinking", "tool_use"])
+def test_claude_subagent_blocks_keep_the_parent_call_identity(kind):
+    """Child activity retains its recorded owner without changing native ids."""
+    block = {"type": kind, kind: "Child reply"}
+    if kind == "tool_use":
+        block = {"type": kind, "id": "child-tool", "name": "Read", "input": {"path": "a.py"}}
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps(
+            {
+                "type": "assistant",
+                "parent_tool_use_id": "parent-agent-call",
+                "message": {
+                    "id": "child-message",
+                    "content": [block],
+                    "usage": {"input_tokens": 3},
+                },
+            }
+        )
+    )
+    assert event.payload["parent_tool_use_id"] == "parent-agent-call"
+    assert event.payload["usage_id"] == "child-message"
+    if kind == "tool_use":
+        assert event.payload["id"] == "child-tool"
+        assert event.payload["input"] == {"path": "a.py"}
+    else:
+        assert event.payload["text"] == "Child reply"
+        assert "preview_id" not in event.payload
+
+
+def test_claude_subagent_tool_result_keeps_the_parent_call_identity():
+    """Results remain paired to the child tool and attributable to its agent."""
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps(
+            {
+                "type": "user",
+                "parent_tool_use_id": "parent-agent-call",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "child-tool",
+                            "content": "Child tool output",
+                            "is_error": True,
+                        }
+                    ]
+                },
+            }
+        )
+    )
+    assert event.payload == {
+        "tool_use_id": "child-tool",
+        "is_error": True,
+        "content": "Child tool output",
+        "parent_tool_use_id": "parent-agent-call",
+    }
+
+
+@pytest.mark.parametrize("parent", [None, "", 1, {"id": "untrusted"}])
+@pytest.mark.parametrize("kind", ["assistant", "user"])
+def test_claude_does_not_invent_a_parent_call_identity(parent, kind):
+    """Only a nonempty recorded string identifies a parent agent call."""
+    block = (
+        {"type": "tool_use", "id": "t", "name": "Read", "input": {}}
+        if kind == "assistant"
+        else {"type": "tool_result", "tool_use_id": "t", "content": "ok"}
+    )
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps({"type": kind, "parent_tool_use_id": parent, "message": {"content": [block]}})
+    )
+    assert "parent_tool_use_id" not in event.payload
+
+
 @pytest.mark.parametrize("is_error", [False, True])
 def test_claude_result_keeps_the_completed_turn_usage(is_error):
     """Success and failure both carry usage that supersedes streamed estimates."""

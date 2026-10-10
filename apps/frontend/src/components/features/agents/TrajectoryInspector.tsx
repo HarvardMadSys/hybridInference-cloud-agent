@@ -292,6 +292,12 @@ export function TrajectoryInspector({
     .map((key) => byKey.get(key))
     .filter((item): item is TrajectoryStep => Boolean(item));
   const parent = step.parentKey ? byKey.get(step.parentKey) : undefined;
+  const delegationParent = step.delegationParentKey
+    ? byKey.get(step.delegationParentKey)
+    : undefined;
+  const delegatedSteps = (step.delegatedKeys ?? [])
+    .map((key) => byKey.get(key))
+    .filter((item): item is TrajectoryStep => Boolean(item));
   const kindLabel =
     step.kind === 'user'
       ? 'User'
@@ -332,6 +338,18 @@ export function TrajectoryInspector({
         active={activeTab}
         onSelect={(tab) => onSelectTab(tab)}
       />
+      {delegationParent ? (
+        <p className="border-b border-gray-100 px-4 py-2 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
+          Delegated by{' '}
+          <button
+            type="button"
+            onClick={() => onSelectStep(delegationParent.key)}
+            className="text-crimson hover:underline dark:text-crimson-light"
+          >
+            {delegationParent.toolName ?? delegationParent.label} · Step {delegationParent.stepNo}
+          </button>
+        </p>
+      ) : null}
       {step.kind === 'assistant' ? (
         <AssistantStepDetails
           step={step}
@@ -345,6 +363,7 @@ export function TrajectoryInspector({
           step={step}
           tab={activeTab as ToolTab}
           parent={parent}
+          delegatedSteps={delegatedSteps}
           telemetry={telemetry}
           onSelectStep={onSelectStep}
           onSelectTab={(tab) => onSelectTab(tab)}

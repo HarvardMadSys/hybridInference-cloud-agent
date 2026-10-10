@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { AgentThreadEventApi } from '@/lib/api/agents';
 import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
 import { toSessionLog } from './trajectory';
+import { projectProtocolEvents, record } from './trajectoryProtocol';
 
 function event(
   id: number,
@@ -34,6 +35,242 @@ function notification(id: number, method: string, params: Record<string, unknown
   );
 }
 const active = turnContextFromJobs([{ id: 'job', state: 'running', current_attempt_id: 1 }]);
+
+function collabItem(overrides: Record<string, unknown> = {}) {
+  return {
+    type: 'collabAgentToolCall',
+    id: 'delegate',
+    tool: 'spawnAgent',
+    status: 'inProgress',
+    senderThreadId: 'main',
+    receiverThreadIds: [],
+    prompt: 'Inspect the parser',
+    model: 'gpt-6',
+    reasoningEffort: 'high',
+    agentsStates: {},
+    ...overrides,
+  };
+}
+
+describe('Codex task and subagent evidence', () => {
+  it('projects each committed plan update with stable identity and preserves raw exports', () => {
+    const records = [
+      notification(1, 'turn/plan/updated', {
+        threadId: 'main',
+        turnId: 'turn',
+        explanation: 'Read before editing',
+        plan: [
+          { step: 'Read the parser', status: 'inProgress' },
+          { step: 'Update rendering', status: 'pending' },
+        ],
+      }),
+      notification(2, 'turn/plan/updated', {
+        threadId: 'main',
+        turnId: 'turn',
+        explanation: null,
+        plan: [{ step: 'Read the parser', status: 'completed' }],
+      }),
+    ];
+    const projected = projectProtocolEvents(records);
+    expect(projected.map((record) => record.event_type)).toEqual(['tool_use', 'tool_use']);
+    expect(projected[0].payload).toMatchObject({
+      id: 'codex-plan:turn:1',
+      name: 'update_plan',
+      native_tool_status: 'completed',
+      native_tool_request: true,
+      input: {
+        explanation: 'Read before editing',
+        plan: [
+          { step: 'Read the parser', status: 'in_progress' },
+          { step: 'Update rendering', status: 'pending' },
+        ],
+      },
+    });
+    const steps = buildTrajectorySteps(records, active);
+    expect(steps.map((step) => step.status)).toEqual(['completed', 'completed']);
+    expect(steps[0].key).toBe(buildTrajectorySteps(records.slice(0, 1), active)[0].key);
+    expect(steps[0].parentKey).toBeUndefined();
+    expect(steps[0].result).toBeUndefined();
+    expect(steps[0].timing.durationMs).toBeNull();
+    expect(steps.flatMap((step) => step.sourceEvents)).toEqual(records);
+    expect(
+      toSessionLog(records)
+        .split('\n')
+        .map((line) => JSON.parse(line)),
+    ).toEqual(records);
+  });
+
+  it('keeps malformed and unsupported plan notices inspectable', () => {
+    const records = [
+      notification(1, 'turn/plan/updated', { plan: [{ step: 'Read', status: 'pending' }] }),
+      notification(2, 'turn/plan/updated', { turnId: 'turn', plan: 'invalid' }),
+      notification(3, 'turn/plan/updated', {
+        turnId: 'turn',
+        plan: [{ step: 'Read', status: 'futureStatus' }],
+      }),
+    ];
+    expect(projectProtocolEvents(records)).toEqual(records);
+  });
+
+  it('pairs only native completion with a delegation and retains recorded target snapshots', () => {
+    const started = notification(1, 'item/started', { item: collabItem() });
+    const updated = notification(2, 'item/updated', {
+      item: collabItem({
+        receiverThreadIds: ['child'],
+        agentsStates: { child: { status: 'running' } },
+      }),
+    });
+    const partial = buildTrajectorySteps([started, updated], active);
+    const tool = partial.find((step) => step.kind === 'tool')!;
+    expect(tool.status).toBe('waiting');
+    expect(tool.result).toBeUndefined();
+    expect(tool.payloadValue).toMatchObject({
+      prompt: 'Inspect the parser',
+      receiverThreadIds: ['child'],
+      agentsStates: { child: { status: 'running' } },
+    });
+    expect(partial.filter((step) => step.kind === 'tool')).toHaveLength(1);
+    expect(partial.find((step) => step.diagnostic)?.sourceEvents).toEqual([updated]);
+
+    const completed = notification(3, 'item/completed', {
+      item: collabItem({
+        status: 'completed',
+        receiverThreadIds: ['child'],
+        agentsStates: { child: { status: 'running', message: null } },
+      }),
+    });
+    const records = [started, updated, completed];
+    const result = buildTrajectorySteps(records, active).find((step) => step.kind === 'tool')!;
+    expect(result.key).toBe(tool.key);
+    expect(result.status).toBe('completed');
+    expect(result.sourceEvents).toEqual([started, completed]);
+    expect(JSON.parse(result.result!.text)).toEqual({
+      status: 'completed',
+      receiverThreadIds: ['child'],
+      agentsStates: { child: { status: 'running', message: null } },
+    });
+    expect(result.parentKey).toBeUndefined();
+    expect(records[0]).toEqual(started);
+    expect(recordedItem(started).receiverThreadIds).toEqual([]);
+    expect(
+      toSessionLog(records)
+        .split('\n')
+        .map((line) => JSON.parse(line)),
+    ).toEqual(records);
+  });
+
+  it.each([
+    ['spawnAgent', 'spawn_agent'],
+    ['sendInput', 'send_input'],
+    ['resumeAgent', 'resume_agent'],
+    ['wait', 'wait'],
+    ['closeAgent', 'close_agent'],
+    ['sendMessage', 'send_message'],
+    ['followupTask', 'followup_task'],
+    ['interruptAgent', 'interrupt_agent'],
+    ['listAgents', 'list_agents'],
+  ])('projects native %s with its recorded arguments', (tool, name) => {
+    const [projected] = projectProtocolEvents([
+      notification(1, 'item/started', { item: collabItem({ tool }) }),
+    ]);
+    expect(projected.event_type).toBe('tool_use');
+    expect(projected.payload).toMatchObject({ name, input: { tool, model: 'gpt-6' } });
+  });
+
+  it.each([
+    ['completed', 'completed', false],
+    ['failed', 'failed', true],
+    ['interrupted', 'cancelled', false],
+  ])(
+    'keeps completion-only %s evidence without inventing a call window',
+    (status, expected, isError) => {
+      const record = notification(1, 'item/completed', {
+        item: collabItem({ status, receiverThreadIds: ['child'] }),
+      });
+      const [projected] = projectProtocolEvents([record]);
+      expect(projected.event_type).toBe('tool_use');
+      expect(projected.payload).toMatchObject({ native_tool_status: expected, input: { status } });
+      const [step] = buildTrajectorySteps([record], active);
+      expect(step.status).toBe(expected);
+      expect(JSON.parse(step.result!.text)).toMatchObject({ status, receiverThreadIds: ['child'] });
+      expect(step.result!.eventIds).toEqual([record.id]);
+      expect(step.result!.isError).toBe(isError);
+      expect(step.timing.durationMs).toBeNull();
+      expect(step.timing.startedAt).toBeNull();
+      expect(step.timing.finishedAt).toBeNull();
+      expect(step.sourceEvents).toEqual([record]);
+    },
+  );
+
+  it('preserves native delegation failure and interruption outcomes', () => {
+    for (const [status, expected] of [
+      ['failed', 'failed'],
+      ['interrupted', 'cancelled'],
+    ]) {
+      const records = [
+        notification(1, 'item/started', { item: collabItem() }),
+        notification(2, 'item/completed', { item: collabItem({ status }) }),
+      ];
+      const [call, result] = projectProtocolEvents(records);
+      expect(call.event_type).toBe('tool_use');
+      expect(result.event_type).toBe('tool_result');
+      expect(record(result.payload).is_error).toBe(status === 'failed');
+      expect(buildTrajectorySteps(records, active)[0].status).toBe(expected);
+    }
+  });
+
+  it('scopes snapshot merging and call pairing to the recorded job and attempt', () => {
+    const records = [
+      notification(1, 'item/started', { item: collabItem() }),
+      notification(
+        2,
+        'item/updated',
+        { item: collabItem({ receiverThreadIds: ['retry-child'] }) },
+        2,
+      ),
+      {
+        ...notification(3, 'item/completed', {
+          item: collabItem({ status: 'completed', receiverThreadIds: ['other-job-child'] }),
+        }),
+        job_id: 'other-job',
+      },
+    ];
+    const projected = projectProtocolEvents(records);
+    expect(projected.map((record) => record.event_type)).toEqual([
+      'tool_use',
+      'tool_use',
+      'tool_use',
+    ]);
+    expect(record(projected[0].payload).input).toMatchObject({ receiverThreadIds: [] });
+    expect(record(projected[1].payload).input).toMatchObject({
+      receiverThreadIds: ['retry-child'],
+    });
+    expect(record(projected[2].payload).input).toMatchObject({
+      receiverThreadIds: ['other-job-child'],
+    });
+    const steps = buildTrajectorySteps(records, active);
+    expect(steps.filter((step) => step.kind === 'tool')).toHaveLength(3);
+    expect(steps[0].result).toBeUndefined();
+    expect(steps[0].status).toBe('waiting');
+  });
+
+  it('does not infer delegation from unknown tools, missing identities or arbitrary raw strings', () => {
+    const records = [
+      notification(1, 'item/started', { item: collabItem({ tool: 'futureTool' }) }),
+      notification(2, 'item/started', { item: collabItem({ id: '' }) }),
+      notification(3, 'item/started', {
+        item: { type: 'futureItem', id: 'a', tool: 'spawnAgent' },
+      }),
+      event(4, 'raw', { text: 'spawn_agent Inspect the parser' }),
+    ];
+    expect(projectProtocolEvents(records)).toEqual(records);
+    expect(buildTrajectorySteps(records).every((step) => !step.diagnostic)).toBe(true);
+  });
+});
+
+function recordedItem(event: AgentThreadEventApi): Record<string, unknown> {
+  return record(record(record(record(event.payload).notification).params).item);
+}
 
 describe('Claude runtime telemetry', () => {
   const counter = {

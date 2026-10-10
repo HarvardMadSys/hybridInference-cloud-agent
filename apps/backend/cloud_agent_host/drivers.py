@@ -521,7 +521,10 @@ class HarnessTurn(Generic[_RuntimeT]):
         event = self._runtime.parse_event(line)
         if event is None:
             return HarnessEvent(LINE, raw_line=line)
-        if event.event_type == MESSAGE:
+        parent_tool_use_id = (event.payload or {}).get("parent_tool_use_id")
+        if event.event_type == MESSAGE and not (
+            isinstance(parent_tool_use_id, str) and parent_tool_use_id
+        ):
             text = str((event.payload or {}).get("text", ""))
             if text.strip():
                 self._final_messages.append(text)
@@ -832,7 +835,10 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
             return [reply]
         events = self._session.events_for_protocol_line(line, self)
         for event in events:
-            if event.event_type == MESSAGE:
+            parent_tool_use_id = event.payload.get("parent_tool_use_id")
+            if event.event_type == MESSAGE and not (
+                isinstance(parent_tool_use_id, str) and parent_tool_use_id
+            ):
                 text = str(event.payload.get("text", ""))
                 if text.strip():
                     self._final_messages.append(text)

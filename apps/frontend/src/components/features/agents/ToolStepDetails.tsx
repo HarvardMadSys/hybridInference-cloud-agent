@@ -21,6 +21,8 @@ import {
 } from './StepDetailParts';
 import { formatDuration } from './TurnFooter';
 import { STATUS_LABEL, type TrajectoryStep } from './trajectorySteps';
+import { parseToolActivity } from './toolActivity';
+import { ToolActivityDetails } from './ToolActivityDetails';
 
 export type ToolTab = 'summary' | 'payload' | 'result' | 'schema' | 'timing';
 
@@ -91,6 +93,7 @@ export function ToolStepDetails({
   step,
   tab,
   parent,
+  delegatedSteps = [],
   telemetry,
   onSelectStep,
   onSelectTab,
@@ -98,6 +101,7 @@ export function ToolStepDetails({
   step: TrajectoryStep;
   tab: ToolTab;
   parent?: TrajectoryStep;
+  delegatedSteps?: TrajectoryStep[];
   telemetry?: ToolCallTelemetry | null;
   onSelectStep?: (key: string) => void;
   onSelectTab: (tab: ToolTab) => void;
@@ -247,6 +251,7 @@ export function ToolStepDetails({
   }
 
   const resultText = step.result ? stripAnsi(resultEmptyText(step)).text : '';
+  const activity = parseToolActivity(step.toolName ?? step.label, step.payloadValue);
 
   return (
     <TabPanel idPrefix={idPrefix} tab="summary">
@@ -273,6 +278,38 @@ export function ToolStepDetails({
           {STATUS_LABEL[step.status]}
         </DetailRow>
       </DetailRows>
+      {activity ? (
+        <ToolActivityDetails
+          activity={activity}
+          output={step.result?.text}
+          isError={step.result?.isError}
+        />
+      ) : null}
+      {delegatedSteps.length ? (
+        <DetailSection title="Subagent activity">
+          <ul className="space-y-1 border-l border-gray-200 pl-3 dark:border-white/10">
+            {delegatedSteps.map((child) => (
+              <li key={child.key}>
+                <button
+                  type="button"
+                  onClick={() => onSelectStep?.(child.key)}
+                  className="flex w-full min-w-0 items-baseline gap-2 rounded px-2 py-1 text-left text-xs hover:bg-gray-50 dark:hover:bg-white/5"
+                >
+                  <span className="shrink-0 text-crimson dark:text-crimson-light">
+                    Step {child.stepNo}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-gray-700 dark:text-gray-300">
+                    {child.label}
+                  </span>
+                  <span className="shrink-0 text-gray-500 dark:text-gray-400">
+                    {STATUS_LABEL[child.status]}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </DetailSection>
+      ) : null}
       {step.ambiguity === 'duplicate_call' ? (
         <p role="note" className="text-[11px] text-amber-700 dark:text-amber-300">
           This call id was stored more than once in the same attempt. Every record is kept, and the

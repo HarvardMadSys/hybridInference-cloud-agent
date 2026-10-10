@@ -878,6 +878,7 @@ export function TrajectoryView({
                 type="button"
                 data-step-key={step.key}
                 data-parent-key={step.parentKey}
+                data-delegation-parent-key={step.delegationParentKey}
                 onClick={() => onSelectStep(step.key)}
                 aria-current={open ? 'true' : undefined}
                 className={`relative flex w-full scroll-mt-80 items-baseline gap-2 py-1.5 pl-5 pr-3 text-left text-[12px] transition-colors hover:bg-gray-50 dark:hover:bg-white/5 ${
@@ -897,6 +898,14 @@ export function TrajectoryView({
                     {step.actor}
                   </span>
                 </span>
+                {step.delegationParentKey ? (
+                  <span
+                    className="shrink-0 text-[10px] text-violet-700 dark:text-violet-300"
+                    title="Activity recorded from a delegated agent"
+                  >
+                    ↳ Subagent
+                  </span>
+                ) : null}
                 {step.kind === 'tool' || step.kind === 'event' ? (
                   <span
                     title={step.toolName ?? step.label}

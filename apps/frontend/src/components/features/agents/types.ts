@@ -57,6 +57,11 @@ export type AgentEvent =
       /** Complete recorded arguments, retained separately from the compact preview. */
       input?: unknown;
       id?: string;
+      /** Explicit delegation owner; never inferred from event order. */
+      parentToolUseId?: string;
+      /** Native call identity keeps anchors stable when an earlier start backfills. */
+      activityKey?: string;
+      resultState?: 'received' | 'failed' | 'waiting' | 'not_recorded' | 'cancelled' | 'unknown';
       /** Event time, ISO. Present so per-tool durations are derivable. */
       at?: string | null;
       /**
@@ -76,6 +81,8 @@ export type AgentEvent =
       kind: 'tool_result';
       text: string;
       toolUseId?: string;
+      parentToolUseId?: string;
+      cancelled?: boolean;
       isError: boolean;
       /** Event time, ISO — paired with its tool_use to time the call. */
       at?: string | null;

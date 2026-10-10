@@ -32,7 +32,7 @@ import type {
   ProcessObservation,
   TurnResources,
 } from './types';
-import { replyPreviewPiece } from './trajectoryProtocol';
+import { projectProtocolEvents, replyPreviewPiece } from './trajectoryProtocol';
 import { agentLiveNote } from './agentLiveStatus';
 
 /**
@@ -121,8 +121,14 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
 
   // Never carry chain-of-thought into the display model. The UI represents
   // this as a compact reasoning status, not as model-authored hidden text.
-  if (type === 'thinking') return { kind: 'thinking', text: '', sourceEventId };
+  if (type === 'thinking')
+    return asText(payload, 'parent_tool_use_id')
+      ? null
+      : { kind: 'thinking', text: '', sourceEventId };
   if (type === 'message') {
+    // A delegated agent's answer belongs to its Task/Agent result, and is
+    // separately inspectable in Trajectory. It is not the main reply.
+    if (asText(payload, 'parent_tool_use_id')) return null;
     const previewId = asText(payload, 'preview_id');
     return {
       kind: 'message',
@@ -143,14 +149,22 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
     const exitCode = payload.exit_code;
     const output = toolOutput(payload);
     const outputIsError =
-      (typeof exitCode === 'number' && exitCode !== 0) || payload.status === 'failed';
+      (typeof exitCode === 'number' && exitCode !== 0) ||
+      payload.status === 'failed' ||
+      payload.is_error === true ||
+      payload.native_tool_status === 'failed';
     return {
       kind: 'tool_use',
       tool: name,
       id: asText(payload, 'id') || undefined,
+      ...(Object.hasOwn(payload, 'input') ? { input: payload.input } : {}),
+      ...(asText(payload, 'parent_tool_use_id')
+        ? { parentToolUseId: asText(payload, 'parent_tool_use_id') }
+        : {}),
+      ...(payload.native_tool_status === 'completed' ? { resultState: 'received' as const } : {}),
+      ...(payload.native_tool_status === 'cancelled' ? { resultState: 'cancelled' as const } : {}),
       ...(event.created_at ? { at: event.created_at } : {}),
       detail: asText(payload, 'detail', 'text') || commandText(payload.input) || 'Running tool',
-      ...(payload.input !== undefined ? { input: payload.input } : {}),
       ...(output ? { output } : {}),
       ...(outputIsError ? { outputIsError: true } : {}),
       sourceEventId,
@@ -166,6 +180,10 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
         readableValue(payload.aggregated_output) ||
         asText(payload, 'text', 'detail'),
       toolUseId: asText(payload, 'tool_use_id') || undefined,
+      ...(asText(payload, 'parent_tool_use_id')
+        ? { parentToolUseId: asText(payload, 'parent_tool_use_id') }
+        : {}),
+      ...(payload.native_tool_status === 'cancelled' ? { cancelled: true } : {}),
       isError: payload.is_error === true,
       ...(event.created_at ? { at: event.created_at } : {}),
       sourceEventId,
@@ -465,20 +483,59 @@ export function ownerFailureMessage(detail: string): string {
 }
 
 /** Preserve attempt boundaries and attach each result to its tool activity. */
-function displayEvents(events: AgentJobEventApi[]): AgentEvent[] {
+function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEvent[] {
   const attemptIds = [...new Set(events.map((event) => event.attempt_id))].sort((a, b) => a - b);
   const attemptNoById = new Map(attemptIds.map((id, index) => [id, index + 1]));
   const rows: AgentEvent[] = [];
   const toolsById = new Map<string, number>();
   const lastToolByAttempt = new Map<number, number>();
 
-  for (const event of events) {
+  const activityEvents = new Map(
+    projectProtocolEvents(events)
+      .filter((event) => event.event_type === 'tool_use' || event.event_type === 'tool_result')
+      .map((event) => [event.id, event]),
+  );
+  const callCounts = new Map<string, number>();
+  const resultCounts = new Map<string, number>();
+  for (const event of activityEvents.values()) {
+    const id = asText(event.payload, event.event_type === 'tool_use' ? 'id' : 'tool_use_id');
+    if (!id) continue;
+    const key = `${attemptNoById.get(event.attempt_id)}:${id}`;
+    const counts = event.event_type === 'tool_use' ? callCounts : resultCounts;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  for (const storedEvent of events) {
+    // Chat has its own answer-preview folding. Read native tool activity here
+    // without projecting message fragments a second time.
+    const event = activityEvents.get(storedEvent.id) ?? storedEvent;
     const mapped = toDisplayEvent(event);
     if (!mapped) continue;
     const attemptNo = attemptNoById.get(event.attempt_id);
     const row = { ...mapped, attemptNo } as AgentEvent;
 
     if (row.kind === 'tool_use') {
+      if (
+        event.payload?.native_tool_request === true &&
+        row.id &&
+        callCounts.get(`${attemptNo}:${row.id}`) === 1
+      ) {
+        row.activityKey = `${event.attempt_id}:${row.id}`;
+      }
+      if (
+        row.id &&
+        ((callCounts.get(`${attemptNo}:${row.id}`) ?? 0) > 1 ||
+          (resultCounts.get(`${attemptNo}:${row.id}`) ?? 0) > 1)
+      )
+        row.resultState = 'unknown';
+      row.resultState ??= row.outputIsError
+        ? 'failed'
+        : row.output !== undefined
+          ? 'received'
+          : job &&
+              (job.state === 'running' || job.state === 'publishing') &&
+              job.current_attempt_id === event.attempt_id
+            ? 'waiting'
+            : 'not_recorded';
       const rowIndex = rows.push(row) - 1;
       if (row.id) toolsById.set(`${attemptNo}:${row.id}`, rowIndex);
       if (attemptNo !== undefined) lastToolByAttempt.set(attemptNo, rowIndex);
@@ -487,14 +544,24 @@ function displayEvents(events: AgentJobEventApi[]): AgentEvent[] {
 
     if (row.kind === 'tool_result') {
       const explicit = row.toolUseId ? toolsById.get(`${attemptNo}:${row.toolUseId}`) : undefined;
-      const targetIndex =
-        explicit ?? (attemptNo === undefined ? undefined : lastToolByAttempt.get(attemptNo));
+      const targetIndex = row.toolUseId
+        ? explicit
+        : attemptNo === undefined
+          ? undefined
+          : lastToolByAttempt.get(attemptNo);
       const target = targetIndex === undefined ? undefined : rows[targetIndex];
-      if (targetIndex !== undefined && target?.kind === 'tool_use' && !target.output) {
+      if (
+        targetIndex !== undefined &&
+        target?.kind === 'tool_use' &&
+        !target.output &&
+        target.resultState !== 'unknown' &&
+        (!row.parentToolUseId || row.parentToolUseId === target.parentToolUseId)
+      ) {
         rows[targetIndex] = {
           ...target,
           output: row.text ? row.text.split('\n') : ['Command completed with no output.'],
           outputIsError: row.isError,
+          resultState: row.cancelled ? 'cancelled' : row.isError ? 'failed' : 'received',
           // Folding is where the pair still exists. Downstream only sees the
           // surviving tool_use row, so a consumer that wanted to time the
           // call — the turn footer does — would find nothing left to pair
@@ -723,7 +790,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
   const failureCause = failureCauseOf(job.detail);
   const events = options.events ?? [];
   const patch = options.patch ?? '';
-  const renderedEvents = displayEvents(events);
+  const renderedEvents = displayEvents(events, job);
 
   // Attempts are inferred from the event log rather than fetched: an attempt
   // is visible once it writes events. Supersession alone does not prove a
@@ -826,7 +893,10 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
       messages: (options.thread?.messages ?? [])
         .filter((message) => message.job_id === threadJob.id)
         .map(mapMessage),
-      events: displayEvents(threadEvents.filter((event) => event.job_id === threadJob.id)),
+      events: displayEvents(
+        threadEvents.filter((event) => event.job_id === threadJob.id),
+        threadJob,
+      ),
     }));
   }
   // A turn copied by fork has no events; its durable messages are the only

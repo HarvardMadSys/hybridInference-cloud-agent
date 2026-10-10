@@ -58,7 +58,12 @@ async def insert_event(
         client_seq,
     )
     text = (payload or {}).get("text")
-    if event_type == "message" and isinstance(text, str) and text.strip():
+    parent_tool_use_id = (payload or {}).get("parent_tool_use_id")
+    is_subagent = isinstance(parent_tool_use_id, str) and bool(parent_tool_use_id)
+    if event_type == "message" and isinstance(text, str) and text.strip() and not is_subagent:
+        # A child agent's reply stays in the recorded trajectory. Mirroring it
+        # into the assistant transcript would expose it as the main answer in
+        # fallback reads and let goal reporting consume the child's response.
         # ``truncated`` travels with the text because it is a fact about the
         # text: the runtime clipped this message, so it is not the model's whole
         # answer and the part that was cut off may be the part that matters. A

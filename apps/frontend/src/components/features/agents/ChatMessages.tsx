@@ -14,6 +14,8 @@ import {
   type ConversationTurnDescription,
 } from './conversationTurnNavigation';
 import type { AgentEvent, AgentThreadMessage, GoalTurn } from './types';
+import { ToolActivityDetails } from './ToolActivityDetails';
+import { parseToolActivity } from './toolActivity';
 
 function Chevron({ className = '' }: { className?: string }) {
   return (
@@ -131,13 +133,85 @@ type ToolActivityItem = {
   blockKey?: string;
 };
 
+function toolResultLabel(event: ToolActivityItem['event']): string {
+  return event.resultState === 'unknown'
+    ? 'Pairing unknown'
+    : event.resultState === 'cancelled'
+      ? 'Call interrupted'
+      : event.outputIsError || event.resultState === 'failed'
+        ? 'Call failed'
+        : event.resultState === 'received' || event.output !== undefined
+          ? 'Result received'
+          : event.resultState === 'waiting'
+            ? 'Waiting for result'
+            : 'Result not recorded';
+}
+
+function RichToolActivity({
+  event,
+  blockKey,
+}: {
+  event: Extract<AgentEvent, { kind: 'tool_use' }>;
+  blockKey?: string;
+}) {
+  const activity = parseToolActivity(event.tool, event.input);
+  const resultLabel = toolResultLabel(event);
+  if (activity) {
+    return (
+      <section
+        data-block-key={blockKey}
+        aria-label={activity.kind === 'tasks' ? 'Task activity' : 'Subagent activity'}
+        className={`my-2 min-w-0 rounded-lg border border-gray-200 bg-white dark:border-white/10 dark:bg-gray-900 ${event.parentToolUseId ? 'ml-4 border-l-2' : ''}`}
+      >
+        <div className="flex flex-wrap items-center gap-2 border-b border-gray-100 px-3 py-2 dark:border-white/5">
+          <ToolIcon tool={event.tool} />
+          <span className="text-[13px] font-medium text-gray-700 dark:text-gray-300">
+            {activity.kind === 'tasks' ? 'Tasks' : 'Subagent'}
+          </span>
+          <span className="break-all font-mono text-[11px] text-gray-500 dark:text-gray-400">
+            {event.tool}
+          </span>
+          <span
+            className={`ml-auto text-[11px] ${event.outputIsError ? 'text-red-700 dark:text-red-300' : 'text-gray-500 dark:text-gray-400'}`}
+          >
+            {resultLabel}
+          </span>
+        </div>
+        <div className="space-y-2 px-3 py-3">
+          <ToolActivityDetails
+            activity={activity}
+            output={event.output?.join('\n')}
+            isError={event.outputIsError}
+          />
+          <details className="group">
+            <summary className="cursor-pointer text-xs text-gray-500 dark:text-gray-400">
+              Call details
+            </summary>
+            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-gray-950 p-3 font-mono text-xs text-gray-200">
+              {event.input === undefined ? event.detail : JSON.stringify(event.input, null, 2)}
+            </pre>
+            {event.output !== undefined ? (
+              <pre
+                className={`mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md p-3 font-mono text-xs ${event.outputIsError ? 'bg-red-950 text-red-100' : 'bg-gray-950 text-gray-200'}`}
+              >
+                {event.output.join('\n')}
+              </pre>
+            ) : null}
+          </details>
+        </div>
+      </section>
+    );
+  }
+  return <ToolActivity tools={[{ event, blockKey }]} />;
+}
+
 function ToolActivity({ tools }: { tools: ToolActivityItem[] }) {
   const [expanded, setExpanded] = useState(false);
   const detailsId = useId();
   const label = tools.length === 1 ? 'tool call' : 'tool calls';
 
   return (
-    <div className="my-1 min-w-0">
+    <div className={`my-1 min-w-0 ${tools[0]?.event.parentToolUseId ? 'ml-4' : ''}`}>
       <div className="flex min-w-0 items-center gap-2 py-1 text-xs text-gray-500 dark:text-gray-400">
         <ul
           role="list"
@@ -153,6 +227,14 @@ function ToolActivity({ tools }: { tools: ToolActivityItem[] }) {
               className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-gray-100 px-2 py-1 dark:bg-white/5"
             >
               <ToolIcon tool={event.tool} />
+              {event.parentToolUseId ? (
+                <span
+                  title={`Delegated by ${event.parentToolUseId}`}
+                  className="text-[10px] text-violet-700 dark:text-violet-300"
+                >
+                  Subagent tool
+                </span>
+              ) : null}
               <span className="max-w-40 truncate font-medium text-gray-700 dark:text-gray-300">
                 {event.tool}
               </span>
@@ -161,7 +243,9 @@ function ToolActivity({ tools }: { tools: ToolActivityItem[] }) {
                   {event.diffStat}
                 </span>
               ) : null}
-              {event.outputIsError ? (
+              {event.resultState === 'unknown' || event.resultState === 'cancelled' ? (
+                <span className="text-gray-500 dark:text-gray-400">{toolResultLabel(event)}</span>
+              ) : event.outputIsError || event.resultState === 'failed' ? (
                 <span className="text-rose-600 dark:text-rose-400">Failed</span>
               ) : null}
             </li>
@@ -213,7 +297,9 @@ function ToolActivity({ tools }: { tools: ToolActivityItem[] }) {
                 </pre>
               ) : (
                 <p className="text-xs text-gray-400 dark:text-gray-500">
-                  Waiting for the tool result…
+                  {event.resultState && event.resultState !== 'waiting'
+                    ? toolResultLabel(event)
+                    : 'Waiting for the tool result…'}
                 </p>
               )}
             </section>
@@ -238,14 +324,20 @@ export function EventList({
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index];
     const blockKey = eventBlockKey(jobId, event, index);
-    if (event.kind !== 'tool_use') {
+    if (event.kind !== 'tool_use' || parseToolActivity(event.tool, event.input)) {
       rows.push(<Fragment key={blockKey}>{renderEvent(event, index, blockKey)}</Fragment>);
       continue;
     }
     const tools: ToolActivityItem[] = [{ event, blockKey }];
     while (index + 1 < events.length) {
       const next = events[index + 1];
-      if (next.kind !== 'tool_use' || next.attemptNo !== event.attemptNo) break;
+      if (
+        next.kind !== 'tool_use' ||
+        next.attemptNo !== event.attemptNo ||
+        next.parentToolUseId !== event.parentToolUseId ||
+        parseToolActivity(next.tool, next.input)
+      )
+        break;
       index += 1;
       tools.push({ event: next, blockKey: eventBlockKey(jobId, next, index) });
     }
@@ -573,7 +665,7 @@ export function EventRow({
     );
   }
   if (event.kind === 'user_message') return <UserMessage text={event.text} blockKey={blockKey} />;
-  if (event.kind === 'tool_use') return <ToolActivity tools={[{ event, blockKey }]} />;
+  if (event.kind === 'tool_use') return <RichToolActivity event={event} blockKey={blockKey} />;
   if (event.kind === 'tool_result') {
     return (
       <details

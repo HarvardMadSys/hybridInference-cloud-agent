@@ -759,6 +759,12 @@ class ClaudeCodeRuntime(AgentRuntime):
         # The CLI emits text and parallel tools as separate blocks of one
         # response, each repeating its usage. Keep the identity for counting.
         usage_fields = {"usage": usage or None, "usage_id": message.get("id")}
+        parent_tool_use_id = event.get("parent_tool_use_id")
+        if isinstance(parent_tool_use_id, str) and parent_tool_use_id:
+            # The enclosing Task/Agent call owns these blocks. Keep that
+            # recorded relationship so the UI can distinguish a child agent's
+            # activity and reply from the conversation's own answer.
+            usage_fields["parent_tool_use_id"] = parent_tool_use_id
         for block in blocks:
             if not isinstance(block, dict):
                 continue
@@ -802,6 +808,12 @@ class ClaudeCodeRuntime(AgentRuntime):
             # accounts for it, and it is nothing new to report.
             return None
         blocks = (event.get("message") or {}).get("content") or []
+        parent_tool_use_id = event.get("parent_tool_use_id")
+        parent_fields = (
+            {"parent_tool_use_id": parent_tool_use_id}
+            if isinstance(parent_tool_use_id, str) and parent_tool_use_id
+            else {}
+        )
         for block in blocks:
             if isinstance(block, dict) and block.get("type") == "tool_result":
                 content = block.get("content")
@@ -811,6 +823,7 @@ class ClaudeCodeRuntime(AgentRuntime):
                         "tool_use_id": block.get("tool_use_id"),
                         "is_error": bool(block.get("is_error")),
                         "content": _payload_text(content),
+                        **parent_fields,
                     },
                 )
         return NormalizedEvent(RAW, {"text": "user turn without a tool result"})

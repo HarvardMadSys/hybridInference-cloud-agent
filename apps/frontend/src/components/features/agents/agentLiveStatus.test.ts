@@ -76,6 +76,46 @@ describe('live agent status', () => {
     ).toBe('Waiting for LLM response');
   });
 
+  it('keeps a committed native plan update from appearing as a pending tool', () => {
+    const plan = event(2, 'raw', {
+      protocol: 'codex-app-server',
+      notification: {
+        method: 'turn/plan/updated',
+        params: { turnId: 'turn', plan: [{ step: 'Inspect the parser', status: 'inProgress' }] },
+      },
+    });
+    expect(agentLiveNote(job, [plan])).toBe('Waiting for LLM response');
+    expect(agentLiveNote(job, [event(1, 'tool_use', { id: 'shell', name: 'Bash' }), plan])).toBe(
+      'Running tool call',
+    );
+  });
+
+  it.each(['completed', 'failed', 'interrupted'])(
+    'recognizes a completion-only native subagent call with status %s',
+    (status) => {
+      expect(
+        agentLiveNote(job, [
+          event(1, 'raw', {
+            protocol: 'codex-app-server',
+            notification: {
+              method: 'item/completed',
+              params: {
+                item: {
+                  id: 'delegate',
+                  type: 'collabAgentToolCall',
+                  tool: 'spawnAgent',
+                  status,
+                  receiverThreadIds: ['reviewer'],
+                  agentsStates: { reviewer: { status: 'running' } },
+                },
+              },
+            },
+          }),
+        ]),
+      ).toBe('Waiting for LLM response');
+    },
+  );
+
   it('shows response streaming from reply previews and returns to waiting at a message boundary', () => {
     const events = [
       event(1, 'raw', { protocol: 'reply-preview', preview_id: 'reply', delta: 'Hello' }),

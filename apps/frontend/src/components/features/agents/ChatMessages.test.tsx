@@ -134,6 +134,172 @@ describe('grouped tool calls', () => {
     <EventRow event={event} blockKey={blockKey} />
   );
 
+  it('keeps task and delegation cards visible between ordinary tool groups', () => {
+    const events: AgentEvent[] = [
+      { kind: 'tool_use', tool: 'Read', detail: 'README.md', sourceEventId: 1 },
+      { kind: 'tool_use', tool: 'Bash', detail: 'npm test', sourceEventId: 2 },
+      {
+        kind: 'tool_use',
+        tool: 'Task',
+        detail: 'Review tests',
+        sourceEventId: 3,
+        input: { description: 'Review tests', prompt: 'Check the tests.' },
+        resultState: 'waiting',
+      },
+      {
+        kind: 'tool_use',
+        tool: 'Read',
+        detail: 'tests.ts',
+        sourceEventId: 4,
+        parentToolUseId: 'delegate',
+      },
+      {
+        kind: 'tool_use',
+        tool: 'Bash',
+        detail: 'npm test',
+        sourceEventId: 5,
+        parentToolUseId: 'delegate',
+      },
+      {
+        kind: 'tool_use',
+        tool: 'update_plan',
+        detail: 'Plan',
+        sourceEventId: 6,
+        input: {
+          plan: [
+            { step: 'Inspect', status: 'completed' },
+            { step: 'Review', status: 'pending' },
+          ],
+        },
+      },
+      { kind: 'tool_use', tool: 'Read', detail: 'src/app.ts', sourceEventId: 7 },
+    ];
+    const renderStructured = vi.fn(renderEvent);
+    render(<EventList events={events} jobId={jobId} renderEvent={renderStructured} />);
+
+    const groups = screen.getAllByRole('list', { name: 'Tool calls' });
+    expect(groups.map((group) => within(group).getAllByRole('listitem').length)).toEqual([2, 2, 1]);
+    const delegation = screen.getByRole('region', { name: 'Subagent activity' });
+    const plan = screen.getByRole('region', { name: 'Task activity' });
+    expect(delegation).toBeVisible();
+    expect(delegation).toHaveAttribute('data-block-key', 'ajob_1:e3');
+    expect(within(delegation).getByText('Review tests')).toBeVisible();
+    expect(within(plan).getByText('1 of 2 marked completed')).toBeVisible();
+    expect(renderStructured).toHaveBeenNthCalledWith(1, events[2], 2, 'ajob_1:e3');
+    expect(renderStructured).toHaveBeenNthCalledWith(2, events[5], 5, 'ajob_1:e6');
+    expect(
+      groups[0].compareDocumentPosition(delegation) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      delegation.compareDocumentPosition(groups[1]) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(groups[1].compareDocumentPosition(plan) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('groups child calls only with calls from the same recorded delegation', () => {
+    render(
+      <EventList
+        jobId={jobId}
+        renderEvent={renderEvent}
+        events={[
+          { kind: 'tool_use', tool: 'Bash', detail: 'main', sourceEventId: 1 },
+          {
+            kind: 'tool_use',
+            tool: 'Read',
+            detail: 'child a',
+            sourceEventId: 2,
+            parentToolUseId: 'a',
+          },
+          {
+            kind: 'tool_use',
+            tool: 'Bash',
+            detail: 'child a tests',
+            sourceEventId: 3,
+            parentToolUseId: 'a',
+          },
+          {
+            kind: 'tool_use',
+            tool: 'Read',
+            detail: 'child b',
+            sourceEventId: 4,
+            parentToolUseId: 'b',
+          },
+        ]}
+      />,
+    );
+
+    const groups = screen.getAllByRole('list', { name: 'Tool calls' });
+    expect(groups.map((group) => within(group).getAllByRole('listitem').length)).toEqual([1, 2, 1]);
+    expect(within(groups[0]).queryByText('Subagent tool')).not.toBeInTheDocument();
+    expect(within(groups[1]).getAllByText('Subagent tool')).toHaveLength(2);
+    expect(within(groups[2]).getByText('Subagent tool')).toHaveAttribute('title', 'Delegated by b');
+    expect(document.querySelectorAll('[data-block-key]')).toHaveLength(4);
+  });
+
+  it('keeps ended, ambiguous and interrupted generic calls from appearing to wait', () => {
+    render(
+      <EventList
+        jobId={jobId}
+        renderEvent={renderEvent}
+        events={[
+          {
+            kind: 'tool_use',
+            tool: 'Bash',
+            detail: 'ended',
+            sourceEventId: 1,
+            resultState: 'not_recorded',
+          },
+          {
+            kind: 'tool_use',
+            tool: 'Read',
+            detail: 'ambiguous',
+            sourceEventId: 2,
+            resultState: 'unknown',
+          },
+          {
+            kind: 'tool_use',
+            tool: 'Write',
+            detail: 'interrupted',
+            sourceEventId: 3,
+            resultState: 'cancelled',
+          },
+        ]}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Show tool calls' }));
+    const hide = screen.getByRole('button', { name: 'Hide tool calls' });
+    const details = document.getElementById(hide.getAttribute('aria-controls')!)!;
+    expect(within(details).getByText('Result not recorded')).toBeVisible();
+    expect(within(details).getByText('Pairing unknown')).toBeVisible();
+    expect(within(details).getByText('Call interrupted')).toBeVisible();
+    expect(screen.queryByText('Waiting for the tool result…')).not.toBeInTheDocument();
+  });
+
+  it('retains a native delegation card and its anchor when an earlier start backfills', () => {
+    const call: AgentEvent = {
+      kind: 'tool_use',
+      tool: 'spawn_agent',
+      detail: 'Review',
+      activityKey: '1:delegate',
+      sourceEventId: 20,
+      input: { description: 'Review' },
+    };
+    const { rerender } = render(
+      <EventList events={[call]} jobId={jobId} renderEvent={renderEvent} />,
+    );
+    const card = screen.getByRole('region', { name: 'Subagent activity' });
+    expect(card).toHaveAttribute('data-block-key', 'ajob_1:activity:1:delegate');
+    rerender(
+      <EventList
+        events={[{ ...call, sourceEventId: 10 }]}
+        jobId={jobId}
+        renderEvent={renderEvent}
+      />,
+    );
+    expect(screen.getByRole('region', { name: 'Subagent activity' })).toBe(card);
+    expect(document.querySelectorAll('[data-block-key]')).toHaveLength(1);
+  });
+
   it('shows adjacent tools together with one disclosure for their complete calls and results', () => {
     render(
       <EventList

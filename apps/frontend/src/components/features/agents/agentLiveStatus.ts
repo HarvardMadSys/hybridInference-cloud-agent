@@ -28,6 +28,7 @@ export function agentLiveNote(
       // Some runtimes record the finished call with its result inline.
       const finished =
         typeof payload.exit_code === 'number' ||
+        ['completed', 'failed', 'cancelled'].includes(String(payload.native_tool_status)) ||
         ['completed', 'failed', 'error', 'success', 'succeeded'].includes(String(payload.status));
       if (finished) pendingTools.delete(key);
       else pendingTools.add(key);

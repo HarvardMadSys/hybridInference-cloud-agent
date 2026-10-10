@@ -61,6 +61,20 @@ conversation content's right edge. It moves to the end of the transcript and
 resumes following output, while the newest rail mark moves to the beginning of
 the newest turn.
 
+## Tasks and subagents
+
+Chat displays recorded plans and task tools as checklists, including each item's
+status and task dependencies when available. Delegation tools show the assigned
+work, agent type, model, and an expandable prompt. The card distinguishes the
+tool call's result from the subagent's reported state, so a successful background
+launch does not imply the delegated work has finished. Call details retain the
+recorded arguments and output.
+
+Trajectory marks explicitly recorded child activity with a **Subagent** label.
+Select a delegation step to browse its child steps in the inspector, or use
+**Delegated by** on a child step to return to its parent. These links require
+runtime ownership records; older sessions without them keep their flat step list.
+
 ## Reading position
 
 The transcript has two reading behaviors:
