@@ -3014,8 +3014,8 @@ class HostHeartbeatRequest(BaseModel):
         None,
         max_length=MAX_SETTINGS_KEYS,
         description=(
-            "What this host's own environment gives each setting with no admin "
-            "value. Null means not reported and keeps what is stored."
+            "The host's original bootstrap environment values, for diagnostics "
+            "and one-time migration. Null means not reported and keeps what is stored."
         ),
     )
 
@@ -3069,10 +3069,9 @@ class HostHeartbeatResponse(BaseModel):
     settings: dict[str, int] = Field(
         default_factory=dict,
         description=(
-            "The runtime settings an admin set for this host — its own values "
-            "over the global ones. A setting absent here is the host's own: "
-            "its .env, or the built-in default. Always the whole set, so a "
-            "value cleared on the admin page is absent rather than unchanged."
+            "The complete runtime settings for this host: per-host overrides, "
+            "then global admin values, then built-in defaults. Clearing an "
+            "override returns the next level's value, never a legacy environment value."
         ),
     )
     residencies_lost: list[ResidencyBeat] = Field(

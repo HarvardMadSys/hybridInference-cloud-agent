@@ -388,9 +388,8 @@ async def heartbeat_host(
         # carried the host's current one: the host adopts it, and the next beat
         # reports it back as the limit it is now serving.
         slots_desired=updated.get("slots_desired"),
-        # The whole set every time, this server's values over the global ones,
-        # so a value cleared on the admin page reaches the host as an absence
-        # and the host falls back to its own .env for it.
+        # The whole set every time: this server's values over global values
+        # and built-in defaults, so clearing an override never revives its .env.
         settings=merge_admin_values(
             await job_store.host_pool.host_settings(),
             updated.get("settings_desired"),
