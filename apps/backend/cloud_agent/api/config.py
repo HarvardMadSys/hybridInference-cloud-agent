@@ -17,7 +17,6 @@ from cloud_agent.api.deps import (
     get_gateway_client,
     get_github_app_state,
     get_storage,
-    require_store,
 )
 from cloud_agent.entitlement import repos_for_user
 from cloud_agent.logging_utils import get_logger
@@ -56,11 +55,6 @@ class _ConfigStorage(Protocol):
     conversation_queries: ConversationQueries
     mcp: McpConnectionRepository
     source_control: SourceControlPort
-
-
-def _require_store(store: _ConfigStorage | None) -> _ConfigStorage:
-    """Return the store or fail with a clear 503 when the DB is absent."""
-    return require_store(store)
 
 
 @router.get("/config", response_model=AgentConfigResponse)

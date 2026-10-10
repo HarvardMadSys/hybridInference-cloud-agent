@@ -48,17 +48,6 @@ _SNAPSHOT_KEYS = (
     "unknown_rows",
     "estimated_calls",
 )
-_TOTALS_KEYS = (
-    "calls",
-    "tokens_in",
-    "tokens_out",
-    "cache_read",
-    "cache_write",
-    "reasoning",
-    "spent_usd",
-)
-_WINDOW_KEYS = ("since", "until", "basis")
-_UNKNOWN_KEYS = ("tokens_in", "tokens_out", "cache_read", "cache_write", "reasoning", "spent_usd")
 
 
 def _projection(source: str, keys: tuple[str, ...]) -> str:

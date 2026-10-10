@@ -2638,17 +2638,6 @@ def finalize(measurement: Measurement | None, outcome: str) -> None:
     measurement.frozen_complete = complete
 
 
-def settle(measurement: Measurement | None) -> None:
-    """Deprecated alias for :func:`finalize`, kept for callers mid-migration.
-
-    Prefer ``finalize(measurement, outcome)``: it also freezes the outcome and
-    the completeness, which is what stops a later export from re-deciding them.
-    """
-    if measurement is None or measurement.frozen:
-        return
-    finalize(measurement, measurement.frozen_outcome or "incomplete")
-
-
 def collection_complete(measurement: Measurement | None, outcome: str) -> bool:
     """Return whether this local record collected everything it set out to.
 
@@ -3140,7 +3129,6 @@ __all__ = [
     "reset_cache",
     "reset_policy",
     "set_attributes",
-    "settle",
     "span",
     "stage_observer",
     "start_operation",

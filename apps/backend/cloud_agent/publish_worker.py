@@ -244,21 +244,6 @@ async def _import_snapshot_base(
     )
 
 
-async def retry_snapshot_base_import(
-    store: PublishStorage,
-    *,
-    credential: GitHubCredential | None,
-    app_credentials: Any | None,
-) -> bool:
-    """Retry one durable post-publish object import after a broker outage."""
-    snapshot = await store.snapshot.pending_snapshot_base_import()
-    if snapshot is None:
-        return False
-    return await _retry_base_import(
-        store, snapshot, credential=credential, app_credentials=app_credentials
-    )
-
-
 async def _retry_due_base_imports(
     store: PublishStorage,
     *,

@@ -27,7 +27,7 @@ from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_gateway_client, get_storage
 from cloud_agent.app import create_app, create_mcp_app
 from cloud_agent.schemas import ResourceMetricBrief, RunResourceSummary
-from cloud_agent_host.event_payloads import MAX_EVENT_PAYLOAD_BYTES
+from cloud_agent_shared.event_payloads import MAX_EVENT_PAYLOAD_BYTES
 
 ADMIN = {"Authorization": "Bearer admin-observations-test"}
 PREFIX = "/admin/agent/runs"

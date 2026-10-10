@@ -799,10 +799,3 @@ class HostHeartbeat:
             return Path(self._readiness_marker).read_text().strip()
         except OSError:
             return ""
-
-
-def sleep_until(deadline: float) -> None:  # pragma: no cover - trivial
-    """Sleep to an absolute time, ignoring how long the caller took."""
-    remaining = deadline - time.monotonic()
-    if remaining > 0:
-        time.sleep(remaining)

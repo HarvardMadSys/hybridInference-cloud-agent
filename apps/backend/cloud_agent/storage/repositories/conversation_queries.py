@@ -165,9 +165,9 @@ class PostgresConversationQueries:
     async def latest_turn(self, *, thread_id: str) -> dict[str, Any] | None:
         """The newest turn of this conversation, whatever state it is in.
 
-        Deliberately not :meth:`latest_terminal_turn`: the decision has to be
-        able to see a turn that is still running, because "a person's turn is in
-        flight" is the reason to wait rather than the reason to schedule.
+        Deliberately not only finished turns: the decision has to be able to see
+        a turn that is still running, because "a person's turn is in flight" is
+        the reason to wait rather than the reason to schedule.
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -200,40 +200,6 @@ class PostgresConversationQueries:
         )
         return None if row is None else job_row_to_dict(row)
 
-    async def latest_terminal_turn(self, *, thread_id: str) -> dict[str, Any] | None:
-        """The newest finished turn of this conversation, or ``None``.
-
-        The parent an owner-initiated automatic round hangs from. It is not
-        always the newest turn: a queued round can be cancelled, and a
-        conversation resumed afterwards continues the same linear chain from the
-        last turn that actually happened.
-        """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"{JOB_SELECT} WHERE j.thread_id = $1 "
-                "AND j.state IN ('succeeded', 'failed', 'cancelled') "
-                # ASC, because ``TRUE > FALSE``: DESC would put the cancelled
-                # turns first, which is the exact opposite of the rule this
-                # orders by. The boolean has to lead — a cancelled round is not
-                # somewhere new work can hang from — and turn_no breaks the tie
-                # among the turns that actually ran.
-                "ORDER BY (j.state = 'cancelled') ASC, j.turn_no DESC LIMIT 1",
-                thread_id,
-            )
-        return None if row is None else job_row_to_dict(row)
-
-    async def latest_assistant_message(self, *, job_id: str) -> str | None:
-        """The last thing this turn said, or ``None`` if it said nothing.
-
-        Ordered by insert, not by time: every assistant message mirrors exactly
-        one ``message`` event, and the insert order *is* the order the runtime
-        emitted them. A turn that produced no assistant text reports ``None``
-        rather than the previous turn's words, which is what makes "no report"
-        distinguishable from "reported".
-        """
-        message = await self.latest_assistant_message_state(job_id=job_id)
-        return None if message is None else message["content"]
-
     async def latest_assistant_message_state(self, *, job_id: str) -> dict[str, Any] | None:
         """The last assistant message, and whether the runtime clipped it.
 
@@ -243,6 +209,12 @@ class PostgresConversationQueries:
         clipped one is a message whose answer may have been removed, and reading
         it as silence is exactly the failure the completeness rule exists to
         prevent.
+
+        Ordered by insert, not by time: every assistant message mirrors exactly
+        one ``message`` event, and the insert order *is* the order the runtime
+        emitted them. A turn that produced no assistant text reports ``None``
+        rather than the previous turn's words, which is what makes "no report"
+        distinguishable from "reported".
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(

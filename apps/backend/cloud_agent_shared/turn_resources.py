@@ -235,11 +235,6 @@ def _fold_status(
     return _STATUS_AVAILABLE
 
 
-def _unavailable_metric(*, reason: str) -> dict[str, Any]:
-    """One metric that cannot be combined across this run's attempts."""
-    return {"status": _STATUS_UNAVAILABLE, "reason_codes": [reason]}
-
-
 def summarize_run_resources(
     attempts: Sequence[Mapping[str, Any] | None],
     *,

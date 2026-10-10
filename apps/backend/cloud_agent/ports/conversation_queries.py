@@ -39,22 +39,12 @@ class ConversationQueries(Protocol):
         """
         ...
 
-    async def latest_terminal_turn(self, *, thread_id: str) -> dict[str, Any] | None:
-        """The newest finished turn of this conversation, or ``None``.
-
-        The parent an owner-initiated automatic round hangs from. It is not
-        always the newest turn: a queued round can be cancelled, and a
-        conversation resumed afterwards continues the same linear chain from the
-        last turn that actually happened.
-        """
-        ...
-
     async def latest_turn(self, *, thread_id: str) -> dict[str, Any] | None:
         """The newest turn of this conversation, whatever state it is in.
 
-        Deliberately not :meth:`latest_terminal_turn`: the decision has to be
-        able to see a turn that is still running, because "a person's turn is in
-        flight" is the reason to wait rather than the reason to schedule.
+        Deliberately not only finished turns: the decision has to be able to see
+        a turn that is still running, because "a person's turn is in flight" is
+        the reason to wait rather than the reason to schedule.
         """
         ...
 
@@ -78,11 +68,6 @@ class ConversationQueries(Protocol):
         clipped one is a message whose answer may have been removed, and reading
         it as silence is exactly the failure the completeness rule exists to
         prevent.
-        """
-        ...
-
-    async def latest_assistant_message(self, *, job_id: str) -> str | None:
-        """The last thing this turn said, or ``None`` if it said nothing.
 
         Ordered by insert, not by time: every assistant message mirrors exactly
         one ``message`` event, and the insert order *is* the order the runtime

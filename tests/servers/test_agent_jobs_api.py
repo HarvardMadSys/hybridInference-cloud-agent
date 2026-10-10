@@ -1336,10 +1336,6 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "goal": self.thread_goals.get(str(job["thread_id"])),
         }
 
-    async def latest_assistant_message(self, *, job_id: str) -> str | None:
-        message = await self.latest_assistant_message_state(job_id=job_id)
-        return None if message is None else str(message["content"])
-
     async def latest_assistant_message_state(self, *, job_id: str) -> dict[str, Any] | None:
         said = [
             message
@@ -1355,20 +1351,6 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             # store carries it onto the row. The fake does the same.
             "truncated": newest.get("truncated") is True,
         }
-
-    async def latest_terminal_turn(self, *, thread_id: str) -> dict[str, Any] | None:
-        finished = sorted(
-            (
-                job
-                for job in self.jobs.values()
-                if job["thread_id"] == thread_id
-                and job["state"] in {"succeeded", "failed", "cancelled"}
-            ),
-            # Newest first, and a turn that actually ran ahead of one that was
-            # cancelled — the same rule the store's ORDER BY states.
-            key=lambda job: (job["state"] == "cancelled", -job["turn_no"]),
-        )
-        return await self.get_job(finished[0]["id"]) if finished else None
 
     async def list_thread_events_after(
         self, *, job_id: str, user_id: str, after_id: int = 0, limit: int = 500

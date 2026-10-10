@@ -235,7 +235,7 @@ merging them would force one to pretend the other's inputs exist.
 | Module | Function | Reads | Answers |
 | --- | --- | --- | --- |
 | `cloud_agent_host/member_resources.py` | `reduce_window()` | the guest's live censuses and the kernel's settled exits | what did this member consume during this activation |
-| `cloud_agent_host/turn_resources.py` | `summarize_turn_resources()` / `summarize_run_resources()` | one or more *stored* snapshots | what should a reader be shown, and how complete is it |
+| `cloud_agent_shared/turn_resources.py` | `summarize_turn_resources()` / `summarize_run_resources()` | one or more *stored* snapshots | what should a reader be shown, and how complete is it |
 
 `summarize_turn_resources()` is a pure function shared by the list projection,
 the detail view, and any later aggregation. It takes the stored summary (or
@@ -375,7 +375,7 @@ success/failure semantics.
 | One member window's numbers | `cloud_agent_host/member_resources.py` | `MemberWindowReducer`, `MemberWindowSampler`, `reduce_window()` |
 | One census record | `guest-observer.c` `journal_window_sample()` | compact per-task entry plus the member totals |
 | Asking for a census | `deploy/sandbox/member-window.c` | the fixed `register`/`sample`/`close`/`probe` verbs |
-| Reading a stored snapshot | `cloud_agent_host/turn_resources.py` | the list, the detail view and any aggregation |
+| Reading a stored snapshot | `cloud_agent_shared/turn_resources.py` | the list, the detail view and any aggregation |
 | Reporting it | `runner.ControlPlane.report_turn_resources()` | one endpoint, snapshot bodies |
 
 ## 5.7 What a real guest still has to prove

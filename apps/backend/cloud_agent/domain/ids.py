@@ -19,11 +19,6 @@ def new_thread_id() -> str:
     return f"athr_{secrets.token_hex(8)}"
 
 
-def new_sandbox_id() -> str:
-    """Generate the platform identity of one retained Docker sandbox."""
-    return f"asbx_{secrets.token_hex(16)}"
-
-
 def new_session_fork_id() -> str:
     """Generate one shared native-session fork operation id."""
     return f"asfork_{secrets.token_hex(16)}"

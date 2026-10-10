@@ -78,10 +78,6 @@ MISSED_HEARTBEATS_BEFORE_OFFLINE = 3
 ENROLL_TOKEN_TTL_S = 900.0
 
 
-class InvalidHostTransition(Exception):
-    """Raised when a status change is not one the table permits."""
-
-
 def transition_allowed(current: str, target: str) -> bool:
     """Whether a host in ``current`` may move to ``target``.
 

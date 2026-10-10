@@ -106,11 +106,6 @@ def client_request_id_for(*, thread_id: str, goal_id: str, kind: str, trigger_re
     return f"{CLIENT_REQUEST_PREFIX}:{thread_id}:{goal_id}:{kind}:{trigger_ref}"
 
 
-def finish_trigger_ref(job_id: str) -> str:
-    """The event identity of one turn reaching a terminal state."""
-    return f"job:{job_id}"
-
-
 async def run_goal_wakeups(
     *,
     store: _GoalStore,
@@ -801,6 +796,5 @@ __all__ = [
     "client_request_id_for",
     "consume_wakeup",
     "continue_after_finish",
-    "finish_trigger_ref",
     "run_goal_wakeups",
 ]

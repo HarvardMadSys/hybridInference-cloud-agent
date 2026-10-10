@@ -14,11 +14,11 @@ import pytest
 from pydantic import ValidationError
 
 from cloud_agent.schemas import WorkerTurnResourcesRequest
-from cloud_agent_host.turn_resources import (
+from cloud_agent_shared.turn_resources import (
+    parse_cpu_capacity,
     summarize_run_resources,
     summarize_turn_resources,
 )
-from cloud_agent_shared.turn_resources import parse_cpu_capacity
 
 MEASUREMENT_ID = "00000000-0000-4000-8000-000000000001"
 

@@ -3395,22 +3395,6 @@ class ChatSandboxManager:
             lock=self._guest_observer_lock,
         )
 
-    def ensure_guest_observer(self, spec: ChatSandboxSpec) -> None:
-        """Start the reviewed eBPF helper and wait until all probes are attached."""
-        if self.backend.runtime != KATA_RUNTIME:
-            raise SandboxError("guest process observation requires the Kata runtime")
-        try:
-            self._guest_observer_controller(spec).ensure()
-        except GuestObserverRuntimeError as exc:
-            raise SandboxError(str(exc)) from exc
-
-    def _start_guest_observer(self, spec: ChatSandboxSpec) -> None:
-        """Replace a stale singleton; caller holds ``_guest_observer_lock``."""
-        try:
-            self._guest_observer_controller(spec).start()
-        except GuestObserverRuntimeError as exc:
-            raise SandboxError(str(exc)) from exc
-
     def begin_guest_observation(
         self,
         spec: ChatSandboxSpec,
@@ -3673,26 +3657,6 @@ class ChatSandboxManager:
                 "retained base bundle import failed: "
                 + result.stderr.decode("utf-8", "replace")[-300:]
             )
-
-    def export_archive(self, spec: ChatSandboxSpec, path: str) -> bytes:
-        """Read one path through Docker's archive boundary (``docker cp``)."""
-        self._require(spec)
-        self._validate_container_path(path)
-        result = self._run_bytes(
-            [
-                self.backend.docker_binary,
-                "cp",
-                f"{spec.container_name}:{path}",
-                "-",
-            ],
-            timeout=120,
-        )
-        if result.returncode != 0:
-            raise SandboxError(
-                "chat sandbox archive export failed: "
-                + result.stderr.decode("utf-8", "replace")[:300]
-            )
-        return result.stdout
 
     def import_archive(self, spec: ChatSandboxSpec, path: str, archive: bytes | BinaryIO) -> None:
         """Write a validated caller-provided tar through Docker's archive boundary.

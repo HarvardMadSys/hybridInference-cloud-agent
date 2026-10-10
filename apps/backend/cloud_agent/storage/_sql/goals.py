@@ -150,28 +150,12 @@ SET state = 'cancelled', cancel_requested = TRUE,
 WHERE thread_id = ANY($1::text[]) AND state = 'queued' AND turn_source = 'goal'
 """
 
-#: Pause an active goal behind one thread, in the caller's transaction.
-#: A goal that is not active is left exactly as it is — a paused goal stays
-#: paused for the reason it was paused, and a complete one is not un-completed
-#: by a late reaping pass.
-#:
-#: Used by :func:`goal_after_terminal`. The owner-facing pause is the goal
-#: repository's own ``pause_goal``, which is revision-fenced; this one
-#: deliberately is not, because a reaper has no revision to offer and a
-#: revision it invented would be a fence it could not check.
-PAUSE_GOAL_SQL = """
-UPDATE agent_threads
-SET goal_state = 'paused', goal_pause_reason = $2,
-    goal_pause_detail = COALESCE($3, goal_pause_detail),
-    goal_completion_basis = NULL, goal_completed_by_job_id = NULL,
-    goal_revision = goal_revision + 1,
-    goal_updated_at = NOW(), updated_at = NOW()
-WHERE id = $1 AND goal_state = 'active'
-"""
-
-#: The same rule for a caller that has more than one thread at a time: the
-#: archive page, and the sweep that fails a queued continuation when its
-#: conversation's native context is gone. ``$2`` reason, ``$3`` detail.
+#: Pause the active goals behind several threads, in the caller's transaction:
+#: the archive page, and the sweep that fails a queued continuation when its
+#: conversation's native context is gone. A goal that is not active is left
+#: exactly as it is — a paused goal stays paused for the reason it was paused,
+#: and a complete one is not un-completed by a late reaping pass. ``$2``
+#: reason, ``$3`` detail.
 PAUSE_GOALS_SQL = """
 UPDATE agent_threads t
 SET goal_state = 'paused', goal_pause_reason = $2,
@@ -297,6 +281,10 @@ async def goal_after_terminal(
 
     Only an automatic round pauses a goal this way. A person's own turn failing
     is reported to the person, and is not by itself a reason to stop their goal.
+
+    Unlike the owner-facing ``pause_goal``, this is not revision-fenced: a
+    reaper has no revision to offer, and a revision it invented would be a
+    fence it could not check.
     """
     reason = "cancelled" if state == "cancelled" else "execution_failed"
     return bool(

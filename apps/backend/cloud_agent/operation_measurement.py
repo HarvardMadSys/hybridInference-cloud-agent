@@ -433,11 +433,6 @@ class Selection:
         operation_profiling.discard(self.measurement)
 
 
-def current_run() -> operation_profiling.ProfilingRun | None:
-    """Return the live run descriptor, or ``None`` when profiling is off."""
-    return operation_profiling.active_run()
-
-
 def scope_facts(job: Mapping[str, Any]) -> dict[str, str]:
     """Return the target facts a route can prove about a chat's workspace.
 
@@ -739,7 +734,6 @@ __all__ = [
     "Root",
     "Selection",
     "continuation",
-    "current_run",
     "observe",
     "operation",
     "reset",
