@@ -239,7 +239,6 @@ ensure_env() {
       "LOCAL_ENROLL_TOKEN_SHA256=$enroll_hash" \
       'AGENT_SESSION_COOKIE_SECURE=false' \
       'AGENT_REPO_ALLOWLIST=local/demo' \
-      'AGENT_SANDBOX_MCP_URL=http://mcp-relay:8001' \
       'AGENT_BROKER_URL_ALLOWED_HOSTS=workspace-broker' \
       'AGENT_NETWORK_NAME=freeinference-local-control' \
       'AGENT_CONTROL_PLANE_BIND=127.0.0.1' \

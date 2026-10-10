@@ -12,6 +12,7 @@ import { getConversationState, toConversationState } from './conversationState';
 import {
   lifecyclePhaseLabel,
   ownerFailureMessage,
+  siteMisconfiguredReason,
   toDiffFileDetails,
   toDiffFiles,
   toDisplayEvent,
@@ -88,6 +89,21 @@ describe('owner failure wording', () => {
     }
     const other = toDisplayJob({ ...JOB, state: 'failed', detail: 'agent exited 1: boom' }, {});
     expect(other.failureCause).toBeUndefined();
+  });
+
+  it('keeps a site misconfiguration in its own words and marks it for an admin', () => {
+    // The runner's SITE_MISCONFIGURED_MCP, verbatim.
+    const detail =
+      'Site misconfigured: this chat uses connected tools, but the server that ran it ' +
+      'has no MCP relay. Ask an admin to finish setting up the site.';
+    expect(ownerFailureMessage(detail)).toBe(detail);
+    const job = toDisplayJob({ ...JOB, state: 'failed', detail }, {});
+    expect(job.stateNote).toBe(detail);
+    expect(job.failureCause).toBe('site_misconfigured');
+    expect(siteMisconfiguredReason(detail)).toBe(
+      'This chat uses connected tools, but the server that ran it has no MCP relay. ' +
+        'Ask an admin to finish setting up the site.',
+    );
   });
 
   it('distinguishes execution timeout and cancellation from connection failure', () => {

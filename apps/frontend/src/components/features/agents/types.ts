@@ -300,9 +300,11 @@ export interface AgentJob {
   stateNote?: string;
   /**
    * Why a failed turn failed, when the cause outlives the attempt: a follow-up
-   * would meet it again, so the run guidance must not suggest one.
+   * would meet it again, so the run guidance must not suggest one. A
+   * `site_misconfigured` turn is the deployment's fault, which only an admin
+   * can clear, so it is shown as an alert rather than a run outcome.
    */
-  failureCause?: 'repository_too_large';
+  failureCause?: 'repository_too_large' | 'site_misconfigured';
   repo: string;
   baseRef?: string;
   baseSha: string;

@@ -27,7 +27,7 @@ import {
 } from '@/lib/api/agents';
 import { submitThreadMessage, type ThreadMessageResultApi } from '@/lib/api/pendingMessages';
 
-import { ownerFailureMessage, toDiffFileDetails } from './adapt';
+import { ownerFailureMessage, siteMisconfiguredReason, toDiffFileDetails } from './adapt';
 import {
   conversationNavigationScope,
   describeCurrentTurn,
@@ -254,6 +254,42 @@ function FirstRunOutcome({ job, onOpenDiff }: { job: AgentJob; onOpenDiff: () =>
   );
 }
 
+/**
+ * A turn the site's own setup made impossible. An alert rather than a run
+ * outcome: the owner cannot fix it, and a follow-up fails the same way until
+ * an admin finishes setting up the site, which the reason says.
+ */
+function SiteMisconfiguredAlert({
+  job,
+  note,
+  onOpenDiff,
+}: {
+  job: AgentJob;
+  note: string | undefined;
+  onOpenDiff: () => void;
+}) {
+  return (
+    <div
+      role="alert"
+      className="mt-6 rounded-xl border border-amber-200 dark:border-amber-500/25 bg-amber-50 dark:bg-amber-500/10 px-4 py-3"
+    >
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
+            Site misconfigured
+          </p>
+          {note ? (
+            <p className="mt-0.5 text-xs text-amber-800 dark:text-amber-300 [overflow-wrap:anywhere]">
+              {siteMisconfiguredReason(note)}
+            </p>
+          ) : null}
+        </div>
+        <RunActions job={job} onOpenDiff={onOpenDiff} />
+      </div>
+    </div>
+  );
+}
+
 function OutcomeCard({
   job,
   onOpenDiff,
@@ -281,6 +317,9 @@ function OutcomeCard({
     );
   }
   const runNote = ownerRunNote(job);
+  if (job.failureCause === 'site_misconfigured') {
+    return <SiteMisconfiguredAlert job={job} note={runNote} onOpenDiff={onOpenDiff} />;
+  }
   return (
     <div className="mt-6 rounded-xl border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-gray-950 px-4 py-3">
       <div className="flex flex-wrap items-center gap-3">

@@ -491,7 +491,7 @@ def _resident_launch(**changes: object) -> ResidentLaunch:
         "native_session_id": None,
         "reasoning_effort": None,
         "mcp_server_ids": ("deepwiki",),
-        # A control plane with no AGENT_SANDBOX_MCP_URL claims exactly this.
+        # What a launch carries from a host with no MCP relay of its own.
         "mcp_base_url": "",
         "mcp_credential": "mcp-token",
     }
@@ -584,6 +584,44 @@ def test_a_request_the_broker_rejects_names_the_field_but_never_its_value():
         "(launch.credential: String should have at most 16384 characters)"
     )
     assert "grant-" not in message
+
+
+@pytest.mark.asyncio
+async def test_the_broker_launches_tools_through_its_hosts_own_mcp_relay(monkeypatch):
+    """Like the gateway's, the MCP relay is this host's, whatever a caller names.
+
+    It is the relay the host rules admit for the group, so any other address
+    would only be refused at the bridge. A launch without tools is given none.
+    """
+    launches: list[ResidentLaunch] = []
+
+    class _RecordingSupervisor(_SharedSupervisor):
+        def ensure_resident(self, thread_id, token, launch, profiling=None):
+            launches.append(launch)
+            return _descriptor(thread_id)
+
+    monkeypatch.setenv("AGENT_SANDBOX_MCP_URL", "http://agent-mcp:8000")
+    app = _app(_RecordingSupervisor())
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    with_tools = {
+        **_launch(),
+        "mcp_server_ids": ["deepwiki"],
+        "mcp_base_url": "http://elsewhere:9000",
+        "mcp_credential": "mcp-token",
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        for launch in (with_tools, _launch()):
+            answered = await client.post(
+                "/shared-sandboxes/athr_source/resident",
+                headers=headers,
+                json={"token": "lease", "launch": launch},
+            )
+            assert answered.status_code == 200, answered.text
+
+    tools, plain = launches
+    assert tools.mcp_base_url == "http://agent-mcp:8000"
+    assert tools.mcp_credential == "mcp-token"
+    assert plain.mcp_base_url == ""
 
 
 def test_a_crash_an_older_broker_answers_as_plain_text_still_names_the_call():

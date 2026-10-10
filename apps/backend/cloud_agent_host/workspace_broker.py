@@ -270,6 +270,7 @@ class SharedResidentLaunchConfig(BaseModel):
     gateway_base_url: str = Field("", max_length=2048)
     credential: str | None = Field(None, max_length=16384)
     mcp_server_ids: list[str] = Field(default_factory=list, max_length=64)
+    # Replaced, like the gateway's, by this host's own MCP relay address.
     mcp_base_url: str = Field("", max_length=2048)
     mcp_credential: str = Field("", max_length=16384)
     slot_id: int = Field(..., ge=0, le=127)
@@ -1569,7 +1570,14 @@ def create_app(
             gateway_base_url=gateway_base_url,
             credential=body.credential,
             mcp_server_ids=tuple(body.mcp_server_ids),
-            mcp_base_url=body.mcp_base_url,
+            # Like the gateway's, the relay is this host's own, so the address
+            # a CLI is told is the one the host rules admit for its group. Only
+            # a launch with tools has one to name.
+            mcp_base_url=(
+                (os.environ.get("AGENT_SANDBOX_MCP_URL") or body.mcp_base_url).strip()
+                if body.mcp_server_ids
+                else ""
+            ),
             mcp_credential=body.mcp_credential,
             slot_id=body.slot_id,
             residency_generation=body.residency_generation,

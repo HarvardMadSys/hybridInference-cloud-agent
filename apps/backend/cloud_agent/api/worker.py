@@ -35,7 +35,6 @@ from cloud_agent.api.deps import (
     get_work_signal,
     require_store,
 )
-from cloud_agent.application.job_admission import ENV_SANDBOX_MCP_URL
 from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.application.residency import RESIDENCY_TTL_S, _mint_residency_grant
 from cloud_agent.attachments.models import AttachmentView
@@ -774,10 +773,6 @@ async def worker_claim(
         worker_token=token,
         sandbox_token=sandbox_token,
         mcp_token=mcp_token,
-        # Where the sandbox reaches the relay. Configured rather than derived:
-        # the runner sees this service through a host-local relay whose address
-        # is nothing this process can work out for itself.
-        mcp_base_url=os.environ.get(ENV_SANDBOX_MCP_URL, ""),
         clone_token=clone_token,
         # Aliases, because that is what the runtime config addresses: the relay
         # path segment is the binding alias, and the runner learns nothing about

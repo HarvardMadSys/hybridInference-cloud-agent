@@ -414,10 +414,33 @@ function isRepositoryTooLarge(detail: string | null | undefined): boolean {
   return Boolean(detail && REPOSITORY_TOO_LARGE.test(detail));
 }
 
+/** The runner refused a turn its site's own setup made impossible, such as
+ * connected tools on a server with no MCP relay. Its message always starts
+ * this way and ends by asking for an admin, the only person who can clear
+ * the cause, so a follow-up fails the same way until one does.
+ */
+const SITE_MISCONFIGURED = /^Site misconfigured:\s*/;
+
+function failureCauseOf(detail: string | null | undefined): AgentJob['failureCause'] {
+  if (isRepositoryTooLarge(detail)) return 'repository_too_large';
+  if (detail && SITE_MISCONFIGURED.test(detail)) return 'site_misconfigured';
+  return undefined;
+}
+
+/** A site-misconfigured failure's reason, for a surface whose title already
+ * says the site is misconfigured. */
+export function siteMisconfiguredReason(detail: string): string {
+  const reason = detail.replace(SITE_MISCONFIGURED, '');
+  return reason.charAt(0).toUpperCase() + reason.slice(1);
+}
+
 /** Translate infrastructure failures only; keep task errors and transcripts intact.
  * The original detail remains in the API and operator logs for diagnosis.
  */
 export function ownerFailureMessage(detail: string): string {
+  // Written for the owner already, and naming what only an admin can fix; it
+  // must never fold into the generic connection message below.
+  if (SITE_MISCONFIGURED.test(detail)) return detail;
   const tooLarge = REPOSITORY_TOO_LARGE.exec(detail);
   if (tooLarge) {
     const [, size, limit] = tooLarge;
@@ -695,6 +718,7 @@ function toDisplayGoal(goal: NonNullable<AgentJobApi['goal']>): AgentGoal {
 }
 
 export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): AgentJob {
+  const failureCause = failureCauseOf(job.detail);
   const events = options.events ?? [];
   const patch = options.patch ?? '';
   const renderedEvents = displayEvents(events);
@@ -832,7 +856,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     state: toDisplayState(job),
     conversationState: job.conversation_state ?? undefined,
     stateNote: job.detail ? ownerFailureMessage(job.detail) : undefined,
-    ...(isRepositoryTooLarge(job.detail) ? { failureCause: 'repository_too_large' as const } : {}),
+    ...(failureCause ? { failureCause } : {}),
     repo: job.repo,
     baseRef: job.base_ref ?? undefined,
     baseSha: (job.base_sha ?? '').slice(0, 7),

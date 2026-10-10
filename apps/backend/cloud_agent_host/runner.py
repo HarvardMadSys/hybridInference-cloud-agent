@@ -229,6 +229,14 @@ ENV_SOURCE_IMPORT_MAX_MIB = "AGENT_SOURCE_IMPORT_MAX_MIB"
 #: A typo guard, not a statement about any machine.
 MAX_SOURCE_IMPORT_MIB = 64 * 1024
 
+#: What the owner reads when their chat uses connected tools and the host that
+#: ran it has no MCP relay. The fault is the deployment's, and only an admin can
+#: fix it, so this says that instead of naming a variable the owner cannot set.
+SITE_MISCONFIGURED_MCP = (
+    "Site misconfigured: this chat uses connected tools, but the server that ran it "
+    "has no MCP relay. Ask an admin to finish setting up the site."
+)
+
 # Hermetic git for anything the *runner* runs: no user config, no hooks, no
 # credential helpers, no prompts.
 _GIT_ENV = {
@@ -289,13 +297,11 @@ class ClaimedJob:
     # The inference credential that enters the sandbox: a gateway grant.
     sandbox_token: str
     execution_profile: str = "trusted-v1"
-    # The MCP credential, and the relay it opens. A *second* pair, because
-    # tools and inference are two services now: a leaked MCP token buys no
-    # inference and a leaked grant buys no tools. Empty means this run has no
-    # MCP, which the runtime refuses rather than resolving against the
-    # inference address.
+    # The MCP credential. A *second* credential, because tools and inference
+    # are two services now: a leaked MCP token buys no inference and a leaked
+    # grant buys no tools. The relay it opens is this host's own, from
+    # `_sandbox_mcp_url`, not anything the claim says.
     mcp_token: str = ""
-    mcp_base_url: str = ""
     # How hard the model should think on this turn, in the runtime's own
     # vocabulary. None is Auto: no flag, whatever the CLI and model default to.
     # Defaulted rather than required, because absent and Auto are the same
@@ -358,7 +364,6 @@ class ClaimedJob:
             worker_token=body["worker_token"],
             sandbox_token=body["sandbox_token"],
             mcp_token=body.get("mcp_token") or "",
-            mcp_base_url=body.get("mcp_base_url") or "",
             clone_token=body.get("clone_token") or None,
             mcp_bindings=list(body.get("mcp_bindings") or []),
             runtime_version=body.get("runtime_version") or None,
@@ -2027,6 +2032,12 @@ def _run_shared_live_attempt(
     if getattr(driver, "launch_live", None) is None:
         finish_attempt("failed", f"runtime {job.runtime!r} has no shared live transport")
         return 2
+    mcp_url = _sandbox_mcp_url()
+    if job.mcp_bindings and not mcp_url:
+        # Before any container work: the runtime would refuse these tools only
+        # at the resident launch, after a checkout the turn could never use.
+        finish_attempt("failed", SITE_MISCONFIGURED_MCP)
+        return 2
 
     manager = ChatSandboxManager(backend)
     stamp = backend.version_stamp()
@@ -2393,7 +2404,7 @@ def _run_shared_live_attempt(
             # when this turn actually exposes MCP endpoints; carrying an
             # otherwise-unused fresh token here would restart every ordinary
             # no-MCP chat and falsely erase HOT continuity.
-            mcp_base_url=job.mcp_base_url if job.mcp_bindings else "",
+            mcp_base_url=mcp_url if job.mcp_bindings else "",
             mcp_credential=job.mcp_token if job.mcp_bindings else "",
             slot_id=slot_id,
             residency_generation=int(running.get("residency_generation") or 0),
@@ -4198,6 +4209,19 @@ def _chat_idle_timeout_s() -> float:
     never be used to decide that a healthy chat is inactive.
     """
     return _env_float("AGENT_CHAT_IDLE_TIMEOUT_S", DEFAULT_CHAT_IDLE_TIMEOUT_S)
+
+
+def _sandbox_mcp_url() -> str:
+    """This host's MCP relay, as its sandboxes reach it; empty when it has none.
+
+    The host compose derives it from the host's own MCP tunnel, as it does the
+    gateway's address, and it is the relay the host rules admit for every
+    group (``egress.network_from_env``). The control plane used to hand one
+    over at claim time from a setting of its own. Nothing kept that copy in
+    step with the host, and left unset it failed every turn whose owner had
+    connected a tool.
+    """
+    return (os.environ.get("AGENT_SANDBOX_MCP_URL") or "").strip()
 
 
 def _runner_local_settings(agent_timeout_s: float) -> dict[str, float]:

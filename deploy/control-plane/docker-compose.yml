@@ -170,12 +170,11 @@ services:
       # There is no registry variable here any more: a deployment-configured
       # server list is the team-MCP feature this product does not offer, and
       # its credentials were one identity shared by every user who could create
-      # a job. The relay below stays for the per-user connections that replace
-      # it; until those exist it resolves nothing.
+      # a job. The relay serves the per-user connections that replaced it.
       #
-      # Where a *sandbox* reaches the relay — a host-local alias, not this
-      # container's own address, which is why it cannot be derived here.
-      AGENT_SANDBOX_MCP_URL: ${AGENT_SANDBOX_MCP_URL:-}
+      # Nor is there a relay address. A sandbox reaches the relay through its
+      # host's own MCP tunnel, and each host hands its sandboxes that address
+      # itself: the one its network rules admit.
 
       # The browser-facing address this service builds OAuth callbacks from.
       # Configured rather than derived from the request: a redirect URI is

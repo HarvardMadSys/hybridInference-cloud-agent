@@ -146,7 +146,9 @@ def _stamp() -> dict[str, Any]:
     }
 
 
-def _run_new_chat(monkeypatch, host_settings: dict[str, float] | None) -> SimpleNamespace:
+def _run_new_chat(
+    monkeypatch, host_settings: dict[str, float] | None, job: ClaimedJob = _JOB
+) -> SimpleNamespace:
     """Drive a first turn of a new chat to its settlement, with collaborators mocked."""
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
@@ -196,7 +198,7 @@ def _run_new_chat(monkeypatch, host_settings: dict[str, float] | None) -> Simple
     finish = Mock()
     result = runner_mod._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
-        job=replace(_JOB),
+        job=replace(job),
         control=control,
         heart=SimpleNamespace(),
         backend=backend,
@@ -209,7 +211,10 @@ def _run_new_chat(monkeypatch, host_settings: dict[str, float] | None) -> Simple
     assert control.settle_chat_sandbox.called, finish.call_args
     reserved = control.reserve_chat_sandbox.call_args.args[0]
     settled = control.settle_chat_sandbox.call_args.kwargs
-    return SimpleNamespace(result=result, reserved=reserved, settled=settled, checkouts=checkouts)
+    launches = [call.kwargs["launch"] for call in supervisor.ensure_shared_resident.call_args_list]
+    return SimpleNamespace(
+        result=result, reserved=reserved, settled=settled, checkouts=checkouts, launches=launches
+    )
 
 
 def test_a_new_chat_takes_its_capacity_import_limit_and_idle_timeout_from_the_settings(
@@ -278,3 +283,79 @@ def test_an_existing_sandbox_keeps_the_capacity_it_was_created_with(monkeypatch,
     )
 
     assert control.reserve_chat_sandbox.call_args.args[0]["resident_slot_capacity"] == 4
+
+
+def test_a_turn_with_tools_reaches_them_through_this_hosts_own_mcp_relay(monkeypatch):
+    """The relay a member CLI is told is the one this host's rules admit.
+
+    A claim from an older control plane still names an address of its own. It
+    decides nothing now: that copy had to match every host's tunnel alias, and
+    left unset it failed every turn whose owner had connected a tool.
+    """
+    monkeypatch.setenv("AGENT_SANDBOX_MCP_URL", "http://agent-mcp:8000")
+    job = ClaimedJob.from_response(
+        {
+            **_PAYLOAD,
+            "runtime_version": _JOB.runtime_version,
+            "mcp_token": "mcp-token",
+            "mcp_bindings": ["deepwiki"],
+            "mcp_base_url": "http://stale-copy:9000",
+        }
+    )
+
+    run = _run_new_chat(monkeypatch, None, job)
+
+    assert run.result == 0
+    (launch,) = run.launches
+    assert launch.mcp_server_ids == ("deepwiki",)
+    assert launch.mcp_base_url == "http://agent-mcp:8000"
+    assert launch.mcp_credential == "mcp-token"
+
+
+def test_a_turn_without_tools_is_given_no_relay(monkeypatch):
+    monkeypatch.setenv("AGENT_SANDBOX_MCP_URL", "http://agent-mcp:8000")
+
+    run = _run_new_chat(monkeypatch, None)
+
+    (launch,) = run.launches
+    assert launch.mcp_server_ids == ()
+    assert launch.mcp_base_url == ""
+    assert launch.mcp_credential == ""
+
+
+def test_a_turn_with_tools_on_a_host_without_a_relay_says_the_site_is_misconfigured(
+    monkeypatch,
+):
+    """Refused before any container work, in words the owner can act on.
+
+    The runtime would refuse the tools only at the resident launch, after a
+    checkout the turn could never use, with a reason only an operator reads.
+    The chat shows a failure starting "Site misconfigured:" as an alert.
+    """
+    monkeypatch.delenv("AGENT_SANDBOX_MCP_URL", raising=False)
+    backend = ContainerBackend(image="img")
+    stamp = Mock(side_effect=_stamp)
+    monkeypatch.setattr(backend, "version_stamp", stamp)
+    supervisors = Mock()
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", supervisors)
+    control = Mock(spec=runner_mod.ControlPlane)
+    finish = Mock()
+
+    result = runner_mod._run_shared_live_attempt(
+        runtime=get_runtime("claude-code"),
+        job=replace(_JOB, mcp_token="mcp-token", mcp_bindings=["deepwiki"]),
+        control=control,
+        heart=SimpleNamespace(),
+        backend=backend,
+        host="host-a",
+        gateway_base_url="http://gateway",
+        agent_timeout_s=30,
+        finish_attempt=finish,
+    )
+
+    assert result == 2
+    finish.assert_called_once_with("failed", runner_mod.SITE_MISCONFIGURED_MCP)
+    assert runner_mod.SITE_MISCONFIGURED_MCP.startswith("Site misconfigured:")
+    assert not stamp.called
+    assert not control.reserve_chat_sandbox.called
+    assert not supervisors.called

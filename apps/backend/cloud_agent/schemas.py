@@ -1607,16 +1607,9 @@ class WorkerClaimResponse(BaseModel):
         description=(
             "The sandbox's *second* credential, for this service's MCP relay. "
             "Scoped `mcp`, so it opens the relay and nothing else — not the "
-            "worker surface, and not the gateway. Empty when this deployment "
-            "serves no MCP."
-        ),
-    )
-    mcp_base_url: str = Field(
-        "",
-        description=(
-            "The relay as the sandbox reaches it. Empty means no MCP for this "
-            "run, which a runtime treats as a refusal rather than resolving "
-            "servers against the inference address."
+            "worker surface, and not the gateway. The relay's address is the "
+            "claiming host's own, the one its network rules admit; the claim "
+            "names none."
         ),
     )
     clone_token: str | None = Field(

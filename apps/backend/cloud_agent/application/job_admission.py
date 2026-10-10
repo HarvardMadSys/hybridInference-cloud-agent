@@ -77,14 +77,6 @@ class _JobCreationStorage(Protocol):
     source_control: SourceControlPort
 
 
-#: The MCP relay's address **as a sandbox can reach it** — a host-local relay,
-#: not this process's own bind address, which is why it is configured rather
-#: than derived. Unset means this deployment offers no MCP: the claim carries
-#: no address, and a runtime asked for servers anyway refuses rather than
-#: resolving them against the inference gateway, which does not answer for MCP.
-ENV_SANDBOX_MCP_URL = "AGENT_SANDBOX_MCP_URL"
-
-
 async def _require_resolvable_model(
     model: str,
     *,

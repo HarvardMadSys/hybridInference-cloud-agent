@@ -6549,7 +6549,7 @@ async def test_the_claim_hands_the_runner_the_job_s_bindings(
     assert "wiki.example.com" not in json.dumps(body)
 
 
-async def test_the_claim_hands_over_the_mcp_credential_too(client: AsyncClient, monkeypatch):
+async def test_the_claim_hands_over_the_mcp_credential_too(client: AsyncClient):
     """**The whole MCP chain, measured across the claim boundary.**
 
     This is where it broke and nothing noticed. `worker_claim` minted an
@@ -6562,12 +6562,10 @@ async def test_the_claim_hands_over_the_mcp_credential_too(client: AsyncClient, 
     where the two halves stopped agreeing: a field with a writer, a reader, and
     a schema in between that knew about neither.
     """
-    monkeypatch.setenv("AGENT_SANDBOX_MCP_URL", "http://agent-mcp:8000")
     await _create_job(client)
 
     body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
 
-    assert body["mcp_base_url"] == "http://agent-mcp:8000"
     assert body["mcp_token"], "the sandbox was handed no MCP credential"
 
     from cloud_agent.tokens import SCOPE_MCP, parse_worker_token
@@ -6578,21 +6576,22 @@ async def test_the_claim_hands_over_the_mcp_credential_too(client: AsyncClient, 
     assert body["mcp_token"] != body["sandbox_token"]
 
 
-async def test_a_deployment_with_no_relay_hands_over_no_mcp_credential(
-    client: AsyncClient, monkeypatch
-):
-    """Empty address, and the runtime refuses rather than guessing.
+async def test_the_claim_names_no_mcp_relay_address(client: AsyncClient, monkeypatch):
+    """The relay is the claiming host's own, so the control plane names none.
 
-    Handing over a token with nowhere to spend it would point the sandbox at
-    whatever it fell back to — which is the inference gateway, a service that
-    does not answer for MCP.
+    It used to hand one over from `AGENT_SANDBOX_MCP_URL`, a copy of every
+    host's tunnel alias that nothing kept in step with the hosts. Left unset,
+    every turn whose owner had connected a tool failed at its resident launch.
+    A control plane whose environment still carries the variable must not
+    bring the copy back.
     """
-    monkeypatch.delenv("AGENT_SANDBOX_MCP_URL", raising=False)
+    monkeypatch.setenv("AGENT_SANDBOX_MCP_URL", "http://agent-mcp:8000")
     await _create_job(client)
 
     body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
 
-    assert body["mcp_base_url"] == ""
+    assert "mcp_base_url" not in body
+    assert "agent-mcp" not in json.dumps(body)
 
 
 async def test_a_job_created_with_an_alias_stores_the_canonical_id(

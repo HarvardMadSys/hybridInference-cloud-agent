@@ -1787,6 +1787,31 @@ describe('JobDetail', () => {
     expect(screen.queryByText(/send a follow-up to try again/)).not.toBeInTheDocument();
   });
 
+  it('shows a site misconfiguration as an alert that sends the owner to an admin', () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'failed',
+          stateNote:
+            'Site misconfigured: this chat uses connected tools, but the server that ran it ' +
+            'has no MCP relay. Ask an admin to finish setting up the site.',
+          failureCause: 'site_misconfigured',
+        })}
+      />,
+    );
+    const outcome = screen.getByRole('region', { name: 'Task progress' });
+    const alert = within(outcome).getByRole('alert');
+    expect(within(alert).getByText('Site misconfigured')).toBeInTheDocument();
+    expect(
+      within(alert).getByText(
+        'This chat uses connected tools, but the server that ran it has no MCP relay. ' +
+          'Ask an admin to finish setting up the site.',
+      ),
+    ).toBeInTheDocument();
+    expect(within(outcome).queryByText('Run failed')).not.toBeInTheDocument();
+    expect(screen.queryByText(/send a follow-up to try again/)).not.toBeInTheDocument();
+  });
+
   it('keeps failure guidance and usage visible when no assistant reply was recorded', async () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(measuredUsage());
     render(<JobDetail job={makeJob({ state: 'failed', events: [], stateNote: undefined })} />);

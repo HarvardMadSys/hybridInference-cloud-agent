@@ -12315,12 +12315,6 @@
             "title": "Job Id",
             "type": "string"
           },
-          "mcp_base_url": {
-            "default": "",
-            "description": "The relay as the sandbox reaches it. Empty means no MCP for this run, which a runtime treats as a refusal rather than resolving servers against the inference address.",
-            "title": "Mcp Base Url",
-            "type": "string"
-          },
           "mcp_bindings": {
             "description": "Aliases of the MCP connections this job may reach through the control-plane relay. The runner passes them to the runtime adapter; it never learns their addresses or their credentials.",
             "items": {
@@ -12331,7 +12325,7 @@
           },
           "mcp_token": {
             "default": "",
-            "description": "The sandbox's *second* credential, for this service's MCP relay. Scoped `mcp`, so it opens the relay and nothing else — not the worker surface, and not the gateway. Empty when this deployment serves no MCP.",
+            "description": "The sandbox's *second* credential, for this service's MCP relay. Scoped `mcp`, so it opens the relay and nothing else — not the worker surface, and not the gateway. The relay's address is the claiming host's own, the one its network rules admit; the claim names none.",
             "title": "Mcp Token",
             "type": "string"
           },
