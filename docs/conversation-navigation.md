@@ -67,8 +67,8 @@ The **Tasks and subagents** pane on the right shows the selected turn and
 attempt's latest task list and delegated agents. It opens beside the conversation
 on desktop; the header toggle opens it explicitly on smaller screens. Drag its
 divider to resize it, or close it to give the conversation the full width. The
-workspace and execution inspector use the same region and restore the overview
-when closed.
+workspace and execution inspector use the same region. On desktop, closing them
+restores an open overview.
 
 Task checklists include recorded status and dependencies. Subagent cards show
 assigned work, agent type, model, expandable prompts, and the latest reported
