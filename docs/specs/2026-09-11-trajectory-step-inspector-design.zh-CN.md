@@ -340,7 +340,8 @@ interface TrajectoryStep {
 - 优先使用明确的 native message ID、parent message ID 等已记录关联。
 - Claude 的部分归一化 payload 保留 `usage_id`，其来自 native `message.id`；在已验证同一 message 的范围内，可将正文、thinking 与 tool-call blocks 组织成一个 Assistant step。
 - 同一 message 的 tools 仍各自有 Tool step，其 Hierarchy 指向该 Assistant；message 只有工具调用时仍呈现为 ASSISTANT 行，不增加占位文案，前提是 native message 身份确有记录。
-- Codex / pi 等记录中若没有保留下来的 message 关联，就按单条 message/thinking 展示，Tool Hierarchy 显示 `Not recorded`。
+- pi 的归一化 payload 同样保留 `usage_id`，取自 pi 在每次 `message_update` / `message_end` 中重复的 `responseId`（经网关时即网关流式回复的 chat-completion ID）；同一回复的 thinking、正文、工具调用和 usage 事件按它归入一个 Assistant step。
+- Codex 等记录中若没有保留下来的 message 关联，就按单条 message/thinking 展示，Tool Hierarchy 显示 `Not recorded`。
 - 不使用“最近一条 Assistant”、时间接近、文本相似或工具名作为父子关联依据。
 - 不将两个不同 native messages 的重复文本去重为一个消息，不将整个 turn 合成一个 Assistant。
 
@@ -397,6 +398,9 @@ thread 和返回行的 ID；存在多个匹配时不归属统计，不按顺序�
 Generation = latency − TTFT（仅在两者已知且非负时）；Throughput = output tokens / Generation
 （仅在 Generation > 0 时）。未采集的细分不展示为空行，历史记录与旧网关显示未关联原因。
 事件入库时间差不再显示为模型请求耗时。日志异步写入时做有限次数重试，并提供手动重试。
+
+2026-10-10 更新：pi 的 `usage_id` 就是网关记录的回复 ID（见 §8.4），因此 pi 的消息同样可以读取网关统计。
+Codex、OpenCode、Kilo 目前没有采集 provider 回复 ID，它们的消息仍不发起该查询。
 
 | 详情字段 | 当前可以使用的证据 | 禁止替代方式 |
 | --- | --- | --- |

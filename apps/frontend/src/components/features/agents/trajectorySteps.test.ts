@@ -182,6 +182,47 @@ describe('buildTrajectorySteps', () => {
     expect(steps[0].usage?.inputTokens).toBe(10);
   });
 
+  it('groups a pi response by its id and reads the usage event pi reports for it', () => {
+    const response = 'chatcmpl-1';
+    const steps = buildTrajectorySteps(
+      [
+        event({
+          id: 1,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'thinking',
+          payload: { text: 'Check the directory.', usage_id: response },
+        }),
+        event({
+          id: 2,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'tool_use',
+          payload: { id: 'call-1', name: 'bash', input: { command: 'pwd' }, usage_id: response },
+        }),
+        event({
+          id: 3,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'usage',
+          payload: {
+            input_tokens: 10,
+            output_tokens: 1,
+            text: '10 in / 1 out tokens',
+            usage_id: response,
+          },
+        }),
+      ],
+      idle,
+    );
+
+    expect(steps.map((step) => step.kind)).toEqual(['assistant', 'tool']);
+    const [assistant] = steps;
+    expect(assistant.nativeMessageId).toBe(response);
+    expect(assistant.usage?.inputTokens).toBe(10);
+    expect(assistant.usage?.outputTokens).toBe(1);
+  });
+
   it('leaves unrecorded usage null rather than zero', () => {
     const [step] = buildTrajectorySteps(
       [event({ id: 1, job_id: 'a', turn_no: 1, payload: { text: 'hi' } })],

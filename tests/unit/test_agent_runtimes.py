@@ -402,6 +402,45 @@ def test_pi_usage_reports_tokens_without_claiming_a_cost():
     assert runtime.capabilities().cost_report is False
 
 
+def test_pi_names_each_response_so_its_gateway_request_can_be_found():
+    """Every block of one response, and its usage, carry pi's ``responseId``.
+
+    pi repeats the partial assistant message on each ``message_update``; the
+    fixture keeps only its ``responseId``. Against the gateway that id is the
+    chat-completion id the request is logged under, so it is what the
+    inspector asks the gateway for.
+    """
+    runtime = PiRuntime()
+    events = [e for line in _pi_contract_lines() if (e := runtime.parse_event(line))]
+    assert [
+        (e.event_type, e.payload.get("usage_id"))
+        for e in events
+        if e.event_type in {"thinking", "tool_use", "message", "usage"}
+    ] == [
+        ("thinking", "synthetic-response-1"),
+        ("tool_use", "synthetic-response-1"),
+        ("usage", "synthetic-response-1"),
+        ("message", "synthetic-response-2"),
+        ("usage", "synthetic-response-2"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "message", [None, {"role": "assistant"}, {"responseId": ""}, {"responseId": 7}]
+)
+def test_pi_without_a_response_id_claims_no_identity(message):
+    """A response pi could not name stays unattributed rather than blank."""
+    record: dict[str, object] = {
+        "type": "message_update",
+        "assistantMessageEvent": {"type": "text_end", "contentIndex": 0, "content": "hi"},
+    }
+    if message is not None:
+        record["message"] = message
+    event = PiRuntime().parse_event(json.dumps(record))
+    assert event.event_type == "message"
+    assert "usage_id" not in event.payload
+
+
 def test_pi_unknown_block_kind_is_reported_once_not_per_token():
     """A new sub-event degrades to one diagnostic, not one row per delta."""
     runtime = PiRuntime()
