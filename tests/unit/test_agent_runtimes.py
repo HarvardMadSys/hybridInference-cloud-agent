@@ -103,6 +103,60 @@ def test_error_result_maps_to_error():
     assert event.payload["subtype"] == "error_max_turns"
 
 
+@pytest.mark.parametrize("is_error", [None, False])
+def test_terminal_api_failure_overrides_the_success_subtype(is_error):
+    failure = {
+        "type": "result",
+        "subtype": "success",
+        "terminal_reason": "api_error",
+        "api_error_status": 503,
+        "result": "API Error: 503 No provider is currently available for model 'kimi-k3'.",
+        "usage": {"input_tokens": 5},
+    }
+    if is_error is not None:
+        failure["is_error"] = is_error
+    event = ClaudeCodeRuntime().parse_event(json.dumps(failure))
+    assert event.event_type == "error"
+    assert event.payload["terminal_reason"] == "api_error"
+    assert event.payload["api_error_status"] == 503
+    assert event.payload["text"] == failure["result"]
+    assert event.payload["usage"] == {"input_tokens": 5}
+    assert event.payload["usage_scope"] == "attempt"
+
+
+def test_successful_terminal_reason_remains_a_result():
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps({"type": "result", "subtype": "success", "terminal_reason": "end_turn"})
+    )
+    assert event.event_type == "lifecycle"
+    assert event.payload["phase"] == "result"
+
+
+def test_api_retry_notices_report_each_attempt_and_delay():
+    runtime = ClaudeCodeRuntime()
+    for attempt, delay_ms in [(1, 5000), (2, 10000)]:
+        event = runtime.parse_event(
+            json.dumps(
+                {
+                    "type": "system",
+                    "subtype": "api_retry",
+                    "attempt": attempt,
+                    "max_retries": 10,
+                    "retry_delay_ms": delay_ms,
+                    "error_status": 503,
+                }
+            )
+        )
+        assert event.event_type == "lifecycle"
+        assert event.payload == {
+            "phase": "api_retry",
+            "attempt": attempt,
+            "max_retries": 10,
+            "retry_delay_ms": delay_ms,
+            "error_status": 503,
+        }
+
+
 @pytest.mark.parametrize("kind", ["text", "thinking", "tool_result", "result"])
 def test_claude_transcript_preserves_content_past_4000_characters(kind):
     """A long answer or tool result must survive normalization in full."""
@@ -551,6 +605,24 @@ def test_claude_prepare_points_at_the_gateway_and_disables_telemetry():
     assert env["ANTHROPIC_API_KEY"] == "ajt.a.b"
     assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert env["DISABLE_AUTOUPDATER"] == "1"
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_claude_native_requests_use_bounded_extended_retries(live):
+    runtime = ClaudeCodeRuntime()
+    settings = {
+        "workdir": "/w",
+        "model": "kimi-k3",
+        "gateway_base_url": "http://gateway",
+        "credential": "inference-credential",
+    }
+    _argv, env = (
+        runtime.prepare_live(**settings)
+        if live
+        else runtime.prepare(task_prompt="do it", **settings)
+    )
+    assert env["CLAUDE_CODE_MAX_RETRIES"] == "15"
+    assert env["CLAUDE_CODE_RETRY_WATCHDOG"] == "0"
 
 
 def test_codex_prepare_and_config_target_the_gateway():

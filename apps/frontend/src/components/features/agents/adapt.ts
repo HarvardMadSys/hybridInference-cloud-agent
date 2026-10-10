@@ -60,6 +60,24 @@ function asText(payload: Record<string, unknown> | null, ...keys: string[]): str
   return '';
 }
 
+function modelRetryMessage(payload: Record<string, unknown>): string {
+  const delay = payload.retry_delay_ms;
+  let message = 'Retrying model request';
+  if (typeof delay === 'number' && Number.isFinite(delay) && delay >= 0) {
+    message = delay === 0 ? 'Retrying now' : `Retrying in ${Math.ceil(delay / 1000)}s`;
+  }
+  const attempt = payload.attempt;
+  if (typeof attempt === 'number' && Number.isInteger(attempt) && attempt > 0) {
+    const maximum = payload.max_retries;
+    message +=
+      typeof maximum === 'number' && Number.isInteger(maximum) && maximum >= attempt
+        ? ` (retry ${attempt} of ${maximum})`
+        : ` (retry ${attempt})`;
+  }
+  const prefix = payload.error_status === 503 ? 'Provider temporarily unavailable. ' : '';
+  return `${prefix}${message}.`;
+}
+
 function readableValue(value: unknown): string {
   if (typeof value === 'string') return value;
   if (value === null || value === undefined) return '';
@@ -210,6 +228,9 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
   }
   if (type === 'lifecycle') {
     const phase = asText(payload, 'phase', 'text') || 'lifecycle';
+    if (phase === 'api_retry') {
+      return { kind: 'lifecycle', text: modelRetryMessage(payload), sourceEventId };
+    }
     // The runner reports whether it reused the tree; the milestone reads
     // differently depending on the answer, and only the runner can know it.
     if (phase === 'checked_out' && payload.reused === true) {

@@ -6,8 +6,10 @@ The model endpoint is a local protocol fixture; no real inference is performed.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+from dataclasses import replace
 
 import pytest
 from tests.external.test_credential_rotation import _pinned_cli_version
@@ -60,12 +62,16 @@ def native_driver(tmp_path, monkeypatch):
     )
     sessions = []
 
-    def open_session(session_id=None):
+    def open_session(session_id=None, *, extra_env=None):
         driver = drivers.ClaudeCodeDriver(ClaudeCodeRuntime())
+        launch_context = replace(
+            context,
+            spawn_live=lambda argv, env: spawn(argv, {**env, **(extra_env or {})}),
+        )
         session = (
-            driver.launch_resident_live(context, session_id=session_id)
+            driver.launch_resident_live(launch_context, session_id=session_id)
             if session_id
-            else driver.launch_live(context)
+            else driver.launch_live(launch_context)
         )
         sessions.append(session)
         return session
@@ -102,6 +108,83 @@ def _assert_history(request, expected):
         assert any(item == (role, text) for item in remaining), (
             f"native history lost, reordered or changed {role} message: {text!r}"
         )
+
+
+def _retry_records(events):
+    records = [json.loads(event.raw_line) for event in events if event.raw_line]
+    return [
+        record
+        for record in records
+        if record.get("type") == "system" and record.get("subtype") == "api_retry"
+    ]
+
+
+def test_native_503_retries_back_off_within_the_same_request(native_driver):
+    gateway, open_session, _ = native_driver
+    gateway.response_statuses.extend([503, 503, 200])
+    gateway.reply_text = "The original native request recovered."
+    session = open_session()
+    prompt = "Answer this request once."
+
+    result, events = _turn(session, prompt)
+
+    assert result.status == "completed"
+    assert result.native_turn_settled
+    assert result.final_output == gateway.reply_text
+    assert len(gateway.requests) == 3
+    retries = _retry_records(events)
+    assert [retry["attempt"] for retry in retries] == [1, 2]
+    assert [retry["max_retries"] for retry in retries] == [15, 15]
+    assert [retry["error_status"] for retry in retries] == [503, 503]
+    # The pinned CLI doubles its 500 ms base and adds at most 25% jitter.
+    assert 500 <= retries[0]["retry_delay_ms"] <= 625
+    assert 1000 <= retries[1]["retry_delay_ms"] <= 1250
+    assert all(request["model"] == MODEL for request in gateway.requests)
+    original_messages = gateway.requests[0]["messages"]
+    assert all(request["messages"] == original_messages for request in gateway.requests)
+    assert (
+        sum(
+            block.get("text") == prompt
+            for message in original_messages
+            if message["role"] == "user"
+            for block in message["content"]
+            if isinstance(block, dict)
+        )
+        == 1
+    )
+    assert {retry["session_id"] for retry in retries} == {session.runtime.session_id}
+
+
+def test_native_503_retry_exhaustion_respects_the_request_cap(native_driver):
+    gateway, open_session, _ = native_driver
+    gateway.response_status = 503
+    # Exercise the real exhaustion path without waiting through 15 backoffs.
+    session = open_session(extra_env={"CLAUDE_CODE_MAX_RETRIES": "1"})
+
+    result, events = _turn(session, "Bounded retry exhaustion probe.")
+
+    assert result.status == "failed"
+    assert result.native_turn_settled
+    assert len(gateway.requests) == 2
+    retries = _retry_records(events)
+    assert len(retries) == 1
+    assert retries[0]["attempt"] == retries[0]["max_retries"] == 1
+    assert retries[0]["error_status"] == 503
+    assert any(event.event_type == ERROR for event in events)
+
+
+def test_native_403_fails_without_retrying(native_driver):
+    gateway, open_session, _ = native_driver
+    gateway.response_statuses.extend([403, 200])
+    session = open_session()
+
+    result, events = _turn(session, "Nonretryable failure probe.")
+
+    assert result.status == "failed"
+    assert result.native_turn_settled
+    assert len(gateway.requests) == 1
+    assert not _retry_records(events)
+    assert any(event.event_type == ERROR for event in events)
 
 
 @pytest.mark.parametrize("retry_turn", [0, 1])

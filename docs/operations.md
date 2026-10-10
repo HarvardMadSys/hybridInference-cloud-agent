@@ -436,6 +436,24 @@ other.
 
 ### Runtime boundaries
 
+Claude Code retries transient inference failures within the native request,
+including HTTP 429 and 5xx responses. Both headless and resident launches set
+`CLAUDE_CODE_MAX_RETRIES=15` and `CLAUDE_CODE_RETRY_WATCHDOG=0`: up to fifteen
+retries after the initial request, with the pinned CLI's exponential delay
+starting at 500 ms, capped at 32 seconds, and adding up to 25% jitter. The CLI
+honors integer `Retry-After` values; its ordinary mode stops if the required
+delay exceeds 60 seconds. The runner's execution timeout remains the overall
+turn limit, and owner cancellation still interrupts the query during backoff.
+Retry notifications appear in the chat with the attempt and wait time.
+
+Retries reuse the pending inference request, preserving completed tool calls,
+the native session and the single platform prompt. Exhaustion remains a failed
+native turn with retained context; the runner does not send the prompt again.
+Ordinary permanent client errors such as HTTP 400 and 403 are not retried;
+HTTP 401 retains the CLI's native credential-refresh recovery. Deploy the
+updated runner to apply the launch settings; existing resident CLI processes
+pick them up when restarted or restored.
+
 An adapter declares MCP support only after both behaviors are checked against
 the pinned binary: it directs the CLI to the platform relay and prevents every
 other MCP configuration source from adding servers. Runtime family alone does

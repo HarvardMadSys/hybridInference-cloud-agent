@@ -205,13 +205,23 @@ def test_a_process_dying_mid_turn_settles_as_failed(tmp_path):
 
 
 @pytest.mark.parametrize("consume_events", [False, True])
-def test_claude_error_result_fails_the_turn_without_poisoning_next_turn(tmp_path, consume_events):
+@pytest.mark.parametrize(
+    "failure_fields",
+    [
+        {"is_error": True},
+        {"is_error": False, "terminal_reason": "api_error", "api_error_status": 503},
+        {"terminal_reason": "api_error", "api_error_status": 503},
+    ],
+)
+def test_claude_error_result_fails_the_turn_without_poisoning_next_turn(
+    tmp_path, consume_events, failure_fields
+):
     process = _LiveProcess()
     context, spawned = _live(process, tmp_path)
     session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
     process.feed = _turn_lines(
         _ANSWER,
-        {"type": "result", "subtype": "success", "is_error": True, "result": "API Error: 403"},
+        {"type": "result", "subtype": "success", "result": "API Error: 503", **failure_fields},
     )
     failed = session.start_turn(TurnInput(prompt="hi", model="deepseek-v4-flash"))
     if consume_events:
@@ -273,8 +283,8 @@ def test_api_retry_rotates_only_after_native_result(tmp_path, monkeypatch, consu
     process = _LiveProcess()
     session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     retry = {"type": "system", "subtype": "api_retry", "attempt": 1}
-    # Pre-observe the subtype: later wire notifications still require rotation
-    # even if the runtime suppresses their normalized diagnostic events.
+    # Pre-observe a notification: later notices still require rotation
+    # independently of their normalized progress rows.
     session.runtime.parse_event(json.dumps(retry))
     process.feed = _turn_lines(retry, _ANSWER, *([_RESULT] if settled else []))
     monkeypatch.setattr(process, "poll", lambda: 0 if process.stdin_closed else None)

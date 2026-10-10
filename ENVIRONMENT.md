@@ -392,6 +392,19 @@ mismatch, restore the original
 `AGENT_POSTGRES_PASSWORD` and `AGENT_DATABASE_URL`. The script never deletes the
 volume or resets its password automatically.
 
+### Claude inference retry policy
+
+The runtime adapter sets `CLAUDE_CODE_MAX_RETRIES=15` and
+`CLAUDE_CODE_RETRY_WATCHDOG=0` for headless and resident Claude Code processes.
+These are fixed launch settings, supplied by the runner rather than host
+`.env` options. The pinned CLI retries transient inference requests with
+exponential backoff and jitter within the current native turn. Disabling the
+watchdog keeps the request retry count bounded; `AGENT_TIMEOUT_S` remains the
+overall execution limit. Retry progress appears in chat, and exhaustion fails
+the turn while preserving its native context. See
+[Runtime boundaries](docs/operations.md#runtime-boundaries) for delay limits
+and rollout behavior.
+
 ### Agent CLI version pins (image build)
 
 The five default versions live in both

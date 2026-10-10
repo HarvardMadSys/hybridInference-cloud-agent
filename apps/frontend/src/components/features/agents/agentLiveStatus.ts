@@ -49,7 +49,13 @@ export function agentLiveNote(
       response = 'waiting';
     } else if (event.event_type === 'lifecycle') {
       const phase = String(payload.phase);
-      if (phase === 'turn_started' || phase === 'init' || phase === 'system') response = 'waiting';
+      if (
+        phase === 'turn_started' ||
+        phase === 'init' ||
+        phase === 'system' ||
+        phase === 'api_retry'
+      )
+        response = 'waiting';
       if (
         [
           'result',

@@ -143,6 +143,22 @@ describe('live agent status', () => {
     ).toBe('Running tool call');
   });
 
+  it('returns to model waiting on a retry after partial output while retaining pending tools', () => {
+    const events = [
+      event(1, 'raw', { protocol: 'reply-preview', preview_id: 'reply', delta: 'Partial reply' }),
+    ];
+    expect(agentLiveNote(job, events)).toBe('Receiving LLM response');
+    events.push(event(2, 'lifecycle', { phase: 'api_retry', retry_delay_ms: 5000 }));
+    expect(agentLiveNote(job, events)).toBe('Waiting for LLM response');
+    expect(agentLiveNote(job, [event(0, 'tool_use', { id: 'parallel' }), ...events])).toBe(
+      'Running tool call',
+    );
+    events.push(
+      event(3, 'raw', { protocol: 'reply-preview', preview_id: 'reply', delta: 'Resumed' }),
+    );
+    expect(agentLiveNote(job, events)).toBe('Receiving LLM response');
+  });
+
   it('reads Codex turn and response notifications without showing raw content', () => {
     const notification = (method: string, params = {}) => ({
       protocol: 'codex-app-server',

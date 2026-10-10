@@ -571,6 +571,12 @@ class ClaudeCodeRuntime(AgentRuntime):
             # subagent definition. `inherit` skips that override, allowing
             # Explore to pick an ungranted default (e.g. opus for DeepSeek).
             "CLAUDE_CODE_SUBAGENT_MODEL": model,
+            # The pinned CLI retries transient inference failures inside the
+            # current native turn with exponential backoff and jitter. Extend
+            # its default request budget without replaying the user's prompt;
+            # disabling the watchdog keeps exhaustion bounded.
+            "CLAUDE_CODE_MAX_RETRIES": "15",
+            "CLAUDE_CODE_RETRY_WATCHDOG": "0",
             # Telemetry and auto-update are switched off explicitly. The
             # sandbox reaches the public web, so nothing else stops the CLI
             # phoning home or replacing itself in the middle of a job.
@@ -663,6 +669,19 @@ class ClaudeCodeRuntime(AgentRuntime):
         kind = event.get("type")
         if kind == "system":
             subtype = str(event.get("subtype") or "system").strip() or "system"
+            if subtype == "api_retry":
+                # Each notice describes a new request attempt and its wait;
+                # suppressing repeated subtypes would hide the retry progress.
+                return NormalizedEvent(
+                    LIFECYCLE,
+                    {
+                        "phase": "api_retry",
+                        "attempt": event.get("attempt"),
+                        "max_retries": event.get("max_retries"),
+                        "retry_delay_ms": event.get("retry_delay_ms"),
+                        "error_status": event.get("error_status"),
+                    },
+                )
             if subtype not in self.MILESTONE_SUBTYPES:
                 # Not discarded outright: the first occurrence is kept as a raw
                 # diagnostic so a subtype nobody has classified yet is still
@@ -833,11 +852,13 @@ class ClaudeCodeRuntime(AgentRuntime):
         # Result usage is the total for this query (one platform attempt),
         # including failed queries. It supersedes provisional block usage.
         usage_fields = {"usage": event.get("usage") or None, "usage_scope": "attempt"}
-        if event.get("is_error"):
+        if event.get("is_error") or event.get("terminal_reason") == "api_error":
             return NormalizedEvent(
                 ERROR,
                 {
                     "subtype": event.get("subtype"),
+                    "terminal_reason": event.get("terminal_reason"),
+                    "api_error_status": event.get("api_error_status"),
                     "text": str(event.get("result") or "")[:2000],
                     **usage_fields,
                 },
