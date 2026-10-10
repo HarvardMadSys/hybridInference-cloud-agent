@@ -211,6 +211,22 @@ async def test_with_nothing_listening_the_stream_reads_on_the_short_clock(
     await stream.aclose()
 
 
+async def test_a_backlog_longer_than_a_page_is_caught_up_without_waiting(
+    idle_read_never, monkeypatch
+):
+    """A reconnect behind by more than a page reads on; it does not wait per page."""
+    monkeypatch.setattr(threads, "_EVENT_PAGE_SIZE", 3)
+    queries = Queries()
+    for index in range(7):
+        queries.store(f"event {index}")
+    stream = await _open(queries, _listening())
+
+    frames = [await asyncio.wait_for(anext(stream), AT_ONCE_S) for _ in range(7)]
+
+    assert [frame.split("\n")[0] for frame in frames] == [f"id: {n}" for n in range(1, 8)]
+    await stream.aclose()
+
+
 async def test_an_idle_stream_sends_a_keepalive_at_the_backstop(monkeypatch):
     monkeypatch.setattr(threads, "_IDLE_READ_S", 0.05)
     monkeypatch.setattr(threads, "_KEEPALIVE_S", 0.04)

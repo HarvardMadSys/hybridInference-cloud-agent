@@ -38,8 +38,10 @@ class LedgerRepository(Protocol):
     async def next_ledger_refresh_due(self) -> datetime | None:
         """When the earliest scheduled refresh or expiring claim becomes due.
 
-        ``None`` when nothing is scheduled; an attempt that stops is announced
-        by a notification instead.
+        A refresh scheduled while its row is claimed counts from the claim's
+        expiry: the claiming worker reads it when that claim completes, so no
+        other worker has anything to do before then. ``None`` when nothing is
+        scheduled; an attempt that stops is announced by a notification instead.
         """
         ...
 
@@ -68,5 +70,7 @@ class LedgerRepository(Protocol):
         consume a later reconciliation: stages advance by the saved query
         start time, never the response completion time. A running query which
         finishes after the attempt ends does not count as a closed-window query.
+        A read requested while a running query was in flight is kept for after
+        it: that query may have started before the call it was asked for.
         """
         ...

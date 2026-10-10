@@ -117,9 +117,9 @@ describe('overlayPushed', () => {
       id: 'ajob_1',
       thread_id: 'athr_1',
       revision: 4,
-      state: 'succeeded',
-      conversation_state: 'idle',
-      published_pr_url: 'https://example.test/pr/1',
+      state: 'running',
+      conversation_state: 'running',
+      published_pr_url: null,
     });
     receiveThreadChange({
       id: 'athr_1',
@@ -128,14 +128,51 @@ describe('overlayPushed', () => {
       title_source: 'generated',
     });
 
-    expect(overlayPushed(JOB)).toMatchObject({
-      state: 'succeeded',
-      conversation_state: 'idle',
-      published_pr_url: 'https://example.test/pr/1',
+    const read = { ...JOB, state: 'queued', conversation_state: 'queued' } as AgentJobApi;
+    expect(overlayPushed(read)).toMatchObject({
+      state: 'running',
+      conversation_state: 'running',
       revision: 4,
       title: 'New title',
       title_source: 'generated',
       thread_revision: 6,
+    });
+  });
+
+  it('lays a pushed pull request link over a turn read as ended', () => {
+    receiveJobChange({
+      id: 'ajob_1',
+      thread_id: 'athr_1',
+      revision: 4,
+      state: 'succeeded',
+      conversation_state: 'idle',
+      published_pr_url: 'https://example.test/pr/1',
+    });
+
+    const read = { ...JOB, state: 'succeeded', conversation_state: 'idle' } as AgentJobApi;
+    expect(overlayPushed(read)).toMatchObject({
+      published_pr_url: 'https://example.test/pr/1',
+      revision: 4,
+    });
+  });
+
+  it('never ends a turn the read still shows active; its own stream does', () => {
+    receiveJobChange({
+      id: 'ajob_1',
+      thread_id: 'athr_1',
+      revision: 4,
+      state: 'succeeded',
+      conversation_state: 'idle',
+      published_pr_url: 'https://example.test/pr/1',
+    });
+    receiveThreadChange({ id: 'athr_1', revision: 6, title: 'New title' });
+
+    expect(overlayPushed(JOB)).toMatchObject({
+      state: 'running',
+      conversation_state: 'running',
+      published_pr_url: null,
+      revision: 3,
+      title: 'New title',
     });
   });
 

@@ -19,9 +19,12 @@ something new:
 
 * ``snapshot``: a snapshot is created or set pending again by a new turn, a
   workspace becomes quiet (no operation, no active turn), a turn ends, or an
-  earlier snapshot is published. A capture the coordinator *deferred* goes
-  back to pending without a wake-up, so a host that is busy is retried on the
-  coordinator's own clock and not in a tight loop.
+  earlier snapshot is published. A capture the coordinator *deferred*, or one
+  the reaper found stalled, goes back to pending without a wake-up: the
+  snapshot from ``capturing`` and its workspace from ``snapshotting`` are both
+  excluded, so a host that is busy is retried on the coordinator's own clock
+  and not in a tight loop. A new turn never moves a workspace out of
+  ``snapshotting``; it adds a pending snapshot, whose insert wakes.
 * ``publish``: a snapshot is captured or published, or a workspace starts
   importing its published base.
 * ``ledger``: an attempt stops running (its closing usage read is due), or a
@@ -263,7 +266,8 @@ def upgrade() -> None:
             AFTER UPDATE ON agent_sandboxes
             FOR EACH ROW
             WHEN ((NEW.snapshot_state = 'pending'
-                   AND OLD.snapshot_state IS DISTINCT FROM 'pending')
+                   AND OLD.snapshot_state IS DISTINCT FROM 'pending'
+                   AND OLD.snapshot_state IS DISTINCT FROM 'snapshotting')
                   OR (NEW.active_operation_count = 0 AND OLD.active_operation_count <> 0))
             EXECUTE FUNCTION agent_wake_background_from_trigger('snapshot')
         """

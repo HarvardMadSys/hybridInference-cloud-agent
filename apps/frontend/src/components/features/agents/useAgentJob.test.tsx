@@ -418,10 +418,9 @@ describe('useAgentJob with the owner change stream', () => {
     expect(listAllAgentThreadEvents).toHaveBeenCalledTimes(1);
   });
 
-  it('shows a pushed state and pull request link for its own turn', async () => {
+  it('shows a pushed pull request link for a turn that has ended', async () => {
     vi.useFakeTimers();
-    serve({ ...settled, state: 'running', conversation_state: 'running' });
-    vi.mocked(streamAgentJob).mockReturnValue(new Promise(() => undefined));
+    serve(settled);
     const { result } = renderHook(() => useAgentJob(settled.id));
     await act(async () => {});
 
@@ -437,9 +436,54 @@ describe('useAgentJob with the owner change stream', () => {
       await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
     });
 
-    expect(result.current.job?.conversationState).toBe('idle');
     expect(result.current.job?.prUrl).toBe('https://example.test/pr/7');
     expect(getAgentJob).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets a running turn's own stream end it, so its last events still arrive", async () => {
+    vi.useFakeTimers();
+    const running = { ...settled, state: 'running', conversation_state: 'running' } as AgentJobApi;
+    serve(running);
+    let stream!: Parameters<typeof streamAgentJob>[1];
+    vi.mocked(streamAgentJob).mockImplementation((_id, options) => {
+      stream = options;
+      return new Promise(() => undefined);
+    });
+    const { result } = renderHook(() => useAgentJob(settled.id));
+    await act(async () => {});
+    expect(streamAgentJob).toHaveBeenCalledTimes(1);
+
+    // The change stream reports the end before the chat stream has delivered
+    // the turn's last message, and a read of the row agrees with it.
+    const ended = { ...running, state: 'succeeded', conversation_state: 'idle', revision: 5 };
+    vi.mocked(getAgentJob).mockResolvedValue(ended as AgentJobApi);
+    await act(async () => {
+      receiveJobChange({
+        id: settled.id,
+        thread_id: 'live-thread',
+        revision: 5,
+        state: 'succeeded',
+        conversation_state: 'idle',
+      });
+      await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+    });
+
+    expect(stream.signal?.aborted).toBe(false);
+    expect(result.current.job?.state).toBe('running');
+
+    // The chat stream delivers the last message and then ends the turn, which
+    // reads the conversation again with everything it said.
+    vi.mocked(listAllAgentThreadEvents).mockResolvedValue([
+      { ...event(9, 'message', { text: 'The last words' }), job_id: settled.id },
+    ]);
+    await act(async () => {
+      stream.onEvent(event(9, 'message', { text: 'The last words' }) as never);
+      stream.onFinished?.({ state: 'succeeded', published_pr_url: null });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(listAllAgentThreadEvents).toHaveBeenCalledTimes(2);
+    expect(result.current.job?.state).not.toBe('running');
   });
 
   it('reads its turn again when the workspace publication moves', async () => {

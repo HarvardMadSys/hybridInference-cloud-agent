@@ -17,6 +17,8 @@ import type {
 } from '@/lib/api/agentChanges';
 import { streamAgentChanges } from '@/lib/api/agentChanges';
 
+import { isActiveJobState } from './conversationJob';
+
 /** How a list re-reads while pushes flow: a backstop, not the way it learns. */
 export const PUSH_FALLBACK_POLL_MS = 60_000;
 /** Changes that land together are delivered together, so a list reads once. */
@@ -141,6 +143,11 @@ export function receiveSync(): void {
  *
  * A read that left before a change and arrived after its push must not put the
  * old title or state back; each row's revision says which of the two is newer.
+ *
+ * A push never ends a turn that is still active in the read. That turn's own
+ * event stream does, after delivering its last events, and the reload it ends
+ * with brings everything the push carried: ending it here would close that
+ * stream before them.
  */
 export function overlayPushed(job: AgentJobApi): AgentJobApi {
   let result = job;
@@ -149,7 +156,8 @@ export function overlayPushed(job: AgentJobApi): AgentJobApi {
     pushedJob &&
     !pushedJob.deleted &&
     (pushedJob.revision ?? -1) > (job.revision ?? -1) &&
-    pushedJob.state !== undefined
+    pushedJob.state !== undefined &&
+    !(isActiveJobState(job.state) && !isActiveJobState(pushedJob.state))
   ) {
     result = {
       ...result,

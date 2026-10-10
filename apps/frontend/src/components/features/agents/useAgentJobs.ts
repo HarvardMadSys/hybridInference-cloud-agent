@@ -322,6 +322,18 @@ export function useProjectJobs(limit = 200): {
 }
 
 /** One job, its event log, and its patch — kept live over SSE. */
+/**
+ * Whether a read of the turn's row says that the turn on screen, still active
+ * here, has ended. Such a read is not applied: the turn's own event stream ends
+ * it, after delivering its last events and `job_finished`, which reloads the
+ * conversation. Applying the read would close that stream before them.
+ */
+function endsStreamingTurn(current: AgentJobApi | null, latest: AgentJobApi): boolean {
+  return (
+    current?.id === latest.id && isActiveJobState(current.state) && !isActiveJobState(latest.state)
+  );
+}
+
 export function useAgentJob(
   jobId: string,
   {
@@ -493,7 +505,11 @@ export function useAgentJob(
       void getAgentJob(jobId)
         .then((latest) => {
           if (!cancelled && read === latestRead)
-            setApi((current) => preserveResolvedTaskTitle(current, overlayPushed(latest)));
+            setApi((current) =>
+              endsStreamingTurn(current, latest)
+                ? current
+                : preserveResolvedTaskTitle(current, overlayPushed(latest)),
+            );
         })
         .catch(() => {
           // The next change, or the fallback clock below, reads it again.
@@ -590,7 +606,11 @@ export function useAgentJob(
       void getAgentJob(jobId)
         .then((latest) => {
           if (!cancelled && generation.current === version)
-            setApi((current) => preserveResolvedTaskTitle(current, overlayPushed(latest)));
+            setApi((current) =>
+              endsStreamingTurn(current, latest)
+                ? current
+                : preserveResolvedTaskTitle(current, overlayPushed(latest)),
+            );
         })
         .catch(() => {
           // This is a background freshness aid. Keep the last good terminal

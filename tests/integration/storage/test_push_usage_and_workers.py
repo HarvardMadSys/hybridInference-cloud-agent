@@ -147,6 +147,72 @@ async def test_a_model_calls_usage_is_read_at_once_and_pushed_to_its_owner(store
         await background.connection.close()
 
 
+async def test_a_call_reported_while_its_usage_is_read_is_read_again_after(store, pool):
+    """A model call that finishes during a usage read schedules the next one.
+
+    That read may have asked the gateway before the call finished, so its own
+    completion keeps the request. Until then, another worker counts the row
+    from the claim's expiry rather than looking again and again.
+    """
+    await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+    ledger_id = await _ledger_row(pool, claim["attempt_id"])
+    usage = {"text": "done", "usage": {"input_tokens": 3, "output_tokens": 1}}
+
+    async def report_a_call() -> None:
+        await store.attempt_commands.append_event(
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            event_type="message",
+            payload=usage,
+        )
+
+    async def scheduled() -> datetime | None:
+        async with pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT next_refresh_at FROM agent_attempt_ledger WHERE id = $1", ledger_id
+            )
+
+    await report_a_call()
+    read = await store.ledger.claim_due_ledger_refresh()
+    assert read is not None and await scheduled() is None
+
+    await report_a_call()
+    assert await scheduled() is not None, "a call during the read is asked for"
+    due = await store.ledger.next_ledger_refresh_due()
+    assert due is not None and due > datetime.now(UTC) + timedelta(seconds=30), (
+        "while the read is claimed, nothing is due before its claim expires"
+    )
+
+    assert await store.ledger.complete_ledger_refresh(
+        ledger_id=read["id"],
+        refresh_generation=read["refresh_generation"],
+        terminal=False,
+        report={},
+        error_code=None,
+    )
+    kept = await scheduled()
+    assert kept is not None, "completing the read keeps the request made during it"
+    assert await store.ledger.next_ledger_refresh_due() == kept
+
+    # Without a call in between, a completed read leaves nothing scheduled.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_attempt_ledger SET next_refresh_at = NOW() WHERE id = $1", ledger_id
+        )
+    read = await store.ledger.claim_due_ledger_refresh()
+    assert read is not None
+    assert await store.ledger.complete_ledger_refresh(
+        ledger_id=read["id"],
+        refresh_generation=read["refresh_generation"],
+        terminal=False,
+        report={},
+        error_code=None,
+    )
+    assert await scheduled() is None
+
+
 async def test_an_attempt_without_a_ledger_row_says_whether_it_ever_called_a_model(store, pool):
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
@@ -264,6 +330,72 @@ async def test_publication_progress_tells_every_conversation_in_the_workspace_an
         assert len(_owner_hints(await owner.until_quiet(pool), "publication")) == 6
     finally:
         await owner.connection.close()
+        await background.connection.close()
+
+
+async def _ended_shared_turn(store) -> dict:
+    """A shared workspace whose one turn has ended, with its snapshot due."""
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence, container_id="container-deferred", context_status="new"
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.settle_thread_sandbox(
+        **fence,
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="native-deferred",
+        idle_timeout_seconds=1800,
+        base_sha=job["base_sha"],
+    )
+    assert await store.attempt_commands.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    return sandbox
+
+
+async def test_a_deferred_or_stalled_capture_leaves_the_coordinator_asleep(store, pool):
+    """The real claim, deferral and stall reaper: a capture handed back wakes nothing.
+
+    Both return the workspace from ``snapshotting`` to ``pending``. The
+    coordinator retries it on its own clock; a wake-up would claim it again at
+    once, and a busy host would be asked in a loop.
+    """
+    sandbox = await _ended_shared_turn(store)
+    background = await _listen(BACKGROUND)
+    try:
+        capture = await store.snapshot.claim_due_sandbox_snapshot()
+        assert capture is not None and capture["sandbox_id"] == sandbox["sandbox_id"]
+        assert await background.until_quiet(pool) == []
+
+        assert await store.snapshot.defer_sandbox_snapshot_capture(
+            snapshot_id=capture["snapshot_id"],
+            sandbox_id=capture["sandbox_id"],
+            sandbox_generation=capture["generation"],
+            container_id=capture["container_id"],
+            detail="a turn entered the workspace",
+        )
+        assert await background.until_quiet(pool) == [], "a deferral must not wake it"
+
+        capture = await store.snapshot.claim_due_sandbox_snapshot()
+        assert capture is not None, "its own clock finds the capture again"
+        assert await store.snapshot.reap_stalled_sandbox_snapshot_captures(stall_seconds=0) == [
+            capture["snapshot_id"]
+        ]
+        assert await background.until_quiet(pool) == [], "nor must a reaped stall"
+        assert await store.snapshot.claim_due_sandbox_snapshot() is not None
+    finally:
         await background.connection.close()
 
 

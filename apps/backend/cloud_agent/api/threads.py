@@ -279,6 +279,10 @@ async def stream_agent_job_events(
                             cursor = event["id"]
                             yield _sse_frame(event)
                         last_frame = clock()
+                        if len(events) >= _EVENT_PAGE_SIZE:
+                            # A full page: more may already be stored. Catch
+                            # up before waiting to be told about anything new.
+                            continue
                     elif clock() - last_frame >= _KEEPALIVE_S:
                         # Comment frame: keeps proxies from reaping an idle
                         # connection without polluting the event sequence.

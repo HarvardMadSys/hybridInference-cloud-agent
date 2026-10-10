@@ -123,15 +123,18 @@ class PostgresLedgerRepository:
     async def next_ledger_refresh_due(self) -> datetime | None:
         """When the earliest scheduled refresh or expiring claim becomes due.
 
-        ``None`` when nothing is scheduled; an attempt that stops is announced
-        by a notification instead.
+        A refresh scheduled while its row is claimed counts from the claim's
+        expiry: the claiming worker reads it when that claim completes, so no
+        other worker has anything to do before then. ``None`` when nothing is
+        scheduled; an attempt that stops is announced by a notification instead.
         """
         async with self._pool.acquire() as conn:
             due: datetime | None = await conn.fetchval(
                 """
                 SELECT LEAST(
                     (SELECT MIN(next_refresh_at) FROM agent_attempt_ledger
-                     WHERE next_refresh_at IS NOT NULL),
+                     WHERE next_refresh_at IS NOT NULL
+                       AND refresh_lease_expires_at IS NULL),
                     (SELECT MIN(refresh_lease_expires_at) FROM agent_attempt_ledger
                      WHERE refresh_lease_expires_at IS NOT NULL)
                 )
@@ -199,6 +202,8 @@ class PostgresLedgerRepository:
         consume a later reconciliation: stages advance by the saved query
         start time, never the response completion time. A running query which
         finishes after the attempt ends does not count as a closed-window query.
+        A read requested while a running query was in flight is kept for after
+        it: that query may have started before the call it was asked for.
         """
         if (report is None) == (error_code is None):
             raise ValueError("a ledger refresh must have either a report or an error code")
@@ -236,7 +241,9 @@ class PostgresLedgerRepository:
                         refresh_lease_expires_at = NULL,
                         terminal_refresh_count = refresh.next_stage,
                         next_refresh_at = CASE
-                            WHEN NOT $3 THEN NULL
+                            -- The claim cleared it, so anything here was asked
+                            -- for while this read ran: keep it for the next.
+                            WHEN NOT $3 THEN l.next_refresh_at
                             WHEN refresh.next_stage = 1
                                 THEN GREATEST(NOW(), refresh.finished_at + INTERVAL '30 seconds')
                             WHEN refresh.next_stage = 2
