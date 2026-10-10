@@ -286,6 +286,11 @@ export const zhCN: Record<TranslationKey, string> = {
   'composer.run': '运行',
   'composer.starting': '启动中…',
   'composer.runTitle': '运行 —— ⏎ 发送,⇧⏎ 换行',
+  'composer.keyboardHint': 'Enter 运行 · Shift + Enter 换行',
+  'composer.workflowRepository': '选择任务使用的仓库和分支。',
+  'composer.workflowAgent': '选择你想使用的编码 Agent 和模型。',
+  'composer.workflowReviewTitle': '审查',
+  'composer.workflowReview': '查看进度、审查改动，并继续对话。',
   'composer.loadConfigFailed': '无法加载配置',
   'composer.startFailed': '无法启动任务',
 

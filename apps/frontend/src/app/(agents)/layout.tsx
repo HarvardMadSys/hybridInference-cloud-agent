@@ -15,9 +15,9 @@ import { DeploymentFooter } from '@/components/DeploymentFooter';
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from './sidebarStorage';
 
 const NAV_ITEM =
-  'rounded-md px-2.5 py-1.5 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-white/10 dark:hover:text-gray-100';
+  'inline-flex min-h-9 shrink-0 items-center rounded-lg px-3 py-2 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/30 dark:hover:bg-white/10 dark:hover:text-gray-100';
 const NAV_ITEM_CURRENT =
-  'rounded-md bg-crimson/[0.06] px-2.5 py-1.5 text-crimson ring-1 ring-inset ring-crimson/10 dark:bg-crimson/20 dark:text-crimson-light dark:ring-crimson/25';
+  'inline-flex min-h-9 shrink-0 items-center rounded-lg bg-crimson/[0.06] px-3 py-2 text-crimson ring-1 ring-inset ring-crimson/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/30 dark:bg-crimson/20 dark:text-crimson-light dark:ring-crimson/25';
 
 // App-mode shell (same fixed-overlay pattern as the playground): slim header +
 // repo/task sidebar + main pane. Deep links keep working — /agents/* are real
@@ -51,9 +51,10 @@ function AgentsHeader({
   };
 
   return (
-    <header className="flex shrink-0 items-center justify-between border-b border-gray-200/80 bg-white/95 px-5 py-2.5 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur dark:border-white/10 dark:bg-gray-900/95">
-      <div className="flex min-w-0 items-baseline gap-2">
+    <header className="flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-gray-200/80 bg-white/95 px-4 py-3 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur sm:px-5 dark:border-white/10 dark:bg-gray-900/95">
+      <div className="flex min-w-0 items-center gap-2.5">
         <button
+          id="agents-sidebar-toggle"
           type="button"
           onClick={onToggleSidebar}
           aria-label={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
@@ -61,7 +62,7 @@ function AgentsHeader({
           aria-controls="agents-sidebar"
           aria-keyshortcuts="Meta+B Control+B"
           title={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
-          className="-ml-1.5 self-center rounded-md p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
+          className="-ml-1.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
         >
           <svg
             aria-hidden="true"
@@ -77,14 +78,28 @@ function AgentsHeader({
         </button>
         <Link
           href="/"
-          className="text-[17px] font-semibold tracking-[-0.02em] text-gray-950 transition-colors hover:text-crimson dark:text-gray-50 dark:hover:text-crimson-light"
+          className="flex min-w-0 items-center gap-2.5 rounded-md text-[17px] font-semibold tracking-[-0.02em] text-gray-950 transition-colors hover:text-crimson focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/30 dark:text-gray-50 dark:hover:text-crimson-light"
         >
-          {branding.appName}
+          <span
+            aria-hidden="true"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-crimson text-white shadow-sm"
+          >
+            <svg
+              className="h-5 w-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={1.8}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="m5 7 5 5-5 5m8 0h6" />
+            </svg>
+          </span>
+          <span className="truncate">{branding.appName}</span>
         </Link>
         {branding.orgName && (
           <a
             href={branding.orgUrl}
-            className="font-serif text-[13px] tracking-[0.01em] text-gray-500 transition-colors hover:text-crimson dark:text-gray-400 dark:hover:text-crimson-light"
+            className="hidden font-serif text-[13px] tracking-[0.01em] text-gray-500 transition-colors hover:text-crimson sm:inline dark:text-gray-400 dark:hover:text-crimson-light"
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -94,7 +109,7 @@ function AgentsHeader({
       </div>
       <nav
         aria-label={t('nav.aria')}
-        className="flex items-center gap-0.5 text-[13px] font-medium text-gray-600 dark:text-gray-400"
+        className="flex max-w-full items-center gap-1 overflow-x-auto text-[13px] font-medium text-gray-600 max-md:w-full dark:text-gray-400"
       >
         {/* Guarded like every other external link here, and for a sharper
             reason than tidiness: an anchor with an empty `href` resolves to the
@@ -162,9 +177,13 @@ function AgentChangeStream({ userId }: { userId: string | undefined }) {
 function AgentsShell({
   children,
   sidebarCollapsed,
+  mobileSidebarOpen,
+  onSidebarNavigate,
 }: {
   children: React.ReactNode;
   sidebarCollapsed: boolean;
+  mobileSidebarOpen: boolean;
+  onSidebarNavigate: () => void;
 }) {
   const { state } = useAuth();
   const { branding } = useSiteConfig();
@@ -196,8 +215,21 @@ function AgentsShell({
     <FirstRunProvider key={state.user?.id} userId={state.user?.id}>
       <AgentChangeStream userId={state.user?.id} />
       <div className="flex min-h-0 flex-1">
-        <AgentsSidebar collapsed={sidebarCollapsed} />
-        <main className="min-w-0 flex-1 overflow-y-auto bg-gray-50/40 dark:bg-gray-950">
+        <div
+          className={`flex min-h-0 shrink-0 ${mobileSidebarOpen ? 'max-md:w-full max-md:[&>aside]:!w-full max-md:[&>[role=separator]]:hidden' : ''}`}
+          onClick={(event) => {
+            if (mobileSidebarOpen && (event.target as HTMLElement).closest('a[href]'))
+              onSidebarNavigate();
+          }}
+        >
+          <AgentsSidebar collapsed={sidebarCollapsed} />
+        </div>
+        <main
+          id="agents-workspace"
+          hidden={mobileSidebarOpen}
+          tabIndex={-1}
+          className="min-w-0 flex-1 overflow-y-auto bg-white/70 outline-none dark:bg-gray-950"
+        >
           {children}
         </main>
       </div>
@@ -206,9 +238,34 @@ function AgentsShell({
 }
 
 export default function AgentsLayout({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobile, setMobile] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+
+  const closeMobileSidebar = useCallback(() => {
+    setMobileSidebarOpen(false);
+    window.requestAnimationFrame(() => document.getElementById('agents-workspace')?.focus());
+  }, []);
 
   const toggleSidebar = useCallback(() => {
+    // A portaled modal stays visible when the workspace is hidden. Keep its
+    // focus cycle intact instead of moving focus to the task list behind it.
+    if (
+      [...document.querySelectorAll('[aria-modal="true"], dialog[open]')].some(
+        (dialog) => !dialog.closest('[hidden], [aria-hidden="true"]'),
+      )
+    ) {
+      return;
+    }
+    if (mobile) {
+      if (mobileSidebarOpen) {
+        closeMobileSidebar();
+        return;
+      }
+      setMobileSidebarOpen((current) => !current);
+      return;
+    }
     setSidebarCollapsed((current) => {
       const next = !current;
       try {
@@ -218,7 +275,41 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
       }
       return next;
     });
+  }, [mobile, mobileSidebarOpen, closeMobileSidebar]);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const query = window.matchMedia('(max-width: 767px)');
+    const sync = () => {
+      const hadSidebarFocus = document
+        .getElementById('agents-sidebar')
+        ?.contains(document.activeElement);
+      setMobile(query.matches);
+      setMobileSidebarOpen(false);
+      if (hadSidebarFocus)
+        window.requestAnimationFrame(() => document.getElementById('agents-workspace')?.focus());
+    };
+    sync();
+    query.addEventListener('change', sync);
+    return () => query.removeEventListener('change', sync);
   }, []);
+
+  useEffect(() => setMobileSidebarOpen(false), [pathname]);
+
+  useEffect(() => {
+    if (!mobileSidebarOpen) return;
+    document
+      .getElementById('agents-sidebar')
+      ?.querySelector<HTMLElement>('a[href], button:not([disabled]), input:not([disabled])')
+      ?.focus();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      setMobileSidebarOpen(false);
+      document.getElementById('agents-sidebar-toggle')?.focus();
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [mobileSidebarOpen]);
 
   // Read after mount so the server-rendered shell and the first client render
   // agree; the sidebar then folds away on the same frame as hydration.
@@ -255,8 +346,17 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
   return (
     <ProtectedRoute>
       <div className="fixed inset-0 z-50 flex flex-col bg-gray-50 dark:bg-gray-950">
-        <AgentsHeader sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} />
-        <AgentsShell sidebarCollapsed={sidebarCollapsed}>{children}</AgentsShell>
+        <AgentsHeader
+          sidebarCollapsed={mobile ? !mobileSidebarOpen : sidebarCollapsed}
+          onToggleSidebar={toggleSidebar}
+        />
+        <AgentsShell
+          sidebarCollapsed={mobile ? !mobileSidebarOpen : sidebarCollapsed}
+          mobileSidebarOpen={mobileSidebarOpen}
+          onSidebarNavigate={closeMobileSidebar}
+        >
+          {children}
+        </AgentsShell>
         <DeploymentFooter />
       </div>
     </ProtectedRoute>

@@ -295,6 +295,11 @@ export const en = {
   'composer.run': 'Run',
   'composer.starting': 'Starting…',
   'composer.runTitle': 'Run — ⏎ to send, ⇧⏎ for a new line',
+  'composer.keyboardHint': 'Enter to run · Shift + Enter for a new line',
+  'composer.workflowRepository': 'Choose the repository and branch for your task.',
+  'composer.workflowAgent': 'Select the coding agent and model you want to work with.',
+  'composer.workflowReviewTitle': 'Review',
+  'composer.workflowReview': 'Follow progress, review the changes, and continue the conversation.',
   'composer.loadConfigFailed': 'could not load config',
   'composer.startFailed': 'could not start the job',
 

@@ -30,11 +30,11 @@ export function Picker({
     return null;
   }
   return (
-    <label className="relative inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-[13px] font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10">
+    <label className="relative inline-flex min-h-9 max-w-full items-center gap-1.5 rounded-lg border border-transparent px-2.5 py-2 text-[13px] font-medium text-gray-600 transition-colors hover:border-gray-200 hover:bg-gray-50 focus-within:border-crimson/30 focus-within:bg-white focus-within:ring-2 focus-within:ring-crimson/15 dark:text-gray-400 dark:hover:border-white/10 dark:hover:bg-white/5 dark:focus-within:bg-gray-900">
       <span className="sr-only">{label}</span>
       {/* The width of the control. Truncated rather than unbounded so one
           pathological model id cannot push the run button off the row. */}
-      <span aria-hidden className="max-w-[13rem] truncate text-gray-700 dark:text-gray-300">
+      <span aria-hidden className="min-w-0 max-w-[13rem] truncate text-gray-700 dark:text-gray-300">
         {value}
       </span>
       <svg
@@ -51,7 +51,7 @@ export function Picker({
         aria-label={label}
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+        className="absolute inset-0 h-full w-full cursor-pointer opacity-0 focus:outline-none"
       >
         {options.map((option) => (
           <option key={option} value={option}>

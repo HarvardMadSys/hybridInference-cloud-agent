@@ -82,6 +82,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   // key ignored — and the text stays, because the trip to GitHub keeps it.
   const [connectNudged, setConnectNudged] = useState(false);
   const headingId = useId();
+  const keyboardHintId = useId();
   // Someone with no conversation yet is told, in one line, what a task becomes.
   const firstVisit = useFirstRun().newcomer;
   const [branches, setBranches] = useState<string[]>([]);
@@ -458,23 +459,48 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
 
   if (loading) {
     return (
-      <section className="mx-auto w-full max-w-3xl px-6 pt-28">
-        <p className="text-center text-sm text-gray-500 dark:text-gray-400">
+      <section
+        aria-busy="true"
+        className="mx-auto w-full max-w-4xl px-4 pb-12 pt-10 sm:px-8 md:pt-20"
+      >
+        <div
+          aria-hidden="true"
+          className="mx-auto h-12 w-12 rounded-2xl bg-gray-100 motion-safe:animate-pulse dark:bg-white/5"
+        />
+        <p aria-live="polite" className="mt-6 text-center text-sm text-gray-500 dark:text-gray-400">
           {t('common.loading')}
         </p>
+        <div
+          aria-hidden="true"
+          className="mt-8 h-64 rounded-2xl border border-gray-200 bg-gray-50 motion-safe:animate-pulse dark:border-white/10 dark:bg-gray-900"
+        />
       </section>
     );
   }
 
   return (
-    <section className="mx-auto w-full max-w-3xl px-6 pb-20 pt-28">
+    <section className="mx-auto w-full max-w-4xl px-4 pb-12 pt-8 sm:px-8 md:pt-16 lg:pt-20">
+      <div
+        aria-hidden="true"
+        className="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-2xl border border-crimson/10 bg-crimson/[0.06] text-crimson shadow-[0_4px_16px_-8px_rgba(165,28,48,0.3)] dark:border-crimson-light/20 dark:bg-crimson/10 dark:text-crimson-light"
+      >
+        <svg
+          className="h-6 w-6"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={1.6}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="m5 7 5 5-5 5m8 0h6" />
+        </svg>
+      </div>
       <h1
         id={headingId}
-        className="text-center text-[28px] font-semibold tracking-[-0.025em] text-gray-950 dark:text-gray-50"
+        className="text-balance text-center text-[30px] font-semibold leading-tight tracking-[-0.035em] text-gray-950 sm:text-[36px] lg:text-[40px] dark:text-gray-50"
       >
         {t('composer.heading')}
       </h1>
-      <p className="mx-auto mt-2 max-w-lg text-center text-sm leading-relaxed text-gray-500 dark:text-gray-400">
+      <p className="mx-auto mt-3 max-w-lg text-balance text-center text-[15px] leading-relaxed text-gray-500 dark:text-gray-400">
         {firstVisit ? t('composer.subheadingFirstVisit') : t('composer.subheading')}
       </p>
 
@@ -521,7 +547,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
             if (files.length) attachments.add(files);
           });
         }}
-        className={`relative rounded-xl border shadow-[0_14px_40px_-28px_rgba(17,24,39,0.5)] transition ${
+        className={`relative rounded-2xl border shadow-[0_8px_40px_-16px_rgba(17,24,39,0.15),0_2px_6px_rgba(17,24,39,0.03)] transition ${
           dropping
             ? 'border-crimson/40 ring-4 ring-crimson/[0.08]'
             : 'border-gray-200/90 dark:border-white/10'
@@ -540,7 +566,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
         />
         <textarea
           ref={taskBox}
-          rows={4}
+          rows={5}
           value={task}
           onChange={(event) => {
             setTask(event.target.value);
@@ -566,8 +592,9 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           // an example task read as a suggestion to run it.
           id={NEW_TASK_PROMPT_ID}
           aria-labelledby={headingId}
+          aria-describedby={keyboardHintId}
           disabled={locked}
-          className="w-full resize-none rounded-t-xl border-0 bg-transparent px-5 pb-2 pt-4 text-[15px] leading-relaxed text-gray-900 dark:text-gray-50 focus:outline-none focus:ring-0 disabled:cursor-not-allowed"
+          className="min-h-[160px] w-full resize-y rounded-t-2xl border-0 bg-transparent px-5 pb-4 pt-5 text-base leading-relaxed text-gray-900 focus:outline-none focus:ring-0 disabled:cursor-not-allowed sm:min-h-[180px] sm:px-6 dark:text-gray-50"
         />
 
         {disconnected ? null : (
@@ -578,114 +605,131 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           />
         )}
 
-        <div className="flex flex-wrap items-center gap-2 border-t border-gray-100/90 dark:border-white/5 px-3.5 py-2.5">
-          {disconnected ? (
-            <span
-              aria-live="polite"
-              className={`inline-flex min-w-0 flex-1 items-center gap-2 text-[13px] ${
-                connectNudged
-                  ? 'text-crimson-dark dark:text-crimson-light'
-                  : 'text-gray-400 dark:text-gray-500'
+        <div className="border-t border-gray-100 dark:border-white/5">
+          <div className="flex flex-wrap items-center gap-1.5 px-3 py-2.5 sm:px-4">
+            {disconnected ? (
+              <span
+                aria-live="polite"
+                className={`inline-flex min-w-0 flex-1 items-center gap-2 text-[13px] ${
+                  connectNudged
+                    ? 'text-crimson-dark dark:text-crimson-light'
+                    : 'text-gray-400 dark:text-gray-500'
+                }`}
+              >
+                <svg
+                  className="h-4 w-4 shrink-0"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  aria-hidden="true"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M8 10V7a4 4 0 0 1 8 0v3m-9 0h10a1 1 0 0 1 1 1v8H6v-8a1 1 0 0 1 1-1Z"
+                  />
+                </svg>
+                {connectNudged ? t('composer.connectToRunKept') : t('composer.connectToRun')}
+              </span>
+            ) : (
+              <>
+                <ComposerPlusMenu
+                  disabled={busy}
+                  onOpen={goalCommand.dismiss}
+                  onFiles={attachments.add}
+                  onOpenSkills={() => setSkillsOpen(true)}
+                  skillSummary={
+                    pendingSkillDefaults
+                      ? t('attach.skillsDefaults')
+                      : String(selectedSkills.length)
+                  }
+                  goalSummary={t('commands.goalHint')}
+                  onOpenGoal={insertGoalCommand}
+                  mcp={mcp}
+                  mcpBlockedReason={mcpBlockedReason}
+                />
+                <span className="h-4 w-px bg-gray-200 dark:bg-white/10" />
+                <RepositoryPicker
+                  repos={config?.repos ?? []}
+                  value={repo}
+                  onChange={chooseRepository}
+                  open={repoPickerOpen}
+                  onOpenChange={(next) => {
+                    if (next) openRepositoryPicker(false);
+                    else setRepoPickerOpen(false);
+                  }}
+                  onRefresh={() => void refreshRepositories()}
+                  refreshing={refreshing}
+                  onConfigure={
+                    config?.github_install_url ? () => void goToGitHub('manage') : undefined
+                  }
+                  returnFocusTo={repoPickerFromTask ? taskBox : undefined}
+                />
+                <Picker
+                  label={t('composer.branch')}
+                  value={branch}
+                  options={branches}
+                  onChange={setBranch}
+                />
+              </>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-1 rounded-b-2xl border-t border-gray-100 bg-gray-50/70 px-3 py-2.5 sm:px-4 dark:border-white/5 dark:bg-white/[0.02]">
+            {!disconnected && (
+              <>
+                <Picker
+                  label={t('composer.agent')}
+                  value={runtime}
+                  options={config?.runtimes ?? []}
+                  onChange={setRuntime}
+                />
+                <Picker
+                  label={t('composer.model')}
+                  value={model}
+                  options={models}
+                  onChange={setModel}
+                />
+                <Picker
+                  label={t('composer.reasoning')}
+                  value={effort}
+                  options={efforts}
+                  onChange={setEffort}
+                />
+              </>
+            )}
+
+            <button
+              type="button"
+              disabled={!canRun}
+              onClick={() => void run()}
+              title={missingRepository ? t('composer.chooseRepository') : t('composer.runTitle')}
+              className={`ml-auto inline-flex min-h-10 items-center gap-2 rounded-xl bg-crimson px-5 py-2 text-sm font-semibold text-white shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/40 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900 ${
+                canRun ? 'hover:bg-crimson-dark' : 'cursor-not-allowed opacity-60'
               }`}
             >
+              {busy ? t('composer.starting') : t('composer.run')}
               <svg
-                className="h-4 w-4 shrink-0"
-                viewBox="0 0 24 24"
+                aria-hidden="true"
+                className="h-3.5 w-3.5"
                 fill="none"
+                viewBox="0 0 24 24"
                 stroke="currentColor"
                 strokeWidth={2}
-                aria-hidden="true"
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M8 10V7a4 4 0 0 1 8 0v3m-9 0h10a1 1 0 0 1 1 1v8H6v-8a1 1 0 0 1 1-1Z"
-                />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14m0 0-6-6m6 6-6 6" />
               </svg>
-              {connectNudged ? t('composer.connectToRunKept') : t('composer.connectToRun')}
-            </span>
-          ) : (
-            <>
-              <ComposerPlusMenu
-                disabled={busy}
-                onOpen={goalCommand.dismiss}
-                onFiles={attachments.add}
-                onOpenSkills={() => setSkillsOpen(true)}
-                skillSummary={
-                  pendingSkillDefaults ? t('attach.skillsDefaults') : String(selectedSkills.length)
-                }
-                goalSummary={t('commands.goalHint')}
-                onOpenGoal={insertGoalCommand}
-                mcp={mcp}
-                mcpBlockedReason={mcpBlockedReason}
-              />
-              <span className="h-4 w-px bg-gray-200 dark:bg-white/10" />
-              <RepositoryPicker
-                repos={config?.repos ?? []}
-                value={repo}
-                onChange={chooseRepository}
-                open={repoPickerOpen}
-                onOpenChange={(next) => {
-                  if (next) openRepositoryPicker(false);
-                  else setRepoPickerOpen(false);
-                }}
-                onRefresh={() => void refreshRepositories()}
-                refreshing={refreshing}
-                onConfigure={
-                  config?.github_install_url ? () => void goToGitHub('manage') : undefined
-                }
-                returnFocusTo={repoPickerFromTask ? taskBox : undefined}
-              />
-              <Picker
-                label={t('composer.branch')}
-                value={branch}
-                options={branches}
-                onChange={setBranch}
-              />
-              <span className="h-4 w-px bg-gray-200 dark:bg-white/10" />
-              <Picker
-                label={t('composer.agent')}
-                value={runtime}
-                options={config?.runtimes ?? []}
-                onChange={setRuntime}
-              />
-              <Picker
-                label={t('composer.model')}
-                value={model}
-                options={models}
-                onChange={setModel}
-              />
-              <Picker
-                label={t('composer.reasoning')}
-                value={effort}
-                options={efforts}
-                onChange={setEffort}
-              />
-            </>
-          )}
-
-          <button
-            type="button"
-            disabled={!canRun}
-            onClick={() => void run()}
-            title={missingRepository ? t('composer.chooseRepository') : t('composer.runTitle')}
-            className={`ml-auto inline-flex items-center gap-1.5 rounded-lg bg-crimson px-3.5 py-1.5 text-[13px] font-medium text-white shadow-sm transition-colors ${
-              canRun ? 'hover:bg-crimson-dark' : 'cursor-not-allowed opacity-60'
-            }`}
-          >
-            {busy ? t('composer.starting') : t('composer.run')}
-            <svg
-              className="h-3.5 w-3.5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14m0 0-6-6m6 6-6 6" />
-            </svg>
-          </button>
+            </button>
+          </div>
         </div>
       </div>
+
+      <p
+        id={keyboardHintId}
+        className="mt-3 text-center text-xs leading-relaxed text-gray-500 dark:text-gray-400"
+      >
+        {t('composer.keyboardHint')}
+      </p>
 
       {skillsOpen ? (
         <SkillSelectionDialog
@@ -737,6 +781,35 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           {error}
         </p>
       ) : null}
+      <div className="mt-8 grid gap-3 sm:grid-cols-3">
+        {(
+          [
+            ['composer.repository', 'composer.workflowRepository'],
+            ['composer.agent', 'composer.workflowAgent'],
+            ['composer.workflowReviewTitle', 'composer.workflowReview'],
+          ] as const
+        ).map(([title, description], index) => (
+          <div
+            key={title}
+            className="flex gap-3 rounded-xl border border-gray-200/60 bg-gray-50/60 p-4 dark:border-white/5 dark:bg-white/[0.02]"
+          >
+            <span
+              aria-hidden="true"
+              className="mt-0.5 text-xs font-medium tabular-nums text-crimson/70 dark:text-crimson-light"
+            >
+              0{index + 1}
+            </span>
+            <div>
+              <h2 className="text-[13px] font-semibold text-gray-700 dark:text-gray-200">
+                {t(title)}
+              </h2>
+              <p className="mt-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                {t(description)}
+              </p>
+            </div>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }

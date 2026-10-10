@@ -563,17 +563,19 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
         style={{ width: pane.width }}
         className="flex shrink-0 flex-col border-r border-gray-200/70 bg-gray-50/80 dark:border-white/10 dark:bg-gray-900/60"
       >
-        <div className="flex-1 overflow-y-auto px-3 py-3">
+        <div className="flex-1 overflow-y-auto px-3 py-4">
           <Link
             href="/"
-            className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[13px] font-medium transition-colors ${
+            aria-current={pathname === '/' ? 'page' : undefined}
+            className={`flex min-h-10 w-full items-center gap-2.5 rounded-lg border px-3 py-2 text-[13px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900 ${
               pathname === '/'
-                ? 'bg-crimson/[0.07] text-crimson-dark dark:bg-crimson/15 dark:text-crimson-light'
-                : 'text-gray-700 hover:bg-gray-200/50 hover:text-gray-900 dark:text-gray-300 dark:hover:bg-white/5 dark:hover:text-gray-100'
+                ? 'border-crimson/15 bg-crimson/[0.07] text-crimson-dark shadow-sm dark:border-crimson/25 dark:bg-crimson/15 dark:text-crimson-light'
+                : 'border-gray-200/80 bg-white text-gray-700 shadow-sm hover:border-crimson/20 hover:bg-crimson/[0.03] hover:text-crimson-dark dark:border-white/10 dark:bg-gray-900 dark:text-gray-300 dark:hover:border-crimson/25 dark:hover:bg-crimson/10 dark:hover:text-crimson-light'
             }`}
           >
             <svg
-              className={`h-4 w-4 ${pathname === '/' ? 'text-crimson dark:text-crimson-light' : 'text-gray-500 dark:text-gray-400'}`}
+              aria-hidden="true"
+              className={`h-4 w-4 shrink-0 ${pathname === '/' ? 'text-crimson dark:text-crimson-light' : 'text-gray-500 dark:text-gray-400'}`}
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -621,8 +623,8 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
             </section>
           )}
 
-          <div className="mb-1 mt-4 flex items-center justify-between pl-2 pr-0.5">
-            <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-gray-400 dark:text-gray-500">
+          <div className="mb-1.5 mt-5 flex items-center justify-between pl-2 pr-0.5">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-gray-500 dark:text-gray-400">
               {t('sidebar.projects')}
             </span>
             <div className="flex items-center gap-0.5">
@@ -632,7 +634,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                 aria-label={t('sidebar.search')}
                 title={`${t('sidebar.search')} (⌘K / Ctrl K)`}
                 aria-expanded={searchOpen}
-                className="rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-200/60 hover:text-gray-700 dark:text-gray-500 dark:hover:bg-white/10 dark:hover:text-gray-200"
+                className="flex h-8 w-8 items-center justify-center rounded-lg text-gray-500 transition-colors hover:bg-gray-200/60 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-200"
                 onClick={() => {
                   if (searchOpen) closeSearch();
                   else {
@@ -736,6 +738,8 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
               ref={resultList}
               onKeyDown={(event) => {
                 if (event.key === 'Escape') {
+                  event.preventDefault();
+                  event.stopPropagation();
                   closeSearch();
                   return;
                 }
@@ -840,7 +844,8 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
           </span>
           <Link
             href="/archived"
-            className={`mt-4 flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] font-medium transition-colors ${
+            aria-current={pathname === '/archived' ? 'page' : undefined}
+            className={`mt-4 flex min-h-9 items-center gap-2 rounded-lg px-2 py-2 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 ${
               pathname === '/archived'
                 ? 'bg-crimson/[0.07] text-crimson-dark dark:bg-crimson/15 dark:text-crimson-light'
                 : 'text-gray-600 hover:bg-gray-200/50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
@@ -865,7 +870,8 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
 
           <Link
             href="/integrations"
-            className={`mt-0.5 flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] font-medium transition-colors ${
+            aria-current={pathname === '/integrations' ? 'page' : undefined}
+            className={`mt-0.5 flex min-h-9 items-center gap-2 rounded-lg px-2 py-2 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 ${
               pathname === '/integrations'
                 ? 'bg-crimson/[0.07] text-crimson-dark dark:bg-crimson/15 dark:text-crimson-light'
                 : 'text-gray-600 hover:bg-gray-200/50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'

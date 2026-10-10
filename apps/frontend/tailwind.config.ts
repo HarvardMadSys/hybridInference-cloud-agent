@@ -9,12 +9,12 @@ export default {
         crimson: {
           DEFAULT: '#A51C30',
           dark: '#8B1729',
-          light: '#C8324A',
+          light: '#F18B9B',
         },
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
-        serif: ['var(--font-serif)', 'Georgia', 'Cambria', 'Times New Roman', 'serif'],
+        serif: ['var(--font-serif, Georgia)', 'Cambria', 'Times New Roman', 'serif'],
       },
       borderRadius: {
         lg: '0.5rem',

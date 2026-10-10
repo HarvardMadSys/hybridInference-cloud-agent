@@ -1,10 +1,13 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import Link from 'next/link';
+import { useState } from 'react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentAccessApi } from '@/lib/api/session';
+import { SkillDialog } from '@/components/features/agents/skills/SkillDialog';
 
 let access: AgentAccessApi | undefined;
 let role = 'internal';
@@ -54,7 +57,23 @@ vi.mock('@/components/providers/SiteConfigProvider', () => ({
 
 vi.mock('@/components/features/agents/AgentsSidebar', () => ({
   AgentsSidebar: ({ collapsed }: { collapsed?: boolean }) =>
-    collapsed ? null : <aside data-testid="sidebar-stub">tasks</aside>,
+    collapsed ? null : (
+      <aside id="agents-sidebar" data-testid="sidebar-stub">
+        tasks
+        <Link href="/" onClick={(event) => event.preventDefault()}>
+          New task
+        </Link>
+        <Link href="/job-1" onClick={(event) => event.preventDefault()}>
+          Existing task
+        </Link>
+        <input
+          aria-label="Task search"
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') event.preventDefault();
+          }}
+        />
+      </aside>
+    ),
 }));
 
 import AgentsLayout from './layout';
@@ -138,6 +157,262 @@ describe('AgentsLayout sidebar collapse', () => {
     expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
     expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBeNull();
   });
+});
+
+describe('AgentsLayout mobile task list', () => {
+  let query: { matches: boolean };
+  let changeListeners: Set<() => void>;
+
+  beforeEach(() => {
+    localStorage.clear();
+    pathname = '/';
+    query = { matches: true };
+    changeListeners = new Set();
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((media: string) => ({
+        get matches() {
+          return query.matches;
+        },
+        media,
+        addEventListener: (_event: string, listener: () => void) => changeListeners.add(listener),
+        removeEventListener: (_event: string, listener: () => void) =>
+          changeListeners.delete(listener),
+      })),
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  function renderLayout() {
+    return render(
+      <AgentsLayout>
+        <p>Task composer</p>
+      </AgentsLayout>,
+    );
+  }
+
+  function resizeToMobile(mobile: boolean) {
+    act(() => {
+      query.matches = mobile;
+      changeListeners.forEach((listener) => listener());
+    });
+  }
+
+  it('starts with the composer visible and the task list closed on a narrow screen', () => {
+    renderLayout();
+
+    expect(window.matchMedia).toHaveBeenCalledWith('(max-width: 767px)');
+    expect(screen.getByRole('main')).toBeVisible();
+    expect(screen.getByText('Task composer')).toBeVisible();
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+    expect(toggle()).toHaveAccessibleName('Expand task list');
+    expect(toggle()).toHaveAttribute('aria-expanded', 'false');
+    expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBeNull();
+  });
+
+  it.each(['0', '1'])(
+    'opens and closes a task-list view while preserving desktop preference %s',
+    (preference) => {
+      localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, preference);
+      renderLayout();
+      const workspace = screen.getByRole('main');
+
+      fireEvent.click(toggle());
+
+      expect(screen.getByTestId('sidebar-stub')).toBeVisible();
+      expect(workspace).not.toBeVisible();
+      expect(workspace).toHaveAttribute('hidden');
+      expect(screen.queryByRole('main')).not.toBeInTheDocument();
+      expect(toggle()).toHaveAccessibleName('Collapse task list');
+      expect(toggle()).toHaveAttribute('aria-expanded', 'true');
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe(preference);
+
+      fireEvent.click(toggle());
+
+      expect(workspace).toBeVisible();
+      expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe(preference);
+    },
+  );
+
+  it('closes the task list with Escape and returns focus to its toggle', () => {
+    renderLayout();
+    fireEvent.click(toggle());
+    screen.getByRole('link', { name: 'Existing task' }).focus();
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+    expect(screen.getByRole('main')).toBeVisible();
+    expect(toggle()).toHaveFocus();
+    expect(toggle()).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('moves focus into the task list when opened with Control+B and back when closed', async () => {
+    renderLayout();
+    const workspace = screen.getByRole('main');
+    workspace.focus();
+    expect(workspace).toHaveFocus();
+
+    fireEvent.keyDown(workspace, { key: 'b', ctrlKey: true });
+
+    const firstTaskLink = screen.getByRole('link', { name: 'New task' });
+    expect(firstTaskLink).toHaveFocus();
+    expect(workspace).not.toBeVisible();
+
+    fireEvent.keyDown(firstTaskLink, { key: 'b', ctrlKey: true });
+
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+    expect(workspace).toBeVisible();
+    await waitFor(() => expect(workspace).toHaveFocus());
+    expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBeNull();
+  });
+
+  it.each([{ ctrlKey: true }, { metaKey: true }])(
+    'keeps focus in a portaled Skills modal when the sidebar shortcut uses %j',
+    (modifier) => {
+      function Workspace() {
+        const [open, setOpen] = useState(true);
+        return (
+          <>
+            <p>Task composer</p>
+            {open && (
+              <SkillDialog title="Skills" onClose={() => setOpen(false)}>
+                <input aria-label="Find skills" />
+              </SkillDialog>
+            )}
+          </>
+        );
+      }
+      render(
+        <AgentsLayout>
+          <Workspace />
+        </AgentsLayout>,
+      );
+      const workspace = screen.getByRole('main');
+      const input = screen.getByRole('textbox', { name: 'Find skills' });
+      expect(input).toHaveFocus();
+
+      fireEvent.keyDown(input, { key: 'b', ...modifier });
+
+      expect(input).toHaveFocus();
+      expect(screen.getByRole('dialog', { name: 'Skills' })).toBeVisible();
+      expect(workspace).toBeVisible();
+      expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(toggle()).toHaveAttribute('aria-expanded', 'false');
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBeNull();
+
+      fireEvent.keyDown(input, { key: 'Tab' });
+      expect(screen.getByRole('button', { name: 'Close skill dialog' })).toHaveFocus();
+      fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+      workspace.focus();
+      fireEvent.keyDown(workspace, { key: 'b', ...modifier });
+      expect(screen.getByRole('link', { name: 'New task' })).toHaveFocus();
+      expect(workspace).not.toBeVisible();
+    },
+  );
+
+  it('keeps an open native dialog in control until it closes', () => {
+    render(
+      <AgentsLayout>
+        <dialog open aria-label="Task details">
+          <input aria-label="Task title" />
+        </dialog>
+      </AgentsLayout>,
+    );
+    const dialog = screen.getByRole('dialog', { name: 'Task details' });
+    const input = screen.getByRole('textbox', { name: 'Task title' });
+    input.focus();
+
+    fireEvent.keyDown(input, { key: 'b', ctrlKey: true });
+    fireEvent.click(toggle());
+
+    expect(input).toHaveFocus();
+    expect(screen.getByRole('main')).toBeVisible();
+    expect(toggle()).toHaveAttribute('aria-expanded', 'false');
+
+    dialog.removeAttribute('open');
+    fireEvent.click(toggle());
+    expect(screen.getByTestId('sidebar-stub')).toBeVisible();
+    expect(toggle()).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('allows the sidebar shortcut when a modal is hidden', () => {
+    render(
+      <AgentsLayout>
+        <div hidden>
+          <div role="dialog" aria-modal="true" aria-label="Inactive dialog" />
+        </div>
+        <p>Task composer</p>
+      </AgentsLayout>,
+    );
+
+    fireEvent.keyDown(screen.getByRole('main'), { key: 'b', ctrlKey: true });
+
+    expect(screen.getByTestId('sidebar-stub')).toBeVisible();
+    expect(toggle()).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('keeps the task list open when a descendant has handled Escape', () => {
+    renderLayout();
+    fireEvent.click(toggle());
+    const search = screen.getByRole('textbox', { name: 'Task search' });
+    search.focus();
+
+    expect(fireEvent.keyDown(search, { key: 'Escape' })).toBe(false);
+
+    expect(screen.getByTestId('sidebar-stub')).toBeVisible();
+    expect(screen.queryByRole('main')).not.toBeInTheDocument();
+    expect(toggle()).toHaveAttribute('aria-expanded', 'true');
+    expect(search).toHaveFocus();
+  });
+
+  it.each(['New task', 'Existing task'])(
+    'returns to the workspace when selecting %s, including the current route',
+    async (linkName) => {
+      renderLayout();
+      const workspace = screen.getByRole('main');
+      fireEvent.click(toggle());
+
+      fireEvent.click(screen.getByRole('link', { name: linkName }));
+
+      expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(screen.getByRole('main')).toBeVisible();
+      expect(toggle()).toHaveAttribute('aria-expanded', 'false');
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBeNull();
+      await waitFor(() => expect(workspace).toHaveFocus());
+    },
+  );
+
+  it.each(['0', '1'])(
+    'restores desktop preference %s when resizing out of an open mobile task list',
+    (preference) => {
+      localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, preference);
+      renderLayout();
+      fireEvent.click(toggle());
+
+      resizeToMobile(false);
+
+      expect(screen.getByRole('main')).toBeVisible();
+      expect(toggle()).toHaveAttribute('aria-expanded', String(preference === '0'));
+      if (preference === '0') expect(screen.getByTestId('sidebar-stub')).toBeVisible();
+      else expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe(preference);
+
+      resizeToMobile(true);
+
+      expect(screen.getByRole('main')).toBeVisible();
+      expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(toggle()).toHaveAttribute('aria-expanded', 'false');
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe(preference);
+    },
+  );
 });
 
 describe('AgentsLayout product navigation', () => {
