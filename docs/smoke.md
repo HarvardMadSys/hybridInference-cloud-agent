@@ -1,82 +1,75 @@
-# Single-host end-to-end smoke (task E11)
+# Staging end-to-end smoke
 
-For a deterministic, provider-key-free local product run, use
-[`deploy/local/dev.sh`](../deploy/local/README.md) first. That Docker-only stack
-has been executed end to end against the real browser/control-plane/runner and
-all five pinned Agent CLI binaries, including `NEW → LIVE`, idle `docker stop`,
-and same-container `RESTORED`. This document remains the separate staging
-gateway + real GitHub publishing runbook; the local substitute intentionally
-does not claim to prove an external provider or pull-request publication.
-Bring up the control plane and one runner host on a single machine, point them
-at a **staging** gateway, and drive one real job from an empty workspace to a
-pull request on a scratch repository.
+Use this runbook to verify a staging Gateway, a Cloud Agent control plane and one
+runner host through a real pull request on a disposable GitHub repository.
+For a provider-key-free local product check, start with the
+[complete local Docker stack](../deploy/local/README.md):
 
-> **The external staging-to-GitHub runbook below remains partly executed.** See
-> the dated log at the bottom for exactly what reached staging. The Docker-only
-> local stack linked above now separately proves image builds, migrations,
-> browser/control-plane/host wiring, retained sandboxes, and all five CLI
-> session paths; it does not prove an external provider or real pull-request
-> publication.
->
-> What staging did prove, on 2026-08-06 (`ajob_8b0be5f9e7ff9ad5`, recorded in
-> `MIGRATION.md` and `cutover.md`): §4 enrolment, §5 job create → remote claim →
-> broker workspace → a tool-calling run → `succeeded`, and the **renewal** half
-> of §6 with a grant minted, renewed four times and revoked after the job
-> settled. **What is still unproven on the real stack is §5's publish step,
-> §6's mid-run cancel, and the rest of §6's fail-closed trio.** Those three are
-> why the log rows below stay blank; §6's fail-closed cases were separately
-> exercised against a local Postgres without Docker (see the partial run).
->
-> The remaining staging steps were written from code and deployment files.
-> Until someone runs them and fills in the log, treat each as a claim to check,
-> not a route known to work — and fix any incorrect step in the same sitting.
-> The still-unverified boundary here is the live external gateway/GitHub path,
-> not whether the standalone images and retained topology can run locally.
+```bash
+./deploy/local/dev.sh up
+./deploy/local/dev.sh smoke
+```
+
+The local stack exercises browser login, control-plane/host wiring, all five
+pinned CLIs and retained native sessions with deterministic external-service
+substitutes. It does not establish live provider behavior or GitHub publication.
+This staging runbook checks those external boundaries separately.
+
+**Recorded staging status:** on 2026-08-06, job `ajob_8b0be5f9e7ff9ad5` verified
+enrollment, job creation/remote claim, broker workspace access, tool-calling
+execution, success, four grant renewals and revocation after settlement. The
+record did not verify real PR publication, mid-run cancellation or the full
+fail-closed sequence. See [MIGRATION.md](../MIGRATION.md),
+[cutover.md](cutover.md) and the dated baseline below. Newer local lifecycle
+checks do not fill those staging acceptance gaps.
 
 ## What this proves, and what it does not
 
-**Proves:** the two processes start, find each other, authenticate to a gateway
-they do not share secrets with, and can carry one job from creation to a
-published PR — including the parts that only exist after the split (identity
-sign-in, an inference grant, a host enrolment).
+A completed passing run proves identity sign-in, explicit Agent access,
+enrollment, inference grants, sandbox execution and GitHub publication for the
+recorded revision/environment. A successful job alone does not prove publication:
+the publisher processes an immutable workspace snapshot asynchronously.
 
-**Does not prove:** anything about migrated data (that is H1 and the cutover
-smoke in [cutover.md](cutover.md)), anything about concurrency or host loss
-(G7), or that the gateway's side is deployed. The three gateway contracts
-landed on the gateway's `dev` and are recorded as live on both staging and
-production in [cutover.md](cutover.md), so the checks in §0 are a health check
-on the gateway you are pointing at rather than a gate waiting on an unmerged
-branch — but a stale deployment is still the first thing to rule out.
+This check does not cover migrated ownership/data, concurrency, host loss or
+all isolation boundaries. Use [cutover](cutover.md),
+[deployment reliability](deployment-reliability.md) and
+[native context recall](context-recall.md) for those separate checks. The Gateway
+contracts belong to the Gateway; verify its deployed routes before starting.
 
 ## 0. Preconditions
 
-- [ ] A machine with Docker, ≥8 GB RAM, and a checkout of this repository.
-- [ ] **The staging gateway serves the contracts it still owns.** JWKS must
-      answer:
+- [ ] Use a disposable staging deployment with Docker/Compose, a checkout and
+      enough memory for the selected CLI. The local all-five-CLI smoke recommends
+      at least 8 GiB; public multi-tenant staging requires a Kata-capable host.
+- [ ] Record the exact release SHA and the Gateway environment. API, host,
+      broker and sandbox must satisfy the shared deployment/version checks.
+- [ ] Verify `GET /v1/identity/jwks` succeeds on the staging Gateway:
+
       ```bash
       curl -sS -o /dev/null -w '%{http_code} %{url_effective}\n' \
         "$GATEWAY_BASE_URL/v1/identity/jwks"
       ```
-      Then, with the dispatch token, check
-      `/internal/model-catalog?user_id=<a real user>` and
-      `/internal/users/<id>/agent-access`. The old `/internal/mcp-registry`
-      endpoint was removed — MCP configuration is owned by this service and
-      requiring that path would make the smoke fail before it began — and
-      `/agent-access` is the lookup that replaced the retired
-      `/internal/users/<id>/status`: admission no longer comes from an account
-      profile. A 404 on either remaining gateway lookup means the gateway side
-      has not landed; **stop
-      here** — everything below will fail closed correctly.
-- [ ] A scratch GitHub repository this run may open pull requests against, and
-      a token that can. Not a repository anyone depends on: the point of this
-      exercise is that a machine writes to it.
-- [ ] A staging gateway account you can sign in with.
+
+- [ ] With the configured dispatch credential, verify
+      `/internal/model-catalog?user_id=<test-user>` and
+      `/internal/users/<test-user>/agent-access`. The test account must receive
+      `agent.use`, and the catalog must include the chosen model. A missing
+      access endpoint or rejected dispatch credential blocks the run. The retired
+      `/internal/mcp-registry` and `/internal/users/<id>/status` are not prerequisites.
+- [ ] Have an account that can complete Gateway browser sign-in, plus
+      infrastructure administration access for host enrollment.
+- [ ] Choose a disposable GitHub repository and configure write/PR permission
+      through the deployment's supported GitHub App or publishing credential.
+      Record its base branch. Do not use a repository others depend on.
 
 ## 1. Configure
 
-Generate this deployment's own secrets. **They are its own** — none is derived
-from anything the gateway holds, and if you find yourself copying a value out
-of the gateway's environment, that is the split being undone:
+Use separate, private environment files for the control plane and host. Start
+from [`control-plane/.env.example`](../deploy/control-plane/.env.example) and
+[`host/.env.example`](../deploy/host/.env.example); [ENVIRONMENT.md](../ENVIRONMENT.md)
+is the reference. Keep the Agent database separate from the Gateway database.
+
+Generate deployment-owned secrets once and keep them out of version control:
 
 ```bash
 for name in AGENT_SESSION_SECRET AGENT_CONTROL_TOKEN_SECRET AGENT_SOURCE_CONTROL_ENCRYPTION_KEY; do
@@ -84,117 +77,121 @@ for name in AGENT_SESSION_SECRET AGENT_CONTROL_TOKEN_SECRET AGENT_SOURCE_CONTROL
 done
 ```
 
-The dispatch token is the one value shared with the gateway, and it must be the
-same string on both sides and different per environment:
+Keep the encryption key stable so saved connections remain decryptable.
+`GATEWAY_GRANT_DISPATCH_TOKEN` is the shared service credential; it must match
+on Agent/Gateway and differ between staging and production. Agent receives
+neither Gateway signing keys nor its account database credentials.
 
-```bash
-printf 'GATEWAY_GRANT_DISPATCH_TOKEN=%s\n' "$(openssl rand -hex 32)"
-```
-
-Write those plus the gateway URLs and the Postgres password into an env file.
-[ENVIRONMENT.md](../ENVIRONMENT.md) is the full list; the compose file refuses
-to render without the required ones, so an omission fails immediately rather
-than at first use.
-
-- [ ] `docker compose -f deploy/control-plane/docker-compose.yml --env-file <file> config`
-      renders without error.
+- [ ] Set the exact `GATEWAY_ISSUER`, JWKS/authorize URLs, callback allowlist,
+      web origin/base path and browser API path. For existing data, prepare the
+      [identity binding](minimal-identity.md#upgrade-an-existing-deployment).
+- [ ] Set explicit Compose project names, sandbox image, enrolled host name,
+      broker credential/reverse route, all three tunnel destinations and keys,
+      and the host's non-overlapping egress pool/resolver.
+- [ ] Render configuration privately using the active environment file. Export
+      `AGENT_DEPLOYMENT_SHA` for direct control-plane Compose commands; the
+      deployment scripts supply it themselves. Rendered configuration contains
+      secrets, so do not paste it into acceptance logs.
 
 ## 2. Start the control plane
 
-```bash
-docker compose -f deploy/control-plane/docker-compose.yml --env-file <file> up -d
-```
+Use the deployment process in [deployment reliability](deployment-reliability.md).
+For a cold source deployment, its `prepare` and `prepare-database` phases build
+images, start Postgres, migrate/check the identity namespace, and bootstrap the
+API and MCP listener needed for host readiness. Complete activation after the
+host publishes readiness in section 4. Preserve the deployment's project and
+configuration root throughout these phases.
 
-- [ ] `migrate` exits 0. It runs `alembic upgrade head`; the service creates no
-      tables itself, so a failure here means the API will not start — which is
-      the intended behaviour, not a race to wait out.
-- [ ] `curl -sS localhost:8000/healthz` answers.
-- [ ] The log shows the reaper starting. Without it nothing recovers a lost
-      attempt, and its absence is invisible until a job hangs.
+- [ ] Migrations exit successfully at the checkout's current head. The API does
+      not create missing tables at startup.
+- [ ] Main API `/healthz` responds on port 8000 by default.
+- [ ] MCP-only `/healthz` responds on port 8001 by default; its tunnel targets
+      that listener.
+- [ ] Reaper and publication workers are running. General health alone does not
+      establish working grant renewal or publication.
 
 ## 3. Sign in — the identity flow end to end
 
-This is the step that exercises C1–C4 and E7/E8 together, and the first place a
-missing gateway contract shows up as a human-visible failure.
-
-- [ ] Open the web UI, choose sign-in, and land on the **gateway's**
-      `/authorize` page.
-- [ ] Approve. You return to this service with a session.
-- [ ] `GET /v1/session/me` reports your gateway user id plus the explicit
-      `agent_access` decision (`allowed`, `permissions`). Roles are
-      deliberately absent: an account role confers nothing, and the session
-      carries no profile.
-- [ ] Nothing in the control plane's logs or database contains a gateway
-      session token. It exchanged a code for a short-lived identity token,
-      minted its own cookie, and kept neither.
+- [ ] Open the web app and start sign-in. The browser reaches the Gateway's
+      authorize page, returns through Agent's callback and establishes a session.
+- [ ] `GET /v1/session/me` returns the test user's `id` and
+      `agent_access: {allowed, permissions}`. Account roles/profile fields are
+      absent. Confirm explicit `agent.use` before creating a task.
+- [ ] Confirm the Agent session is signed with its own secret and carries the
+      configured issuer. No Gateway session token is retained in Agent storage.
+      Avoid recording cookies or token bodies in the run log.
 
 ## 4. Enrol the host
 
-The runner does not authenticate with a shared password; it is issued a
-credential bound to the name an admin chose for it.
-
-- [ ] `POST /admin/agent/runner-hosts/enroll-token` with the host's name,
-      using `ADMIN_TOKEN`.
-- [ ] Start the host stack from `deploy/host/docker-compose.sandbox.yml` with
-      that token, after filling `deploy/host/.env.example`: `COMPOSE_PROJECT`
-      and `AGENT_SANDBOX_IMAGE` are required and unset values stop the render,
-      and the three tunnel destinations with their own keys and known-hosts
-      files are needed even for a single-machine run.
-- [ ] `GET /admin/agent/runner-hosts` shows the host `online` with a broker URL.
-- [ ] Confirm the token cannot be reused under a different name — register a
-      second machine under a typo of the first and watch it be refused
-      **without spending the token**. This is the protection that stops a typo
-      evicting a live host.
+- [ ] Issue `POST /admin/agent/runner-hosts/enroll-token` with the chosen `host`
+      name using infrastructure admin access. The response reveals a single-use
+      enrollment token; put it in the host's private configuration.
+- [ ] Deploy the host through `deploy/host/deploy.sh` for the same target release.
+      The host process prepares/attests the sandbox image, starts tunnels and
+      broker, probes both relays and publishes the completed-generation marker.
+      Directly starting runner Compose containers does not complete this gate.
+- [ ] `GET /admin/agent/runner-hosts` shows a fresh online heartbeat, expected
+      deployment capability and reachable broker URL. Check the reverse broker
+      route from the control plane.
+- [ ] Complete control-plane activation and confirm its readiness check succeeds
+      for the intended host/API SHA.
+- [ ] If testing enrollment refusal, use a separate disposable token: redemption
+      under a different host name must fail without consuming it. Record the
+      refusal; do not attempt to reenroll an unrelated live host.
 
 ## 5. One job, all the way
 
-- [ ] Connect the scratch repository under Integrations.
-- [ ] Create a job against it with a small, checkable instruction ("add a
-      CONTRIBUTING.md saying X").
-- [ ] It reaches `queued`, then the host claims it.
-- [ ] **A grant was minted for the attempt.** The control plane's log records
-      it; the gateway's `agent_grants` row names the same external job and
-      attempt. This is the moment the split is doing its job: the sandbox holds
-      a capability the gateway issued, and no key of the gateway's.
-- [ ] Events stream to the browser over SSE while it runs.
-- [ ] The agent's model calls succeed — proving the grant's `allowed_models`
-      clamp resolved to something the account can actually reach.
-- [ ] It reaches `succeeded`, and **a pull request is open on the scratch
-      repository**, authored by the configured git identity.
-- [ ] Open a terminal on the finished workspace; files list.
+- [ ] Connect/authorize the scratch repository under **Integrations**.
+- [ ] Create a task on its intended base branch with a small verifiable change,
+      such as adding a `CONTRIBUTING.md` containing a specified sentence.
+- [ ] Observe `queued` then a host claim. Record job/attempt/host identifiers and
+      the non-secret grant ID. Verify the sandbox receives scoped inference
+      authority for the account's chosen model.
+- [ ] Confirm events stream to the browser and at least one model/tool call
+      succeeds.
+- [ ] Confirm the turn succeeds with the expected file change. Wait for snapshot
+      publication and open its real **draft pull request**. Check target branch,
+      author and diff; record its URL. Execution success alone is insufficient.
+- [ ] List files and open a terminal on the retained workspace through the app.
 
 ## 6. The parts that only fail later
 
-Cheap to check now, expensive to discover at cutover:
+Run failure injection only in the disposable staging deployment and restore its
+original settings after each case.
 
-- [ ] **Renewal.** Leave a job running longer than the grant TTL — this service
-      mints for `GRANT_TTL_S` = **120 s** (30-second renewal interval × four
-      headroom passes; `grants.py`), not the gateway's 300-second renewal step,
-      which is what one *renewal* buys. A lost renewal therefore surfaces at
-      roughly two minutes, not five. It must keep working; if it dies near
-      120 s, the renewal loop is not running and every long job on this
-      deployment is broken.
-- [ ] **Revocation.** Cancel a job mid-run; the grant is revoked within a
-      reaper pass rather than living to its TTL.
-- [ ] **Fail-closed.** Point `GATEWAY_BASE_URL` at a port nothing listens on
-      and restart. Sign-in must refuse and job creation must refuse. If either
-      *succeeds*, something is failing open and that is a stop-everything
-      finding, not a smoke-test nit.
-- [ ] **The gateway holds no attempt state.** Stop the control plane with a job
-      running. Nothing at the gateway ends the attempt; the grant simply
-      expires. This is the design — the fence is here, not there.
+- [ ] **Renewal:** keep a turn running across several renewal passes. Initial
+      grant TTL is 120 seconds (30-second cadence × four passes); a Gateway
+      renewal buys 300 seconds. Verify actual renewal and continued model calls.
+      A quick successful turn never exercises this boundary.
+- [ ] **Cancellation/revocation:** cancel a separate running turn. Verify worker
+      acknowledgment, terminal cancellation, unusable abandoned member
+      credentials and grant-revocation evidence. Revocation accelerates expiry;
+      TTL remains the backstop if its HTTP call fails.
+- [ ] **Fail closed:** make the Gateway unavailable, then attempt fresh sign-in
+      and a new protected owner request/task creation. Neither may gain access.
+      Existing-session `/me` must show a temporary failure without exposing
+      protected content. Restore reachability and verify recovery.
+- [ ] **Control-plane loss:** stop the disposable API while a task runs. The
+      Gateway does not own or end the attempt; renewal ceases and the grant
+      expires. After restoring the API, verify lease/reaper handling here.
+- [ ] Check live follow-up and same-container idle restore separately using
+      [context recall](context-recall.md#verification-before-accepting-a-deployment).
 
 ## 7. Tear down
 
-- [ ] `docker compose ... down -v` on both stacks.
-- [ ] Delete the scratch repository's branches, or the repository.
-- [ ] Revoke the dispatch token and the scratch repo token if this machine is
-      not staying.
+- [ ] Stop the disposable stacks using their recorded project names. Keep data
+      until acceptance evidence has been captured. Volume deletion is permanent;
+      use `down -v` only for a stack whose database is intentionally disposable.
+- [ ] Delete scratch branches/repository and revoke test-only repository and
+      dispatch credentials when the deployment is retired.
+- [ ] Restore any failure-injection settings on staging and append the dated
+      result table below.
 
 ## Log
 
-Fill this in **while running**, not afterwards. An entry written from memory is
-the thing this file exists to replace.
+Record results while running. The table below is the historical baseline; append
+a dated table for a new acceptance run, including its source SHA, environment,
+host, job and PR identifiers. Blank cells are unverified historical steps.
 
 | Step | Run at (UTC) | Result | Notes |
 |---|---|---|---|
@@ -208,6 +205,9 @@ the thing this file exists to replace.
 | 7. Tear down | | | |
 
 ## Partial run, 2026-08-04
+
+This is a historical run, with a migration observation rechecked on 2026-09-10.
+Its revision and table counts are dated evidence, not the current migration head.
 
 Run **without a container runtime** — no Docker daemon was available — so the
 service was started directly against a local Postgres instead of through

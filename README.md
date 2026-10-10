@@ -1,169 +1,190 @@
 # Cloud Agent
 
-Cloud coding agents that run in sandboxed containers on a pool of hosts, drive a
-user's repository, and publish the result as a pull request.
+Cloud Agent runs coding agents against a user's repository in retained sandbox
+containers. Users work through a web interface; enrolled hosts run Claude Code,
+Codex, pi, OpenCode, or Kilo; the control plane manages jobs, sessions, and
+publication to source control.
 
-## Powered by a HybridInference gateway
-
-Model calls go through a [HybridInference](https://github.com/HarvardMadSys/hybridInference) gateway
-(FreeInference is the hosted deployment of one),
-and **HTTP is the only thing these two services share** — no database, no
-signing secret, no Python import. Three contracts, each written down in
-[`gateway_contracts/`](gateway_contracts/):
-
-| Contract | What it answers | Why it cannot live here |
-|---|---|---|
-| **Identity** | Who this user is | The gateway owns the accounts. It signs with a private key and publishes the public half, so this service verifies without holding anything it could also mint with. |
-| **Inference grants** | Which models one attempt may call, for the next few minutes | Only the gateway knows what a role may reach — and it is the gateway that meters the spend. |
-| **Internal lookups** | A user's model catalog, and whether an account is still active | Two reads that used to be imports. |
-
-A grant says *what*, never *how much*: spend is governed by the account's daily
-quota at the gateway, and there is deliberately no per-task budget here. Grants
-live minutes and are renewed while an attempt is genuinely still running, so
-revocation is expiry rather than bookkeeping — and this service, not the
-gateway, is what decides an attempt is still current.
-
-MCP servers are owned by each user and resolved from their connections by the
-control plane. They are no longer part of the gateway's grants or internal
-lookups. The sandbox calls the control plane's MCP-only relay with a separate,
-scoped credential.
-
-Every call to the gateway fails **closed**. An unreachable catalog resolves to
-no models, not every model; an unreadable user status resolves to "cannot use
-the service", not "fine".
-
-> **Status: serving production.** The extraction from the HybridInference
-> monorepo is complete: production cut over on 2026-08-07 and the gateway's own
-> agent routes were deleted on 2026-08-09. [MIGRATION.md](MIGRATION.md) records
-> the split, its decisions, and deferred work. New work tracks in this
-> repository's issues and pull requests.
-
-## Architecture
-
-```text
-browser ──▶ apps/frontend/ (Next.js + BFF)
-                 │ session cookie
-                 ▼
-         cloud_agent — control plane ◀── HTTP ──▶ HybridInference gateway
-         jobs · scheduling · publishing           identity · grants · lookups
-                 │ claim / heartbeat / workspace
-                 ▼
-         cloud_agent_host — enrolled host
-         runner · workspace broker · group supervisor
-                 │ Docker lifecycle / per-member live transports
-                 ▼
-         retained sandbox group — kata | container
-         one Docker container · shared /workspace
-         one native session and active CLI process per chat member
-         claude-code · codex · pi · opencode · kilo
-                 │ scoped credentials over fixed relays
-                 ├──▶ inference gateway
-                 ├──▶ control plane's MCP-only listener
-                 └──▶ public IPv4 on TCP 80/443 only, under host rules
-```
-
-The deployment defaults to `kata`, which provides a separate guest kernel per
-sandbox group and is required for public multi-tenant use. `container` is an
-explicit shared-kernel downgrade for trusted repositories. The unisolated
-`process` backend remains a unit-test seam and cannot attest the deployed
-retained-session topology. See [docs/operations.md](docs/operations.md) for
-execution profiles and deployment checks.
-
-### Threads use retained native sessions
-
-A new chat starts in a one-member sandbox group. The container's writable layer
-holds the workspace and native Agent CLI state. The broker's group supervisor
-keeps a live CLI process per active member; a compatible follow-up sends only
-the new message to that process. If the process must be replaced, the CLI
-resumes its native session in the same retained container.
-
-Fork creates a separate chat and native session in the same group. Parent and
-child share the container and workspace and may run concurrently, with separate
-member UIDs, credentials, and process control.
-
-| Context status | Meaning |
-|---|---|
-| `NEW` | The member has no previously settled native turn. |
-| `LIVE` | The turn uses the compatible resident process already running. |
-| `RESTORED` | A replacement process resumes the same native session from the retained container. |
-| `LOST` | The required native state or container cannot be proved intact; execution fails closed. |
-
-`docker stop` preserves the writable layer for a later `docker start`. Losing
-the container or Docker data root is not recoverable through transcript replay
-or a platform checkpoint; portable storage and cross-host restore are deferred.
-The implemented design is
-[`docs/specs/2026-08-31-native-session-fork-shared-workspace-design.md`](docs/specs/2026-08-31-native-session-fork-shared-workspace-design.md).
-
-Three deployment units, one repository:
-
-| Unit | Path | Runs where |
-|---|---|---|
-| Web + BFF | `apps/frontend/` | alongside the control plane |
-| Control plane | `apps/backend/cloud_agent/` | one service, owns the Postgres database |
-| Host agent | `apps/backend/cloud_agent_host/` | every enrolled host; runner, workspace broker, and gateway/control-plane/MCP tunnels deploy together |
-
-## Repository layout
-
-```text
-apps/backend/          the three Python packages: control plane, host agent,
-                       and the shared vocabulary both images ship
-apps/frontend/         Next.js app (user UI + admin dashboard)
-gateway_contracts/     Gateway contract mirrors and the control-plane API snapshot
-migrations/            Alembic migrations for the agent-owned database
-deploy/                control-plane / host / sandbox deployment
-tests/                 unit, servers, integration (dbtest), external (external)
-docs/                  operations and design docs
-```
+Model access and account identity come from a
+[HybridInference gateway](https://github.com/HarvardMadSys/hybridInference).
+FreeInference is a hosted deployment of that gateway. Cloud Agent is a separate
+service with its own database and credentials.
 
 ## Getting started
 
-Prerequisites: Python 3.12+ and [uv](https://github.com/astral-sh/uv).
+Choose a path based on what you want to do:
+
+| Goal | Start here |
+|---|---|
+| Run the browser, API, host, and sandboxes locally | [Local Docker stack](deploy/local/README.md) |
+| Change the backend or frontend | [Developer guide](docs/development.md) |
+| Operate a self-hosted deployment | [Operations runbook](docs/operations.md) |
+| Build or deploy a release | [Release guide](deploy/release/README.md) |
+| Find configuration or a feature guide | [Documentation index](docs/README.md) |
+
+### Backend development
+
+Install Python 3.12 and [uv](https://github.com/astral-sh/uv), then run these
+commands from the repository root:
 
 ```bash
 make setup-dev
 make check
 ```
 
-`make check` = format + lint + type-check + test. Every change must leave it green.
-The [developer guide](docs/development.md) explains the package boundaries,
-where common changes belong, and how to run backend, frontend, and API checks.
+The package supports Python 3.12 and 3.13; setup and CI use 3.12 by default.
+`make check` formats the backend, checks lint and types, and runs tests that
+require neither an external deployment nor a test database. Frontend development
+uses Node.js 22 and npm, with separate checks described in the
+[developer guide](docs/development.md#run-the-relevant-checks).
 
-| Command | What it does |
+| Command | Purpose |
 |---|---|
-| `make format` | `ruff format` then `ruff check --fix` |
-| `make lint` | ruff format check, ruff lint, pydocstyle |
-| `make typecheck` | mypy over the control plane, host, and shared packages |
-| `make test` | pytest, excluding `external` and `dbtest` |
-| `make test-db` | the `dbtest` tier (needs Postgres) |
+| `make format` | Apply Ruff formatting and automatic lint fixes |
+| `make lint` | Check formatting, Ruff rules, and Python docstrings |
+| `make typecheck` | Run mypy across all three backend packages |
+| `make test` | Run pytest excluding `external` and `dbtest` |
+| `make test-db` | Run database-backed tests against a dedicated test database |
 
 ### Complete local Docker run
 
-To exercise the actual browser, OAuth boundary, control plane, enrolled host,
-all five pinned Agent CLIs, and retained sandbox lifecycle without a staging
-gateway or provider key:
+Install Docker 28+, Docker Compose, `openssl`, `curl`, and Python 3, then run:
 
 ```bash
 ./deploy/local/dev.sh up
 ./deploy/local/dev.sh smoke
 ```
 
-Open <http://127.0.0.1:13002>. The stack publishes only that loopback edge;
-repository, session, and database state remain Docker-owned. `dev.sh stop`
-stops rather than deletes the stack, so the same chat containers can be
-started and resumed later. See [deploy/local/README.md](deploy/local/README.md)
-for the topology and commands.
+Open <http://127.0.0.1:13002>. This stack includes the web app, OAuth flow,
+control plane, database, enrolled host, and all five pinned Agent CLIs. A local
+gateway fixture provides deterministic inference responses, so no staging
+gateway or provider key is needed. This verifies integration and session
+lifecycle; it does not measure model quality or qualify production isolation.
+
+`./deploy/local/dev.sh stop` preserves database and sandbox state for later
+startup. Read the [local guide](deploy/local/README.md) for prerequisites,
+configuration, logs, and running multiple stacks.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    Browser[Browser] --> Web[Next.js web app and BFF]
+    Web --> Control[Control plane: API, scheduling, publication]
+    Control --> Database[(Agent-owned PostgreSQL)]
+    Control <-->|HTTP contracts| Gateway[HybridInference gateway]
+    Host[Enrolled host: runner and workspace broker] <-->|Claims, heartbeats, workspace| Control
+    Host -->|Container lifecycle| Sandbox[Retained sandbox group: shared workspace, native CLI sessions]
+    Sandbox -->|Scoped inference credential via relay| Gateway
+    Sandbox -->|Scoped tool credential via relay| MCP[Control plane MCP-only listener]
+    Sandbox -->|TCP 80 and 443 under host rules| Public[Public IPv4 destinations]
+```
+
+The web app, control plane, and host pool deploy separately. Each host runs the
+runner, workspace broker, group supervisor, and the tunnels needed to reach the
+control plane and relays. Hosts enroll once, then advertise their capacity and
+capabilities through heartbeats.
+
+A **job** records a task; an **attempt** records one execution on a host. Attempts
+carry leases and fencing generations. The store rejects writes from a
+superseded attempt, including stale publication results.
+
+### Threads use retained native sessions
+
+A new chat creates a one-member sandbox group with a retained container. Its
+writable layer holds the workspace and native CLI state. Compatible follow-ups
+send the new message to the member's live CLI process. When that process needs
+replacement, the CLI resumes its native session in the same container.
+
+Fork creates another chat and native session in the same group. Parent and child
+share the workspace and can run concurrently, with separate member UIDs,
+credentials, and process control.
+
+| Context status | Meaning |
+|---|---|
+| `NEW` | No native turn has previously settled for this member |
+| `LIVE` | The turn uses the compatible resident CLI process |
+| `RESTORED` | A replacement process resumes the retained native session |
+| `LOST` | Required native state or container integrity cannot be established; execution is refused |
+
+Stopping a container preserves its writable layer. Losing the container or
+Docker data root loses the required native state; transcript replay and
+cross-host restoration are not recovery paths. See
+[native conversation recall](docs/context-recall.md) for verification and limits.
+
+## Powered by a HybridInference gateway
+
+The services communicate over HTTP. Cloud Agent does not share the gateway's
+database, Python modules, or signing secrets. The consumed contracts are
+documented in [gateway_contracts/](gateway_contracts/README.md):
+
+| Contract | Responsibility |
+|---|---|
+| Identity | Exchange login codes and verify gateway-signed identity using public keys |
+| Inference grants | Mint, renew, revoke, and read usage for scoped inference grants |
+| Internal lookups | Read the user's model catalog and deployment-owned Agent access decision |
+
+The gateway owns account permissions and inference quotas. A grant limits the
+models an attempt may call; there is no per-task dollar budget. The control
+plane renews grants while their attempt or retained member remains eligible.
+Revocation ends access sooner; expiry is the backstop if revocation fails.
+
+Protected owner and admin requests check the gateway's current Agent access
+decision. Unavailable or invalid gateway responses do not grant access. Each
+Agent database is bound to one gateway identity issuer; see
+[admission policy](docs/agent-access-policy.md) and
+[identity configuration](docs/minimal-identity.md).
+
+MCP connections belong to users and are resolved by the control plane. Sandboxes
+call tools through the MCP-only listener with a separate scoped credential;
+inference grants grant no MCP or platform-management authority.
+
+## Sandbox isolation
+
+The host deployment defaults to `kata`, with a separate guest kernel per sandbox
+group. Public multi-tenant use requires Kata isolation, non-root execution,
+dropped capabilities, seccomp, and resource limits. The `container` backend is
+for trusted internal repositories; `process` is a unit-test seam.
+
+Every group has one network for setup and agent execution. Host nftables rules
+allow public IPv4 on TCP 80/443, one configured DNS resolver, and the group's
+inference and MCP relays. They block host addresses, private and special-purpose
+ranges, other groups, other ports, and IPv6. Failed network verification prevents
+the group from starting.
+
+Long-lived account and service credentials stay outside the sandbox. Short-lived
+inference grants can still be exfiltrated and replayed through the gateway's
+public inference API until expiry or revocation, subject to the owner's model
+permissions and quota. Read the [security guidance](SECURITY.md) and
+[operations runbook](docs/operations.md#the-sandbox-network) before deployment.
+
+## Repository layout
+
+```text
+apps/backend/cloud_agent/         FastAPI control plane and PostgreSQL storage
+apps/backend/cloud_agent_host/    Host runner, sandboxes, workspace broker, CLI adapters
+apps/backend/cloud_agent_shared/  Shared protocols, pins, errors, Git and archive helpers
+apps/frontend/                    Next.js user interface and admin dashboard
+gateway_contracts/                Gateway contract mirrors and control-plane API snapshot
+migrations/                       Alembic revisions for the Agent database
+deploy/                           Control-plane, host, sandbox, local, and release recipes
+tests/                            Unit, API, integration, and external verification
+docs/                             Feature guides, runbooks, designs, and acceptance records
+```
 
 ## Contributing
 
-Start with the [developer guide](docs/development.md) and
-[contribution workflow](CONTRIBUTING.md). [AGENTS.md](AGENTS.md) also records
-the repository rules and permanent service boundaries for people and coding
-agents.
+Read the [developer guide](docs/development.md),
+[contribution workflow](CONTRIBUTING.md), and [repository rules](AGENTS.md).
+Branch from `dev` as `<user>/<scope>/<name>`; pull requests target `dev`.
+Run `make check` before opening a PR, plus the relevant frontend or database
+checks for the change.
 
-Branch off `dev` as `<user>/<scope>/<name>`; pull requests target `dev`.
+The extraction from HybridInference completed in August 2026.
+[MIGRATION.md](MIGRATION.md) preserves its decisions and deferred work. Current
+work is tracked in this repository's issues and pull requests.
 
 ## License
 
-[MIT](LICENSE) — the same licence, and the same copyright holder, as the
-HybridInference repository this code is extracted from. See
-[MIGRATION.md](MIGRATION.md#licence-and-provenance).
+[MIT](LICENSE). The code retains the HybridInference project's copyright and
+license; see [licence and provenance](MIGRATION.md#licence-and-provenance).

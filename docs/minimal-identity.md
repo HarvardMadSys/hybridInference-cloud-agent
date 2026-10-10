@@ -1,94 +1,93 @@
 # Minimal Agent identity
 
-The Gateway's identity token contains only `iss`, `aud`, `sub`, `iat` and `exp`.
-Agent validates the signature, exact configured issuer, audience and expiry.
-An older Gateway may still include profile claims during the rollout; the
-verifier discards them immediately. Agent no longer calls the account-status
-endpoint. Admission comes from the existing `agent-access` contract.
+Cloud Agent stores the Gateway user ID and the issuer that minted it. It does
+not copy an account profile or derive permissions from account roles. Current
+access comes from the [Agent admission contract](agent-access-policy.md).
 
-A policy denial for an active account still permits a minimal identity session
-so the web app can explain that access is required. An unavailable account is
-refused at login using that same access contract's `subject_unavailable` error;
-proxy failures or unreadable responses remain temporary failures.
+## Tokens and sessions
 
-The Agent session contains only `sub`, `gateway_issuer`, `iat` and `exp`, signed
-with the Agent's own session secret. `gateway_issuer` identifies the upstream
-identity authority; it does not claim the Gateway signed this cookie. Sessions
-remain valid for thirty days and permissions are checked on each protected
-request. Cookies missing the new issuer field, carrying old profile fields, or
-belonging to another issuer are rejected. Users sign in again after upgrading.
-There is no session version, revocation table or copied account profile: a
-copied cookie works until it expires unless the Gateway withdraws Agent access
-or `AGENT_SESSION_SECRET` is rotated, which ends every session.
+| Credential | Claims retained by Agent | Validation |
+| --- | --- | --- |
+| Gateway identity token | `iss`, `aud`, `sub`, `iat`, `exp` | RS256 signature through JWKS, exact configured issuer, `cloud-agent` audience and expiry |
+| Agent session | `sub`, `gateway_issuer`, `iat`, `exp` | HS256 signature with `AGENT_SESSION_SECRET`, exact issuer, expiry and exact claim set |
 
-`/v1/session/me` returns only `id` and `agent_access`. The web settings contain
-theme and interface-language preferences; account profiles are managed on the
-Gateway. Tasks, messages, Git/MCP connection identifiers and encrypted business
-credentials remain Agent-owned data; this change does not filter user-authored
-content.
+Older Gateways may send additional profile claims. Agent discards them at
+verification. The session's `gateway_issuer` names the upstream identity
+authority; Agent signs the session itself. Sessions last 30 days. Legacy cookies
+missing the issuer or containing profile claims, and cookies from another issuer,
+are rejected. Users must sign in again after upgrading from those formats.
+
+An active account without Agent permission may establish a minimal session for
+the access-required page. A missing/inactive account is refused through the
+access contract's typed `subject_unavailable` error. Unreadable responses and
+proxy failures cannot establish access.
+
+`GET /v1/session/me` returns `id` and `agent_access`. Settings offer theme and
+interface-language preferences; account profiles belong to the Gateway. Tasks,
+messages, connection identifiers and encrypted Git/MCP credentials remain
+Agent-owned data. User-authored content is unaffected.
+
+There is no individual session-revocation table. A copied cookie remains valid
+until expiry; protected requests still require current Gateway access. Rotating
+`AGENT_SESSION_SECRET` invalidates every session. Withdrawing Gateway permission
+prevents subsequent protected requests.
 
 ## Database identity boundary
 
-The identity namespace binding is one singleton record in
-`agent_identity_namespace`, created by the `0001_schema_baseline` revision that
-replaced the pre-2026-09-10 migration chain (it was `0029_identity_namespace`
-in that chain, which no longer exists). It does not
-rewrite owners or infer the original issuer from a URL, a user ID, or old data.
-At startup both control-plane and MCP listeners compare `GATEWAY_ISSUER` with
-that record before starting background workers. A mismatch, or removing the
-issuer after binding, aborts startup. Two different issuers cannot concurrently
-initialize the same database.
+`agent_identity_namespace` has one record binding the database to a
+`GATEWAY_ISSUER`. Both the main API and MCP listener validate the binding before
+starting workers. The binding never rewrites owner IDs or infers their issuer
+from old rows. Its table is part of `0001_schema_baseline`; the retired migration
+chain called this change `0029_identity_namespace`.
 
-An empty Agent database records its first configured issuer automatically. An
-existing database with tasks, connections or other owner data requires explicit
-adoption into its **original** identity namespace. Adoption cannot overwrite a
-recorded issuer. A deployment with neither a Gateway configuration nor a stored
-issuer can still start for local infrastructure administration; identity login
-and session authentication remain unavailable until the issuer is configured.
+| Database state | Startup/check behavior |
+| --- | --- |
+| Empty, no binding, issuer configured | Bind automatically to that issuer |
+| Owner data present, no binding, issuer configured | Refuse until an operator explicitly adopts the original issuer |
+| Bound to the configured issuer | Continue |
+| Bound to another issuer, or issuer removed after binding | Refuse |
+| Neither Gateway configuration nor binding | Allow local infrastructure administration; identity/session authentication stays unavailable |
 
-Use the exact `iss` the original Gateway signs. `GATEWAY_BASE_URL` and JWKS URLs
-are transport locations and may change without changing the identity domain.
-Distinct Gateways must not reuse an issuer. Replacing a Gateway database with
-an unrelated identity domain under the same issuer is not a supported migration.
+Concurrent initialization is serialized. Adoption can fill an absent binding;
+it cannot replace one. Use the exact `iss` signed by the original Gateway.
+`GATEWAY_BASE_URL` and JWKS URLs are transport locations and can change without
+changing the identity namespace. Independent Gateways must use distinct issuers.
+Replacing the Gateway's account database with unrelated identities under the
+same issuer is not a supported migration.
 
 ## Upgrade an existing deployment
 
-An upstream `dev` merge publishes a release but deploys no named environment.
-Complete the identity preparation below **before a downstream distribution
-advances its lock or deploys**, separately for staging and production; the
-database contents do not reveal which issuer originally owned them.
+Prepare each environment before its distribution advances the Agent release.
+Merging upstream source does not deploy a named environment, and existing owner
+rows do not reveal the original Gateway issuer.
 
-1. Verify the original Gateway's effective issuer in its running deployment
-   environment. `serving.utils.identity_tokens.issuer()` reads `IDENTITY_ISSUER`,
-   falls back to `base_url`, and removes trailing slashes. Pin
-   `IDENTITY_ISSUER` to that existing effective value on the Gateway, and set
-   `GATEWAY_ISSUER` to the same value in the Agent deployment's `.env`. Do not
-   infer either value from a transport hostname or from another environment.
-2. Back up the Agent database. Use a checkout and image containing this change
-   to migrate it to head and to run the explicit adoption against the existing
-   Agent database. Keep the original Gateway configuration unchanged during
-   preparation; the old API and MCP relay may remain running because this
-   only records their existing identity namespace, without rewriting owners.
-   On a database still stamped with the pre-2026-09-10 chain, `upgrade head`
-   cannot run: those databases require either the supported history-preserving
-   copy conversion or an intentional selected-state rebuild, as
-   `docs/operations.md` describes. The resulting deployment runs
-   `identity_namespace --check` before either listener starts, so the issuer
-   must be settled before it, not after.
-3. In the same deployment environment, explicitly acknowledge that ownership:
+1. Verify the original Gateway's effective issuer from its running environment.
+   In the Gateway implementation used by the original rollout,
+   `serving.utils.identity_tokens.issuer()` reads `IDENTITY_ISSUER`, falls back
+   to `base_url`, and removes trailing slashes. Pin the verified effective value
+   as Gateway `IDENTITY_ISSUER` and Agent `GATEWAY_ISSUER`. Verify staging and
+   production separately.
+2. Back up the Agent database. If it still uses the migration chain from before
+   2026-09-10, follow the conversion/rebuild procedure in
+   [operations](operations.md) before running migrations. `upgrade head` cannot
+   directly convert a retired revision stamp. With the supported schema, migrate
+   to head using the prepared release image.
+3. Adopt existing owner data into its original issuer, then verify the binding.
+   In an environment with the Agent package and database configuration:
 
-   ```sh
+   ```bash
    python -m cloud_agent.identity_namespace --adopt-existing --issuer '<original-issuer>'
+   python -m cloud_agent.identity_namespace --check
    ```
 
-   The argument must match `GATEWAY_ISSUER`. This command records only an absent
-   issuer and preserves every task, connection and owner ID. It refuses to
-   change an already-recorded issuer, even with the adoption flag.
+   The adoption argument must exactly match `GATEWAY_ISSUER`. It changes only an
+   absent binding, preserving tasks, connections and owner IDs. There is no
+   persistent auto-adoption switch.
 
-   For the Compose deployment, run from the prepared checkout using the
-   **existing** Compose project name and the active environment file:
+   For Compose, use the existing project name, active environment file and
+   prepared checkout:
 
-   ```sh
+   ```bash
    export AGENT_DEPLOYMENT_SHA="$(git rev-parse HEAD)"
    dc() {
      docker compose -p '<existing-project>' --env-file '<active-env-file>' \
@@ -101,64 +100,44 @@ database contents do not reveal which issuer originally owned them.
    dc run --rm --no-deps control-plane python -m cloud_agent.identity_namespace --check
    ```
 
-   These preparation commands reuse the existing Postgres service and do not
-   replace the running API or MCP relay. There is no persistent auto-adoption
-   switch; a later unbound database requires its own explicit acknowledgement.
-4. Merge and let CD release the Agent backend and web app together. Verify
-   sign-in, `/me`, owner/admin permissions and existing task ownership. Old
-   cookies must be rejected and replaced through a fresh login.
-5. The Gateway profile-removal change may be released before or after this
-   Agent version: the current permission-based Agent treats token profiles as
-   optional. Agent-first is recommended because it removes the extra profile
-   lookup sooner. This compatibility does not cover Agents predating the
-   Gateway permissions contract.
+   These commands require the existing Postgres service to be running. They
+   prepare the binding without replacing the API or MCP relay.
+4. Release Agent backend and web app together through the deployment workflow.
+   Verify fresh login, `/me`, owner/admin permissions and ownership of existing
+   tasks. Confirm legacy cookies are rejected.
 
-`deploy.sh` now runs `identity_namespace --check` after migration and before
-bootstrapping either listener, waiting on host readiness, or replacing the
-running stack. A missing issuer, a conflicting binding, or unadopted historical
-data stops the control-plane deployment before its existing API/MCP containers
-are replaced. An empty database may initialize its binding during this check.
-Both Compose listeners require the same `GATEWAY_ISSUER`. The independent host
-rollout still runs in parallel, so this guard does not replace the pre-merge
-preparation above.
+`deploy/control-plane/deploy.sh` runs the identity check after migration and
+before bootstrap, host-readiness waiting or API/MCP replacement. Unadopted owner
+data, a missing required issuer or a conflicting binding stops that deployment.
+The host rollout can run in parallel, so prepare the identity boundary first.
+Both Compose listeners use the same issuer.
 
-For the local Docker demo, `dev.sh` supplies its fixed `freeinference-local`
-issuer. An existing demo database still needs explicit adoption with that issuer;
-updating the example environment does not silently authorize its history.
+A permission-capable Gateway may remove profile claims before or after this
+Agent release; Agent treats them as optional. Older Gateways without the access
+contract remain incompatible. The local Docker stack uses the fixed issuer
+`freeinference-local`; existing unbound demo owner data needs explicit adoption
+of that issuer too.
 
-**A downgrade is not a way back through this boundary.** The rewritten
-`0001_schema_baseline` drops its tables — `agent_identity_namespace` among them
-— so a `downgrade` deletes the record that says which Gateway minted the
-`user_id`s in the database. **It deletes the owner data with it**: the rewrite is
-one baseline revision, so `downgrade base` drops `agent_threads`, the
-connections and everything else, not just the binding. There is no partial
-downgrade that keeps the rows and drops the record.
+### Rollback and restore constraints
 
-What happens on the way back up depends on whether the rows come back with it,
-and the two cases are not the same:
+Do not use `alembic downgrade base` to undo identity binding: the baseline drops
+owner tables and `agent_identity_namespace` together. No partial downgrade
+preserves owner data while removing only this record.
 
-- **Re-upgrade with nothing restored** — the database is empty, so it takes the
-  empty-database path: `identity_namespace --check` binds whatever
-  `GATEWAY_ISSUER` is configured at that moment and exits 0. Verified on a
-  throwaway database: issuer A and one thread, `downgrade base`, `upgrade head`,
-  then `--check` under issuer B — exit 0, bound to B, zero rows. **A downgrade
-  round trip is a total data loss, and the rebind to a different issuer is
-  silent**; nothing here refuses it, because there is no history left to
-  attribute to anyone.
-- **Re-upgrade with owner data restored but not the binding** — this is the case
-  the guard exists for. `_has_owner_data()` finds a row keyed by `user_id`,
-  `--check` exits 1 with "existing owner data but no identity issuer", and the
-  deploy stops before either listener starts. Recovery is the explicit adoption
-  below, with the *original* issuer. Verified on the same probe: one thread, no
-  binding, issuer B configured — exit 1.
+- Re-upgrading an empty database automatically binds the currently configured
+  issuer. It cannot protect history already deleted by the downgrade.
+- Restoring owner rows without their matching binding causes the identity check
+  to fail. Restore the original binding or explicitly adopt the verified
+  original issuer using the procedure above.
 
-So the guard protects a restore, not the downgrade itself: restoring owner rows
-without the matching `agent_identity_namespace` row is what stops the
-deployment, and it stops it for the right reason. Rolling back to an old
-Agent binary is worse still: it would restore profile cookies and would not
-enforce this record. Neither a downgrade nor an old binary is a safe
-identity-boundary rollback; prefer a compatible fix, or stop Agent while
-leaving the Gateway running.
+An older Agent binary may accept profile cookies and ignore the stored issuer.
+Prefer a compatible forward fix, or stop Agent while keeping the Gateway
+available. Back up and restore the binding with the data whose owners it names.
+
+The implementation is in
+[`identity.py`](../apps/backend/cloud_agent/identity.py),
+[`identity_namespace.py`](../apps/backend/cloud_agent/identity_namespace.py) and
+[`lifespan.py`](../apps/backend/cloud_agent/bootstrap/lifespan.py).
 
 ## Local verification (2026-09-10)
 

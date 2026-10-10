@@ -1,106 +1,115 @@
 # Agent admission policy
 
-The deployment decides who can use Agent. HybridInference verifies the account
-and runs the deployment's registered policy; this service consumes the decision
-from `GET /internal/users/{user_id}/agent-access` using its dispatch credential.
-FreeInference's policy currently grants `agent.use` and `agent.admin` only to
-active admin accounts. A different deployment can grant different accounts
-access without changing this service.
+The Gateway returns the deployment's decision about who may use Cloud Agent.
+Agent reads `GET /internal/users/{user_id}/agent-access` over HTTP with its
+dispatch credential. The response contains `user_id`, `allowed` and
+`permissions`; account roles and profile fields are not authorization inputs.
 
-`agent.use` permits the owner API, subject to the existing job ownership checks.
-`agent.admin` additionally permits the runner-host administration API. The latter
-requires `agent.use`. Sessions contain no account role or profile. The access
-policy migration itself needs no account table; the subsequent
-[minimal identity migration](minimal-identity.md) records the database issuer.
+## Permissions and request checks
 
-Login checks the current decision and verifies that the account still exists
-and is active before issuing a session. An active account with no Agent permission
-can sign in to see the access-required page; its session grants no protected
-owner or admin access. Missing and inactive accounts receive no new session.
-Existing sessions
-are checked again on each protected owner/admin request and on `/v1/session/me`.
-The session response includes `agent_access: {allowed, permissions}` so the web
-app can render the same decision. Missing, malformed, unavailable or contradictory
-decisions never grant access. The frontend must also deny when an older `/me`
-response lacks `agent_access`.
+| Permission | Access |
+| --- | --- |
+| `agent.use` | Owner APIs, subject to per-resource ownership checks |
+| `agent.admin` | Gateway-authorized administration, including runner-host APIs; requires `agent.use` |
 
-When current access cannot be checked, `/me` returns 503 and the web app hides
-protected content and offers a retry without sending the user through sign-in.
-Callback outages redirect to the public login page with a retry action and the
-original destination, clearing the consumed login-flow cookie. An account refusal
-uses a separate explanation. Only a 403 explicitly typed `subject_unavailable`
-is an account denial; an untyped or proxy-generated 403 is an operational failure.
+`allowed` must agree with the presence of `agent.use`. Permissions must be
+unique, use recognized values and include `agent.use` whenever `agent.admin`
+is present. A decision for another user, or any malformed or contradictory
+response, cannot grant access.
 
-Missing local identity configuration, a missing Gateway endpoint, and a rejected
-dispatch credential return a typed `agent_configuration_error` (HTTP 503). The
-web app asks the operator to correct the deployment instead of offering a retry.
-Temporary transport/server failures retain the retry action. An invalid `/me`
-response is reported separately. Expired or invalid browser login flows return
-to the public login page with a fresh-start action; they never redeem an
-unverified state or reuse a consumed code. When no web destination is configured,
-the API keeps its HTTP error response.
+The FreeInference policy documented by the original rollout grants both
+permissions to active admin accounts. Another deployment can register a policy
+that admits other accounts without changing Agent. A neutral Gateway with no
+registered policy denies access. Verify the policy in the deployment being
+operated; this repository consumes its decision.
 
-The lookup contract declares exact error-type enums for Agent access refusals.
-Unit tests exercise those declared types through the actual Agent client and
-permission resolver. To check the producer as well, run the read-only HTTP probe
-against an isolated or otherwise authorized Gateway:
+An active account denied Agent permission can still sign in to see the
+access-required page. Missing or inactive accounts cannot create a session.
+Existing sessions recheck permissions on each protected owner/admin request and
+on `/v1/session/me`. The session response exposes
+`agent_access: {allowed, permissions}`. The web app denies access if that field
+is missing, including responses from an older backend.
+
+Checks govern admission of each request. A policy change does not itself close
+an open stream or cancel a running job. Agent caches no session permissions;
+the Gateway's account cache can still delay direct database edits until its
+expiry. Ordinary Gateway account-management operations invalidate that cache.
+
+## Failure behavior
+
+| Condition | Result |
+| --- | --- |
+| Explicit policy denial | Protected APIs refuse access; an active account can see the access-required page |
+| Gateway 403 typed `subject_unavailable` | Refuse a new login; existing sessions receive a denied access decision |
+| Missing identity configuration, missing access endpoint or rejected dispatch credential | HTTP 503, typed `agent_configuration_error`; correct the deployment |
+| Transport/server failure, unreadable decision or untyped/proxy 403 | HTTP 503; retry after the Gateway recovers |
+| Expired or invalid login-flow state | Return to login and start a fresh flow |
+
+When `/me` cannot confirm current access, the web app hides protected content
+and offers a retry without forcing another sign-in. A callback outage returns
+to the public login page with the original destination and a retry action; the
+consumed login-flow cookie is cleared. Configuration failures ask the operator
+to correct the deployment. An invalid `/me` payload has its own explanation.
+Without a configured web destination, the API retains its HTTP error response.
+Unverified state and consumed authorization codes are never reused.
+
+## Infrastructure credentials
+
+`ADMIN_TOKEN` independently authorizes infrastructure administration even when
+the Gateway is unavailable. The on-call dispatch credential must also pass the
+configured service account's `agent.use` check before creating a job; its
+polling and cancellation access remains available for cleanup. Host/worker
+credentials, attempt lease fences and owner checks are separate controls.
+
+Sessions carry minimal identity only. See
+[minimal identity](minimal-identity.md) for cookie contents, issuer binding and
+upgrade constraints.
+
+## Verify the Gateway contract
+
+The schema is in
+[`internal-lookups.openapi.yaml`](../gateway_contracts/internal-lookups.openapi.yaml).
+Local tests validate its error types against the Agent client and permission
+resolver. To validate an isolated or otherwise authorized Gateway over HTTP:
 
 ```bash
-# Supply these through the environment; do not commit or print the dispatch token.
+# Set both values securely in the environment before running; never commit them.
 export AGENT_CONTRACT_GATEWAY_URL
 export AGENT_CONTRACT_DISPATCH_TOKEN
 uv run pytest -q -m external tests/external/test_gateway_access_contract.py
 ```
 
-The probe queries a randomly named missing account and validates the Gateway's
-actual 403 response against the schema and consumer. It creates no accounts and
-does not access either database directly. This external test requires explicit
-Gateway credentials and is not part of default CI; ordinary CI runs the local
-schema/consumer agreement tests. It was exercised against the production Gateway
-router and error handler as merged by `c7987680` ("feat(agent): expose
-deployment-owned access permissions", hybridInference#1408), using an isolated
-empty account-store fixture over loopback HTTP. The commit this line used to
-cite, `bd93e98fe`, is a documentation-only one and named no router revision.
-
-The local `ADMIN_TOKEN` remains an infrastructure credential independent of
-Gateway availability. The dedicated on-call token must additionally pass the
-configured service account's `agent.use` check before creating jobs. Its existing
-polling/cancellation credentials remain available for cleanup. Worker credentials,
-lease fences and per-job ownership checks retain their separate purposes.
-
-Checks apply when a request is admitted. This change does not terminate an
-already-open stream or already-running job when the deployment policy changes.
-There is no session permission cache; each new protected request asks the Gateway.
-The Gateway retains its existing account-row cache. Normal account management
-invalidates it, while direct database edits or updates from another process can
-remain unseen until that cache expires.
+The probe queries a randomly named missing account and checks the real 403
+against the schema and consumer. It creates no accounts and opens neither
+database. It requires explicit Gateway credentials and is excluded from default
+CI. Historical verification exercised the production Gateway router/error
+handler from `c7987680` (hybridInference#1408) through an isolated empty-store
+fixture over loopback HTTP; it did not verify a live deployment.
 
 ## Rollout
 
-1. Stage the FreeInference policy registration. Its compatibility path permits
-   the currently pinned older Gateway, which has no Agent access hook yet.
-2. Publish and validate a Gateway build with the policy hook and access endpoint,
-   then update FreeInference's upstream lock to the real backend and frontend
-   artifacts. The frontend must include the explicit internal access-path rewrite.
-   Verify that an active admin receives both permissions, a non-admin receives
-   an explicit denial, and inactive accounts are refused.
-3. Release this Agent backend and web app together. Verify existing sessions as
-   well as a fresh login, owner requests and runner-host administration.
+For a deployment first adopting permission-based access:
 
-A neutral Gateway with no registered policy returns a denial. An older Gateway
-without the endpoint is incompatible with the permission-consuming Agent and
-causes protected requests to fail closed. To roll back the Gateway to such a
-version, first roll back the Agent backend and web app to a mutually compatible
-release. Never compensate by restoring role-based fallback in the new Agent.
+1. Configure its Gateway policy registration.
+2. Release the Gateway policy hook and access endpoint together with compatible
+   distribution backend/frontend artifacts. Verify an admitted account, an
+   active account without permission, and a missing/inactive account. Ensure
+   the deployment's proxy routes the internal access path correctly.
+3. Release Agent backend and web app together. Check fresh login, existing
+   sessions, owner APIs and administration.
 
-After adopting the minimal-identity release, follow its
-[upgrade and rollback constraints](minimal-identity.md#upgrade-an-existing-deployment)
-instead: older Agent binaries do not enforce the database's stored issuer, and
-existing profile cookies must be replaced through a fresh login.
+A Gateway without the access endpoint is incompatible and causes protected
+requests to fail closed. Do not add role-based fallback to compensate. After
+adopting minimal identity, follow its
+[upgrade and rollback constraints](minimal-identity.md#upgrade-an-existing-deployment):
+older Agent binaries do not enforce the database issuer, and profile-bearing
+cookies require a fresh login. Source changes alone do not update pinned images
+or deploy either service.
 
-The API's wire schema and errors are recorded in
-[`internal-lookups.openapi.yaml`](../gateway_contracts/internal-lookups.openapi.yaml).
-Source changes alone do not update pinned images or deploy any service.
+The implementation is in
+[`agent_access.py`](../apps/backend/cloud_agent/agent_access.py),
+[`deps.py`](../apps/backend/cloud_agent/api/deps.py) and
+[`session.py`](../apps/backend/cloud_agent/api/session.py).
 
 ## Local verification (2026-09-10)
 

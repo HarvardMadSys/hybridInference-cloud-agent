@@ -1,161 +1,131 @@
 # Conversation navigation
 
-A long conversation is a stack of turns — what you asked, what the agent did
-about it, what it answered. The rail beside the transcript is the index into
-that stack: one mark per turn, in the order the turns appear.
+Use the turn rail beside **Chat** to find earlier questions and replies without
+leaving the conversation. Each mark represents one turn in transcript order.
+The newest mark takes you to that turn's beginning; **Back to bottom** takes you
+to the end and resumes following new output.
 
-This document describes the behaviour as shipped. The design, its alternatives
-and the measurements behind the sizes are in
-[the turn navigation design](specs/2026-09-11-conversation-turn-navigation-design.zh.md).
+This guide describes the current implementation. For design decisions and sizing
+measurements, see the [turn navigation design](specs/2026-09-11-conversation-turn-navigation-design.zh.md).
 
 ## The rail
 
-Marks appear in the right-hand gutter of the Chat column, not at the edge of the
-browser window, so opening the workspace does not move them away from the
-conversation. The rail is hidden while a conversation has fewer than two turns:
-a ladder with one rung is not navigation.
+The rail sits in the Chat column's right gutter. It appears when the conversation
+has at least two visible turns, the column is at least 720px wide, the reading
+area is at least 200px high, and the device reports a fine pointer. Opening the
+workspace can make the column too narrow to show it. On smaller or touch-only
+layouts, use normal transcript scrolling. Trajectory has no rail.
 
-A mark is a quiet hairline until it matters. The turn you are reading is the
-longest and darkest mark; the mark under the pointer or keyboard focus widens a
-little; everything else stays short. Mark length carries interaction state only
-— never message length, duration, token spend or progress.
+The current turn has the longest, darkest mark. Hovered or focused marks widen
+slightly. These lengths indicate interaction state; they do not encode message
+length, duration, tokens or progress.
 
-Long conversations keep a fixed gap between marks and scroll inside the rail
-instead of compressing. The faded ends of the rail say which way there is more.
-Scrolling the rail never scrolls the transcript.
-
-The rail is the only turn navigation control. There is no header menu or list
-panel. When the column is too narrow, the reading area too short, or the input
-is touch, the rail stays hidden and the transcript scrolls normally.
+Marks retain their spacing in long conversations. Scroll within the rail to
+reach more turns; faded ends indicate additional marks. Scrolling the rail does
+not scroll the transcript. There is no separate turn menu or list panel.
 
 ## Previews
 
-Pointing at a mark, or moving keyboard focus to it, shows that turn: the
-question and the last reply the transcript shows for it. The compact card uses
-two text levels and a light shadow, without a visible turn number or status row.
-Nothing moves while the preview is open — hovering a mark does not
-scroll the transcript, does not request anything, and does not change which turn
-is current. Moving the pointer onto the preview keeps it open; pressing Escape
-or leaving the rail closes it.
+Hover a mark or focus it with the keyboard to preview the question and its last
+visible reply. Moving the pointer onto the preview keeps it open. Escape closes
+it; moving away closes it after a short delay.
 
-The question is the words you actually sent, not the conversation's title. The
-reply is the last thing that turn said, and only once the turn has reached a
-terminal state: what a running turn has produced so far is not what it will say,
-and a card that rewrites itself under the pointer is worse than one that waits.
+The question uses the message that was sent, rather than the conversation title.
+A reply appears only after the turn reaches a terminal state, so a running
+answer does not change beneath the pointer. Previews follow the attempt shown
+in the transcript and contain only visible question/reply text. They exclude
+reasoning, tool arguments, tool output and runtime records. Question text is
+capped at 50 characters and reply text at 120.
 
-Nothing hidden is ever previewed. Chain-of-thought, tool arguments, tool output
-and runtime records stay out; the preview repeats text you could already read in the
-transcript, capped at fifty characters for the question and a hundred and twenty
-for the reply.
-
-A turn copied by Fork has no stored event log. Its preview and its transcript
-come from the durable messages the fork copied, so it reads the way it did in
-the conversation it came from.
+Hovering changes neither the reading position nor the current turn and sends no
+request. Copied Fork history uses durable messages for both transcript and
+preview even when those turns have no stored event log.
 
 ## Jumping
 
-Clicking a mark or pressing Enter on a focused mark moves the transcript so
-that turn's first question sits just
-below the top of the reading area. A turn with no question yet lands on whatever
-it does show.
+Click a mark, or press Enter or Space on a focused mark, to place the turn's
+first question about 24px below the top of the reading area. A turn without a
+question lands on its first visible content.
 
-Jumping is navigation inside the page. It does not change the URL, does not
-switch the selected run attempt, does not open the workspace, and never calls
-Fork, Rewind or Cancel. Arrow keys walk between marks and Home/End jump to the
-ends of the rail without scrolling the transcript; only Enter, Space or a click
-commits.
+Arrow keys move focus between marks; Home and End focus the first and last.
+Moving focus does not jump until you activate the mark. A jump leaves the URL,
+selected attempt and workspace state unchanged. It does not invoke Fork,
+Rewind or Cancel.
 
-A jump in flight is cancelled by the next one, by your own scrolling, and by
-leaving the conversation. If a turn cannot be located at all, the reading
-position is left where it was and a short message says so, rather than the
-transcript silently landing somewhere you did not ask for.
+A later jump, manual transcript scrolling or leaving the conversation cancels
+an unfinished jump. If the target cannot be found, the transcript stays in place
+and an accessible message reports that the turn is unavailable.
 
-**Back to bottom** is a different control from the newest mark. The newest mark
-goes to the beginning of the newest turn; Back to bottom goes to the end of the
-transcript and resumes following it. It appears as a circular chevron button,
-aligned with the right edge of the conversation content and 16px above the
-composer. Its tooltip and accessible name describe the action.
+**Back to bottom** is the circular chevron above the composer, aligned with the
+conversation content's right edge. It moves to the end of the transcript and
+resumes following output, while the newest rail mark moves to the beginning of
+the newest turn.
 
 ## Reading position
 
-The transcript grows while you read it, and where it grows decides whether it
-moves you.
+The transcript has two reading behaviors:
 
-- **Following** — the transcript stays at the end as output arrives. This is how
-  the conversation opens, and how it behaves after Back to bottom, after you
-  scroll down to the live end yourself, and after a follow-up you sent is
-  accepted.
-- **Reading** — the transcript holds its place. Scrolling up, focusing a turn
-  through the rail, or switching to an older run attempt puts it here, and new
-  output neither pulls you to the bottom nor shifts the text under your eyes.
-- While you are away from the end, the circular return button appears. New
-  content adds a small dot and updates its tooltip and accessible name. No text
-  capsule or persistent turn-number badge is shown over the conversation.
+- **Following:** new output keeps the transcript at its end. A conversation opens
+  this way. Following resumes after Back to bottom, scrolling to the live end,
+  or acceptance of a follow-up you sent.
+- **Reading:** the transcript holds the text in place as output arrives. Scrolling
+  up, jumping through the rail, or selecting an older run attempt enters this
+  state.
 
-Whether you are at the end is a measurement, not a settings toggle. Returning to
-the end is always something you do.
+Back to bottom appears while you are away from the end. New content adds a dot
+and updates the button's tooltip and accessible name. It does not automatically
+pull you back to the live end. Switching from Chat to Trajectory and back keeps
+the page's reading position; reloading opens at the end again.
 
 ## Accessibility
 
-The rail is a named navigation region of real buttons. Each mark is labelled
-with the turn it addresses, the current one is marked `aria-current`, and the
-preview is associated with its mark as a description. Arrow keys move between
-marks, Home and End go to the first and last, and Enter or Space jumps. Only one
-mark is in the tab order at a time, so a two-hundred-turn conversation does not
-take two hundred Tab presses to pass. Escape closes the preview.
+The rail is a named navigation region with real buttons. Each mark names its
+turn, the current mark has `aria-current`, and the preview is associated with
+its mark as a description. One mark is in the tab order at a time. Arrow keys,
+Home and End reach the others without requiring a Tab press for every turn.
+Enter or Space jumps; Escape closes the preview.
 
-A jump is announced once to screen readers when you ask for it, without a
-visible turn-number badge. Nothing is announced while output streams. The
-transcript retains named turn anchors, but has no numbered divider labels.
-
-Reduced-motion preferences are honoured, and both shipped languages have full
-strings for the rail, the previews and the accessible states.
+A requested jump is announced once to screen readers. Streaming output does
+not repeatedly announce navigation state. Turn anchors remain named, without
+visible numbered dividers. English and Simplified Chinese strings, light/dark
+themes and reduced-motion preferences are supported.
 
 ## What the rail does not do
 
-- It does not change the conversation's data. There is no new endpoint, no new
-  subscription, and hovering or jumping issues no request.
-- It does not list turns the page is not showing. Opening an older turn's link
-  lists the turns that are on screen and stops there, rather than offering a
-  jump to a turn with no body to land on.
-- It does not persist anything. The reading position lives in the page, and
-  reloading starts the conversation at its end, like a fresh open.
+The rail navigates only turns already rendered by the page. Opening a historical
+turn link limits the rail to that view; it does not offer a jump to later turns
+whose bodies are absent. Hovering and jumping add no endpoint, subscription or
+network request. Navigation does not persist a reading position across reloads
+or alter conversation data.
 
 ## Verifying it in a browser
 
-Real layout is the part jsdom cannot supply: the unit tests pin the arithmetic
-(`useConversationScroll.test.ts`), the controller's decisions against an injected
-box model (`useConversationScroll.dom.test.tsx`), the pure data rules
-(`conversationTurnNavigation.test.ts`) and rendering and focus
-(`TurnNavigator.test.tsx`, `JobDetail.test.tsx`). What none of them can prove is
-what a browser actually lays out — Markdown reflow, the sticky composer's real
-height, ResizeObserver timing, pointer and touch input, and the landing distance
-in pixels. Check the following in a real browser, against a conversation with at
-least a few turns:
+Use a real browser and a conversation with several turns. Unit and DOM tests
+cover navigation data, focus and an injected box model; browser checks are still
+needed for Markdown reflow, the sticky composer, resize timing and actual pixel
+positions.
 
-1. **Landing.** Click the middle mark: the turn's question sits about 24px below
-   the top of the reading area, and the mark you clicked is the current one.
-2. **Long turn.** Scroll deep into a long turn so its own question is off screen:
-   its mark stays current.
-3. **Streaming.** With a run producing output, scroll up. Existing text keeps its
-   screen position (within a few pixels) while new output arrives, and the
-   Back to bottom control appears.
-4. **Resuming.** Scroll back down to the end, or press Back to bottom, and confirm
-   following resumes — then scroll up again and confirm it does not resume on its
-   own.
-5. **Both widths.** At a Chat column wider than 720px the rail is visible and the
-   text clears it; narrower, or with the workspace open on a small screen, the
-   rail is hidden and the transcript remains scrollable. No Turns button or
-   list panel appears at either width.
-6. **Rearrangement.** Expand and collapse a tool row, change the composer's
-   height, and open or close the workspace while reading history: the text you
-   were reading stays put.
-7. **A hundred turns.** With a long conversation, marks keep their spacing, the
-   rail scrolls inside itself and the keyboard reaches every mark.
-8. **Forked history.** In a conversation copied by Fork, the copied turns have
-   marks and previews even though they have no stored events.
-9. **Views.** Trajectory shows no rail; returning to Chat restores the reading
-   position.
-10. **Keyboard and languages.** Complete the flow with the keyboard only, in both
-    light and dark themes, in English and Simplified Chinese, with reduced motion
-    enabled.
+1. Click a middle mark. Its question should land about 24px below the reading
+   area's top, and the mark should become current.
+2. Scroll well into a long turn until its question is off-screen. That turn's
+   mark should remain current.
+3. While output streams, scroll up. Existing text should retain its screen
+   position within a few pixels, and Back to bottom should appear.
+4. Use Back to bottom or scroll to the end. Following should resume. Scroll up
+   again and confirm following stays paused.
+5. Test columns on both sides of 720px, reading areas on both sides of 200px,
+   and touch input. Hidden-rail layouts must still scroll normally.
+6. Expand a tool row, resize the composer, and open/close the workspace while
+   reading history. The text under the reader should stay in place.
+7. With roughly 100 turns, check fixed mark spacing, rail scrolling and keyboard
+   access to every mark.
+8. Fork a conversation and verify copied turns have marks and previews.
+9. Switch to Trajectory and back. Verify the rail is absent in Trajectory and
+   Chat retains the reading position.
+10. Repeat keyboard navigation in both languages, both themes and reduced motion.
+
+Implementation and tests live in
+[`JobDetail.tsx`](../apps/frontend/src/components/features/agents/JobDetail.tsx),
+[`TurnNavigator.tsx`](../apps/frontend/src/components/features/agents/TurnNavigator.tsx),
+[`conversationTurnNavigation.ts`](../apps/frontend/src/components/features/agents/conversationTurnNavigation.ts)
+and [`useConversationScroll.ts`](../apps/frontend/src/components/features/agents/useConversationScroll.ts).

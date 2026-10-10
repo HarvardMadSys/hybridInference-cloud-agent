@@ -1,125 +1,117 @@
 # The gateway contracts this service depends on
 
-Three OpenAPI documents describing **the gateway's** side of the split, not
-this service's. They exist because after the split those calls are the only
-way this repository can answer questions it used to answer by importing, and a
-cross-repo dependency that lives only in two codebases' heads is one that
-drifts silently.
+The three YAML documents describe the Gateway HTTP APIs consumed by Cloud Agent.
+They record the cross-repository boundary: Cloud Agent uses HTTP, never imports
+Gateway modules, and never holds the Gateway's signing secrets.
 
-| Document | Gateway module | Consumed here by |
+| Document | Gateway router | Cloud Agent consumer |
 |---|---|---|
-| [`identity.openapi.yaml`](identity.openapi.yaml) | `serving/servers/routers/identity.py` | [`identity.py`](../apps/backend/cloud_agent/identity.py), [`api/session.py`](../apps/backend/cloud_agent/api/session.py) |
-| [`inference-grants.openapi.yaml`](inference-grants.openapi.yaml) | `serving/servers/routers/agent_grants.py` | [`grants.py`](../apps/backend/cloud_agent/grants.py) |
-| [`internal-lookups.openapi.yaml`](internal-lookups.openapi.yaml) | `serving/servers/routers/internal_lookups.py` | [`gateway.py`](../apps/backend/cloud_agent/gateway.py) |
+| [identity.openapi.yaml](identity.openapi.yaml) | `serving/servers/routers/identity.py` | [identity.py](../apps/backend/cloud_agent/identity.py), [gateway.py](../apps/backend/cloud_agent/gateway.py), [api/session.py](../apps/backend/cloud_agent/api/session.py) |
+| [inference-grants.openapi.yaml](inference-grants.openapi.yaml) | `serving/servers/routers/agent_grants.py` | [grants.py](../apps/backend/cloud_agent/grants.py) |
+| [internal-lookups.openapi.yaml](internal-lookups.openapi.yaml) | `serving/servers/routers/internal_lookups.py` | [gateway.py](../apps/backend/cloud_agent/gateway.py) |
+
+This directory also contains the JSON snapshot of Cloud Agent's own public API,
+[described below](#the-one-document-here-that-is-ours).
 
 ## What these are, and what they are not
 
-**Hand-written from the gateway's source, not generated from a running
-gateway.** Generating them would make the document agree with whatever is
-deployed, which is the opposite of what a contract is for: the value is that it
-says what was *agreed*, so a gateway that stops honouring it produces a
-disagreement someone can see rather than a client that quietly breaks.
+The YAML contracts are hand-written from Gateway source. They document the
+agreed interface independently of a running deployment. Only endpoints consumed
+by this service are included; they are not a complete Gateway API reference.
 
-**They are not validated against at runtime.** Nothing in this service loads
-them. A client that drifts from its contract is caught by review and by the
-tests named in each document's `x-pinned-by`, not by a schema check on every
-call — a wire-level validator here would fail closed on a gateway that added an
-optional field, which is a compatible change.
-
-**Only the endpoints this service calls appear.** The gateway's public API is
-much larger; none of the rest is a dependency of this repository, and listing
-it would invite someone to treat this directory as a mirror of the gateway.
+The application does not load these documents or validate every response against
+OpenAPI at runtime. Consumer tests and review check agreement with the contracts.
+Runtime clients handle compatible additions such as optional fields; the live
+contract tests can still flag undeclared additions for documentation review.
 
 ## Source commits
 
-Each document names, in `info.x-source`, the branch and file it was **written
-from**. That is a historical record, not a claim about where the code lives now,
-and it is kept because a contract's value is that it says what was *agreed* at a
-known point — a later reader can diff the two.
+Each document's `info.x-source` records the repository, branch, source files,
+and, when available, commit used to write it. These references are provenance,
+not a statement that your Gateway deployment runs that version.
 
-All three are served by the gateway's `main`. Checked 2026-09-10 by reading the
-route decorators at `origin/main`, not by a schema re-review:
+A route check recorded on 2026-09-10 found all three routers on the Gateway's
+`origin/main`:
 
-| Document | Served by |
+| Document | Routes checked |
 |---|---|
-| `identity.openapi.yaml` | `apps/backend/serving/servers/routers/identity.py` — `/v1/identity/{jwks,code,token}`. |
-| `inference-grants.openapi.yaml` | `apps/backend/serving/servers/routers/agent_grants.py` — mint / renew / revoke / usage. |
-| `internal-lookups.openapi.yaml` | `apps/backend/serving/servers/routers/internal_lookups.py` — `/internal/model-catalog` and `/internal/users/{user_id}/agent-access`; it also still serves `/internal/users/{user_id}/status`, which this document does not describe. |
+| `identity.openapi.yaml` | `/v1/identity/jwks`, `/v1/identity/code`, `/v1/identity/token` |
+| `inference-grants.openapi.yaml` | Grant mint, renew, revoke, and usage routes |
+| `internal-lookups.openapi.yaml` | `/internal/model-catalog` and `/internal/users/{user_id}/agent-access` |
 
-**Which branch a router is on is not the durable question.** `main` is a
-fast-forward mirror of `dev` (`.github/workflows/sync-main.yml`), so an endpoint
-that is on `dev` alone is a lag of hours to days rather than a state worth
-recording — a table that says so goes stale between writing and review. What a
-reader needs is whether *the gateway they are pointing at* serves the route: an
-older deployment may not, and
-[`docs/agent-access-policy.md`](../docs/agent-access-policy.md) carries the
-rollout, the compatibility path, and the fail-closed behaviour in that case.
+That historical check does not establish readiness of a current deployment.
+When a Gateway router changes, compare the contract with its merged source and
+run the relevant consumer and live contract tests. The local suite cannot read
+or verify files in the Gateway repository.
 
-**When the gateway changes one of these routers, re-verify the document against
-the merged source.** A review can change a contract, and a document describing
-the version proposed rather than the version accepted is exactly the silent
-drift this directory exists to prevent. Nothing here checks that for you —
-`tests/unit/test_contracts.py` pins this repository's side only.
+Agent admission is described in `internal-lookups.openapi.yaml`; it is not a
+fourth contract. The client uses `/internal/users/{user_id}/agent-access` rather
+than the retired user-status lookup. Before connecting an older Gateway, read
+[agent access policy](../docs/agent-access-policy.md) for deployment policy,
+rollout requirements, and fail-closed behavior.
 
 ## What these do not cover
 
-Two dependencies never appear in a response body, so no schema here can check
-them:
+Response schemas alone do not establish grant timing or the meaning of a
+refusal. Keep these dependencies aligned with the Gateway:
 
-- **The gateway's own clamps.** `grants.py` mirrors `GATEWAY_MAX_TTL_S` (900)
-  and `GATEWAY_RENEWAL_STEP_S` (300) from the gateway's `serving/grants.py`. A
-  request for more than the maximum is clamped *down* silently, and every
-  renewal re-times the grant to the gateway's step — so either one would shorten
-  a live grant without any call failing. The document declares both under
-  `x-constants` — as `MAX_GRANT_TTL_S` and `DEFAULT_GRANT_TTL_S`, deliberately
-  not under this client's names — but that is a declaration rather than a check:
-  each number also lives in the gateway and in `grants.py`, and comparing the
-  copies is left to tests rather than to anything in this directory.
-- **Which refusals mean "this grant is dead".** `DEAD_GRANT_REFUSALS`
-  (`unknown_grant`, `grant_not_live`, `subject_unavailable`) mirrors the
-  gateway's error *types*. The status code alone is not enough: the gateway
-  answers 404 for both a dead grant and an unconfigured internal API, and 401
-  for a rotated dispatch token.
+- `GATEWAY_MAX_TTL_S = 900` and `GATEWAY_RENEWAL_STEP_S = 300` in `grants.py`
+  mirror the Gateway's maximum and default grant TTL. The contract records them
+  as `MAX_GRANT_TTL_S` and `DEFAULT_GRANT_TTL_S` under `x-constants`. Requests
+  above the maximum are clamped, and renewal resets expiry using the renewal
+  step, so a mismatch can shorten a live grant without a failed call.
+- `DEAD_GRANT_REFUSALS` in `cloud_agent/workers/attempts.py` contains
+  `unknown_grant`, `grant_not_live`, and `subject_unavailable`. The worker uses
+  the error type to distinguish a dead grant from a Gateway configuration or
+  authentication failure. HTTP status alone is insufficient: a 404 can mean
+  either a dead grant or an unconfigured internal API.
 
-`tests/unit/test_grant_lifecycle.py` pins both mirrors against this service's
-own cadence — the requested lifetime must fit under the maximum, and the renewal
-loop and the give-up must fit inside the step. It cannot reach the gateway, so it
-would not notice the gateway changing one of them: the symptom is a sandbox
-losing its authorization mid-run — far from the constant that moved.
+`test_grant_constants_match_contract.py` compares the client constants with the
+YAML document. `test_grant_lifecycle.py` checks them against the client's renewal
+cadence and pins the dead-grant error types. The opt-in live grant lifecycle test
+checks the deployed Gateway's timing; local tests cannot establish that it uses
+these values.
 
 ## The one document here that is ours
 
-[`agent-control-plane.openapi.json`](agent-control-plane.openapi.json) is not a
-gateway contract. It is the API **this** service serves, generated from
-`create_app().openapi()` and committed key-sorted so that a change to the
-published shape is a diff somebody chose. `tests/unit/test_api_surface_contract.py`
-compares the served document with the committed file and fails when they
-disagree, catching a route changing its parameters or disappearing even if
-the behavioural tests still pass. The test does not overwrite the snapshot.
+[agent-control-plane.openapi.json](agent-control-plane.openapi.json) records the
+API served by Cloud Agent. It is generated from `create_app().openapi()` and
+committed with sorted keys so API changes can be reviewed.
 
-It is checked in rather than produced during CI on purpose: a document generated
-at test time agrees with whatever the code does by construction, which is the
-opposite of a contract. Regenerate it deliberately, in the pull request that
-changes the API, with the command in the
-[developer guide](../docs/development.md#changing-an-api) or that test's failure
-message.
+`tests/unit/test_api_surface_contract.py` compares the served schema with this
+snapshot and fails on disagreement. It does not regenerate the file. For an
+intentional API change, use the command in the
+[developer guide](../docs/development.md#changing-an-api), review the diff, and
+commit it with the implementation change.
 
 ## Checking them
 
+From the repository root, run the local document and snapshot checks:
+
 ```bash
-uv run pytest -q tests/unit/test_contracts.py
+uv run pytest -q \
+  tests/unit/test_contracts.py \
+  tests/unit/test_grant_constants_match_contract.py \
+  tests/unit/test_api_surface_contract.py
 ```
 
-CI runs these same tests. They validate each document as OpenAPI, check that
-every consumer test path cited in an `x-pinned-by` list exists, and verify that
-every `/internal/` or `/v1/` path literal in `gateway.py` and `grants.py` appears
-in some document. They cannot check whether the documents describe the
-gateway's current implementation; that is what the `x-source` references and
-the paired tests are for.
+The contract checks validate YAML documents as OpenAPI, verify that their
+`x-pinned-by.consumer` test paths exist, and check that `/internal/` and `/v1/`
+path literals in `gateway.py` and `grants.py` appear in a document. CI runs these
+checks. They establish agreement within this repository, not agreement with a
+live Gateway.
 
-A fourth family is consumed but not documented here as a separate document:
-`/internal/users/{user_id}/agent-access`, which lives in
-`internal-lookups.openapi.yaml` and replaced the retired
-`/internal/users/{id}/status`. See
-[the policy rollout and verification notes](../docs/agent-access-policy.md)
-before upgrading the Agent against an older Gateway.
+To check a deployment, set `AGENT_CONTRACT_GATEWAY_URL` and
+`AGENT_CONTRACT_DISPATCH_TOKEN`, then run:
+
+```bash
+uv run pytest -q -m external \
+  tests/external/test_gateway_access_contract.py \
+  tests/external/test_gateway_contracts_live.py
+```
+
+These probes check JWKS keys and typed refusals using randomly named missing
+accounts. The grant lifecycle case skips unless `AGENT_CONTRACT_SUBJECT` names
+an account selected for the test. Setting that variable opts into minting,
+renewing, and revoking a real grant; the test revokes it during cleanup.
+See [smoke testing](../docs/smoke.md) for the wider deployment checks.
