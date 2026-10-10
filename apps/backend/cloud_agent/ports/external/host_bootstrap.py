@@ -27,6 +27,10 @@ class DeploymentProfile(ComputeValue):
     files: dict[str, str] = Field(default_factory=dict)
     install_prerequisites: bool = True
     timeout_seconds: int = Field(default=1800, ge=60, le=7200)
+    # A provider-mounted local disk (the Cloud Agent CloudLab profile's
+    # ``dataMount``) that holds Docker's and containerd's state under their
+    # default paths. A Host's whole state is what moves between nodes.
+    data_mount: str | None = Field(default=None, pattern=r"^/[a-zA-Z0-9/_-]+$")
 
     @field_validator("deploy_root")
     @classmethod
@@ -51,12 +55,36 @@ class DeploymentProfile(ComputeValue):
 
 
 class BootstrapIntent(ComputeValue):
-    """Stable binding to be authorized before issuing an enrollment token."""
+    """Stable binding to be authorized before issuing an enrollment token.
+
+    ``namespace`` is the Compose project that names every retained sandbox,
+    group bridge and nftables table. It defaults to ``ca-<node>``; a node that
+    takes over a rotated Host keeps the Host's original namespace.
+    """
 
     operation_id: str
     allocation_id: str
     node_id: str
     host: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
+    namespace: str | None = Field(default=None, pattern=r"^ca-[a-z0-9]{1,61}$")
+
+    @property
+    def project(self) -> str:
+        """The Compose project this deployment runs under."""
+        return self.namespace or default_namespace(self.node_id)
+
+
+def default_namespace(node_id: str) -> str:
+    """The sandbox namespace of a Host started on this node."""
+    return "ca-" + node_id.replace("-", "").lower()
+
+
+class TransferResult(ComputeValue):
+    """What one node-to-node copy of a Host's container state moved."""
+
+    bytes_transferred: int = 0
+    seconds: float = 0.0
+    streams: int = 1
 
 
 class PreflightResult(ComputeValue):
@@ -117,8 +145,16 @@ class HostBootstrap(Protocol):
         profile: DeploymentProfile,
         intent: BootstrapIntent,
         enrollment_token: SecretStr | None,
+        *,
+        prerequisites: bool | None = None,
+        reenroll: bool = False,
     ) -> BootstrapResult:
-        """Install the trusted host recipe while retaining its existing safety gates."""
+        """Install the trusted host recipe while retaining its existing safety gates.
+
+        ``prerequisites=False`` skips package and Kata installation on a node
+        staged earlier. ``reenroll`` discards the node's persisted Host
+        credential so the supplied token enrolls it again.
+        """
         ...
 
     async def readiness(
@@ -131,4 +167,43 @@ class HostBootstrap(Protocol):
         self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
     ) -> HostInventory:
         """Observe stopped containers and orphan state for resource release guards."""
+        ...
+
+    async def stage(
+        self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
+    ) -> BootstrapResult:
+        """Install prerequisites and the recipe without starting or enrolling a Host."""
+        ...
+
+    async def stop(
+        self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
+    ) -> None:
+        """Stop the Host stack, its sandboxes and the container daemons, keeping all state."""
+        ...
+
+    async def transfer(
+        self,
+        source: NodeObservation,
+        target: NodeObservation,
+        target_profile: DeploymentProfile,
+        target_intent: BootstrapIntent,
+        *,
+        final: bool,
+        first: bool = False,
+    ) -> TransferResult:
+        """Copy Docker's and containerd's state directly from source to target.
+
+        ``first`` empties the staged target's fresh daemons before the copy;
+        ``final`` runs on a stopped source and deletes what it no longer has.
+        """
+        ...
+
+    async def revoke_transfer(self, source: NodeObservation, target: NodeObservation) -> None:
+        """Remove the one-off transfer key from both machines."""
+        ...
+
+    async def wipe(
+        self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
+    ) -> None:
+        """Delete a node's container state after its successor took the Host over."""
         ...
