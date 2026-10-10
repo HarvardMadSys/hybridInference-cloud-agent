@@ -12,9 +12,11 @@ import contextlib
 from typing import TYPE_CHECKING, Protocol
 
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.workers.background_wake import SNAPSHOT
 
 if TYPE_CHECKING:
     from cloud_agent.ports import HostPoolRepository, SnapshotRepository
+    from cloud_agent.workers.background_wake import BackgroundWake
 
 #: The moved loop keeps logging under the module it came from: the deployment's
 #: log selection is on ``cloud_agent.app``, and a relocation must not move these
@@ -32,11 +34,14 @@ class _SnapshotCapture(Protocol):
 SNAPSHOT_CAPTURE_INTERVAL_S = 5.0
 
 
-async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> None:
-    """Capture at most one quiescent shared workspace without blocking turns."""
+async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> bool:
+    """Capture at most one quiescent shared workspace without blocking turns.
+
+    Reports whether one was due, captured or deferred.
+    """
     snapshot = await store.snapshot.claim_due_sandbox_snapshot()
     if snapshot is None:
-        return
+        return False
 
     from cloud_agent.broker_routing import broker_for_job
     from cloud_agent.workspace_broker_client import WorkspaceBrokerError
@@ -51,7 +56,7 @@ async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> None:
                 container_id=str(snapshot["container_id"]),
                 detail="the owning workspace broker is unavailable",
             )
-            return
+            return True
         receipt = await broker.capture_shared_snapshot(snapshot)
         expected = {
             "snapshot_id": int(snapshot["snapshot_id"]),
@@ -122,18 +127,28 @@ async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> None:
                 detail=str(exc) or type(exc).__name__,
             )
         raise
+    return True
 
 
 async def coordinate_shared_snapshots(
     store: _SnapshotCapture,
     *,
     interval_seconds: float = SNAPSHOT_CAPTURE_INTERVAL_S,
+    wake: BackgroundWake | None = None,
 ) -> None:
-    """Capture shared-workspace publication snapshots on an independent clock."""
+    """Capture shared-workspace publication snapshots on an independent clock.
+
+    With ``wake`` a snapshot that becomes due is captured at once; the clock
+    remains the retry for a capture that was deferred, which no trigger
+    announces so that a busy host is not retried in a tight loop.
+    """
     if interval_seconds <= 0:
         raise ValueError("snapshot capture interval must be positive")
     while True:
-        await asyncio.sleep(interval_seconds)
+        if wake is None:
+            await asyncio.sleep(interval_seconds)
+        else:
+            await wake.wait(SNAPSHOT, interval_seconds)
         try:
             await _capture_due_shared_snapshot(store)
         except Exception:

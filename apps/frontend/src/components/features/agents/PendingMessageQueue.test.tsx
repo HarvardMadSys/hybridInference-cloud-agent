@@ -24,6 +24,7 @@ import {
 } from '@/lib/api/pendingMessages';
 import { APIError } from '@/lib/utils/errors';
 
+import { PUSH_BATCH_MS, receiveHint, resetAgentPush, setAgentPushLive } from './agentPush';
 import { PendingMessageQueue } from './PendingMessageQueue';
 import { usePendingMessages } from './usePendingMessages';
 
@@ -114,7 +115,10 @@ beforeEach(() => {
   ]);
   vi.mocked(getThreadQueue).mockImplementation(async () => structuredClone(server));
 });
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  resetAgentPush();
+});
 
 describe('PendingMessageQueue', () => {
   it('lists waiting messages in send order under one header, and says why one was refused', async () => {
@@ -533,5 +537,34 @@ describe('usePendingMessages', () => {
     });
 
     expect(result.current.messages.map((row) => row.id)).toContain('apmsg_new');
+  });
+});
+
+describe('the queue with the owner change stream', () => {
+  it('reads a pushed change to its queue at once and drops the two-second clock', async () => {
+    vi.useFakeTimers();
+    try {
+      act(() => setAgentPushLive(true));
+      renderHook(() => usePendingMessages({ threadId: 'athr_1', active: true }));
+      await act(async () => {});
+      const reads = vi.mocked(getThreadQueue).mock.calls.length;
+
+      await act(async () => vi.advanceTimersByTimeAsync(5_000));
+      expect(getThreadQueue).toHaveBeenCalledTimes(reads);
+
+      await act(async () => {
+        receiveHint('queue', 'athr_1');
+        await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+      });
+      expect(getThreadQueue).toHaveBeenCalledTimes(reads + 1);
+
+      await act(async () => {
+        receiveHint('queue', 'athr_other');
+        await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+      });
+      expect(getThreadQueue).toHaveBeenCalledTimes(reads + 1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

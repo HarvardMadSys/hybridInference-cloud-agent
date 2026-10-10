@@ -1,9 +1,10 @@
 """Collect, per owner, which of their jobs and threads changed, and wake their tabs.
 
 Triggers notify ``agent_owner_changes`` with the owner, the kind of row and its
-id (migration ``0031``), and the process's shared listener (``notifications``)
-hands it here. Each open stream of that owner adds the id to its own pending
-set and is woken; it then reads those rows and sends their current values.
+id (migrations ``0031`` and ``0032``), and the process's shared listener
+(``notifications``) hands it here. Each open stream of that owner adds the id
+to its own pending set and is woken; it then reads changed jobs and threads and
+sends their current values, and forwards the other kinds as hints.
 
 A stream subscribes before it says hello, so anything that changes after the
 tab's own snapshot is in its pending set. When the listening connection opens
@@ -27,6 +28,10 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 CHANNEL = "agent_owner_changes"
+#: Kinds the stream forwards as a hint, without reading anything: the tab reads
+#: that one thing again. ``usage`` and ``mcp`` name a job; ``queue`` and
+#: ``publication`` name a conversation (migration ``0032``).
+HINT_KINDS = ("usage", "queue", "mcp", "publication")
 
 
 @dataclass
@@ -35,6 +40,7 @@ class OwnerChanges:
 
     jobs: set[str] = field(default_factory=set)
     threads: set[str] = field(default_factory=set)
+    hints: dict[str, set[str]] = field(default_factory=dict)
     resync: bool = False
 
 
@@ -52,6 +58,8 @@ class OwnerSubscription:
             self._pending.jobs.add(row_id)
         elif kind == "thread":
             self._pending.threads.add(row_id)
+        elif kind in HINT_KINDS:
+            self._pending.hints.setdefault(kind, set()).add(row_id)
         else:
             return
         self.woken.set()

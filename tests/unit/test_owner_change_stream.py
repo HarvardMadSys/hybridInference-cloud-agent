@@ -158,6 +158,30 @@ async def test_a_changed_job_and_thread_reach_the_tab_at_once_with_their_revisio
     await stream.aclose()
 
 
+async def test_usage_queue_tool_approvals_and_publication_arrive_as_hints():
+    """Each names what to read again; the stream itself reads nothing for them."""
+    queries = Queries()
+    signal = _listening()
+    stream = await _open(queries, signal)
+    await anext(stream)
+
+    _notify(signal, "usage", "ajob_1")
+    _notify(signal, "mcp", "ajob_1")
+    _notify(signal, "queue", "athr_1")
+    _notify(signal, "publication", "athr_1")
+    _notify(signal, "something-new", "x")
+
+    frames = [_parse(await asyncio.wait_for(anext(stream), AT_ONCE_S)) for _ in range(4)]
+    assert frames == [
+        ("usage", {"id": "ajob_1"}),
+        ("queue", {"id": "athr_1"}),
+        ("mcp", {"id": "ajob_1"}),
+        ("publication", {"id": "athr_1"}),
+    ]
+    assert queries.reads == []
+    await stream.aclose()
+
+
 async def test_a_row_that_is_gone_is_reported_as_deleted():
     signal = _listening()
     stream = await _open(Queries(), signal)

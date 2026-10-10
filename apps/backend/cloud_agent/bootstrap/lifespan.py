@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.workers.attempts import reap_expired_attempts
+from cloud_agent.workers.background_wake import BackgroundWake
 from cloud_agent.workers.job_event_signal import JobEventSignal
 from cloud_agent.workers.notifications import listen
 from cloud_agent.workers.owner_change_signal import OwnerChangeSignal
@@ -86,6 +87,7 @@ def _start_publisher(app: FastAPI, store: PublishStorage) -> None:
             credential_provider=credential_provider,
             github_app=app.state.source_control.github,
             base_branch=os.getenv(ENV_PUBLISH_BASE_BRANCH, "dev"),
+            wake=getattr(app.state, "background_wake", None),
         )
     )
     _BACKGROUND_TASKS.add(task)
@@ -193,9 +195,16 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                 gateway=app.state.gateway,
             )
         )
-        snapshot_coordinator = asyncio.create_task(coordinate_shared_snapshots(storage))
+        # The workers below wait on this as well as their clocks; the shared
+        # listener started further down is what sets it.
+        app.state.background_wake = BackgroundWake()
+        snapshot_coordinator = asyncio.create_task(
+            coordinate_shared_snapshots(storage, wake=app.state.background_wake)
+        )
         ledger_collector = asyncio.create_task(
-            collect_usage_snapshots(storage.ledger, app.state.grants)
+            collect_usage_snapshots(
+                storage.ledger, app.state.grants, wake=app.state.background_wake
+            )
         )
         # Host capacity history keeps filling whether or not anybody has the
         # admin page open — that is the whole reason it is stored at all rather
@@ -238,8 +247,9 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # One connection to Postgres answers what waits on a change: idle hosts
         # parked on the worker wait endpoint (a job was queued, requeued or
         # ended), owners' event streams (their job stored an event or changed
-        # state), and owners' change streams (one of their jobs or
-        # conversations changed).
+        # state), owners' change streams (one of their jobs, conversations,
+        # usage, queue, tool approvals or publications changed), and this
+        # process's own snapshot, publish and usage workers.
         app.state.work_signal = WorkSignal()
         app.state.job_event_signal = JobEventSignal()
         app.state.owner_change_signal = OwnerChangeSignal()
@@ -250,6 +260,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                     app.state.work_signal,
                     app.state.job_event_signal,
                     app.state.owner_change_signal,
+                    app.state.background_wake,
                 ),
             )
         )
@@ -272,6 +283,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         app.state.work_signal = None
         app.state.job_event_signal = None
         app.state.owner_change_signal = None
+        app.state.background_wake = None
         app.state.notification_listener_task = None
         logger.info("cloud agent relay listener started")
 

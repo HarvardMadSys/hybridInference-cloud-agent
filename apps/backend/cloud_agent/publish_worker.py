@@ -39,6 +39,7 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.publisher import PublishError, fetch_base_bundle, publish_patch
 from cloud_agent.schemas import BASE_REF_METADATA_KEY
 from cloud_agent.source_control_runtime import SourceControlUnavailable
+from cloud_agent.workers.background_wake import PUBLISH
 from cloud_agent_shared.git.patch_gate import branch_name_for
 
 if TYPE_CHECKING:
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
         SourceControlRepository,
     )
     from cloud_agent.source_control_runtime import GitHubAppSource
+    from cloud_agent.workers.background_wake import BackgroundWake
 
 
 class PublishStorage(Protocol):
@@ -433,8 +435,13 @@ async def publish_loop(
     github_app: GitHubAppSource | None = None,
     base_branch: str = "dev",
     interval_seconds: float = POLL_INTERVAL_S,
+    wake: BackgroundWake | None = None,
 ) -> None:
     """Drain the publish queue forever.
+
+    With ``wake`` a snapshot that is captured, published, or whose base is to
+    be imported is handled at once; the clock remains the retry for a base
+    import that failed, which has no schedule of its own.
 
     ``credential_provider`` is called per job so a short-lived installation
     token is minted fresh rather than held for the lifetime of the process.
@@ -446,7 +453,10 @@ async def publish_loop(
     the rest of the process after one failed load (issue #47).
     """
     while True:
-        await asyncio.sleep(interval_seconds)
+        if wake is None:
+            await asyncio.sleep(interval_seconds)
+        else:
+            await wake.wait(PUBLISH, interval_seconds)
         try:
             try:
                 app_credentials = github_app.get() if github_app is not None else None

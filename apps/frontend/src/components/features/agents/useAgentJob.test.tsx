@@ -18,6 +18,7 @@ import {
 import {
   PUSH_BATCH_MS,
   PUSH_FALLBACK_POLL_MS,
+  receiveHint,
   receiveJobChange,
   receiveThreadChange,
   resetAgentPush,
@@ -439,6 +440,21 @@ describe('useAgentJob with the owner change stream', () => {
     expect(result.current.job?.conversationState).toBe('idle');
     expect(result.current.job?.prUrl).toBe('https://example.test/pr/7');
     expect(getAgentJob).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads its turn again when the workspace publication moves', async () => {
+    vi.useFakeTimers();
+    serve(settled);
+    renderHook(() => useAgentJob(settled.id));
+    await act(async () => {});
+
+    await act(async () => {
+      receiveHint('publication', 'live-thread');
+      await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+    });
+
+    expect(getAgentJob).toHaveBeenCalledTimes(2);
+    expect(getAgentJobThread).toHaveBeenCalledTimes(1);
   });
 
   it('ignores what changed in other conversations', async () => {

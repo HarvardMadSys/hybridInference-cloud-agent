@@ -15,6 +15,7 @@ import {
   onAgentRecordsChanged,
   overlayPushed,
   PUSH_BATCH_MS,
+  receiveHint,
   receiveJobChange,
   receiveSync,
   receiveThreadChange,
@@ -68,6 +69,25 @@ describe('pushed records', () => {
     expect(seen[0].jobs.map((job) => job.id)).toEqual(['ajob_1']);
     expect(seen[0].threads.map((thread) => thread.id)).toEqual(['athr_1']);
     expect(seen[0].resync).toBe(true);
+  });
+
+  it('names usage, queue, approval and publication changes once per batch', () => {
+    const seen = collect();
+    receiveHint('usage', 'ajob_1');
+    receiveHint('usage', 'ajob_1');
+    receiveHint('mcp', 'ajob_1');
+    receiveHint('queue', 'athr_1');
+    receiveHint('publication', 'athr_1');
+    vi.advanceTimersByTime(PUSH_BATCH_MS);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      usage: ['ajob_1'],
+      mcp: ['ajob_1'],
+      queues: ['athr_1'],
+      publications: ['athr_1'],
+      resync: false,
+    });
   });
 
   it('drops a push that is not newer than one already held', () => {

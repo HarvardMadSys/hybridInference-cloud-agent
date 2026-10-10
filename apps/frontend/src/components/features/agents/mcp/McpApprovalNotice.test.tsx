@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { listMcpInvocations } from '@/lib/api/mcp';
 import { McpApprovalNotice } from './McpApprovalNotice';
+import { PUSH_BATCH_MS, receiveHint, resetAgentPush, setAgentPushLive } from '../agentPush';
 
 vi.mock('@/lib/api/mcp', () => ({ listMcpInvocations: vi.fn() }));
 const list = vi.mocked(listMcpInvocations);
@@ -14,6 +15,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  resetAgentPush();
   vi.useRealTimers();
 });
 
@@ -65,4 +67,26 @@ it('stops polling when the job is no longer active', async () => {
     await vi.advanceTimersByTimeAsync(9000);
   });
   expect(list).not.toHaveBeenCalled();
+});
+
+it('shows a call held for approval as soon as it is pushed, not at the next poll', async () => {
+  list.mockResolvedValue({ invocations: [] });
+  act(() => setAgentPushLive(true));
+  await act(async () => {
+    render(<McpApprovalNotice jobId="job-1" active onReview={() => {}} />);
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(3000);
+  });
+  expect(list).toHaveBeenCalledTimes(1);
+
+  list.mockResolvedValue({ invocations: [{ status: 'pending' }] } as Awaited<
+    ReturnType<typeof list>
+  >);
+  await act(async () => {
+    receiveHint('mcp', 'job-1');
+    await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+  });
+  expect(list).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole('status')).toHaveTextContent('A tool call needs your approval.');
 });

@@ -14,6 +14,8 @@ import {
 } from '@/lib/api/pendingMessages';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
+import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from './agentPush';
+
 /**
  * How often a page with messages waiting reads the queue again.
  *
@@ -212,13 +214,31 @@ export function usePendingMessages({
 
   const [inFlight, setInFlight] = useState(0);
   const waiting = messages.length > 0 || inFlight > 0;
+  // While the owner's change stream flows, a change to this queue, to the
+  // conversation (its pause), or to one of its turns is pushed and read at
+  // once; the clock is then only a backstop.
+  const pushLive = useAgentPushLive();
   const interval = !threadId
     ? null
-    : waiting
-      ? PENDING_QUEUE_POLL_MS
-      : active
-        ? IDLE_QUEUE_POLL_MS
-        : null;
+    : waiting || active
+      ? pushLive
+        ? PUSH_FALLBACK_POLL_MS
+        : waiting
+          ? PENDING_QUEUE_POLL_MS
+          : IDLE_QUEUE_POLL_MS
+      : null;
+  useEffect(() => {
+    if (!threadId) return undefined;
+    return onAgentRecordsChanged((change) => {
+      if (
+        change.resync ||
+        change.queues.includes(threadId) ||
+        change.threads.some((thread) => thread.id === threadId) ||
+        change.jobs.some((job) => job.thread_id === threadId)
+      )
+        void refresh();
+    });
+  }, [refresh, threadId]);
   useEffect(() => {
     if (interval === null) return undefined;
     const timer = setInterval(() => void refresh(), interval);

@@ -42,12 +42,20 @@ export interface AgentThreadChangeApi {
   updated_at?: string | null;
 }
 
+/**
+ * Things the stream only names: read that one thing again. `usage` and `mcp`
+ * name a job; `queue` and `publication` name a conversation.
+ */
+export const AGENT_CHANGE_HINTS = ['usage', 'queue', 'mcp', 'publication'] as const;
+export type AgentChangeHint = (typeof AGENT_CHANGE_HINTS)[number];
+
 export interface StreamAgentChangesOptions {
   signal: AbortSignal;
   /** `hello` on connect and `resync` after a gap: read lists again. */
   onSync: (live: boolean) => void;
   onJob: (change: AgentJobChangeApi) => void;
   onThread: (change: AgentThreadChangeApi) => void;
+  onHint: (kind: AgentChangeHint, id: string) => void;
   /** The connection dropped; nothing is pushed until it is back. */
   onDisconnect: () => void;
 }
@@ -132,6 +140,8 @@ export async function streamAgentChanges(
             if (frame.event === 'job') opts.onJob(record as unknown as AgentJobChangeApi);
             else if (frame.event === 'thread')
               opts.onThread(record as unknown as AgentThreadChangeApi);
+            else if ((AGENT_CHANGE_HINTS as readonly string[]).includes(frame.event))
+              opts.onHint(frame.event as AgentChangeHint, record.id);
           }
         }
       }

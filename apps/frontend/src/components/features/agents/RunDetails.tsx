@@ -32,6 +32,7 @@ import {
 } from './StepDetailParts';
 import { formatDuration } from './TurnFooter';
 import type { AgentJob } from './types';
+import { onAgentRecordsChanged } from './agentPush';
 
 export type RunTab = 'overview' | 'usage' | 'raw';
 
@@ -185,6 +186,19 @@ function useJobUsage(jobId: string): {
       if (timer) clearTimeout(timer);
     };
   }, [jobId, read]);
+
+  // A pushed change to this job's usage is read at once, outside the budget
+  // above: it is the server saying there is something new, not a guess.
+  useEffect(
+    () =>
+      onAgentRecordsChanged((change) => {
+        if (change.resync || change.usage.includes(jobId)) {
+          requested.current = true;
+          setRead((value) => value + 1);
+        }
+      }),
+    [jobId],
+  );
 
   const refresh = useCallback(() => {
     setRefreshing(true);

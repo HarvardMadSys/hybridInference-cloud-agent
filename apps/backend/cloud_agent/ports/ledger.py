@@ -9,6 +9,7 @@ operations it needs rather than on the whole persistence surface.
 
 from __future__ import annotations
 
+from datetime import datetime  # noqa: TC003 — a port's signature.
 from typing import Any, Protocol
 
 
@@ -32,6 +33,14 @@ class LedgerRepository(Protocol):
 
     async def queue_job_ledger_refresh(self, *, job_id: str) -> int:
         """Queue known references, sharing in-flight work and throttling retries."""
+        ...
+
+    async def next_ledger_refresh_due(self) -> datetime | None:
+        """When the earliest scheduled refresh or expiring claim becomes due.
+
+        ``None`` when nothing is scheduled; an attempt that stops is announced
+        by a notification instead.
+        """
         ...
 
     async def claim_due_ledger_refresh(self, *, lease_seconds: float = 60) -> dict[str, Any] | None:

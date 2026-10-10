@@ -4,7 +4,9 @@ The chat list, the sidebar and an open conversation used to ask for state,
 title and pull request link every few seconds. A tab now holds this stream, and
 it sends each changed job or thread the moment Postgres says it changed
 (migration ``0031``): its id, its ``revision`` and the values the tab shows.
-Lists still read their own pages; what they no longer do is ask on a clock.
+Usage, the message queue, tool approvals and publication progress are named
+as hints (migration ``0032``), and the tab reads that one thing again. Lists
+still read their own pages; what they no longer do is ask on a clock.
 
 The stream replays nothing. It says ``hello`` once it collects the owner's
 changes, so a tab that reads its lists after that misses none, and
@@ -24,7 +26,8 @@ from fastapi.responses import StreamingResponse
 from cloud_agent.api._job_views import _iso
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_owner_change_signal, get_storage, require_store
-from cloud_agent.workers.owner_change_signal import (  # noqa: TC001 — FastAPI resolves it.
+from cloud_agent.workers.owner_change_signal import (
+    HINT_KINDS,
     OwnerChangeSignal,
 )
 
@@ -92,8 +95,10 @@ async def stream_owner_changes(
 
     Events: ``hello`` and ``resync`` carry ``{"live": bool}``; ``job`` and
     ``thread`` carry the row's current values and its ``revision``, or
-    ``{"id": ..., "deleted": true}`` once it is gone. 404 where this process
-    pushes nothing, which a tab treats as "keep reading on a clock".
+    ``{"id": ..., "deleted": true}`` once it is gone; ``usage``, ``mcp`` (a
+    job) and ``queue``, ``publication`` (a conversation) carry only
+    ``{"id": ...}``: read that again. 404 where this process pushes nothing,
+    which a tab treats as "keep reading on a clock".
     """
     job_store = require_store(store)
     if signal is None:
@@ -135,7 +140,10 @@ async def stream_owner_changes(
                     for job_id in sorted(changes.jobs):
                         row = found_jobs.get(job_id)
                         yield _frame("job", _job(row) if row else {"id": job_id, "deleted": True})
-                elif not woken:
+                for kind in HINT_KINDS:
+                    for row_id in sorted(changes.hints.get(kind, ())):
+                        yield _frame(kind, {"id": row_id})
+                if not (woken or changes.resync):
                     yield ": keepalive\n\n"
 
     return StreamingResponse(frames(), media_type="text/event-stream", headers=_SSE_HEADERS)

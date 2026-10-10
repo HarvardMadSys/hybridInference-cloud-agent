@@ -485,7 +485,8 @@ export function useAgentJob(
           (job) =>
             job.id === jobId || (pushThreadId !== undefined && job.thread_id === pushThreadId),
         ) ||
-        change.threads.some((thread) => thread.id === pushThreadId);
+        change.threads.some((thread) => thread.id === pushThreadId) ||
+        (pushThreadId != null && change.publications.includes(pushThreadId));
       if (!touched) return;
       setApi((current) => (current?.id === jobId ? overlayPushed(current) : current));
       const read = ++latestRead;
@@ -574,7 +575,7 @@ export function useAgentJob(
     (publicationActive ||
       goalActive ||
       (state !== 'running' && state !== 'publishing' && conversationActive));
-  const metadataInterval = pushLive && !publicationActive ? PUSH_FALLBACK_POLL_MS : 5_000;
+  const metadataInterval = pushLive ? PUSH_FALLBACK_POLL_MS : 5_000;
   useEffect(() => {
     if (!active || !jobId || !metadataActive) return undefined;
     let cancelled = false;
@@ -598,8 +599,6 @@ export function useAgentJob(
         .finally(() => {
           pending = false;
         });
-      // Publication progress lives outside the rows the change stream watches,
-      // so it keeps the short clock even while pushes flow.
     }, metadataInterval);
     return () => {
       cancelled = true;

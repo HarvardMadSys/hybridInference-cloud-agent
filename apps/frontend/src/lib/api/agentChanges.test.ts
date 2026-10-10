@@ -28,6 +28,7 @@ function options(controller: AbortController): StreamAgentChangesOptions {
     onSync: vi.fn(),
     onJob: vi.fn(),
     onThread: vi.fn(),
+    onHint: vi.fn(),
     onDisconnect: vi.fn(() => controller.abort()),
   };
 }
@@ -44,6 +45,8 @@ describe('streamAgentChanges', () => {
         ': keepalive\n\n',
         'event: thread\ndata: {"id":"athr_1","revision":2,"title":"Pushed"}\n\n',
         'event: job\ndata: {"id":"ajob_1","revision":3,"state":"succeeded"}\n\n',
+        'event: usage\ndata: {"id":"ajob_1"}\n\n',
+        'event: publication\ndata: {"id":"athr_1"}\n\n',
         'event: resync\ndata: {"live":false}\n\n',
         'event: job\ndata: not json\n\n',
       ),
@@ -63,6 +66,8 @@ describe('streamAgentChanges', () => {
     expect(opts.onThread).toHaveBeenCalledWith({ id: 'athr_1', revision: 2, title: 'Pushed' });
     expect(opts.onJob).toHaveBeenCalledTimes(1);
     expect(opts.onJob).toHaveBeenCalledWith({ id: 'ajob_1', revision: 3, state: 'succeeded' });
+    expect(opts.onHint).toHaveBeenNthCalledWith(1, 'usage', 'ajob_1');
+    expect(opts.onHint).toHaveBeenNthCalledWith(2, 'publication', 'athr_1');
     expect(opts.onDisconnect).toHaveBeenCalledTimes(1);
   });
 

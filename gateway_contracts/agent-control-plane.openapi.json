@@ -18351,7 +18351,7 @@
     },
     "/v1/agent/changes": {
       "get": {
-        "description": "Stream the caller's changed jobs and conversations as SSE.\n\nEvents: ``hello`` and ``resync`` carry ``{\"live\": bool}``; ``job`` and\n``thread`` carry the row's current values and its ``revision``, or\n``{\"id\": ..., \"deleted\": true}`` once it is gone. 404 where this process\npushes nothing, which a tab treats as \"keep reading on a clock\".",
+        "description": "Stream the caller's changed jobs and conversations as SSE.\n\nEvents: ``hello`` and ``resync`` carry ``{\"live\": bool}``; ``job`` and\n``thread`` carry the row's current values and its ``revision``, or\n``{\"id\": ..., \"deleted\": true}`` once it is gone; ``usage``, ``mcp`` (a\njob) and ``queue``, ``publication`` (a conversation) carry only\n``{\"id\": ...}``: read that again. 404 where this process pushes nothing,\nwhich a tab treats as \"keep reading on a clock\".",
         "operationId": "stream_owner_changes_v1_agent_changes_get",
         "parameters": [
           {

@@ -10,7 +10,11 @@
 import { useEffect, useSyncExternalStore } from 'react';
 
 import type { AgentJobApi } from '@/lib/api/agents';
-import type { AgentJobChangeApi, AgentThreadChangeApi } from '@/lib/api/agentChanges';
+import type {
+  AgentChangeHint,
+  AgentJobChangeApi,
+  AgentThreadChangeApi,
+} from '@/lib/api/agentChanges';
 import { streamAgentChanges } from '@/lib/api/agentChanges';
 
 /** How a list re-reads while pushes flow: a backstop, not the way it learns. */
@@ -21,9 +25,24 @@ export const PUSH_BATCH_MS = 300;
 export interface AgentRecordsChange {
   jobs: AgentJobChangeApi[];
   threads: AgentThreadChangeApi[];
+  /** Jobs whose usage changed. */
+  usage: string[];
+  /** Conversations whose waiting messages changed. */
+  queues: string[];
+  /** Jobs whose tool calls awaiting approval changed. */
+  mcp: string[];
+  /** Conversations whose publication progress changed. */
+  publications: string[];
   /** Changes may have been missed: read again rather than trust patches. */
   resync: boolean;
 }
+
+const HINT_FIELD = {
+  usage: 'usage',
+  queue: 'queues',
+  mcp: 'mcp',
+  publication: 'publications',
+} as const satisfies Record<AgentChangeHint, keyof AgentRecordsChange>;
 
 let live = false;
 const liveListeners = new Set<() => void>();
@@ -42,7 +61,15 @@ function flush(): void {
 }
 
 function queue(update: (change: AgentRecordsChange) => void): void {
-  pending ??= { jobs: [], threads: [], resync: false };
+  pending ??= {
+    jobs: [],
+    threads: [],
+    usage: [],
+    queues: [],
+    mcp: [],
+    publications: [],
+    resync: false,
+  };
   update(pending);
   flushTimer ??= setTimeout(flush, PUSH_BATCH_MS);
 }
@@ -94,6 +121,13 @@ export function receiveJobChange(change: AgentJobChangeApi): void {
 
 export function receiveThreadChange(change: AgentThreadChangeApi): void {
   if (newer(latestThreads, change)) queue((batch) => batch.threads.push(change));
+}
+
+export function receiveHint(kind: AgentChangeHint, id: string): void {
+  queue((batch) => {
+    const ids = batch[HINT_FIELD[kind]];
+    if (!ids.includes(id)) ids.push(id);
+  });
 }
 
 export function receiveSync(): void {
@@ -171,6 +205,7 @@ export function useAgentChangeStream(userId: string | undefined): void {
       },
       onJob: receiveJobChange,
       onThread: receiveThreadChange,
+      onHint: receiveHint,
       onDisconnect: () => setAgentPushLive(false),
     }).then(() => setAgentPushLive(false));
     return () => {

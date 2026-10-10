@@ -10,11 +10,14 @@ import {
 } from '@/lib/api/agents';
 
 import type { AgentJob } from './types';
+import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from './agentPush';
 
 const POLL_INTERVAL_MS = 15_000;
 const MAX_RETRY_INTERVAL_MS = 60_000;
 const PERMANENT_REASONS = new Set([
   'attribution_unavailable',
+  // Nothing was called: there is no usage to wait for.
+  'no_model_calls',
   'usage_unconfigured',
   'internal_api_not_configured',
   'binding_changed',
@@ -148,6 +151,10 @@ function UsageSummary({
 // Owned by the job view, independently of which message holds the summary.
 export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
   const [loaded, setLoaded] = useState<LoadedUsage | null>(null);
+  // While the owner's change stream flows, the control plane reads usage when
+  // a model call finishes and pushes that it changed: no refresh request from
+  // here, and the clock below is only a backstop.
+  const pushLive = useAgentPushLive();
 
   useEffect(() => {
     let disposed = false;
@@ -159,8 +166,9 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
     let sourceHasFailed = false;
     let lastRefreshAt = -Infinity;
     const active = job.state === 'running' || job.state === 'queued';
+    const pollMs = pushLive ? PUSH_FALLBACK_POLL_MS : POLL_INTERVAL_MS;
 
-    function schedule(delay = POLL_INTERVAL_MS) {
+    function schedule(delay = pollMs) {
       clearTimeout(timer);
       timer = setTimeout(() => void load(), delay);
     }
@@ -208,7 +216,8 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
         if (!sourceHasFailed) sourceFailures = 0;
         const scheduled = Boolean(data.ledger.refreshing || data.ledger.next_refresh_at);
         const eligible = canRefresh(data);
-        const needsSourceRefresh = active || sourceHasFailed || data.ledger.status === 'pending';
+        const needsSourceRefresh =
+          !pushLive && (active || sourceHasFailed || data.ledger.status === 'pending');
 
         // Always read before requesting fresh accounting. This shares existing
         // work and leaves the server's delayed terminal checks at their due time.
@@ -225,9 +234,7 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
         if (refresh || active || scheduled || (eligible && needsSourceRefresh)) {
           const remainingBackoff = retryInterval(sourceFailures) - (Date.now() - lastRefreshAt);
           schedule(
-            sourceHasFailed && !scheduled && !refresh
-              ? Math.max(POLL_INTERVAL_MS, remainingBackoff)
-              : POLL_INTERVAL_MS,
+            sourceHasFailed && !scheduled && !refresh ? Math.max(pollMs, remainingBackoff) : pollMs,
           );
         }
       } catch {
@@ -248,12 +255,21 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
     }
 
     void load();
+    const unsubscribe = onAgentRecordsChanged((change) => {
+      if (
+        change.resync ||
+        change.usage.includes(job.id) ||
+        change.jobs.some((pushed) => pushed.id === job.id)
+      )
+        void load();
+    });
     return () => {
       disposed = true;
+      unsubscribe();
       clearTimeout(timer);
       controller?.abort();
     };
-  }, [job.id, job.state]);
+  }, [job.id, job.state, pushLive]);
 
   // Effects run after render; never expose the previous job in that first frame.
   return loaded?.jobId === job.id ? loaded : null;
@@ -294,6 +310,17 @@ export function LedgerUsage({ job, usage }: { job: AgentJob; usage: LoadedUsage 
       : ledger?.next_refresh_at
         ? 'Usage may change.'
         : null;
+
+  // Nothing was called, so there is nothing to show: every attempt ended
+  // before its agent could reach a model, or the turn never ran at all.
+  const terminal = job.state !== 'running' && job.state !== 'queued';
+  const nothingCalled =
+    !loading &&
+    !(totals && hasValues) &&
+    Boolean(
+      ledger && (ledger.status === 'available' || (terminal && ledger.attempts.length === 0)),
+    );
+  if (nothingCalled) return null;
 
   return (
     <section

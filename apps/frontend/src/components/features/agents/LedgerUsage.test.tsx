@@ -12,6 +12,7 @@ import {
 } from '@/lib/api/agents';
 
 import { LedgerUsage as UsageView, useLedgerUsage } from './LedgerUsage';
+import { PUSH_BATCH_MS, receiveHint, resetAgentPush, setAgentPushLive } from './agentPush';
 import type { AgentJob } from './types';
 
 function LedgerUsage({ job: currentJob }: { job: AgentJob }) {
@@ -469,5 +470,60 @@ describe('LedgerUsage', () => {
     expect(screen.queryByText('$0.12345678')).not.toBeInTheDocument();
     view.unmount();
     expect(vi.mocked(getAgentJobUsage).mock.calls.at(-1)![1]!.aborted).toBe(true);
+  });
+});
+
+describe('LedgerUsage with the owner change stream', () => {
+  afterEach(() => resetAgentPush());
+
+  function nothingCalled(): AgentJobUsageApi {
+    const data = unavailable('no_model_calls');
+    data.ledger.status = 'available';
+    data.ledger.missing_attempts = 0;
+    data.ledger.attempts[0] = { ...data.ledger.attempts[0], status: 'available' };
+    data.runtime = {
+      source: 'runtime',
+      input_tokens: null,
+      output_tokens: null,
+      cache_read_tokens: null,
+      normalized_input_tokens: null,
+    };
+    return data;
+  }
+
+  it('shows nothing for a turn that ended before its agent called a model', async () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(nothingCalled());
+    await mount({ ...job, state: 'failed' } as AgentJob);
+    expect(screen.queryByLabelText('Usage')).not.toBeInTheDocument();
+    expect(screen.queryByText(/temporarily unavailable|Counting usage/)).not.toBeInTheDocument();
+  });
+
+  it('shows nothing for a turn that never ran', async () => {
+    const data = nothingCalled();
+    data.ledger.status = 'unavailable';
+    data.ledger.attempts = [];
+    vi.mocked(getAgentJobUsage).mockResolvedValue(data);
+    await mount({ ...job, state: 'cancelled' } as AgentJob);
+    expect(screen.queryByLabelText('Usage')).not.toBeInTheDocument();
+  });
+
+  it('reads a pushed usage change at once and never asks for a refresh itself', async () => {
+    act(() => setAgentPushLive(true));
+    await mount({ ...job, state: 'running' } as AgentJob);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+
+    // The fifteen-second clock is gone while pushes flow.
+    await advance(15_000);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+
+    act(() => receiveHint('usage', 'ajob_1'));
+    await advance(PUSH_BATCH_MS);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+
+    act(() => receiveHint('usage', 'another_job'));
+    await advance(PUSH_BATCH_MS);
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
   });
 });

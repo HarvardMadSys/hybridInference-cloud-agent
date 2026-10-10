@@ -14,6 +14,7 @@ from cloud_agent.storage._sql.ledger import LEDGER_WINDOW_UNTIL_SQL
 from cloud_agent.storage._sql.rows import load_json
 
 if TYPE_CHECKING:
+    from datetime import datetime
     from typing import Any
 
     import asyncpg
@@ -43,7 +44,15 @@ class PostgresLedgerRepository:
                            OR l.next_refresh_at <= NOW()
                            OR (a.status <> 'running' AND l.terminal_refresh_count = 0
                                AND l.next_refresh_at IS NULL)
-                       )) IS TRUE AS refreshing
+                       )) IS TRUE AS refreshing,
+                       -- Only for a finished attempt that never bound a grant:
+                       -- did its agent report any model usage at all?
+                       CASE WHEN l.id IS NULL AND a.status <> 'running' THEN EXISTS (
+                           SELECT 1 FROM agent_job_events e
+                           WHERE e.attempt_id = a.id
+                             AND (e.event_type = 'usage'
+                                  OR jsonb_typeof(e.payload->'usage') = 'object')
+                       ) END AS model_usage_reported
                 FROM agent_attempts a
                 JOIN agent_jobs j ON j.id = a.job_id
                 LEFT JOIN agent_attempt_ledger l ON l.attempt_id = a.id
@@ -67,6 +76,7 @@ class PostgresLedgerRepository:
             rows = await conn.fetch(
                 """
                 SELECT j.id AS job_id, j.state AS job_state, a.id AS attempt_id, a.attempt_no,
+                       a.status AS attempt_status,
                        l.id, l.grant_id, l.snapshot, l.queried_at,
                        l.last_error_code, l.next_refresh_at,
                        (l.id IS NOT NULL AND (
@@ -109,6 +119,25 @@ class PostgresLedgerRepository:
                 job_id,
             )
         return len(rows)
+
+    async def next_ledger_refresh_due(self) -> datetime | None:
+        """When the earliest scheduled refresh or expiring claim becomes due.
+
+        ``None`` when nothing is scheduled; an attempt that stops is announced
+        by a notification instead.
+        """
+        async with self._pool.acquire() as conn:
+            due: datetime | None = await conn.fetchval(
+                """
+                SELECT LEAST(
+                    (SELECT MIN(next_refresh_at) FROM agent_attempt_ledger
+                     WHERE next_refresh_at IS NOT NULL),
+                    (SELECT MIN(refresh_lease_expires_at) FROM agent_attempt_ledger
+                     WHERE refresh_lease_expires_at IS NOT NULL)
+                )
+                """
+            )
+        return due
 
     async def claim_due_ledger_refresh(self, *, lease_seconds: float = 60) -> dict[str, Any] | None:
         """Fence one due snapshot query across control-plane workers.
