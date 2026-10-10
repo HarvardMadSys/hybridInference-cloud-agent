@@ -1812,7 +1812,7 @@ def _stream_shared_agent_turn(
     timeout_s: float,
     measurement: operation_profiling.Measurement | None = None,
     on_frozen: Callable[[operation_profiling.Measurement], None] | None = None,
-) -> tuple[int, str, list[str], dict[str, Any] | None]:
+) -> tuple[int, str, list[str], dict[str, Any] | None, str | None]:
     """Relay exactly one broker-framed member turn under its attempt fence.
 
     Handing the prompt to the supervisor closes the startup measurement:
@@ -1820,6 +1820,12 @@ def _stream_shared_agent_turn(
     separate post-dispatch fragment. The caller marks the ``prompt_dispatch``
     boundary immediately before this call, so the handoff is one stage in the
     startup timeline rather than a stage of its own after it.
+
+    The last element is what the turn itself said went wrong, when it said
+    anything: the Agent CLI's own last error, or else the broker's. It is the
+    failure's reason; the output tail is only a fallback for when neither
+    exists, because its last lines are whatever the CLI printed last -- for a
+    Codex turn refused with a 403 that was a configuration warning.
     """
     stream = supervisor.start_shared_turn(
         job.thread_id,
@@ -1858,6 +1864,18 @@ def _stream_shared_agent_turn(
     result_frame: dict[str, Any] | None = None
     forced_exit_code: int | None = None
     interrupt_deadline: float | None = None
+    agent_error: str | None = None
+    sandbox_error: str | None = None
+
+    def outcome(exit_code: int) -> tuple[int, str, list[str], dict[str, Any] | None, str | None]:
+        if agent_error:
+            reported = f"agent reported an error: {agent_error[:900]}"
+        elif sandbox_error:
+            reported = f"sandbox failed: {sandbox_error[:900]}"
+        else:
+            reported = None
+        return exit_code, "".join(tail), tool_errors, result_frame, reported
+
     try:
         while True:
             if heart.lease_lost:
@@ -1880,7 +1898,7 @@ def _stream_shared_agent_turn(
                 forced_exit_code = 124
                 interrupt_deadline = now + _SHARED_TURN_INTERRUPT_DRAIN_S
             if interrupt_deadline is not None and now > interrupt_deadline:
-                return forced_exit_code or 1, "".join(tail), tool_errors, result_frame
+                return outcome(forced_exit_code or 1)
             try:
                 frame = frames.get(timeout=_POLL_INTERVAL_S)
             except queue.Empty:
@@ -1900,6 +1918,13 @@ def _stream_shared_agent_turn(
                 if event_type == "tool_result" and payload.get("is_error"):
                     content = str(payload.get("content") or "")
                     tool_errors.append(content[:200])
+                if event_type == "error":
+                    # Each driver reports its CLI's own failure this way: a
+                    # Claude error result, Codex's final error, pi's failed
+                    # prompt or agent end, OpenCode and Kilo's session error.
+                    text = str(payload.get("text") or payload.get("detail") or "").strip()
+                    if text:
+                        agent_error = text
                 if event_type and event_type != LINE:
                     control.append_event(NormalizedEvent(event_type, payload))
                 continue
@@ -1922,7 +1947,8 @@ def _stream_shared_agent_turn(
                 result_frame = frame
                 detail = str(frame.get("detail") or "shared turn failed")
                 tail.append(detail[-2000:])
-                return forced_exit_code or 1, "".join(tail), tool_errors, result_frame
+                sandbox_error = detail
+                return outcome(forced_exit_code or 1)
             if kind == "client_error":
                 # The result may already have crossed the wire before the
                 # transport failed. Preserve that terminal frame rather than
@@ -1934,7 +1960,7 @@ def _stream_shared_agent_turn(
         if result_frame is None:
             raise SessionSupervisorError(502, "shared turn ended without a result")
         if forced_exit_code is not None:
-            return forced_exit_code, "".join(tail), tool_errors, result_frame
+            return outcome(forced_exit_code)
         status = str(result_frame.get("status") or "failed")
         exit_code = int(result_frame.get("exit_code") or 0)
         if status == "cancelled":
@@ -1951,7 +1977,7 @@ def _stream_shared_agent_turn(
                     },
                 )
             )
-        return exit_code, "".join(tail), tool_errors, result_frame
+        return outcome(exit_code)
     finally:
         stream.close()
 
@@ -2515,15 +2541,17 @@ def _run_shared_live_attempt(
                     drain_s=DELIVERY_HANDOFF_DRAIN_S,
                 )
 
-            exit_code, tail, tool_errors, result_frame = _stream_shared_agent_turn(
-                supervisor=supervisor,
-                job=job,
-                control=control,
-                heart=heart,
-                lease_token=lease_token,
-                timeout_s=agent_timeout_s,
-                measurement=measurement,
-                on_frozen=_frozen_measurement,
+            exit_code, tail, tool_errors, result_frame, reported_failure = (
+                _stream_shared_agent_turn(
+                    supervisor=supervisor,
+                    job=job,
+                    control=control,
+                    heart=heart,
+                    lease_token=lease_token,
+                    timeout_s=agent_timeout_s,
+                    measurement=measurement,
+                    on_frozen=_frozen_measurement,
+                )
             )
         finally:
             # Container totals include concurrent siblings and cannot be
@@ -2575,7 +2603,7 @@ def _run_shared_live_attempt(
             and result_frame.get("native_turn_settled") is True
         )
         if exit_code != 0 and not settled_failure:
-            failure_detail = f"agent exited {exit_code}: {tail[-500:]}"
+            failure_detail = reported_failure or f"agent exited {exit_code}: {tail[-500:]}"
             abandon_before_finish(lost=True, detail=failure_detail)
             finish_attempt("failed", failure_detail, base_sha=base_sha)
             return 1
@@ -2624,7 +2652,9 @@ def _run_shared_live_attempt(
             # Record the native turn ordinal before failing the job, so later
             # retries and historical forks keep matching the CLI transcript.
             finish_attempt(
-                "failed", f"agent failed at native turn boundary: {tail[-500:]}", base_sha=base_sha
+                "failed",
+                reported_failure or f"agent failed at native turn boundary: {tail[-500:]}",
+                base_sha=base_sha,
             )
             return 1
         try:

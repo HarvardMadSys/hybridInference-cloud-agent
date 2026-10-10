@@ -418,6 +418,13 @@ function isRepositoryTooLarge(detail: string | null | undefined): boolean {
  * The original detail remains in the API and operator logs for diagnosis.
  */
 export function ownerFailureMessage(detail: string): string {
+  // The agent's own words for why it stopped, e.g. the gateway refusing the
+  // request. The host records them with this prefix; the rest is the reason.
+  const reported = /^agent reported an error: ([\s\S]+)$/.exec(detail);
+  if (reported) return reported[1].trim();
+  if (/^sandbox failed: /.test(detail)) {
+    return 'The sandbox failed while running this response.';
+  }
   const tooLarge = REPOSITORY_TOO_LARGE.exec(detail);
   if (tooLarge) {
     const [, size, limit] = tooLarge;

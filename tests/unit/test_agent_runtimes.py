@@ -103,6 +103,34 @@ def test_error_result_maps_to_error():
     assert event.payload["subtype"] == "error_max_turns"
 
 
+@pytest.mark.parametrize(
+    ("result", "text"),
+    [
+        # An API failure: the reason is the result text (staging, 2026-09-27).
+        (
+            {
+                "subtype": "success",
+                "api_error_status": 403,
+                "result": "Failed to authenticate. API Error: 403 This account has no active API key",
+            },
+            "Failed to authenticate. API Error: 403 This account has no active API key",
+        ),
+        # The error subtypes carry it in ``errors`` (the pinned 2.1.220).
+        (
+            {"subtype": "error_max_turns", "errors": ["Reached maximum number of turns (8)"]},
+            "Reached maximum number of turns (8)",
+        ),
+        ({"subtype": "error_during_execution", "errors": []}, "error_during_execution"),
+    ],
+)
+def test_a_claude_error_result_says_why(result, text):
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps({"type": "result", "is_error": True, **result})
+    )
+    assert event.event_type == "error"
+    assert event.payload["text"] == text
+
+
 @pytest.mark.parametrize("kind", ["text", "thinking", "tool_result", "result"])
 def test_claude_transcript_preserves_content_past_4000_characters(kind):
     """A long answer or tool result must survive normalization in full."""

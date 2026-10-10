@@ -817,11 +817,21 @@ class ClaudeCodeRuntime(AgentRuntime):
         # including failed queries. It supersedes provisional block usage.
         usage_fields = {"usage": event.get("usage") or None, "usage_scope": "attempt"}
         if event.get("is_error"):
+            # An API failure arrives as subtype "success" with the reason in
+            # ``result``; the error subtypes carry it in ``errors`` instead
+            # (both verified against the pinned 2.1.220).
+            errors = event.get("errors")
+            reasons = [str(item) for item in errors if item] if isinstance(errors, list) else []
+            text = (
+                str(event.get("result") or "")
+                or "; ".join(reasons)
+                or str(event.get("subtype") or "")
+            )
             return NormalizedEvent(
                 ERROR,
                 {
                     "subtype": event.get("subtype"),
-                    "text": str(event.get("result") or "")[:2000],
+                    "text": text[:2000],
                     **usage_fields,
                 },
             )

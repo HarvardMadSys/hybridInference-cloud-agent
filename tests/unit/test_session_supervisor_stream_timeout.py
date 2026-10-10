@@ -107,7 +107,7 @@ def test_quiet_turn_outlives_lifecycle_timeout(quiet_broker):
     timer = threading.Timer(0.5, quiet_broker.release.set)
     control = SimpleNamespace(append_event=lambda _event: timer.start())
     try:
-        code, _tail, errors, result = _run_turn(quiet_broker.client, control=control)
+        code, _tail, errors, result, _reported = _run_turn(quiet_broker.client, control=control)
     finally:
         timer.cancel()
         timer.join(timeout=5)
@@ -147,7 +147,7 @@ def test_quiet_turn_remains_interruptible(quiet_broker, monkeypatch, reason):
         with pytest.raises(LeaseLost):
             _run_turn(quiet_broker.client, **kwargs)
     else:
-        code, _tail, _errors, result = _run_turn(quiet_broker.client, **kwargs)
+        code, _tail, _errors, result, _reported = _run_turn(quiet_broker.client, **kwargs)
         assert code == (124 if reason == "deadline" else 130)
         assert result["resources"]["process_observation_complete"] is True
     assert quiet_broker.event_sent.is_set()
