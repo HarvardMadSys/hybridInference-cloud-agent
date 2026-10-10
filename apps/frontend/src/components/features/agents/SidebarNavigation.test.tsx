@@ -55,6 +55,14 @@ import { AgentsSidebar } from './AgentsSidebar';
 import { ArchivedTasksView } from './ArchivedTasksView';
 import { announceConversationRestored } from './conversationEvents';
 import { DEFAULT_PREFERENCES, sidebarPreferencesKey } from './sidebarPreferences';
+import {
+  PUSH_BATCH_MS,
+  receiveHint,
+  receiveJobChange,
+  receiveSync,
+  receiveThreadChange,
+  resetAgentPush,
+} from './agentPush';
 function conversation(id: string, repo = 'owner/repo'): AgentConversationApi {
   return {
     job: {
@@ -73,6 +81,7 @@ function conversation(id: string, repo = 'owner/repo'): AgentConversationApi {
 }
 const base = [conversation('a'), conversation('b')];
 beforeEach(() => {
+  resetAgentPush();
   localStorage.clear();
   api.pathname = '/';
   api.params = '';
@@ -92,9 +101,56 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  resetAgentPush();
+  vi.useRealTimers();
   vi.resetAllMocks();
 });
 describe('sidebar navigation interactions', () => {
+  it('keeps project and conversation lists steady during tool and usage updates', async () => {
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    api.list.mockClear();
+    api.projects.mockClear();
+    vi.useFakeTimers();
+
+    for (const kind of ['usage', 'mcp', 'queue', 'publication'] as const) {
+      act(() => {
+        receiveHint(kind, kind === 'queue' || kind === 'publication' ? 'thread-a' : 'a');
+        vi.advanceTimersByTime(PUSH_BATCH_MS);
+      });
+      expect(api.list).not.toHaveBeenCalled();
+      expect(api.projects).not.toHaveBeenCalled();
+      expect(screen.getByText('Task a')).toBeInTheDocument();
+      expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
+    }
+  });
+
+  it.each(['job', 'thread', 'resync'] as const)(
+    'refreshes project and conversation lists for a %s change alongside tool activity',
+    async (kind) => {
+      render(<AgentsSidebar />);
+      await screen.findByText('Task a');
+      api.list.mockClear();
+      api.projects.mockClear();
+      vi.useFakeTimers();
+
+      await act(async () => {
+        receiveHint('usage', 'a');
+        receiveHint('mcp', 'a');
+        if (kind === 'job')
+          receiveJobChange({ id: 'a', thread_id: 'thread-a', revision: 1, state: 'running' });
+        else if (kind === 'thread')
+          receiveThreadChange({ id: 'thread-a', revision: 1, title: 'Updated task' });
+        else receiveSync();
+        vi.advanceTimersByTime(PUSH_BATCH_MS);
+      });
+
+      expect(api.projects).toHaveBeenCalledOnce();
+      expect(api.list).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo' }));
+      expect(api.list).toHaveBeenCalledWith(expect.objectContaining({ pinned: true }));
+    },
+  );
+
   it('refreshes a delayed automatic title after the conversation is idle', async () => {
     localStorage.setItem(
       sidebarPreferencesKey('alice'),

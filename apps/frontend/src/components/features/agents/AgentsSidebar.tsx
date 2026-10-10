@@ -222,7 +222,10 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   // clock below is the backstop for when it is not flowing.
   useEffect(
     () =>
-      onAgentRecordsChanged(() => {
+      onAgentRecordsChanged((change) => {
+        // Tool approvals, usage, queues and publication hints belong to detail
+        // panes. Only changed records or a stream gap can affect these lists.
+        if (!change.resync && change.jobs.length === 0 && change.threads.length === 0) return;
         reload();
         reloadProjects();
       }),
