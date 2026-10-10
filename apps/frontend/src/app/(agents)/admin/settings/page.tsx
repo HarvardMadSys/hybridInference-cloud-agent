@@ -10,6 +10,7 @@ import { getAgentRunnerHosts, setAgentHostSettings, setAgentRuntimeVersion } fro
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import AgentVersions, { agentName } from './AgentVersions';
+import ApplicationSettings from './ApplicationSettings';
 import { AdminNavigation } from '../AdminNavigation';
 import { GlobalSettingsCard, type NamedHost } from '../hosts/HostSettings';
 import { runtimeMenu, serverInventory } from '../hosts/format';
@@ -133,7 +134,8 @@ function SettingsView() {
         <AdminNavigation current="settings" />
         <div className="max-w-4xl">
           <p className="mt-6 text-sm text-gray-500 dark:text-gray-400">
-            Default agent versions and sandbox settings for all servers. Set them for one server in{' '}
+            Application settings, default agent versions, and sandbox settings for all servers.
+            Override sandbox settings for one server in{' '}
             <Link
               href="/admin/hosts"
               className="underline hover:text-gray-700 dark:hover:text-gray-200"
@@ -168,6 +170,7 @@ function SettingsView() {
               Loading settings…
             </p>
           )}
+          <ApplicationSettings onAccessDenied={fail} />
           {pool && (
             <>
               <AgentVersions

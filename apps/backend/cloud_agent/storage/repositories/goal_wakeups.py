@@ -25,6 +25,7 @@ from cloud_agent.goals.models import (
     WAKEUP_BACKOFF_MAX_S,
     WAKEUP_BACKOFF_S,
 )
+from cloud_agent.settings import integer_setting, number_setting
 
 if TYPE_CHECKING:
     import asyncpg
@@ -265,7 +266,10 @@ async def _release_on(
             WHERE id = $1 AND state = 'pending'
             """,
             wakeup_id,
-            min(retry_in_seconds, WAKEUP_BACKOFF_MAX_S),
+            min(
+                retry_in_seconds,
+                number_setting("goals.wakeup_backoff_max_seconds", WAKEUP_BACKOFF_MAX_S),
+            ),
         )
 
 
@@ -276,14 +280,16 @@ def wakeup_backoff(attempts: int) -> float:
     a database that is refusing writes, not to schedule anything precisely:
     every wakeup that matters is also re-armed by the finish that unblocks it.
     """
+    backoff = number_setting("goals.wakeup_backoff_seconds", WAKEUP_BACKOFF_S)
+    max_backoff = number_setting("goals.wakeup_backoff_max_seconds", WAKEUP_BACKOFF_MAX_S)
     if attempts <= 1:
-        return WAKEUP_BACKOFF_S
-    return min(WAKEUP_BACKOFF_S * math.pow(2, attempts - 1), WAKEUP_BACKOFF_MAX_S)
+        return min(backoff, max_backoff)
+    return min(backoff * math.pow(2, min(attempts - 1, 100)), max_backoff)
 
 
 def is_exhausted(attempts: int) -> bool:
     """Whether a wakeup has failed often enough to stop retrying it."""
-    return attempts >= MAX_WAKEUP_ATTEMPTS
+    return attempts >= integer_setting("goals.max_wakeup_attempts", MAX_WAKEUP_ATTEMPTS)
 
 
 __all__ = [

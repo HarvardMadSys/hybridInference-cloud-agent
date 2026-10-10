@@ -18,7 +18,6 @@ branch so the caller can open the PR against it.
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
@@ -27,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import number_setting, setting_env
 from cloud_agent_shared.git.patch_gate import (
     PatchGateResult,
     branch_name_for,
@@ -50,11 +50,11 @@ _COMMIT_SHA = re.compile(r"[0-9a-fA-F]{7,64}")
 # name the software rather than one site. Read from the runner's environment,
 # which a patch cannot reach — the whole point of the dictionary below.
 def _identity_name() -> str:
-    return os.environ.get("AGENT_GIT_AUTHOR_NAME") or "HybridInference Agent"
+    return setting_env("AGENT_GIT_AUTHOR_NAME") or "HybridInference Agent"
 
 
 def _identity_email() -> str:
-    return os.environ.get("AGENT_GIT_AUTHOR_EMAIL") or "agent@localhost"
+    return setting_env("AGENT_GIT_AUTHOR_EMAIL") or "agent@localhost"
 
 
 # A patch must not be able to reach configuration that changes what git does.
@@ -63,10 +63,6 @@ _GIT_ENV = {
     "GIT_CONFIG_SYSTEM": "/dev/null",
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_ASKPASS": "/bin/true",
-    "GIT_COMMITTER_NAME": _identity_name(),
-    "GIT_COMMITTER_EMAIL": _identity_email(),
-    "GIT_AUTHOR_NAME": _identity_name(),
-    "GIT_AUTHOR_EMAIL": _identity_email(),
 }
 
 
@@ -91,7 +87,16 @@ def _run_git(
     env_extra: dict[str, str] | None = None,
 ) -> str:
     """Run one git command hermetically and return stdout."""
-    env = {"PATH": "/usr/bin:/bin:/usr/local/bin", **_GIT_ENV, **(env_extra or {})}
+    env = {
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        **_GIT_ENV,
+        "GIT_COMMITTER_NAME": _identity_name(),
+        "GIT_COMMITTER_EMAIL": _identity_email(),
+        "GIT_AUTHOR_NAME": _identity_name(),
+        "GIT_AUTHOR_EMAIL": _identity_email(),
+        **(env_extra or {}),
+    }
+    timeout_s = number_setting("publish_git_timeout_s", _GIT_TIMEOUT_S)
     try:
         completed = subprocess.run(
             ["git", *args],
@@ -99,12 +104,12 @@ def _run_git(
             env=env,
             capture_output=True,
             text=True,
-            timeout=_GIT_TIMEOUT_S,
+            timeout=timeout_s,
             stdin=subprocess.DEVNULL,
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise PublishError(f"git {args[0]} timed out after {_GIT_TIMEOUT_S:.0f}s") from exc
+        raise PublishError(f"git {args[0]} timed out after {timeout_s:.0f}s") from exc
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip().splitlines()
         tail = detail[-1] if detail else "no output"

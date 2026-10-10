@@ -7,11 +7,12 @@ from typing import TYPE_CHECKING, Any
 import asyncpg
 
 from cloud_agent.skills.models import (
-    MAX_LIBRARY_SKILLS,
-    MAX_SELECTED_SKILLS,
-    MAX_SELECTION_BYTES,
     SkillConflict,
     SkillError,
+    skill_max_library,
+    skill_max_selected,
+    skill_max_selection_bytes,
+    skill_size_label,
 )
 
 if TYPE_CHECKING:
@@ -85,13 +86,14 @@ class PostgresSkillRepository:
             user_id,
             skill_id,
         )
-        if totals["count"] + 1 > MAX_SELECTED_SKILLS:
-            raise SkillError("Enable at most 16 default skills for new chats.")
-        if (
-            totals["bytes"] + len(str(candidate["instructions"]).encode("utf-8"))
-            > MAX_SELECTION_BYTES
-        ):
-            raise SkillError("Default skill instructions must total no more than 128 KB.")
+        max_selected = skill_max_selected()
+        max_bytes = skill_max_selection_bytes()
+        if totals["count"] + 1 > max_selected:
+            raise SkillError(f"Enable at most {max_selected} default skills for new chats.")
+        if totals["bytes"] + len(str(candidate["instructions"]).encode("utf-8")) > max_bytes:
+            raise SkillError(
+                f"Default skill instructions must total no more than {skill_size_label(max_bytes)}."
+            )
 
     async def create_skill(self, *, user_id: str, values: dict[str, Any]) -> dict[str, Any]:
         """Insert a skill, enforcing names, library size, and default limits."""
@@ -102,8 +104,9 @@ class PostgresSkillRepository:
                     "SELECT count(*) FROM agent_skills WHERE user_id = $1 AND deleted_at IS NULL",
                     user_id,
                 )
-                if count >= MAX_LIBRARY_SKILLS:
-                    raise SkillError("Your library can contain at most 100 skills.")
+                max_library = skill_max_library()
+                if count >= max_library:
+                    raise SkillError(f"Your library can contain at most {max_library} skills.")
                 await self._check_defaults(conn, user_id, values)
                 row = await conn.fetchrow(
                     """

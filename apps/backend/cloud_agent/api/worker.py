@@ -36,7 +36,7 @@ from cloud_agent.api.deps import (
     require_store,
 )
 from cloud_agent.application.pending_messages import settle_queue_when_possible
-from cloud_agent.application.residency import RESIDENCY_TTL_S, _mint_residency_grant
+from cloud_agent.application.residency import _mint_residency_grant, residency_ttl_s
 from cloud_agent.attachments.models import AttachmentView
 from cloud_agent.attachments.selection import prompt_with_attachments
 from cloud_agent.broker_routing import ENV_BROKER_TOKEN, broker_for_attempt, hydrate_shared_broker
@@ -1158,7 +1158,7 @@ async def worker_establish_shared_sandbox_residency(
         runtime_id=body.runtime_id,
         runtime_version=body.runtime_version,
         sandbox_id=body.sandbox_id,
-        ttl_seconds=RESIDENCY_TTL_S,
+        ttl_seconds=residency_ttl_s(),
     )
     if row is None:
         raise _lease_lost()
@@ -1194,7 +1194,7 @@ async def worker_establish_shared_sandbox_residency(
     return HostResidencyEstablishResponse(
         thread_id=thread_id,
         generation=int(row["generation"]),
-        ttl_seconds=RESIDENCY_TTL_S,
+        ttl_seconds=residency_ttl_s(),
         credential=credential,
         model=row.get("model"),
     )

@@ -22,6 +22,7 @@ Start with the task you need:
 | Prepare a host and its credentials | [Prerequisites](#before-a-job-can-run-for-real), [credentials](#2-credentials) |
 | Start or inspect the host service | [Running self-hosted](#running-self-hosted) |
 | Enable isolation for untrusted repositories | [Provisioning Kata](#provisioning-kata-on-a-runner-host) |
+| Change application behavior, integrations, or appearance | [Admin Settings](#admin-settings) |
 | Change concurrency, sandbox settings, or placement | [How many runners](#how-many-runners), [which machine runs the jobs](#which-machine-runs-the-jobs) |
 | Add a host on another machine | [Tunnels and broker routing](#running-runners-on-another-machine) |
 | Deploy or roll back a release | [Rolling deployment order](#rolling-deployment-order), [deployment reliability](deployment-reliability.md) |
@@ -40,6 +41,44 @@ and queue alerts, use [deployment reliability](deployment-reliability.md).
 Historical measurements below describe the runs that were recorded; consult the
 deployment's own records for its current readiness. Replace `<...>` placeholders
 with deployment values before running commands.
+
+## Admin Settings
+
+Open **Admin → Settings** to manage application and integration configuration,
+publication, web appearance, operational intervals, upload and skill limits,
+task-title generation, and sandbox/workspace limits. Application settings are
+persisted in the Agent database. The application API is
+`GET /admin/agent/settings` and `PUT /admin/agent/settings` with a partial body
+such as `{"settings": {"max_attempts": 3}}`; omitted keys retain their values.
+Writes use the existing administrator guard and record changes in the Audit
+log. Credential fields show only whether a value is configured. Enter and save
+a replacement to change one; **Reset** restores its built-in default.
+
+For the first deployment of this release, run `alembic upgrade head` through
+`0036_host_settings_import`, then start the main control-plane listener with its
+existing complete environment. It imports registered environment settings once.
+The MCP-only listener waits for initialization and reads the same settings.
+Subsequent deployments preserve admin values, and resetting a field never
+restores an old `.env` value. Listeners synchronize saved changes every five
+seconds; web appearance uses the saved public fields on each request. Apply
+changes to subsequent operations according to the description beside each
+setting.
+
+Set `AGENT_SETTINGS_ENCRYPTION_KEY` to a stable key of at least 32 bytes, or use
+the existing `AGENT_SESSION_SECRET` fallback. Both listeners must receive the
+same effective key. Back it up with the database. Before changing that key,
+re-encrypt stored settings from the old key to the new one and coordinate the
+listener rollout; replacing the environment value alone makes existing
+ciphertext unreadable. Rotating the session secret has the same effect when it
+is the fallback, including when introducing a dedicated settings key.
+`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` and `AGENT_COMPUTE_SECRET_KEY` continue to
+protect their separate user and compute credential stores.
+
+Database access, identity issuer/JWKS, signing and encryption keys, recovery
+authentication, host/broker credentials, security and isolation policy,
+networking and listeners, build routing, mounted files, and trusted compute
+deployment profiles remain deployment configuration. These bootstrap names
+appear on the page with hidden values. See [the environment inventory](../ENVIRONMENT.md#settings-and-bootstrap-configuration).
 
 ## What a job does
 
@@ -632,7 +671,8 @@ unavailable — see below. Put the file on the host, owned by the service user
 and `chmod 600`. The control-plane image does not carry the deployment's
 `config/`, `distributions/`, or `var/data/` directories.
 
-**Whether GitHub is configured is decided by `AGENT_GITHUB_APP_ID` alone.** The
+**Whether GitHub is configured is decided by the saved GitHub App ID**, imported
+from `AGENT_GITHUB_APP_ID` at the first settings initialization. The
 key path always has a default in this stack, and `/dev/null` is mounted there
 when no App exists, so the path says nothing. With the App ID set, a key that
 cannot be loaded — missing, empty, unreadable by the service user, or not a
@@ -649,13 +689,15 @@ valid key — does not stop the control plane (issue #47):
   `queue_not_starting` alert fires as well.
 - The service reads the key again every 30 seconds. Fixing the file in place —
   its owner, mode or content — recovers the same process within a minute and
-  logs `source_control_load_recovered`. Changing an environment variable, or
-  the host path the bind mount points at, still needs the container recreated.
+  logs `source_control_load_recovered`. Change the App ID and inline credentials
+  through Admin → Settings. Changing the host path of the key bind mount still
+  needs the container recreated.
 
-Alternatively `AGENT_GITHUB_APP_PRIVATE_KEY` takes the PEM inline (escaped
-`\n` are accepted and unescaped) and skips the mount — at the cost of putting
-the key in the process environment, where `docker inspect`, crash dumps and
-log shippers can read it. Prefer the file.
+Alternatively save an inline PEM in the Settings page; it is encrypted in the
+database and takes precedence over the mounted key. The legacy
+`AGENT_GITHUB_APP_PRIVATE_KEY` environment value is accepted for the one-time
+import in deployments that pass it through. The mounted file remains available
+when the saved inline key is empty.
 
 The App needs `contents: write` and `pull_requests: write` and nothing else —
 notably not `workflows`, so a patch touching `.github/` cannot be pushed even
@@ -1108,16 +1150,24 @@ machine, and only _Host default_ returns it to the environment.
 
 #### Sandbox settings
 
-Use the admin settings pages for sandbox limits. The turn time limit,
-the repository size limit, the sandbox idle timeout, sessions per sandbox and
-the three terminal limits sit in the _Sandbox_ card on the _Settings_ page, once
+Use the admin settings pages for sandbox and workspace limits. The turn time
+limit, repository size limit, sandbox idle timeout, sessions per sandbox,
+workspace command/file limits and terminal resource limits sit in the
+_Sandbox_ card on the _Settings_ page, once
 for every server, and in the _Sandbox_ table of each server's details on the
 _Servers_ page for that server alone; the API is `PUT /admin/agent/host-settings` and
 `PUT /admin/agent/runner-hosts/<host>/settings` with
 `{"settings": {"<key>": N}}`, where `null` clears a key. A server's own value
-wins over the global one, and a setting set in neither place keeps the host's
-`.env` value or built-in default — `ENVIRONMENT.md` §_Sandbox settings from
-the admin pages_ lists the precedence and the variables. They ride the heartbeat
+wins over the global one, and a setting set in neither place uses its built-in
+default. Migration `0036_host_settings_import` imports existing valid nondefault
+`.env` observations as per-server settings without replacing an administrator's
+choices. Hosts without a complete report finish this import through their
+initial heartbeats. Admin edits and resets exclude only the changed keys from
+pending imports, so unrelated legacy customizations are preserved. Global
+exclusions also protect newly enrolled hosts. Subsequent `.env` edits have no
+effect, and clearing an override never restores them.
+`ENVIRONMENT.md` §_Sandbox settings from the admin pages_ lists the precedence
+and initial variables. They ride the heartbeat
 answer like the slot limit, so nothing is redeployed, and the same rule holds:
 saving is not applying. Each host reports what it applies, the runner's share
 as it hands each turn over and the workspace broker's as the broker confirms

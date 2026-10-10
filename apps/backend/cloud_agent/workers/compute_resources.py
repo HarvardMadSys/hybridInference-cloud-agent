@@ -6,6 +6,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from cloud_agent.compute_config import current_poll_seconds
 from cloud_agent.logging_utils import get_logger
 
 if TYPE_CHECKING:
@@ -31,13 +32,12 @@ class ComputeResourceWorker:
                 group.create_task(self._consume(f"{self.identity}:{slot}"))
 
     async def _schedule(self) -> None:
-        interval = self.reconciler.commands.configuration.poll_seconds
         while True:
             try:
                 await self.reconciler.schedule()
             except Exception as exc:
                 logger.error("compute_scheduler_failed", extra={"error_type": type(exc).__name__})
-            await asyncio.sleep(interval)
+            await asyncio.sleep(current_poll_seconds(self.reconciler.commands.configuration))
 
     async def _consume(self, worker_id: str) -> None:
         while True:

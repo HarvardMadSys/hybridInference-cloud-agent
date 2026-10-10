@@ -46,6 +46,7 @@ from cloud_agent.storage.repositories import (
     PostgresResidencyRepository,
     PostgresSandboxRepository,
     PostgresSessionForkRepository,
+    PostgresSettingsRepository,
     PostgresSkillRepository,
     PostgresSnapshotRepository,
     PostgresSourceControlRepository,
@@ -78,6 +79,7 @@ if TYPE_CHECKING:
         ResidencyRepository,
         SandboxRepository,
         SessionForkRepository,
+        SettingsRepository,
         SkillRepository,
         SnapshotRepository,
         SourceControlRepository,
@@ -122,6 +124,7 @@ class Storage:
         self.residency: ResidencyRepository = PostgresResidencyRepository(pool)
         self.sandbox: SandboxRepository = PostgresSandboxRepository(pool)
         self.session_fork: SessionForkRepository = PostgresSessionForkRepository(pool)
+        self.settings: SettingsRepository = PostgresSettingsRepository(pool)
         self.skills: SkillRepository = PostgresSkillRepository(pool)
         self.attachments: AttachmentRepository = PostgresAttachmentRepository(pool)
         self.snapshot: SnapshotRepository = PostgresSnapshotRepository(pool)

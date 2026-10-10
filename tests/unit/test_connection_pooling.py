@@ -39,6 +39,9 @@ async def test_the_lifespan_gives_both_gateway_clients_one_pool(monkeypatch) -> 
     monkeypatch.delenv("GATEWAY_BASE_URL", raising=False)
     monkeypatch.delenv("GATEWAY_ISSUER", raising=False)
     monkeypatch.setattr(asyncpg, "create_pool", AsyncMock(return_value=AsyncMock()))
+    # This test's pool is a socket-ownership sentinel, not a settings database.
+    # Initialization/import semantics have separate repository-backed tests.
+    monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock())
     monkeypatch.setattr(
         "cloud_agent.identity_namespace.ensure_gateway_namespace", AsyncMock(return_value=None)
     )

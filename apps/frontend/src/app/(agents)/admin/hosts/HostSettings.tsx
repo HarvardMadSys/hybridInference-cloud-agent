@@ -6,8 +6,8 @@
 //
 // Two places, one precedence: the Settings page sets a value for every server,
 // and a server's own panel on the Servers page can set one that wins over it.
-// Clearing a value falls back a level, ending at the server's own `.env` or
-// built-in default. Nothing here claims a value is in force until the server
+// Clearing a value falls back a level, ending at the deployment's built-in
+// default. Nothing here claims a value is in force until the server
 // reports applying it.
 
 import Link from 'next/link';
@@ -234,7 +234,7 @@ export function GlobalSettingsCard({
                   saved={saved}
                   placeholder={definition.default}
                   label={`${definition.label} for all servers`}
-                  clearLabel="Use server defaults"
+                  clearLabel="Use deployment default"
                   busy={busy}
                   onChange={onChange}
                 />
@@ -326,7 +326,7 @@ export function ServerSettingsPanel({
                     key={`${definition.key}:${override ?? 'unset'}`}
                     definition={definition}
                     saved={override}
-                    placeholder={fact.admin ?? fact.own ?? definition.default}
+                    placeholder={fact.admin ?? definition.default}
                     label={`${definition.label} for ${name}`}
                     clearLabel="Use default"
                     busy={busy}

@@ -99,6 +99,28 @@ def _reply(request: httpx.Request, result: Any, **headers: str) -> httpx.Respons
     )
 
 
+async def test_existing_transport_uses_updated_default_timeouts_and_keeps_overrides(monkeypatch):
+    values = {"mcp_request_timeout_s": 120.0, "mcp_connect_timeout_s": 10.0}
+    monkeypatch.setattr(
+        transports, "number_setting", lambda name, default=None: values.get(name, default)
+    )
+    timeouts = []
+
+    def handle(request):
+        timeouts.append(request.extensions["timeout"])
+        return _reply(request, {"tools": []})
+
+    async with _client(handle) as http:
+        implicit = StreamableHttpTransport(_config(), http)
+        explicit = StreamableHttpTransport(_config(request_timeout=17, connect_timeout=3), http)
+        await implicit.request("tools/list")
+        values.update(mcp_request_timeout_s=31.0, mcp_connect_timeout_s=2.0)
+        await implicit.request("tools/list")
+        await explicit.request("tools/list")
+    assert [timeout["read"] for timeout in timeouts] == [120, 31, 17]
+    assert [timeout["connect"] for timeout in timeouts] == [10, 2, 3]
+
+
 def _sse(payloads: list[Any], **headers: str) -> httpx.Response:
     """Answer with a request-scoped SSE stream carrying ``payloads``."""
     frames = b"".join(b"data: " + json.dumps(payload).encode() + b"\n\n" for payload in payloads)

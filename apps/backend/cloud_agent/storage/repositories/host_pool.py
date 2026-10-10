@@ -24,6 +24,7 @@ from cloud_agent.host_pool import (
     transition_allowed,
 )
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import number_setting
 from cloud_agent.storage._sql.compute_admission import (
     host_compute_admission,
     lock_compute_entry,
@@ -38,6 +39,12 @@ from cloud_agent.storage._sql.hosts import (
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent.storage.repositories.host_capacity import insert_capacity_history_point
+from cloud_agent_shared.host_settings import (
+    HOST_SETTINGS_BY_KEY,
+    RUNNER_SETTING_KEYS,
+    admin_values,
+    reported_values,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -48,6 +55,10 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
+
+_LEGACY_BROKER_KEYS = frozenset(
+    {"terminal_idle_ttl_s", "terminal_hard_ttl_s", "terminal_max_sessions"}
+)
 
 
 def _changed_settings(
@@ -319,13 +330,22 @@ class PostgresHostPoolRepository:
             runtime_versions: Default CLI version per runtime.
             runtime_versions_available: Every CLI version its image holds.
             settings_applied: The runtime settings the host is applying now.
-            settings_local: What its own environment would give it with no
-                admin value. Either ``None`` leaves what is stored in place.
+            settings_local: Legacy environment observations, imported once as
+                per-host overrides. Either ``None`` leaves the report in place.
 
         Returns:
             The updated host row, or ``None`` when the host no longer exists.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            # Match the admin writer's lock order: policy before host. Once
+            # defaults are authoritative, a legacy observation is imported at
+            # most once and cannot resurrect an explicitly reset setting.
+            policy = await conn.fetchrow(
+                "SELECT host_settings, host_settings_import_excluded "
+                "FROM agent_runner_policy WHERE id FOR SHARE"
+            )
+            global_settings = (load_json(policy["host_settings"]) or {}) if policy else {}
+            global_exclusions = set(policy["host_settings_import_excluded"]) if policy else set()
             row = await conn.fetchrow(
                 f"""
                 UPDATE agent_runner_hosts
@@ -352,7 +372,7 @@ class PostgresHostPoolRepository:
                     settings_applied = COALESCE($12::jsonb, settings_applied),
                     settings_local = COALESCE($13::jsonb, settings_local)
                 WHERE host = $1
-                RETURNING {HOST_COLUMNS}
+                RETURNING {HOST_COLUMNS}, settings_imported, settings_import_excluded
                 """,
                 host,
                 slots_total,
@@ -376,6 +396,44 @@ class PostgresHostPoolRepository:
             )
             if row is None:
                 return None
+            if (
+                not row["settings_imported"]
+                and settings_local is not None
+                and (
+                    credential_hash is None
+                    or await conn.fetchval(
+                        "SELECT credential_hash = $2 FROM agent_runner_hosts WHERE host = $1",
+                        host,
+                        credential_hash,
+                    )
+                )
+            ):
+                observed = reported_values(dict(settings_local)) or {}
+                previous = dict(load_json(row["settings_desired"]) or {})
+                excluded = global_exclusions | set(row["settings_import_excluded"])
+                imports = {
+                    key: value
+                    for key, value in admin_values(observed).items()
+                    if value != HOST_SETTINGS_BY_KEY[key].default
+                    and key not in previous
+                    and key not in global_settings
+                    and key not in excluded
+                }
+                expected = RUNNER_SETTING_KEYS | (
+                    _LEGACY_BROKER_KEYS if row["broker_url"] else frozenset()
+                )
+                complete = expected <= observed.keys()
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE agent_runner_hosts
+                    SET settings_desired = $2::jsonb, settings_imported = $3
+                    WHERE host = $1
+                    RETURNING {HOST_COLUMNS}, settings_imported, settings_import_excluded
+                    """,
+                    host,
+                    json.dumps({**previous, **imports}),
+                    complete,
+                )
             if (
                 capacity is not None
                 and capacity_sample_age_ms is not None
@@ -442,7 +500,7 @@ class PostgresHostPoolRepository:
         """Set or clear runtime settings for one server, over the global values.
 
         ``changes`` names only the settings to change, and ``None`` clears one
-        so the global value, or the host's own, applies again. Settings it does
+        so the global value, or the built-in default, applies again. Settings it does
         not name keep their values. The host applies the result from its next
         heartbeat answer.
 
@@ -464,9 +522,13 @@ class PostgresHostPoolRepository:
                 return None
             previous = dict(load_json(current["settings_desired"]) or {})
             await conn.execute(
-                "UPDATE agent_runner_hosts SET settings_desired = $2::jsonb WHERE host = $1",
+                "UPDATE agent_runner_hosts SET settings_desired = $2::jsonb, "
+                "settings_import_excluded = ARRAY(SELECT DISTINCT key FROM "
+                "unnest(settings_import_excluded || $3::text[]) AS touched(key)) "
+                "WHERE host = $1",
                 host,
                 json.dumps(_changed_settings(previous, changes)),
+                list(changes),
             )
         return previous
 
@@ -684,7 +746,7 @@ class PostgresHostPoolRepository:
         )
 
     async def queue_health(self, *, expected_deployment_sha: str) -> dict[str, int]:
-        """Observe ten-minute queue stalls without claiming or changing jobs.
+        """Observe configured queue stalls without claiming or changing jobs.
 
         Occupied slots are ordinary backpressure. Missing/stale/disabled hosts,
         lost deployment markers and a wrong placement pin are not. Retained
@@ -702,7 +764,7 @@ class PostgresHostPoolRepository:
                     LEFT JOIN agent_thread_sandbox_memberships m ON m.thread_id = t.id
                     LEFT JOIN agent_sandboxes g ON g.id = m.sandbox_id
                     WHERE j.state = 'queued' AND NOT j.cancel_requested
-                      AND j.updated_at < NOW() - INTERVAL '10 minutes'
+                      AND j.updated_at < NOW() - $3 * INTERVAL '1 second'
                       AND NOT EXISTS (
                           SELECT 1 FROM agent_jobs earlier
                           WHERE earlier.thread_id = j.thread_id AND earlier.turn_no < j.turn_no
@@ -738,6 +800,7 @@ class PostgresHostPoolRepository:
                 """,
                 expected_deployment_sha,
                 KATA_RUNTIME,
+                number_setting("queue_alert_after_s", 600.0),
                 timeout=10,
             )
         return {key: int(row[key]) for key in ("queued", "unavailable", "running")}
@@ -796,7 +859,7 @@ class PostgresHostPoolRepository:
         """The runtime settings set for every server, as stored.
 
         A server's own values win over these, and a setting set nowhere falls
-        back to the host's environment. Read through
+        back to the built-in default. Read through
         ``cloud_agent_shared.host_settings.admin_values``, which drops anything
         a release can no longer apply.
         """
@@ -825,11 +888,20 @@ class PostgresHostPoolRepository:
             # UPDATE touches nothing and still reports success.
             await conn.execute(
                 """
-                INSERT INTO agent_runner_policy (id, host_settings) VALUES (TRUE, $1::jsonb)
+                INSERT INTO agent_runner_policy (id, host_settings, host_settings_import_excluded)
+                VALUES (TRUE, $1::jsonb, $2::text[])
                 ON CONFLICT (id) DO UPDATE
-                SET host_settings = EXCLUDED.host_settings, updated_at = NOW()
+                SET host_settings = EXCLUDED.host_settings,
+                    host_settings_import_excluded = ARRAY(
+                        SELECT DISTINCT key FROM unnest(
+                            agent_runner_policy.host_settings_import_excluded ||
+                            EXCLUDED.host_settings_import_excluded
+                        ) AS touched(key)
+                    ),
+                    updated_at = NOW()
                 """,
                 json.dumps(_changed_settings(previous, changes)),
+                list(changes),
             )
         return previous
 

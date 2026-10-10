@@ -35,6 +35,7 @@ from cloud_agent.storage.repositories.profiling_control import (
 from cloud_agent.storage.repositories.residency import PostgresResidencyRepository
 from cloud_agent.storage.repositories.sandbox import PostgresSandboxRepository
 from cloud_agent.storage.repositories.session_fork import PostgresSessionForkRepository
+from cloud_agent.storage.repositories.settings import PostgresSettingsRepository
 from cloud_agent.storage.repositories.skills import PostgresSkillRepository
 from cloud_agent.storage.repositories.snapshot import PostgresSnapshotRepository
 from cloud_agent.storage.repositories.source_control import PostgresSourceControlRepository
@@ -63,6 +64,7 @@ __all__ = [
     "PostgresResidencyRepository",
     "PostgresSandboxRepository",
     "PostgresSessionForkRepository",
+    "PostgresSettingsRepository",
     "PostgresSkillRepository",
     "PostgresSnapshotRepository",
     "PostgresSourceControlRepository",

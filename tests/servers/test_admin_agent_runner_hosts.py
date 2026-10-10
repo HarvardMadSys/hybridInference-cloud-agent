@@ -517,6 +517,17 @@ async def test_the_pool_lists_every_setting_an_admin_may_set_with_its_bounds(adm
         "terminal_idle_ttl_s",
         "terminal_hard_ttl_s",
         "terminal_max_sessions",
+        "terminal_max_sessions_per_workspace",
+        "workspace_command_timeout_s",
+        "workspace_file_write_max_mib",
+        "workspace_file_preview_max_kib",
+        "workspace_command_output_max_mib",
+        "workspace_directory_max_entries",
+        "terminal_buffer_max_mib",
+        "terminal_buffer_max_events",
+        "terminal_output_max_mib",
+        "terminal_input_max_kib",
+        "terminal_max_streams_per_session",
     }
     assert definitions["source_import_max_mib"] | {"label": None, "description": None} == {
         "key": "source_import_max_mib",

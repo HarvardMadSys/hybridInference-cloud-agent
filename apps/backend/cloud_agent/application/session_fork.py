@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import HTTPException
 
-from cloud_agent.application.residency import RESIDENCY_TTL_S, _mint_residency_grant
+from cloud_agent.application.residency import _mint_residency_grant, residency_ttl_s
 from cloud_agent.broker_routing import broker_for_job
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 from cloud_agent.workspace_errors import _workspace_broker_http_error
@@ -168,7 +168,7 @@ async def materialize_session_fork(
     residencies = await job_store.session_fork.establish_session_fork_residencies(
         operation_id=operation_id,
         coordinator_token=coordinator_token,
-        ttl_seconds=RESIDENCY_TTL_S,
+        ttl_seconds=residency_ttl_s(),
     )
     if residencies is None:
         await job_store.session_fork.release_session_fork_materialization(

@@ -56,11 +56,12 @@ services:
       AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
 
       # --- The gateway, over HTTP only --------------------------------------
-      GATEWAY_BASE_URL: ${GATEWAY_BASE_URL:?origin of the FreeInference gateway}
+      # Optional after the one-time import: saved Admin settings are authoritative.
+      GATEWAY_BASE_URL: ${GATEWAY_BASE_URL:-}
       GATEWAY_JWKS_URL: ${GATEWAY_JWKS_URL:?the gateway origin plus /v1/identity/jwks}
       # Authorizes this service to mint and revoke inference grants. A service
       # credential: it must never reach a sandbox or a browser.
-      GATEWAY_GRANT_DISPATCH_TOKEN: ${GATEWAY_GRANT_DISPATCH_TOKEN:?shared with the gateway, distinct per environment}
+      GATEWAY_GRANT_DISPATCH_TOKEN: ${GATEWAY_GRANT_DISPATCH_TOKEN:-}
       GATEWAY_GRANT_BASE_PATH: ${GATEWAY_GRANT_BASE_PATH:-/internal/agent-grants}
       GATEWAY_GRANT_BINDING_ID: ${GATEWAY_GRANT_BINDING_ID:-}
       # The exact identity authority, independent of the transport URL. Both
@@ -69,22 +70,23 @@ services:
       # The consent page a sign-in starts at. Server-side: the whole PKCE round
       # trip is assembled in the control plane now, so the web app no longer
       # needs its own copy of this.
-      GATEWAY_AUTHORIZE_URL: ${GATEWAY_AUTHORIZE_URL:?the gateway origin plus /authorize}
+      GATEWAY_AUTHORIZE_URL: ${GATEWAY_AUTHORIZE_URL:-}
       # Where the gateway sends the browser back — this service's callback, as
       # the public internet addresses it, and **byte-identical to an entry in
       # the gateway's IDENTITY_ALLOWED_REDIRECTS**, which is matched as an exact
       # string. Configured rather than derived from request headers so that
       # whatever sits in front of this service cannot decide where sign-in
       # returns to.
-      AGENT_SESSION_REDIRECT_URI: ${AGENT_SESSION_REDIRECT_URI:?public URL of /v1/session/callback, allowlisted at the gateway}
+      AGENT_SESSION_REDIRECT_URI: ${AGENT_SESSION_REDIRECT_URI:-}
       # Where the browser lands once the cookie is set: the web app's public
       # origin including any base path, e.g. https://example.org/agents.
-      AGENT_WEB_BASE_URL: ${AGENT_WEB_BASE_URL:?public origin of the web app, including any base path}
+      AGENT_WEB_BASE_URL: ${AGENT_WEB_BASE_URL:-}
 
       # --- This service's own secrets ---------------------------------------
       # Required, never defaulted. A default here is a deployment that looks
       # configured and is signing with a value in a public git repository.
       AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:?32+ random bytes, unique per environment}
+      AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:?32+ random bytes, unique per environment}
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:?32+ random bytes, unique per environment}
       # The API enforces the same exact host-generation capability as the
@@ -92,6 +94,13 @@ services:
       # while deploy.sh correctly refused to replace the old API.
       AGENT_DEPLOYMENT_SHA: ${AGENT_DEPLOYMENT_SHA:?exact commit this control plane serves}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      # Imported once into admin Settings; subsequent changes are made there.
+      AGENT_WEB_APP_NAME: ${AGENT_WEB_APP_NAME:-}
+      AGENT_WEB_ORG_NAME: ${AGENT_WEB_ORG_NAME:-}
+      AGENT_WEB_ORG_URL: ${AGENT_WEB_ORG_URL:-}
+      AGENT_WEB_STATUS_URL: ${AGENT_WEB_STATUS_URL:-}
+      AGENT_WEB_GATEWAY_URL: ${AGENT_WEB_GATEWAY_URL:-}
+      AGENT_WEB_FEATURE_RAG: ${AGENT_WEB_FEATURE_RAG:-}
       # Optional compute management runs only on this stable main listener.
       # Mount the operator configuration using docker-compose.compute.yml.
       AGENT_COMPUTE_CONFIG: ${AGENT_COMPUTE_CONFIG:-}
@@ -245,6 +254,9 @@ services:
       - "${AGENT_MCP_RELAY_BIND:-127.0.0.1}:${AGENT_MCP_RELAY_PORT:-8001}:8001"
     environment:
       AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
+      # Both listeners decrypt the shared admin settings using the same key.
+      AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:?32+ random bytes, unique per environment}
+      AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
       GATEWAY_ISSUER: ${GATEWAY_ISSUER:?exact iss from the Gateway identity token}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:?32+ random bytes, unique per environment}
       # The relay resolves each owner's stored MCP connection and therefore
@@ -301,6 +313,7 @@ services:
     # legitimate configuration and hide the corresponding link; an illegal one
     # is refused at render time rather than silently dropped.
     environment:
+      AGENT_CONTROL_PLANE_URL: http://control-plane:8000
       AGENT_WEB_APP_NAME: ${AGENT_WEB_APP_NAME:-}
       AGENT_WEB_ORG_NAME: ${AGENT_WEB_ORG_NAME:-}
       AGENT_WEB_ORG_URL: ${AGENT_WEB_ORG_URL:-}

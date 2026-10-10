@@ -5,10 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.attachments.models import (
-    MAX_ATTACHMENT_FILE_BYTES,
-    MAX_ATTACHMENT_FILES,
-    MAX_ATTACHMENT_TOTAL_BYTES,
     AttachmentError,
+    attachment_max_file_bytes,
+    attachment_max_files,
+    attachment_max_total_bytes,
+    attachment_size_label,
 )
 
 if TYPE_CHECKING:
@@ -44,8 +45,13 @@ class PostgresAttachmentRepository:
         """Stage one upload before any job exists, enforcing the owner's quota."""
         if not content:
             raise AttachmentError("An uploaded file cannot be empty.")
-        if len(content) > MAX_ATTACHMENT_FILE_BYTES:
-            raise AttachmentError("Each file must be 5 MB or smaller.")
+        max_file_bytes = attachment_max_file_bytes()
+        max_files = attachment_max_files()
+        max_total_bytes = attachment_max_total_bytes()
+        if len(content) > max_file_bytes:
+            raise AttachmentError(
+                f"Each file must be {attachment_size_label(max_file_bytes)} or smaller."
+            )
         async with self._pool.acquire() as conn, conn.transaction():
             await self._lock_uploads(conn, user_id)
             # The quota counts what is staged, not what is attached: a claimed
@@ -56,10 +62,13 @@ class PostgresAttachmentRepository:
                 "FROM agent_job_attachments WHERE user_id = $1 AND job_id IS NULL",
                 user_id,
             )
-            if int(staged["files"]) >= MAX_ATTACHMENT_FILES:
-                raise AttachmentError(f"Attach at most {MAX_ATTACHMENT_FILES} files.")
-            if int(staged["bytes"]) + len(content) > MAX_ATTACHMENT_TOTAL_BYTES:
-                raise AttachmentError("Attached files must total no more than 20 MB.")
+            if int(staged["files"]) >= max_files:
+                raise AttachmentError(f"Attach at most {max_files} files.")
+            if int(staged["bytes"]) + len(content) > max_total_bytes:
+                raise AttachmentError(
+                    "Attached files must total no more than "
+                    f"{attachment_size_label(max_total_bytes)}."
+                )
             row = await conn.fetchrow(
                 f"""
                 INSERT INTO agent_job_attachments (user_id, path, content, content_type)

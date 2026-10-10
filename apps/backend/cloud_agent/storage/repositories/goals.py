@@ -23,6 +23,7 @@ from cloud_agent.goals.models import (
     STALLED_AFTER_S,
     GoalConflict,
 )
+from cloud_agent.settings import number_setting
 from cloud_agent.storage._sql.goals import (
     CANCEL_QUEUED_GOAL_ROUNDS_SQL,
     EDITED_WHILE_PAUSED_DETAIL,
@@ -567,7 +568,7 @@ class PostgresGoalRepository:
                 ORDER BY t.goal_updated_at
                 LIMIT 200
                 """,
-                ARM_AFTER_S,
+                number_setting("goals.arm_after_seconds", ARM_AFTER_S),
             )
             # The ids of wakeups this pass made due again. Populated before the
             # arming loop below, which appends the goals it newly armed.
@@ -640,7 +641,7 @@ class PostgresGoalRepository:
                 LIMIT 200
                 FOR UPDATE OF t SKIP LOCKED
                 """,
-                STALLED_AFTER_S,
+                number_setting("goals.stalled_after_seconds", STALLED_AFTER_S),
             )
             stalled_ids = [str(row["id"]) for row in stalled]
             if stalled_ids:

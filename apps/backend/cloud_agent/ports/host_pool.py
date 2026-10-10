@@ -20,7 +20,7 @@ class HostPoolRepository(Protocol):
     """Port: the runner-host pool and its enrollment."""
 
     async def queue_health(self, *, expected_deployment_sha: str) -> dict[str, int]:
-        """Observe ten-minute queue stalls without claiming or changing jobs.
+        """Observe configured queue stalls without claiming or changing jobs.
 
         Occupied slots are ordinary backpressure. Missing/stale/disabled hosts,
         lost deployment markers and a wrong placement pin are not. Retained
@@ -188,8 +188,8 @@ class HostPoolRepository(Protocol):
             runtime_versions: Default CLI version per runtime.
             runtime_versions_available: Every CLI version its image holds.
             settings_applied: The runtime settings the host is applying now.
-            settings_local: What its own environment would give it with no
-                admin value. Either ``None`` leaves what is stored in place.
+            settings_local: Legacy environment observations, imported once as
+                per-host overrides. Either ``None`` leaves the report in place.
 
         Returns:
             The updated host row, or ``None`` when the host no longer exists.
@@ -231,7 +231,7 @@ class HostPoolRepository(Protocol):
         """Set or clear runtime settings for one server, over the global values.
 
         ``changes`` names only the settings to change, and ``None`` clears one
-        so the global value, or the host's own, applies again. Settings it does
+        so the global value, or the built-in default, applies again. Settings it does
         not name keep their values. The host applies the result from its next
         heartbeat answer.
 
@@ -378,7 +378,7 @@ class HostPoolRepository(Protocol):
         """The runtime settings set for every server, as stored.
 
         A server's own values win over these, and a setting set nowhere falls
-        back to the host's environment. Read through
+        back to the built-in default. Read through
         ``cloud_agent_shared.host_settings.admin_values``, which drops anything
         a release can no longer apply.
         """

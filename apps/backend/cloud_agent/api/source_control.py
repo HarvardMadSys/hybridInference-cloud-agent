@@ -11,7 +11,6 @@ only from this module's handlers.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -40,6 +39,7 @@ from cloud_agent.schemas import (
     SourceControlProviderResponse,
     SourceControlRepository,
 )
+from cloud_agent.settings import setting_env
 from cloud_agent.source_control import (
     OAuthStateError,
     SourceControlError,
@@ -120,7 +120,7 @@ async def _connect_github_for_user(
         installation.get("account_id") == profile["id"] for installation in installations
     )
     if not own_account_installed:
-        github_install_url = (os.getenv("AGENT_GITHUB_APP_INSTALL_URL") or "").strip()
+        github_install_url = (setting_env("AGENT_GITHUB_APP_INSTALL_URL") or "").strip()
         if github_install_url:
             install_state = await issue_oauth_state(
                 store.source_control, user_id=user_id, provider="github"
@@ -175,7 +175,7 @@ async def _source_control_providers(
     no repository list — while the user's own connections still come from
     their records: an outage must not look like a lost connection.
     """
-    github_install_url = (os.getenv("AGENT_GITHUB_APP_INSTALL_URL") or "").strip()
+    github_install_url = (setting_env("AGENT_GITHUB_APP_INSTALL_URL") or "").strip()
     github_configured = github_connect_configured(app_credentials)
     github_connect_url = None
     github_error = None

@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING
 
 from cloud_agent.capacity_protocol import CAPACITY_HISTORY_RETENTION_S
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import number_setting
 
 if TYPE_CHECKING:
     from cloud_agent.ports import HostCapacityRepository
@@ -91,7 +92,10 @@ async def _prune(store: HostCapacityRepository, *, limit: int, timeout_seconds: 
     try:
         removed = await asyncio.wait_for(
             store.prune_capacity_history(
-                older_than_seconds=CAPACITY_HISTORY_RETENTION_S, limit=limit
+                older_than_seconds=number_setting(
+                    "capacity_history_retention_s", CAPACITY_HISTORY_RETENTION_S
+                ),
+                limit=limit,
             ),
             timeout=timeout_seconds,
         )

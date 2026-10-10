@@ -29,7 +29,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.responses import PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 
 from cloud_agent.logging_utils import configure_process_logging, get_logger
 
@@ -45,6 +45,7 @@ ADMIN_READ_PREFIXES = (
     "/admin/agent/measurements",
     "/admin/agent/measurement-writer",
     "/admin/agent/profiling-runs",
+    "/admin/agent/settings",
 )
 
 
@@ -64,7 +65,20 @@ def install_admin_no_store(
     async def with_no_store(request: Request, exc: Exception) -> Response:
         response: Response
         if isinstance(exc, RequestValidationError):
-            response = await request_validation_exception_handler(request, exc)
+            if request.url.path.rstrip("/") == "/admin/agent/settings":
+                # Validation errors normally echo invalid input. Settings can
+                # contain credentials, including in a malformed request body.
+                response = JSONResponse(
+                    status_code=422,
+                    content={
+                        "detail": [
+                            {"loc": error["loc"], "msg": error["msg"], "type": error["type"]}
+                            for error in exc.errors()
+                        ]
+                    },
+                )
+            else:
+                response = await request_validation_exception_handler(request, exc)
         else:
             response = await http_exception_handler(request, exc)  # type: ignore[arg-type]
         if any(
@@ -112,6 +126,7 @@ def create_app() -> FastAPI:
         admin_profiling_control,
         admin_runs,
         admin_sandboxes,
+        admin_settings,
         admin_steps,
         admin_usage,
         compute_registration,
@@ -121,6 +136,7 @@ def create_app() -> FastAPI:
         routes,
         service_jobs,
         session,
+        site_config,
         skills,
         uploads,
         usage,
@@ -156,6 +172,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_conversations.router)
     app.include_router(admin_runs.router)
     app.include_router(admin_sandboxes.router)
+    app.include_router(admin_settings.router)
     app.include_router(admin_usage.router)
     app.include_router(admin_measurements.router)
     # Start/Stop for the same feature, in its own module so the write path's
@@ -181,6 +198,7 @@ def create_app() -> FastAPI:
     # ``routes.py`` because it authenticates nothing on entry — it is the route
     # that *creates* the credential every other route requires.
     app.include_router(session.router)
+    app.include_router(site_config.router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

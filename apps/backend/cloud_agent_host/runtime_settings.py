@@ -1,9 +1,10 @@
-"""The runtime settings this host applies, from the admin page or its own ``.env``.
+"""The runtime settings this host applies from the admin settings page.
 
 The control plane answers every heartbeat with the values an admin set for this
 host (see :mod:`cloud_agent_shared.host_settings`). This module holds them
-beside the host's own values and resolves the two: an admin value wins, and a
-setting with none keeps the host's environment variable or built-in default.
+beside the host's legacy bootstrap values. Once the first answer arrives, every
+setting uses an admin value or its built-in default; clearing a value never
+reactivates the host's old environment variable.
 
 Two processes apply them. The runner hands its share to each turn as it starts
 it, so a turn keeps the values it began with. The workspace broker is a separate
@@ -28,6 +29,7 @@ from cloud_agent_shared.host_settings import (
     BROKER_SETTING_KEYS,
     RUNNER_SETTING_KEYS,
     admin_values,
+    default_values,
     reported_values,
     resolve,
 )
@@ -75,12 +77,15 @@ class RuntimeSettings:
         reached costs this host its broker settings' confirmation, not its
         heartbeat.
         """
-        runner_admin = admin_values(admin, RUNNER_SETTING_KEYS)
+        runner_admin = {
+            **default_values(RUNNER_SETTING_KEYS),
+            **admin_values(admin, RUNNER_SETTING_KEYS),
+        }
         with self._lock:
             was = resolve(self._admin, self._local)
-            changed = runner_admin != self._admin
             self._admin = runner_admin
             now = resolve(self._admin, self._local)
+            changed = was != now
         self._adopted.set()
         if was != now:
             logger.info(
@@ -93,7 +98,9 @@ class RuntimeSettings:
         broker_local: dict[str, int | float] = {}
         error: str | None = None
         try:
-            answer = self._broker(admin_values(admin, BROKER_SETTING_KEYS))
+            answer = self._broker(
+                {**default_values(BROKER_SETTING_KEYS), **admin_values(admin, BROKER_SETTING_KEYS)}
+            )
             broker_applied = reported_values(answer.get("applied")) or {}
             broker_local = reported_values(answer.get("local")) or {}
         except Exception as exc:

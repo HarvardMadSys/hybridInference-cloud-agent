@@ -76,6 +76,7 @@ from cloud_agent.mcp_proxy import (
     filter_json_body,
     plan_request,
 )
+from cloud_agent.settings import number_setting
 from cloud_agent.source_control import SourceControlError
 from cloud_agent.tokens import SCOPE_MCP, InvalidAgentToken, parse_worker_token
 
@@ -890,7 +891,10 @@ def build_upstream_client(request_timeout_s: float | None = None) -> httpx.Async
     """
     return httpx.AsyncClient(
         timeout=httpx.Timeout(
-            request_timeout_s or _DEFAULT_UPSTREAM_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S
+            request_timeout_s
+            if request_timeout_s is not None
+            else number_setting("mcp_request_timeout_s", _DEFAULT_UPSTREAM_TIMEOUT_S),
+            connect=number_setting("mcp_connect_timeout_s", _CONNECT_TIMEOUT_S),
         ),
         follow_redirects=False,
         transport=pinned_transport(),

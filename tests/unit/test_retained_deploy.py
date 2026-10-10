@@ -165,6 +165,13 @@ def _host(
         "AGENT_BROKER_REVERSE_PORT",
         "AGENT_WORKSPACE_BROKER_ADVERTISE_URL",
         "AGENT_HOST_STORAGE_PROBE",
+        # Runtime image defaults are reviewed source pins. A launcher's own
+        # CLI version must not become an operator override in this fixture.
+        "CLAUDE_CODE_VERSION",
+        "CODEX_VERSION",
+        "PI_VERSION",
+        "OPENCODE_VERSION",
+        "KILO_VERSION",
         "DOCKER_DAEMON_JSON",
     ):
         env.pop(name, None)

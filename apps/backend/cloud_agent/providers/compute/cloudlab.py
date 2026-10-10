@@ -34,6 +34,8 @@ from cloud_agent.ports.external.compute_provider import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cloud_agent.ports.external.compute_provider import SecretResolver
 
 
@@ -86,21 +88,37 @@ class CloudLabProvider(ComputeProvider):
     """Adapt CloudLab experiments to the common resource lifecycle contract."""
 
     def __init__(
-        self, *, api_url: str, resolver: SecretResolver, client: httpx.AsyncClient | None = None
+        self,
+        *,
+        api_url: str | Callable[[], str],
+        resolver: SecretResolver,
+        client: httpx.AsyncClient | None = None,
     ) -> None:
-        url = urlsplit(api_url)
-        if (
-            url.scheme != "https"
-            or not url.hostname
-            or url.username
-            or url.password
-            or url.query
-            or url.fragment
-        ):
-            raise ValueError("CloudLab requires an operator-verified HTTPS API endpoint")
-        self._api_url = api_url.rstrip("/")
+        if isinstance(api_url, str):
+            api_url = self._validated_api_url(api_url)
+        self._api_url = api_url
         self._resolver = resolver
         self._client = client
+
+    @staticmethod
+    def _validated_api_url(api_url: str) -> str:
+        """Keep credentials on the configured HTTPS endpoint without redirects."""
+        try:
+            url = urlsplit(api_url)
+            valid = (
+                url.scheme == "https"
+                and bool(url.hostname)
+                and not url.username
+                and not url.password
+                and not url.query
+                and not url.fragment
+            )
+            _ = url.port
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError("CloudLab requires an operator-verified HTTPS API endpoint")
+        return api_url.rstrip("/")
 
     def capabilities(self) -> ProviderCapabilities:
         """Return the actions this adapter implements."""
@@ -153,6 +171,16 @@ class CloudLabProvider(ComputeProvider):
     async def _request(
         self, method: str, path: str, credential_ref: str, *, payload: dict[str, Any] | None = None
     ) -> httpx.Response:
+        # Snapshot the endpoint before awaiting credentials, so an admin edit
+        # cannot change the destination midway through this request.
+        try:
+            api_url = self._validated_api_url(
+                self._api_url() if callable(self._api_url) else self._api_url
+            )
+        except ValueError:
+            raise ProviderError(
+                "provider_unavailable", "CloudLab API endpoint is not configured correctly"
+            ) from None
         token = (await self._resolver.resolve(credential_ref)).strip()
         if not token or "\n" in token or "\r" in token:
             raise ProviderError("credential_invalid", "CloudLab credential is missing or malformed")
@@ -160,7 +188,7 @@ class CloudLabProvider(ComputeProvider):
             if self._client is not None:
                 response = await self._client.request(
                     method,
-                    self._api_url + path,
+                    api_url + path,
                     headers={"X-Api-Token": token, "X-Api-Elaborate": "true"},
                     json=payload,
                     follow_redirects=False,
@@ -170,7 +198,7 @@ class CloudLabProvider(ComputeProvider):
                 async with httpx.AsyncClient() as client:
                     response = await client.request(
                         method,
-                        self._api_url + path,
+                        api_url + path,
                         headers={"X-Api-Token": token, "X-Api-Elaborate": "true"},
                         json=payload,
                         follow_redirects=False,

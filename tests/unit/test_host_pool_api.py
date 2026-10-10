@@ -44,6 +44,7 @@ from cloud_agent.host_pool import (
     normalize_capabilities,
     transition_allowed,
 )
+from cloud_agent_shared.host_settings import default_values
 
 ADMIN = {"Authorization": "Bearer test-admin"}
 
@@ -856,7 +857,7 @@ async def test_a_heartbeat_answers_with_the_requested_limit(client):
 
 
 async def test_a_heartbeat_answers_with_this_servers_settings_over_the_global_ones(client):
-    """The whole set each time, so a cleared value reaches the host as an absence."""
+    """Every answer includes defaults, globals and the server's winning overrides."""
     async_client, store = client
     credential = await _enroll(async_client, store)
     auth = {"Authorization": f"Bearer {credential}"}
@@ -864,12 +865,20 @@ async def test_a_heartbeat_answers_with_this_servers_settings_over_the_global_on
     store.rows["runner-a"]["settings_desired"] = {"agent_timeout_s": 900}
 
     body = (await async_client.post("/v1/agent/host/heartbeat", json={}, headers=auth)).json()
-    assert body["settings"] == {"agent_timeout_s": 900, "terminal_max_sessions": 32}
+    assert body["settings"] == {
+        **default_values(),
+        "agent_timeout_s": 900,
+        "terminal_max_sessions": 32,
+    }
 
     store.rows["runner-a"]["settings_desired"] = {}
     store.global_settings = {"agent_timeout_s": 7200}
     body = (await async_client.post("/v1/agent/host/heartbeat", json={}, headers=auth)).json()
-    assert body["settings"] == {"agent_timeout_s": 7200}
+    assert body["settings"] == {**default_values(), "agent_timeout_s": 7200}
+
+    store.global_settings = {}
+    body = (await async_client.post("/v1/agent/host/heartbeat", json={}, headers=auth)).json()
+    assert body["settings"] == default_values()
 
 
 async def test_a_heartbeat_never_sends_a_stored_value_the_host_could_not_apply(client):
@@ -886,7 +895,7 @@ async def test_a_heartbeat_never_sends_a_stored_value_the_host_could_not_apply(c
         )
     ).json()
 
-    assert body["settings"] == {"agent_timeout_s": 900}
+    assert body["settings"] == {**default_values(), "agent_timeout_s": 900}
 
 
 async def test_a_heartbeat_stores_the_settings_report_reduced_to_known_numbers(client):

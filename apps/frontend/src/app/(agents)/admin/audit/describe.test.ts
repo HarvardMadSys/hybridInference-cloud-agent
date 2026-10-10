@@ -37,7 +37,7 @@ describe('describeAuditEntry', () => {
       old_values: { agent_timeout_s: null },
     });
     expect(describeAuditEntry(global, [TIMEOUT])).toBe(
-      "Set Turn time limit to 2 h for all servers (was each server's default)",
+      'Set Turn time limit to 2 h for all servers (was the deployment default)',
     );
     const cleared = entry('agent.runner_host.set_settings', {
       host: 'rtx6000b',
@@ -46,6 +46,13 @@ describe('describeAuditEntry', () => {
     });
     expect(describeAuditEntry(cleared, [TIMEOUT])).toBe(
       'Reset Turn time limit on rtx6000b to the Settings value (was 30 min)',
+    );
+    const reset = entry('agent.host_settings.set', {
+      changes: { agent_timeout_s: null },
+      old_values: { agent_timeout_s: 7200 },
+    });
+    expect(describeAuditEntry(reset, [TIMEOUT])).toBe(
+      'Reset Turn time limit for all servers to the deployment default (was 2 h)',
     );
   });
 

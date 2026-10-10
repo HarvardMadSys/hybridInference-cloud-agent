@@ -10,6 +10,7 @@ from cloud_agent_shared.host_settings import (
     HOST_SETTINGS_BY_KEY,
     RUNNER_SETTING_KEYS,
     admin_values,
+    default_values,
     merge_admin_values,
     reported_values,
     resolve,
@@ -78,11 +79,21 @@ def test_a_server_value_beats_the_global_one_and_resolves_over_the_host_default(
         {"agent_timeout_s": 7200, "terminal_max_sessions": 32},
         {"agent_timeout_s": 900},
     )
-    assert merged == {"agent_timeout_s": 900, "terminal_max_sessions": 32}
+    assert merged == {**default_values(), "agent_timeout_s": 900, "terminal_max_sessions": 32}
     local = {"agent_timeout_s": 3600.0, "chat_idle_timeout_s": 15.0}
     # Only the host's own keys come back: the runner never resolves a terminal
     # setting, and the broker never resolves the turn time limit.
-    assert resolve(merged, local) == {"agent_timeout_s": 900, "chat_idle_timeout_s": 15.0}
+    assert resolve(merged, local) == {"agent_timeout_s": 900, "chat_idle_timeout_s": 1800}
+
+
+def test_reset_emits_every_default_even_if_an_old_host_environment_differs():
+    merged = merge_admin_values({}, {})
+
+    assert set(merged) == set(HOST_SETTINGS_BY_KEY)
+    assert resolve(merged, {"agent_timeout_s": 9999, "terminal_input_max_kib": 2}) == {
+        "agent_timeout_s": 3600,
+        "terminal_input_max_kib": 64,
+    }
 
 
 def test_a_report_keeps_known_finite_numbers_and_distinguishes_absent_from_empty():

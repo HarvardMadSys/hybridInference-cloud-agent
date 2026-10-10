@@ -24,8 +24,13 @@ vi.mock('@/lib/api/admin', () => ({
   setAgentRuntimeVersion: vi.fn(),
   HOST_SETTINGS_CAPABILITY: 'host-settings-v1',
 }));
+vi.mock('@/lib/api/adminSettings', () => ({
+  getAgentAdminSettings: vi.fn(),
+  setAgentAdminSettings: vi.fn(),
+}));
 
 import { getAgentRunnerHosts, setAgentHostSettings, setAgentRuntimeVersion } from '@/lib/api/admin';
+import { getAgentAdminSettings } from '@/lib/api/adminSettings';
 
 import AdminSettingsPage from './page';
 
@@ -155,6 +160,13 @@ beforeEach(() => {
   list.mockReset().mockResolvedValue(pool());
   setLimit.mockReset();
   setVersion.mockReset();
+  vi.mocked(getAgentAdminSettings).mockReset().mockResolvedValue({
+    revision: 1,
+    definitions: [],
+    values: {},
+    secret_configured: {},
+    bootstrap: [],
+  });
   vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
 });
 
@@ -170,6 +182,7 @@ describe('admin Settings', () => {
     render(<AdminSettingsPage />);
     expect(screen.getByText('Admin access required')).toBeInTheDocument();
     expect(list).not.toHaveBeenCalled();
+    expect(getAgentAdminSettings).not.toHaveBeenCalled();
   });
 
   it('admits a free account with admin permission and shows versions and sandbox settings', async () => {
@@ -177,6 +190,7 @@ describe('admin Settings', () => {
     await screen.findByLabelText('Claude Code');
     expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('aria-current', 'page');
     expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual([
+      'Application settings',
       'Agent versions',
       'Sandbox',
     ]);
@@ -342,7 +356,7 @@ describe('global limits', () => {
     setLimit.mockResolvedValue(pool({ host_settings: { agent_timeout_s: 7200 } }));
     render(<AdminSettingsPage />);
     const input = await screen.findByLabelText('Turn time limit for all servers');
-    expect(screen.getAllByText('Each server uses its own .env value, or 1 h')).toHaveLength(1);
+    expect(screen.getAllByText('Deployment default: 1 h')).toHaveLength(1);
     expect(screen.getByLabelText('Turn time limit for all servers unit')).toHaveValue('h');
     fireEvent.change(input, { target: { value: '2' } });
     submit(input);
@@ -364,7 +378,7 @@ describe('global limits', () => {
     list.mockResolvedValue(pool({ host_settings: { terminal_max_sessions: 16 } }));
     setLimit.mockResolvedValue(pool());
     render(<AdminSettingsPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Use server defaults' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Use deployment default' }));
     await waitFor(() => expect(setLimit).toHaveBeenCalledWith({ terminal_max_sessions: null }));
   });
 

@@ -289,7 +289,7 @@ async def set_agent_host_settings(
 
     Each host picks the values up from its next heartbeat answer, except where
     a value set for that server wins. ``null`` clears a setting, and each host
-    goes back to its own ``.env`` or built-in default for it.
+    goes back to the deployment's built-in default for it.
 
     **Saving is not applying.** Each host reports what it applied, and the page
     shows the hosts that have not caught up yet. Nothing running is
@@ -325,7 +325,7 @@ async def set_agent_runner_host_settings(
     """Set or clear runtime settings for one server, over the global values.
 
     A value set here wins over the one set for every server. ``null`` clears
-    it, and the server goes back to the global value, or to its own when there
+    it, and the server goes back to the global value, or the built-in default when there
     is none. Applied from the host's next heartbeat, like the global values,
     and kept through heartbeats and re-enrollment.
     """

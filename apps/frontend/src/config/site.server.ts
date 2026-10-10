@@ -7,10 +7,12 @@
 //    layout and its `generateMetadata` are evaluated once, during
 //    `next build`, and the environment of whatever machine ran the build is
 //    baked into every page — the exact failure this work exists to remove.
-//    Waiting for the request is what makes "restart the container with a
-//    different `AGENT_WEB_APP_NAME`" a real answer.
+//    Waiting for the request makes saved appearance edits visible when the
+//    next page is rendered.
 //
-// 2. `process.env` is read. Importing `next/server` here also means a client
+// 2. The control plane's public appearance settings are fetched. `process.env`
+//    supplies only its deployment address, image metadata, and a legacy
+//    fallback when that address is absent. Importing `next/server` here means a client
 //    component that imports this file fails the build instead of quietly
 //    shipping server configuration into the browser bundle.
 //
@@ -27,7 +29,7 @@ import 'server-only';
 
 import { connection } from 'next/server';
 
-import { parseRuntimeSiteConfig, type RuntimeSiteConfig } from './site';
+import { parseRuntimeSiteConfig, parseSavedSiteConfig, type RuntimeSiteConfig } from './site';
 
 /**
  * The site identity for the request being rendered.
@@ -37,5 +39,19 @@ import { parseRuntimeSiteConfig, type RuntimeSiteConfig } from './site';
  */
 export async function readRuntimeSiteConfig(): Promise<RuntimeSiteConfig> {
   await connection();
+  const api = (process.env['AGENT_CONTROL_PLANE_URL'] || '').replace(/\/+$/, '');
+  if (api) {
+    try {
+      const response = await fetch(`${api}/v1/agent/site-config`, {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(5000),
+      });
+      if (response.ok) return parseSavedSiteConfig(await response.json(), process.env);
+    } catch {
+      // Appearance settings must not prevent the administrator opening the
+      // settings page during a transient backend failure or malformed response.
+    }
+    return parseSavedSiteConfig(null, process.env);
+  }
   return parseRuntimeSiteConfig(process.env);
 }

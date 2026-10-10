@@ -64,14 +64,13 @@ def _build_source_control(app: FastAPI) -> None:
     """
     from cloud_agent.source_control_runtime import SourceControlRuntime
 
-    app.state.source_control = SourceControlRuntime.from_env(dict(os.environ))
+    app.state.source_control = SourceControlRuntime.from_env()
 
 
 def _start_publisher(app: FastAPI, store: PublishStorage) -> None:
     """Start the publish loop, idle if no git credential is configured."""
     from cloud_agent.publish_worker import GitHubCredential, publish_loop
-
-    static_token = os.getenv(ENV_GITHUB_TOKEN, "")
+    from cloud_agent.settings import setting_env
 
     def credential_provider() -> GitHubCredential | None:
         """Mint the credential for one publish, or None if unconfigured.
@@ -79,7 +78,7 @@ def _start_publisher(app: FastAPI, store: PublishStorage) -> None:
         Read per call rather than captured, so rotating the token does not
         need a restart.
         """
-        token = os.getenv(ENV_GITHUB_TOKEN, static_token)
+        token = setting_env(ENV_GITHUB_TOKEN, "")
         return GitHubCredential(token) if token else None
 
     task = asyncio.create_task(
@@ -87,7 +86,6 @@ def _start_publisher(app: FastAPI, store: PublishStorage) -> None:
             store,
             credential_provider=credential_provider,
             github_app=app.state.source_control.github,
-            base_branch=os.getenv(ENV_PUBLISH_BASE_BRANCH, "dev"),
             wake=getattr(app.state, "background_wake", None),
         )
     )
@@ -123,6 +121,12 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     from cloud_agent.mcp.catalog import McpCatalog
     from cloud_agent.operational_health import monitor_queue
     from cloud_agent.profiling_control_config import profiling_control_deployment
+    from cloud_agent.settings import (
+        initialize_settings,
+        reset_settings,
+        setting_env,
+        synchronize_settings,
+    )
     from cloud_agent.storage.assembly import Storage
     from cloud_agent.workers.profiling_control import ProfilingPolicyWorker
 
@@ -132,6 +136,12 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
 
     pool = await asyncpg.create_pool(dsn)
     storage = Storage(pool)
+    try:
+        await initialize_settings(storage.settings, seed=background)
+    except Exception:
+        await pool.close()
+        reset_settings()
+        raise
     # Schema is Alembic's. There is no initialize step to run: the store's
     # no-op one went with the store, and the DDL and backfills it used to
     # carry have been migrations since 0001.
@@ -139,14 +149,18 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         from cloud_agent.identity import ENV_ISSUER, gateway_issuer
         from cloud_agent.identity_namespace import ensure_gateway_namespace
 
-        configured = bool(os.environ.get("GATEWAY_BASE_URL") or os.environ.get(ENV_ISSUER))
+        configured = bool(setting_env("GATEWAY_BASE_URL") or os.environ.get(ENV_ISSUER))
         issuer = gateway_issuer() if configured else None
         app.state.gateway_issuer = await ensure_gateway_namespace(pool, issuer)
     except Exception:
         await pool.close()
+        reset_settings()
         raise
 
     app.state.storage = storage
+    app.state.settings_task = asyncio.create_task(synchronize_settings(storage.settings))
+    _BACKGROUND_TASKS.add(app.state.settings_task)
+    app.state.settings_task.add_done_callback(_BACKGROUND_TASKS.discard)
     # One pool, shared by both gateway clients. Each call used to build its own
     # client and pay a connect — and a TLS handshake, where the gateway is
     # behind TLS — and admission is not an occasional call: `require_agent_owner`
@@ -322,6 +336,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                 )
         reset_writer(None)
         for task in (
+            app.state.settings_task,
             app.state.mcp_maintenance_task,
             app.state.mcp_catalog_task,
             app.state.reaper_task,
@@ -346,4 +361,5 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         await app.state.source_control.aclose()
         await http.aclose()
         await pool.close()
+        reset_settings()
         logger.info("cloud agent control plane stopped")

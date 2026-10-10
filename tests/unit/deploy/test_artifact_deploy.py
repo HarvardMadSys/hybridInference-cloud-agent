@@ -17,8 +17,19 @@ import pytest
 import yaml
 from deploy.release import build_recipe
 
+from cloud_agent_shared.shared_protocol import SHARED_SANDBOX_RUNTIME_PINS
+
 REPO = Path(__file__).resolve().parents[3]
 COMMIT = "a" * 40
+# Packaged images already carry their reviewed default pins. Test processes may
+# run under a launcher with its own CLI version; that is not host configuration.
+_RUNTIME_DEFAULT_VARIABLES = {
+    "CLAUDE_CODE_VERSION",
+    "CODEX_VERSION",
+    "PI_VERSION",
+    "OPENCODE_VERSION",
+    "KILO_VERSION",
+}
 
 
 def manifest() -> dict:
@@ -46,7 +57,12 @@ def manifest() -> dict:
         "source_commit": COMMIT,
         "deploy_protocol": "shared-live-exact-sha-v4",
         "artifacts": artifacts,
-        "runtime_catalog": {"codex": {"default": "0.145.0", "versions": ["0.145.0"]}},
+        "runtime_catalog": {
+            "codex": {
+                "default": SHARED_SANDBOX_RUNTIME_PINS["codex"],
+                "versions": [SHARED_SANDBOX_RUNTIME_PINS["codex"]],
+            }
+        },
         "recipe": {
             "url": "https://github.com/HarvardMadSys/hybridInference-cloud-agent/releases/download/test/recipe.tgz",
             "sha256": "b" * 64,
@@ -212,7 +228,14 @@ def deployment(tmp_path: Path, stack: str, *, real_compose: bool = False) -> tup
         k: v
         for k, v in os.environ.items()
         if not k.startswith(("AGENT_", "COMPOSE_", "TEST_"))
-        and k not in {"DEPLOY_SHA", "REPLICAS", "SIBLING_COMPOSE_PROJECTS", "ALLOW_STRAY_STACK"}
+        and k
+        not in {
+            "DEPLOY_SHA",
+            "REPLICAS",
+            "SIBLING_COMPOSE_PROJECTS",
+            "ALLOW_STRAY_STACK",
+            *_RUNTIME_DEFAULT_VARIABLES,
+        }
     }
     env.update(
         {

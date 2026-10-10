@@ -34,7 +34,6 @@ at all and the operator — not the caller — is who can fix it.
 
 from __future__ import annotations
 
-import os
 import secrets
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -64,6 +63,7 @@ from cloud_agent.schemas import (
     AgentJobEventsResponse,
     AgentJobResponse,
 )
+from cloud_agent.settings import setting_env
 from cloud_agent.source_control_runtime import (
     SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
@@ -135,7 +135,7 @@ async def verify_oncall_dispatch(
     every other authenticator it is just an invalid credential. An **unset**
     token opens nothing here either — the comparison requires both sides.
     """
-    configured = (os.environ.get(ENV_ONCALL_DISPATCH_TOKEN) or "").strip()
+    configured = (setting_env(ENV_ONCALL_DISPATCH_TOKEN) or "").strip()
     presented = (
         authorization[7:].strip() if authorization and authorization.startswith("Bearer ") else ""
     )
@@ -153,7 +153,7 @@ def _oncall_owner() -> dict[str, Any]:
     account on the deployment. 503 when unconfigured — the caller did nothing
     wrong, and retrying with another credential will not help.
     """
-    user_id = (os.environ.get(ENV_ONCALL_USER_ID) or "").strip()
+    user_id = (setting_env(ENV_ONCALL_USER_ID) or "").strip()
     if not user_id:
         raise HTTPException(
             status_code=503,

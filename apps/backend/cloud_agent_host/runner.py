@@ -133,7 +133,11 @@ from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
     build_upload_archive,
 )
-from cloud_agent_shared.host_settings import RUNNER_SETTING_KEYS, reported_values
+from cloud_agent_shared.host_settings import (
+    HOST_SETTINGS_BY_KEY,
+    RUNNER_SETTING_KEYS,
+    reported_values,
+)
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.shared_protocol import (
     FORK_HELPER,
@@ -162,7 +166,7 @@ _WORK_WAIT_GRACE_S = 10.0
 #: One upload is capped at 5 MB by the control plane, but the connection can be
 #: slow; the default 30 s client timeout is too tight for a file transfer.
 _ATTACHMENT_TIMEOUT_S = 120.0
-DEFAULT_AGENT_TIMEOUT_S = 3600.0
+DEFAULT_AGENT_TIMEOUT_S = float(HOST_SETTINGS_BY_KEY["agent_timeout_s"].default)
 # How often the control checks run while the agent is silent.
 _POLL_INTERVAL_S = 0.5
 # The broker closes guest telemetry and enforces the member activation
@@ -2082,7 +2086,7 @@ def _run_shared_live_attempt(
         existing.get("resident_slot_capacity")
         or settings.get("shared_resident_capacity")
         or os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY")
-        or 8
+        or HOST_SETTINGS_BY_KEY["shared_resident_capacity"].default
     )
     if not 2 <= capacity <= 128:
         finish_attempt("failed", "shared resident capacity must be between 2 and 128")
@@ -4245,15 +4249,18 @@ def _sandbox_mcp_url() -> str:
 def _runner_local_settings(agent_timeout_s: float) -> dict[str, float]:
     """This host's own value for each setting the runner applies.
 
-    Read the way each one always was, from the environment or its default, so
-    a host with no admin value behaves exactly as before. ``agent_timeout_s``
-    is the runner's own, already read from ``AGENT_TIMEOUT_S`` or its flag.
+    Legacy bootstrap values, used only before the first settings heartbeat.
+    ``agent_timeout_s`` was already read from ``AGENT_TIMEOUT_S`` or its flag.
+    The admin settings replace every value, including defaults, once adopted.
     """
     return {
         "agent_timeout_s": agent_timeout_s,
         "chat_idle_timeout_s": _chat_idle_timeout_s(),
         "source_import_max_mib": source_import_max_bytes() // (1024 * 1024),
-        "shared_resident_capacity": int(os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY") or 8),
+        "shared_resident_capacity": int(
+            os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY")
+            or HOST_SETTINGS_BY_KEY["shared_resident_capacity"].default
+        ),
     }
 
 

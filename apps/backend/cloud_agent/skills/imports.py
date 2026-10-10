@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.github_app import GitHubAppError, read_repository_contents
-from cloud_agent.skills.models import MAX_SKILL_BYTES, SkillContent, SkillError
+from cloud_agent.skills.models import SkillContent, SkillError, skill_max_bytes, skill_size_label
 
 
 class SkillImportNotFound(SkillError):
@@ -70,8 +70,9 @@ def github_skill_location(url: str) -> GitHubSkillLocation:
 
 def parse_skill_document(content: str) -> SkillContent:
     """Read standard YAML name/description metadata and Markdown instructions."""
-    if len(content.encode("utf-8")) > MAX_SKILL_BYTES:
-        raise SkillError("SKILL.md must be no larger than 64 KB.")
+    max_bytes = skill_max_bytes()
+    if len(content.encode("utf-8")) > max_bytes:
+        raise SkillError(f"SKILL.md must be no larger than {skill_size_label(max_bytes)}.")
     if "\x00" in content:
         raise SkillError("SKILL.md must be UTF-8 text without NUL characters.")
     normalized = content.lstrip("\ufeff").replace("\r\n", "\n")
@@ -108,6 +109,7 @@ async def fetch_github_skill(
 ) -> dict[str, str]:
     """Read one bounded GitHub API response, ignoring download and redirect URLs."""
     location = github_skill_location(url)
+    max_bytes = skill_max_bytes()
     try:
         if credentials is not None:
             body = await credentials.repository_contents(
@@ -115,7 +117,7 @@ async def fetch_github_skill(
                 path=location.path,
                 ref=location.ref,
                 allow_symbolic_ref=True,
-                max_response_bytes=MAX_SKILL_BYTES * 2 + 16384,
+                max_response_bytes=max_bytes * 2 + 16384,
             )
         else:
             async with httpx.AsyncClient(
@@ -128,7 +130,7 @@ async def fetch_github_skill(
                     path=location.path,
                     ref=location.ref,
                     token=token,
-                    max_response_bytes=MAX_SKILL_BYTES * 2 + 16384,
+                    max_response_bytes=max_bytes * 2 + 16384,
                 )
         if (
             not isinstance(body, dict)
@@ -143,8 +145,8 @@ async def fetch_github_skill(
         if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", revision):
             raise SkillError("GitHub returned an invalid skill revision.")
         raw = base64.b64decode("".join(encoded.split()), validate=True)
-        if len(raw) > MAX_SKILL_BYTES:
-            raise SkillError("SKILL.md must be no larger than 64 KB.")
+        if len(raw) > max_bytes:
+            raise SkillError(f"SKILL.md must be no larger than {skill_size_label(max_bytes)}.")
         content = raw.decode("utf-8")
     except GitHubAppError as exc:
         if exc.status == 404:

@@ -20,6 +20,8 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 
+from cloud_agent.settings import number_setting, settings_environment
+
 if TYPE_CHECKING:
     from cloud_agent.ports import SourceControlRepository
 
@@ -138,7 +140,7 @@ def github_connect_configured(app_credentials: Any, env: dict[str, str] | None =
     of all three there is nothing for a user to press, and the deployment's
     allowlist is the only way a repository becomes available.
     """
-    source = env if env is not None else os.environ
+    source = env if env is not None else settings_environment()
     return (
         app_credentials is not None
         and bool((source.get("AGENT_GITHUB_APP_INSTALL_URL") or "").strip())
@@ -178,7 +180,7 @@ class GitLabOAuthConfig:
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> GitLabOAuthConfig | None:
         """Load a complete, safe GitLab.com OAuth configuration or return None."""
-        source = env if env is not None else dict(os.environ)
+        source = env if env is not None else settings_environment()
         client_id = (source.get("AGENT_GITLAB_OAUTH_CLIENT_ID") or "").strip()
         client_secret = (source.get("AGENT_GITLAB_OAUTH_CLIENT_SECRET") or "").strip()
         redirect_uri = (source.get("AGENT_GITLAB_OAUTH_REDIRECT_URI") or "").strip()
@@ -211,12 +213,12 @@ class GitLabOAuthClient:
         config: GitLabOAuthConfig,
         *,
         cipher: SourceControlCipher,
-        timeout_s: float = 20.0,
+        timeout_s: float | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.config = config
         self.cipher = cipher
-        self._timeout_s = timeout_s
+        self._timeout_override = timeout_s
         self._transport = transport
 
     async def authorization_url(self, store: SourceControlRepository, *, user_id: str) -> str:
@@ -236,7 +238,9 @@ class GitLabOAuthClient:
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
-            timeout=self._timeout_s,
+            timeout=self._timeout_override
+            if self._timeout_override is not None
+            else number_setting("gitlab_request_timeout_s", 20.0),
             transport=self._transport,
             follow_redirects=False,
         )

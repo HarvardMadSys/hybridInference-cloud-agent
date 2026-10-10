@@ -44,7 +44,6 @@ REQUIRED_SECRETS = (
     "AGENT_SESSION_SECRET",
     "AGENT_CONTROL_TOKEN_SECRET",
     "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
-    "GATEWAY_GRANT_DISPATCH_TOKEN",
 )
 
 
@@ -66,6 +65,35 @@ def test_a_secret_is_required_rather_than_defaulted(control_plane_env: dict, var
     assert ":?" in control_plane_env[variable], (
         f"{variable} has a default; a secret that can be omitted will be omitted"
     )
+
+
+async def test_saved_gateway_dispatch_credential_needs_no_environment_default(
+    control_plane_env: dict, monkeypatch
+) -> None:
+    """An empty import disables grants; a saved credential configures the live client."""
+    from cloud_agent import settings
+    from cloud_agent.gateway import GatewayError
+    from cloud_agent.grants import GrantClient
+
+    assert control_plane_env["GATEWAY_GRANT_DISPATCH_TOKEN"] == (
+        "${GATEWAY_GRANT_DISPATCH_TOKEN:-}"
+    )
+    monkeypatch.delenv("GATEWAY_GRANT_DISPATCH_TOKEN", raising=False)
+    monkeypatch.setenv("AGENT_SETTINGS_ENCRYPTION_KEY", "k" * 32)
+    settings.reset_settings()
+    try:
+        settings.apply_settings(1, {"gateway_base_url": "https://gateway.example"})
+        client = GrantClient()
+        assert not client.configured
+        with pytest.raises(GatewayError):
+            await client._post("/internal/agent-grants", {})
+        encoded = settings.encode_changes({"gateway_dispatch_token": "saved-credential"})
+        settings.apply_settings(2, {"gateway_base_url": "https://gateway.example", **encoded})
+        assert client.configured
+        assert "GATEWAY_GRANT_DISPATCH_TOKEN" not in os.environ
+        assert "saved-credential" not in str(settings.settings_response(2, encoded))
+    finally:
+        settings.reset_settings()
 
 
 def test_the_database_is_required_and_the_service_owns_it(control_plane_env: dict) -> None:

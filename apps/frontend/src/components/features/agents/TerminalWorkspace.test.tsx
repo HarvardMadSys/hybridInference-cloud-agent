@@ -127,6 +127,46 @@ describe('TerminalWorkspace', () => {
     vi.unstubAllGlobals();
   });
 
+  it('uses the broker session limit when deciding whether another terminal can open', async () => {
+    vi.mocked(listAgentTerminals).mockResolvedValue({
+      terminals: [terminal('term-1')],
+      max_sessions: 1,
+    });
+    render(<TerminalWorkspace jobId="job-1" active />);
+    await screen.findByRole('application', { name: 'Terminal 1 terminal' });
+    expect(screen.getByRole('button', { name: 'New terminal' })).toBeDisabled();
+    expect(createAgentTerminal).not.toHaveBeenCalled();
+  });
+
+  it('passes the advertised input limit to the active terminal without recreating it', async () => {
+    const first = terminal('term-1');
+    vi.mocked(listAgentTerminals).mockResolvedValue({
+      terminals: [first],
+      max_sessions: 4,
+      max_input_bytes: 1024,
+    });
+    render(<TerminalWorkspace jobId="job-1" active />);
+    await screen.findByRole('application', { name: 'Terminal 1 terminal' });
+    await waitFor(() => expect(xtermHarness.instances).toHaveLength(1));
+    xtermHarness.instances[0].emitData('paste');
+    await waitFor(() =>
+      expect(writeAgentTerminalInput).toHaveBeenCalledWith('job-1', first.id, 'paste', 1024),
+    );
+    expect(xtermHarness.instances).toHaveLength(1);
+  });
+
+  it('resets the advertised session limit when switching workspaces', async () => {
+    vi.mocked(listAgentTerminals)
+      .mockResolvedValueOnce({ terminals: [terminal('term-1')], max_sessions: 1 })
+      .mockResolvedValueOnce([terminal('term-2')]);
+    const view = render(<TerminalWorkspace jobId="job-1" active />);
+    await screen.findByRole('application', { name: 'Terminal 1 terminal' });
+    expect(screen.getByRole('button', { name: 'New terminal' })).toBeDisabled();
+    view.rerender(<TerminalWorkspace jobId="job-2" active />);
+    await screen.findByRole('application', { name: 'Terminal 1 terminal' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'New terminal' })).toBeEnabled());
+  });
+
   it('creates, switches, splits, and kills real terminal sessions', async () => {
     const first = terminal('term-1');
     const second = terminal('term-2', 'bash');
@@ -229,7 +269,7 @@ describe('TerminalWorkspace', () => {
     view.rerender(<TerminalWorkspace jobId="job-1" active ready />);
 
     expect(await screen.findByRole('button', { name: 'New terminal' })).toBeEnabled();
-    expect(listAgentTerminals).toHaveBeenCalledWith('job-1');
+    expect(listAgentTerminals).toHaveBeenCalledWith('job-1', { includeLimits: true });
     expect(screen.queryByText('Loading terminals…')).not.toBeInTheDocument();
   });
 
@@ -378,7 +418,7 @@ describe('TerminalWorkspace', () => {
 
     render(<TerminalWorkspace jobId="job-1" active />);
     await screen.findByRole('region', { name: 'Terminal 1 pane' });
-    expect(listAgentTerminals).toHaveBeenCalledWith('job-1');
+    expect(listAgentTerminals).toHaveBeenCalledWith('job-1', { includeLimits: true });
     await waitFor(() => expect(xtermHarness.instances).toHaveLength(1));
     expect(xtermHarness.instances[0].options.disableStdin).toBe(true);
     xtermHarness.instances[0].emitData('pwd\r');
@@ -422,7 +462,9 @@ describe('TerminalWorkspace', () => {
     const view = render(<TerminalWorkspace jobId="job-a" active />);
     fireEvent.click(await screen.findByRole('button', { name: 'New terminal' }));
     view.rerender(<TerminalWorkspace jobId="job-b" active />);
-    await waitFor(() => expect(listAgentTerminals).toHaveBeenCalledWith('job-b'));
+    await waitFor(() =>
+      expect(listAgentTerminals).toHaveBeenCalledWith('job-b', { includeLimits: true }),
+    );
 
     resolveCreate(stale);
     await waitFor(() => expect(deleteAgentTerminal).toHaveBeenCalledWith('job-a', stale.id));

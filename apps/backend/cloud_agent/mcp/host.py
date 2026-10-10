@@ -52,7 +52,6 @@ from cloud_agent.mcp.models import (
 )
 from cloud_agent.mcp.net_policy import EgressPolicy
 from cloud_agent.mcp.transports import (
-    DEFAULT_REQUEST_TIMEOUT,
     RemoteTransportConfig,
     TransportError,
     connect_legacy_sse,
@@ -633,7 +632,7 @@ class McpHost:
             secret=secret,
             headers={},
             protocol_version="",
-            request_timeout=connection.request_timeout_s or DEFAULT_REQUEST_TIMEOUT,
+            request_timeout=connection.request_timeout_s,
             allow_plain_http=self._policy.allow_plain_http,
         )
         try:

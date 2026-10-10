@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 from cloud_agent.schemas_compute import RenewalPolicy
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cloud_agent.compute_registry import ComputeProviderRegistry
     from cloud_agent.compute_secrets import ComputeSecretStore
     from cloud_agent.ports.compute_resources import ComputeResourceRepository
@@ -22,7 +24,7 @@ class ServerQueries:
         registry: ComputeProviderRegistry,
         secrets: ComputeSecretStore,
         *,
-        observation_seconds: int,
+        observation_seconds: int | Callable[[], int],
     ) -> None:
         self.repository = repository
         self.registry = registry
@@ -117,7 +119,11 @@ class ServerQueries:
             "expiration_known": row.get("expiration_known", False),
             "observed_at": row.get("observed_at"),
             "check_interval_seconds": (
-                self.observation_seconds
+                (
+                    self.observation_seconds()
+                    if callable(self.observation_seconds)
+                    else self.observation_seconds
+                )
                 if not terminal and row.get("external_id") and entry and self.secrets.configured
                 else None
             ),

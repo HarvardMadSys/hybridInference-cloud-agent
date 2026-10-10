@@ -42,10 +42,12 @@ from cloud_agent_host.workspace_broker import (
     TerminalRequest,
     _run_terminal,
     _terminal_sse_frame,
+    _TerminalLimits,
     _TerminalManager,
     _TerminalSession,
     create_app,
 )
+from cloud_agent_shared.host_settings import BROKER_SETTING_KEYS, default_values
 
 
 class _TerminalProcess(TerminalProcess):
@@ -1037,7 +1039,7 @@ def test_shared_one_shot_terminal_uses_group_writable_umask():
 
 @pytest.mark.asyncio
 async def test_the_runner_sets_the_brokers_runtime_settings_over_its_own():
-    """Applied at runtime, answered with what is applied, and cleared back to its own."""
+    """Apply runtime overrides and reset the complete configuration to defaults."""
     supervisor = _SharedSupervisor()
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
@@ -1050,6 +1052,7 @@ async def test_the_runner_sets_the_brokers_runtime_settings_over_its_own():
     )
     headers = {"X-Agent-Workspace-Token": "broker-secret"}
     own = {
+        **default_values(BROKER_SETTING_KEYS),
         "terminal_idle_ttl_s": 1800,
         "terminal_hard_ttl_s": 28800,
         "terminal_max_sessions": 64,
@@ -1083,6 +1086,200 @@ async def test_the_runner_sets_the_brokers_runtime_settings_over_its_own():
     assert cleared.json() == {"applied": own, "local": own}
     assert terminals._max_sessions == 64
     assert supervisor.idle_timeout_s == 1800
+
+
+@pytest.mark.asyncio
+async def test_reset_uses_defaults_after_the_broker_bootstrapped_from_environment(monkeypatch):
+    monkeypatch.setenv("AGENT_TERMINAL_MAX_SESSIONS", "99")
+    monkeypatch.setenv("AGENT_CHAT_IDLE_TIMEOUT_S", "600")
+    monkeypatch.setenv("AGENT_TERMINAL_INPUT_MAX_KIB", "2")
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    assert app.state.terminal_manager._max_sessions == 99
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        reset = await client.post("/host-settings", headers=headers, json={"settings": {}})
+
+    assert reset.status_code == 200
+    assert reset.json()["applied"] == default_values(BROKER_SETTING_KEYS)
+    assert reset.json()["local"]["terminal_max_sessions"] == 99
+    assert reset.json()["local"]["chat_idle_timeout_s"] == 600
+    assert reset.json()["local"]["terminal_input_max_kib"] == 2
+    assert app.state.terminal_manager._max_sessions == 64
+    assert supervisor.idle_timeout_s == 1800
+
+
+@pytest.mark.asyncio
+async def test_admin_workspace_terminal_limits_are_advertised_and_enforced(monkeypatch):
+    supervisor = _SharedSupervisor()
+    process = _RunningTerminalProcess()
+    monkeypatch.setattr(supervisor.workspace_backend, "spawn_terminal", lambda *_a, **_k: process)
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        configured = await client.post(
+            "/host-settings",
+            headers=headers,
+            json={
+                "settings": {"terminal_max_sessions_per_workspace": 1, "terminal_input_max_kib": 1}
+            },
+        )
+        first = await client.post(
+            "/workspaces/athr_source/terminals", headers=headers, json={"rows": 24, "cols": 80}
+        )
+        second = await client.post(
+            "/workspaces/athr_child/terminals", headers=headers, json={"rows": 24, "cols": 80}
+        )
+        listed = await client.get("/workspaces/athr_child/terminals", headers=headers)
+        terminal_id = first.json()["id"]
+        rejected = await client.post(
+            f"/workspaces/athr_source/terminals/{terminal_id}/input",
+            headers=headers,
+            json={"data": base64.b64encode(b"x" * 1025).decode()},
+        )
+        accepted = await client.post(
+            f"/workspaces/athr_source/terminals/{terminal_id}/input",
+            headers=headers,
+            json={"data": base64.b64encode(b"x" * 1024).decode()},
+        )
+        await client.delete(f"/workspaces/athr_source/terminals/{terminal_id}", headers=headers)
+
+    assert configured.status_code == first.status_code == accepted.status_code == 200
+    assert second.status_code == 409
+    assert rejected.status_code == 413
+    assert listed.json()["max_sessions"] == 1
+    assert listed.json()["max_input_bytes"] == 1024
+    assert [row["id"] for row in listed.json()["terminals"]] == [terminal_id]
+
+
+@pytest.mark.asyncio
+async def test_admin_file_limits_reach_the_retained_workspace_reader_and_writer(monkeypatch):
+    seen: list[dict] = []
+
+    def read(_backend, relative, **kwargs):
+        kwargs.pop("observer", None)
+        seen.append(kwargs)
+        return {"path": relative, "kind": "directory", "entries": []}
+
+    def write(_backend, relative, _content, **kwargs):
+        kwargs.pop("observer", None)
+        seen.append(kwargs)
+        return {"path": relative, "kind": "file", "content": "saved"}
+
+    monkeypatch.setattr("cloud_agent_host.workspace_broker.read_retained_file", read)
+    monkeypatch.setattr("cloud_agent_host.workspace_broker.write_retained_file", write)
+    app = _app(_SharedSupervisor())
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        configured = await client.post(
+            "/host-settings",
+            headers=headers,
+            json={
+                "settings": {
+                    "workspace_file_write_max_mib": 1,
+                    "workspace_file_preview_max_kib": 64,
+                    "workspace_directory_max_entries": 20,
+                }
+            },
+        )
+        listed = await client.get("/workspaces/athr_source/files", headers=headers)
+        saved = await client.put(
+            "/workspaces/athr_source/files?path=a.txt", headers=headers, json={"content": "saved"}
+        )
+
+    assert configured.status_code == listed.status_code == saved.status_code == 200
+    assert seen == [
+        {"max_preview_bytes": 64 * 1024, "max_directory_entries": 20},
+        {
+            "max_write_bytes": 1024 * 1024,
+            "max_preview_bytes": 64 * 1024,
+            "max_directory_entries": 20,
+        },
+    ]
+
+
+def test_lower_terminal_output_limits_apply_to_existing_terminals():
+    manager = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8)
+    session = _TerminalSession(
+        terminal_id="term_live", process=_TerminalProcess(), workdir=None, rows=24, cols=80, now=0
+    )
+    manager._sessions["asbx_shared"] = {session.id: session}
+    session._append_output(b"a" * 100)
+    session._append_output(b"b" * 100)
+    session.open_stream()
+
+    manager.configure(
+        idle_ttl_s=1800,
+        hard_ttl_s=28800,
+        max_sessions=8,
+        limits=_TerminalLimits(buffer_bytes=100, buffer_events=2, output_bytes=150, streams=1),
+    )
+
+    assert [(event.kind, event.data) for event in session.events_after(0, wait_s=0)] == [
+        ("reset", b""),
+        ("output", b"b" * 100),
+    ]
+    with pytest.raises(HTTPException) as refused:
+        session.open_stream()
+    assert refused.value.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_lower_command_output_limit_stops_an_oversized_command(monkeypatch):
+    supervisor = _SharedSupervisor()
+    killed: list[bool] = []
+
+    def spawn(_spec):
+        return SimpleNamespace(
+            lines=lambda: iter(["x" * (1024 * 1024 + 1)]),
+            kill=lambda: killed.append(True),
+            wait=lambda: 0,
+            stderr_text=lambda: "",
+        )
+
+    monkeypatch.setattr(supervisor.workspace_backend, "spawn", spawn)
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        configured = await client.post(
+            "/host-settings",
+            headers=headers,
+            json={"settings": {"workspace_command_output_max_mib": 1}},
+        )
+        command = await client.post(
+            "/workspaces/athr_source/terminal",
+            headers=headers,
+            json={"command": "print_many_bytes"},
+        )
+
+    assert configured.status_code == 200
+    assert command.status_code == 413
+    assert killed == [True]
+
+
+def test_lower_terminal_total_output_limit_stops_the_process():
+    class LoudTerminal(_TerminalProcess):
+        def chunks(self):
+            yield b"x" * 1025
+
+    process = LoudTerminal()
+    session = _TerminalSession(
+        terminal_id="term_loud",
+        process=process,
+        workdir=None,
+        rows=24,
+        cols=80,
+        now=0,
+        limits=_TerminalLimits(output_bytes=1024),
+    )
+
+    session._pump()
+
+    assert process.killed
+    events = session.events_after(0, wait_s=0)
+    assert any(b"output limit exceeded" in event.data for event in events)
+    assert events[-1].kind == "exit"
 
 
 class _RunningTerminalProcess(_TerminalProcess):

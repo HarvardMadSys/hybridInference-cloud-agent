@@ -2501,7 +2501,7 @@ class AgentRunnerHost(BaseModel):
         description=(
             "Runtime settings set for this server on the admin page, by key "
             "(see host_setting_definitions). They win over the global values; "
-            "a setting absent here uses the global value, or the host's own."
+            "a setting absent here uses the global value, or the deployment default."
         ),
     )
     settings_applied: dict[str, int | float] | None = Field(
@@ -2516,9 +2516,9 @@ class AgentRunnerHost(BaseModel):
     settings_local: dict[str, int | float] | None = Field(
         None,
         description=(
-            "What this host's own environment gives each setting with no admin "
-            "value: its .env, or the built-in default. Clearing an admin value "
-            "returns the host to this."
+            "The host's original bootstrap environment values, for diagnostics "
+            "and one-time migration. Clearing an admin value restores the global "
+            "value or built-in default."
         ),
     )
 
@@ -2527,11 +2527,13 @@ class HostSettingDefinition(BaseModel):
     """One runtime setting an admin may set, with its unit and bounds."""
 
     key: str
-    env: str = Field(..., description="The host environment variable it overrides.")
+    env: str = Field(
+        ..., description="The legacy host environment variable imported at enrollment."
+    )
     label: str
     description: str
     unit: SettingUnit
-    default: int = Field(..., description="Built-in value when neither an admin nor .env sets it.")
+    default: int = Field(..., description="Built-in value when no admin override is set.")
     minimum: int
     maximum: int
     scope: SettingScope = Field(
@@ -2587,7 +2589,7 @@ class ListAgentRunnerHostsResponse(BaseModel):
         default_factory=dict,
         description=(
             "Runtime settings set for every server. A value set for one server "
-            "wins over these; a setting set nowhere uses each host's own."
+            "wins over these; a setting set nowhere uses the deployment default."
         ),
     )
     host_setting_definitions: list[HostSettingDefinition] = Field(
@@ -2695,7 +2697,7 @@ class SetHostSettingsRequest(BaseModel):
             "The settings to change, by key (see host_setting_definitions), each "
             "a whole number inside that setting's bounds, or null to clear it so "
             "the next level applies: a server's value falls back to the global "
-            "one, and a global value to each host's own .env or default. "
+            "one, and a global value to the deployment's built-in default. "
             "Settings not named keep their values. Hosts apply the result from "
             "their next heartbeat answer."
         ),

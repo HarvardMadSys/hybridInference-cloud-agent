@@ -6,6 +6,8 @@ import re
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from cloud_agent.settings import integer_setting
+
 #: Deliberately small. Bytes live in the control plane's own database rather
 #: than an object store this service does not have, so the ceiling is what
 #: keeps that decision defensible rather than merely convenient.
@@ -30,10 +32,34 @@ class AttachmentError(ValueError):
 class AttachmentLimits(BaseModel):
     """Advertise the server's upload bounds to clients."""
 
-    max_files: int = MAX_ATTACHMENT_FILES
-    max_file_bytes: int = MAX_ATTACHMENT_FILE_BYTES
-    max_total_bytes: int = MAX_ATTACHMENT_TOTAL_BYTES
+    max_files: int = Field(default_factory=lambda: attachment_max_files())
+    max_file_bytes: int = Field(default_factory=lambda: attachment_max_file_bytes())
+    max_total_bytes: int = Field(default_factory=lambda: attachment_max_total_bytes())
     max_path_length: int = MAX_ATTACHMENT_PATH_LENGTH
+
+
+def attachment_max_files() -> int:
+    """Read the current staging and turn quota without caching an admin edit."""
+    return integer_setting("attachments.max_files", MAX_ATTACHMENT_FILES)
+
+
+def attachment_max_file_bytes() -> int:
+    """Read the per-file upload limit; the schema retains its absolute ceiling."""
+    return integer_setting("attachments.max_file_bytes", MAX_ATTACHMENT_FILE_BYTES)
+
+
+def attachment_max_total_bytes() -> int:
+    """Read the combined staging and turn byte quota."""
+    return integer_setting("attachments.max_total_bytes", MAX_ATTACHMENT_TOTAL_BYTES)
+
+
+def attachment_size_label(size: int) -> str:
+    """Keep size-limit errors readable even for a quota below one megabyte."""
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):g} MB"
+    if size >= 1024:
+        return f"{size / 1024:g} KB"
+    return f"{size} bytes"
 
 
 class AttachmentView(BaseModel):

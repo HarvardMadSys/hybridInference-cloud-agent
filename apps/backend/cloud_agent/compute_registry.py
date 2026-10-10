@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
 
+from cloud_agent.compute_config import current_cloudlab_api_url
 from cloud_agent.domain.compute import ComputeRefusal
 from cloud_agent.providers.compute.cloudlab import CloudLabProvider
 from cloud_agent.providers.compute.existing_ssh import ExistingSSHProvider
@@ -34,6 +35,7 @@ class ComputeProviderRegistration:
     credential_kind: Literal["ssh_key", "api_token"] = "api_token"
     connection_probe: Callable[[str], Awaitable[None]] | None = None
     can_import: bool = False
+    available: Callable[[], bool] | None = None
 
     def configuration(
         self, supplied: dict[str, Any], connection_id: str, ssh_connection_id: str | None
@@ -136,7 +138,16 @@ class ComputeProviderRegistry:
     """Resolve configured children without provider branches in Host operations."""
 
     def __init__(self, entries: list[ComputeProviderRegistration]) -> None:
-        self.entries = {entry.id: entry for entry in entries}
+        self._entries = {entry.id: entry for entry in entries}
+
+    @property
+    def entries(self) -> dict[str, ComputeProviderRegistration]:
+        """Current provider availability, including endpoints enabled after startup."""
+        return {
+            key: entry
+            for key, entry in self._entries.items()
+            if entry.available is None or entry.available()
+        }
 
     def get(self, provider_id: str) -> ComputeProviderRegistration:
         """Refuse a missing implementation or an unconfigured cloud endpoint."""
@@ -194,13 +205,23 @@ def build_registry(
             ),
         )
     ]
-    if configuration.cloudlab_api_url:
-        cloudlab = CloudLabProvider(api_url=configuration.cloudlab_api_url, resolver=resolver)
+    if configuration.admin_settings or configuration.cloudlab_api_url:
+        endpoint = (
+            (lambda: current_cloudlab_api_url(configuration))
+            if configuration.admin_settings
+            else configuration.cloudlab_api_url
+        )
+        cloudlab = CloudLabProvider(api_url=endpoint, resolver=resolver)
         entries.append(
             ComputeProviderRegistration(
                 id="cloudlab",
                 label="CloudLab",
                 provider=cloudlab,
+                available=(
+                    (lambda: bool(current_cloudlab_api_url(configuration)))
+                    if configuration.admin_settings
+                    else None
+                ),
                 connection_probe=cloudlab.validate_connection,
                 can_import=True,
                 ssh_credential_fields=("ssh_credential_ref", "ssh_known_hosts_ref"),

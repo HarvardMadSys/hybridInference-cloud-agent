@@ -33,7 +33,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -50,6 +49,7 @@ from cloud_agent.grant_usage import (
     parse_usage_request_page,
 )
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import number_setting, setting_env
 
 logger = get_logger(__name__)
 
@@ -202,28 +202,63 @@ class GrantClient:
                 from ``GATEWAY_GRANT_BINDING_ID``. When supplied, this names
                 the authority across URL, prefix and credential migrations.
             client: An existing httpx client, for tests and pooling.
+
+        Supplying both the URL and token fixes the connection, including any
+        path and installation identity inherited at construction. The default
+        deployment client reads saved settings on each operation.
         """
-        self._base_url = (base_url or os.environ.get(ENV_BASE_URL) or "").rstrip("/")
-        self._token = dispatch_token or os.environ.get(ENV_DISPATCH_TOKEN) or ""
-        self._base_path = (
-            base_path or os.environ.get(ENV_GRANT_BASE_PATH) or _DEFAULT_GRANT_BASE_PATH
+        self._base_url_override = base_url
+        self._token_override = dispatch_token
+        self._base_path_override = base_path
+        self._binding_identity_override = binding_id
+        if base_url is not None and dispatch_token is not None:
+            if base_path is None:
+                self._base_path_override = (
+                    setting_env(ENV_GRANT_BASE_PATH) or _DEFAULT_GRANT_BASE_PATH
+                )
+            if binding_id is None:
+                self._binding_identity_override = setting_env(ENV_GRANT_BINDING_ID) or ""
+        # Preserve constructor validation for callers that supply a bad path.
+        self._validated_base_path()
+        self._client = client
+        self._request_page_slots = asyncio.Semaphore(_MAX_CONCURRENT_REQUEST_PAGES)
+
+    @property
+    def _base_url(self) -> str:
+        value = self._base_url_override
+        return (value if value is not None else setting_env(ENV_BASE_URL) or "").rstrip("/")
+
+    @property
+    def _token(self) -> str:
+        value = self._token_override
+        return value if value is not None else setting_env(ENV_DISPATCH_TOKEN) or ""
+
+    def _validated_base_path(self) -> str:
+        value = self._base_path_override
+        path = (
+            value
+            if value is not None
+            else setting_env(ENV_GRANT_BASE_PATH) or _DEFAULT_GRANT_BASE_PATH
         ).rstrip("/")
-        if not self._base_path.startswith("/") or any(
-            character in self._base_path for character in ("?", "#")
-        ):
+        if not path.startswith("/") or any(character in path for character in ("?", "#")):
             raise ValueError("the grant base path must be an absolute URL path")
-        identity = (
-            binding_id if binding_id is not None else os.environ.get(ENV_GRANT_BINDING_ID, "")
-        ).strip()
+        return path
+
+    @property
+    def _base_path(self) -> str:
+        return self._validated_base_path()
+
+    @property
+    def _binding_id(self) -> str:
+        value = self._binding_identity_override
+        identity = (value if value is not None else setting_env(ENV_GRANT_BINDING_ID) or "").strip()
         binding_parts = (
             ["installation", identity]
             if identity
             else ["endpoint", self._base_url, self._base_path]
         )
         binding = json.dumps(binding_parts, separators=(",", ":"))
-        self._binding_id = "gw_" + hashlib.sha256(binding.encode()).hexdigest()
-        self._client = client
-        self._request_page_slots = asyncio.Semaphore(_MAX_CONCURRENT_REQUEST_PAGES)
+        return "gw_" + hashlib.sha256(binding.encode()).hexdigest()
 
     @property
     def configured(self) -> bool:
@@ -250,7 +285,10 @@ class GrantClient:
         if not self.configured:
             raise GatewayError(f"{ENV_BASE_URL} and {ENV_DISPATCH_TOKEN} must both be set")
         headers = {"Authorization": f"Bearer {self._token}"}
-        timeout = httpx.Timeout(_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
+        timeout = httpx.Timeout(
+            number_setting("gateway_request_timeout_s", _TIMEOUT_S),
+            connect=number_setting("gateway_connect_timeout_s", _CONNECT_TIMEOUT_S),
+        )
         url = f"{self._base_url}{path}"
         try:
             if self._client is not None:
@@ -378,7 +416,10 @@ class GrantClient:
         path = f"{self._base_path}/{quote(grant_id, safe='')}/usage"
         params = {"since": since.isoformat(), "until": until.isoformat(), "detail": "totals"}
         headers = {"Authorization": f"Bearer {self._token}"}
-        timeout = httpx.Timeout(_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
+        timeout = httpx.Timeout(
+            number_setting("gateway_request_timeout_s", _TIMEOUT_S),
+            connect=number_setting("gateway_connect_timeout_s", _CONNECT_TIMEOUT_S),
+        )
         try:
             if self._client is not None:
                 response = await self._client.get(
@@ -472,13 +513,21 @@ class GrantClient:
             params["response_id"] = response_id
         url = f"{self._base_url}{path}"
         headers = {"Authorization": f"Bearer {self._token}"}
-        timeout = httpx.Timeout(_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
+        timeout = httpx.Timeout(
+            number_setting("gateway_request_timeout_s", _TIMEOUT_S),
+            connect=number_setting("gateway_connect_timeout_s", _CONNECT_TIMEOUT_S),
+        )
         try:
             # One deadline over everything this call waits for on the wire:
             # the slot, the connection, and every chunk of the body. Without it
             # a slow-drip response holds a slot until the gateway decides to
             # finish, whatever the per-operation timeout says.
-            async with asyncio.timeout(_REQUEST_PAGE_DEADLINE_S), self._request_page_slots:
+            async with (
+                asyncio.timeout(
+                    number_setting("gateway_request_timeout_s", _REQUEST_PAGE_DEADLINE_S)
+                ),
+                self._request_page_slots,
+            ):
                 if self._client is not None:
                     status, payload = await _bounded_json(
                         self._client, url, params, headers, timeout

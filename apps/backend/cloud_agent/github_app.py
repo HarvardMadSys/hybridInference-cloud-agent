@@ -19,6 +19,7 @@ network round trip and the publisher runs per job.
 
 from __future__ import annotations
 
+import asyncio
 import json as json_module
 import re
 import time
@@ -32,6 +33,7 @@ import httpx
 import jwt
 
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import number_setting
 from cloud_agent.source_control import SourceControlCipher
 
 if TYPE_CHECKING:
@@ -190,7 +192,7 @@ class GitHubAppCredentials:
         self,
         config: AppConfig,
         *,
-        timeout_s: float = 30.0,
+        timeout_s: float | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         """Build a minter.
@@ -204,7 +206,7 @@ class GitHubAppCredentials:
                 it alone.
         """
         self._config = config
-        self._timeout_s = timeout_s
+        self._timeout_override = timeout_s
         self._tokens: dict[tuple[int, str], _CachedToken] = {}
         self._installations: dict[str, int] = {}
         #: Per user, per set of connected installations: when the answer was
@@ -213,6 +215,10 @@ class GitHubAppCredentials:
         self._cipher: SourceControlCipher | None = None
         self._client = client
         self._owned: httpx.AsyncClient | None = None
+        self._active_http = 0
+        self._retired = False
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._retire_task: asyncio.Task[None] | None = None
 
     @asynccontextmanager
     async def _http(self) -> AsyncIterator[httpx.AsyncClient]:
@@ -232,9 +238,42 @@ class GitHubAppCredentials:
         if self._client is not None:
             yield self._client
             return
+        # Requests that acquired the previous configuration may still finish
+        # after an admin saved a replacement. Their remaining calls use a
+        # temporary pool; the retired shared pool closes once its current
+        # callers finish, without interrupting an in-flight GitHub request.
+        if self._retired:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+                yield client
+            return
+        self._loop = asyncio.get_running_loop()
         if self._owned is None:
             self._owned = httpx.AsyncClient(timeout=self._timeout_s)
-        yield self._owned
+        else:
+            self._owned.timeout = httpx.Timeout(self._timeout_s)
+        self._active_http += 1
+        try:
+            yield self._owned
+        finally:
+            self._active_http -= 1
+            if self._retired and not self._active_http:
+                await self.aclose()
+
+    def retire(self) -> None:
+        """Release this configuration's pool after its current calls finish."""
+        self._retired = True
+        if self._loop is not None and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._schedule_retirement)
+
+    @property
+    def _timeout_s(self) -> float:
+        if self._timeout_override is not None:
+            return self._timeout_override
+        return number_setting("github_request_timeout_s", 30.0)
+
+    def _schedule_retirement(self) -> None:
+        if not self._active_http and self._owned is not None:
+            self._retire_task = asyncio.create_task(self.aclose())
 
     async def aclose(self) -> None:
         """Release the client this object created, if it created one.
@@ -494,7 +533,9 @@ class GitHubAppCredentials:
     ) -> list[str] | None:
         """This user's repositories if read within the last minute, else ``None``."""
         cached = self._user_repositories.get((user_id, installation_ids))
-        if cached is None or time.monotonic() - cached[0] > _USER_REPOSITORIES_TTL_S:
+        if cached is None or time.monotonic() - cached[0] > number_setting(
+            "github_repository_cache_s", _USER_REPOSITORIES_TTL_S
+        ):
             return None
         return list(cached[1])
 

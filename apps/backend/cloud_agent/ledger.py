@@ -27,6 +27,7 @@ from cloud_agent.grant_usage import (
     GrantUsageWindow,
 )
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import integer_setting, number_setting
 from cloud_agent.thread_stats import normalized_runtime_input_tokens, summarize_thread
 from cloud_agent.workers.background_wake import LEDGER
 
@@ -421,7 +422,7 @@ async def refresh_ledger_entry(store: LedgerRepository, grants: Any, row: dict[s
         else:
             result = await asyncio.wait_for(
                 grants.usage(row["grant_id"], since=row["window_since"], until=row["window_until"]),
-                timeout=REFRESH_TIMEOUT_SECONDS,
+                timeout=number_setting("ledger_refresh_timeout_s", REFRESH_TIMEOUT_SECONDS),
             )
             report = result.model_dump(mode="json")
     except GatewayError as exc:
@@ -454,7 +455,7 @@ async def collect_usage_snapshots(
     while True:
         try:
             rows = []
-            for _ in range(REFRESH_CONCURRENCY):
+            for _ in range(integer_setting("ledger_refresh_concurrency", REFRESH_CONCURRENCY)):
                 row = await store.claim_due_ledger_refresh()
                 if row is None:
                     break
@@ -474,7 +475,11 @@ async def collect_usage_snapshots(
             continue
         # While nothing listens, a refresh scheduled meanwhile announces
         # nothing: look on the old clock until the listener is back.
-        idle_s = LEDGER_IDLE_S if wake.listening else REFRESH_POLL_SECONDS
+        idle_s = (
+            number_setting("ledger_idle_s", LEDGER_IDLE_S)
+            if wake.listening
+            else REFRESH_POLL_SECONDS
+        )
         with contextlib.suppress(Exception):
             due = await store.next_ledger_refresh_due()
             if due is not None:

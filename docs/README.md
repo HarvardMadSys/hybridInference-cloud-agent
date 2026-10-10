@@ -20,6 +20,7 @@ guides run from the repository root unless the guide says otherwise.
 | Guide | Use it to |
 |---|---|
 | [Environment inventory](../ENVIRONMENT.md) | Find configuration names, defaults, ownership, and provisioning requirements |
+| [Admin Settings](operations.md#admin-settings) | Manage saved application settings, integrations, appearance and runtime limits; initialize settings and preserve encryption keys |
 | [Operations runbook](operations.md) | Configure credentials, enroll hosts, qualify Kata, deploy, migrate databases, and manage storage and networking |
 | [Release guide](../deploy/release/README.md) | Build immutable release artifacts and deploy their recipes in the required order |
 | [Compute resources](operations-compute.md) | Configure optional server provisioning, global sandbox placement, and CloudLab node replacement |

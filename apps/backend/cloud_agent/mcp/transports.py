@@ -76,6 +76,7 @@ from cloud_agent.mcp.protocol import (
     request_meta,
 )
 from cloud_agent.mcp.sse import SseDecoder, SseError
+from cloud_agent.settings import number_setting
 
 #: A tool call can be a repo-wide search; it is not a token stream. Bounded all
 #: the same, because a sandbox waiting on a hung upstream burns a job.
@@ -192,11 +193,27 @@ class RemoteTransportConfig:
     headers: Mapping[str, str] = field(default_factory=dict)
     protocol_version: str = ""
     session_id: str | None = None
-    request_timeout: float = DEFAULT_REQUEST_TIMEOUT
-    connect_timeout: float = DEFAULT_CONNECT_TIMEOUT
+    request_timeout: float | None = None
+    connect_timeout: float | None = None
     #: Overrides the scheme check for a private connector bridge. Set only by
     #: the caller that already knows the location.
     allow_plain_http: bool = False
+
+
+def _request_timeout(config: RemoteTransportConfig) -> float:
+    if config.request_timeout is not None:
+        return config.request_timeout
+    return number_setting("mcp_request_timeout_s", DEFAULT_REQUEST_TIMEOUT)
+
+
+def _connect_timeout(config: RemoteTransportConfig) -> float:
+    if config.connect_timeout is not None:
+        return config.connect_timeout
+    return number_setting("mcp_connect_timeout_s", DEFAULT_CONNECT_TIMEOUT)
+
+
+def _http_timeout(config: RemoteTransportConfig) -> httpx.Timeout:
+    return httpx.Timeout(_request_timeout(config), connect=_connect_timeout(config))
 
 
 def _auth_headers(config: RemoteTransportConfig) -> dict[str, str]:
@@ -587,7 +604,11 @@ class StreamableHttpTransport(_HttpCore):
         if self.stateless and method:
             headers.update(request_headers(method, params))
         request = self._client.build_request(
-            "POST", config.endpoint.url, content=payload, headers=headers
+            "POST",
+            config.endpoint.url,
+            content=payload,
+            headers=headers,
+            timeout=_http_timeout(config),
         )
         try:
             # Streamed, deliberately. A reply that is read on the caller's
@@ -647,7 +668,10 @@ class StreamableHttpTransport(_HttpCore):
         try:
             await self._guard(config.endpoint.url)
             request = self._client.build_request(
-                "DELETE", config.endpoint.url, headers=build_headers(config, body=False)
+                "DELETE",
+                config.endpoint.url,
+                headers=build_headers(config, body=False),
+                timeout=_http_timeout(config),
             )
             response = await self._client.send(request, stream=True)
             try:
@@ -752,6 +776,7 @@ class LegacySseTransport(_HttpCore):
                     message_url,
                     content=encode_request(request_id, method, params),
                     headers=build_headers(config, body=True),
+                    timeout=_http_timeout(config),
                 ),
                 stream=True,
             )
@@ -783,7 +808,7 @@ class LegacySseTransport(_HttpCore):
         finally:
             await response.aclose()
         try:
-            async with asyncio.timeout(config.request_timeout):
+            async with asyncio.timeout(_request_timeout(config)):
                 await waiter.wait()
         except TimeoutError as exc:
             self._waiters.pop(key, None)
@@ -819,6 +844,7 @@ class LegacySseTransport(_HttpCore):
                     message_url,
                     content=encode_notification(method, params),
                     headers=build_headers(config, body=True),
+                    timeout=_http_timeout(config),
                 ),
                 stream=True,
             )
@@ -881,7 +907,11 @@ class LegacySseTransport(_HttpCore):
             message_url = self._message_url or await self.announcement()
             response = await self._client.send(
                 self._client.build_request(
-                    "POST", message_url, content=payload, headers=build_headers(config, body=True)
+                    "POST",
+                    message_url,
+                    content=payload,
+                    headers=build_headers(config, body=True),
+                    timeout=_http_timeout(config),
                 ),
                 stream=True,
             )
@@ -922,7 +952,7 @@ def build_client(config: RemoteTransportConfig) -> httpx.AsyncClient:
     reporting it as a misconfiguration costs less than getting it wrong.
     """
     return httpx.AsyncClient(
-        timeout=httpx.Timeout(config.request_timeout, connect=config.connect_timeout),
+        timeout=_http_timeout(config),
         follow_redirects=False,
         transport=pinned_transport(),
     )
@@ -1146,6 +1176,7 @@ async def connect_legacy_sse(
                 **build_headers(config, body=False),
                 "accept": "text/event-stream",
             },
+            timeout=_http_timeout(config),
         )
         try:
             response = await http.send(stream_request, stream=True)
@@ -1155,7 +1186,7 @@ async def connect_legacy_sse(
         stream_task = asyncio.create_task(transport.consume(response))
         transport.attach_stream(stream_task)
         try:
-            async with asyncio.timeout(config.connect_timeout * 3):
+            async with asyncio.timeout(_connect_timeout(config) * 3):
                 announced = await transport.announcement()
         except TimeoutError as exc:
             raise TransportError(
@@ -1208,7 +1239,7 @@ class HttpMetadataFetcher(MetadataFetcher):
     """
 
     client: httpx.AsyncClient | None = None
-    timeout: float = DEFAULT_CONNECT_TIMEOUT * 2
+    timeout: float | None = None
 
     async def fetch_json(
         self,
@@ -1230,8 +1261,13 @@ class HttpMetadataFetcher(MetadataFetcher):
         except EndpointRejected as exc:
             raise TransportError(str(exc), kind=exc.kind) from exc
         owned = self.client is None
+        timeout = httpx.Timeout(
+            self.timeout
+            if self.timeout is not None
+            else number_setting("mcp_metadata_timeout_s", DEFAULT_CONNECT_TIMEOUT * 2)
+        )
         client = self.client or httpx.AsyncClient(
-            timeout=httpx.Timeout(self.timeout),
+            timeout=timeout,
             follow_redirects=False,
             transport=pinned_transport(),
         )
@@ -1240,6 +1276,7 @@ class HttpMetadataFetcher(MetadataFetcher):
                 "GET",
                 endpoint.url,
                 headers={"accept": "application/json", **dict(headers or {})},
+                timeout=timeout,
             )
             response = await client.send(request, stream=True)
             try:

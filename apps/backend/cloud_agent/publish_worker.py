@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -40,6 +40,7 @@ from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.publisher import PublishError, fetch_base_bundle, publish_patch
 from cloud_agent.schemas import BASE_REF_METADATA_KEY
+from cloud_agent.settings import number_setting, setting_env
 from cloud_agent.source_control_runtime import SourceControlUnavailable
 from cloud_agent.workers.background_wake import PUBLISH
 from cloud_agent_shared.git.patch_gate import branch_name_for
@@ -126,7 +127,7 @@ class GitHubCredential:
     """
 
     token: str
-    api_base: str = GITHUB_API
+    api_base: str = field(default_factory=lambda: setting_env("AGENT_GITHUB_API") or GITHUB_API)
 
     def clone_url(self, repo: str) -> str:
         """Return an authenticated clone URL for ``owner/name``."""
@@ -141,14 +142,16 @@ async def create_draft_pull_request(
     title: str,
     body: str,
     credential: GitHubCredential,
-    timeout_s: float = 30.0,
+    timeout_s: float | None = None,
 ) -> str:
     """Open a draft PR and return its URL.
 
     Draft is not a nicety: the whole safety story assumes a human reads the
     change before it can merge, so this must never open a ready-for-review PR.
     """
-    async with httpx.AsyncClient(timeout=timeout_s) as client:
+    async with httpx.AsyncClient(
+        timeout=timeout_s if timeout_s is not None else number_setting("publish_pr_timeout_s", 30.0)
+    ) as client:
         response = await client.post(
             f"{credential.api_base}/repos/{repo}/pulls",
             headers={
@@ -317,7 +320,7 @@ async def publish_one(
     *,
     credential: GitHubCredential | None = None,
     app_credentials: Any | None = None,
-    base_branch: str = "dev",
+    base_branch: str | None = None,
     allow_workflow_changes: bool = False,
 ) -> str | None:
     """Publish at most one pending job. Returns the PR URL, or ``None``.
@@ -336,7 +339,9 @@ async def publish_one(
         job,
         credential=credential,
         app_credentials=app_credentials,
-        base_branch=base_branch,
+        base_branch=base_branch
+        if base_branch is not None
+        else setting_env("AGENT_PUBLISH_BASE_BRANCH") or "dev",
         allow_workflow_changes=allow_workflow_changes,
     )
 
@@ -500,8 +505,8 @@ async def publish_loop(
     *,
     credential_provider: Any = None,
     github_app: GitHubAppSource | None = None,
-    base_branch: str = "dev",
-    interval_seconds: float = POLL_INTERVAL_S,
+    base_branch: str | None = None,
+    interval_seconds: float | None = None,
     wake: BackgroundWake | None = None,
 ) -> None:
     """Drain the publish queue forever.
@@ -522,10 +527,15 @@ async def publish_loop(
     """
     without_source = False
     while True:
+        poll_seconds = (
+            interval_seconds
+            if interval_seconds is not None
+            else number_setting("publish_poll_seconds", POLL_INTERVAL_S)
+        )
         if wake is None:
-            await asyncio.sleep(interval_seconds)
+            await asyncio.sleep(poll_seconds)
         elif without_source or not wake.listening:
-            await wake.wait(PUBLISH, interval_seconds)
+            await wake.wait(PUBLISH, poll_seconds)
         else:
             await wake.wait(PUBLISH, await _next_look_s(store))
         without_source = False
@@ -557,7 +567,9 @@ async def publish_loop(
                 store,
                 credential=credential,
                 app_credentials=app_credentials,
-                base_branch=base_branch,
+                base_branch=base_branch
+                if base_branch is not None
+                else setting_env("AGENT_PUBLISH_BASE_BRANCH") or "dev",
             )
         except asyncio.CancelledError:
             raise
@@ -567,7 +579,7 @@ async def publish_loop(
 
 async def _next_look_s(store: PublishStorage) -> float:
     """How long the publisher may sleep before it looks for work again."""
-    idle_s = PUBLISH_IDLE_S
+    idle_s = number_setting("publish_idle_seconds", PUBLISH_IDLE_S)
     with contextlib.suppress(Exception):
         due = await store.snapshot.next_base_import_retry_due()
         if due is not None:

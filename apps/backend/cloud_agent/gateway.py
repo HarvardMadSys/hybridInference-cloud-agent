@@ -16,7 +16,6 @@ travels only on this path and never toward a sandbox or a browser.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 from urllib.parse import quote
 
@@ -25,6 +24,7 @@ from pydantic import ValidationError
 
 from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import number_setting, setting_env
 
 logger = get_logger(__name__)
 
@@ -102,9 +102,19 @@ class GatewayClient:
             client: An existing httpx client, for tests and for sharing a
                 connection pool.
         """
-        self._base_url = (base_url or os.environ.get(ENV_BASE_URL) or "").rstrip("/")
-        self._token = dispatch_token or os.environ.get(ENV_DISPATCH_TOKEN) or ""
+        self._base_url_override = base_url
+        self._token_override = dispatch_token
         self._client = client
+
+    @property
+    def _base_url(self) -> str:
+        value = self._base_url_override
+        return (value if value is not None else setting_env(ENV_BASE_URL) or "").rstrip("/")
+
+    @property
+    def _token(self) -> str:
+        value = self._token_override
+        return value if value is not None else setting_env(ENV_DISPATCH_TOKEN) or ""
 
     @property
     def configured(self) -> bool:
@@ -123,7 +133,10 @@ class GatewayClient:
                 error_type="gateway_not_configured",
             )
         headers = {"Authorization": f"Bearer {self._token}"}
-        timeout = httpx.Timeout(_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
+        timeout = httpx.Timeout(
+            number_setting("gateway_request_timeout_s", _TIMEOUT_S),
+            connect=number_setting("gateway_connect_timeout_s", _CONNECT_TIMEOUT_S),
+        )
         try:
             if self._client is not None:
                 response = await self._client.get(
@@ -325,7 +338,10 @@ class GatewayClient:
             "client_id": client_id,
             "redirect_uri": redirect_uri,
         }
-        timeout = httpx.Timeout(_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
+        timeout = httpx.Timeout(
+            number_setting("gateway_request_timeout_s", _TIMEOUT_S),
+            connect=number_setting("gateway_connect_timeout_s", _CONNECT_TIMEOUT_S),
+        )
         path = "/v1/identity/token"
         try:
             if self._client is not None:

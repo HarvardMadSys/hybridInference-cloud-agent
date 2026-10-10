@@ -65,6 +65,13 @@ lifecycle; it does not measure model quality or qualify production isolation.
 startup. Read the [local guide](deploy/local/README.md) for prerequisites,
 configuration, logs, and running multiple stacks.
 
+Administrators manage application behavior, integrations and credentials, web
+appearance, and sandbox/workspace limits in **Admin → Settings**. Saved values
+survive restarts; existing environment values are imported once, and Reset
+restores built-in defaults. Database access, identity, encryption, security and
+deployment infrastructure remain bootstrap configuration. See the
+[Settings runbook](docs/operations.md#admin-settings) for migration and key setup.
+
 ## Architecture
 
 ```mermaid

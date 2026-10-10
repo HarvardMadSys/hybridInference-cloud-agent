@@ -76,7 +76,18 @@ def _host(
     )
 
     env = {
-        **os.environ,
+        **{
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {
+                "CLAUDE_CODE_VERSION",
+                "CODEX_VERSION",
+                "PI_VERSION",
+                "OPENCODE_VERSION",
+                "KILO_VERSION",
+            }
+        },
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "APP_DIR": str(app_dir),
         "KATA_SETUP_SCRIPT": str(kata_script),

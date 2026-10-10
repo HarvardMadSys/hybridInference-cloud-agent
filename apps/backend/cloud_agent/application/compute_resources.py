@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from cloud_agent.application.server_queries import ServerQueries
+from cloud_agent.compute_config import current_observation_seconds
 from cloud_agent.domain.compute import (
     ComputeRefusal,
     fingerprint,
@@ -57,7 +58,10 @@ class ComputeCommands:
         self.secrets = secrets
         self.configuration = configuration
         self.queries = ServerQueries(
-            repository, registry, secrets, observation_seconds=configuration.observation_seconds
+            repository,
+            registry,
+            secrets,
+            observation_seconds=lambda: current_observation_seconds(configuration),
         )
 
     def catalog(self) -> dict[str, Any]:

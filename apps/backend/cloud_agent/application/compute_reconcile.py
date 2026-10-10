@@ -16,6 +16,7 @@ from pydantic import SecretStr
 from cloud_agent.application.compute_rotation import ComputeRotation
 from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.broker_routing import broker_for_host
+from cloud_agent.compute_config import current_observation_seconds, current_registration_url
 from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import ComputeRefusal
 from cloud_agent.host_pool import hash_secret
@@ -120,6 +121,7 @@ class ComputeReconciler:
     async def schedule(self) -> None:
         """Observe leases and submit renewals even while retirement is blocked."""
         now = _now()
+        observation_seconds = current_observation_seconds(self.commands.configuration)
         for row in await self.repository.list_allocations():
             if row.get("release_committed_at") or row.get("observed_state") in {
                 "terminated",
@@ -129,18 +131,14 @@ class ComputeReconciler:
             operations = await self.repository.list_operations(allocation_id=row["id"])
             if row.get("external_id"):
                 observed = _moment(row.get("observed_at"))
-                due = (
-                    observed is None
-                    or (now - observed).total_seconds()
-                    >= self.commands.configuration.observation_seconds
-                )
+                due = observed is None or (now - observed).total_seconds() >= observation_seconds
                 active_inspect = any(
                     op["kind"] in {"inspect", "acquire", "import"}
                     and op["state"] in {"pending", "running", "waiting", "unknown"}
                     for op in operations
                 )
                 if due and not active_inspect:
-                    slot = int(now.timestamp()) // self.commands.configuration.observation_seconds
+                    slot = int(now.timestamp()) // observation_seconds
                     await self.commands.queue_inspection(
                         row, request_key=f"inspect:{row['id']}:{slot}"
                     )
@@ -553,7 +551,7 @@ class ComputeReconciler:
         Each submission gets a fresh token; only the newest one of an
         allocation can register, and only its hash is stored.
         """
-        url = self.commands.configuration.registration_url
+        url = current_registration_url(self.commands.configuration)
         if not url:
             raise ProviderError(
                 "registration_unavailable",

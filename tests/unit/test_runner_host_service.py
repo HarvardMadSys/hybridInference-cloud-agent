@@ -1754,10 +1754,14 @@ def test_a_poll_that_claimed_nothing_spends_no_slot(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clean_delivery_state():
-    """Every test starts having delivered nothing."""
+    """Every test starts with no cached profiling run or delivered records."""
+    from cloud_agent_shared import operation_profiling
+
+    operation_profiling.reset_cache()
     runner_mod.reset_delivery_state()
     yield
     runner_mod.reset_delivery_state()
+    operation_profiling.reset_cache()
 
 
 def _sink_with(monkeypatch: Any, tmp_path: Any, records: list[dict[str, Any]]) -> str:

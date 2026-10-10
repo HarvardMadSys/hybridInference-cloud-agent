@@ -2448,7 +2448,9 @@ describe('JobDetail', () => {
       />,
     );
 
-    await waitFor(() => expect(listAgentTerminals).toHaveBeenCalledWith('ajob_1'));
+    await waitFor(() =>
+      expect(listAgentTerminals).toHaveBeenCalledWith('ajob_1', { includeLimits: true }),
+    );
     expect(terminal).not.toHaveTextContent('pytest -q');
     expect(terminal).not.toHaveTextContent('2 passed');
     expect(terminal).not.toHaveTextContent('Terminal input is available after the agent finishes');
@@ -2481,7 +2483,9 @@ describe('JobDetail', () => {
     openWorkspace();
     fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
 
-    await waitFor(() => expect(listAgentTerminals).toHaveBeenCalledWith('ajob_1'));
+    await waitFor(() =>
+      expect(listAgentTerminals).toHaveBeenCalledWith('ajob_1', { includeLimits: true }),
+    );
     expect(screen.getByRole('button', { name: 'New terminal' })).toBeEnabled();
   });
 

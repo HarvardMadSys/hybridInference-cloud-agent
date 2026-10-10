@@ -24,7 +24,7 @@ def build_compute_runtime(
     host_pool: HostPoolRepository,
 ) -> tuple[ComputeCommands, ComputeResourceWorker]:
     """Compose adapters outside the Host and HTTP layers."""
-    configuration = ComputeConfiguration.from_env()
+    configuration = ComputeConfiguration.from_env().with_runtime_settings()
     secrets = ComputeSecretStore(repository)
     resolver = ComputeSecretResolver(secrets, configuration)
     transport = OpenSshTransport(resolver)

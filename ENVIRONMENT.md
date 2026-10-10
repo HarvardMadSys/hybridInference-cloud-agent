@@ -18,6 +18,40 @@ use; **NEW** and **MOVED** labels record earlier changes, not provisioning statu
 > examples use placeholders such as `agents.example.org`; documented protocol
 > ports and defaults are safe to retain here.
 
+## Settings and bootstrap configuration
+
+Use **Admin → Settings** for application behavior, integration URLs and
+credentials, publication, web appearance, operational intervals, upload and
+skill limits, task titles, and sandbox/workspace limits. Saved application
+settings live in the Agent database and are authoritative across restarts.
+The inventory below records defaults and the environment names used for an
+initial import; registered settings are no longer continuously read from `.env`.
+
+Run `alembic upgrade head` (through `0036_host_settings_import`) before starting
+this release. The main control-plane listener initializes the settings document
+once from its existing environment. The MCP-only listener waits for that document and uses the same
+saved values. Later environment edits do not overwrite it. **Reset** restores
+the setting's built-in default, including an empty default for a credential;
+it does not restore an old environment value. Listeners synchronize changes
+every five seconds, and the web server reads saved appearance settings for each
+request without rebuilding or restarting the web image.
+
+Host sandbox and workspace values use per-server overrides, then global admin
+values, then built-in defaults. Migration `0036_host_settings_import` preserves
+valid nondefault legacy host values as saved per-server overrides when an admin
+has not already configured them. Unreported values are imported through initial
+heartbeats, including the broker's report. Admin edits and resets exclude only
+the changed keys from pending imports, preserving unrelated legacy values.
+Global exclusions also apply to newly enrolled hosts. Later environment changes
+are ignored; clearing an override never reactivates an old environment value.
+
+Bootstrap configuration stays in deployment files: database access; identity
+issuer and JWKS; signing, encryption and recovery keys; broker/host credentials;
+security and isolation policy; networking, tunnels and listeners; image/build
+routing; mounted key paths; and trusted compute deployment profiles. These
+values are needed before settings can be read or define the service's security
+boundary. The Settings page lists their names without displaying their values.
+
 ## The one rule
 
 > The gateway's `API_KEY_SECRET` and `JWT_SECRET_KEY` must never appear in this
@@ -70,7 +104,7 @@ it before deployment; it needs no model API key or deployed-service setting.
 | `GATEWAY_BASE_URL` | **NEW** | Origin of the HybridInference gateway this deployment federates with, e.g. `https://gateway.example.org`. |
 | `GATEWAY_JWKS_URL` | **NEW** | Explicit URL of the gateway's public key set, typically `<GATEWAY_BASE_URL>/v1/identity/jwks`; it is not derived automatically. The verifier caches the JWKS set for five minutes and refreshes for an unknown `kid`. Publish current and retiring public keys through rotation; removal takes effect when the cache expires. |
 | `GATEWAY_GRANT_DISPATCH_TOKEN` | **NEW** | Bearer credential for minting, renewing, revoking and reading usage for inference grants. Generate random 32 bytes; provision the same value on both sides and a distinct value for each environment. |
-| `GATEWAY_GRANT_BASE_PATH` | optional | Grant service route prefix, default `/internal/agent-grants`; applies to mint, renew, revoke and usage queries. Use an absolute URL path without a query or fragment. Reload the control plane after changing the gateway binding. |
+| `GATEWAY_GRANT_BASE_PATH` | optional initial import | Grant service route prefix, default `/internal/agent-grants`; applies to mint, renew, revoke and usage queries. Use an absolute URL path without a query or fragment. Change it in Admin Settings; deployment clients apply it live. |
 | `GATEWAY_GRANT_BINDING_ID` | optional; recommended before the first ledger-enabled deployment | Nonsecret identity of the logical gateway installation. When set, usage snapshots pin this identity across URL, grant-prefix and credential migrations. Change it when switching installations, including at the same URL. Without it, the fingerprint uses `GATEWAY_BASE_URL` and `GATEWAY_GRANT_BASE_PATH`, so changing either prevents refreshing old snapshots. Credential rotation always preserves the binding. Configure this only in the control plane; service credentials never enter snapshots or the browser. |
 | `GATEWAY_ISSUER` | **Required for Gateway access** | Exact `iss` signed by the Gateway. It identifies the user namespace and need not equal the HTTP origin. Recorded in the Agent database; changing it requires a separate database or an explicit ownership migration. See [minimal identity migration](docs/minimal-identity.md). |
 | `GATEWAY_AUTHORIZE_URL` | **NEW** | Explicit consent-page URL, typically `<GATEWAY_BASE_URL>/authorize`; it is not derived automatically. The control plane performs the PKCE flow. Unset disables sign-in and reports it unavailable. |
@@ -82,6 +116,7 @@ it before deployment; it needs no model API key or deployed-service setting.
 
 | Variable | New? | Value / who provisions |
 |---|---|---|
+| `AGENT_SETTINGS_ENCRYPTION_KEY` | **NEW** | Optional dedicated key of at least 32 bytes for encrypted admin setting secrets. If absent, `AGENT_SESSION_SECRET` supplies the key. Keep the same effective key on the main API and MCP-only listener, and preserve it with database backups. Changing the effective key requires re-encrypting existing settings first; session-key rotation also changes it when the fallback is in use. |
 | `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` | **NEW** | Encrypts stored source-control and per-user MCP credentials under separate domain separators. Generate random 32 bytes, unique per environment. Without a key, neither stores plaintext; MCP offers an empty picker. Credentials from the pre-extraction gateway key require re-wrapping, not copying. |
 | `AGENT_CONTROL_TOKEN_SECRET` | **NEW** | Signs host/worker control tokens. Generate random 32 bytes, unique per environment and independent of gateway secrets. |
 | `AGENT_SESSION_SECRET` | **NEW** | Signs the web session cookie. Generate random 32 bytes, unique per environment. |
@@ -114,9 +149,9 @@ it before deployment; it needs no model API key or deployed-service setting.
 | `AGENT_GITHUB_APP_ID` | existing | Identifies the GitHub App used for repository access. Setting it enables key loading; an unreadable key makes GitHub temporarily unavailable and is retried every 30 seconds. Without it, key settings are ignored. Configure the App's callback/setup URLs for this deployment. See [credentials](docs/operations.md#2-credentials). |
 | `AGENT_GITHUB_APP_CLIENT_ID` | existing | GitHub App OAuth client ID for users connecting their own GitHub account. |
 | `AGENT_GITHUB_APP_CLIENT_SECRET` | existing | GitHub App OAuth client secret. Store outside Git; rotate when changing the App's audience. |
-| `AGENT_GITHUB_APP_PRIVATE_KEY_PATH` | existing | Preferred application setting: path inside the container to a read-only PEM key. Supported Compose mounts it at `/etc/cloud-agent/github-app.pem`. Keep private keys out of environment variables, Docker inspection output and log pipelines. |
+| `AGENT_GITHUB_APP_PRIVATE_KEY_PATH` | existing bootstrap | Path inside the container to a read-only PEM key. Supported Compose mounts it at `/etc/cloud-agent/github-app.pem`. An encrypted inline key saved in Admin Settings takes precedence over this mount. Keep private keys out of environment variables, Docker inspection output and log pipelines. |
 | `AGENT_GITHUB_APP_PRIVATE_KEY_FILE` | existing | Host-side key file mounted read-only by control-plane Compose at `/etc/cloud-agent/github-app.pem`. Default `/dev/null` supplies no key. This differs from the in-container `_PATH` setting. |
-| `AGENT_GITHUB_APP_PRIVATE_KEY` | existing | Inline PEM. Supported by the code, and **deliberately not offered by `deploy/control-plane/docker-compose.yml`** — that stack mounts the key as a read-only file, so setting this in its env file does nothing. Use the `_PATH` form there; the inline form is for deployments that do not use this compose stack. |
+| `AGENT_GITHUB_APP_PRIVATE_KEY` | existing initial import | Inline PEM for a one-time import in deployments that already supply it. Compose does not forward this variable. Set or replace an inline key in Admin Settings, where it is encrypted and never returned to the browser. The mounted `_PATH` form remains available for deployment-managed keys. |
 | `AGENT_GITHUB_APP_INSTALL_URL` | existing | HTTPS GitHub authorization/installation URL used by the Connect GitHub flow. The App, OAuth credentials and this URL must all be configured for user connections. |
 | `AGENT_GITHUB_API` | existing | Defaults to `https://api.github.com`; override for GHE. |
 | `AGENT_GITLAB_OAUTH_CLIENT_ID` | existing | GitLab.com OAuth application client ID for user connections. |
@@ -155,8 +190,8 @@ relay reachability and connection target policy.
 
 ### Sandbox settings from the admin pages
 
-Seven host settings can be set from the admin pages instead of in each host's
-`.env`: `AGENT_TIMEOUT_S`, `AGENT_CHAT_IDLE_TIMEOUT_S`,
+Host settings can be set from the admin pages instead of in each host's
+`.env`, including `AGENT_TIMEOUT_S`, `AGENT_CHAT_IDLE_TIMEOUT_S`,
 `AGENT_SOURCE_IMPORT_MAX_MIB`, `AGENT_SHARED_RESIDENT_CAPACITY`,
 `AGENT_TERMINAL_IDLE_TTL_SECONDS`, `AGENT_TERMINAL_HARD_TTL_SECONDS` and
 `AGENT_TERMINAL_MAX_SESSIONS`. The **Settings** page sets a value for every
@@ -167,13 +202,30 @@ applies, highest first:
 
 1. the value set for that server;
 2. the value set for every server;
-3. the host's own environment variable, exactly as described in its row below;
-4. the built-in default.
+3. the built-in default.
 
-So the variables stay valid configuration: a host with no admin values behaves
-as it always did, and clearing an admin value returns it to its `.env`. The
-bounds an admin may set are in `cloud_agent_shared/host_settings.py` and are
-typo guards, not capacity statements.
+The control plane sends complete effective values, including defaults, on each
+heartbeat. Host environment values apply only before the first settings answer
+and remain visible as diagnostic local values. Clearing a per-server value
+uses the global value or built-in default; clearing a global value uses the
+built-in default. The bounds an admin may set are in
+`cloud_agent_shared/host_settings.py` and are typo guards, not capacity statements.
+
+The same cards also manage workspace and terminal resource limits. These
+additional environment names supply initial local values only:
+
+| Variable | New? | Initial default / purpose |
+|---|---|---|
+| `AGENT_TERMINAL_MAX_SESSIONS_PER_WORKSPACE` | **NEW** | 4 open terminals per shared workspace. |
+| `AGENT_WORKSPACE_COMMAND_TIMEOUT_S` | **NEW** | 60 seconds for workspace commands and Git inspection. |
+| `AGENT_WORKSPACE_FILE_WRITE_MAX_MIB` | **NEW** | 2 MiB for one workspace file replacement. |
+| `AGENT_WORKSPACE_FILE_PREVIEW_MAX_KIB` | **NEW** | 512 KiB for one file preview. |
+| `AGENT_WORKSPACE_COMMAND_OUTPUT_MAX_MIB` | **NEW** | 2 MiB of workspace command output. |
+| `AGENT_WORKSPACE_DIRECTORY_MAX_ENTRIES` | **NEW** | 5,000 entries per directory listing. |
+| `AGENT_TERMINAL_BUFFER_MAX_MIB` / `AGENT_TERMINAL_BUFFER_MAX_EVENTS` | **NEW** | 2 MiB / 4,096 events retained for terminal reconnects. |
+| `AGENT_TERMINAL_OUTPUT_MAX_MIB` | **NEW** | 32 MiB of output over one terminal's lifetime. |
+| `AGENT_TERMINAL_INPUT_MAX_KIB` | **NEW** | 64 KiB of input per terminal request. |
+| `AGENT_TERMINAL_MAX_STREAMS_PER_SESSION` | **NEW** | 4 concurrent viewers per terminal. |
 
 The values ride the heartbeat answer, so a host applies a change within one
 heartbeat (about 30 seconds) with no redeploy. Nothing running is interrupted:
@@ -255,8 +307,8 @@ compose, because they name the stack rather than configure it.
 | `AGENT_RUNNER_VERSION` | **NEW** | Free-text version for the pool listing. Operator-facing only — never a compatibility gate, and a missing value must not stop a host enrolling. |
 | `AGENT_HOST_CAPACITY_ENABLED` | **NEW** | Whether a runner samples its Docker host's CPU, memory and retained-container count for the admin Servers page. Defaults to enabled; `0`/`false`/`no`/`off` turns it off, and the server is then shown as not measured rather than as idle. The host Compose stack bind-mounts the host's `/proc/stat`, `/proc/meminfo` and `/proc/sys/kernel/random/boot_id` read-only under `/run/host-metrics` for it — three named files, never all of `/proc` and never `pid: host`, because a container's own `/proc/stat` describes the container and a shared pid namespace would show untrusted sandbox neighbours every process on the machine. Sampling is best effort in both directions: a missing file yields a missing measurement, never a fallback read of an unscoped `/proc`, and an unscoped or malformed report is dropped by the control plane without refusing the heartbeat that carried it. |
 | `AGENT_HOST_STORAGE_PROBE` | **NEW** | Which probe measures the filesystem holding the sandbox writable layers, shown as the Servers page's Storage column. `overlay_root` (the default, and what the host Compose stack interpolates) reads the runner's own root filesystem: the runner is an ordinary container under the same daemon and storage driver, so OverlayFS's `statfs` makes `os.statvfs("/")` describe the upper layer's filesystem — the disk the sandboxes write to. `off` stops measuring storage on that host and is the rollback; it needs an `up` to reach replicas that are already running, since a container's environment is fixed when it is created, and the `check` before it clears the verdict so those replicas stop publishing a figure in the meantime. No other spelling is accepted: the host script refuses anything but these two at configuration time, because its vocabulary and the runner's used to differ and a value only one side recognised produced a rollout log reading "storage verified" beside a page reading "switched off". A reading is published only when the deployment has attested the topology in `.storage-probe/verdict.json`: `sandbox_host.sh` compares the container's own numbers against `df` of the **mount root** of the filesystem containing the upper directory, because `df <upperdir>` returns a project quota when `overlay2.size` is configured and would agree with a container reading that quota. Verification failures never block a deployment — the runner reports `unverified` and every other metric keeps working. |
-| `AGENT_LOG_LEVEL` | **NEW** | Process log level, default `INFO`, read at startup by the control-plane listeners, runner and broker. |
-| `AGENT_LOG_FORMAT` | **NEW** | Process log format, default `text`. `json` emits one JSON object per record and includes structured `extra` fields; the same handler also formats uvicorn logs. Text emits the message without those fields. An unknown value warns and uses text. To inspect JSON logs, pipe `docker logs …` to `jq`. |
+| `AGENT_LOG_LEVEL` | **NEW** | Process log level, default `INFO`. The control-plane listeners use it during bootstrap and import it once into Admin → Settings; subsequent changes apply to their own logging handler without restarting. Runner and broker process logs remain host deployment configuration and read this value at startup. |
+| `AGENT_LOG_FORMAT` | **NEW** | Process log format, default `text`. The control plane imports it once into Admin → Settings and applies saved text/JSON changes without restarting. Host processes still read it at startup. `json` emits one JSON object per record and includes structured `extra` fields; the same handler also formats uvicorn logs. Text emits the message without those fields. An unknown initial environment value warns and uses text. Existing embedding or test logging handlers retain their configuration. To inspect JSON logs, pipe `docker logs …` to `jq`. |
 | `AGENT_OPERATION_PROFILING_ENABLED` | **NEW** | Legacy static-experiment switch. With no explicit MODE, `true` preserves environment-driven collection and still requires a valid RUN. Unset or `false` now defaults to **Admin control with collection Disabled until an administrator enables a run**. Under explicit `MODE=admin` this variable is ignored. No profiling variables are required to use the Admin button. In environment mode each producer (CP, runner, broker) needs the same static experiment. Read once per process. |
 | `AGENT_OPERATION_PROFILING_RUN` | **NEW** | JSON descriptor for the current profiling run: `run_id`, a non-empty `operations` list (this slice implements `attempt.startup`), an absolute UTC `expires_at`, a positive `max_operations`, and an optional `target` naming `host`, `job_id`, `thread_id` or `sandbox_id` — any other target field rejects the whole descriptor, because a filter that can never match would silently measure nothing. A descriptor missing any other required part leaves profiling off and logs one warning instead of refusing to start. `expires_at` becomes a monotonic deadline when first read, so a service restart or a wall-clock jump cannot extend a run, and it is enforced while collecting: past it nothing more is recorded, the record ends at the deadline rather than when someone noticed, and it is emitted as partial (`measurement_complete: false`, `profiling_stopped: "expired"`). `max_operations` is a per-process budget in this slice, not a fleet-wide admission: two replicas can each spend it. A slot is only spent on an operation that was actually selected — targets are matched with every configured field present and equal, so an unknown value is a mismatch, and a rejected candidate returns its slot. `operations` may also name `files.list`, `files.open` and `terminal.open`, which the **control plane** roots; a control plane that is not enabled neither selects nor reports them. |
 | `AGENT_OPERATION_PROFILING_SINK` | **NEW** | Optional JSONL path for the finished measurements, which are logged as well. An external benchmark reads this file to aggregate a baseline. It is **not** an outbox and is not required for Postgres/Admin delivery: root producers send the same cached frozen record directly through their bounded delivery path. Log and JSONL publication still use one bounded background exporter, so a slow file or log handler never runs on the measured thread. The runner sends selected context to the broker in `X-Agent-Operation-Profiling`; file/terminal response metadata returns in JSON or `x-agent-profiling-*` headers. Browser continuation uses `X-Agent-Interaction-Id` (the older measurement header is compatibility-only). |
@@ -461,9 +513,11 @@ Verify stream compatibility before offering a version to users.
 
 ## Web (`apps/frontend/`)
 
-Frontend configuration is public. Build-time settings enter the downloaded
-bundle and require a rebuild. Runtime identity settings are read by the web
-server and require a restart. Neither class may contain secrets.
+Frontend configuration is public. Build-time routing settings enter the
+downloaded bundle and require a rebuild. Appearance settings are saved through
+Admin → Settings and read by the web server for each request. Deployment
+timestamps and release identity remain runtime environment metadata. These
+public values may not contain secrets.
 
 ### Build-time: the image variant
 
@@ -491,10 +545,13 @@ configuration.
 
 ### Runtime: the deployment's identity
 
-Read by the web server on every request (`apps/frontend/src/config/site.server.ts`), so
-the same built image serves any deployment and changing one is a restart, not a
-rebuild. Each must be a key under the `web` service's `environment:`;
-`test_web_runtime_variables_are_wired` fails on one that is not.
+The main control plane imports the first six appearance variables below when
+it initializes the settings document. Set them in its deployment environment
+before the first start, then change them through Admin → Settings. The web
+server reads the saved public appearance fields on every request through
+`GET /v1/agent/site-config`; the same built image serves any deployment. A web
+server without `AGENT_CONTROL_PLANE_URL` uses its environment for standalone
+development. Deployment time remains web runtime metadata.
 
 | Variable | New? | Notes |
 |---|---|---|
@@ -511,9 +568,10 @@ version: the first seven commit characters are visible, with the full commit in
 the tooltip. Both values are resolved per request, independently of the image's
 build date.
 
-Invalid runtime URLs or booleans fail at render time with the variable name.
-Deployment identity is configured here; the gateway's `/site-config` endpoint
-is outside the contracts Cloud Agent consumes.
+Saved URLs and booleans are validated before an admin update is committed.
+The standalone environment fallback validates them when rendering.
+The gateway's `/site-config` endpoint is outside the contracts Cloud Agent
+consumes; public saved appearance comes from this service's own endpoint.
 
 ## Set on the HybridInference side — not here
 

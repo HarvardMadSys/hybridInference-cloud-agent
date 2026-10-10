@@ -23,13 +23,13 @@ must refuse jobs, not accept every repository on the internet.
 
 from __future__ import annotations
 
-import os
 import re
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.github_app import UserAuthorizationRevoked
 from cloud_agent.github_user_token import forget_revoked_token, user_access_token
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import setting_env
 
 if TYPE_CHECKING:
     from cloud_agent.ports import SourceControlRepository
@@ -65,8 +65,7 @@ def allowed_repos(env: dict[str, str] | None = None) -> list[str]:
     repository under one owner — enough for "our own org" without becoming a
     pattern language nobody can audit.
     """
-    source = env if env is not None else dict(os.environ)
-    raw = source.get(_ALLOWLIST_VAR) or ""
+    raw = (env.get(_ALLOWLIST_VAR) if env is not None else setting_env(_ALLOWLIST_VAR)) or ""
     return [entry.strip().lower() for entry in raw.split(",") if entry.strip()]
 
 

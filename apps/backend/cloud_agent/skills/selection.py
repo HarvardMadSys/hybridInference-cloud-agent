@@ -6,10 +6,11 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.skills.models import (
-    MAX_SELECTED_SKILLS,
-    MAX_SELECTION_BYTES,
     SkillError,
     SkillSnapshot,
+    skill_max_selected,
+    skill_max_selection_bytes,
+    skill_size_label,
 )
 
 if TYPE_CHECKING:
@@ -18,10 +19,14 @@ if TYPE_CHECKING:
 
 def check_selection(skills: list[dict[str, Any]]) -> None:
     """Bound the total instructions that one turn can receive."""
-    if len(skills) > MAX_SELECTED_SKILLS:
-        raise SkillError("Select at most 16 skills.")
-    if sum(len(str(s["instructions"]).encode("utf-8")) for s in skills) > MAX_SELECTION_BYTES:
-        raise SkillError("Selected skill instructions must total no more than 128 KB.")
+    max_selected = skill_max_selected()
+    max_bytes = skill_max_selection_bytes()
+    if len(skills) > max_selected:
+        raise SkillError(f"Select at most {max_selected} skills.")
+    if sum(len(str(s["instructions"]).encode("utf-8")) for s in skills) > max_bytes:
+        raise SkillError(
+            f"Selected skill instructions must total no more than {skill_size_label(max_bytes)}."
+        )
 
 
 async def resolve_skills(

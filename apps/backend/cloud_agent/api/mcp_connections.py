@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import secrets
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -71,6 +70,7 @@ from cloud_agent.mcp.registry import (
     oauth_cipher,
     resolve_connection,
 )
+from cloud_agent.settings import setting_env
 from cloud_agent.source_control import SourceControlError
 
 if TYPE_CHECKING:
@@ -150,13 +150,13 @@ _TEMPLATES: tuple[dict[str, Any], ...] = (
 
 def _public_base_url() -> str:
     """Reuse the configured public API address unless MCP has an explicit override."""
-    explicit = os.environ.get(ENV_MCP_PUBLIC_BASE_URL, "").strip().rstrip("/")
+    explicit = (setting_env(ENV_MCP_PUBLIC_BASE_URL) or "").strip().rstrip("/")
     if explicit:
         return explicit
     # Session sign-in already needs the public API callback, including its
     # proxy prefix. Reuse that operator-controlled URL, never Host/Forwarded
     # headers or the web origin (which may live on a different host).
-    callback = os.environ.get("AGENT_SESSION_REDIRECT_URI", "").strip()
+    callback = (setting_env("AGENT_SESSION_REDIRECT_URI") or "").strip()
     suffix = "/v1/session/callback"
     try:
         parsed = urlsplit(callback)
@@ -1557,7 +1557,7 @@ def _callback_redirect(provider: str, *, ok: bool, message: str) -> Response:
     """Send the browser back to the app with a result it can display."""
     # The registered callback belongs to the API; the result belongs to the web
     # app, whose origin and mount path may differ (for example /agents/api vs /agents).
-    base = os.environ.get("AGENT_WEB_BASE_URL", "").strip().rstrip("/")
+    base = (setting_env("AGENT_WEB_BASE_URL") or "").strip().rstrip("/")
     result = {"mcp_authorized": "1" if ok else "0", "mcp_connection": provider}
     if message:
         result["mcp_message"] = message

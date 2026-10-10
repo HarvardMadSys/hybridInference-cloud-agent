@@ -30,6 +30,7 @@ AuditCategory = Literal["settings", "servers", "measurements", "content"]
 #: a settings change, and an action belongs to the first filter that covers it.
 AUDIT_CATEGORIES: dict[AuditCategory, tuple[str, ...]] = {
     "settings": (
+        "agent.settings.",
         "agent.host_settings.",
         "agent.runtime_version.",
         "agent.runner_host.set_settings",

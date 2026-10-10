@@ -417,6 +417,14 @@ describe('agents api', () => {
     );
   });
 
+  it('can include the broker session limit without changing the legacy list result', async () => {
+    fetchWithAuth.mockResolvedValueOnce(jsonResponse({ terminals: [], max_sessions: 2 }));
+    await expect(listAgentTerminals('job/one', { includeLimits: true })).resolves.toEqual({
+      terminals: [],
+      max_sessions: 2,
+    });
+  });
+
   it('manages PTY sessions and loads live Git state', async () => {
     const terminal = {
       id: 'term/1',
@@ -498,6 +506,21 @@ describe('agents api', () => {
       return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     });
     expect(decoded.join('')).toBe(pasted);
+  });
+
+  it('uses a lower advertised input limit while preserving complete UTF-8 characters', async () => {
+    fetchWithAuth.mockResolvedValue(new Response(null, { status: 204 }));
+    const pasted = `${'a'.repeat(1023)}λ🙂${'z'.repeat(1024)}`;
+    await writeAgentTerminalInput('job-1', 'term-1', pasted, 1024);
+    const decoded = fetchWithAuth.mock.calls.map((call: unknown[]) => {
+      const init = call[2] as RequestInit;
+      const encoded = (JSON.parse(String(init.body)) as { data: string }).data;
+      const bytes = Uint8Array.from(Buffer.from(encoded, 'base64'));
+      expect(bytes.byteLength).toBeLessThanOrEqual(1024);
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    });
+    expect(decoded.join('')).toBe(pasted);
+    expect(fetchWithAuth).toHaveBeenCalledTimes(3);
   });
 
   it('streams terminal output and exit frames from an explicit resume cursor', async () => {

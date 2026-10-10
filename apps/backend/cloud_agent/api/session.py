@@ -66,6 +66,7 @@ from cloud_agent.api.errors import AgentConfigurationError
 from cloud_agent.gateway import GatewayClient, GatewayError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import SessionUserResponse
+from cloud_agent.settings import setting_env
 
 logger = get_logger(__name__)
 
@@ -105,8 +106,8 @@ def _cookie_is_secure() -> bool:
 
 
 def _env(name: str) -> str:
-    """Return a trimmed environment value."""
-    return (os.environ.get(name) or "").strip()
+    """Return a trimmed deployment setting."""
+    return (setting_env(name) or "").strip()
 
 
 def safe_return_to(candidate: str | None) -> str:

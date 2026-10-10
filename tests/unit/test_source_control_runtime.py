@@ -369,6 +369,76 @@ def test_gitlab_unconfigured_and_ready_are_what_they_were() -> None:
     assert ready.client is not None
 
 
+async def test_saved_provider_settings_replace_credentials_and_close_retired_pool(
+    monkeypatch: pytest.MonkeyPatch, private_pem: str
+) -> None:
+    from cloud_agent import source_control_runtime
+
+    values: dict[str, str] = {}
+    monkeypatch.setattr(source_control_runtime, "settings_environment", lambda: dict(values))
+    runtime = SourceControlRuntime.from_env()
+    provider = runtime.github
+    assert provider.get() is None
+    assert runtime.gitlab.client is None
+    values.update(
+        AGENT_GITHUB_APP_ID="first-app",
+        AGENT_GITHUB_APP_PRIVATE_KEY=private_pem,
+    )
+    first = provider.get()
+    assert first is not None
+    async with first._http() as pool:
+        values["AGENT_GITHUB_APP_ID"] = "second-app"
+        second = provider.get()
+        assert second is not None and second is not first
+        assert second._config.app_id == "second-app"
+        assert runtime.github is provider
+        assert not pool.is_closed, "saving settings must let an in-flight call finish"
+    assert pool.is_closed
+    values.update(
+        AGENT_GITLAB_OAUTH_CLIENT_ID="client",
+        AGENT_GITLAB_OAUTH_CLIENT_SECRET="secret",
+        AGENT_GITLAB_OAUTH_REDIRECT_URI="https://agents.example/callback",
+        AGENT_SOURCE_CONTROL_ENCRYPTION_KEY="test-encryption-key",
+    )
+    first_gitlab = runtime.gitlab.client
+    assert first_gitlab is not None
+    values["AGENT_GITLAB_OAUTH_CLIENT_SECRET"] = "rotated-secret"
+    second_gitlab = runtime.gitlab.client
+    assert second_gitlab is not None and second_gitlab is not first_gitlab
+    assert second_gitlab.config.client_secret == "rotated-secret"
+    values["AGENT_GITHUB_APP_PRIVATE_KEY"] = "invalid-key"
+    with pytest.raises(SourceControlUnavailable):
+        provider.get()
+    values["AGENT_GITHUB_APP_ID"] = ""
+    assert provider.get() is None
+    values["AGENT_GITLAB_OAUTH_CLIENT_SECRET"] = ""
+    assert runtime.gitlab.client is None
+    assert runtime.gitlab.load_status == "unavailable"
+    await runtime.aclose()
+
+
+def test_failed_app_reload_uses_current_interval_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, private_pem: str
+) -> None:
+    from cloud_agent import source_control_runtime
+
+    values = {"github_reload_interval_s": 30.0}
+    monkeypatch.setattr(
+        source_control_runtime,
+        "number_setting",
+        lambda name, default=None: values.get(name, default),
+    )
+    path = tmp_path / "later.pem"
+    clock = _Clock()
+    provider = GitHubAppProvider(_app_env(path), clock=clock)
+    path.write_text(private_pem)
+    clock.advance(2)
+    with pytest.raises(SourceControlUnavailable):
+        provider.get()
+    values["github_reload_interval_s"] = 1
+    assert provider.get() is not None
+
+
 async def test_closing_releases_the_client_and_loads_nothing_after(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, private_pem: str
 ) -> None:
@@ -423,6 +493,7 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
     monkeypatch.setattr(
         "cloud_agent.identity_namespace.ensure_gateway_namespace", AsyncMock(return_value=None)
     )
+    monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock(return_value=None))
 
     started: dict[str, dict[str, Any]] = {}
 
@@ -439,6 +510,7 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
     monkeypatch.setattr("cloud_agent.bootstrap.lifespan.reap_expired_attempts", recording("reaper"))
     monkeypatch.setattr("cloud_agent.publish_worker.publish_loop", recording("publisher"))
     for loop_path in (
+        "cloud_agent.settings.synchronize_settings",
         "cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots",
         "cloud_agent.ledger.collect_usage_snapshots",
         "cloud_agent.capacity_history.prune_host_capacity_history",

@@ -27,10 +27,10 @@ least :data:`RETRY_INTERVAL_S` ago, reads the key again first. The publisher
 asks every 15 seconds and the reaper every 30, so a repaired key is picked up
 within a minute whether or not anybody is using the site.
 
-**GitLab is loaded once.** Its configuration is environment variables only,
-and a running process's environment does not change, so every retry would fail
-the way the first attempt did. Changing an environment variable still means
-recreating the process — for GitHub as well.
+Admin settings are checked when each provider is requested. Saving a changed
+configuration replaces the credentials on the next operation. Explicitly
+injected environment mappings remain fixed for callers that need an isolated
+configuration, such as tests.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from cloud_agent.github_app import AppConfig, GitHubAppCredentials, GitHubAppError, build_app_jwt
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import number_setting, settings_environment
 from cloud_agent.source_control import (
     ENV_ENCRYPTION_KEY,
     GitLabOAuthClient,
@@ -68,6 +69,20 @@ RETRY_INTERVAL_S = 30.0
 #: the control-plane compose file always sets that one, and mounts
 #: ``/dev/null`` there when no App exists, so the path's presence says nothing.
 ENV_GITHUB_APP_ID = "AGENT_GITHUB_APP_ID"
+_GITHUB_ENV_KEYS = (
+    ENV_GITHUB_APP_ID,
+    "AGENT_GITHUB_APP_PRIVATE_KEY",
+    "AGENT_GITHUB_APP_PRIVATE_KEY_PATH",
+    "AGENT_GITHUB_APP_CLIENT_ID",
+    "AGENT_GITHUB_APP_CLIENT_SECRET",
+    "AGENT_GITHUB_API",
+)
+_GITLAB_ENV_KEYS = (
+    "AGENT_GITLAB_OAUTH_CLIENT_ID",
+    "AGENT_GITLAB_OAUTH_CLIENT_SECRET",
+    "AGENT_GITLAB_OAUTH_REDIRECT_URI",
+    ENV_ENCRYPTION_KEY,
+)
 
 
 class SourceControlUnavailable(Exception):
@@ -120,15 +135,15 @@ class _LoadFailed(Exception):
 class GitHubAppProvider:
     """The GitHub App's credentials, loaded again after a failure.
 
-    One per control-plane process, built by the lifespan. It reads the
-    environment once; each attempt after that re-reads only the key.
+    One per control-plane process, built by the lifespan. Without an explicit
+    environment it refreshes saved configuration before supplying credentials.
     """
 
     def __init__(
         self,
-        env: Mapping[str, str],
+        env: Mapping[str, str] | None = None,
         *,
-        retry_interval_s: float = RETRY_INTERVAL_S,
+        retry_interval_s: float | None = None,
         clock: Callable[[], float] = time.monotonic,
         credentials_factory: Callable[[AppConfig], GitHubAppCredentials] = GitHubAppCredentials,
     ) -> None:
@@ -142,9 +157,10 @@ class GitHubAppProvider:
                 that must not reach GitHub substitutes a fake here, after the
                 key has been read and signed with for real.
         """
-        self._env = dict(env)
+        self._dynamic = env is None
+        self._env = dict(env) if env is not None else settings_environment()
         self._configured = bool((self._env.get(ENV_GITHUB_APP_ID) or "").strip())
-        self._retry_interval_s = retry_interval_s
+        self._retry_interval_override = retry_interval_s
         self._clock = clock
         self._credentials_factory = credentials_factory
         self._credentials: GitHubAppCredentials | None = None
@@ -152,12 +168,19 @@ class GitHubAppProvider:
         self._attempted_at: float | None = None
         self._unavailable_since: float | None = None
         self._closed = False
+        self._retired: list[GitHubAppCredentials] = []
         # Requests resolve their dependencies on a thread pool, while the
         # publisher and the reaper ask from the event loop. One attempt at a
         # time; a caller that finds one in progress does not wait for it.
         self._lock = threading.Lock()
         if self._configured:
             self._load()
+
+    @property
+    def _retry_interval_s(self) -> float:
+        if self._retry_interval_override is not None:
+            return self._retry_interval_override
+        return number_setting("github_reload_interval_s", RETRY_INTERVAL_S)
 
     @property
     def load_status(self) -> LoadStatus:
@@ -174,6 +197,7 @@ class GitHubAppProvider:
                 could not load it. Tried again first when the last attempt is
                 at least the retry interval old.
         """
+        self._refresh_settings()
         credentials = self._credentials
         if credentials is not None or not self._configured:
             return credentials
@@ -187,6 +211,30 @@ class GitHubAppProvider:
         if credentials is None:
             raise SourceControlUnavailable("github")
         return credentials
+
+    def _refresh_settings(self) -> None:
+        if not self._dynamic or self._closed:
+            return
+        env = settings_environment()
+        if all(env.get(key) == self._env.get(key) for key in _GITHUB_ENV_KEYS):
+            return
+        # A caller never gets the previous configuration while another thread
+        # replaces it. The existing nonblocking load retry keeps its behavior.
+        with self._lock:
+            env = settings_environment()
+            if all(env.get(key) == self._env.get(key) for key in _GITHUB_ENV_KEYS):
+                return
+            previous, self._credentials = self._credentials, None
+            if previous is not None:
+                previous.retire()
+                self._retired.append(previous)
+            self._env = env
+            self._configured = bool((env.get(ENV_GITHUB_APP_ID) or "").strip())
+            self._attempted_at = None
+            self._reason = None
+            self._unavailable_since = None
+            if self._configured:
+                self._load()
 
     def state(self) -> GitHubAppState:
         """Like :meth:`get`, answered as one consistent reading, never raised.
@@ -210,6 +258,9 @@ class GitHubAppProvider:
         credentials, self._credentials = self._credentials, None
         if credentials is not None:
             await credentials.aclose()
+        retired, self._retired = self._retired, []
+        for previous in retired:
+            await previous.aclose()
 
     def _due(self) -> bool:
         return (
@@ -288,21 +339,54 @@ class GitHubAppProvider:
 
 
 class GitLabOAuthLoad:
-    """GitLab OAuth, loaded once: nothing it reads can change under a process."""
+    """GitLab OAuth, refreshed from saved settings when used."""
 
-    def __init__(self, env: Mapping[str, str]) -> None:
-        self.client: GitLabOAuthClient | None = None
-        self.load_status: LoadStatus = "unconfigured"
+    def __init__(self, env: Mapping[str, str] | None = None) -> None:
+        self._dynamic = env is None
+        self._env = dict(env) if env is not None else settings_environment()
+        self._lock = threading.Lock()
+        self._client: GitLabOAuthClient | None = None
+        self._load_status: LoadStatus = "unconfigured"
+        self._load(self._env)
+
+    @property
+    def client(self) -> GitLabOAuthClient | None:
+        """Return the client built from the current saved provider configuration."""
+        self._refresh_settings()
+        return self._client
+
+    @property
+    def load_status(self) -> LoadStatus:
+        """Return the current configuration's load result."""
+        self._refresh_settings()
+        return self._load_status
+
+    def _refresh_settings(self) -> None:
+        if not self._dynamic:
+            return
+        env = settings_environment()
+        if all(env.get(key) == self._env.get(key) for key in _GITLAB_ENV_KEYS):
+            return
+        with self._lock:
+            env = settings_environment()
+            if all(env.get(key) == self._env.get(key) for key in _GITLAB_ENV_KEYS):
+                return
+            self._env = env
+            self._load(env)
+
+    def _load(self, env: Mapping[str, str]) -> None:
+        self._client = None
+        self._load_status = "unconfigured"
         try:
             config = GitLabOAuthConfig.from_env(dict(env))
             if config is None:
                 return
-            self.client = GitLabOAuthClient(
+            self._client = GitLabOAuthClient(
                 config, cipher=SourceControlCipher(env.get(ENV_ENCRYPTION_KEY, ""))
             )
-            self.load_status = "ready"
+            self._load_status = "ready"
         except Exception as exc:
-            self.load_status = "unavailable"
+            self._load_status = "unavailable"
             logger.error(
                 "source_control_load_failed",
                 extra={
@@ -326,8 +410,8 @@ class SourceControlRuntime:
         self.gitlab = gitlab
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str]) -> SourceControlRuntime:
-        """Load both providers from one reading of the environment."""
+    def from_env(cls, env: Mapping[str, str] | None = None) -> SourceControlRuntime:
+        """Load saved provider settings, or an explicitly fixed environment."""
         return cls(github=GitHubAppProvider(env), gitlab=GitLabOAuthLoad(env))
 
     async def aclose(self) -> None:

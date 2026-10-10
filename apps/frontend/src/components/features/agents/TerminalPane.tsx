@@ -122,6 +122,7 @@ interface TerminalPaneProps {
   canCreate: boolean;
   canSplit: boolean;
   busy: boolean;
+  maxInputBytes?: number;
   onSelect: (terminalId: string) => void;
   onNew: () => void;
   onSplit: () => void;
@@ -137,6 +138,7 @@ export function TerminalPane({
   canCreate,
   canSplit,
   busy,
+  maxInputBytes,
   onSelect,
   onNew,
   onSplit,
@@ -149,6 +151,8 @@ export function TerminalPane({
   const themeRef = useRef(resolved);
   themeRef.current = resolved;
   const inputEnabledRef = useRef(ready && terminal.state === 'running');
+  const inputLimitRef = useRef(maxInputBytes);
+  inputLimitRef.current = maxInputBytes;
   const tabListRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef(new Map<string, HTMLButtonElement>());
   const inputEnabled = ready && terminal.state === 'running';
@@ -255,7 +259,11 @@ export function TerminalPane({
             while (!disposed && inputEnabledRef.current && pendingInput) {
               const batch = pendingInput;
               pendingInput = '';
-              await writeAgentTerminalInput(jobId, terminal.id, batch);
+              if (inputLimitRef.current === undefined) {
+                await writeAgentTerminalInput(jobId, terminal.id, batch);
+              } else {
+                await writeAgentTerminalInput(jobId, terminal.id, batch, inputLimitRef.current);
+              }
             }
           } catch (cause: unknown) {
             pendingInput = '';

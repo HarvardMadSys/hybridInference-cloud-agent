@@ -249,7 +249,7 @@ export interface AgentRunnerHost {
 }
 
 /** Which unit a runtime setting's whole number counts. */
-export type HostSettingUnit = 'seconds' | 'MiB' | 'count';
+export type HostSettingUnit = 'seconds' | 'MiB' | 'KiB' | 'count';
 
 /**
  * One runtime setting an admin may set, as the control plane defines it

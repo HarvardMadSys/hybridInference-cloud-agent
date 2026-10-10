@@ -12,7 +12,8 @@ import {
 import { TerminalPane } from './TerminalPane';
 import { loadTerminalRuntime } from './terminalRuntime';
 
-const MAX_SESSIONS = 4;
+// Compatibility fallback for brokers that predate advertised limits.
+const DEFAULT_MAX_SESSIONS = 4;
 
 // xterm's cell box for this pane's font (13px monospace, 1.25 line height),
 // and the chrome around it. Both are first guesses: `fitAddon.fit()` measures
@@ -47,6 +48,8 @@ interface TerminalWorkspaceProps {
 
 export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorkspaceProps) {
   const [sessions, setSessions] = useState<AgentTerminalApi[]>([]);
+  const [maxSessions, setMaxSessions] = useState(DEFAULT_MAX_SESSIONS);
+  const [maxInputBytes, setMaxInputBytes] = useState<number | undefined>();
   const [visibleIds, setVisibleIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -77,6 +80,8 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
     currentJobRef.current = jobId;
     jobGenerationRef.current += 1;
     setSessions([]);
+    setMaxSessions(DEFAULT_MAX_SESSIONS);
+    setMaxInputBytes(undefined);
     setVisibleIds([]);
     setError(null);
     setLoadFailed(false);
@@ -96,9 +101,22 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
     const generation = jobGenerationRef.current;
     loadedJobRef.current = jobId;
     setLoading(true);
-    void listAgentTerminals(jobId)
-      .then((items) => {
+    void listAgentTerminals(jobId, { includeLimits: true })
+      .then((response) => {
         if (!requestIsCurrent(jobId, generation)) return;
+        const items = Array.isArray(response) ? response : response.terminals;
+        const maximum = Array.isArray(response) ? undefined : response.max_sessions;
+        const inputMaximum = Array.isArray(response) ? undefined : response.max_input_bytes;
+        setMaxInputBytes(
+          typeof inputMaximum === 'number' && Number.isInteger(inputMaximum) && inputMaximum >= 4
+            ? inputMaximum
+            : undefined,
+        );
+        setMaxSessions(
+          typeof maximum === 'number' && Number.isInteger(maximum) && maximum > 0
+            ? maximum
+            : DEFAULT_MAX_SESSIONS,
+        );
         setSessions((current) => {
           const listed = new Set(items.map((item) => item.id));
           // Creating no longer waits for this request, so a terminal opened
@@ -140,7 +158,7 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
   // other one. The button stays visible and disabled rather than absent: the
   // wait is short and aiming at a control that is about to work beats hunting
   // for one that is not there yet.
-  const canCreate = ready && !loadFailed && sessions.length < MAX_SESSIONS;
+  const canCreate = ready && !loadFailed && sessions.length < maxSessions;
 
   function retryLoad() {
     loadedJobRef.current = null;
@@ -265,6 +283,7 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
               canCreate={canCreate}
               canSplit={canCreate && visible.length < 2}
               busy={busy}
+              maxInputBytes={maxInputBytes}
               onSelect={(terminalId) => select(paneIndex, terminalId)}
               onNew={() => void create('new', paneIndex)}
               onSplit={() => void create('split')}

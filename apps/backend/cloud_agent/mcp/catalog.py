@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import number_setting, text_setting
 
 if TYPE_CHECKING:
     import httpx
@@ -258,13 +259,16 @@ async def fetch_catalog(client: httpx.AsyncClient) -> list[dict[str, Any]]:
     entries: dict[str, dict[str, Any]] = {}
     cursors: set[str] = set()
     params = {"version": "latest", "limit": "100"}
-    async with asyncio.timeout(240):
+    registry_url = text_setting("mcp_registry_url", REGISTRY_URL).rstrip("/")
+    if _https(registry_url) is None:
+        raise ValueError("MCP Registry must be a public HTTPS URL")
+    async with asyncio.timeout(number_setting("mcp_catalog_sync_timeout_s", 240)):
         for _ in range(1000):
             async with client.stream(
                 "GET",
-                f"{REGISTRY_URL}/v0.1/servers",
+                f"{registry_url}/v0.1/servers",
                 params=params,
-                timeout=15,
+                timeout=number_setting("mcp_catalog_request_timeout_s", 15),
                 follow_redirects=False,
             ) as response:
                 response.raise_for_status()
@@ -305,20 +309,25 @@ class McpCatalog:
         self.repository = repository
         self.client = client
         self.snapshot: dict[str, Any] | None = None
+        self._registry_url = text_setting("mcp_registry_url", REGISTRY_URL)
 
     async def refresh(self) -> None:
         """Reuse a fresh durable snapshot or atomically publish one complete fetch."""
-        async with asyncio.timeout(10):
+        registry_url = text_setting("mcp_registry_url", REGISTRY_URL)
+        async with asyncio.timeout(number_setting("mcp_catalog_storage_timeout_s", 10)):
             stored = await self.repository.load_mcp_catalog()
         if stored is not None:
             self.snapshot = stored
-            if (datetime.now(timezone.utc) - stored["synced_at"]).total_seconds() < SYNC_INTERVAL:
+            if self._registry_url == registry_url and (
+                datetime.now(timezone.utc) - stored["synced_at"]
+            ).total_seconds() < number_setting("mcp_catalog_sync_seconds", SYNC_INTERVAL):
                 return
         started = datetime.now(timezone.utc)
         entries = await fetch_catalog(self.client)
-        async with asyncio.timeout(10):
+        async with asyncio.timeout(number_setting("mcp_catalog_storage_timeout_s", 10)):
             await self.repository.save_mcp_catalog(entries, started)
         self.snapshot = {"entries": entries, "synced_at": started}
+        self._registry_url = registry_url
 
     async def run(self) -> None:
         """Keep external failures out of startup, readiness and the connection API."""
@@ -330,10 +339,10 @@ class McpCatalog:
                     if self.snapshot
                     else 0
                 )
-                delay = max(60, SYNC_INTERVAL - age)
+                delay = max(1, number_setting("mcp_catalog_sync_seconds", SYNC_INTERVAL) - age)
             except Exception:
                 logger.warning("MCP directory sync failed; keeping cached servers", exc_info=True)
-                delay = RETRY_INTERVAL
+                delay = number_setting("mcp_catalog_retry_seconds", RETRY_INTERVAL)
             await asyncio.sleep(delay)
 
     def search(
@@ -362,5 +371,6 @@ class McpCatalog:
             "next_offset": offset + limit if offset + limit < len(matches) else None,
             "synced_at": synced_at.isoformat() if synced_at else None,
             "stale": not synced_at
-            or (datetime.now(timezone.utc) - synced_at).total_seconds() > 2 * SYNC_INTERVAL,
+            or (datetime.now(timezone.utc) - synced_at).total_seconds()
+            > 2 * number_setting("mcp_catalog_sync_seconds", SYNC_INTERVAL),
         }

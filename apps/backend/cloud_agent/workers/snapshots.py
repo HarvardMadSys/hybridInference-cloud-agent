@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import number_setting
 from cloud_agent.workers.background_wake import SNAPSHOT
 
 if TYPE_CHECKING:
@@ -141,7 +142,7 @@ async def _next_look_s(
     """How long the coordinator may sleep before it looks for a capture again."""
     if not wake.listening:
         return interval_seconds
-    idle_s = SNAPSHOT_IDLE_S
+    idle_s = number_setting("snapshot_idle_s", SNAPSHOT_IDLE_S)
     with contextlib.suppress(Exception):
         due = await store.snapshot.next_snapshot_retry_due()
         if due is not None:
@@ -152,7 +153,7 @@ async def _next_look_s(
 async def coordinate_shared_snapshots(
     store: _SnapshotCapture,
     *,
-    interval_seconds: float = SNAPSHOT_CAPTURE_INTERVAL_S,
+    interval_seconds: float | None = None,
     wake: BackgroundWake | None = None,
 ) -> None:
     """Capture shared-workspace publication snapshots on an independent clock.
@@ -163,13 +164,18 @@ async def coordinate_shared_snapshots(
     is not claimed again before its retry time, so it neither loops on a busy
     host nor holds up the workspaces behind it.
     """
-    if interval_seconds <= 0:
+    if interval_seconds is not None and interval_seconds <= 0:
         raise ValueError("snapshot capture interval must be positive")
     while True:
+        interval = (
+            interval_seconds
+            if interval_seconds is not None
+            else number_setting("snapshot_capture_interval_s", SNAPSHOT_CAPTURE_INTERVAL_S)
+        )
         if wake is None:
-            await asyncio.sleep(interval_seconds)
+            await asyncio.sleep(interval)
         else:
-            await wake.wait(SNAPSHOT, await _next_look_s(store, wake, interval_seconds))
+            await wake.wait(SNAPSHOT, await _next_look_s(store, wake, interval))
         try:
             while await _capture_due_shared_snapshot(store):
                 pass

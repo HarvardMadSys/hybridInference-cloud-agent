@@ -125,7 +125,7 @@ const SENTENCES: Record<string, Sentence> = {
   'agent.host_settings.set': (details, _host, definitions) => {
     const lines = settingChanges(details, definitions, {
       where: 'for all servers',
-      inherited: "each server's default",
+      inherited: 'the deployment default',
     });
     return lines.length > 0 ? lines.join('; ') : 'Changed sandbox settings for all servers';
   },

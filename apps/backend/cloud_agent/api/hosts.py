@@ -288,7 +288,7 @@ async def heartbeat_host(
             thread_id=residency_beat.thread_id,
             generation=residency_beat.generation,
             host=updated["host"],
-            ttl_seconds=RESIDENCY_TTL_S,
+            ttl_seconds=residency_ttl_s(),
         )
         if extended and grants is not None:
             # The credential lives exactly as long as the residency_beat: the residency_beat
@@ -353,7 +353,7 @@ async def heartbeat_host(
                 thread_id=member.thread_id,
                 generation=member.residency_generation,
                 host=updated["host"],
-                ttl_seconds=RESIDENCY_TTL_S,
+                ttl_seconds=residency_ttl_s(),
             )
             if extended and grants is not None:
                 with contextlib.suppress(Exception):
@@ -407,7 +407,7 @@ async def heartbeat_host(
     )
 
 
-from cloud_agent.application.residency import RESIDENCY_TTL_S
+from cloud_agent.application.residency import residency_ttl_s
 
 
 async def _probed_broker_error(

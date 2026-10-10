@@ -141,6 +141,22 @@ async def test_successful_publish_records_the_pr(monkeypatch):
     assert "ajob_1" in captured["body"]
 
 
+async def test_default_publish_branch_uses_current_saved_setting(monkeypatch):
+    values = {"AGENT_PUBLISH_BASE_BRANCH": "first"}
+    monkeypatch.setattr(
+        publish_worker, "setting_env", lambda name, default=None: values.get(name, default)
+    )
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
+    )
+    captured = _patch_pr(monkeypatch)
+    await publish_one(FakeStore(dict(_JOB)), credential=GitHubCredential("t"))
+    assert captured["base_branch"] == "first"
+    values["AGENT_PUBLISH_BASE_BRANCH"] = "second"
+    await publish_one(FakeStore(dict(_JOB)), credential=GitHubCredential("t"))
+    assert captured["base_branch"] == "second"
+
+
 async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(monkeypatch):
     from cloud_agent import broker_routing
 

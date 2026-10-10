@@ -20,6 +20,7 @@ from cloud_agent.goals.controller import run_goal_wakeups
 from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
 from cloud_agent.host_pool import HEARTBEAT_INTERVAL_S, MISSED_HEARTBEATS_BEFORE_OFFLINE
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import integer_setting
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -398,7 +399,9 @@ async def _renew_live_grants(
     # Each coroutine touches only its own grant's entry in `failures` and its
     # own id in `seen`, so the shared state needs no lock — the rows come from
     # one query and a grant id appears once.
-    limit = asyncio.Semaphore(GRANT_RENEWAL_CONCURRENCY)
+    limit = asyncio.Semaphore(
+        integer_setting("grant_renewal_concurrency", GRANT_RENEWAL_CONCURRENCY)
+    )
 
     async def _renew_bounded(row: dict[str, Any]) -> None:
         async with limit:
@@ -531,7 +534,7 @@ async def reap_expired_attempts(
     store: _Reaping,
     *,
     interval_seconds: float = REAP_INTERVAL_S,
-    max_attempts: int = MAX_ATTEMPTS,
+    max_attempts: int | None = None,
     grants: Any | None = None,
     github_app: GitHubAppSource | None = None,
     gateway: Any | None = None,
@@ -625,7 +628,13 @@ async def reap_expired_attempts(
         except Exception:
             logger.warning("Goal scheduling sweep failed", exc_info=True)
         try:
-            actions = await store.attempt_commands.reap_expired(max_attempts=max_attempts)
+            actions = await store.attempt_commands.reap_expired(
+                max_attempts=(
+                    max_attempts
+                    if max_attempts is not None
+                    else integer_setting("max_attempts", MAX_ATTEMPTS)
+                )
+            )
             await _cleanup_reaped_shared_residencies(store.host_pool, actions, grants)
             await _reconcile_settled_terminals(store)
             if actions:

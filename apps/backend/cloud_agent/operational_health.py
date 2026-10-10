@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from cloud_agent.settings import number_setting, setting_env
+
 if TYPE_CHECKING:
     from cloud_agent.ports import HostPoolRepository
 
@@ -52,7 +54,7 @@ async def deliver_event(event: str, details: dict[str, str]) -> None:
 
 
 async def _post(payload: dict[str, object]) -> None:
-    url = os.environ.get(ENV_ALERT_WEBHOOK, "").strip()
+    url = (setting_env(ENV_ALERT_WEBHOOK) or "").strip()
     if not url:
         return
     async with httpx.AsyncClient(timeout=5, follow_redirects=False) as client:
@@ -60,7 +62,9 @@ async def _post(payload: dict[str, object]) -> None:
         response.raise_for_status()
 
 
-async def monitor_queue(store: HostPoolRepository, *, interval_seconds: float = 60) -> None:
+async def monitor_queue(
+    store: HostPoolRepository, *, interval_seconds: float | None = None
+) -> None:
     """Report persistent failures, recovery and a bounded reminder.
 
     Two consecutive observations suppress one transient database failure.
@@ -72,7 +76,11 @@ async def monitor_queue(store: HostPoolRepository, *, interval_seconds: float = 
     observed = ""
     last_sent = 0.0
     while True:
-        await asyncio.sleep(interval_seconds)
+        await asyncio.sleep(
+            interval_seconds
+            if interval_seconds is not None
+            else number_setting("queue_monitor_interval_s", 60.0)
+        )
         snapshot: dict[str, int] = {}
         try:
             async with asyncio.timeout(15):
@@ -85,7 +93,10 @@ async def monitor_queue(store: HostPoolRepository, *, interval_seconds: float = 
         if event != observed:
             observed = event
             continue
-        if event == previous and (not event or time.monotonic() - last_sent < 1800):
+        if event == previous and (
+            not event
+            or time.monotonic() - last_sent < number_setting("queue_alert_cooldown_s", 1800.0)
+        ):
             continue
         notification = event or "queue_recovered"
         logger.log(
