@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { EventRow, ThreadTurn } from './ChatMessages';
-import type { AgentThreadMessage, GoalTurn } from './types';
+import { EventList, EventRow, ThreadTurn } from './ChatMessages';
+import type { AgentEvent, AgentThreadMessage, GoalTurn } from './types';
 
 // The round marker is rendered directly: what it says about a report is the
 // whole subject, and mounting a conversation would bury it under a transcript.
@@ -125,5 +125,172 @@ describe('a message sent into a running turn', () => {
     const bubble = screen.getByText('also check the docs');
     expect(bubble.closest('[data-block-key="ajob_1:event:5"]')).not.toBeNull();
     expect(screen.getByRole('button', { name: 'Copy message' })).toBeInTheDocument();
+  });
+});
+
+describe('grouped tool calls', () => {
+  const jobId = 'ajob_1';
+  const renderEvent = (event: AgentEvent, _index: number, blockKey: string) => (
+    <EventRow event={event} blockKey={blockKey} />
+  );
+
+  it('shows adjacent tools together with one disclosure for their complete calls and results', () => {
+    render(
+      <EventList
+        jobId={jobId}
+        renderEvent={renderEvent}
+        events={[
+          {
+            kind: 'tool_use',
+            tool: 'Bash',
+            detail: 'pytest -q',
+            input: { command: 'pytest -q', cwd: '/workspace', timeout: 0 },
+            output: ['2 passed'],
+            attemptNo: 1,
+            sourceEventId: 10,
+          },
+          {
+            kind: 'tool_use',
+            tool: 'Read',
+            detail: 'src/router.ts',
+            input: { file_path: 'src/router.ts', offset: 20 },
+            output: ['router source'],
+            attemptNo: 1,
+            sourceEventId: 11,
+          },
+        ]}
+      />,
+    );
+
+    const calls = screen.getByRole('list', { name: 'Tool calls' });
+    const chips = within(calls).getAllByRole('listitem');
+    expect(chips).toHaveLength(2);
+    expect(chips[0]).toHaveTextContent('Bash');
+    expect(chips[1]).toHaveTextContent('Read');
+    expect(chips.map((chip) => chip.getAttribute('data-block-key'))).toEqual([
+      'ajob_1:e10',
+      'ajob_1:e11',
+    ]);
+    const show = screen.getByRole('button', { name: 'Show tool calls' });
+    expect(screen.getAllByRole('button', { name: /Show tool calls?/ })).toHaveLength(1);
+    expect(show).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByText('2 passed')).not.toBeVisible();
+    expect(screen.getByText('router source')).not.toBeVisible();
+
+    fireEvent.click(show);
+    const hide = screen.getByRole('button', { name: 'Hide tool calls' });
+    expect(hide).toHaveAttribute('aria-expanded', 'true');
+    const details = document.getElementById(hide.getAttribute('aria-controls')!);
+    expect(details).toBeVisible();
+    expect(details).toHaveTextContent('"cwd": "/workspace"');
+    expect(details).toHaveTextContent('"timeout": 0');
+    expect(details).toHaveTextContent('"file_path": "src/router.ts"');
+    expect(details).toHaveTextContent('"offset": 20');
+    expect(screen.getByText('2 passed')).toBeVisible();
+    expect(screen.getByText('router source')).toBeVisible();
+    expect(details?.querySelectorAll('[data-block-key]')).toHaveLength(0);
+
+    fireEvent.click(hide);
+    expect(screen.getByText('2 passed')).not.toBeVisible();
+    expect(screen.getByText('router source')).not.toBeVisible();
+  });
+
+  it('keeps messages and attempts between groups and passes original event indexes to the renderer', () => {
+    const events: AgentEvent[] = [
+      { kind: 'tool_use', tool: 'Read', detail: 'README.md', attemptNo: 1, sourceEventId: 10 },
+      { kind: 'message', text: 'Checking the implementation.', attemptNo: 1, sourceEventId: 11 },
+      { kind: 'tool_use', tool: 'Bash', detail: 'pytest', attemptNo: 1, sourceEventId: 12 },
+      { kind: 'tool_use', tool: 'Read', detail: 'src/app.ts', attemptNo: 2, sourceEventId: 13 },
+      { kind: 'tool_use', tool: 'Bash', detail: 'npm test', attemptNo: 2, sourceEventId: 14 },
+      { kind: 'user_message', text: 'Also check the docs.', attemptNo: 2, sourceEventId: 15 },
+      { kind: 'tool_use', tool: 'Read', detail: 'docs/api.md', attemptNo: 2, sourceEventId: 16 },
+    ];
+    const renderNonTool = vi.fn(renderEvent);
+    render(<EventList events={events} jobId={jobId} renderEvent={renderNonTool} />);
+
+    const groups = screen.getAllByRole('list', { name: 'Tool calls' });
+    expect(groups.map((group) => within(group).getAllByRole('listitem').length)).toEqual([
+      1, 1, 2, 1,
+    ]);
+    expect(screen.getAllByRole('button', { name: 'Show tool call' })).toHaveLength(3);
+    expect(screen.getAllByRole('button', { name: 'Show tool calls' })).toHaveLength(1);
+    expect(renderNonTool).toHaveBeenCalledTimes(2);
+    expect(renderNonTool).toHaveBeenNthCalledWith(1, events[1], 1, 'ajob_1:e11');
+    expect(renderNonTool).toHaveBeenNthCalledWith(2, events[5], 5, 'ajob_1:e15');
+
+    const implementation = screen.getByText('Checking the implementation.');
+    const docs = screen.getByText('Also check the docs.');
+    expect(
+      groups[0].compareDocumentPosition(implementation) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      implementation.compareDocumentPosition(groups[1]) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(groups[2].compareDocumentPosition(docs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(docs.compareDocumentPosition(groups[3]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('keeps the disclosure open and existing anchors when another call and results arrive', () => {
+    const first: AgentEvent = {
+      kind: 'tool_use',
+      tool: 'Bash',
+      detail: 'pytest -q',
+      input: { command: 'pytest -q' },
+      attemptNo: 1,
+      sourceEventId: 21,
+    };
+    const next: AgentEvent = {
+      kind: 'tool_use',
+      tool: 'Read',
+      detail: 'README.md',
+      input: { file_path: 'README.md' },
+      attemptNo: 1,
+      sourceEventId: 22,
+    };
+    const { rerender } = render(
+      <EventList events={[first]} jobId={jobId} renderEvent={renderEvent} />,
+    );
+    const firstChip = screen.getByRole('listitem');
+    const show = screen.getByRole('button', { name: 'Show tool call' });
+    const detailsId = show.getAttribute('aria-controls');
+    fireEvent.click(show);
+    expect(screen.getByText('Waiting for the tool result…')).toBeVisible();
+
+    rerender(
+      <EventList
+        events={[{ ...first, output: ['2 passed'] }, next]}
+        jobId={jobId}
+        renderEvent={renderEvent}
+      />,
+    );
+    const hide = screen.getByRole('button', { name: 'Hide tool calls' });
+    expect(hide).toHaveAttribute('aria-expanded', 'true');
+    expect(hide).toHaveAttribute('aria-controls', detailsId);
+    const chips = screen.getAllByRole('listitem');
+    expect(chips[0]).toBe(firstChip);
+    expect(chips.map((chip) => chip.getAttribute('data-block-key'))).toEqual([
+      'ajob_1:e21',
+      'ajob_1:e22',
+    ]);
+    expect(screen.getByText('2 passed')).toBeVisible();
+    expect(screen.getByText('Waiting for the tool result…')).toBeVisible();
+
+    rerender(
+      <EventList
+        events={[
+          { ...first, output: ['2 passed'] },
+          { ...next, output: ['project documentation'] },
+        ]}
+        jobId={jobId}
+        renderEvent={renderEvent}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Hide tool calls' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+    expect(screen.getByText('project documentation')).toBeVisible();
+    expect(screen.queryByText('Waiting for the tool result…')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('listitem')[0]).toBe(firstChip);
   });
 });

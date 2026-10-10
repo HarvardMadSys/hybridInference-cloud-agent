@@ -1311,11 +1311,13 @@ describe('JobDetail', () => {
     );
 
     const turn = screen.getByLabelText('Turn 1');
-    const activity = within(turn).getByText('Read').closest('details');
-    expect(activity).not.toBeNull();
-    expect(activity).not.toHaveAttribute('open');
-    expect(activity).toHaveTextContent('src/router.py');
-    expect(activity).toHaveTextContent('router source');
+    const showCall = within(turn).getByRole('button', { name: 'Show tool call' });
+    expect(showCall).toHaveAttribute('aria-expanded', 'false');
+    expect(within(turn).getByText('Read')).toBeVisible();
+    expect(within(turn).getByText('src/router.py', { selector: 'pre' })).not.toBeVisible();
+    expect(within(turn).getByText('router source')).not.toBeVisible();
+    fireEvent.click(showCall);
+    expect(within(turn).getByText('router source')).toBeVisible();
     expect(within(turn).getByText('Earlier answer')).toBeInTheDocument();
     expect(screen.getAllByText('Earlier answer')).toHaveLength(1);
     expect(within(turn).getByRole('button', { name: 'View execution' })).toBeInTheDocument();
@@ -1396,16 +1398,47 @@ describe('JobDetail', () => {
     expect(screen.queryByText('private chain of thought')).not.toBeInTheDocument();
   });
 
-  it('keeps tool activity collapsed with its result available on demand', () => {
-    render(<JobDetail job={makeJob()} />);
+  it('shows inline tool activity with its complete call and result available on demand', () => {
+    const input = { command: 'pytest -q', cwd: '/workspace', timeout: 0 };
+    render(
+      <JobDetail
+        job={makeJob({
+          events: [
+            {
+              kind: 'tool_use',
+              tool: 'Bash',
+              detail: 'pytest -q',
+              input,
+              output: ['2 passed'],
+              attemptNo: 1,
+            },
+          ],
+        })}
+      />,
+    );
 
-    const activity = screen.getByText('Bash').closest('details');
-    expect(activity).not.toBeNull();
-    expect(activity).not.toHaveAttribute('open');
-    expect(activity).toHaveTextContent('2 passed');
+    const showCall = screen.getByRole('button', { name: 'Show tool call' });
+    expect(showCall).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByText('Bash')).toBeVisible();
+    expect(screen.getByTitle('Bash: pytest -q')).toBeVisible();
+    const call = document.getElementById(showCall.getAttribute('aria-controls')!);
+    expect(call).toHaveTextContent('"cwd": "/workspace"');
+    expect(call).toHaveTextContent('"timeout": 0');
+    expect(call).not.toBeVisible();
+    expect(screen.getByText('2 passed')).not.toBeVisible();
 
-    fireEvent.click(screen.getByText('Bash'));
-    expect(activity).toHaveAttribute('open');
+    fireEvent.click(showCall);
+    const hideCall = screen.getByRole('button', { name: 'Hide tool call' });
+    expect(hideCall).toHaveAttribute('aria-expanded', 'true');
+    expect(call).toBeVisible();
+    expect(screen.getByText('2 passed')).toBeVisible();
+
+    fireEvent.click(hideCall);
+    expect(screen.getByRole('button', { name: 'Show tool call' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    expect(screen.getByText('2 passed')).not.toBeVisible();
   });
 
   it('uses the real cancel endpoint and refreshes the job', async () => {

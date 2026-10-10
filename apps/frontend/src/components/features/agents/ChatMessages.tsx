@@ -1,6 +1,6 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { Fragment, useId, useState, type ReactNode } from 'react';
 import toast from 'react-hot-toast';
 
 import { Markdown } from '@/components/ui/Markdown';
@@ -126,46 +126,132 @@ function LifecycleRow({
   );
 }
 
-function ToolActivity({
-  event,
-  blockKey,
-}: {
+type ToolActivityItem = {
   event: Extract<AgentEvent, { kind: 'tool_use' }>;
   blockKey?: string;
-}) {
+};
+
+function ToolActivity({ tools }: { tools: ToolActivityItem[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const detailsId = useId();
+  const label = tools.length === 1 ? 'tool call' : 'tool calls';
+
   return (
-    <details
-      data-block-key={blockKey}
-      className="group my-1 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900"
-    >
-      <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3 py-2 text-[13px] text-gray-700 dark:text-gray-300 marker:content-none">
-        <Chevron className="shrink-0 text-gray-400 dark:text-gray-500 transition-transform group-open:rotate-90" />
-        <ToolIcon tool={event.tool} />
-        <span className="font-medium">{event.tool}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-xs text-gray-500 dark:text-gray-400">
-          {event.detail}
-        </span>
-        {event.diffStat ? (
-          <span className="shrink-0 font-mono text-xs text-gray-500 dark:text-gray-400">
-            {event.diffStat}
-          </span>
-        ) : null}
-      </summary>
-      <div className="border-t border-gray-100 dark:border-white/5 px-3 py-2.5">
-        {event.output ? (
-          <pre
-            className={`max-h-72 overflow-auto whitespace-pre-wrap rounded-md px-3 py-2.5 font-mono text-xs leading-relaxed ${
-              event.outputIsError ? 'bg-red-950 text-red-100' : 'bg-gray-950 text-gray-200'
-            }`}
-          >
-            {event.output.join('\n')}
-          </pre>
-        ) : (
-          <p className="text-xs text-gray-400 dark:text-gray-500">Waiting for the tool result…</p>
-        )}
+    <div className="my-1 min-w-0">
+      <div className="flex min-w-0 items-center gap-2 py-1 text-xs text-gray-500 dark:text-gray-400">
+        <ul
+          role="list"
+          aria-label="Tool calls"
+          tabIndex={0}
+          className="flex min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-x-auto rounded-md focus-visible:outline-crimson"
+        >
+          {tools.map(({ event, blockKey }, index) => (
+            <li
+              key={blockKey ?? index}
+              data-block-key={blockKey}
+              title={`${event.tool}: ${event.detail}`}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-gray-100 px-2 py-1 dark:bg-white/5"
+            >
+              <ToolIcon tool={event.tool} />
+              <span className="max-w-40 truncate font-medium text-gray-700 dark:text-gray-300">
+                {event.tool}
+              </span>
+              {event.diffStat ? (
+                <span className="max-w-20 truncate font-mono" title={event.diffStat}>
+                  {event.diffStat}
+                </span>
+              ) : null}
+              {event.outputIsError ? (
+                <span className="text-rose-600 dark:text-rose-400">Failed</span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-controls={detailsId}
+          onClick={() => setExpanded((value) => !value)}
+          className="inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-crimson dark:hover:bg-white/10 dark:hover:text-gray-100"
+        >
+          <Chevron className={`transition-transform ${expanded ? 'rotate-90' : ''}`} />
+          {expanded ? `Hide ${label}` : `Show ${label}`}
+        </button>
       </div>
-    </details>
+      <div
+        id={detailsId}
+        hidden={!expanded}
+        className="mt-1 space-y-3 rounded-lg border border-gray-200 bg-white px-3 py-2.5 dark:border-white/10 dark:bg-gray-900"
+      >
+        {tools.map(({ event, blockKey }, index) => {
+          const call =
+            event.input === undefined
+              ? event.detail
+              : typeof event.input === 'string'
+                ? event.input
+                : JSON.stringify(event.input, null, 2);
+          return (
+            <section
+              key={blockKey ?? index}
+              className="space-y-2 border-b border-gray-100 pb-3 last:border-b-0 last:pb-0 dark:border-white/5"
+            >
+              <p className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                {event.tool} · Call {index + 1}
+              </p>
+              <p className="text-xs text-gray-500 dark:text-gray-400">Tool call</p>
+              <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-gray-50 px-3 py-2.5 font-mono text-xs leading-relaxed text-gray-700 dark:bg-white/5 dark:text-gray-300">
+                {call}
+              </pre>
+              <p className="text-xs text-gray-500 dark:text-gray-400">Result</p>
+              {event.output !== undefined ? (
+                <pre
+                  className={`max-h-72 overflow-auto whitespace-pre-wrap rounded-md px-3 py-2.5 font-mono text-xs leading-relaxed ${
+                    event.outputIsError ? 'bg-red-950 text-red-100' : 'bg-gray-950 text-gray-200'
+                  }`}
+                >
+                  {event.output.join('\n') || 'Command completed with no output.'}
+                </pre>
+              ) : (
+                <p className="text-xs text-gray-400 dark:text-gray-500">
+                  Waiting for the tool result…
+                </p>
+              )}
+            </section>
+          );
+        })}
+      </div>
+    </div>
   );
+}
+
+/** Consecutive calls share one line; other events keep their original position. */
+export function EventList({
+  events,
+  jobId,
+  renderEvent,
+}: {
+  events: AgentEvent[];
+  jobId: string;
+  renderEvent: (event: AgentEvent, index: number, blockKey: string) => ReactNode;
+}) {
+  const rows: ReactNode[] = [];
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index];
+    const blockKey = eventBlockKey(jobId, event, index);
+    if (event.kind !== 'tool_use') {
+      rows.push(<Fragment key={blockKey}>{renderEvent(event, index, blockKey)}</Fragment>);
+      continue;
+    }
+    const tools: ToolActivityItem[] = [{ event, blockKey }];
+    while (index + 1 < events.length) {
+      const next = events[index + 1];
+      if (next.kind !== 'tool_use' || next.attemptNo !== event.attemptNo) break;
+      index += 1;
+      tools.push({ event: next, blockKey: eventBlockKey(jobId, next, index) });
+    }
+    rows.push(<ToolActivity key={blockKey} tools={tools} />);
+  }
+  return <>{rows}</>;
 }
 
 export function CopyIcon() {
@@ -487,7 +573,7 @@ export function EventRow({
     );
   }
   if (event.kind === 'user_message') return <UserMessage text={event.text} blockKey={blockKey} />;
-  if (event.kind === 'tool_use') return <ToolActivity event={event} blockKey={blockKey} />;
+  if (event.kind === 'tool_use') return <ToolActivity tools={[{ event, blockKey }]} />;
   if (event.kind === 'tool_result') {
     return (
       <details
@@ -567,19 +653,22 @@ export function HistoryTurn({
           />
         ))}
       <div aria-label={`Turn ${turn.displayNo} agent activity`} className="mt-2">
-        {turn.events.map((event, index) => (
-          <EventRow
-            key={eventBlockKey(jobId, event, index)}
-            event={event}
-            blockKey={eventBlockKey(jobId, event, index)}
-            busy={busy}
-            onFork={
-              event.kind === 'message' && index === lastEventMessageIndex && onFork
-                ? () => onFork(turn.jobId)
-                : undefined
-            }
-          />
-        ))}
+        <EventList
+          events={turn.events}
+          jobId={jobId}
+          renderEvent={(event, index, blockKey) => (
+            <EventRow
+              event={event}
+              blockKey={blockKey}
+              busy={busy}
+              onFork={
+                event.kind === 'message' && index === lastEventMessageIndex && onFork
+                  ? () => onFork(turn.jobId)
+                  : undefined
+              }
+            />
+          )}
+        />
         {turn.fallbackResponses.map((message) => (
           <ThreadTurn
             key={message.id}

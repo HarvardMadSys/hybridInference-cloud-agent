@@ -32,7 +32,6 @@ import {
   conversationNavigationScope,
   describeCurrentTurn,
   describeHistoryTurns,
-  eventBlockKey,
   messageBlockKey,
   sameNavigationEntries,
   toNavigationEntry,
@@ -99,6 +98,7 @@ import {
   MessageActions,
   ThreadTurn,
   EventRow,
+  EventList,
   HistoryTurn,
 } from './ChatMessages';
 
@@ -1631,25 +1631,28 @@ export function JobDetail({
                     ) : null}
 
                     <div aria-label="Agent activity" className="mt-2">
-                      {visibleEvents.map((event, index) => (
-                        <EventRow
-                          key={eventBlockKey(job.id, event, index)}
-                          event={event}
-                          blockKey={eventBlockKey(job.id, event, index)}
-                          busy={forking}
-                          firstRun={firstRun}
-                          footer={index === lastVisibleMessageIndex ? usageFooter : undefined}
-                          onFork={
-                            event.kind === 'message' &&
-                            index === lastVisibleMessageIndex &&
-                            isSuccessful &&
-                            canForkCurrent &&
-                            selectedAttemptIsCurrent
-                              ? () => void forkFrom(job.id)
-                              : undefined
-                          }
-                        />
-                      ))}
+                      <EventList
+                        events={visibleEvents}
+                        jobId={job.id}
+                        renderEvent={(event, index, blockKey) => (
+                          <EventRow
+                            event={event}
+                            blockKey={blockKey}
+                            busy={forking}
+                            firstRun={firstRun}
+                            footer={index === lastVisibleMessageIndex ? usageFooter : undefined}
+                            onFork={
+                              event.kind === 'message' &&
+                              index === lastVisibleMessageIndex &&
+                              isSuccessful &&
+                              canForkCurrent &&
+                              selectedAttemptIsCurrent
+                                ? () => void forkFrom(job.id)
+                                : undefined
+                            }
+                          />
+                        )}
+                      />
                       {job.state === 'queued' && visibleEvents.length === 0 ? (
                         <div className="flex items-center gap-2.5 py-3 text-[13px] text-gray-500 dark:text-gray-400">
                           <span className="h-2 w-2 animate-pulse rounded-full bg-gray-400 dark:bg-gray-600" />

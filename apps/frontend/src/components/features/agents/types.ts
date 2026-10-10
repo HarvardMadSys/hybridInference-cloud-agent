@@ -54,6 +54,8 @@ export type AgentEvent =
       kind: 'tool_use';
       tool: string;
       detail: string;
+      /** Complete recorded arguments, retained separately from the compact preview. */
+      input?: unknown;
       id?: string;
       /** Event time, ISO. Present so per-tool durations are derivable. */
       at?: string | null;

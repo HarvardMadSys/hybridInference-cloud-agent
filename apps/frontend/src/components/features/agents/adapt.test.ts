@@ -269,12 +269,12 @@ describe('toDisplayEvent', () => {
     expect(toDisplayEvent(event(1, 'diff'))).toBeNull();
   });
 
-  it('reads a command and completion output from normalized Codex events', () => {
+  it('keeps complete tool arguments alongside a compact command and completion output', () => {
     expect(
       toDisplayEvent(
         event(1, 'tool_use', {
           name: 'command_execution',
-          input: { command: 'pytest -q' },
+          input: { command: 'pytest -q', cwd: '/workspace', timeout: 0 },
           output: '1 passed',
           exit_code: 0,
         }),
@@ -284,6 +284,7 @@ describe('toDisplayEvent', () => {
       tool: 'command_execution',
       id: undefined,
       detail: 'pytest -q',
+      input: { command: 'pytest -q', cwd: '/workspace', timeout: 0 },
       output: ['1 passed'],
       sourceEventId: 1,
     });

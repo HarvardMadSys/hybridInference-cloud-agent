@@ -150,6 +150,7 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
       id: asText(payload, 'id') || undefined,
       ...(event.created_at ? { at: event.created_at } : {}),
       detail: asText(payload, 'detail', 'text') || commandText(payload.input) || 'Running tool',
+      ...(payload.input !== undefined ? { input: payload.input } : {}),
       ...(output ? { output } : {}),
       ...(outputIsError ? { outputIsError: true } : {}),
       sourceEventId,
