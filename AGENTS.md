@@ -68,7 +68,7 @@ database stamped with the chain that predates it.
 
 ```bash
 make setup-dev   # uv venv + uv sync
-make check       # format + lint + test — must be green before every PR
+make check       # format + lint + type-check + test — must be green before every PR
 ```
 
 `make test` runs everything except the `external` and `dbtest` markers.

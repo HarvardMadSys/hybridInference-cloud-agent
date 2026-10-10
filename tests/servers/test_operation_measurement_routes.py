@@ -26,6 +26,7 @@ import json
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
@@ -1327,20 +1328,32 @@ async def test_a_request_that_outlived_its_run_reports_incomplete(
     configuration -- a Disable, or the next experiment -- leaves it alone and
     this request would now be complete on purpose.
     """
-    run = _enable(
-        monkeypatch,
-        expires_at=(datetime.now(timezone.utc) + timedelta(seconds=0.4)).isoformat(),
-    )
     broker = _RecordingClient()
     _use_broker(monkeypatch, broker)
     job_id = await _ready_job(client, store)
+
+    # Advance only the measurement modules' clocks, leaving asyncio and the
+    # exporter thread's waits on real time. Job admission cannot spend the run.
+    clock_offset = 0.0
+    clock = SimpleNamespace(
+        monotonic=lambda: time.monotonic() + clock_offset,
+        monotonic_ns=lambda: time.monotonic_ns() + int(clock_offset * 1_000_000_000),
+        time=lambda: time.time() + clock_offset,
+        sleep=time.sleep,
+    )
+    monkeypatch.setattr(operation_profiling, "time", clock)
+    monkeypatch.setattr(operation_measurement, "time", clock)
+    run = _enable(monkeypatch)
+    selected_run = operation_profiling.active_run()
+    assert selected_run is not None
 
     # The run lapses mid-request: the deadline judgement has to run before the
     # response body is built, or the response claims a sample the record denies.
     original = broker.files
 
     async def _outlive_the_run(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        time.sleep(0.7)
+        nonlocal clock_offset
+        clock_offset = selected_run.deadline_mono - time.monotonic() + 1.0
         return await original(*args, **kwargs)
 
     monkeypatch.setattr(broker, "files", _outlive_the_run)

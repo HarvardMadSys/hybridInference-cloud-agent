@@ -3085,51 +3085,6 @@ class HostHeartbeatResponse(BaseModel):
     )
 
 
-class ProfilingPolicyRun(BaseModel):
-    """The immutable experiment a policy names, as a host receives it."""
-
-    run_id: str
-    operations: list[str]
-    target: dict[str, str] = Field(default_factory=dict)
-    expires_at: datetime
-    config_version: int = 1
-    max_operations: int
-    admission_instances: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class ProfilingPolicy(BaseModel):
-    """What a host agent should collect for, and until when.
-
-    Two orders, and they answer two different questions:
-
-    * ``revision`` -- which configuration this is. A host refuses an answer
-      older than the one it already applied, which is the whole anti-rollback
-      rule; there is no lease and no renewal to confuse it with.
-    * ``run.config_version`` -- which immutable experiment this is. It never
-      changes for a given run.
-    """
-
-    mode: str = Field(
-        ...,
-        description=(
-            "``admin`` means the persisted configuration decides, so this answer "
-            "is authoritative. ``environment`` and ``disabled`` mean the host "
-            "keeps its own deployment configuration and must ignore the run "
-            "below, which is empty in both cases."
-        ),
-    )
-    revision: int = Field(..., description="Configuration version this answer states.")
-    run: ProfilingPolicyRun | None = Field(
-        None,
-        description=(
-            "The experiment in force, or null when the deployment is not "
-            "collecting. Null is a statement, not an absence: a host holding an "
-            "older revision adopts it and stops selecting."
-        ),
-    )
-    server_time: datetime = Field(..., description="The control plane's instant for this answer.")
-
-
 # ── Session ────────────────────────────────────────────────────────────
 
 

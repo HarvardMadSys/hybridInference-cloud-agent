@@ -54,5 +54,5 @@ test-all:  ## Run all tests except external (includes db-dependent)
 check: format lint typecheck test  ## Format, lint, type-check, and test — the gate every task must pass
 
 clean:  ## Remove caches and build artifacts
-	rm -rf .pytest_cache .ruff_cache .coverage htmlcov build dist *.egg-info
-	find . -type d -name __pycache__ -not -path "./.venv/*" -exec rm -rf {} +
+	rm -rf .pytest_cache .ruff_cache .mypy_cache .coverage coverage.xml htmlcov build dist *.egg-info apps/backend/*.egg-info
+	find . -type d \( -name .venv -o -name venv -o -name node_modules \) -prune -o -type d -name __pycache__ -exec rm -rf {} +

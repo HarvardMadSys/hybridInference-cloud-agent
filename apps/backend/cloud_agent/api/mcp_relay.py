@@ -187,11 +187,6 @@ def _error_reply(request_id: Any, message: str, code: int = METHOD_NOT_FOUND) ->
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
-def protocol_error(payload: dict[str, Any], message: str) -> dict[str, Any]:
-    """Build a JSON-RPC error reply mirroring a whole request payload."""
-    return _error_reply(payload.get("id"), message)
-
-
 def _result_reply(request_id: Any, result: Any, *, stateless: bool) -> dict[str, Any]:
     """Build a JSON-RPC result reply, discriminated when the client is modern.
 

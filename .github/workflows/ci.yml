@@ -569,19 +569,6 @@ jobs:
           # failing random checkouts on this pool.
           fetch-depth: 0
 
-      # apps/frontend/ is an empty placeholder until task F1 lands the Next.js app. Until
-      # then this workflow is a deliberate no-op rather than a red X: gating on
-      # the manifest keeps the required-check list stable across that boundary.
-      - name: Detect web app
-        id: detect
-        run: |
-          if [ -f apps/frontend/package.json ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "apps/frontend/package.json not present yet — skipping (task F1)"
-          fi
-
       - name: Isolate the npm cache dir
         # Off the shared ~/.npm and onto this runner process's own temp, which
         # runs one job at a time. Set before setup-node, which reads
@@ -591,12 +578,10 @@ jobs:
         # the paths it covers, so a per-run path would never restore and would
         # upload a new copy of node_modules' cache on all five cells, every
         # run. Same reasoning as UV_CACHE_DIR in backend-ci.
-        if: steps.detect.outputs.present == 'true'
         run: |
           echo "npm_config_cache=${RUNNER_TEMP}/npm-cache" >> "${GITHUB_ENV}"
 
       - name: Set up Node
-        if: steps.detect.outputs.present == 'true'
         uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -604,7 +589,6 @@ jobs:
           cache-dependency-path: apps/frontend/package-lock.json
 
       - name: Install dependencies
-        if: steps.detect.outputs.present == 'true'
         working-directory: ./apps/frontend
         run: npm ci
 
@@ -613,28 +597,24 @@ jobs:
       # order is now something a reader can spend.
       - name: ESLint
         id: eslint
-        if: steps.detect.outputs.present == 'true'
         continue-on-error: true
         working-directory: ./apps/frontend
         run: npm run lint
 
       - name: Prettier
         id: prettier
-        if: steps.detect.outputs.present == 'true'
         continue-on-error: true
         working-directory: ./apps/frontend
         run: npm run format:check
 
       - name: TypeScript
         id: typescript
-        if: steps.detect.outputs.present == 'true'
         continue-on-error: true
         working-directory: ./apps/frontend
         run: npm run type-check
 
       - name: Tests
         id: tests
-        if: steps.detect.outputs.present == 'true'
         continue-on-error: true
         working-directory: ./apps/frontend
         run: npm run test
@@ -645,7 +625,6 @@ jobs:
       # script exits non-zero when it does not.
       - name: Server-only guard
         id: server-only
-        if: steps.detect.outputs.present == 'true'
         continue-on-error: true
         working-directory: ./apps/frontend
         run: node scripts/check-server-only-guard.mjs
@@ -658,16 +637,11 @@ jobs:
       # assertions, including the sign-in and asset prefixes per variant.
       - name: Runtime site config
         id: runtime-config
-        if: steps.detect.outputs.present == 'true'
         continue-on-error: true
         working-directory: ./apps/frontend
         run: node scripts/check-runtime-site-config.mjs
 
-      # Skipped along with the checks when apps/frontend/ is absent, so this stays the
-      # deliberate no-op the `Detect web app` step describes rather than
-      # reading six empty outcomes as six failures.
       - name: Every check passed
-        if: steps.detect.outputs.present == 'true'
         env:
           RESULTS: >-
             eslint=${{ steps.eslint.outcome }}

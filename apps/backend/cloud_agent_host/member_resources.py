@@ -11,33 +11,22 @@ independent sources describe it, and neither replaces the other.
 * The **exit event** is the kernel's final word on one task. It is the only
   way a process born and died between two censuses is measured at all.
 
-They describe the same work from different directions, which is what makes
-them useful and also what makes them dangerous: adding two totals would count
-a process that both ran and exited inside the window twice. So this module
-keeps them as two estimates and decides between them, rather than summing.
+Both sources advance the same cumulative counters for each stable task
+instance. A census charges growth since that task's previous trusted reading;
+its settled exit charges only the growth beyond the last reading. Repeated
+values and duplicate exits add nothing, while a later exit record that reports
+more settled work contributes only that increase.
 
-How the two are combined:
+A task proven to have started inside the window is charged from its first
+reading. For a task that may predate the window, the first reading establishes
+a baseline, so earlier work is excluded. An exit without that baseline or
+proof of birth contributes nothing and marks the affected metric partial.
 
-* Each estimate accumulates only *non-negative deltas* of its own source. A
-  live total can fall when a task exits, and a fall is not negative work, so
-  it is dropped rather than subtracted. An exit total only ever grows, once
-  per instance.
-* When both produced a value, the larger one is reported. It is the better
-  floor: the live estimate can miss a short-lived process that started and
-  finished between two censuses, and the exit estimate can miss a process
-  still running when the window closes.
-* When the two disagree by more than the reconciliation tolerance, the result
-  is ``partial`` with ``estimates_diverged``. Two measurements of one quantity
-  that differ that much mean one of them is wrong, and reporting the larger
-  one as if it were exact would be the overclaim this shape exists to stop.
-  The tolerance is generous because the sources are not expected to agree
-  exactly: they are sampled at different instants and one of them sees the
-  closing moment.
-
-Neither estimate is repaired with zero. A cycle that could not read a counter
-does not move its total, a counter that goes backwards is refused rather than
-reconciled, and a window with no usable reading reports the metric as
-unavailable rather than as nothing.
+Missing counters, lost events, incomplete collection and counter regressions
+are reported rather than repaired with zero. A window with no usable reading
+reports the metric as unavailable; a complete census with no tasks can prove
+a measured zero. Memory uses the peak of complete member PSS samples, keeping
+its coverage separate from the task CPU and I/O counters.
 """
 
 from __future__ import annotations
@@ -75,14 +64,6 @@ WINDOW_READING_COMPLETE = 1 << 6
 #: accounts for that task. A clear bit means absent, never zero.
 EXIT_COUNTER_CPU = 1 << 0
 EXIT_COUNTER_IO = 1 << 2
-
-#: How far the live and exit estimates may differ before the result is called
-#: partial. A tenth of the larger value or ten milliseconds of CPU, whichever
-#: is greater: the two are sampled at different instants, so exact agreement
-#: is not the standard. Agreement within this is evidence they are measuring
-#: the same work; disagreement outside it is evidence that one is wrong.
-DIVERGENCE_FRACTION = 0.10
-DIVERGENCE_FLOOR_NS = 10_000_000
 
 #: One kernel task start time is reported in clock ticks. USER_HZ is 100 on
 #: every configuration this platform deploys; the conversion happens once,
