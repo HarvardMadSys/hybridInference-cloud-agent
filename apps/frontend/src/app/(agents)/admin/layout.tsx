@@ -14,19 +14,12 @@ import { hasAgentPermission } from '@/components/providers/AuthProvider';
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const { state } = useAuth();
-  // While the session loads, neither branch is true yet: render nothing rather
-  // than flash "admin access required" at a signed-in admin.
-  if (!state.loading && !hasAgentPermission(state.user?.agent_access, 'agent.admin')) {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
-        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-50">
-          Admin access required
-        </h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">
-          These pages are visible to admins only.
-        </p>
-      </div>
-    );
+  // Until the permission answer is in, this layout owns the refusal: render
+  // nothing rather than flash the admin area at a visitor still being decided.
+  // (ProtectedRoute also withholds children while it loads; this is the
+  // layout's own statement, not a duplicate of that.)
+  if (state.loading || !hasAgentPermission(state.user?.agent_access, 'agent.admin')) {
+    return null;
   }
   return <>{children}</>;
 }
