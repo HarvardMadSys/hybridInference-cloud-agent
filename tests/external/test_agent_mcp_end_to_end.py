@@ -51,6 +51,7 @@ import uvicorn
 from tests.support.migrations import apply_migrations
 
 from cloud_agent.mcp.registry import mcp_cipher
+from cloud_agent.settings import initialize_settings
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_MCP, mint_worker_token
 
@@ -359,6 +360,7 @@ async def test_a_tool_call_travels_the_whole_chain(pi_install: pathlib.Path) -> 
                 f"postgresql://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['database']}"
             ),
             "AGENT_CONTROL_TOKEN_SECRET": _MCP_TOKEN_SECRET,
+            "AGENT_SETTINGS_ENCRYPTION_KEY": "e2e-admin-settings-secret-32-bytes-long",
             "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": _ENCRYPTION_KEY,
             "AGENT_MCP_ALLOW_PRIVATE_TARGETS": "1",
             "AGENT_MCP_ALLOW_PLAIN_HTTP": "1",
@@ -371,6 +373,9 @@ async def test_a_tool_call_travels_the_whole_chain(pi_install: pathlib.Path) -> 
     servers: list[uvicorn.Server] = []
     try:
         apply_migrations(db)
+        # Deployments initialize settings through the main listener first.
+        # This isolated relay test uses that same seed path before startup.
+        await initialize_settings(Storage(pool).settings)
         token = await _seed(pool, upstream_url=f"http://127.0.0.1:{upstream_port}/mcp")
 
         from cloud_agent.app import create_mcp_app

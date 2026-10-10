@@ -40,6 +40,7 @@ from tests.support.claude_cli import sse
 from tests.support.migrations import apply_migrations
 
 from cloud_agent.mcp.protocol import presented_name
+from cloud_agent.settings import initialize_settings
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_MCP, mint_worker_token, parse_worker_token
 from cloud_agent_host.chat_sandbox import ChatSandboxManager
@@ -541,11 +542,15 @@ async def test_resident_mcp_call_followup_resume_and_fork(
     for name, value in {
         "AGENT_DATABASE_URL": f"postgresql://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['database']}",
         "AGENT_CONTROL_TOKEN_SECRET": _MCP_TOKEN_SECRET,
+        "AGENT_SETTINGS_ENCRYPTION_KEY": "e2e-admin-settings-secret-32-bytes-long",
         "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": _ENCRYPTION_KEY,
         "AGENT_MCP_ALLOW_PRIVATE_TARGETS": "1",
         "AGENT_MCP_ALLOW_PLAIN_HTTP": "1",
     }.items():
         monkeypatch.setenv(name, value)
+    # The main listener imports deployment settings before the relay starts.
+    # This test runs only the relay, so perform the same real seed first.
+    await initialize_settings(Storage(pool).settings)
     upstream = Gateway(tmp_path / "model.jsonl", tool_name=tool_name)
     upstream_port, model_port = upstream.start()
     relay_port = _free_port()
