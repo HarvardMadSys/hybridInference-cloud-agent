@@ -52,6 +52,55 @@ class SessionSupervisorError(RuntimeError):
         return self.message
 
 
+#: Where a FastAPI validation error says a field came from. Dropped from the
+#: field path: every lifecycle field is in the body, so it only adds noise.
+_REQUEST_PARTS = frozenset({"body", "query", "path", "header", "cookie"})
+
+
+def _validation_problems(detail: Any) -> str:
+    """Name the fields a FastAPI validation error rejected, never their values.
+
+    The values stay out: the field most likely to exceed its bound is a
+    credential, and this text becomes an event the chat's owner reads.
+    """
+    if not isinstance(detail, list):
+        return ""
+    problems: list[str] = []
+    for item in detail[:3]:
+        if not isinstance(item, dict):
+            continue
+        location = item.get("loc")
+        parts = location if isinstance(location, list) else []
+        if parts and parts[0] in _REQUEST_PARTS:
+            parts = parts[1:]
+        field_path = ".".join(str(part) for part in parts)
+        message = str(item.get("msg") or "is invalid")[:200]
+        problems.append(f"{field_path}: {message}" if field_path else message)
+    return "; ".join(problems)
+
+
+def _error_detail(response: httpx.Response, refused: str) -> str:
+    """The broker's own reason for an error response, or the most a caller can say.
+
+    A refusal the broker anticipated carries its reason as a string
+    ``detail``. Anything else used to collapse into ``refused`` alone, which
+    named neither the call nor the cause: a request the broker's models
+    rejected, whose ``detail`` is a list, or a crash an older broker answered
+    as plain text. The status, and the fields a validation error names, are
+    what make that line findable in the broker's log.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, str) and detail:
+        return detail
+    reason = f"{refused}: HTTP {response.status_code} {response.reason_phrase}".rstrip()
+    problems = _validation_problems(detail)
+    return f"{reason} ({problems})" if problems else reason
+
+
 class SessionSupervisorClient:
     """Use the broker credential without ever exposing it to a chat container."""
 
@@ -86,14 +135,14 @@ class SessionSupervisorClient:
         except httpx.HTTPError as exc:
             raise SessionSupervisorError(503, "shared Session Supervisor is unavailable") from exc
         if response.is_error:
-            detail = "shared Session Supervisor rejected the lifecycle transition"
-            try:
-                body = response.json()
-                if isinstance(body, dict) and isinstance(body.get("detail"), str):
-                    detail = body["detail"]
-            except ValueError:
-                pass
-            raise SessionSupervisorError(response.status_code, detail)
+            operation = suffix or "status"
+            raise SessionSupervisorError(
+                response.status_code,
+                _error_detail(
+                    response,
+                    f"shared Session Supervisor rejected the lifecycle transition ({operation})",
+                ),
+            )
         body = response.json()
         if not isinstance(body, dict):
             raise SessionSupervisorError(502, "shared Session Supervisor returned invalid data")
@@ -117,14 +166,10 @@ class SessionSupervisorClient:
         except httpx.HTTPError as exc:
             raise SessionSupervisorError(503, "workspace broker is unavailable") from exc
         if response.is_error:
-            detail = "workspace broker rejected the profiling policy"
-            try:
-                body = response.json()
-                if isinstance(body, dict) and isinstance(body.get("detail"), str):
-                    detail = body["detail"]
-            except ValueError:
-                pass
-            raise SessionSupervisorError(response.status_code, detail)
+            raise SessionSupervisorError(
+                response.status_code,
+                _error_detail(response, "workspace broker rejected the profiling policy"),
+            )
         body = response.json()
         if not isinstance(body, dict):
             raise SessionSupervisorError(502, "workspace broker returned invalid data")
@@ -163,14 +208,12 @@ class SessionSupervisorClient:
         except httpx.HTTPError as exc:
             raise SessionSupervisorError(503, "chat Session Supervisor is unavailable") from exc
         if response.is_error:
-            detail = "chat Session Supervisor rejected the lifecycle observation"
-            try:
-                body = response.json()
-                if isinstance(body, dict) and isinstance(body.get("detail"), str):
-                    detail = body["detail"]
-            except ValueError:
-                pass
-            raise SessionSupervisorError(response.status_code, detail)
+            raise SessionSupervisorError(
+                response.status_code,
+                _error_detail(
+                    response, "chat Session Supervisor rejected the lifecycle observation"
+                ),
+            )
         body = response.json()
         rows = body.get("sandboxes") if isinstance(body, dict) else None
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
@@ -264,13 +307,7 @@ class SessionSupervisorClient:
             raise SessionSupervisorError(503, "shared Session Supervisor is unavailable") from exc
         if response.is_error:
             response.read()
-            detail = "shared Session Supervisor rejected the turn"
-            try:
-                body = response.json()
-                if isinstance(body, dict) and isinstance(body.get("detail"), str):
-                    detail = body["detail"]
-            except ValueError:
-                pass
+            detail = _error_detail(response, "shared Session Supervisor rejected the turn")
             status_code = response.status_code
             response.close()
             raise SessionSupervisorError(status_code, detail)

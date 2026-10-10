@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -10,6 +11,7 @@ import threading
 import time
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
@@ -17,7 +19,13 @@ from httpx import ASGITransport, AsyncClient
 from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
 from cloud_agent_host.chat_sandbox import RetainedChatBackend
 from cloud_agent_host.guest_observer import GuestObservation, GuestProcess
+from cloud_agent_host.resident_transport import ResidentLaunch
+from cloud_agent_host.runtimes import RuntimeEffortUnsupportedError, RuntimeMCPUnavailableError
 from cloud_agent_host.sandbox import ProcessBackend, SandboxError, TerminalProcess
+from cloud_agent_host.session_supervisor_client import (
+    SessionSupervisorClient,
+    SessionSupervisorError,
+)
 from cloud_agent_host.shared_session_supervisor import (
     SharedSessionDescriptor,
     SharedSessionLease,
@@ -438,6 +446,168 @@ async def test_an_invalid_profiling_context_never_rejects_a_sandbox_request():
     assert acquired[1][2] == live
     assert residents[0][2] is None
     assert residents[1][2] == live
+
+
+def _runner_client(app) -> SessionSupervisorClient:
+    """The runner's own client, wired to this broker app in-process.
+
+    The client is synchronous and the app is ASGI, so each request runs the app
+    on an event loop of its own. Every answer the client reads is one the broker
+    produced, never a body written by the test.
+    """
+
+    def forward(request: httpx.Request) -> httpx.Response:
+        async def answer() -> httpx.Response:
+            transport = ASGITransport(app=app, raise_app_exceptions=False)
+            async with AsyncClient(transport=transport, base_url="http://broker") as broker:
+                answered = await broker.request(
+                    request.method,
+                    request.url.path,
+                    headers=dict(request.headers),
+                    content=request.content,
+                )
+            return httpx.Response(
+                answered.status_code,
+                headers={"content-type": answered.headers.get("content-type", "")},
+                content=answered.content,
+            )
+
+        return asyncio.run(answer())
+
+    client = SessionSupervisorClient("http://broker", "broker-secret")
+    client._client.close()
+    client._client = httpx.Client(
+        transport=httpx.MockTransport(forward),
+        headers={"X-Agent-Workspace-Token": "broker-secret"},
+    )
+    return client
+
+
+def _resident_launch(**changes: object) -> ResidentLaunch:
+    """What the runner sends for a first turn whose claim bound one MCP server."""
+    fields: dict[str, object] = {
+        **_launch(),
+        "thread_id": "athr_source",
+        "native_session_id": None,
+        "reasoning_effort": None,
+        "mcp_server_ids": ("deepwiki",),
+        # A control plane with no AGENT_SANDBOX_MCP_URL claims exactly this.
+        "mcp_base_url": "",
+        "mcp_credential": "mcp-token",
+    }
+    fields.update(changes)
+    return ResidentLaunch(**fields)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        RuntimeMCPUnavailableError(
+            "MCP was requested but no relay address was configured for this run"
+        ),
+        RuntimeEffortUnsupportedError(
+            "runtime 'pi' cannot express reasoning effort 'xhigh' "
+            "(declares ['minimal', 'low', 'medium', 'high'])"
+        ),
+    ],
+)
+def test_a_runtime_refusal_reaches_the_runner_in_the_runtimes_own_words(refusal):
+    """Regression: a refused resident launch read as an opaque platform failure.
+
+    The runtime refuses a launch it cannot run as configured, with a reason
+    written for the owner. Neither refusal is a driver or sandbox error, so the
+    broker answered Starlette's plain-text 500, and the turn's error event said
+    only "shared Session Supervisor rejected the lifecycle transition".
+    """
+
+    class _RefusingSupervisor(_SharedSupervisor):
+        def ensure_resident(self, thread_id, token, launch, profiling=None):
+            raise refusal
+
+    client = _runner_client(_app(_RefusingSupervisor()))
+    try:
+        with pytest.raises(SessionSupervisorError) as raised:
+            client.ensure_shared_resident("athr_source", token="lease", launch=_resident_launch())
+    finally:
+        client.close()
+
+    assert raised.value.status_code == 422
+    assert str(raised.value) == str(refusal)
+
+
+def test_an_unexpected_broker_failure_names_its_type_and_route_but_not_its_message():
+    """A failure no route anticipated still answers a body the runner can read.
+
+    The message stays in the broker's log: the same answer reaches the owner's
+    browser through the control plane, which shows only what is safe to show.
+    """
+
+    class _CrashingSupervisor(_SharedSupervisor):
+        def ensure_resident(self, thread_id, token, launch, profiling=None):
+            raise OSError(24, "Too many open files", "/var/lib/agent/private-state")
+
+    client = _runner_client(_app(_CrashingSupervisor()))
+    try:
+        with pytest.raises(SessionSupervisorError) as raised:
+            client.ensure_shared_resident("athr_source", token="lease", launch=_resident_launch())
+    finally:
+        client.close()
+
+    assert raised.value.status_code == 500
+    assert str(raised.value) == (
+        "workspace broker failed unexpectedly "
+        "(OSError in POST /shared-sandboxes/{thread_id}/resident)"
+    )
+
+
+def test_a_request_the_broker_rejects_names_the_field_but_never_its_value():
+    """FastAPI's validation ``detail`` is a list, which the runner used to drop.
+
+    The field path is what makes the rejection actionable. The value is left
+    out because the field likeliest to exceed its bound is a credential.
+    """
+    credential = "grant-" + "x" * 20_000
+    client = _runner_client(_app(_SharedSupervisor()))
+    try:
+        with pytest.raises(SessionSupervisorError) as raised:
+            client.ensure_shared_resident(
+                "athr_source", token="lease", launch=_resident_launch(credential=credential)
+            )
+    finally:
+        client.close()
+
+    message = str(raised.value)
+    assert raised.value.status_code == 422
+    assert message == (
+        "shared Session Supervisor rejected the lifecycle transition (resident): "
+        "HTTP 422 Unprocessable Entity "
+        "(launch.credential: String should have at most 16384 characters)"
+    )
+    assert "grant-" not in message
+
+
+def test_a_crash_an_older_broker_answers_as_plain_text_still_names_the_call():
+    """A broker without the JSON answer, mid-rollout, still yields a findable error."""
+    client = SessionSupervisorClient("http://broker", "broker-secret")
+    client._client.close()
+    client._client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(500, text="Internal Server Error")
+        )
+    )
+    try:
+        with pytest.raises(SessionSupervisorError) as raised:
+            client.settle_shared(
+                "athr_source", token="lease", job_id="ajob_source", context_status="new"
+            )
+    finally:
+        client.close()
+
+    assert raised.value.status_code == 500
+    assert str(raised.value) == (
+        "shared Session Supervisor rejected the lifecycle transition (settle): "
+        "HTTP 500 Internal Server Error"
+    )
 
 
 @pytest.mark.asyncio

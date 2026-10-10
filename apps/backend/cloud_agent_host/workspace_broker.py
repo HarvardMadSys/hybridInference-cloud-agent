@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from cloud_agent_host import broker_profiling_policy
@@ -57,6 +57,7 @@ from cloud_agent_host.retained_workspace import (
     read_retained_file,
     write_retained_file,
 )
+from cloud_agent_host.runtimes import RuntimeEffortUnsupportedError, RuntimeMCPUnavailableError
 from cloud_agent_host.sandbox import (
     ContainerBackend,
     SandboxBackend,
@@ -1340,6 +1341,44 @@ def create_app(
     app = FastAPI(title="Agent workspace broker", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.terminal_manager = terminals
     app.state.shared_session_supervisor = shared_supervisor
+
+    async def runtime_refused(_request: Request, exc: Exception) -> JSONResponse:
+        """Answer a runtime's deliberate refusal with the runtime's own reason.
+
+        A runtime refuses a launch it cannot run as configured: MCP servers
+        with no relay to reach them, or an effort its CLI cannot express. The
+        message is written to be read, but these are not driver or sandbox
+        errors, so no route mapped them. Each left as a plain-text 500, and
+        the runner could only say the supervisor "rejected the lifecycle
+        transition".
+        """
+        return JSONResponse(status_code=422, content={"detail": str(exc)[:300]})
+
+    for refusal in (RuntimeMCPUnavailableError, RuntimeEffortUnsupportedError):
+        app.add_exception_handler(refusal, runtime_refused)
+
+    async def unexpected_failure(request: Request, exc: Exception) -> JSONResponse:
+        """Answer a failure no route anticipated in a body both clients can read.
+
+        Starlette's plain-text ``Internal Server Error`` has no ``detail``, so
+        the cause never left this process. The exception's type and the route
+        are enough to find it in this log; Starlette still re-raises after
+        answering, so the traceback is logged here. The message stays here
+        too: a broker failure can reach the owner's browser through the
+        control plane, which shows only what is safe to show.
+        """
+        route = getattr(request.scope.get("route"), "path", None) or "an unknown route"
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": (
+                    "workspace broker failed unexpectedly "
+                    f"({type(exc).__name__} in {request.method} {route})"
+                )
+            },
+        )
+
+    app.add_exception_handler(Exception, unexpected_failure)
 
     # Until a policy arrives, this broker holds none, which reads as "not
     # collecting". That is what stops a broker that started before its runner
