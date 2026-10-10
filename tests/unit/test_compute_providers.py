@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from cloud_agent.ports.external.compute_provider import (
     AcquireRequest,
     ExtendRequest,
+    NodeRegistration,
     OperationIntent,
     ProviderError,
     ResourceRef,
@@ -600,3 +601,79 @@ async def test_a_request_that_never_left_is_retryable_even_when_it_mutates(failu
         )
     assert (extended.value.code, extended.value.retryable) == ("temporarily_unavailable", True)
     assert TOKEN not in str(created.value) + str(extended.value)
+
+
+REGISTERING = {
+    "credential_ref": "account-1",
+    "project": "research",
+    "profile_name": "cloud-agent-node",
+    "profile_project": "research",
+    "bindings": {"phystype": "r6615"},
+    "ssh_username": "agent",
+    "ssh_credential_ref": "ssh-1",
+    "ssh_known_hosts_ref": "ssh-1:known_hosts",
+    "host_key_source": "registration",
+}
+
+
+@pytest.mark.asyncio
+async def test_the_registration_token_rides_only_on_the_create_request():
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(201, json={"id": EXPERIMENT})
+
+    secret = "r" * 43
+    request = AcquireRequest(
+        mode="provision",
+        config=REGISTERING,
+        registration=NodeRegistration(url="https://example.org/register", token=secret),
+    )
+    receipt = await provider(respond).acquire(request, intent())
+    bindings = json.loads(requests[0].content)["bindings"]
+    assert bindings["registrationUrl"] == "https://example.org/register"
+    assert bindings["registrationToken"] == secret
+    # What the control plane persists never holds the token.
+    assert secret not in receipt.model_dump_json()
+    assert secret not in repr(request)
+
+
+@pytest.mark.asyncio
+async def test_a_registering_node_is_never_created_without_its_token():
+    adapter = provider(lambda request: httpx.Response(201, json={"id": EXPERIMENT}))
+    with pytest.raises(ProviderError) as refused:
+        await adapter.acquire(AcquireRequest(mode="provision", config=REGISTERING), intent())
+    assert refused.value.code == "registration_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_a_registering_node_is_reached_through_its_registered_key_only():
+    def respond(request):
+        if request.url.path.endswith("/manifests"):
+            return httpx.Response(
+                200,
+                json={
+                    "urn:aggregate": '<rspec xmlns="http://www.geni.net/resources/rspec/3"><node client_id="vm1"><services><login authentication="ssh-keys" username="agent" hostname="node.example.org" port="22"/></services></node></rspec>'
+                },
+            )
+        return httpx.Response(200, json=resource())
+
+    config = {**REGISTERING, "external_id": EXPERIMENT}
+    observation = await provider(respond).inspect(
+        ResourceRef(external_id=EXPERIMENT, config=config)
+    )
+    connection = observation.nodes[0].connection
+    assert connection.known_hosts_ref is None and connection.host_key is None
+
+
+def test_registration_applies_only_to_nodes_this_control_plane_creates():
+    adapter = provider(lambda request: httpx.Response(200, json=resource()))
+    without_list = {
+        key: value for key, value in REGISTERING.items() if key != "ssh_known_hosts_ref"
+    }
+    assert adapter.validate_config("provision", without_list)["host_key_source"] == "registration"
+    with pytest.raises(ProviderError):
+        adapter.validate_config("attach", {**without_list, "external_id": EXPERIMENT})
+    with pytest.raises(ProviderError):
+        adapter.validate_config("provision", {**without_list, "host_key_source": "known_hosts"})

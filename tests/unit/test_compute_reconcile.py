@@ -17,6 +17,7 @@ import pytest
 
 from cloud_agent.application import compute_reconcile
 from cloud_agent.application.compute_reconcile import ComputeReconciler
+from cloud_agent.host_pool import hash_secret
 from cloud_agent.ports.external.compute_provider import (
     AcquisitionResolution,
     NodeObservation,
@@ -25,6 +26,7 @@ from cloud_agent.ports.external.compute_provider import (
     ProviderReceipt,
     ResourceObservation,
     ResourceRef,
+    SshConnection,
 )
 from cloud_agent.ports.external.host_bootstrap import BootstrapResult, DeploymentProfile
 from cloud_agent.schemas_compute import RenewalPolicy
@@ -594,3 +596,86 @@ async def test_missing_resource_within_its_lease_is_never_assumed_deleted(monkey
     assert h.operation["state"] == "blocked"
     assert h.allocation.get("observed_state") != "terminated"
     h.repository.record_observation_error.assert_awaited_once()
+
+
+REGISTERED_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMdO7VBdfUlnQkwf4yfnmrk1h3G625rktRv0VgZa5awA"
+
+
+def registering(monkeypatch):
+    """A provisioned node that must register its host keys before any SSH."""
+    h = harness(monkeypatch)
+    # The adapter echoes the full validated configuration in each observation.
+    ref = REF.model_copy(update={"config": {**REF.config, "host_key_source": "registration"}})
+    h.allocation["configuration"] = ref.config
+    h.commands.configuration.registration_url = "https://example.org/v1/compute/node-registrations"
+    connection = SshConnection(address="node.example.org", username="agent", credential_ref="ssh-1")
+    node = NODE.model_copy(update={"connection": connection})
+    ready = observed().model_copy(update={"ref": ref, "nodes": (node,)})
+    h.provider.acquire.return_value = ProviderReceipt(
+        outcome="confirmed", resource=ref, observation=ready
+    )
+    h.provider.inspect.return_value = ready
+    h.repository.create_node_registration = AsyncMock(return_value={"id": "registration-a"})
+    h.repository.node_registration = AsyncMock(
+        return_value={"registered_at": None, "expired": False, "host_keys": []}
+    )
+    h.repository.record_host_key = AsyncMock()
+    return h
+
+
+@pytest.mark.asyncio
+async def test_a_registering_node_gets_a_token_whose_hash_alone_is_kept(monkeypatch):
+    h = registering(monkeypatch)
+    await h.reconciler.execute(h.operation)
+    request = h.provider.acquire.await_args.args[0]
+    token = request.registration.token.get_secret_value()
+    assert request.registration.url == "https://example.org/v1/compute/node-registrations"
+    stored = h.repository.create_node_registration.await_args.kwargs
+    assert stored["token_hash"] == hash_secret(token) and token not in str(stored)
+    assert "registration" not in request.config and token not in str(h.allocation)
+    # Ready, but unregistered: nothing has connected to the node yet.
+    assert (h.operation["state"], h.operation["step"]) == ("waiting", "waiting_for_registration")
+    h.bootstrap.deploy.assert_not_awaited()
+    h.repository.prepare_bootstrap_binding.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_registered_key_is_pinned_before_the_first_ssh_connection(monkeypatch):
+    h = registering(monkeypatch)
+    rsa_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7"
+    h.repository.node_registration.return_value = {
+        "registered_at": NOW,
+        "expired": False,
+        "host_keys": [rsa_key, REGISTERED_KEY],
+    }
+    await h.reconciler.execute(h.operation)
+    h.repository.record_host_key.assert_awaited_once()
+    assert h.repository.record_host_key.await_args.kwargs["host_key"] == REGISTERED_KEY
+    deployed_node = h.bootstrap.deploy.await_args.args[0]
+    assert deployed_node.connection.host_key == REGISTERED_KEY
+    assert deployed_node.connection.known_hosts_ref is None
+    assert h.operation["state"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_a_node_that_never_registers_blocks_instead_of_being_trusted(monkeypatch):
+    h = registering(monkeypatch)
+    h.repository.node_registration.return_value = {
+        "registered_at": None,
+        "expired": True,
+        "host_keys": [],
+    }
+    await h.reconciler.execute(h.operation)
+    assert h.operation["state"] == "blocked"
+    assert h.operation["result"]["blocked_reasons"][0]["code"] == "registration_expired"
+    h.bootstrap.deploy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_without_a_public_address_no_registering_node_is_created(monkeypatch):
+    h = registering(monkeypatch)
+    h.commands.configuration.registration_url = ""
+    await h.reconciler.execute(h.operation)
+    h.provider.acquire.assert_not_awaited()
+    assert h.operation["state"] == "blocked"
+    assert h.operation["result"]["blocked_reasons"][0]["code"] == "registration_unavailable"

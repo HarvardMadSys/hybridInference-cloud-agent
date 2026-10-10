@@ -636,7 +636,14 @@ class PostgresComputeResourceRepository:
             (id,allocation_id,provider_node_id,instance_identity,name,connection,managed)
             VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)
             ON CONFLICT (allocation_id,provider_node_id) DO UPDATE
-            SET name=EXCLUDED.name,connection=EXCLUDED.connection,updated_at=NOW()
+            SET name=EXCLUDED.name,updated_at=NOW(),
+                -- A registered host key belongs to this exact instance and
+                -- provider observations never carry it: keep it.
+                connection=CASE WHEN agent_compute_nodes.connection ? 'host_key'
+                    AND NOT EXCLUDED.connection ? 'host_key'
+                    THEN EXCLUDED.connection
+                        || jsonb_build_object('host_key', agent_compute_nodes.connection->'host_key')
+                    ELSE EXCLUDED.connection END
             WHERE agent_compute_nodes.instance_identity=EXCLUDED.instance_identity RETURNING *""",
             node.get("id") or str(uuid4()),
             allocation_id,
@@ -649,6 +656,110 @@ class PostgresComputeResourceRepository:
         if row is None:
             raise ValueError("resource_identity_changed")
         return _row(row)
+
+    async def create_node_registration(
+        self,
+        *,
+        allocation_id: str,
+        token_hash: str,
+        ttl_seconds: float,
+        operation_id: str,
+        generation: int,
+        worker_id: str,
+    ) -> dict[str, Any]:
+        """Open the one registration a new node may complete; only the hash is kept."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            await self._fence(conn, operation_id, generation, worker_id, allocation_id)
+            row = await conn.fetchrow(
+                """INSERT INTO agent_compute_node_registrations
+                (id,allocation_id,operation_id,token_hash,expires_at)
+                VALUES ($1,$2,$3,$4,NOW()+make_interval(secs=>$5))
+                RETURNING id,expires_at,created_at""",
+                str(uuid4()),
+                allocation_id,
+                operation_id,
+                token_hash,
+                ttl_seconds,
+            )
+            return dict(row)
+
+    async def complete_node_registration(self, *, token_hash: str, host_keys: list[str]) -> str:
+        """Record a node's host keys once: registered, replayed, conflict or invalid.
+
+        Only the newest registration of a live allocation is open. The same
+        keys again get the same answer; a different set is never swapped in.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """SELECT r.id,r.allocation_id,r.host_keys,r.registered_at,
+                    r.expires_at>NOW() AS live,a.desired_state,a.release_committed_at
+                FROM agent_compute_node_registrations r
+                JOIN agent_compute_allocations a ON a.id=r.allocation_id
+                WHERE r.token_hash=$1 FOR UPDATE OF r""",
+                token_hash,
+            )
+            if row is None:
+                return "invalid"
+            if row["registered_at"] is not None:
+                return "replayed" if load_json(row["host_keys"]) == host_keys else "conflict"
+            newest = await conn.fetchval(
+                """SELECT id FROM agent_compute_node_registrations WHERE allocation_id=$1
+                ORDER BY created_at DESC,id DESC LIMIT 1""",
+                row["allocation_id"],
+            )
+            if (
+                not row["live"]
+                or row["desired_state"] != "present"
+                or row["release_committed_at"] is not None
+                or newest != row["id"]
+            ):
+                return "invalid"
+            await conn.execute(
+                """UPDATE agent_compute_node_registrations
+                SET host_keys=$2::jsonb,registered_at=NOW() WHERE id=$1""",
+                row["id"],
+                _json(host_keys),
+            )
+            return "registered"
+
+    async def node_registration(self, *, allocation_id: str) -> dict[str, Any] | None:
+        """Read the newest registration of an allocation, without its token."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT id,expires_at,host_keys,registered_at,created_at,
+                    expires_at<=NOW() AS expired
+                FROM agent_compute_node_registrations WHERE allocation_id=$1
+                ORDER BY created_at DESC,id DESC LIMIT 1""",
+                allocation_id,
+            )
+        if row is None:
+            return None
+        result = dict(row)
+        result["host_keys"] = load_json(result["host_keys"]) or []
+        return result
+
+    async def record_host_key(
+        self,
+        *,
+        node_id: str,
+        host_key: str,
+        operation_id: str,
+        generation: int,
+        worker_id: str,
+    ) -> None:
+        """Pin the host key a node registered, for this exact node instance only."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            await lock_compute_entry(conn, exclusive=True)
+            await self._fence(conn, operation_id, generation, worker_id)
+            updated = await conn.fetchval(
+                """UPDATE agent_compute_nodes
+                SET connection=connection || jsonb_build_object('host_key',$2::text),updated_at=NOW()
+                WHERE id=$1 AND connection <> '{}'::jsonb RETURNING id""",
+                node_id,
+                host_key,
+            )
+            if updated is None:
+                raise ValueError("resource_identity_changed")
 
     async def claim_operation(
         self, *, worker_id: str, lease_seconds: float = 120

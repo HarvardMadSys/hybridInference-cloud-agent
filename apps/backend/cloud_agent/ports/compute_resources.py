@@ -144,6 +144,43 @@ class ComputeResourceRepository(Protocol):
         """Observe an immutable node identity without rebinding retained execution state."""
         ...
 
+    async def create_node_registration(
+        self,
+        *,
+        allocation_id: str,
+        token_hash: str,
+        ttl_seconds: float,
+        operation_id: str,
+        generation: int,
+        worker_id: str,
+    ) -> dict[str, Any]:
+        """Open the one registration a new node may complete; only the hash is kept."""
+        ...
+
+    async def complete_node_registration(self, *, token_hash: str, host_keys: list[str]) -> str:
+        """Record a node's host keys once: registered, replayed, conflict or invalid.
+
+        Only the newest registration of a live allocation is open. The same
+        keys again get the same answer; a different set is never swapped in.
+        """
+        ...
+
+    async def node_registration(self, *, allocation_id: str) -> dict[str, Any] | None:
+        """Read the newest registration of an allocation, without its token."""
+        ...
+
+    async def record_host_key(
+        self,
+        *,
+        node_id: str,
+        host_key: str,
+        operation_id: str,
+        generation: int,
+        worker_id: str,
+    ) -> None:
+        """Pin the host key a node registered, for this exact node instance only."""
+        ...
+
     async def claim_operation(
         self, *, worker_id: str, lease_seconds: float = 120
     ) -> dict[str, Any] | None:

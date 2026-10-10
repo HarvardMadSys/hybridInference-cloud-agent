@@ -7,6 +7,7 @@ runs provider mutations inline with an HTTP request.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -15,9 +16,11 @@ from cloud_agent.application.server_queries import ServerQueries
 from cloud_agent.domain.compute import (
     ComputeRefusal,
     fingerprint,
+    normalize_host_keys,
     public_connection,
     public_operation,
 )
+from cloud_agent.host_pool import hash_secret
 from cloud_agent.schemas_compute import RenewalPolicy
 
 if TYPE_CHECKING:
@@ -333,6 +336,32 @@ class ComputeCommands:
             requested_by=actor,
         )
         return await self.operation_view(operation)
+
+    async def register_node(self, token: str, host_keys: list[str]) -> None:
+        """Record a new node's SSH host keys against its one-time token.
+
+        Every refusal for an unknown, expired, spent or superseded token looks
+        the same to the caller. Keys are compared as a set: the same keys again
+        succeed, a different set never replaces the registered one.
+        """
+        if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", token):
+            raise ComputeRefusal(
+                "registration_not_found", "No open registration matches this token.", status=404
+            )
+        keys = normalize_host_keys(host_keys)
+        outcome = await self.repository.complete_node_registration(
+            token_hash=hash_secret(token), host_keys=keys
+        )
+        if outcome == "conflict":
+            raise ComputeRefusal(
+                "registration_conflict",
+                "Different host keys are already registered for this node.",
+                status=409,
+            )
+        if outcome not in {"registered", "replayed"}:
+            raise ComputeRefusal(
+                "registration_not_found", "No open registration matches this token.", status=404
+            )
 
     async def servers(self) -> dict[str, Any]:
         """Read inventory through the independent query surface."""

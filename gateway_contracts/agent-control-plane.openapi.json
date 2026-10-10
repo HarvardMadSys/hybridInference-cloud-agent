@@ -9723,6 +9723,35 @@
         "title": "MessageRequestDetail",
         "type": "object"
       },
+      "NodeRegistrationRequest": {
+        "additionalProperties": false,
+        "description": "A node's SSH host public keys and the token it was created with.",
+        "properties": {
+          "host_keys": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Host Keys",
+            "type": "array"
+          },
+          "token": {
+            "format": "password",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "token",
+          "host_keys"
+        ],
+        "title": "NodeRegistrationRequest",
+        "type": "object"
+      },
       "OAuthConnectRequest": {
         "description": "Authorization callback values supplied by GitHub or GitLab.",
         "properties": {
@@ -25955,6 +25984,49 @@
           }
         },
         "summary": "Worker Wait"
+      }
+    },
+    "/v1/compute/node-registrations": {
+      "post": {
+        "description": "Record the node's host keys once; repeating the same keys is harmless.",
+        "operationId": "register_node_v1_compute_node_registrations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeRegistrationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Register Node V1 Compute Node Registrations Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register Node"
       }
     },
     "/v1/session/callback": {

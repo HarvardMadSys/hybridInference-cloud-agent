@@ -52,12 +52,21 @@ class CloudLabConfig(ComputeValue):
     ssh_username: str | None = Field(default=None, pattern=r"^[a-zA-Z_][a-zA-Z0-9_.-]*$")
     ssh_credential_ref: str | None = None
     ssh_known_hosts_ref: str | None = None
+    # "known_hosts": every node key must already be in the administrator's
+    # verified list. "registration": the profile's boot script registers the
+    # node's keys with a one-time token (deploy/cloudlab/cloud-agent-node.py).
+    host_key_source: Literal["known_hosts", "registration"] = "known_hosts"
 
     @field_validator("external_id")
     @classmethod
     def validate_external_id(cls, value: str | None) -> str | None:
         """Canonicalize an experiment UUID before constructing a request URL."""
         return str(UUID(value)) if value else None
+
+
+# Parameters of deploy/cloudlab/cloud-agent-node.py the boot script reads.
+REGISTRATION_URL_BINDING = "registrationUrl"
+REGISTRATION_TOKEN_BINDING = "registrationToken"
 
 
 def _wire_bindings(bindings: dict[str, Any]) -> dict[str, Any]:
@@ -115,11 +124,19 @@ class CloudLabProvider(ComputeProvider):
                 "invalid_configuration",
                 "Provision requires a profile and its project, without an existing experiment ID",
             )
-        ssh_fields = (parsed.ssh_username, parsed.ssh_credential_ref, parsed.ssh_known_hosts_ref)
-        if any(ssh_fields) and not all(ssh_fields):
+        ssh_fields = (parsed.ssh_username, parsed.ssh_credential_ref)
+        trusts_list = parsed.host_key_source == "known_hosts"
+        if (any(ssh_fields) or parsed.ssh_known_hosts_ref) and not (
+            all(ssh_fields) and (parsed.ssh_known_hosts_ref or not trusts_list)
+        ):
             raise ProviderError(
                 "invalid_configuration",
                 "SSH username, credential and verified host keys must be supplied together",
+            )
+        if not trusts_list and mode != "provision":
+            raise ProviderError(
+                "invalid_configuration",
+                "Only a node created from the Cloud Agent profile can register its host keys",
             )
         return parsed.model_dump(mode="json", exclude_none=True)
 
@@ -223,13 +240,23 @@ class CloudLabProvider(ComputeProvider):
         # No vendor idempotency key exists. The orchestrator must call this
         # only on an unsent persisted intent; recovery must never re-POST it.
         name = config.name or "ca-" + intent.allocation_id.replace("-", "")[:13]
+        bindings = dict(config.bindings)
+        if config.host_key_source == "registration":
+            if request.registration is None:
+                raise ProviderError(
+                    "registration_unavailable", "Node registration is not configured"
+                )
+            # Only the outgoing request carries the token; the persisted
+            # configuration below never does.
+            bindings[REGISTRATION_URL_BINDING] = request.registration.url
+            bindings[REGISTRATION_TOKEN_BINDING] = request.registration.token.get_secret_value()
         payload = {
             "name": name,
             "project": config.project,
             "profile_name": config.profile_name,
             "profile_project": config.profile_project,
             "duration": config.duration,
-            "bindings": _wire_bindings(config.bindings),
+            "bindings": _wire_bindings(bindings),
         }
         if config.group:
             payload["group"] = config.group
@@ -408,7 +435,11 @@ class CloudLabProvider(ComputeProvider):
                     )
                 identities.add(node_id)
                 connection = None
-                if config.ssh_username and config.ssh_credential_ref and config.ssh_known_hosts_ref:
+                if (
+                    config.ssh_username
+                    and config.ssh_credential_ref
+                    and (config.ssh_known_hosts_ref or config.host_key_source == "registration")
+                ):
                     # Manifest is authoritative for forwarded VM SSH ports.
                     # Never silently assume port 22 for an unobserved login.
                     destination = logins.get((aggregate_id, str(node["client_id"])))
@@ -419,7 +450,11 @@ class CloudLabProvider(ComputeProvider):
                                 port=destination[1],
                                 username=config.ssh_username,
                                 credential_ref=config.ssh_credential_ref,
-                                known_hosts_ref=config.ssh_known_hosts_ref,
+                                # A registering node is trusted only through
+                                # the key it registered, never the list.
+                                known_hosts_ref=config.ssh_known_hosts_ref
+                                if config.host_key_source == "known_hosts"
+                                else None,
                             )
                         except ValidationError:
                             raise ProviderError(

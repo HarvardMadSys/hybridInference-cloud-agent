@@ -113,6 +113,7 @@ def create_app() -> FastAPI:
         admin_runs,
         admin_steps,
         admin_usage,
+        compute_registration,
         host_profiling,
         hosts,
         mcp_connections,
@@ -147,6 +148,10 @@ def create_app() -> FastAPI:
     app.include_router(host_profiling.router)
     app.include_router(admin_hosts.router)
     app.include_router(admin_compute.router)
+    # A new compute node reports its SSH host keys here with a one-time token,
+    # before the control plane connects to it. Public by necessity: the node
+    # has no other credential yet.
+    app.include_router(compute_registration.router)
     app.include_router(admin_conversations.router)
     app.include_router(admin_runs.router)
     app.include_router(admin_usage.router)

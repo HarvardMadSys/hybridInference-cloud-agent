@@ -13,6 +13,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import ValidationError
 
@@ -24,6 +25,38 @@ if TYPE_CHECKING:
 
 ENV_COMPUTE_CONFIG = "AGENT_COMPUTE_CONFIG"
 ENV_CLOUDLAB_API_URL = "AGENT_CLOUDLAB_API_URL"
+ENV_REGISTRATION_URL = "AGENT_COMPUTE_REGISTRATION_URL"
+REGISTRATION_PATH = "/v1/compute/node-registrations"
+
+
+def registration_url() -> str:
+    """Where a new node posts its host keys: explicit, or the public API origin.
+
+    Reuses the operator-configured sign-in callback (as MCP OAuth does), never
+    request headers. Only HTTPS qualifies: the node authenticates the control
+    plane by its certificate before sending the token.
+    """
+    explicit = os.environ.get(ENV_REGISTRATION_URL, "").strip()
+    if explicit:
+        return explicit if urlsplit(explicit).scheme == "https" else ""
+    callback = os.environ.get("AGENT_SESSION_REDIRECT_URI", "").strip()
+    suffix = "/v1/session/callback"
+    try:
+        parsed = urlsplit(callback)
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.endswith(suffix)
+    ):
+        return ""
+    base = parsed.path[: -len(suffix)]
+    return urlunsplit((parsed.scheme, parsed.netloc, base + REGISTRATION_PATH, "", ""))
 
 
 @dataclass(frozen=True)
@@ -33,6 +66,7 @@ class ComputeConfiguration:
     profiles: dict[str, DeploymentProfile] = field(default_factory=dict)
     deployment_secrets: dict[str, str] = field(default_factory=dict)
     cloudlab_api_url: str = ""
+    registration_url: str = ""
     poll_seconds: int = 30
     observation_seconds: int = 120
 
@@ -41,7 +75,10 @@ class ComputeConfiguration:
         """Load the optional mounted configuration with no secret-value fallback."""
         location = os.environ.get(ENV_COMPUTE_CONFIG, "")
         if not location:
-            return cls(cloudlab_api_url=os.environ.get(ENV_CLOUDLAB_API_URL, ""))
+            return cls(
+                cloudlab_api_url=os.environ.get(ENV_CLOUDLAB_API_URL, ""),
+                registration_url=registration_url(),
+            )
         try:
             path = Path(location)
             if not path.is_absolute() or path.stat().st_size > 1024 * 1024:
@@ -85,6 +122,7 @@ class ComputeConfiguration:
             profiles=profiles,
             deployment_secrets=secrets,
             cloudlab_api_url=os.environ.get(ENV_CLOUDLAB_API_URL, ""),
+            registration_url=registration_url(),
             poll_seconds=poll,
             observation_seconds=observation,
         )

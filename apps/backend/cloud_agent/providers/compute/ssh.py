@@ -16,6 +16,12 @@ if TYPE_CHECKING:
     from cloud_agent.ports.external.compute_provider import SecretResolver, SshConnection
 
 
+def known_hosts_line(address: str, port: int, host_key: str) -> str:
+    """Render one pinned key in the known_hosts form OpenSSH looks up."""
+    pattern = address if port == 22 else f"[{address}]:{port}"
+    return f"{pattern} {host_key}\n"
+
+
 class OpenSshTransport:
     """Use isolated strict SSH trust files and suppress secret-bearing diagnostics."""
 
@@ -34,7 +40,13 @@ class OpenSshTransport:
         # trust-on-first-use policy. Each request has isolated temporary files.
         """Run a trusted remote command without exposing credentials or error output."""
         key = await self._resolver.resolve(connection.credential_ref)
-        known_hosts = await self._resolver.resolve(connection.known_hosts_ref)
+        if connection.host_key:
+            # A key the node registered with its one-time token: trust exactly it.
+            known_hosts = known_hosts_line(connection.address, connection.port, connection.host_key)
+        elif connection.known_hosts_ref:
+            known_hosts = await self._resolver.resolve(connection.known_hosts_ref)
+        else:
+            known_hosts = ""
         if not key.strip() or not known_hosts.strip():
             raise ProviderError("ssh_configuration", "SSH key and verified host keys are required")
         with tempfile.TemporaryDirectory(prefix="agent-compute-ssh-") as directory:

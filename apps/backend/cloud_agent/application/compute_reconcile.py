@@ -7,6 +7,7 @@ fixed resource identity and request parameters bound the external effects.
 
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -16,11 +17,13 @@ from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.broker_routing import broker_for_host
 from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import ComputeRefusal
+from cloud_agent.host_pool import hash_secret
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.ports.external.compute_provider import (
     AcquireRequest,
     ExtendRequest,
     NodeObservation,
+    NodeRegistration,
     OperationIntent,
     ProviderError,
     ProviderReceipt,
@@ -65,6 +68,30 @@ _PREFLIGHT_CHECKS = {
 
 # How long past its recorded deadline a missing resource is taken as ended.
 _EXPIRY_GRACE = timedelta(minutes=10)
+# A node registers at first boot; provisioning plus boot fit well inside this.
+_REGISTRATION_TTL_SECONDS = 2 * 3600
+_HOST_KEY_PREFERENCE = (
+    "ssh-ed25519",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "ssh-rsa",
+)
+
+
+def _preferred_host_key(keys: list[str]) -> str:
+    """Pin the strongest key type the node registered."""
+    ranked = sorted(
+        keys,
+        key=lambda key: (
+            _HOST_KEY_PREFERENCE.index(key.split()[0])
+            if key.split()[0] in _HOST_KEY_PREFERENCE
+            else len(_HOST_KEY_PREFERENCE)
+        ),
+    )
+    if not ranked or ranked[0].split()[0] not in _HOST_KEY_PREFERENCE:
+        raise ProviderError("registration_invalid", "The node registered no supported host key")
+    return ranked[0]
 
 
 def _now() -> datetime:
@@ -354,7 +381,10 @@ class ComputeReconciler:
             )
         allocation = await self._allocation(allocation["id"])
         node = allocation["nodes"][0]
-        observed_node = observation.nodes[0]
+        registered = await self._registered_node(operation, allocation, node, observation.nodes[0])
+        if registered is None:
+            return
+        observed_node = registered
         profile = DeploymentProfile.model_validate(allocation["deployment_profile"])
         intent = self._bootstrap_intent(operation, allocation, node)
         await self.repository.prepare_bootstrap_binding(
@@ -483,6 +513,75 @@ class ComputeReconciler:
             scope_complete=True,
         )
 
+    @staticmethod
+    def _registers_host_keys(allocation: dict[str, Any]) -> bool:
+        return (allocation.get("configuration") or {}).get("host_key_source") == "registration"
+
+    async def _open_registration(
+        self, operation: dict[str, Any], allocation: dict[str, Any]
+    ) -> NodeRegistration:
+        """Mint the one-time token this acquisition's node registers its host keys with.
+
+        Each submission gets a fresh token; only the newest one of an
+        allocation can register, and only its hash is stored.
+        """
+        url = self.commands.configuration.registration_url
+        if not url:
+            raise ProviderError(
+                "registration_unavailable",
+                "Set the public API address before nodes can register their host keys",
+            )
+        token = secrets.token_urlsafe(32)
+        await self.repository.create_node_registration(
+            allocation_id=allocation["id"],
+            token_hash=hash_secret(token),
+            ttl_seconds=_REGISTRATION_TTL_SECONDS,
+            **self._fence(operation),
+        )
+        return NodeRegistration(url=url, token=SecretStr(token))
+
+    async def _registered_node(
+        self,
+        operation: dict[str, Any],
+        allocation: dict[str, Any],
+        node: dict[str, Any],
+        observed: NodeObservation,
+    ) -> NodeObservation | None:
+        """Return the node with the host key it registered, or None while waiting.
+
+        Nodes trusted through an administrator's verified list are unchanged.
+        A registering node is reached over SSH only once its key is pinned.
+        """
+        connection = observed.connection
+        if connection is None or not self._registers_host_keys(allocation):
+            return observed
+        pinned = (node.get("connection") or {}).get("host_key")
+        if not pinned:
+            registration = await self.repository.node_registration(allocation_id=allocation["id"])
+            if registration is None or (
+                not registration.get("registered_at") and registration.get("expired")
+            ):
+                raise ProviderError(
+                    "registration_expired",
+                    "The node did not register its SSH host keys in time",
+                )
+            if not registration.get("registered_at"):
+                await self._finish(
+                    operation,
+                    "waiting",
+                    "waiting_for_registration",
+                    "Waiting for the node to register its SSH host keys.",
+                    retry=15,
+                )
+                return None
+            pinned = _preferred_host_key(registration["host_keys"])
+            await self.repository.record_host_key(
+                node_id=node["id"], host_key=pinned, **self._fence(operation)
+            )
+        return observed.model_copy(
+            update={"connection": connection.model_copy(update={"host_key": pinned})}
+        )
+
     async def _release_failed_acquisition(
         self, operation: dict[str, Any], allocation: dict[str, Any]
     ) -> None:
@@ -513,10 +612,13 @@ class ComputeReconciler:
         self, operation: dict[str, Any], allocation: dict[str, Any]
     ) -> ProviderReceipt:
         provider = self.commands.registry.get(allocation["provider_id"]).provider
-        try:
-            return await provider.acquire(
-                self._request(allocation), self._intent(operation, allocation)
+        request = self._request(allocation)
+        if self._registers_host_keys(allocation):
+            request = request.model_copy(
+                update={"registration": await self._open_registration(operation, allocation)}
             )
+        try:
+            return await provider.acquire(request, self._intent(operation, allocation))
         except (ProviderError, ComputeSecretError) as exc:
             if getattr(exc, "code", "credential_unavailable") != "result_unknown":
                 # A definite rejection is safe to retry after credentials or

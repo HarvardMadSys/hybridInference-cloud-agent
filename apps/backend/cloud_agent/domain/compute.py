@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 from typing import Any
+
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 
 
 class ComputeRefusal(Exception):
@@ -25,6 +31,39 @@ def fingerprint(kind: str, parameters: dict[str, Any]) -> str:
         allow_nan=False,
     )
     return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def normalize_host_keys(keys: list[str]) -> list[str]:
+    """Return a node's SSH host public keys as sorted, comment-free, parsed keys.
+
+    Accepts Ed25519, NIST ECDSA and RSA of at least 2048 bits. Anything else,
+    or a line that does not parse as the key type it claims, is refused.
+    """
+    normalized: set[str] = set()
+    for line in keys:
+        parts = line.split() if isinstance(line, str) and len(line) <= 8192 else []
+        if len(parts) < 2:
+            raise ComputeRefusal(
+                "invalid_host_keys", "Host keys must be OpenSSH public keys.", status=422
+            )
+        algorithm, body = parts[0], parts[1]
+        try:
+            key = serialization.load_ssh_public_key(f"{algorithm} {body}".encode())
+            embedded = base64.b64decode(body, validate=True)
+        except (ValueError, UnsupportedAlgorithm, binascii.Error):
+            raise ComputeRefusal(
+                "invalid_host_keys", "Host keys must be OpenSSH public keys.", status=422
+            ) from None
+        name_length = int.from_bytes(embedded[:4], "big")
+        if embedded[4 : 4 + name_length].decode(errors="replace") != algorithm or not (
+            isinstance(key, ed25519.Ed25519PublicKey | ec.EllipticCurvePublicKey)
+            or (isinstance(key, rsa.RSAPublicKey) and key.key_size >= 2048)
+        ):
+            raise ComputeRefusal("invalid_host_keys", "Host key type is not supported.", status=422)
+        normalized.add(f"{algorithm} {body}")
+    if not normalized:
+        raise ComputeRefusal("invalid_host_keys", "No host key was supplied.", status=422)
+    return sorted(normalized)
 
 
 def public_connection(record: dict[str, Any]) -> dict[str, Any]:

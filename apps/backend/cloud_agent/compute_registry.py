@@ -272,6 +272,27 @@ def build_registry(
                         "required": True,
                         "deployment_only": True,
                     },
+                    {
+                        "key": "host_key_source",
+                        "label": "Node host keys",
+                        "section": "access",
+                        "type": "select",
+                        "default": "known_hosts",
+                        "options": [
+                            {
+                                "value": "known_hosts",
+                                "label": "Verified list on the SSH connection",
+                            },
+                            {
+                                "value": "registration",
+                                "label": "Registered by the node at first boot",
+                            },
+                        ],
+                        "description": "Registration needs the Cloud Agent profile (deploy/cloudlab/cloud-agent-node.py) and lets new nodes join without anyone verifying their keys by hand.",
+                        "advanced": True,
+                        "deployment_only": True,
+                        "modes": ["provision"],
+                    },
                 ),
             )
         )

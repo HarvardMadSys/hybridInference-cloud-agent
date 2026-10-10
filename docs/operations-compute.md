@@ -143,6 +143,40 @@ CloudLab node has an unknown host key, deployment blocks until the administrator
 verifies it and updates the selected SSH connection; retry then uses the same
 resource.
 
+### CloudLab nodes that register their own host keys
+
+For nodes nobody verifies by hand (automatic replacement), choose **Node host
+keys → Registered by the node at first boot** under the CloudLab server's
+advanced options. It applies only to experiments this control plane creates
+from the Cloud Agent profile:
+
+1. Publish `deploy/cloudlab/cloud-agent-node.py` once in the CloudLab project
+   as a **project-private** profile (never public) and use its name and project
+   as the server's template. Its node, image and data-disk parameters replace
+   `small-lan`'s (`phystype`, `osImage`, `dataMount`, `dataSize`).
+2. Make sure the control plane has a public HTTPS address: the default comes
+   from `AGENT_SESSION_REDIRECT_URI`, or set `AGENT_COMPUTE_REGISTRATION_URL`.
+3. Each acquisition mints a one-time token (stored only as a hash, valid two
+   hours) and sends it with the experiment's parameters. At first boot the node
+   gives itself fresh SSH host keys and posts their public halves to
+   `/v1/compute/node-registrations` over HTTPS. The control plane pins the
+   strongest key on that node and connects with strict checking against it
+   alone; no administrator list is consulted for it.
+
+The token can register keys once and nothing else: it cannot claim work, enroll
+a Host or take over a Host name. The same keys again are accepted, different
+keys are refused, and a resubmitted acquisition's newer token supersedes the
+older one. Everyone in the CloudLab project can read experiment parameters,
+including the token; project members already administer every node of the
+project, so this grants nothing new. Keep the profile private and keep other
+people out of the project.
+
+If the operation waits at `waiting_for_registration` and then blocks with
+`registration_expired`, the node never reached the control plane: read
+`/var/lib/cloud-agent-node/registration` on the node (through the CloudLab
+console) and check that the registration address is reachable from CloudLab.
+`registration_unavailable` means the control plane has no public HTTPS address.
+
 Choose `AGENT_EGRESS_CHAT_NETWORK_POOL`, resolver and protected CIDRs for the
 actual environment. The sample range is illustrative. Preserve the target
 release's per-group nftables policy; setting up cloud resources is not a reason

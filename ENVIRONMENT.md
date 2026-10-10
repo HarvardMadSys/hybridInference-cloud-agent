@@ -203,6 +203,7 @@ for deployment profiles, verified SSH access and CloudLab endpoint setup.
 | `AGENT_COMPUTE_CONFIG` | Absolute path inside the control-plane process to the operator-owned JSON deployment configuration. |
 | `AGENT_COMPUTE_DIRECTORY` | Absolute host directory mounted read-only at `/run/compute` by the optional Compose overlay; `deploy.sh` includes the overlay when this is set. |
 | `AGENT_CLOUDLAB_API_URL` | Operator-verified HTTPS Portal API base. Leave unset to disable the CloudLab adapter. |
+| `AGENT_COMPUTE_REGISTRATION_URL` | Optional. The HTTPS address new CloudLab nodes post their SSH host keys to, ending in `/v1/compute/node-registrations`. When unset it is derived from `AGENT_SESSION_REDIRECT_URI` (its `/v1/session/callback` suffix replaced), like MCP callbacks. Only HTTPS is used: a node checks the control plane's certificate before sending its one-time token. Without either, nodes set to register their keys cannot be created. |
 
 Without this configuration the existing Host management remains available;
 resource creation requires configured credentials and deployment profiles.
