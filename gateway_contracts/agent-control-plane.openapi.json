@@ -9394,6 +9394,18 @@
           },
           "runtime": {
             "$ref": "#/components/schemas/RuntimeUsage"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Orders two reads of one job's usage, asked for or pushed: the one whose version compares greater as a string saw everything the other did. Opaque.",
+            "title": "Version"
           }
         },
         "required": [

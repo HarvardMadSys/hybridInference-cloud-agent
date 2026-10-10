@@ -10,7 +10,12 @@ import {
 } from '@/lib/api/agents';
 
 import type { AgentJob } from './types';
-import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from './agentPush';
+import {
+  isOlderUsage,
+  onAgentRecordsChanged,
+  PUSH_FALLBACK_POLL_MS,
+  useAgentPushLive,
+} from './agentPush';
 
 const POLL_INTERVAL_MS = 15_000;
 const MAX_RETRY_INTERVAL_MS = 60_000;
@@ -247,6 +252,10 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
     function show(data: AgentJobUsageApi | null) {
       setLoaded((previous) => {
         const cached = previous?.jobId === job.id ? previous.data : null;
+        // Read or pushed, whichever arrives last: an older one than what is
+        // shown only ends the wait for it.
+        if (previous && cached && data && isOlderUsage(data, cached))
+          return { ...previous, loading: false, requesting: false, failed: false };
         return {
           jobId: job.id,
           data: data ? preserveKnownUsage(cached, data) : cached,
@@ -258,11 +267,15 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
       });
     }
 
-    // What the stream sent is newer than any read already on its way, which
-    // is therefore dropped; the clock goes on as a backstop.
+    // What the stream sent is shown unless something newer already is; a read
+    // still on its way is shown after it only if it is newer. The clock goes on
+    // as a backstop.
     function receive(data: AgentJobUsageApi) {
-      ++generation;
-      controller?.abort();
+      if (!data.version) {
+        // Nothing orders the two: take the push as the newer.
+        ++generation;
+        controller?.abort();
+      }
       readFailures = 0;
       sourceHasFailed = hasTransientError(data);
       if (!sourceHasFailed) sourceFailures = 0;

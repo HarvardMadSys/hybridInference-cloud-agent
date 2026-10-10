@@ -13,6 +13,7 @@ import {
   type AgentRecordsChange,
   isAgentPushLive,
   onAgentRecordsChanged,
+  isOlderUsage,
   overlayPushed,
   PUSH_BATCH_MS,
   receiveHint,
@@ -195,6 +196,22 @@ describe('overlayPushed', () => {
     receiveThreadChange({ id: 'athr_1', revision: 5, title: 'Pushed' });
 
     expect(overlayPushed(JOB)).toBe(JOB);
+  });
+});
+
+describe('isOlderUsage', () => {
+  const at = (version: string | null) => ({ version }) as AgentJobUsageApi;
+
+  it('orders two reads of a usage by their versions, and nothing without both', () => {
+    expect(isOlderUsage(at('00000000000000000009.999998'), at('00000000000000000009.999999'))).toBe(
+      true,
+    );
+    expect(isOlderUsage(at('00000000000000000010.999990'), at('00000000000000000009.999999'))).toBe(
+      false,
+    );
+    expect(isOlderUsage(at('0001'), at('0001'))).toBe(false);
+    expect(isOlderUsage(at(null), at('0002'))).toBe(false);
+    expect(isOlderUsage(at('0001'), null)).toBe(false);
   });
 });
 

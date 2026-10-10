@@ -25,7 +25,7 @@ import {
   setAgentPushLive,
 } from './agentPush';
 import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
-import { useAgentJob } from './useAgentJobs';
+import { STREAM_RETRY_MAX_MS, STREAM_RETRY_MIN_MS, useAgentJob } from './useAgentJobs';
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentJob: vi.fn(),
@@ -46,6 +46,11 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
 });
+
+/** A turn's stream that stays open; one that returns without the turn ending could not connect. */
+function stayOpen(): Promise<void> {
+  return new Promise(() => undefined);
+}
 
 function event(
   id: number,
@@ -99,7 +104,7 @@ describe('useAgentJob live turn rows', () => {
       id === first.id ? firstThread : { ...firstThread, jobs: [first, next] },
     );
     vi.mocked(listAllAgentThreadEvents).mockResolvedValue([answer]);
-    vi.mocked(streamAgentJob).mockResolvedValue(undefined);
+    vi.mocked(streamAgentJob).mockImplementation(stayOpen);
 
     const { result, rerender } = renderHook(({ id }) => useAgentJob(id), {
       initialProps: { id: first.id },
@@ -149,7 +154,7 @@ describe('useAgentJob live turn rows', () => {
       messages: [],
     } as unknown as AgentThreadApi);
     vi.mocked(listAllAgentThreadEvents).mockResolvedValue([]);
-    vi.mocked(streamAgentJob).mockResolvedValue(undefined);
+    vi.mocked(streamAgentJob).mockImplementation(stayOpen);
 
     const { result } = renderHook(() => useAgentJob(initial.id));
     await act(async () => {});
@@ -334,8 +339,9 @@ describe('useAgentJob live turn rows', () => {
       event(1, 'tool_use', { id: 'old', name: 'Bash' }),
     ]);
     let stream: Parameters<typeof streamAgentJob>[1] | undefined;
-    vi.mocked(streamAgentJob).mockImplementation(async (_jobId, options) => {
+    vi.mocked(streamAgentJob).mockImplementation((_jobId, options) => {
       stream = options;
+      return stayOpen();
     });
 
     const { result } = renderHook(() => useAgentJob('live-job'));
@@ -484,6 +490,83 @@ describe('useAgentJob with the owner change stream', () => {
 
     expect(listAllAgentThreadEvents).toHaveBeenCalledTimes(2);
     expect(result.current.job?.state).not.toBe('running');
+  });
+
+  describe('when its stream cannot connect', () => {
+    const running = { ...settled, state: 'running', conversation_state: 'running' } as AgentJobApi;
+    const ended = { ...running, state: 'succeeded', conversation_state: 'idle', revision: 5 };
+    const lastWords = { ...event(9, 'message', { text: 'The last words' }), job_id: settled.id };
+
+    it('reads the conversation again, which ends a turn that has ended with its last events', async () => {
+      vi.useFakeTimers();
+      serve(running);
+      vi.mocked(streamAgentJob).mockResolvedValue(undefined);
+      vi.mocked(getAgentJob)
+        .mockResolvedValueOnce(running)
+        .mockResolvedValue(ended as AgentJobApi);
+      vi.mocked(listAllAgentThreadEvents).mockResolvedValueOnce([]).mockResolvedValue([lastWords]);
+      const { result } = renderHook(() => useAgentJob(settled.id));
+      await act(async () => {});
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+
+      expect(listAllAgentThreadEvents).toHaveBeenCalledTimes(2);
+      expect(result.current.job?.state).not.toBe('running');
+      expect(result.current.events.map((item) => item.payload?.text)).toContain('The last words');
+      await act(async () => vi.advanceTimersByTimeAsync(STREAM_RETRY_MAX_MS));
+      expect(streamAgentJob).toHaveBeenCalledTimes(1);
+    });
+
+    it('opens it again after a growing pause while the turn runs', async () => {
+      vi.useFakeTimers();
+      serve(running);
+      vi.mocked(streamAgentJob)
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(undefined)
+        .mockImplementation(stayOpen);
+      const { result } = renderHook(() => useAgentJob(settled.id));
+      await act(async () => {});
+      expect(streamAgentJob).toHaveBeenCalledTimes(1);
+      expect(listAllAgentThreadEvents).toHaveBeenCalledTimes(2);
+      expect(result.current.job?.state).toBe('running');
+
+      await act(async () => vi.advanceTimersByTimeAsync(STREAM_RETRY_MIN_MS));
+      expect(streamAgentJob).toHaveBeenCalledTimes(2);
+      // It failed again: twice the pause before the next try.
+      await act(async () => vi.advanceTimersByTimeAsync(STREAM_RETRY_MIN_MS));
+      expect(streamAgentJob).toHaveBeenCalledTimes(2);
+      await act(async () => vi.advanceTimersByTimeAsync(STREAM_RETRY_MIN_MS));
+      expect(streamAgentJob).toHaveBeenCalledTimes(3);
+      await act(async () => vi.advanceTimersByTimeAsync(STREAM_RETRY_MAX_MS));
+      expect(streamAgentJob).toHaveBeenCalledTimes(3);
+    });
+
+    it('reads the conversation whole when a pushed end arrives before it is open again', async () => {
+      vi.useFakeTimers();
+      serve(running);
+      vi.mocked(streamAgentJob).mockResolvedValueOnce(undefined).mockImplementation(stayOpen);
+      const { result } = renderHook(() => useAgentJob(settled.id));
+      await act(async () => {});
+      expect(listAllAgentThreadEvents).toHaveBeenCalledTimes(2);
+
+      vi.mocked(getAgentJob).mockResolvedValue(ended as AgentJobApi);
+      vi.mocked(listAllAgentThreadEvents).mockResolvedValue([lastWords]);
+      await act(async () => {
+        receiveJobChange({
+          id: settled.id,
+          thread_id: 'live-thread',
+          revision: 5,
+          state: 'succeeded',
+          conversation_state: 'idle',
+        });
+        await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+      });
+
+      expect(listAllAgentThreadEvents).toHaveBeenCalledTimes(3);
+      expect(result.current.job?.state).not.toBe('running');
+      expect(result.current.events.map((item) => item.payload?.text)).toContain('The last words');
+      await act(async () => vi.advanceTimersByTimeAsync(STREAM_RETRY_MAX_MS));
+      expect(streamAgentJob).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('reads its turn again when the workspace publication moves', async () => {

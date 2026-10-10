@@ -32,7 +32,7 @@ import {
 } from './StepDetailParts';
 import { formatDuration } from './TurnFooter';
 import type { AgentJob } from './types';
-import { onAgentRecordsChanged } from './agentPush';
+import { isOlderUsage, onAgentRecordsChanged } from './agentPush';
 
 export type RunTab = 'overview' | 'usage' | 'raw';
 
@@ -140,8 +140,8 @@ function useJobUsage(jobId: string): {
   const retries = useRef(0);
   const waits = useRef(0);
   const currentJob = useRef(jobId);
-  // Raised by each usage pushed for this job: a read that left before it is
-  // older than what is shown, and is dropped.
+  // Raised by each usage pushed for this job without a version: a read that
+  // left before it is taken to be older, and is dropped.
   const pushes = useRef(0);
 
   useEffect(() => {
@@ -162,8 +162,11 @@ function useJobUsage(jobId: string): {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const pushesBefore = pushes.current;
     getAgentJobUsage(jobId, controller.signal)
-      .then((result) => {
+      .then((read) => {
         if (controller.signal.aborted || pushes.current !== pushesBefore) return;
+        // A usage pushed while this read was on its way may be the newer one.
+        const shown = usageCache.get(jobId);
+        const result = read && shown && isOlderUsage(read, shown) ? shown : read;
         usageCache.set(jobId, result);
         setUsage(result);
         setError(null);
@@ -199,7 +202,9 @@ function useJobUsage(jobId: string): {
       onAgentRecordsChanged((change) => {
         const pushed = change.usageValues[jobId];
         if (pushed && !change.resync) {
-          pushes.current += 1;
+          // A read that left after this was computed may already show more.
+          if (isOlderUsage(pushed, usageCache.get(jobId))) return;
+          if (!pushed.version) pushes.current += 1;
           usageCache.set(jobId, pushed);
           setUsage(pushed);
           setError(null);

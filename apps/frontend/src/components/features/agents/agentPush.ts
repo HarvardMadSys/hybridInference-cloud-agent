@@ -195,6 +195,20 @@ export function overlayPushed(job: AgentJobApi): AgentJobApi {
   return result;
 }
 
+/**
+ * Whether `candidate` is an older read of a job's usage than `shown`.
+ *
+ * A read the tab asked for and one it was pushed can arrive in either order;
+ * each carries its snapshot's version, and the greater saw everything the
+ * lesser did. Without versions on both, nothing is known to be older.
+ */
+export function isOlderUsage(
+  candidate: AgentJobUsageApi,
+  shown: AgentJobUsageApi | null | undefined,
+): boolean {
+  return Boolean(candidate.version && shown?.version && candidate.version < shown.version);
+}
+
 /** Forget everything this tab was told; for a new account and for tests. */
 export function resetAgentPush(): void {
   if (flushTimer) clearTimeout(flushTimer);

@@ -215,6 +215,72 @@ async def test_a_call_reported_while_its_usage_is_read_is_read_again_after(store
     assert await scheduled() is None
 
 
+def _without_window_end(rows: list[dict]) -> list[dict]:
+    """Rows as compared across reads: a running attempt's window ends at each read's NOW()."""
+    return [{k: v for k, v in row.items() if k != "window_until"} for row in rows]
+
+
+async def test_an_owners_usage_is_read_from_one_snapshot_whose_version_orders_it(
+    store, pool, monkeypatch
+):
+    """A tab keeps the newer of a usage it read and one it was pushed, by version.
+
+    The read is one ``REPEATABLE READ`` snapshot: a commit that lands while it
+    reads is not half in it. Its version is greater than an earlier read's once
+    anything was committed between them, and no read sees another owner's job.
+    """
+    from cloud_agent.storage.repositories import ledger as ledger_repository
+
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+    ledger_id = await _ledger_row(pool, claim["attempt_id"])
+    first = await store.ledger.job_usage_reads(job_id=job["id"], user_id=job["user_id"])
+    assert first is not None
+    assert first["job"]["state"] == "running" and first["job"]["runtime"] == job["runtime"]
+    assert _without_window_end(first["ledger_rows"]) == _without_window_end(
+        await store.ledger.ledger_rows_for_job(job_id=job["id"])
+    )
+    assert first["conversation_rows"] == await store.ledger.ledger_rows_for_conversation(
+        job_id=job["id"], user_id=job["user_id"]
+    )
+    assert first["inputs"] == await store.execution_queries.job_usage_inputs(job_id=job["id"])
+    assert await store.ledger.job_usage_reads(job_id=job["id"], user_id="someone-else") is None
+
+    # A usage event and a stored reading land while the read is under way,
+    # after its first statement: neither is in it.
+    real_inputs = ledger_repository.fetch_job_usage_inputs
+
+    async def a_commit_lands_first(conn, job_id):
+        async with pool.acquire() as other:
+            await other.execute(
+                "INSERT INTO agent_job_events (job_id, attempt_id, seq, event_type, payload) "
+                "VALUES ($1, $2, 1, 'usage', '{\"input_tokens\": 9}'::jsonb)",
+                job["id"],
+                claim["attempt_id"],
+            )
+            await other.execute(
+                "UPDATE agent_attempt_ledger SET queried_at = NOW() WHERE id = $1", ledger_id
+            )
+        return await real_inputs(conn, job_id)
+
+    monkeypatch.setattr(ledger_repository, "fetch_job_usage_inputs", a_commit_lands_first)
+    during = await store.ledger.job_usage_reads(job_id=job["id"], user_id=job["user_id"])
+    monkeypatch.setattr(ledger_repository, "fetch_job_usage_inputs", real_inputs)
+    assert during is not None
+    assert during["inputs"]["events"] == [], "the event committed mid-read is not in it"
+    assert during["ledger_rows"][0]["queried_at"] is None
+    assert during["version"] >= first["version"]
+
+    after = await store.ledger.job_usage_reads(job_id=job["id"], user_id=job["user_id"])
+    assert after is not None
+    assert [event["event_type"] for event in after["inputs"]["events"]] == ["usage"]
+    assert after["ledger_rows"][0]["queried_at"] is not None
+    assert after["version"] > during["version"], "it saw a commit the other did not"
+    again = await store.ledger.job_usage_reads(job_id=job["id"], user_id=job["user_id"])
+    assert again is not None and again["version"] >= after["version"]
+
+
 async def test_an_attempt_without_a_ledger_row_says_whether_it_ever_called_a_model(store, pool):
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)

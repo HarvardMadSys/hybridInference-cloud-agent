@@ -17,6 +17,8 @@ from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
 from cloud_agent.app import create_app, create_mcp_app
 
+VERSION = "00000000000000000042.999999"
+
 
 @pytest.fixture
 def store():
@@ -35,21 +37,32 @@ def store():
         }
         for attempt in (10, 11)
     ]
-    return OneFake(
-        SimpleNamespace(
-            get_job=AsyncMock(return_value={"id": "ajob_1", "user_id": "owner"}),
-            ledger_rows_for_job=AsyncMock(return_value=[ledger_row()]),
-            ledger_rows_for_conversation=AsyncMock(return_value=[ledger_row(job_id="ajob_1")]),
-            job_usage_inputs=AsyncMock(
-                return_value={
-                    "job_ids": ["ajob_1"],
-                    "attempts": [{"job_id": "ajob_1", "started_at": START}],
-                    "events": events,
-                }
-            ),
-            queue_job_ledger_refresh=AsyncMock(),
-        )
+    fake = SimpleNamespace(
+        get_job=AsyncMock(return_value={"id": "ajob_1", "user_id": "owner"}),
+        ledger_rows_for_job=AsyncMock(return_value=[ledger_row()]),
+        ledger_rows_for_conversation=AsyncMock(return_value=[ledger_row(job_id="ajob_1")]),
+        job_usage_inputs=AsyncMock(
+            return_value={
+                "job_ids": ["ajob_1"],
+                "attempts": [{"job_id": "ajob_1", "started_at": START}],
+                "events": events,
+            }
+        ),
+        queue_job_ledger_refresh=AsyncMock(),
     )
+
+    async def job_usage_reads(*, job_id: str, user_id: str) -> dict:
+        # The one-snapshot read, made of the rows each test sets above.
+        return {
+            "job": fake.get_job.return_value,
+            "ledger_rows": fake.ledger_rows_for_job.return_value,
+            "conversation_rows": fake.ledger_rows_for_conversation.return_value,
+            "inputs": fake.job_usage_inputs.return_value,
+            "version": VERSION,
+        }
+
+    fake.job_usage_reads = AsyncMock(side_effect=job_usage_reads)
+    return OneFake(fake)
 
 
 @pytest.fixture
@@ -77,9 +90,8 @@ async def test_usage_keeps_runtime_and_gateway_counts_in_separate_same_job_field
         "cache_read_tokens": 160,
         "normalized_input_tokens": None,
     }
-    store.job_usage_inputs.assert_awaited_once_with(job_id="ajob_1")
-    store.ledger_rows_for_job.assert_awaited_once_with(job_id="ajob_1")
-    store.ledger_rows_for_conversation.assert_awaited_once_with(job_id="ajob_1", user_id="owner")
+    assert body["version"] == VERSION
+    store.job_usage_reads.assert_awaited_once_with(job_id="ajob_1", user_id="owner")
     store.queue_job_ledger_refresh.assert_not_awaited()
     assert "grant_id" not in response.text
     assert "binding_id" not in response.text
@@ -105,10 +117,20 @@ async def test_another_owner_cannot_read_or_queue_usage(app, store, method, path
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await getattr(client, method)("/v1/agent/jobs/ajob_other" + path)
     assert response.status_code == 404
+    store.job_usage_reads.assert_not_awaited()
     store.ledger_rows_for_job.assert_not_awaited()
     store.ledger_rows_for_conversation.assert_not_awaited()
     store.job_usage_inputs.assert_not_awaited()
     store.queue_job_ledger_refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_job_deleted_between_the_check_and_the_read_is_not_found(app, store):
+    store.job_usage_reads.side_effect = None
+    store.job_usage_reads.return_value = None
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/v1/agent/jobs/ajob_1/usage")
+    assert response.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -146,8 +168,7 @@ async def test_jobs_without_attempts_only_wait_for_usage_while_still_runnable(
         "normalized_input_tokens": None,
     }
     store.get_job.assert_awaited_once_with("ajob_1")
-    store.ledger_rows_for_job.assert_awaited_once_with(job_id="ajob_1")
-    store.job_usage_inputs.assert_awaited_once_with(job_id="ajob_1")
+    store.job_usage_reads.assert_awaited_once_with(job_id="ajob_1", user_id="owner")
 
 
 def test_usage_routes_are_available_only_on_the_control_plane():

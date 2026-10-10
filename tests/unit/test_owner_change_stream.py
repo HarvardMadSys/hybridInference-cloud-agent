@@ -54,9 +54,6 @@ class Queries:
             "threads": [self.threads[i] for i in thread_ids if i in self.threads],
         }
 
-    async def get_job(self, job_id: str) -> dict[str, Any] | None:
-        return self.jobs.get(job_id)
-
 
 class Request:
     async def is_disconnected(self) -> bool:
@@ -166,11 +163,16 @@ async def test_a_changed_job_and_thread_reach_the_tab_at_once_with_their_revisio
 
 async def test_usage_arrives_with_its_value_and_the_rest_as_hints(monkeypatch):
     """Usage is read once by the stream and sent; the others name what to read again."""
-    usage = {"ledger": {"status": "available"}, "runtime": {"source": "runtime"}}
-    read_usage = AsyncMock(return_value=SimpleNamespace(model_dump=lambda **_: usage))
+    usage = {"ledger": {"status": "available"}, "runtime": {"source": "runtime"}, "version": "v"}
+
+    async def owner_usage(store: Any, *, job_id: str, user_id: str) -> Any:
+        if job_id != "ajob_1":
+            return None  # not this owner's, or gone
+        return SimpleNamespace(model_dump=lambda **_: usage)
+
+    read_usage = AsyncMock(side_effect=owner_usage)
     monkeypatch.setattr(changes, "job_usage_response", read_usage)
     queries = Queries()
-    queries.jobs["ajob_1"] = {"id": "ajob_1", "user_id": OWNER}
     signal = _listening()
     stream = await _open(queries, signal)
     await anext(stream)
@@ -190,26 +192,12 @@ async def test_usage_arrives_with_its_value_and_the_rest_as_hints(monkeypatch):
         ("mcp", {"id": "ajob_1"}),
         ("publication", {"id": "athr_1"}),
     ]
-    read_usage.assert_awaited_once()
-    assert read_usage.await_args.args[1] == {"id": "ajob_1", "user_id": OWNER}
+    # Read as this owner, so another owner's job reads as nothing.
+    assert [call.kwargs for call in read_usage.await_args_list] == [
+        {"job_id": "ajob_1", "user_id": OWNER},
+        {"job_id": "ajob_gone", "user_id": OWNER},
+    ]
     assert queries.reads == [], "no row read for them"
-    await stream.aclose()
-
-
-async def test_another_owners_usage_is_never_sent(monkeypatch):
-    read_usage = AsyncMock()
-    monkeypatch.setattr(changes, "job_usage_response", read_usage)
-    queries = Queries()
-    queries.jobs["ajob_theirs"] = {"id": "ajob_theirs", "user_id": "u2"}
-    signal = _listening()
-    stream = await _open(queries, signal)
-    await anext(stream)
-    _notify(signal, "usage", "ajob_theirs")
-    assert _parse(await asyncio.wait_for(anext(stream), AT_ONCE_S)) == (
-        "usage",
-        {"id": "ajob_theirs"},
-    )
-    read_usage.assert_not_awaited()
     await stream.aclose()
 
 

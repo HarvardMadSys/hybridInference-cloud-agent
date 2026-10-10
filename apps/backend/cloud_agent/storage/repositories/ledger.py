@@ -10,8 +10,13 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from cloud_agent.storage._sql.ledger import LEDGER_WINDOW_UNTIL_SQL
-from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.storage._sql.ledger import (
+    LEDGER_WINDOW_UNTIL_SQL,
+    fetch_job_usage_inputs,
+    fetch_ledger_rows_for_conversation,
+    fetch_ledger_rows_for_job,
+    fetch_snapshot_version,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -30,38 +35,7 @@ class PostgresLedgerRepository:
     async def ledger_rows_for_job(self, *, job_id: str) -> list[dict[str, Any]]:
         """Read stored grant snapshots and retain attempts without attribution."""
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"""
-                SELECT a.id AS attempt_id, a.job_id, a.attempt_no,
-                       a.status AS attempt_status, a.started_at, a.finished_at,
-                       l.id, l.grant_id, l.residency_generation, l.binding_id,
-                       l.window_since, {LEDGER_WINDOW_UNTIL_SQL} AS window_until,
-                       l.snapshot, l.queried_at, l.last_error_code, l.next_refresh_at,
-                       l.last_refresh_attempt_at, l.refresh_generation,
-                       l.refresh_lease_expires_at, l.terminal_refresh_count,
-                       (l.id IS NOT NULL AND (
-                           l.refresh_lease_expires_at IS NOT NULL
-                           OR l.next_refresh_at <= NOW()
-                           OR (a.status <> 'running' AND l.terminal_refresh_count = 0
-                               AND l.next_refresh_at IS NULL)
-                       )) IS TRUE AS refreshing,
-                       -- Only for a finished attempt that never bound a grant:
-                       -- did its agent report any model usage at all?
-                       CASE WHEN l.id IS NULL AND a.status <> 'running' THEN EXISTS (
-                           SELECT 1 FROM agent_job_events e
-                           WHERE e.attempt_id = a.id
-                             AND (e.event_type = 'usage'
-                                  OR jsonb_typeof(e.payload->'usage') = 'object')
-                       ) END AS model_usage_reported
-                FROM agent_attempts a
-                JOIN agent_jobs j ON j.id = a.job_id
-                LEFT JOIN agent_attempt_ledger l ON l.attempt_id = a.id
-                WHERE a.job_id = $1
-                ORDER BY a.attempt_no, l.id
-                """,
-                job_id,
-            )
-        return [{**dict(row), "snapshot": load_json(row["snapshot"])} for row in rows]
+            return await fetch_ledger_rows_for_job(conn, job_id)
 
     async def ledger_rows_for_conversation(
         self, *, job_id: str, user_id: str
@@ -73,30 +47,41 @@ class PostgresLedgerRepository:
         or load historical event payloads to calculate a conversation total.
         """
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
+            return await fetch_ledger_rows_for_conversation(conn, job_id, user_id)
+
+    async def job_usage_reads(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
+        """Everything an owner's read of a job's usage is made of, from one snapshot.
+
+        ``job``, ``ledger_rows``, ``conversation_rows`` and ``inputs``, and the
+        snapshot's ``version``: of two reads of a job's usage, the one whose
+        version is greater saw everything the other did. ``None`` when the job
+        is not this owner's, or its conversation was deleted.
+        """
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(isolation="repeatable_read", readonly=True),
+        ):
+            job = await conn.fetchrow(
                 """
-                SELECT j.id AS job_id, j.state AS job_state, a.id AS attempt_id, a.attempt_no,
-                       a.status AS attempt_status,
-                       l.id, l.grant_id, l.snapshot, l.queried_at,
-                       l.last_error_code, l.next_refresh_at,
-                       (l.id IS NOT NULL AND (
-                           l.refresh_lease_expires_at IS NOT NULL
-                           OR l.next_refresh_at <= NOW()
-                           OR (a.status <> 'running' AND l.terminal_refresh_count = 0
-                               AND l.next_refresh_at IS NULL)
-                       )) IS TRUE AS refreshing
-                FROM agent_jobs anchor
-                JOIN agent_jobs j ON (j.thread_id = anchor.thread_id OR j.id = anchor.id)
-                    AND j.user_id = $2
-                LEFT JOIN agent_attempts a ON a.job_id = j.id
-                LEFT JOIN agent_attempt_ledger l ON l.attempt_id = a.id
-                WHERE anchor.id = $1 AND anchor.user_id = $2
-                ORDER BY j.turn_no, a.attempt_no, l.id
+                SELECT j.id, j.user_id, j.state, j.runtime
+                FROM agent_jobs j
+                LEFT JOIN agent_threads t ON t.id = j.thread_id
+                WHERE j.id = $1 AND j.user_id = $2 AND t.deleted_at IS NULL
                 """,
                 job_id,
                 user_id,
             )
-        return [{**dict(row), "snapshot": load_json(row["snapshot"])} for row in rows]
+            if job is None:
+                return None
+            return {
+                "job": dict(job),
+                "ledger_rows": await fetch_ledger_rows_for_job(conn, job_id),
+                "conversation_rows": await fetch_ledger_rows_for_conversation(
+                    conn, job_id, user_id
+                ),
+                "inputs": await fetch_job_usage_inputs(conn, job_id),
+                "version": await fetch_snapshot_version(conn),
+            }
 
     async def queue_job_ledger_refresh(self, *, job_id: str) -> int:
         """Queue known references, sharing in-flight work and throttling retries."""

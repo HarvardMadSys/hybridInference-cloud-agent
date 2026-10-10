@@ -342,6 +342,11 @@ export interface AgentJobUsageApi {
     /** Cache-inclusive input, null when the harness counters cannot establish it. */
     normalized_input_tokens?: number | null;
   };
+  /**
+   * Orders two reads of this job's usage, asked for or pushed: the one whose
+   * version compares greater saw everything the other did. Opaque.
+   */
+  version?: string | null;
   conversation?: {
     totals: AgentLedgerTotalsApi | null;
     unknown_rows: AgentLedgerUnknownRowsApi | null;

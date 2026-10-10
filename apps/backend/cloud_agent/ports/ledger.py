@@ -31,6 +31,16 @@ class LedgerRepository(Protocol):
         """
         ...
 
+    async def job_usage_reads(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
+        """Everything an owner's read of a job's usage is made of, from one snapshot.
+
+        ``job``, ``ledger_rows``, ``conversation_rows`` and ``inputs``, and the
+        snapshot's ``version``: of two reads of a job's usage, the one whose
+        version is greater saw everything the other did. ``None`` when the job
+        is not this owner's, or its conversation was deleted.
+        """
+        ...
+
     async def queue_job_ledger_refresh(self, *, job_id: str) -> int:
         """Queue known references, sharing in-flight work and throttling retries."""
         ...

@@ -38,7 +38,7 @@ from cloud_agent.workers.owner_change_signal import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from cloud_agent.ports import ConversationQueries, ExecutionQueries, LedgerRepository
+    from cloud_agent.ports import ConversationQueries, LedgerRepository
 
 
 router = APIRouter(prefix="/v1/agent")
@@ -58,7 +58,6 @@ class _ChangesStorage(Protocol):
     """The capabilities the change stream reads through: rows, and usage."""
 
     conversation_queries: ConversationQueries
-    execution_queries: ExecutionQueries
     ledger: LedgerRepository
 
 
@@ -92,10 +91,9 @@ def _thread(row: dict[str, Any]) -> dict[str, Any]:
 
 async def _usage(store: _ChangesStorage, user_id: str, job_id: str) -> dict[str, Any]:
     """A job's usage as its usage read returns it; only its id if it is not theirs."""
-    job = await store.conversation_queries.get_job(job_id)
-    if job is None or str(job.get("user_id")) != user_id:
+    usage = await job_usage_response(store, job_id=job_id, user_id=user_id)
+    if usage is None:
         return {"id": job_id}
-    usage = await job_usage_response(store, job)
     return {"id": job_id, "usage": usage.model_dump(mode="json")}
 
 

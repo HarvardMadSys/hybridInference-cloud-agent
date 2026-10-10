@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cloud_agent.storage._sql.ledger import fetch_job_usage_inputs
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 
@@ -161,28 +162,7 @@ class PostgresExecutionQueries:
             self._pool.acquire() as conn,
             conn.transaction(isolation="repeatable_read", readonly=True),
         ):
-            attempts = await conn.fetch(
-                "SELECT job_id, started_at FROM agent_attempts WHERE job_id = $1",
-                job_id,
-            )
-            events = await conn.fetch(
-                """
-                SELECT job_id, attempt_id, seq, event_type, created_at,
-                       (payload - ARRAY['text', 'input', 'content'])
-                       || jsonb_build_object(
-                           'has_text', COALESCE(payload->>'text', '') ~ '[^[:space:]]'
-                       ) AS payload
-                FROM agent_job_events
-                WHERE job_id = $1
-                ORDER BY attempt_id, seq
-                """,
-                job_id,
-            )
-        return {
-            "job_ids": [job_id],
-            "attempts": [dict(row) for row in attempts],
-            "events": [{**dict(row), "payload": load_json(row["payload"])} for row in events],
-        }
+            return await fetch_job_usage_inputs(conn, job_id)
 
     async def job_attempts_telemetry(self, *, job_id: str) -> list[dict[str, Any]]:
         """Read lightweight attempt summaries without tool or process rows."""

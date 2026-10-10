@@ -533,6 +533,13 @@ describe('LedgerUsage with the owner change stream', () => {
     expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
   });
 
+  function versioned(version: string, calls: number): AgentJobUsageApi {
+    const data = usage();
+    data.version = version;
+    data.ledger.totals = { ...data.ledger.totals!, calls };
+    return data;
+  }
+
   it('shows usage the stream sent without reading it, over a read that left before it', async () => {
     act(() => setAgentPushLive(true));
     await mount({ ...job, state: 'running' } as AgentJob);
@@ -547,16 +554,60 @@ describe('LedgerUsage with the owner change stream', () => {
     await advance(PUSH_BATCH_MS);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
 
-    const newer = usage();
-    newer.ledger.totals = { ...newer.ledger.totals!, calls: 7 };
-    act(() => receiveHint('usage', 'ajob_1', newer));
+    act(() => receiveHint('usage', 'ajob_1', versioned('0002', 7)));
     await advance(PUSH_BATCH_MS);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
     expect(screen.getByLabelText('Run usage')).toHaveTextContent('7 model calls');
 
-    await act(async () => finishOlder(usage()));
+    await act(async () => finishOlder(versioned('0001', 3)));
     expect(screen.getByLabelText('Run usage')).toHaveTextContent('7 model calls');
     expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+  });
+
+  it('keeps a read over an older usage pushed after it', async () => {
+    act(() => setAgentPushLive(true));
+    vi.mocked(getAgentJobUsage).mockResolvedValue(versioned('0005', 9));
+    await mount({ ...job, state: 'running' } as AgentJob);
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('9 model calls');
+
+    // Computed before the read, delivered after it.
+    act(() => receiveHint('usage', 'ajob_1', versioned('0004', 8)));
+    await advance(PUSH_BATCH_MS);
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('9 model calls');
+  });
+
+  it('shows a read still on its way when it is newer than a usage pushed meanwhile', async () => {
+    act(() => setAgentPushLive(true));
+    vi.mocked(getAgentJobUsage).mockResolvedValue(versioned('0001', 1));
+    await mount({ ...job, state: 'running' } as AgentJob);
+
+    let finishNewer!: (value: AgentJobUsageApi) => void;
+    vi.mocked(getAgentJobUsage).mockImplementationOnce(
+      () => new Promise((resolve) => (finishNewer = resolve)),
+    );
+    act(() => receiveHint('usage', 'ajob_1'));
+    await advance(PUSH_BATCH_MS);
+    act(() => receiveHint('usage', 'ajob_1', versioned('0002', 2)));
+    await advance(PUSH_BATCH_MS);
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('2 model calls');
+
+    await act(async () => finishNewer(versioned('0003', 3)));
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
+  });
+
+  it('keeps the newer usage across a change of the turn it shows', async () => {
+    act(() => setAgentPushLive(true));
+    vi.mocked(getAgentJobUsage).mockResolvedValue(versioned('0007', 7));
+    const view = await mount({ ...job, state: 'running' } as AgentJob);
+    // The turn ends: the line reads again and is shown the newer usage...
+    await act(async () => {
+      view.rerender(<LedgerUsage job={{ ...job, state: 'done' } as AgentJob} />);
+    });
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('7 model calls');
+    // ...and an older one pushed before the turn ended does not replace it.
+    act(() => receiveHint('usage', 'ajob_1', versioned('0006', 6)));
+    await advance(PUSH_BATCH_MS);
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('7 model calls');
   });
 
   it('reads a turn that changed in the same batch rather than trust the usage sent', async () => {

@@ -133,6 +133,13 @@ class JobUsageResponse(BaseModel):
     ledger: JobLedgerSummary
     runtime: RuntimeUsage
     conversation: ConversationUsage | None = None
+    version: str | None = Field(
+        default=None,
+        description=(
+            "Orders two reads of one job's usage, asked for or pushed: the one whose "
+            "version compares greater as a string saw everything the other did. Opaque."
+        ),
+    )
 
 
 def summarize_job_ledger(ledger_rows: list[dict[str, Any]], *, terminal: bool) -> JobLedgerSummary:

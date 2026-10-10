@@ -241,6 +241,37 @@ describe('RunDetails', () => {
     resetAgentPush();
   });
 
+  it('keeps the newer of the usage it read and the usage it was pushed', async () => {
+    vi.useFakeTimers();
+    const read = usage();
+    read.version = '0005';
+    read.ledger.totals = { ...read.ledger.totals!, tokens_in: 5555 };
+    vi.mocked(getAgentJobUsage).mockResolvedValue(read);
+    await act(async () => {
+      render(
+        <RunDetails
+          jobId="ajob_versions"
+          turnNo={2}
+          tab="usage"
+          job={HISTORY_JOB}
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />,
+      );
+    });
+    expect(screen.getByText('5,555')).toBeInTheDocument();
+
+    // Computed before that read, delivered after it.
+    const older = usage();
+    older.version = '0004';
+    older.ledger.totals = { ...older.ledger.totals!, tokens_in: 4444 };
+    act(() => receiveHint('usage', 'ajob_versions', older));
+    await act(async () => vi.advanceTimersByTimeAsync(PUSH_BATCH_MS));
+    expect(screen.getByText('5,555')).toBeInTheDocument();
+    expect(screen.queryByText('4,444')).toBeNull();
+    resetAgentPush();
+  });
+
   it('says the deployment has no ledger instead of showing nothing', async () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(null);
     render(
