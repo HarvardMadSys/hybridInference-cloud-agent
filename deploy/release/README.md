@@ -51,14 +51,16 @@ Two invariants worth naming because they cannot be enforced in the same place:
 
 ## Producing one
 
-`.github/workflows/publish.yml` produces a release for every CI run that
-concludes green on a push to `dev`, and for a `workflow_dispatch` naming a dev
-commit whose own CI is green. In order:
+`.github/workflows/publish.yml` produces a release for every push to `dev` whose
+own CI concludes green, and for a `workflow_dispatch` naming a dev commit whose
+own CI is green. A push starts building at once, alongside its CI, and is
+published only once that CI has passed; CI finishing green also starts it, which
+is what publishes a commit whose CI passed only on a re-run. In order:
 
-1. **Vet the commit.** It has to be on `dev`, its own CI has to have concluded
-   success on a push, and no release may exist for it yet. A release that
-   exists is left exactly as it is: a manifest that could be overwritten is
-   one whose sha256 nobody can pin.
+1. **Vet the commit.** It has to be on `dev`, and no release may exist for it
+   yet. A release that exists is left exactly as it is: a manifest that could
+   be overwritten is one whose sha256 nobody can pin. Unless the run is the push
+   itself, its own CI has to have concluded success on a push already.
 2. **Build, push and start each artifact** — one cell per artifact, on the
    architecture it is deployed to, from the same matrix CI verifies
    (`test_publish_workflow.py` fails if the two differ). Each cell pushes by
@@ -70,17 +72,21 @@ commit whose own CI is green. In order:
    records into the generator's input (below), `build_recipe.py` packages the
    recipe, and `release_manifest.py` writes the document — only if every
    check passes.
-4. **Publish a release** tagged `agent-<sha>`, created as a draft, with
+4. **Wait for the commit's own CI.** A push's CI has been running alongside;
+   only its newest run concluding success on this exact commit lets the release
+   out. A commit CI fails, or cancels for the next push, is built and
+   deploy-tested but never published: its images stay in the registry under
+   their `<cell>-<sha>` tags with no manifest naming them, and nothing selects
+   on those.
+5. **Publish a release** tagged `agent-<sha>`, created as a draft, with
    `recipe.tar.gz` and `release.json` attached, and made visible only once
    both assets are on it. The release notes and the run summary carry the
    sha256 of `release.json`, which is the value a distribution's lock pins.
 
 Nothing on this path deploys, and nothing on it is reachable from a pull
-request: there is no `pull_request` trigger, and `workflow_run` executes the
-copy of the file on the default branch. That is also the one operational
-caveat: `workflow_run` fires only for a workflow file that is on the default
-branch, so until `publish.yml` has been synced to `main`, dev pushes do not
-publish on their own and a dispatch on `dev` is how a release is produced.
+request: there is no `pull_request` trigger, a `push` runs only for commits on
+`dev`, and `workflow_run` executes the copy of the file on the default branch,
+which is `dev`. Each runs merged code, never a pull request's copy.
 
 The generator's input, written by `publish_inputs.py assemble` from the cell
 records:

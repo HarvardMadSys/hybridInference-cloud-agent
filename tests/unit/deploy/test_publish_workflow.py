@@ -65,12 +65,14 @@ def live_lines(script: str) -> list[str]:
 
 
 def test_publication_is_never_reachable_from_a_pull_request() -> None:
-    """No `pull_request`, no `push`: a run is CI finishing on dev, or a hand.
+    """No `pull_request`: a run is a push to dev, CI finishing on dev, or a hand.
 
-    `workflow_run` executes the copy of this file on the default branch, so a
-    pull request cannot even edit its way in.
+    A `push` fires only for commits on dev, and `workflow_run` executes the copy
+    of this file on the default branch, which is dev: either runs merged code,
+    so a pull request cannot even edit its way in.
     """
-    assert set(triggers()) == {"workflow_run", "workflow_dispatch"}
+    assert set(triggers()) == {"push", "workflow_run", "workflow_dispatch"}
+    assert triggers()["push"] == {"branches": ["dev"]}
     assert triggers()["workflow_run"] == {
         "workflows": ["CI"],
         "branches": ["dev"],
@@ -79,10 +81,11 @@ def test_publication_is_never_reachable_from_a_pull_request() -> None:
     assert workflow()["concurrency"]["cancel-in-progress"] is False
 
 
-def test_the_gate_admits_only_ci_finishing_green_on_a_push_to_dev() -> None:
+def test_the_gate_admits_a_push_to_dev_or_ci_finishing_green_on_one() -> None:
     condition = job("commit")["if"]
     for fragment in (
         "github.event_name == 'workflow_dispatch'",
+        "(github.event_name == 'push' && github.ref == 'refs/heads/dev')",
         "github.event.workflow_run.event == 'push'",
         "github.event.workflow_run.head_branch == 'dev'",
         "github.event.workflow_run.head_repository.full_name == github.repository",
@@ -103,7 +106,11 @@ def test_a_named_commit_must_be_on_dev_with_its_own_green_ci() -> None:
         "the ancestry check is against dev, whatever was dispatched"
     )
 
-    script = str(step("Require the commit's own CI", "commit")["with"]["script"])
+    required = step("Require the commit's own CI", "commit")
+    # A push's CI is still running when this job does; the `ci` job waits for
+    # it before anything is published.
+    assert required["if"] == "github.event_name != 'push'"
+    script = str(required["with"]["script"])
     for fragment in (
         "listWorkflowRuns",
         "workflow_id: 'ci.yml'",
@@ -120,11 +127,45 @@ def test_a_published_release_is_never_rebuilt_or_rewritten() -> None:
     assert "getReleaseByTag" in script
     assert "core.setOutput('existing', 'true')" in script
     assert "error.status !== 404" in script
-    for name in ("artifacts", "acceptance", "publish"):
+    for name in ("artifacts", "acceptance", "ci"):
         assert job(name)["if"] == "needs.commit.outputs.existing == ''", name
+    assert job("publish")["if"] == (
+        "needs.commit.outputs.existing == '' && needs.ci.outputs.green == 'true'"
+    )
     assert job("artifacts")["needs"] == "commit"
     assert job("acceptance")["needs"] == ["commit", "artifacts"]
-    assert job("publish")["needs"] == ["commit", "acceptance"]
+    assert job("ci")["needs"] == ["commit", "acceptance"]
+    assert job("publish")["needs"] == ["commit", "acceptance", "ci"]
+
+
+def test_nothing_is_published_until_ci_passed_this_exact_commit() -> None:
+    """A push builds alongside CI; only CI's own verdict on it releases it.
+
+    The wait reads CI's newest push run for this commit and says green only
+    when it completed with success: a failed run, or one cancelled by the next
+    push, leaves `publish` skipped.
+    """
+    ci = job("ci")
+    assert ci["permissions"] == {"actions": "read"}
+    assert ci["outputs"] == {"green": "${{ steps.verdict.outputs.green }}"}
+    wait = step("Wait for CI to conclude", "ci")
+    assert wait["id"] == "verdict"
+    assert wait["with"]["script"]
+    script = live_lines(str(wait["with"]["script"]))
+    joined = "\n".join(script)
+    for fragment in (
+        "listWorkflowRuns",
+        "workflow_id: 'ci.yml'",
+        "head_sha: sha,",
+        "event: 'push',",
+        "run.status === 'completed'",
+        "const green = run.conclusion === 'success';",
+        "core.setOutput('green', green ? 'true' : 'false');",
+        "core.setFailed(",
+    ):
+        assert fragment in joined, fragment
+    assert "status: 'success'" not in joined, "the wait must see a run that is still going"
+    assert wait["env"]["SHA"] == "${{ needs.commit.outputs.sha }}"
 
 
 # --------------------------------------------------------------------- matrix
@@ -258,6 +299,7 @@ def test_write_permissions_sit_only_where_writing_happens() -> None:
     assert workflow()["permissions"] == {"contents": "read"}
     assert job("commit")["permissions"] == {"contents": "read", "actions": "read"}
     assert job("artifacts")["permissions"] == {"contents": "read", "packages": "write"}
+    assert job("ci")["permissions"] == {"actions": "read"}
     assert job("publish")["permissions"] == {"contents": "write"}
 
 
