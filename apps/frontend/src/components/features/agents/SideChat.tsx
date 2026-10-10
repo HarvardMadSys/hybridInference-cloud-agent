@@ -14,6 +14,7 @@ import {
   ComposerSendButton,
 } from './ConversationComposer';
 import { HistoryTurn } from './ChatMessages';
+import { LiveAgentStatus } from './LiveAgentStatus';
 import { describeConversationTurns } from './conversationTurnNavigation';
 import { highestEffort, offeredEfforts } from './effort';
 import { McpApprovalNotice } from './mcp/McpApprovalNotice';
@@ -372,11 +373,6 @@ function SideChatContent({
         >
           <div className="flex-1 px-5 pt-3">
             {active && turns.map((turn) => <HistoryTurn key={turn.key} turn={turn} busy={false} />)}
-            {turns.length && current?.liveNote ? (
-              <p role="status" className="py-2 text-xs text-gray-500 dark:text-gray-400">
-                {current.liveNote}
-              </p>
-            ) : null}
             {turns.length && current && ownerRunNote(current) ? (
               <p className="py-2 text-xs text-gray-500 dark:text-gray-400">
                 {ownerRunNote(current!)}
@@ -384,6 +380,7 @@ function SideChatContent({
             ) : null}
           </div>
           <div ref={scroll.composerRef} className="sticky bottom-0 bg-white p-3 dark:bg-gray-900">
+            {active && current ? <LiveAgentStatus job={current} /> : null}
             {scroll.awayFromBottom ? (
               <div className="mb-2 flex justify-end">
                 <BackToBottom

@@ -890,7 +890,8 @@ def test_shared_turn_lease_loss_interrupts_and_fences():
     assert supervisor.stream.closed is True
 
 
-def test_shared_turn_streams_events_and_requires_a_result():
+@pytest.mark.parametrize("runtime_id", ["claude-code", "codex", "pi", "opencode", "kilo"])
+def test_shared_turn_streams_events_and_requires_a_result(runtime_id):
     supervisor = _Supervisor(
         [
             {
@@ -911,7 +912,7 @@ def test_shared_turn_streams_events_and_requires_a_result():
 
     code, tail, errors, result = runner_mod._stream_shared_agent_turn(
         supervisor=supervisor,
-        job=_JOB,
+        job=replace(_JOB, runtime=runtime_id),
         control=control,
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         lease_token="lease",
@@ -920,7 +921,52 @@ def test_shared_turn_streams_events_and_requires_a_result():
 
     assert (code, tail, errors) == (0, "raw\n", [])
     assert result is not None and result["status"] == "completed"
-    assert control.events == [("assistant", {"text": "done"})]
+    assert control.events == [
+        ("lifecycle", {"phase": "turn_started"}),
+        ("assistant", {"text": "done"}),
+    ]
+
+
+def test_shared_turn_reports_dispatch_before_waiting_for_runtime_output():
+    control = _Control()
+
+    def frames():
+        assert control.events == [("lifecycle", {"phase": "turn_started"})]
+        yield {"kind": "result", "status": "completed", "exit_code": 0}
+
+    supervisor = _Supervisor()
+    supervisor.stream.frames = frames
+
+    code, _tail, _errors, _result = runner_mod._stream_shared_agent_turn(
+        supervisor=supervisor,
+        job=_JOB,
+        control=control,
+        heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
+        lease_token="lease",
+        timeout_s=30,
+    )
+
+    assert code == 0
+    assert control.events == [("lifecycle", {"phase": "turn_started"})]
+    assert supervisor.stream.closed is True
+
+
+def test_shared_turn_does_not_report_dispatch_when_prompt_handoff_is_rejected():
+    supervisor = _Supervisor()
+    supervisor.start_shared_turn = Mock(side_effect=SessionSupervisorError(409, "turn rejected"))
+    control = _Control()
+
+    with pytest.raises(SessionSupervisorError, match="turn rejected"):
+        runner_mod._stream_shared_agent_turn(
+            supervisor=supervisor,
+            job=_JOB,
+            control=control,
+            heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
+            lease_token="lease",
+            timeout_s=30,
+        )
+
+    assert control.events == []
 
 
 def test_run_forever_refuses_to_enroll_a_host_that_cannot_attest(monkeypatch):

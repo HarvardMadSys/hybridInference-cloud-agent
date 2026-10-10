@@ -58,6 +58,7 @@ import type { SelectedSkillApi } from '@/lib/api/skills';
 import { BackToBottom, TurnRail } from './TurnNavigator';
 import { TerminalWorkspace } from './TerminalWorkspace';
 import { ThreadStatsBar } from './ThreadStatsBar';
+import { LiveAgentStatus } from './LiveAgentStatus';
 import { ThreadActions } from './ThreadActions';
 import { McpSessionPanel } from './mcp/McpSessionPanel';
 import { NativeQuestionPrompt } from './NativeQuestionPrompt';
@@ -1649,12 +1650,6 @@ export function JobDetail({
                           }
                         />
                       ))}
-                      {job.liveNote ? (
-                        <div className="flex items-center gap-2.5 py-3 text-[13px] text-gray-500 dark:text-gray-400">
-                          <span className="h-2 w-2 animate-pulse rounded-full bg-blue-500" />
-                          {job.liveNote}
-                        </div>
-                      ) : null}
                       {job.state === 'queued' && visibleEvents.length === 0 ? (
                         <div className="flex items-center gap-2.5 py-3 text-[13px] text-gray-500 dark:text-gray-400">
                           <span className="h-2 w-2 animate-pulse rounded-full bg-gray-400 dark:bg-gray-600" />
@@ -1694,6 +1689,7 @@ export function JobDetail({
                 ref={scroll.composerRef}
                 className="sticky bottom-0 z-10 -mx-2 mt-10 bg-gradient-to-t from-gray-50 via-gray-50/95 px-2 pb-2 pt-8 dark:from-gray-950 dark:via-gray-950/95"
               >
+                <LiveAgentStatus job={job} />
                 {/* `/goal` on its own is not an objective. It is consumed
                     rather than sent to the model, and this is where the owner
                     is told what is missing — beside the box the token is still

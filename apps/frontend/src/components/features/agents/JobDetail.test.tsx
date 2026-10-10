@@ -1219,6 +1219,37 @@ describe('JobDetail', () => {
     expect(screen.getByRole('textbox', { name: 'Add a follow-up' })).toBeDisabled();
   });
 
+  it('shows live agent activity while reading either chat or trajectory', () => {
+    const job = makeJob({ liveNote: 'Running tool call' });
+    const { rerender } = render(<JobDetail job={job} />);
+
+    expect(screen.getByRole('status', { name: 'Agent status' })).toHaveTextContent(
+      'Running tool call',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    expect(screen.getByRole('status', { name: 'Agent status' })).toBeVisible();
+
+    rerender(<JobDetail job={{ ...job, liveNote: 'Waiting for LLM response' }} />);
+    expect(screen.getByRole('status', { name: 'Agent status' })).toHaveTextContent(
+      'Waiting for LLM response',
+    );
+    expect(screen.queryByText('Running tool call')).not.toBeInTheDocument();
+  });
+
+  it.each(['done', 'cancelled'] as const)(
+    'hides live agent activity after a running job becomes %s',
+    (state) => {
+      const job = makeJob({ liveNote: 'Running tool call' });
+      const { rerender } = render(<JobDetail job={job} />);
+      expect(screen.getByRole('status', { name: 'Agent status' })).toBeVisible();
+
+      rerender(<JobDetail job={{ ...job, state }} />);
+
+      expect(screen.queryByRole('status', { name: 'Agent status' })).not.toBeInTheDocument();
+      expect(screen.queryByText('Running tool call')).not.toBeInTheDocument();
+    },
+  );
+
   it('renders the conversation first, including history and the full current prompt', () => {
     render(
       <JobDetail

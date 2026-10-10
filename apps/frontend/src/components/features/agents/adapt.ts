@@ -33,6 +33,7 @@ import type {
   TurnResources,
 } from './types';
 import { replyPreviewPiece } from './trajectoryProtocol';
+import { agentLiveNote } from './agentLiveStatus';
 
 /**
  * Preserve a server result as a per-turn display state.
@@ -902,6 +903,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     currentAttemptNo: currentAttemptIndex >= 0 ? currentAttemptIndex + 1 : undefined,
     telemetryAttemptNo: telemetryAttemptIndex >= 0 ? telemetryAttemptIndex + 1 : undefined,
     events: renderedEvents,
+    liveNote: agentLiveNote(job, events),
     diffFiles: toDiffFiles(patch),
     workspaceDiffAvailable: typeof options.patch === 'string',
     diffFileDetails: toDiffFileDetails(patch),

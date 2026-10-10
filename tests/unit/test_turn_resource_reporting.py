@@ -392,8 +392,13 @@ def test_a_running_checkpoint_is_posted_as_collecting_during_the_stream(monkeypa
     """
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "8")
     bodies: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
 
     def endpoint(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/events"):
+            events.append(_json_body(request))
+            return httpx.Response(200, json={"ok": True})
+        assert request.url.path.endswith("/turn-resources")
         bodies.append(_json_body(request))
         return httpx.Response(200, json={"ok": True})
 
@@ -436,6 +441,9 @@ def test_a_running_checkpoint_is_posted_as_collecting_during_the_stream(monkeypa
         control.close()
 
     assert exit_code == 0
+    assert events == [
+        {"event_type": "lifecycle", "payload": {"phase": "turn_started"}, "event_seq": 1}
+    ]
     assert len(bodies) == 1
     assert bodies[0]["state"] == "collecting"
     assert bodies[0]["report_seq"] == 11

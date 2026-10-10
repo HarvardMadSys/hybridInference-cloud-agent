@@ -363,6 +363,67 @@ describe('Side Chat', () => {
     expect(screen.getByRole('textbox')).toHaveValue('');
   });
 
+  it('updates live agent activity as its child starts and completes a tool call', async () => {
+    vi.mocked(streamAgentJob).mockReturnValue(new Promise(() => {}));
+    const started: AgentThreadEventApi = {
+      id: 18,
+      seq: 18,
+      job_id: next.id,
+      turn_no: next.turn_no!,
+      attempt_id: 12,
+      event_type: 'lifecycle',
+      payload: { phase: 'init' },
+      created_at: null,
+    };
+    events = [started];
+    render(<SideChat {...props()} />);
+    await send();
+    expect(await screen.findByRole('status', { name: 'Agent status' })).toHaveTextContent(
+      'Waiting for LLM response',
+    );
+    await waitFor(() => expect(streamAgentJob).toHaveBeenCalledWith(next.id, expect.anything()));
+    const handler = vi.mocked(streamAgentJob).mock.calls.at(-1)![1];
+    const toolCall: AgentThreadEventApi = {
+      ...started,
+      id: 19,
+      seq: 19,
+      event_type: 'tool_use',
+      payload: { id: 'tool', name: 'Bash', input: { command: 'pwd' } },
+    };
+    await act(async () => {
+      events.push(toolCall);
+      handler.onEvent(toolCall);
+    });
+    expect(screen.getByRole('status', { name: 'Agent status' })).toHaveTextContent(
+      'Running tool call',
+    );
+
+    const toolResult: AgentThreadEventApi = {
+      ...started,
+      id: 20,
+      seq: 20,
+      event_type: 'tool_result',
+      payload: { tool_use_id: 'tool', content: 'done' },
+    };
+    await act(async () => {
+      events.push(toolResult);
+      handler.onEvent(toolResult);
+    });
+    expect(screen.getByRole('status', { name: 'Agent status' })).toHaveTextContent(
+      'Waiting for LLM response',
+    );
+
+    await act(async () => {
+      jobs = jobs.map((job) =>
+        job.id === next.id ? { ...job, state: 'succeeded', conversation_state: 'idle' } : job,
+      );
+      handler.onFinished?.({ state: 'succeeded', published_pr_url: null });
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole('status', { name: 'Agent status' })).not.toBeInTheDocument(),
+    );
+  });
+
   it('stops only the child and preserves an unsent draft when its native context is lost', async () => {
     render(<SideChat {...props()} />);
     await send();

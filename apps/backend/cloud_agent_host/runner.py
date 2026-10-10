@@ -1856,7 +1856,6 @@ def _stream_shared_agent_turn(
             frames.put(None)
 
     reader = threading.Thread(target=pump, daemon=True, name="shared-agent-stream")
-    reader.start()
     deadline = time.monotonic() + timeout_s
     tail: list[str] = []
     tool_errors: list[str] = []
@@ -1864,6 +1863,11 @@ def _stream_shared_agent_turn(
     forced_exit_code: int | None = None
     interrupt_deadline: float | None = None
     try:
+        # The broker admits and dispatches the prompt before opening this
+        # response stream. Resident follow-ups need not emit a native init
+        # event, so report this shared boundary before waiting for CLI output.
+        control.append_event(NormalizedEvent("lifecycle", {"phase": "turn_started"}))
+        reader.start()
         while True:
             if heart.lease_lost:
                 with contextlib.suppress(Exception):

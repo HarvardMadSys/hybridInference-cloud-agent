@@ -1811,7 +1811,12 @@ class _StubControl:
     def __init__(self, answers: list[Any]) -> None:
         self.answers = answers
         self.sent: list[tuple[str, dict[str, Any]]] = []
+        self.events: list[tuple[str, dict[str, Any]]] = []
         self.closed = False
+
+    def append_event(self, event: Any) -> None:
+        """Record execution milestones separately from measurement delivery."""
+        self.events.append((event.event_type, event.payload))
 
     def record_measurement(self, job_id: str, body: dict[str, Any]) -> Any:
         """Record the body and return the next scripted answer."""
@@ -2015,10 +2020,11 @@ def test_the_streaming_helper_invokes_the_freeze_callback(startup_measurement):
     """
     measurement = startup_measurement
     frozen: list[Any] = []
+    control = _StubControl([])
     runner_mod._stream_shared_agent_turn(
         supervisor=_IdleSupervisor(),
         job=_claimed(job_id="ajob_1"),
-        control=_StubControl([]),
+        control=control,
         heart=_IdleHeart(),
         lease_token="lease",
         timeout_s=1.0,
@@ -2027,6 +2033,7 @@ def test_the_streaming_helper_invokes_the_freeze_callback(startup_measurement):
     )
 
     assert frozen == [measurement], "the record must leave the host at the handoff"
+    assert control.events == [("lifecycle", {"phase": "turn_started"})]
 
 
 def test_the_call_path_actually_passes_the_freeze_callback():
@@ -2351,6 +2358,7 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
     delivered = threading.Event()
     release_delivery = threading.Event()
     release_turn = threading.Event()
+    frames_entered = threading.Event()
 
     class _Recorder:
         def record_measurement(self, job_id: str, body: dict[str, Any]) -> Any:
@@ -2379,6 +2387,7 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
     class _HangingStream:
         def frames(self) -> Any:
             """Block until the test is done with the assertion."""
+            frames_entered.set()
             release_turn.wait(timeout=10)
             return iter(({"kind": "result", "exit_code": 0},))
 
@@ -2389,14 +2398,14 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
         operation=operation_profiling.STARTUP_OPERATION, host="host-a"
     )
     assert measurement is not None
-    real_control = runner_mod.ControlPlane
+    stream_control = _StubControl([])
     monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_a, **_k: _Recorder())
     try:
         turn = threading.Thread(
             target=lambda: runner_mod._stream_shared_agent_turn(
                 supervisor=_HangingSupervisor(),
                 job=_claimed(),
-                control=real_control("http://control", "t"),
+                control=stream_control,
                 heart=_IdleHeart(),
                 lease_token="lease",
                 timeout_s=10.0,
@@ -2413,6 +2422,8 @@ def test_the_startup_record_is_delivered_while_the_turn_is_still_running(monkeyp
         turn.start()
         assert turn_is_running.wait(timeout=5), "the turn must have started"
         assert delivered.wait(timeout=5), "the startup sample must reach the destination"
+        assert frames_entered.wait(timeout=5), "the turn must be waiting for runtime output"
+        assert stream_control.events == [("lifecycle", {"phase": "turn_started"})]
 
         # The record is out while the model is still working. The delivery is
         # held open, so the turn cannot have finished before this was sent.

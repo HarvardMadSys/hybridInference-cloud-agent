@@ -337,7 +337,7 @@ export interface AgentJob {
   /** Display number whose continuity/resources came from the telemetry read. */
   telemetryAttemptNo?: number;
   events: AgentEvent[];
-  /** Bottom-of-stream live line while running, e.g. "turn 15 · …". */
+  /** Current attempt's tool or model activity, derived from its live events. */
   liveNote?: string;
   diffFiles: string[];
   /** Whether the current shared workspace diff was actually readable. */

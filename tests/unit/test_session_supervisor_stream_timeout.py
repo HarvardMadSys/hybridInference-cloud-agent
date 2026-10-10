@@ -44,7 +44,7 @@ def quiet_broker():
             self.send_header("Content-Type", "application/x-ndjson")
             self.end_headers()
             self.wfile.write(
-                b'{"kind":"event","event_type":"lifecycle","payload":{"phase":"turn_started"}}\n'
+                b'{"kind":"event","event_type":"lifecycle","payload":{"phase":"init"}}\n'
             )
             self.wfile.flush()
             event_sent.set()
@@ -105,7 +105,14 @@ def _run_turn(client, *, heart=None, control=None, timeout_s=5):
 def test_quiet_turn_outlives_lifecycle_timeout(quiet_broker):
     """A model can think longer than the control API timeout and still finish."""
     timer = threading.Timer(0.5, quiet_broker.release.set)
-    control = SimpleNamespace(append_event=lambda _event: timer.start())
+    events = []
+
+    def on_event(event):
+        events.append((event.event_type, event.payload))
+        if event.payload == {"phase": "init"}:
+            timer.start()
+
+    control = SimpleNamespace(append_event=on_event)
     try:
         code, _tail, errors, result = _run_turn(quiet_broker.client, control=control)
     finally:
@@ -114,6 +121,10 @@ def test_quiet_turn_outlives_lifecycle_timeout(quiet_broker):
 
     assert code == 0
     assert errors == []
+    assert events == [
+        ("lifecycle", {"phase": "turn_started"}),
+        ("lifecycle", {"phase": "init"}),
+    ]
     assert result["status"] == "completed"
     assert not quiet_broker.interrupted.is_set()
 
@@ -131,7 +142,7 @@ def test_quiet_turn_remains_interruptible(quiet_broker, monkeypatch, reason):
     heart = SimpleNamespace(cancel_requested=False, lease_lost=False)
 
     def on_event(event):
-        if event.payload != {"phase": "turn_started"}:
+        if event.payload != {"phase": "init"}:
             return
         if reason == "cancel":
             heart.cancel_requested = True
