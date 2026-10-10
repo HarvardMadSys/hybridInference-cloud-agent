@@ -793,18 +793,6 @@ export async function disconnectAgentIntegration(
   if (!resp.ok) await jsonOrThrow(resp);
 }
 
-/**
- * Model ids this gateway serves — the model picker's options.
- *
- * Sourced from the agent config, not /v1/models: that list answers for the
- * browsing user, and on staging it offered 15 models of which 13 failed the
- * job's first call. The config's list is the create endpoint's own predicate.
- */
-export async function listAgentModels(): Promise<string[]> {
-  const cfg = await getAgentConfig();
-  return cfg.models ?? [];
-}
-
 export interface RepoBranchesApi {
   default: string | null;
   branches: string[];
@@ -850,19 +838,6 @@ export interface CreateAgentJobRequest {
   /** A branch. The platform pins it to a commit at creation. */
   base_ref?: string;
   base_sha?: string;
-}
-
-export async function listAgentJobs(
-  limit = 50,
-  archived = false,
-  repo?: string,
-): Promise<AgentJobApi[]> {
-  const query = new URLSearchParams({ limit: String(limit) });
-  if (archived) query.set('archived', 'true');
-  if (repo) query.set('repo', repo);
-  const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs?${query.toString()}`);
-  const body = await jsonOrThrow<{ jobs: AgentJobApi[] }>(resp);
-  return body.jobs;
 }
 
 export interface AgentConversationApi {
@@ -1450,19 +1425,6 @@ export async function forkAgentJob(
     // owner's retry returns that child instead of creating another one.
     throw cause;
   }
-}
-
-/** Page through the event log. Used to backfill before the stream attaches. */
-export async function listAgentJobEvents(
-  jobId: string,
-  after = 0,
-  limit = 500,
-): Promise<{ events: AgentJobEventApi[]; next_cursor: number }> {
-  const resp = await fetchWithAuth(
-    API_BASE,
-    `/v1/agent/jobs/${encodeURIComponent(jobId)}/events?after=${after}&limit=${limit}`,
-  );
-  return jsonOrThrow(resp);
 }
 
 /** One stored event labelled with the conversation turn it belongs to. */

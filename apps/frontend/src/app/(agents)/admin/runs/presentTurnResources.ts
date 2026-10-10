@@ -461,16 +461,6 @@ export function completenessSentence(summary: {
   ].join(' ');
 }
 
-/**
- * What a CPU number is and is not, so it is never read as a fraction of one core.
- *
- * The sum is the member's own scheduler time across every thread. A reader who
- * assumes wall-clock utilisation will read 80 CPU-s of a 130-second turn as
- * impossible; the sentence says why it is not.
- */
-export const CPU_BASIS =
-  'The member\u2019s own scheduler time, summed over its threads and processes; it is not wall-clock time and may exceed the turn';
-
 /** What a peak is, so a sampled maximum is never mistaken for a physical total. */
 export const MEMORY_BASIS =
   'Proportional resident memory, shared between users of the same pages; it is not machine memory and not a sum over executions';

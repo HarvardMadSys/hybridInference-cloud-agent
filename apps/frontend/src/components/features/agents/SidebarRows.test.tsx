@@ -3,7 +3,26 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Highlight, TaskRow } from './SidebarRows';
-import { AGENT_JOBS } from './mock';
+import type { AgentJob } from './types';
+
+const JOB: AgentJob = {
+  id: 'job-1',
+  title: 'Initial request',
+  state: 'done',
+  repo: 'owner/repo',
+  baseSha: 'abcdef1',
+  branch: 'agent/job-1',
+  runtime: 'claude-code',
+  model: 'model',
+  spentUsd: 0,
+  timeoutLabel: '',
+  sandbox: '',
+  attempts: [],
+  events: [],
+  diffFiles: [],
+  gates: [],
+  usage: { tokensIn: '', tokensOut: '', cachePct: 0, turns: 0 },
+};
 afterEach(cleanup);
 describe('literal search highlighting', () => {
   it('keeps original offsets after Unicode letters whose lowercase form changes length', () => {
@@ -49,8 +68,8 @@ describe('conversation status in sidebar rows', () => {
         <TaskRow
           row={{
             key: 'conversation-1',
-            job: { ...AGENT_JOBS[0], state, conversationState },
-            jobIds: [AGENT_JOBS[0].id],
+            job: { ...JOB, state, conversationState },
+            jobIds: [JOB.id],
             archived: false,
             lastActivityAt: null,
           }}

@@ -12,7 +12,6 @@ const api = vi.hoisted(() => ({
   thread: vi.fn(),
   archive: vi.fn(),
   restore: vi.fn(),
-  archivedJobs: vi.fn(),
   sessions: vi.fn(),
   setArchived: vi.fn(),
   pin: vi.fn(),
@@ -47,7 +46,6 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentJobThread: api.thread,
   archiveAgentJob: api.archive,
   restoreAgentJob: api.restore,
-  listAgentJobs: api.archivedJobs,
   listAgentSessions: api.sessions,
   setAgentSessionsArchived: api.setArchived,
   pinAgentJob: api.pin,
@@ -571,7 +569,6 @@ describe('sidebar navigation interactions', () => {
         next_cursor: null,
       };
     });
-    api.archivedJobs.mockImplementation(async () => (archived ? [old.job] : []));
     api.list.mockImplementation(async ({ q, repo }: { q?: string; repo?: string }) => ({
       // This old task never belongs to the unscoped first page.
       conversations: q

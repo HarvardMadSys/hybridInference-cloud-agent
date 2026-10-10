@@ -6,12 +6,6 @@ export default {
   theme: {
     extend: {
       colors: {
-        brand: {
-          primary: '#111827',
-          accent: '#3B82F6',
-          bgLight: '#F9FAFB',
-          bgDark: '#0B1220',
-        },
         crimson: {
           DEFAULT: '#A51C30',
           dark: '#8B1729',

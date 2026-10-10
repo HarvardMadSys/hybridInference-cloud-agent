@@ -313,11 +313,6 @@ export async function listMcpConnections(): Promise<McpConnectionsApi> {
   return jsonOrThrow(await fetchWithAuth(API_BASE, '/v1/agent/mcp/connections'));
 }
 
-/** Templates alone, for a caller that needs presets before it needs a list. */
-export async function listMcpTemplates(): Promise<McpTemplateApi[]> {
-  return jsonOrThrow(await fetchWithAuth(API_BASE, '/v1/agent/mcp/templates'));
-}
-
 /** Search our durable directory cache; this does not contact a listed server. */
 export async function listMcpCatalog(
   search = '',

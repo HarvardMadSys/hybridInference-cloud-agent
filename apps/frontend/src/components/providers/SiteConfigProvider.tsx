@@ -36,7 +36,3 @@ export function SiteConfigProvider({
 export function useSiteConfig(): RuntimeSiteConfig {
   return useContext(SiteConfigContext);
 }
-
-export function useBranding(): RuntimeSiteConfig['branding'] {
-  return useSiteConfig().branding;
-}

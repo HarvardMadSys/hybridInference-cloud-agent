@@ -61,5 +61,3 @@ export const config = {
   isDevelopment: process.env.NODE_ENV === 'development',
   isProduction: process.env.NODE_ENV === 'production',
 } as const;
-
-export type Config = typeof config;

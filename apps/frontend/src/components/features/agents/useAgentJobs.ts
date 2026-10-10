@@ -7,7 +7,6 @@ import {
   getAgentJobGit,
   getAgentJobThread,
   listAllAgentThreadEvents,
-  listAgentJobs,
   listAgentProjects,
   streamAgentJob,
 } from '@/lib/api/agents';
@@ -24,7 +23,6 @@ import type {
 import { toDisplayJob } from './adapt';
 import { announceAgentSessionsChanged, onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import type { AgentJob } from './types';
-import { getConversationState } from './conversationState';
 import { isActiveJobState, isActiveConversationState } from './conversationJob';
 import { hasActiveGoal } from './goal/liveWork';
 import { preserveResolvedTaskTitle, taskTitleNeedsGeneration } from './taskTitles';
@@ -121,78 +119,6 @@ export function applyAgentLifecycleEvent(
 // error — the server's SSE cap is finite by design, so a drop is the expected
 // shape and the client resumes from the last event id.
 
-/** List the caller's jobs, refreshed on an interval while any are live. */
-export function useAgentJobList(
-  pollMs = 10_000,
-  archived = false,
-): {
-  jobs: AgentJob[];
-  loading: boolean;
-  error: string | null;
-  reload: () => void;
-} {
-  const [jobs, setJobs] = useState<AgentJob[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [tick, setTick] = useState(0);
-  const generation = useRef(0);
-
-  const reload = useCallback(() => {
-    generation.current += 1;
-    setTick((value) => value + 1);
-  }, []);
-
-  useEffect(
-    () =>
-      onAgentSessionsChanged((change) => {
-        if (change.deleted || (change.archived !== undefined && change.archived !== archived)) {
-          const changed = new Set(change.threadIds);
-          setJobs((current) => current.filter((job) => !changed.has(job.threadId ?? job.id)));
-        }
-        reload();
-      }),
-    [archived, reload],
-  );
-
-  useEffect(() => {
-    let cancelled = false;
-    const requestGeneration = generation.current;
-    listAgentJobs(50, archived)
-      .then((api: AgentJobApi[]) => {
-        if (cancelled || requestGeneration !== generation.current) return;
-        setJobs(api.map((job) => toDisplayJob(job)));
-        setError(null);
-      })
-      .catch((cause: unknown) => {
-        if (!cancelled && requestGeneration === generation.current)
-          setError(cause instanceof Error ? cause.message : 'could not load jobs');
-      })
-      .finally(() => {
-        if (!cancelled && requestGeneration === generation.current) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [archived, tick]);
-
-  // Only poll while something can still change; a list of finished jobs does
-  // not need a request every ten seconds.
-  const hasLive = jobs.some(
-    (job) =>
-      getConversationState(job) === 'running' ||
-      getConversationState(job) === 'queued' ||
-      (job.workspaceShared === true &&
-        isActiveWorkspacePublicationState(job.workspacePublicationState)),
-  );
-  useEffect(() => {
-    if (!hasLive) return undefined;
-    const timer = setInterval(reload, pollMs);
-    return () => clearInterval(timer);
-  }, [hasLive, pollMs, reload]);
-
-  return { jobs, loading, error, reload };
-}
-
 /** The caller's projects, for the sidebar's folder tree. */
 export function useAgentProjects(archived = false): {
   projects: AgentProjectApi[];
@@ -235,94 +161,6 @@ export function useAgentProjects(archived = false): {
   }, [archived, tick]);
 
   return { projects, loading, error, reload };
-}
-
-/**
- * One project's jobs, fetched on demand.
- *
- * The sidebar's shared job list is a global newest-first page, so a project
- * that has been quiet holds only its most recent turns there. Expanding such a
- * folder pulls that project's own page instead of widening the global one.
- */
-export function useProjectJobs(limit = 200): {
-  jobsByRepo: Map<string, AgentJob[]>;
-  loadingRepos: Set<string>;
-  errorRepos: Map<string, string>;
-  load: (repo: string) => void;
-} {
-  const [jobsByRepo, setJobsByRepo] = useState<Map<string, AgentJob[]>>(new Map());
-  const [loadingRepos, setLoadingRepos] = useState<Set<string>>(new Set());
-  const [errorRepos, setErrorRepos] = useState<Map<string, string>>(new Map());
-  const inFlight = useRef<Map<string, symbol>>(new Map());
-  const requestedRepos = useRef<Set<string>>(new Set());
-
-  const load = useCallback(
-    (repo: string) => {
-      if (inFlight.current.has(repo)) return;
-      requestedRepos.current.add(repo);
-      const request = Symbol(repo);
-      inFlight.current.set(repo, request);
-      setLoadingRepos((current) => new Set(current).add(repo));
-      listAgentJobs(limit, false, repo)
-        .then((api: AgentJobApi[]) => {
-          if (inFlight.current.get(repo) !== request) return;
-          setJobsByRepo((current) =>
-            new Map(current).set(
-              repo,
-              api.map((job) => toDisplayJob(job)),
-            ),
-          );
-          setErrorRepos((current) => {
-            if (!current.has(repo)) return current;
-            const next = new Map(current);
-            next.delete(repo);
-            return next;
-          });
-        })
-        .catch((cause: unknown) => {
-          if (inFlight.current.get(repo) !== request) return;
-          setErrorRepos((current) =>
-            new Map(current).set(
-              repo,
-              cause instanceof Error ? cause.message : 'could not load this project',
-            ),
-          );
-        })
-        .finally(() => {
-          if (inFlight.current.get(repo) !== request) return;
-          inFlight.current.delete(repo);
-          setLoadingRepos((current) => {
-            const next = new Set(current);
-            next.delete(repo);
-            return next;
-          });
-        });
-    },
-    [limit],
-  );
-
-  // Completed project pages do not poll. Invalidate both cached rows and any
-  // older request, then refresh every folder the reader has already opened.
-  useEffect(
-    () =>
-      onAgentSessionsChanged(() => {
-        inFlight.current.clear();
-        setJobsByRepo(new Map());
-        setLoadingRepos(new Set());
-        setErrorRepos(new Map());
-        requestedRepos.current.forEach(load);
-      }),
-    [load],
-  );
-
-  useEffect(
-    () => () => {
-      inFlight.current.clear();
-    },
-    [],
-  );
-
-  return { jobsByRepo, loadingRepos, errorRepos, load };
 }
 
 /** One job, its event log, and its patch — kept live over SSE. */

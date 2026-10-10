@@ -38,7 +38,6 @@ import {
   type RowActions,
   type SidebarReorderProps,
 } from './SidebarRows';
-export { groupJobsByConversation, groupJobsByProject } from './conversations';
 export const SIDEBAR_WIDTH_STORAGE_KEY = 'agents.sidebar.width';
 export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   const pathname = usePathname() ?? '';

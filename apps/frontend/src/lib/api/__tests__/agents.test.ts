@@ -27,7 +27,6 @@ import {
   listAllAgentThreadEvents,
   listAgentConversations,
   listAgentTerminals,
-  listAgentJobs,
   pauseAgentGoal,
   pinAgentJob,
   renameAgentJob,
@@ -174,25 +173,6 @@ describe('agents api', () => {
     expect(await refreshAgentJobUsage('ajob_1')).toBeNull();
     fetchWithAuth.mockResolvedValue(jsonResponse({ detail: 'Unavailable' }, 503));
     await expect(getAgentJobUsage('ajob_1')).rejects.toMatchObject({ statusCode: 503 });
-  });
-
-  it('lists jobs', async () => {
-    fetchWithAuth.mockResolvedValue(jsonResponse({ jobs: [{ id: 'ajob_1' }] }));
-    const jobs = await listAgentJobs();
-    expect(jobs).toHaveLength(1);
-    expect(jobs[0].id).toBe('ajob_1');
-    expect(fetchWithAuth).toHaveBeenCalledWith(expect.any(String), '/v1/agent/jobs?limit=50');
-  });
-
-  it('lists archived jobs separately', async () => {
-    fetchWithAuth.mockResolvedValue(jsonResponse({ jobs: [] }));
-
-    await listAgentJobs(25, true);
-
-    expect(fetchWithAuth).toHaveBeenCalledWith(
-      expect.any(String),
-      '/v1/agent/jobs?limit=25&archived=true',
-    );
   });
 
   it('reads every page of a conversation event log', async () => {

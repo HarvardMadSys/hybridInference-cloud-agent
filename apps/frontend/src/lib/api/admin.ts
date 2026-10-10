@@ -343,12 +343,6 @@ export interface AgentHostCapacityHistory {
   points: AgentHostCapacityPoint[];
 }
 
-export interface HostEnrollToken {
-  enroll_token: string;
-  host: string;
-  expires_at: string;
-}
-
 export async function getAgentRunnerHosts(signal?: AbortSignal): Promise<AgentRunnerHostPool> {
   return jsonOrThrow<AgentRunnerHostPool>(await fetchWithAuth(API_BASE, HOSTS, { signal }));
 }
@@ -544,26 +538,6 @@ export async function removeAgentRunnerHost(
     },
   );
   return jsonOrThrow<AgentRunnerHostPool>(resp);
-}
-
-/**
- * Mint a one-time token that lets one named machine join the pool.
- *
- * The token comes back **once**: only its hash is stored, so there is no call
- * that can show it again. Lose it and issue another.
- */
-export async function issueHostEnrollToken(
-  host: string,
-  ttlSeconds?: number,
-): Promise<HostEnrollToken> {
-  const body: { host: string; ttl_seconds?: number } = { host };
-  if (ttlSeconds !== undefined) body.ttl_seconds = ttlSeconds;
-  const resp = await fetchWithAuth(API_BASE, `${HOSTS}/enroll-token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  return jsonOrThrow<HostEnrollToken>(resp);
 }
 
 /** What an Audit log entry is about; the page filters by it. */

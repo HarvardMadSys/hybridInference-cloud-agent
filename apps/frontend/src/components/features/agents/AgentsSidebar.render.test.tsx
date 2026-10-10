@@ -33,8 +33,6 @@ vi.mock('@/lib/api/agents', () => ({
   getAgentJob: vi.fn(),
   getAgentJobFiles: vi.fn(),
   getAgentJobThread: vi.fn(),
-  listAgentJobEvents: vi.fn(),
-  listAgentJobs: mocks.listAgentJobs,
   listAgentConversations: mocks.listAgentConversations,
   listAgentProjects: mocks.listAgentProjects,
   pinAgentJob: mocks.pinAgentJob,

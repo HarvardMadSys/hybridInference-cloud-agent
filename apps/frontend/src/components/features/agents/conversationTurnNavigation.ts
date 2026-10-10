@@ -443,14 +443,6 @@ export function toNavigationEntry(
   };
 }
 
-/** Build the rail's entries for the turns a page currently renders. */
-export function buildConversationTurnNavigation(
-  job: AgentJob,
-  options: ConversationTurnOptions = {},
-): ConversationTurnNavigationEntry[] {
-  return describeConversationTurns(job, options).map((turn) => toNavigationEntry(turn, options));
-}
-
 /**
  * Whether two entry lists would render the same marks.
  *
