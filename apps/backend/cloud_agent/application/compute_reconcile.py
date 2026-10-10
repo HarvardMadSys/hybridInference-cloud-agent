@@ -63,6 +63,10 @@ _PREFLIGHT_CHECKS = {
 }
 
 
+# How long past its recorded deadline a missing resource is taken as ended.
+_EXPIRY_GRACE = timedelta(minutes=10)
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -318,6 +322,12 @@ class ComputeReconciler:
         await self._save_observation(operation, allocation, observation)
         if observation.state == "terminated":
             raise ProviderError("resource_terminated", "The allocated resource has terminated")
+        if observation.state == "failed":
+            await self._release_failed_acquisition(operation, allocation)
+            raise ProviderError(
+                "resource_failed",
+                "The provider could not set up this resource; it was released",
+            )
         if observation.state != "ready":
             await self._finish(
                 operation,
@@ -436,9 +446,68 @@ class ComputeReconciler:
         self, operation: dict[str, Any], allocation: dict[str, Any]
     ) -> ResourceObservation:
         provider = self.commands.registry.get(allocation["provider_id"]).provider
-        observation = await provider.inspect(self._ref(allocation))
+        try:
+            observation = await provider.inspect(self._ref(allocation))
+        except ProviderError as exc:
+            expired = self._expired_absence(allocation, exc)
+            if expired is None:
+                raise
+            observation = expired
         await self._save_observation(operation, allocation, observation)
         return observation
+
+    def _expired_absence(
+        self, allocation: dict[str, Any], exc: ProviderError
+    ) -> ResourceObservation | None:
+        """Treat a missing resource as ended only once its own recorded lease has run out.
+
+        Absence alone never proves deletion: visibility or credentials can
+        change. Past the lease the provider has ended it regardless, so the
+        recorded deadline is the evidence.
+        """
+        expires = _moment(allocation.get("expires_at"))
+        if (
+            exc.code != "resource_visibility_unknown"
+            or not allocation.get("expiration_known")
+            or expires is None
+            or _now() < expires + _EXPIRY_GRACE
+        ):
+            return None
+        return ResourceObservation(
+            ref=self._ref(allocation),
+            state="terminated",
+            raw_state="expired_not_found",
+            observed_at=_now(),
+            expires_at=expires,
+            lease_known=True,
+            scope_complete=True,
+        )
+
+    async def _release_failed_acquisition(
+        self, operation: dict[str, Any], allocation: dict[str, Any]
+    ) -> None:
+        """Delete a resource the provider failed to set up.
+
+        No Host ever ran there: deployment starts only once a resource is ready.
+        Left alone it would hold machines and this deployment setup until its
+        lease ends.
+        """
+        if allocation["mode"] != "provision" or allocation.get("management_mode") != "manage":
+            return
+        provider = self.commands.registry.get(allocation["provider_id"]).provider
+        if not provider.capabilities().can_release:
+            return
+        await self._checkpoint(operation, "releasing_failed", {"external_pending": True})
+        receipt = await provider.release(self._ref(allocation), self._intent(operation, allocation))
+        observation = receipt.observation or await provider.inspect(self._ref(allocation))
+        await self._save_observation(operation, allocation, observation)
+        if observation.state != "terminated":
+            raise ProviderError(
+                "release_pending",
+                "Waiting for the provider to remove the failed resource",
+                retryable=True,
+            )
+        await self._checkpoint(operation, "failed_resource_released", {"external_pending": False})
 
     async def _submit_acquisition(
         self, operation: dict[str, Any], allocation: dict[str, Any]

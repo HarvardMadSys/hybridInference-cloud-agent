@@ -60,6 +60,19 @@ class CloudLabConfig(ComputeValue):
         return str(UUID(value)) if value else None
 
 
+def _wire_bindings(bindings: dict[str, Any]) -> dict[str, Any]:
+    """Send parameter values the way the Portal stores them.
+
+    Since 2026-10-09 the Portal answers a JSON boolean binding with HTTP 400
+    ("Not a HASH reference"). It keeps every binding as a string and parses
+    booleans from "True"/"False" itself, as experiments created earlier show.
+    """
+    return {
+        key: ("True" if value else "False") if isinstance(value, bool) else value
+        for key, value in bindings.items()
+    }
+
+
 class CloudLabProvider(ComputeProvider):
     """Adapt CloudLab experiments to the common resource lifecycle contract."""
 
@@ -146,6 +159,13 @@ class CloudLabProvider(ComputeProvider):
                         follow_redirects=False,
                         timeout=60,
                     )
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+            # No byte of the request left this process: the TCP or TLS
+            # handshake failed (the API host has intermittently served an
+            # expired certificate). Even a mutation is safe to send again.
+            raise ProviderError(
+                "temporarily_unavailable", "CloudLab could not be reached", retryable=True
+            ) from None
         except httpx.RequestError:
             mutation = method != "GET"
             raise ProviderError(
@@ -209,7 +229,7 @@ class CloudLabProvider(ComputeProvider):
             "profile_name": config.profile_name,
             "profile_project": config.profile_project,
             "duration": config.duration,
-            "bindings": config.bindings,
+            "bindings": _wire_bindings(config.bindings),
         }
         if config.group:
             payload["group"] = config.group

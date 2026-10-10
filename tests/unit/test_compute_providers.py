@@ -540,3 +540,63 @@ async def test_http_200_error_body_does_not_acknowledge_extension_or_leak_diagno
     assert TOKEN not in receipt.model_dump_json()
     with pytest.raises(ProviderError):
         await adapter.validate_connection("account-1")
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_sends_boolean_bindings_in_the_portal_string_form():
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(201, json={"id": EXPERIMENT})
+
+    config = {
+        "credential_ref": "account-1",
+        "project": "research",
+        "profile_name": "small-lan",
+        "profile_project": "PortalProfiles",
+        "bindings": {
+            "phystype": "r6615",
+            "tempFileSystemMax": True,
+            "useVMs": False,
+            "nodeCount": 1,
+        },
+    }
+    await provider(respond).acquire(AcquireRequest(mode="provision", config=config), intent())
+    assert json.loads(requests[0].content)["bindings"] == {
+        "phystype": "r6615",
+        "tempFileSystemMax": "True",
+        "useVMs": "False",
+        "nodeCount": 1,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.ConnectError("certificate has expired"), httpx.ConnectTimeout("handshake timed out")],
+)
+async def test_a_request_that_never_left_is_retryable_even_when_it_mutates(failure):
+    def respond(request):
+        raise failure
+
+    adapter = provider(respond)
+    request = AcquireRequest(
+        mode="provision",
+        config={
+            "credential_ref": "account-1",
+            "project": "research",
+            "profile_name": "small-lan",
+            "profile_project": "PortalProfiles",
+        },
+    )
+    with pytest.raises(ProviderError) as created:
+        await adapter.acquire(request, intent())
+    assert (created.value.code, created.value.retryable) == ("temporarily_unavailable", True)
+    with pytest.raises(ProviderError) as extended:
+        await adapter.extend(
+            ResourceRef(external_id=EXPERIMENT, config=CONFIG),
+            ExtendRequest(target_expires_at=NOW + timedelta(days=1), reason="research"),
+        )
+    assert (extended.value.code, extended.value.retryable) == ("temporarily_unavailable", True)
+    assert TOKEN not in str(created.value) + str(extended.value)

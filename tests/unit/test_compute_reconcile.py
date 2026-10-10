@@ -20,6 +20,7 @@ from cloud_agent.application.compute_reconcile import ComputeReconciler
 from cloud_agent.ports.external.compute_provider import (
     AcquisitionResolution,
     NodeObservation,
+    ProviderCapabilities,
     ProviderError,
     ProviderReceipt,
     ResourceObservation,
@@ -152,6 +153,11 @@ def harness(monkeypatch, *, kind="acquire", identified=False):
         record_inventory=AsyncMock(return_value=True),
     )
     provider = SimpleNamespace(
+        capabilities=Mock(
+            return_value=ProviderCapabilities(
+                acquisition_modes=("attach", "provision"), can_extend=True, can_release=True
+            )
+        ),
         acquire=AsyncMock(
             return_value=ProviderReceipt(outcome="confirmed", resource=REF, observation=observed())
         ),
@@ -527,3 +533,64 @@ async def test_bootstrap_refusal_reports_only_public_diagnostics(
     assert "secret-looking-remote-output" not in str(h.operation["result"])
     h.bootstrap.readiness.assert_not_awaited()
     h.repository.clear_bootstrap_hold.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_provisioning_is_released_and_never_deployed(monkeypatch):
+    h = harness(monkeypatch)
+    h.provider.acquire.return_value = ProviderReceipt(outcome="pending", resource=REF)
+    # CloudLab marks an experiment failed when it cannot set it up; it holds
+    # no Host, so the acquisition deletes it instead of waiting forever.
+    h.provider.inspect.return_value = ResourceObservation(
+        ref=REF, state="failed", raw_state="failed", observed_at=NOW, lease_known=True
+    )
+    await h.reconciler.execute(h.operation)
+    h.provider.release.assert_awaited_once()
+    assert h.provider.release.await_args.args[0].external_id == REF.external_id
+    assert h.allocation["observed_state"] == "terminated"
+    assert h.operation["state"] == "blocked"
+    assert h.operation["result"]["blocked_reasons"][0]["code"] == "resource_failed"
+    h.repository.prepare_bootstrap_binding.assert_not_awaited()
+    h.bootstrap.deploy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_attachment_is_reported_but_never_released(monkeypatch):
+    h = harness(monkeypatch, identified=True)
+    h.allocation["mode"] = "attach"
+    h.provider.inspect.return_value = ResourceObservation(
+        ref=REF, state="failed", raw_state="failed", observed_at=NOW, lease_known=True
+    )
+    await h.reconciler.execute(h.operation)
+    h.provider.release.assert_not_awaited()
+    assert h.operation["state"] == "blocked"
+    assert h.operation["result"]["blocked_reasons"][0]["code"] == "resource_failed"
+
+
+@pytest.mark.asyncio
+async def test_missing_resource_past_its_recorded_lease_has_ended(monkeypatch):
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    expired = NOW - timedelta(hours=1)
+    h.allocation["expires_at"] = expired
+    h.provider.inspect.side_effect = ProviderError(
+        "resource_visibility_unknown", "Experiment is not visible"
+    )
+    await h.reconciler.execute(h.operation)
+    assert h.operation["state"] == "succeeded"
+    assert h.allocation["observed_state"] == "terminated"
+    assert h.allocation["provider_state"] == "expired_not_found"
+    assert h.allocation["expires_at"] == expired
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expires_in", [timedelta(hours=1), timedelta(minutes=-5)])
+async def test_missing_resource_within_its_lease_is_never_assumed_deleted(monkeypatch, expires_in):
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.allocation["expires_at"] = NOW + expires_in
+    h.provider.inspect.side_effect = ProviderError(
+        "resource_visibility_unknown", "Experiment is not visible"
+    )
+    await h.reconciler.execute(h.operation)
+    assert h.operation["state"] == "blocked"
+    assert h.allocation.get("observed_state") != "terminated"
+    h.repository.record_observation_error.assert_awaited_once()
