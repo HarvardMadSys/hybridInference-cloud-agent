@@ -33,6 +33,8 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
     github_install_url: null,
   }),
   getAgentJobGit: vi.fn(),
+  getAgentJob: vi.fn().mockRejectedValue(new Error('Timing unavailable')),
+  getAgentAttemptTelemetry: vi.fn().mockRejectedValue(new Error('Timing unavailable')),
   getAgentJobUsage: vi.fn().mockResolvedValue(null),
   refreshAgentJobUsage: vi.fn().mockResolvedValue(null),
   getAgentThreadStats: vi.fn().mockResolvedValue(null),

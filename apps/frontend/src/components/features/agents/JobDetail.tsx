@@ -1995,6 +1995,7 @@ export function JobDetail({
                 <div className="flex-1">
                   <TrajectoryView
                     events={events}
+                    jobs={threadJobs}
                     steps={trajectorySteps}
                     query={trajectoryQuery}
                     onQueryChange={setTrajectoryQuery}
