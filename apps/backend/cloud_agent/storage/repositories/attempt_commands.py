@@ -295,7 +295,7 @@ class PostgresAttemptCommands:
                 LIMIT 1
                 FOR UPDATE OF j SKIP LOCKED
                 """,
-                capabilities,
+                json.dumps(capabilities),
                 host,
                 secure_attestation,
                 shared_attestation,
