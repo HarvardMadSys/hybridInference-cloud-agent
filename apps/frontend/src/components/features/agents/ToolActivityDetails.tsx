@@ -146,31 +146,40 @@ export function ToolActivityDetails({
   const targets = [
     ...new Set([...activity.targets, ...(!isError && output ? recordedAgentTargets(output) : [])]),
   ];
+  // One row of meta, not one per field: a delegation card carries at most a
+  // handful of recorded details, and the transcript stacks many of them.
+  const meta = [
+    activity.agentType,
+    activity.model,
+    activity.background === undefined
+      ? undefined
+      : activity.background
+        ? 'Background requested'
+        : 'Foreground requested',
+    targets.length
+      ? `${targets.length === 1 ? 'Agent' : 'Agents'}: ${targets.join(', ')}`
+      : undefined,
+  ].filter((value): value is string => !!value);
   return (
-    <section aria-label={activity.title} className="space-y-2.5">
-      <h3 className="text-xs font-medium text-gray-700 dark:text-gray-200">{activity.title}</h3>
-      {activity.description ? (
-        <p className="break-words text-xs text-gray-600 dark:text-gray-300">
-          {activity.description}
+    <section aria-label={activity.title} className="min-w-0 space-y-1.5">
+      <h3 className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs font-medium text-gray-700 dark:text-gray-200">
+        {activity.description ?? activity.title}
+        <span className="min-w-0 font-normal text-gray-400 dark:text-gray-500">
+          {activity.title}
+        </span>
+      </h3>
+      {meta.length ? (
+        <p className="flex min-w-0 flex-wrap gap-x-3 gap-y-0.5 text-xs text-gray-500 dark:text-gray-400">
+          {meta.map((value) => (
+            <span key={value} className="min-w-0 break-words">
+              {value}
+            </span>
+          ))}
         </p>
       ) : null}
-      <dl className="space-y-1">
-        {activity.agentType ? <Field label="Agent type">{activity.agentType}</Field> : null}
-        {activity.model ? <Field label="Model">{activity.model}</Field> : null}
-        {activity.background !== undefined ? (
-          <Field label="Execution">
-            {activity.background ? 'Background requested' : 'Foreground requested'}
-          </Field>
-        ) : null}
-        {targets.length ? (
-          <Field label={targets.length === 1 ? 'Agent' : 'Agents'}>
-            <span className="font-mono [overflow-wrap:anywhere]">{targets.join(', ')}</span>
-          </Field>
-        ) : null}
-      </dl>
       {activity.prompt ? (
-        <details className="rounded-md border border-gray-100 text-xs dark:border-white/5">
-          <summary className="cursor-pointer px-2 py-1.5 text-gray-500 dark:text-gray-400">
+        <details className="w-fit rounded-md border border-gray-100 text-xs dark:border-white/5">
+          <summary className="cursor-pointer px-2 py-1 text-gray-500 dark:text-gray-400">
             {activity.promptLabel}
           </summary>
           <p className="max-h-60 overflow-auto whitespace-pre-wrap break-words border-t border-gray-100 px-2 py-2 text-gray-600 dark:border-white/5 dark:text-gray-300">
@@ -179,31 +188,26 @@ export function ToolActivityDetails({
         </details>
       ) : null}
       {states.length ? (
-        <div className="space-y-1.5">
-          <p className="text-[10px] font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">
-            Recorded agent states
-          </p>
-          <ul className="space-y-1.5">
-            {states.map((state) => (
-              <li key={state.id} className="space-y-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="min-w-0 break-all font-mono text-[11px] text-gray-500 dark:text-gray-400">
-                    {state.id}
-                  </span>
-                  <Status value={state.status} />
-                </div>
+        <ul className="space-y-1">
+          {states.map((state) => (
+            <li key={state.id} className="min-w-0">
+              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+                <span className="min-w-0 break-all font-mono text-[11px] text-gray-500 dark:text-gray-400">
+                  {state.id}
+                </span>
+                <Status value={state.status} />
                 {state.message ? (
                   <details className="text-xs text-gray-500 dark:text-gray-400">
-                    <summary className="cursor-pointer">Agent message</summary>
+                    <summary className="cursor-pointer">Message</summary>
                     <p className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words">
                       {state.message}
                     </p>
                   </details>
                 ) : null}
-              </li>
-            ))}
-          </ul>
-        </div>
+              </div>
+            </li>
+          ))}
+        </ul>
       ) : null}
     </section>
   );

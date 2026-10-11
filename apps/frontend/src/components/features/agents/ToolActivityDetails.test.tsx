@@ -23,7 +23,7 @@ describe('ToolActivityDetails', () => {
     rendered.rerender(
       view('spawn_agent', { prompt: 'Review' }, JSON.stringify({ agent_id: 'new-child' })),
     );
-    expect(screen.getByText('new-child')).toBeInTheDocument();
+    expect(screen.getByText('Agent: new-child')).toBeInTheDocument();
     expect(screen.queryByText('Running')).not.toBeInTheDocument();
     expect(screen.queryByText('Completed')).not.toBeInTheDocument();
   });
@@ -111,12 +111,11 @@ describe('ToolActivityDetails', () => {
         }),
       ),
     );
-    expect(screen.getByText('a, b')).toBeInTheDocument();
-    expect(screen.getByText('Recorded agent states')).toBeInTheDocument();
+    expect(screen.getByText('Agents: a, b')).toBeInTheDocument();
     expect(screen.getByText('Completed')).toBeInTheDocument();
     expect(screen.getByText('Errored')).toBeInTheDocument();
     expect(screen.queryByText('Running')).not.toBeInTheDocument();
-    expect(screen.getByText('Agent message').closest('details')).toHaveTextContent('Tests pass.');
+    expect(screen.getByText('Message').closest('details')).toHaveTextContent('Tests pass.');
   });
 
   it('does not turn failure text or missing task data into a completion', () => {

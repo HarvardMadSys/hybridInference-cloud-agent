@@ -208,7 +208,7 @@ function RichToolActivity({
             {resultLabel}
           </span>
         </div>
-        <div className="space-y-2 px-3 py-3">
+        <div className="space-y-1.5 px-3 py-2">
           <ToolActivityDetails
             activity={activity}
             output={event.output?.join('\n')}

@@ -3461,7 +3461,8 @@ describe('JobDetail', () => {
       details.focus();
       expect(details).toHaveFocus();
       expect(within(activity).getByText('Implement the activity window')).toBeVisible();
-      expect(within(activity).getAllByText('agent-ui-review-1')).toHaveLength(2);
+      // The id appears once as the launch target and once as its recorded state row.
+      expect(within(activity).getAllByText(/agent-ui-review-1/)).toHaveLength(2);
       expect(screen.queryByRole('region', { name: 'Task activity' })).not.toBeInTheDocument();
       expect(screen.queryByRole('region', { name: 'Subagent activity' })).not.toBeInTheDocument();
 
