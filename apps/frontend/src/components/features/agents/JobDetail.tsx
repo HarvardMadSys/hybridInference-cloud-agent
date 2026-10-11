@@ -94,10 +94,17 @@ import { useTranscriptPresentation, TranscriptPresentationControl } from './tran
 import { TurnDeliverables } from './TurnDeliverables';
 import { recordedTurnOutputs, type RecordedFileSelection } from './turnDeliverables';
 import { RecordedDiffPanel } from './RecordedDiffPanel';
-import { hasLostContext, latestJob, ownerRunNote } from './conversationJob';
+import {
+  hasLostContext,
+  isActiveConversationState,
+  isBusyJob,
+  latestJob,
+  ownerRunNote,
+} from './conversationJob';
 import { useFirstRun } from './firstRun';
 import { SideChat } from './SideChat';
 import { codeReviewPrompt } from './codeReview';
+import { watchPullRequestPrompt } from './watchPullRequest';
 import { WorkspaceTabBar } from './WorkspaceTabBar';
 import { useWorkspaceTabs, type WorkspaceTab } from './useWorkspaceTabs';
 import {
@@ -194,15 +201,32 @@ function ReviewButton({ onReview }: { onReview?: () => void }) {
   );
 }
 
+function WatchPullRequestButton({ onWatchPr }: { onWatchPr?: () => void }) {
+  const t = useT();
+  return (
+    <button
+      type="button"
+      onClick={onWatchPr}
+      disabled={!onWatchPr}
+      title={t(onWatchPr ? 'watchPr.start' : 'watchPr.unavailable')}
+      className="rounded-md bg-white dark:bg-gray-900 px-3 py-1.5 text-[13px] font-medium text-gray-700 dark:text-gray-300 shadow-sm ring-1 ring-inset ring-gray-200 dark:ring-white/10 hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
+    >
+      {t('watchPr.action')}
+    </button>
+  );
+}
+
 function RunActions({
   job,
   onOpenDiff,
   onReview,
+  onWatchPr,
   showChanges = job.diffFiles.length > 0,
 }: {
   job: AgentJob;
   onOpenDiff: () => void;
   onReview?: () => void;
+  onWatchPr?: () => void;
   showChanges?: boolean;
 }) {
   return (
@@ -227,6 +251,7 @@ function RunActions({
             Open draft PR
           </a>
           <ReviewButton onReview={onReview} />
+          <WatchPullRequestButton onWatchPr={onWatchPr} />
         </>
       ) : null}
     </>
@@ -257,10 +282,12 @@ function FirstRunOutcome({
   job,
   onOpenDiff,
   onReview,
+  onWatchPr,
 }: {
   job: AgentJob;
   onOpenDiff: () => void;
   onReview?: () => void;
+  onWatchPr?: () => void;
 }) {
   const t = useT();
   return (
@@ -287,7 +314,7 @@ function FirstRunOutcome({
           {t('firstRun.doneBody')}
         </p>
         <div className="mt-3 flex flex-wrap items-center gap-3">
-          <RunActions job={job} onOpenDiff={onOpenDiff} onReview={onReview} />
+          <RunActions job={job} onOpenDiff={onOpenDiff} onReview={onReview} onWatchPr={onWatchPr} />
         </div>
       </div>
     </div>
@@ -334,11 +361,13 @@ function OutcomeCard({
   job,
   onOpenDiff,
   onReview,
+  onWatchPr,
   firstRun = false,
 }: {
   job: AgentJob;
   onOpenDiff: () => void;
   onReview?: () => void;
+  onWatchPr?: () => void;
   firstRun?: boolean;
 }) {
   if (job.state === 'running' || job.state === 'queued') return null;
@@ -347,12 +376,24 @@ function OutcomeCard({
     const hasActions = job.diffFiles.length > 0 || Boolean(job.prUrl);
     if (!hasActions && !hasLostContext(job)) return null;
     if (firstRun && job.prUrl)
-      return <FirstRunOutcome job={job} onOpenDiff={onOpenDiff} onReview={onReview} />;
+      return (
+        <FirstRunOutcome
+          job={job}
+          onOpenDiff={onOpenDiff}
+          onReview={onReview}
+          onWatchPr={onWatchPr}
+        />
+      );
     return (
       <div className="mt-6">
         {hasActions ? (
           <div className="flex flex-wrap items-center gap-3">
-            <RunActions job={job} onOpenDiff={onOpenDiff} onReview={onReview} />
+            <RunActions
+              job={job}
+              onOpenDiff={onOpenDiff}
+              onReview={onReview}
+              onWatchPr={onWatchPr}
+            />
           </div>
         ) : null}
         <RunGuidance job={job} />
@@ -389,10 +430,12 @@ function GitPanel({
   job,
   active,
   onReview,
+  onWatchPr,
 }: {
   job: AgentJob;
   active: boolean;
   onReview?: () => void;
+  onWatchPr?: () => void;
 }) {
   const [view, setView] = useState<GitView>('diff');
   const gitId = useId();
@@ -641,6 +684,7 @@ function GitPanel({
                   Open pull request
                 </a>
                 <ReviewButton onReview={onReview} />
+                <WatchPullRequestButton onWatchPr={onWatchPr} />
               </div>
             ) : (
               <p className="text-xs text-gray-400 dark:text-gray-500">
@@ -803,7 +847,9 @@ export function JobDetail({
         : latest,
     { turnNo: job.turnNo ?? 1, skills: job.skills ?? [] },
   ).skills;
-  useEffect(() => setChosenSkills(null), [job.id]);
+  // Unsent composer choices belong to the conversation, including when a PR
+  // action advances it to another turn without sending the owner's draft.
+  useEffect(() => setChosenSkills(null), [threadId]);
   // The same rule for the goal guidance. This component is deliberately not
   // remounted when the conversation moves to its next turn, so anything that
   // belongs to *one* message has to be reset explicitly when that turn does.
@@ -822,6 +868,8 @@ export function JobDetail({
   const [submitting, setSubmitting] = useState(false);
   const [rewriting, setRewriting] = useState(false);
   const sendRequestedRef = useRef(false);
+  const watchPrRequestedRef = useRef(false);
+  const [watchPrAcceptedJobId, setWatchPrAcceptedJobId] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const [forking, setForking] = useState(false);
   const [restoring, setRestoring] = useState(false);
@@ -988,6 +1036,7 @@ export function JobDetail({
     setStopping(false);
     forkRequestedRef.current = false;
     setForking(false);
+    setWatchPrAcceptedJobId(null);
   }, [job.id]);
 
   useEffect(() => {
@@ -1278,6 +1327,7 @@ export function JobDetail({
     if (
       sendRequestedRef.current ||
       rewriting ||
+      watchPrRequestedRef.current ||
       contextLost ||
       isArchived ||
       attachments.uploading ||
@@ -1308,6 +1358,7 @@ export function JobDetail({
       if (!composerMounted.current || currentDraftScope.current !== snapshot.scope) return result;
       queue.apply(result);
       // The queued message retains its uploads; the next draft starts without them.
+      setChosenSkills(null);
       attachments.reset();
       return result;
     } catch (cause: unknown) {
@@ -1519,6 +1570,56 @@ export function JobDetail({
       if (how.requested || how.after === viewedJobId) followTurn(jobId);
     },
   });
+  const watchPrPrompt = watchPullRequestPrompt(job);
+  // These live fields describe the entire conversation/workspace. Other
+  // thread rows can retain older pending/running values after it settles.
+  const publicationState =
+    job.workspacePublicationState ?? latestQuestionTurn?.workspace_publication_state;
+  const publicationPending = Boolean(publicationState && publicationState !== 'published');
+  const conversationBusy =
+    job.conversationState !== undefined
+      ? isActiveConversationState(job.conversationState)
+      : Boolean(latestQuestionTurn && isBusyJob(latestQuestionTurn));
+  const canWatchPr = Boolean(
+    userId &&
+    job.prUrl &&
+    isSuccessful &&
+    !isActive &&
+    !isArchived &&
+    !contextLost &&
+    !submitting &&
+    !rewriting &&
+    !mcp.saving &&
+    !publicationPending &&
+    watchPrAcceptedJobId !== job.id &&
+    !queue.messages.some((message) => message.prompt === watchPrPrompt) &&
+    !conversationBusy,
+  );
+
+  async function watchPr() {
+    if (!canWatchPr || watchPrRequestedRef.current || sendRequestedRef.current) return;
+    const watchScope = currentDraftScope.current;
+    watchPrRequestedRef.current = true;
+    setSubmitting(true);
+    setActionError(null);
+    try {
+      // This action sends its own message. Unsent text, uploads and composer
+      // selections belong to the owner's next message and stay in place.
+      const result = await submitThreadMessage(threadId, { prompt: watchPrPrompt });
+      if (!composerMounted.current || currentDraftScope.current !== watchScope) return;
+      // Keep the completed source action closed while the next turn loads.
+      // Queued watches are guarded by their queue card, which can be removed.
+      if (result.job && !result.pending) setWatchPrAcceptedJobId(job.id);
+      queue.apply(result);
+    } catch (cause: unknown) {
+      if (!composerMounted.current || currentDraftScope.current !== watchScope) return;
+      setActionError(cause instanceof Error ? cause.message : t('watchPr.sendFailed'));
+    } finally {
+      watchPrRequestedRef.current = false;
+      if (composerMounted.current) setSubmitting(false);
+    }
+  }
+
   // Announced only for a jump the reader asked for, never for a streamed
   // event: a transcript that talks on every token is one nobody can listen to.
   const [announcedTurn, setAnnouncedTurn] = useState<string | null>(null);
@@ -2009,6 +2110,7 @@ export function JobDetail({
                       firstRun={firstRun}
                       onOpenDiff={() => openWorkspace('git')}
                       onReview={canReview ? openReview : undefined}
+                      onWatchPr={canWatchPr ? () => void watchPr() : undefined}
                     />
                     {selectedAttemptIsCurrent ? <RunNotices job={job} /> : null}
                     {usageFooter && lastVisibleMessageIndex < 0 && currentReplyId === undefined ? (
@@ -2461,6 +2563,7 @@ export function JobDetail({
                 job={job}
                 active={workspaceOpen && workspaceTab === 'git'}
                 onReview={canReview ? openReview : undefined}
+                onWatchPr={canWatchPr ? () => void watchPr() : undefined}
               />
             )}
           </div>

@@ -82,6 +82,7 @@ import { installSideChatLocks } from './sideChatTestSupport';
 import { FirstRunProvider } from './firstRun';
 import { sideChatKeys } from './sideChatStorage';
 import { JobDetail, WORKSPACE_WIDTH_STORAGE_KEY } from './JobDetail';
+import { watchPullRequestPrompt } from './watchPullRequest';
 import type { AgentJob } from './types';
 
 const navigation = vi.hoisted(() => ({ push: vi.fn() }));
@@ -664,6 +665,362 @@ describe('JobDetail', () => {
     fireEvent.click(review);
     expect(forkAgentJob).not.toHaveBeenCalled();
     expect(submitThreadMessage).not.toHaveBeenCalled();
+  });
+
+  it('watches the published PR in the same thread and follows the resulting turn', async () => {
+    const prUrl = 'https://github.com/owner/repository/pull/7';
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_watch' },
+    } as never);
+    window.history.pushState(null, '', '/ajob_1');
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          threadId: 'original-thread',
+          workspacePublicationState: 'published',
+          prUrl,
+        })}
+        userId="alice"
+      />,
+    );
+
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    expect(watch).toBeEnabled();
+    expect(watch.parentElement).toContainElement(
+      screen.getByRole('link', { name: 'Open draft PR' }),
+    );
+    fireEvent.click(watch);
+
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(1));
+    const [threadId, body] = vi.mocked(submitThreadMessage).mock.calls[0];
+    expect(threadId).toBe('original-thread');
+    expect(body).toEqual({ prompt: expect.any(String) });
+    expect(body.prompt).toContain(prUrl);
+    expect(body.prompt).toContain('owner/repository');
+    expect(body.prompt).toContain('agent/ajob_1');
+    expect(body.prompt).toMatch(/checks|tests/i);
+    expect(body.prompt).toMatch(/reviews|approvals/i);
+    expect(body.prompt).toMatch(/latest.*head|head.*latest/i);
+    expect(body.prompt).toMatch(/merge/i);
+    expect(forkAgentJob).not.toHaveBeenCalled();
+    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch'));
+    expect(navigation.push).not.toHaveBeenCalled();
+    expect(watch).toBeDisabled();
+    fireEvent.click(watch);
+    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('watches from the Git PR action, prevents duplicate sends and applies a queued result', async () => {
+    const prUrl = 'https://github.com/owner/repository/pull/7';
+    let finishSend!: (value: Awaited<ReturnType<typeof submitThreadMessage>>) => void;
+    vi.mocked(submitThreadMessage).mockReturnValue(
+      new Promise((resolve) => {
+        finishSend = resolve;
+      }),
+    );
+    window.history.pushState(null, '', '/ajob_1');
+    render(
+      <JobDetail
+        job={makeJob({ state: 'done', threadId: 'original-thread', prUrl })}
+        userId="alice"
+      />,
+    );
+    openWorkspace();
+    const git = screen.getByLabelText('Git workspace');
+    fireEvent.click(within(git).getByRole('tab', { name: 'review' }));
+    const watch = within(git).getByRole('button', { name: 'Watch PR and merge' });
+    expect(watch.parentElement).toContainElement(
+      within(git).getByRole('link', { name: 'Open pull request' }),
+    );
+    fireEvent.click(watch);
+    expect(watch).toBeDisabled();
+    for (const button of screen.getAllByRole('button', { name: 'Watch PR and merge' })) {
+      expect(button).toBeDisabled();
+      fireEvent.click(button);
+    }
+    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
+    expect(submitThreadMessage).toHaveBeenCalledWith('original-thread', {
+      prompt: expect.stringContaining(prUrl),
+    });
+    const prompt = vi.mocked(submitThreadMessage).mock.calls[0][1].prompt;
+    await act(async () =>
+      finishSend({
+        pending: {
+          id: 'apmsg_watch',
+          thread_id: 'original-thread',
+          position: 1,
+          state: 'queued',
+          revision: 1,
+          prompt,
+        },
+        job: null,
+      }),
+    );
+
+    const queue = await screen.findByRole('region', { name: 'Queued messages' });
+    expect(within(queue).getByTitle(prompt, { normalizer: (value) => value })).toBeInTheDocument();
+    expect(within(queue).getByText('1 pending')).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/ajob_1');
+    expect(navigation.push).not.toHaveBeenCalled();
+    expect(forkAgentJob).not.toHaveBeenCalled();
+    expect(watch).toBeDisabled();
+    fireEvent.click(watch);
+    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses live idle and published state over stale thread rows and re-enables watching after a turn change', async () => {
+    const job = makeJob({
+      state: 'done',
+      threadId: 'original-thread',
+      conversationState: 'idle',
+      workspacePublicationState: 'published',
+      prUrl: 'https://github.com/owner/repository/pull/7',
+    });
+    const threadJobs = [
+      {
+        id: 'ajob_stale',
+        thread_id: 'original-thread',
+        turn_no: 2,
+        state: 'running',
+        conversation_state: 'running',
+        workspace_publication_state: 'pending',
+        runtime: 'claude-code',
+        model: 'qwen-test',
+      } as AgentJobApi,
+    ];
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_watch' },
+    } as never);
+    window.history.pushState(null, '', '/ajob_1');
+    const { rerender } = render(<JobDetail job={job} userId="alice" threadJobs={threadJobs} />);
+
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    expect(watch).toBeEnabled();
+    fireEvent.click(watch);
+    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch'));
+    expect(watch).toBeDisabled();
+
+    rerender(
+      <JobDetail
+        job={{ ...job, id: 'ajob_watch', turnNo: 3 }}
+        userId="alice"
+        threadJobs={threadJobs}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Watch PR and merge' })).toBeEnabled();
+    rerender(<JobDetail job={job} userId="alice" threadJobs={threadJobs} />);
+    const originalWatch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    expect(originalWatch).toBeEnabled();
+    fireEvent.click(originalWatch);
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(2));
+  });
+
+  it.each([
+    ['archived', { archivedAt: '2026-09-10T00:00:00Z' }, 'alice', undefined, undefined],
+    ['lost native context', { nativeState: 'lost' }, 'alice', undefined, undefined],
+    ['lost attempt context', { contextStatus: 'lost' }, 'alice', undefined, undefined],
+    ['signed out', {}, undefined, undefined, undefined],
+    ['queued', { state: 'queued' }, 'alice', undefined, undefined],
+    ['running', { state: 'running' }, 'alice', undefined, undefined],
+    ['a later queued turn', {}, 'alice', 'queued', undefined],
+    ['a later running turn', {}, 'alice', 'running', undefined],
+    [
+      'pending publication',
+      { workspacePublicationState: 'pending' },
+      'alice',
+      undefined,
+      undefined,
+    ],
+    [
+      'capturing publication',
+      { workspacePublicationState: 'capturing' },
+      'alice',
+      undefined,
+      undefined,
+    ],
+    [
+      'captured publication',
+      { workspacePublicationState: 'captured' },
+      'alice',
+      undefined,
+      undefined,
+    ],
+    [
+      'publishing changes',
+      { workspacePublicationState: 'publishing' },
+      'alice',
+      undefined,
+      undefined,
+    ],
+    ['failed publication', { workspacePublicationState: 'failed' }, 'alice', undefined, undefined],
+    ['a later pending publication', {}, 'alice', 'succeeded', 'pending'],
+    ['a later capturing publication', {}, 'alice', 'succeeded', 'capturing'],
+    ['a later captured publication', {}, 'alice', 'succeeded', 'captured'],
+    ['a later publishing turn', {}, 'alice', 'succeeded', 'publishing'],
+    ['a later failed publication', {}, 'alice', 'succeeded', 'failed'],
+  ] as const)(
+    'disables PR watching when the conversation is %s',
+    (_reason, overrides, userId, latestState, latestPublicationState) => {
+      const threadJobs: AgentJobApi[] = [];
+      if (latestState) {
+        threadJobs.push({
+          id: 'ajob_later',
+          thread_id: 'original-thread',
+          turn_no: 2,
+          state: latestState,
+          runtime: 'claude-code',
+          model: 'qwen-test',
+          workspace_publication_state: latestPublicationState,
+        } as AgentJobApi);
+      }
+      render(
+        <JobDetail
+          job={makeJob({
+            state: 'done',
+            threadId: 'original-thread',
+            prUrl: 'https://github.com/owner/repository/pull/7',
+            ...overrides,
+          })}
+          userId={userId}
+          threadJobs={threadJobs}
+        />,
+      );
+      openWorkspace();
+      const git = screen.getByLabelText('Git workspace');
+      fireEvent.click(within(git).getByRole('tab', { name: 'review' }));
+      const watch = within(git).getByRole('button', { name: 'Watch PR and merge' });
+      expect(watch).toBeDisabled();
+      fireEvent.click(watch);
+      expect(submitThreadMessage).not.toHaveBeenCalled();
+      expect(forkAgentJob).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not resubmit a matching watch already waiting in the thread queue', async () => {
+    const job = makeJob({
+      state: 'done',
+      threadId: 'original-thread',
+      prUrl: 'https://github.com/owner/repository/pull/7',
+    });
+    vi.mocked(getThreadQueue).mockImplementation(async (threadId) => ({
+      ...emptyQueue(threadId),
+      pending_messages: [
+        {
+          id: 'apmsg_existing_watch',
+          thread_id: threadId,
+          position: 1,
+          state: 'queued',
+          revision: 1,
+          prompt: watchPullRequestPrompt(job),
+        },
+      ],
+    }));
+    render(<JobDetail job={job} userId="alice" />);
+
+    await screen.findByRole('region', { name: 'Queued messages' });
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    expect(watch).toBeDisabled();
+    fireEvent.click(watch);
+    expect(submitThreadMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps the draft and its controls through a failed PR watch and a successful retry', async () => {
+    const prUrl = 'https://github.com/owner/repository/pull/7';
+    vi.mocked(listSkills).mockResolvedValue([
+      {
+        id: 7,
+        name: 'Review',
+        description: 'Review changes',
+        revision: 2,
+        source: 'created',
+        source_url: null,
+        source_revision: null,
+        default_enabled: true,
+        created_at: '',
+        updated_at: '',
+      },
+    ]);
+    vi.mocked(uploadAttachment).mockResolvedValue({
+      id: 42,
+      path: 'spec.txt',
+      size_bytes: 12,
+      content_type: 'text/plain',
+    });
+    vi.mocked(submitThreadMessage)
+      .mockRejectedValueOnce(new Error('Could not start watching'))
+      .mockResolvedValueOnce({ pending: null, job: { id: 'ajob_watch' } } as never)
+      .mockResolvedValue({ pending: null, job: { id: 'ajob_draft' } } as never);
+    const job = makeJob({
+      state: 'done',
+      threadId: 'original-thread',
+      prUrl,
+      skills: [{ id: 7, name: 'Review', description: 'Review changes', revision: 1 }],
+    });
+    const { container, rerender } = render(<JobDetail job={job} userId="alice" />);
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'Use this spec next' } });
+    const model = await screen.findByLabelText('Model for this turn');
+    fireEvent.change(model, { target: { value: 'glm-test' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add to message' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: /Skills\s*1/ }));
+    fireEvent.click(await screen.findByRole('switch'));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    const file = new File(['requirements'], 'spec.txt');
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    fireEvent.change(input, { target: { files: [file] } });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeEnabled(),
+    );
+
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    fireEvent.click(watch);
+    expect(await screen.findByText('Could not start watching')).toBeInTheDocument();
+    expect(watch).toBeEnabled();
+    expect(box).toHaveValue('Use this spec next');
+    expect(model).toHaveValue('glm-test');
+    expect(screen.getByText('spec.txt')).toBeInTheDocument();
+    fireEvent.click(watch);
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch'));
+    expect(watch).toBeDisabled();
+    expect(screen.queryByText('Could not start watching')).not.toBeInTheDocument();
+    expect(box).toHaveValue('Use this spec next');
+    expect(model).toHaveValue('glm-test');
+    expect(screen.getByText('spec.txt')).toBeInTheDocument();
+    for (const [, body] of vi.mocked(submitThreadMessage).mock.calls) {
+      expect(body).toEqual({ prompt: expect.stringContaining(prUrl) });
+    }
+    expect(deleteAttachment).not.toHaveBeenCalled();
+    expect(forkAgentJob).not.toHaveBeenCalled();
+
+    rerender(
+      <JobDetail job={{ ...job, id: 'ajob_watch', turnNo: 2, state: 'running' }} userId="alice" />,
+    );
+    expect(box).toHaveValue('Use this spec next');
+    expect(model).toHaveValue('glm-test');
+    expect(screen.getByText('spec.txt')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
+    await waitFor(() =>
+      expect(submitThreadMessage).toHaveBeenLastCalledWith('original-thread', {
+        prompt: 'Use this spec next',
+        model: 'glm-test',
+        skill_ids: [],
+        attachment_ids: [42],
+      }),
+    );
+  });
+
+  it('omits PR watching in both outcome and Git actions when there is no published PR', () => {
+    render(<JobDetail job={makeJob({ state: 'done' })} userId="alice" />);
+    expect(screen.queryByRole('button', { name: 'Watch PR and merge' })).not.toBeInTheDocument();
+    openWorkspace();
+    const git = screen.getByLabelText('Git workspace');
+    fireEvent.click(within(git).getByRole('tab', { name: 'review' }));
+    expect(screen.queryByRole('button', { name: 'Watch PR and merge' })).not.toBeInTheDocument();
   });
 
   it('closes all side tabs, remembers closure after refresh and can create a fresh chat', async () => {
@@ -2139,6 +2496,10 @@ describe('JobDetail', () => {
     expect(screen.getByRole('link', { name: 'Open draft PR' })).toHaveAttribute('href', prUrl);
     // Its milestones say what they mean, this once.
     expect(screen.getByRole('button', { name: 'Review' })).toBeInTheDocument();
+    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
+    expect(watch.parentElement).toContainElement(
+      screen.getByRole('link', { name: 'Open draft PR' }),
+    );
     expect(screen.getByText(/keeps going if you close this page/)).toBeInTheDocument();
   });
 
