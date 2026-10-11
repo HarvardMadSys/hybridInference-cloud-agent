@@ -20,7 +20,8 @@ import sys
 import tarfile
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+# Copied builders may have fewer ancestors; an explicit --root still takes precedence.
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 FORMAT_VERSION = 1
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
 PACKAGE_ROOTS = (

@@ -80,6 +80,34 @@ def test_archive_metadata_does_not_depend_on_the_builder(source_tree: Path) -> N
             assert member.mode in {0o644, 0o755}
 
 
+def test_default_root_builds_the_current_checkout() -> None:
+    """Keep the repository-local entry point usable without an explicit root."""
+    assert hb.build() == hb.build(REPO_ROOT)
+
+
+def test_relocated_builder_accepts_an_explicit_source_root(
+    source_tree: Path, tmp_path: Path
+) -> None:
+    """A shallow Docker copy must reach argument parsing and build the supplied tree."""
+    script = Path(hb.__file__).read_text()
+    relocated_path = str(Path(tmp_path.anchor) / "builder" / "build_host_bundle.py")
+    namespace: dict[str, object] = {
+        "__file__": relocated_path,
+        "__name__": "relocated_host_bundle",
+    }
+    exec(compile(script, relocated_path, "exec"), namespace)
+    output = tmp_path / "relocated-release"
+    main = namespace["main"]
+    assert callable(main)
+    assert (
+        main(["--root", str(source_tree), "--output", str(output), "--source-commit", COMMIT]) == 0
+    )
+    assert (output / "source.tar.gz").read_bytes() == hb.build(source_tree)
+    manifest = json.loads((output / "release.json").read_text())
+    assert manifest["source_commit"] == COMMIT
+    assert manifest["source_sha256"] == hashlib.sha256(hb.build(source_tree)).hexdigest()
+
+
 def test_untracked_deployment_secrets_and_caches_do_not_enter_the_archive(
     source_tree: Path,
 ) -> None:
