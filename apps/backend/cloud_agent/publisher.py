@@ -139,6 +139,7 @@ class _StagedChangeSet:
 
     paths: list[str]
     symlinks: list[str]
+    gitlinks: list[str]
     blobs: list[_StagedBlob]
 
 
@@ -188,6 +189,7 @@ def _staged_change_set(repo: Path) -> _StagedChangeSet:
     raw = _run_git(["diff", "--cached", "--raw", "-z", "--no-renames", "--abbrev=64"], cwd=repo)
     paths: list[str] = []
     symlinks: list[str] = []
+    gitlinks: list[str] = []
     blobs: list[_StagedBlob] = []
     # `:<srcmode> <dstmode> <srcsha> <dstsha> <status>\0<path>\0`
     fields = raw.split("\0")
@@ -206,6 +208,8 @@ def _staged_change_set(repo: Path) -> _StagedChangeSet:
             paths.append(path)
             if dst_mode == "120000":
                 symlinks.append(path)
+            if dst_mode == "160000":
+                gitlinks.append(path)
             if dst_mode in ("100644", "100755"):
                 blobs.append(
                     _StagedBlob(
@@ -215,7 +219,7 @@ def _staged_change_set(repo: Path) -> _StagedChangeSet:
                     )
                 )
         index += 2
-    return _StagedChangeSet(paths=paths, symlinks=symlinks, blobs=blobs)
+    return _StagedChangeSet(paths=paths, symlinks=symlinks, gitlinks=gitlinks, blobs=blobs)
 
 
 def _blob_size(repo: Path, sha: str) -> int:
@@ -348,7 +352,7 @@ def publish_patch(
         # the paths and modes come from the index itself, so there is nothing
         # left to misread.
         staged = _staged_change_set(repo)
-        post = validate_change_set(staged.paths, staged.symlinks)
+        post = validate_change_set(staged.paths, staged.symlinks, staged.gitlinks)
         if not _gate_permits(post, allow_workflow_changes=allow_workflow_changes):
             raise PublishError(f"patch rejected after apply: {post.reason}")
         _validate_staged_blobs(repo, staged.blobs)
@@ -425,7 +429,7 @@ def _gate_permits(gate: PatchGateResult, *, allow_workflow_changes: bool) -> boo
 
     The only overridable violation is the workflow-file block, and only when a
     human explicitly released it. Every other violation (secrets, path escape,
-    symlinks, size) is unconditional.
+    symlinks, submodules, size) is unconditional.
     """
     if gate.ok:
         return True

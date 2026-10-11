@@ -118,6 +118,46 @@ def test_symlink_creation_is_rejected():
     assert "symlinks" in result.reason
 
 
+_GITLINK = "Subproject commit deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+
+@pytest.mark.parametrize(
+    "mode_lines",
+    [
+        "new file mode 160000\nindex 0000000..deadbee",
+        # Moving an existing submodule names its mode only on the index line.
+        "index 1111111..deadbee 160000",
+    ],
+)
+def test_submodule_entry_is_rejected(mode_lines):
+    """A gitlink pulls in another repository's code, which no gate ever reads."""
+    patch = (
+        "diff --git a/vendor/lib b/vendor/lib\n"
+        f"{mode_lines}\n"
+        "--- a/vendor/lib\n+++ b/vendor/lib\n@@ -0,0 +1 @@\n"
+        f"+{_GITLINK}\n"
+    )
+
+    result = validate_patch(patch)
+
+    assert result.ok is False
+    assert "submodule entries: vendor/lib" in result.reason
+    assert not result.requires_human_release
+
+
+def test_a_regular_file_index_line_is_not_a_submodule():
+    """Only the gitlink mode trips the check, not every index line."""
+    assert validate_patch(_CLEAN_PATCH).ok is True
+
+
+def test_the_change_set_gate_refuses_staged_gitlinks():
+    """The post-apply pass reads modes from the index; a gitlink is refused there too."""
+    result = validate_change_set([".gitmodules", "vendor/lib"], [], ["vendor/lib"])
+
+    assert result.ok is False
+    assert result.violations == ["patch introduces submodule entries: vendor/lib"]
+
+
 @pytest.mark.parametrize(
     ("label", "secret"),
     [

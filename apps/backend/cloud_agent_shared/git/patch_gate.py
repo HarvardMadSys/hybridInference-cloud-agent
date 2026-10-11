@@ -15,6 +15,9 @@ Four gates, in the order they matter:
    released by a human explicitly.
 2. **Path escape.** ``..`` segments, absolute paths, and symlink-mode entries
    let a patch write outside the worktree or turn a file into a link to one.
+   Gitlink (submodule) entries are refused with them: they pull in code from
+   another repository that never appears in the diff, so none of these gates
+   would ever read it.
 3. **Secret scan.** An agent can inadvertently paste credentials it saw (env
    dumps, logs, a leaked token) into the diff; a match blocks publication.
 4. **Size limits.** A patch larger than the cap, or touching more files than
@@ -79,11 +82,14 @@ _DIFF_HEADER = re.compile(r"^diff --git (?P<a>.+?) (?P<b>.+)$")
 _RENAME_TO = re.compile(r"^rename to (?P<path>.+)$")
 _COPY_TO = re.compile(r"^copy to (?P<path>.+)$")
 _NEW_MODE = re.compile(r"^(?:new|new file) mode (?P<mode>\d{6})$")
+# A modified entry names its mode only here, after the two object ids.
+_INDEX_MODE = re.compile(r"^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+ (?P<mode>\d{6})$")
 # Traditional hunk name lines. git omits the `diff --git` header in some diff
 # formats, and a patch that carries only these still applies perfectly well —
 # so a parser that keys solely off the header sees an empty change set.
 _NAME_LINE = re.compile(r"^(?:---|\+\+\+) (?P<path>.+?)(?:\t.*)?$")
 _SYMLINK_MODE = "120000"
+_GITLINK_MODE = "160000"
 _BINARY_BLOCK = re.compile(r"^(literal|delta) ([0-9]+)$")
 
 
@@ -256,10 +262,11 @@ class PatchGateResult:
         return "; ".join(self.violations) if self.violations else "ok"
 
 
-def _collect_paths(patch: str) -> tuple[list[str], list[str]]:
-    """Return (changed paths, paths introduced with a symlink mode)."""
+def _collect_paths(patch: str) -> tuple[list[str], list[str], list[str]]:
+    """Return (changed paths, paths given a symlink mode, paths given a gitlink mode)."""
     changed: list[str] = []
     symlinks: list[str] = []
+    gitlinks: list[str] = []
     pending_paths: list[str] = []
 
     def remember(path: str) -> None:
@@ -301,8 +308,11 @@ def _collect_paths(patch: str) -> tuple[list[str], list[str]]:
         mode = _NEW_MODE.match(line)
         if mode and mode.group("mode") == _SYMLINK_MODE:
             symlinks.extend(pending_paths)
+        mode = mode or _INDEX_MODE.match(line)
+        if mode and mode.group("mode") == _GITLINK_MODE:
+            gitlinks.extend(pending_paths)
 
-    return changed, symlinks
+    return changed, symlinks, gitlinks
 
 
 def _is_escaping(path: str) -> bool:
@@ -337,6 +347,7 @@ def _scan_secrets(patch: str, paths: list[str]) -> list[str]:
 def validate_change_set(
     paths: list[str],
     symlinks: list[str] | None = None,
+    gitlinks: list[str] | None = None,
     *,
     max_files: int = MAX_CHANGED_FILES,
 ) -> PatchGateResult:
@@ -374,6 +385,10 @@ def validate_change_set(
     symlink_paths = sorted({path for path in (symlinks or []) if path and path != "/dev/null"})
     if symlink_paths:
         violations.append(f"patch introduces symlinks: {', '.join(symlink_paths)}")
+
+    gitlink_paths = sorted({path for path in (gitlinks or []) if path and path != "/dev/null"})
+    if gitlink_paths:
+        violations.append(f"patch introduces submodule entries: {', '.join(gitlink_paths)}")
 
     secrets = _scan_secrets("", unique_files)
     if secrets:
@@ -417,12 +432,12 @@ def validate_patch(
             )
         )
 
-    changed, symlinks = _collect_paths(patch)
+    changed, symlinks, gitlinks = _collect_paths(patch)
     unique_files = sorted({path for path in changed if path != "/dev/null"})
     if not unique_files:
         violations.append("patch contains no recognizable file headers")
 
-    path_result = validate_change_set(unique_files, symlinks, max_files=max_files)
+    path_result = validate_change_set(unique_files, symlinks, gitlinks, max_files=max_files)
     violations.extend(path_result.violations)
     requires_human_release = path_result.requires_human_release
 
