@@ -208,6 +208,10 @@ export function TerminalPane({
   inputLimitRef.current = maxInputBytes;
   // Set once the shell has exited or its stream is gone for good.
   const endedRef = useRef(terminal.state !== 'running');
+  // How much output the listing reported: where the history ends, for a
+  // broker too old to say so when the stream attaches.
+  const listedSeqRef = useRef(terminal.last_seq);
+  listedSeqRef.current = terminal.last_seq;
   const resizeRef = useRef<(() => void) | null>(null);
   const tabListRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -275,11 +279,12 @@ export function TerminalPane({
     let pendingInput: Array<{ binary: boolean; data: string }> = [];
     let flushingInput = false;
     // Output up to `replayThrough` predates this screen: the first attach
-    // names it. While xterm is still parsing it, a reply xterm sends answers
-    // a query in that history — for a program long past waiting, or gone.
-    // A reconnect's backlog is not history: it arrived late, but for this
-    // screen, so its queries are answered as over any slow link.
-    let replayThrough = 0;
+    // names it, and without one the listing's count stands. While xterm is
+    // still parsing it, a reply xterm sends answers a query in that history —
+    // for a program long past waiting, or gone. A reconnect's backlog is not
+    // history: it arrived late, but for this screen, so its queries are
+    // answered as over any slow link.
+    let replayThrough = listedSeqRef.current;
     let attached = false;
     let replayWrites = 0;
     let lastSize: string | null = null;

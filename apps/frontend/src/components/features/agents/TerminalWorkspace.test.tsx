@@ -847,6 +847,36 @@ describe('TerminalWorkspace', () => {
     expect(writeAgentTerminalInput).toHaveBeenCalledTimes(2);
   });
 
+  it('takes the history boundary from the listing when the broker does not name it', async () => {
+    // A broker that predates the `attached` frame, with two events retained.
+    const first = { ...terminal('term-1'), last_seq: 2 };
+    vi.mocked(listAgentTerminals).mockResolvedValue([first]);
+    let live: ((seq: number) => void) | undefined;
+    vi.mocked(streamAgentTerminal).mockImplementation(async (_job, _terminal, opts) => {
+      opts.onOutput({ seq: 1, data: btoa('\x1b[6n') });
+      opts.onOutput({ seq: 2, data: btoa('$ ') });
+      live = (seq) => opts.onOutput({ seq, data: btoa('\x1b[6n') });
+    });
+    xtermHarness.heldWrites = [];
+
+    render(<TerminalWorkspace jobId="job-1" active />);
+    await waitFor(() => expect(live).toBeTypeOf('function'));
+    const xterm = xtermHarness.instances[0];
+
+    xterm.emitData('\x1b[24;1R');
+    const replayed = xtermHarness.heldWrites.splice(0);
+    expect(replayed).toHaveLength(2);
+    replayed.forEach((parsed) => parsed());
+    xtermHarness.heldWrites = null;
+
+    live!(3);
+    xterm.emitData('\x1b[5;1R');
+    await waitFor(() =>
+      expect(writeAgentTerminalInput).toHaveBeenCalledWith('job-1', first.id, '\x1b[5;1R'),
+    );
+    expect(writeAgentTerminalInput).toHaveBeenCalledTimes(1);
+  });
+
   it('answers queries that arrived while the stream was reconnecting', async () => {
     const first = terminal('term-1');
     vi.mocked(listAgentTerminals).mockResolvedValue([first]);
