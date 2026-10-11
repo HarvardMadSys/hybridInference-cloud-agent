@@ -15,10 +15,12 @@ import asyncio
 import hashlib
 from typing import TYPE_CHECKING
 
+import asyncpg
 import pytest
 from tests.integration.storage.test_agent_job_store import (
     _claim,
     _create_job,
+    _expire_attempt,
     _reserve_shared_chat,
     pool,  # noqa: F401 - pytest fixture
     store,  # noqa: F401 - pytest fixture
@@ -397,3 +399,92 @@ async def test_titling_a_thread_does_not_deadlock_with_its_streaming_reply(
         await _settle(title)
     saved = await store.conversation_queries.get_job(job["id"])
     assert saved is not None and saved["title"] == "Flaky test fix"
+
+
+@pytest.mark.parametrize("sibling", ["claim", "finish"])
+async def test_the_attempt_reaper_gives_a_slot_back_after_writing_the_group(
+    pool, store: Storage, sibling: str
+):
+    """The reaper takes a group before its host, as a claim and a finish do.
+
+    Every member of a group runs on the group's host. Claiming a member reads
+    the group and then takes a slot; finishing one writes the group and then
+    gives its slot back. The reaper gave an expired member's slot back before
+    writing the group, so it deadlocked with a sibling claimed or finishing on
+    the same host.
+    """
+    _job, claim, sandbox = await _reserve_shared_chat(store)
+    await _expire_attempt(pool, store, claim["attempt_id"])
+    reap = None
+    async with pool.acquire() as member:
+        try:
+            async with member.transaction():
+                if sibling == "claim":
+                    await member.execute(
+                        "SELECT id FROM agent_sandboxes WHERE id = $1 FOR SHARE",
+                        sandbox["sandbox_id"],
+                    )
+                else:
+                    await member.execute(
+                        "UPDATE agent_sandboxes SET last_activity_at = NOW() WHERE id = $1",
+                        sandbox["sandbox_id"],
+                    )
+                member_pid = await member.fetchval("SELECT pg_backend_pid()")
+                reap = asyncio.create_task(store.attempt_commands.reap_expired())
+                await _blocked_by(pool, member_pid)
+                # The sibling's slot next, which the waiting reaper must not hold.
+                await member.execute(
+                    "SELECT host FROM agent_runner_hosts WHERE host = $1 FOR UPDATE NOWAIT",
+                    _HOST,
+                )
+            actions = await asyncio.wait_for(reap, timeout=10)
+        finally:
+            await _settle(reap)
+    assert [(action["attempt_id"], action["action"]) for action in actions] == [
+        (claim["attempt_id"], "failed")
+    ]
+
+
+async def test_an_attempt_the_reaper_cannot_close_does_not_undo_the_others(
+    pool, store: Storage, monkeypatch
+):
+    """Each expired attempt is reaped in a transaction of its own.
+
+    The reaper closed every expired attempt in one transaction, so one the
+    database refused -- a deadlock against a live writer is the usual way --
+    took back every attempt the pass had already closed. It is left for the
+    next pass now, and the others stay closed.
+    """
+    for n in range(3):
+        await _create_job(store, task_prompt=f"task {n}")
+    claims = []
+    for n in range(3):
+        claim = await _claim(store, worker_id=f"w{n}", lease_ttl_seconds=60)
+        assert claim is not None
+        claims.append(claim)
+        await _expire_attempt(pool, store, claim["attempt_id"])
+    stuck = claims[1]["attempt_id"]
+    original = attempt_module.insert_event
+
+    async def deadlock_on_one(conn, **fields):
+        if fields["attempt_id"] == stuck:
+            raise asyncpg.exceptions.DeadlockDetectedError("deadlock detected")
+        return await original(conn, **fields)
+
+    monkeypatch.setattr(attempt_module, "insert_event", deadlock_on_one)
+    actions = await store.attempt_commands.reap_expired()
+    assert [action["attempt_id"] for action in actions] == [
+        claims[0]["attempt_id"],
+        claims[2]["attempt_id"],
+    ]
+    async with pool.acquire() as conn:
+        statuses = await conn.fetch(
+            "SELECT id, status FROM agent_attempts WHERE id = ANY($1::bigint[]) ORDER BY id",
+            [claim["attempt_id"] for claim in claims],
+        )
+    assert [row["status"] for row in statuses] == ["superseded", "running", "superseded"]
+
+    monkeypatch.undo()
+    assert [action["attempt_id"] for action in await store.attempt_commands.reap_expired()] == [
+        stuck
+    ]
