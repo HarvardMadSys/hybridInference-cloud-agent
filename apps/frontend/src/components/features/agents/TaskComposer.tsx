@@ -17,6 +17,8 @@ import {
 import { SOURCE_CONTROL_RECHECK_MS } from './sourceControlRecovery';
 import { highestEffort, offeredEfforts } from './effort';
 import { useT } from '@/components/providers';
+import { useAuth } from '@/components/providers/AuthProvider';
+import { useComposerDraft } from './useComposerDraft';
 import { Picker } from './Picker';
 import { RepositoryPicker } from './RepositoryPicker';
 import { CreateRepositoryDialog } from './CreateRepositoryDialog';
@@ -44,11 +46,53 @@ import type { SelectedSkillApi } from '@/lib/api/skills';
 // produced could run.
 
 export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
+  const { state } = useAuth();
+  const userId = state.user?.id;
+  return (
+    <TaskComposerContent key={userId ?? 'anonymous'} userId={userId} initialRepo={initialRepo} />
+  );
+}
+
+interface NewTaskDraft {
+  task: string;
+  repo: string;
+  runtime: string;
+  model: string;
+  effort: string;
+  branch: string;
+}
+
+function readNewTaskDraft(value: string): NewTaskDraft | null {
+  try {
+    const saved: unknown = JSON.parse(value);
+    if (!saved || typeof saved !== 'object') return null;
+    const record = saved as Record<string, unknown>;
+    const fields = ['task', 'repo', 'runtime', 'model', 'effort', 'branch'] as const;
+    if (!fields.every((field) => typeof record[field] === 'string')) return null;
+    return saved as NewTaskDraft;
+  } catch {
+    return null;
+  }
+}
+
+function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; userId?: string }) {
   const router = useRouter();
   const t = useT();
-  // What the owner had here before a trip to GitHub, put back when they return.
-  // Read once; the storage copy is dropped as soon as this composer commits.
-  const [draft] = useState(peekComposerDraft);
+  const draftStore = useComposerDraft({ userId, threadId: 'new-task' });
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  // Restore this account's unsent text and settings on any return to New task.
+  // The older GitHub receipt remains a scoped fallback for an existing trip.
+  const [draft] = useState(() => {
+    const saved = readNewTaskDraft(draftStore.value);
+    const returning = peekComposerDraft(userId);
+    return saved ?? (returning ? { ...returning, effort: '', branch: '' } : null);
+  });
   const [task, setTask] = useState(() => draft?.task ?? '');
   const skillLibrary = useSkillLibrary();
   const [chosenSkills, setChosenSkills] = useState<SelectedSkillApi[] | null>(null);
@@ -68,7 +112,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   const [models, setModels] = useState<string[]>([]);
   // Empty until the owner picks one. A task changes a real repository, so
   // where it runs is never a default — see RepositoryPicker.
-  const [repo, setRepo] = useState('');
+  const [repo, setRepo] = useState(draft?.repo ?? '');
   const [repoPickerOpen, setRepoPickerOpen] = useState(false);
   // Enter with no repository opens the picker; the choice then hands the caret
   // back to the task, so a second Enter sends it.
@@ -89,16 +133,23 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   // Someone with no conversation yet is told, in one line, what a task becomes.
   const firstVisit = useFirstRun().newcomer;
   const [branches, setBranches] = useState<string[]>([]);
-  const [branch, setBranch] = useState('');
-  const [runtime, setRuntime] = useState('');
-  const [model, setModel] = useState('');
-  const [effort, setEffort] = useState('');
+  const [branch, setBranch] = useState(draft?.branch ?? '');
+  const [branchOptionsRepo, setBranchOptionsRepo] = useState<string | null>(null);
+  const [runtime, setRuntime] = useState(draft?.runtime ?? '');
+  const [model, setModel] = useState(draft?.model ?? '');
+  const [effort, setEffort] = useState(draft?.effort ?? '');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [rewriting, setRewriting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const attachments = useAttachments(t, config?.attachment_limits);
   const mcp = useComposerMcp(t);
+  const saveDraft = draftStore.setValue;
+  const savedBranch =
+    branchOptionsRepo === repo ? branch : draft?.repo === repo ? draft.branch : '';
+  useEffect(() => {
+    saveDraft(JSON.stringify({ task, repo, runtime, model, effort, branch: savedBranch }));
+  }, [saveDraft, task, repo, runtime, model, effort, savedBranch]);
   const goalCommand = useGoalCommand({
     value: task,
     setValue: setTask,
@@ -154,7 +205,11 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     if (first && draft) {
       if (draft.runtime && config.runtimes.includes(draft.runtime)) setRuntime(draft.runtime);
       if (draft.model && (config.models ?? []).includes(draft.model)) setModel(draft.model);
-      if (draft.repo && config.repos.includes(draft.repo)) {
+      if (
+        (!initialRepo || draft.repo === initialRepo) &&
+        draft.repo &&
+        config.repos.includes(draft.repo)
+      ) {
         setRepo(draft.repo);
         setUnavailableRepo(null);
         return;
@@ -173,8 +228,8 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   }, [config, draft, initialRepo]);
 
   useEffect(() => {
-    if (draft) forgetComposerDraft();
-  }, [draft]);
+    if (draft) forgetComposerDraft(userId);
+  }, [draft, userId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -204,17 +259,26 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   useEffect(() => {
     if (!githubUnavailable) return undefined;
     let cancelled = false;
-    const timer = window.setInterval(() => {
+    let pending = false;
+    const read = () => {
+      if (document.visibilityState === 'hidden' || pending) return;
+      pending = true;
       getAgentConfig()
         .then((cfg) => {
           if (!cancelled) applyConfig(cfg);
         })
         // The next tick asks again; the notice already says why nothing runs.
-        .catch(() => undefined);
-    }, SOURCE_CONTROL_RECHECK_MS);
+        .catch(() => undefined)
+        .finally(() => {
+          pending = false;
+        });
+    };
+    const timer = window.setInterval(read, SOURCE_CONTROL_RECHECK_MS);
+    document.addEventListener('visibilitychange', read);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', read);
     };
   }, [githubUnavailable, applyConfig]);
 
@@ -236,6 +300,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   // and are dropped at once, so the previous repository's branch can never be
   // sent with this one while the new list is on its way.
   useEffect(() => {
+    setBranchOptionsRepo(null);
     setBranches([]);
     setBranch('');
     if (!repo || !config?.github_connected) return undefined;
@@ -244,7 +309,11 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
       .then((found) => {
         if (cancelled) return;
         setBranches(found.branches);
-        setBranch(found.default ?? found.branches[0] ?? '');
+        setBranchOptionsRepo(repo);
+        const restored = draft?.repo === repo ? draft.branch : '';
+        setBranch(
+          found.branches.includes(restored) ? restored : (found.default ?? found.branches[0] ?? ''),
+        );
       })
       .catch(() => {
         // No branch list is a working state: the job then runs against the
@@ -252,12 +321,13 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
         if (!cancelled) {
           setBranches([]);
           setBranch('');
+          setBranchOptionsRepo(repo);
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [config?.github_connected, repo]);
+  }, [config?.github_connected, repo, draft]);
 
   // `mcp_runtimes` has been reported by /config since MCP landed and read by
   // nothing; an older control plane omits it, and not knowing is not the same
@@ -297,12 +367,16 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   async function goToGitHub(kind: 'connect' | 'manage') {
     setLeaving(kind);
     setError(null);
-    rememberReturn(initialRepo ? `/?repo=${encodeURIComponent(initialRepo)}` : '/', {
-      task,
-      repo,
-      runtime,
-      model,
-    });
+    rememberReturn(
+      initialRepo ? `/?repo=${encodeURIComponent(initialRepo)}` : '/',
+      {
+        task,
+        repo,
+        runtime,
+        model,
+      },
+      userId,
+    );
     try {
       const url = await githubAccessUrl(kind);
       if (url) {
@@ -342,6 +416,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     try {
       const cfg = await getAgentConfig({ fresh: true });
       applyConfig(cfg);
+      setError(null);
       // The repository the link asked for may be the one that just arrived.
       if (unavailableRepo && cfg.repos.includes(unavailableRepo)) {
         setRepo(unavailableRepo);
@@ -430,9 +505,11 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
    * "unlimited" is the absence of a bound and a large number is not.
    */
   async function applyGoalObjective(objective: string): Promise<void> {
+    const snapshot = draftStore.capture();
     setGoalHint(null);
     const job = await createAgentJob(requestBody(objective, { objective }));
-    router.push(`/${job.id}`);
+    draftStore.acknowledge(snapshot);
+    if (mounted.current) router.push(`/${job.id}`);
   }
 
   async function run() {
@@ -453,8 +530,10 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
     setSubmitting(true);
     setError(null);
     try {
+      const snapshot = draftStore.capture();
       const job = await createAgentJob(requestBody(task.trim()));
-      router.push(`/${job.id}`);
+      draftStore.acknowledge(snapshot);
+      if (mounted.current) router.push(`/${job.id}`);
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : t('composer.startFailed'));
       setSubmitting(false);
@@ -819,6 +898,16 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
       {error ? (
         <p className="mt-3 text-center text-[13px] text-red-600 dark:text-red-400" role="alert">
           {error}
+          {!config && (
+            <button
+              type="button"
+              disabled={refreshing}
+              onClick={() => void refreshRepositories()}
+              className="ml-2 underline"
+            >
+              {t('common.retry')}
+            </button>
+          )}
         </p>
       ) : null}
       <div className="mt-8 grid gap-3 sm:grid-cols-3">

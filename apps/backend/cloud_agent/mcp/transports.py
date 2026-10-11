@@ -41,6 +41,7 @@ from typing import Any
 import httpcore
 import httpx
 
+from cloud_agent.mcp.http_body import IDENTITY_ENCODING_HEADERS, iter_response_bytes
 from cloud_agent.mcp.jsonrpc import (
     MCP_RESERVED_CODES,
     JsonRpcError,
@@ -113,7 +114,7 @@ async def read_bounded(response: httpx.Response) -> bytes:
     total = 0
     try:
         try:
-            async for chunk in response.aiter_bytes():
+            async for chunk in iter_response_bytes(response):
                 total += len(chunk)
                 if total > MAX_RESPONSE_BYTES:
                     raise TransportError(
@@ -221,7 +222,10 @@ def _auth_headers(config: RemoteTransportConfig) -> dict[str, str]:
     if config.auth.kind is AuthKind.NONE or not config.secret:
         return {}
     if config.auth.kind is AuthKind.STATIC:
-        return config.auth.header.render(config.secret)
+        try:
+            return config.auth.header.render(config.secret)
+        except EndpointRejected as exc:
+            raise TransportError(str(exc), kind="blocked_target") from exc
     return {"Authorization": f"Bearer {config.secret}"}
 
 
@@ -253,6 +257,7 @@ def build_headers(config: RemoteTransportConfig, *, body: bool) -> dict[str, str
     """
     headers: dict[str, str] = {
         "accept": "application/json, text/event-stream",
+        **IDENTITY_ENCODING_HEADERS,
     }
     if body:
         headers["content-type"] = "application/json"
@@ -386,7 +391,7 @@ class _HttpCore:
         found: Any = None
         total = 0
         try:
-            async for chunk in response.aiter_bytes():
+            async for chunk in iter_response_bytes(response):
                 total += len(chunk)
                 if total > MAX_RESPONSE_BYTES:
                     raise TransportError(
@@ -433,6 +438,26 @@ class _HttpCore:
                                     await read_bounded(answered)
                                 finally:
                                     await answered.aclose()
+            for event in decoder.close():
+                if event.data:
+                    try:
+                        payload = event.json()
+                    except SseError:
+                        continue
+                    for raw in payload if isinstance(payload, list) else [payload]:
+                        if isinstance(raw, Mapping):
+                            message = decode(json.dumps(raw))[0]
+                            if (
+                                message.is_response
+                                and expect_key is not None
+                                and message.key == expect_key
+                            ):
+                                found = message
+        except SseError as exc:
+            raise TransportError(
+                "the server sent an invalid or oversized SSE event",
+                kind="protocol_incompatible",
+            ) from exc
         except httpx.HTTPError as exc:
             # Same conversion as :func:`read_bounded`: a transport failure while
             # reading must reach the caller as the error it already handles, or
@@ -442,21 +467,6 @@ class _HttpCore:
                 f"the server stopped answering while it was replying: {exc}",
                 kind="unreachable",
             ) from exc
-        for event in decoder.close():
-            if event.data:
-                try:
-                    payload = event.json()
-                except SseError:
-                    continue
-                for raw in payload if isinstance(payload, list) else [payload]:
-                    if isinstance(raw, Mapping):
-                        message = decode(json.dumps(raw))[0]
-                        if (
-                            message.is_response
-                            and expect_key is not None
-                            and message.key == expect_key
-                        ):
-                            found = message
         if found is not None:
             return [found]
         return results
@@ -479,7 +489,10 @@ async def guard_target(
     optional because the relay validates a target the registry already chose,
     and required by the transports, which follow URLs a server hands them.
     """
-    endpoint = validate_endpoint(url, policy)
+    try:
+        endpoint = validate_endpoint(url, policy)
+    except EndpointRejected as exc:
+        raise TransportError(str(exc), kind=exc.kind) from exc
     if origin is not None and endpoint.origin != origin:
         raise TransportError(
             f"{endpoint.origin} is not the origin this connection's credential belongs to",
@@ -726,11 +739,14 @@ class LegacySseTransport(_HttpCore):
         return self._announcement
 
     def announced(self, message_url: str) -> None:
-        """Record the endpoint the stream announced, once."""
-        self._message_url = message_url
+        """Validate every announcement before changing the credential's target."""
+        try:
+            self._message_url = _resolve_message_url(self._config, message_url)
+        except EndpointRejected as exc:
+            raise TransportError(str(exc), kind=exc.kind) from exc
         future = self.announcement()
         if not future.done():
-            future.set_result(message_url)
+            future.set_result(self._message_url)
 
     def _new_id(self) -> str:
         """Allocate a request id."""
@@ -743,7 +759,7 @@ class LegacySseTransport(_HttpCore):
 
     def deliver(self, message: Any) -> None:
         """Record a message that arrived on the stream."""
-        if message.is_response:
+        if message.is_response and message.key in self._waiters and message.key not in self._inbox:
             self._inbox[message.key] = message
             waiter = self._waiters.pop(message.key, None)
             if waiter is not None:
@@ -762,75 +778,80 @@ class LegacySseTransport(_HttpCore):
         request_id = self._new_id()
         key = id_key(request_id)
         waiter = self._waiter(key)
-        config = self._config_with_state()
-        # The validated endpoint, not the announcement as it arrived: the
-        # raw value is a path until the connection has checked it against the
-        # origin and the egress policy, and a request must never go to the
-        # unchecked form.
-        message_url = self._message_url or await self.announcement()
-        await self._guard(message_url)
         try:
-            response = await self._client.send(
-                self._client.build_request(
-                    "POST",
-                    message_url,
-                    content=encode_request(request_id, method, params),
-                    headers=build_headers(config, body=True),
-                    timeout=_http_timeout(config),
-                ),
-                stream=True,
-            )
-        except httpx.HTTPError as exc:
-            raise TransportError(f"the server could not be reached: {exc}") from exc
-        try:
-            if response.status_code in (401, 403):
-                raise TransportError(
-                    "the server rejected this connection's credential; reconnect it",
-                    kind="needs_authorization",
-                    status=response.status_code,
+            config = self._config_with_state()
+            # The validated endpoint, not the announcement as it arrived: the
+            # raw value is a path until the connection has checked it against the
+            # origin and the egress policy, and a request must never go to the
+            # unchecked form.
+            message_url = self._message_url or await self.announcement()
+            await self._guard(message_url)
+            try:
+                response = await self._client.send(
+                    self._client.build_request(
+                        "POST",
+                        message_url,
+                        content=encode_request(request_id, method, params),
+                        headers=build_headers(config, body=True),
+                        timeout=_http_timeout(config),
+                    ),
+                    stream=True,
                 )
-            if response.status_code >= 400:
-                # The body is read here, unlike on the success path, because era
-                # detection and the caller's diagnosis both need it: it is the only
-                # thing that distinguishes a modern server refusing a version from
-                # a legacy server that has never heard of the request.
-                try:
-                    payload = await read_bounded(response)
-                except httpx.HTTPError:
-                    payload = b""
+            except httpx.HTTPError as exc:
+                raise TransportError(f"the server could not be reached: {exc}") from exc
+            try:
+                if response.status_code in (401, 403):
+                    raise TransportError(
+                        "the server rejected this connection's credential; reconnect it",
+                        kind="needs_authorization",
+                        status=response.status_code,
+                    )
+                if response.status_code >= 400:
+                    # The body is read here, unlike on the success path, because era
+                    # detection and the caller's diagnosis both need it: it is the only
+                    # thing that distinguishes a modern server refusing a version from
+                    # a legacy server that has never heard of the request.
+                    try:
+                        payload = await read_bounded(response)
+                    except httpx.HTTPError:
+                        payload = b""
+                    raise TransportError(
+                        f"the server answered {response.status_code} to {method!r}",
+                        kind="protocol_incompatible",
+                        status=response.status_code,
+                        payload=payload,
+                    )
+                await read_bounded(response)
+            finally:
+                await response.aclose()
+            try:
+                async with asyncio.timeout(_request_timeout(config)):
+                    await waiter.wait()
+            except TimeoutError as exc:
+                self._waiters.pop(key, None)
                 raise TransportError(
-                    f"the server answered {response.status_code} to {method!r}",
-                    kind="protocol_incompatible",
-                    status=response.status_code,
-                    payload=payload,
-                )
-            await read_bounded(response)
-        finally:
-            await response.aclose()
-        try:
-            async with asyncio.timeout(_request_timeout(config)):
-                await waiter.wait()
-        except TimeoutError as exc:
-            self._waiters.pop(key, None)
-            raise TransportError(
-                f"the server did not answer {method!r} before the timeout",
-                kind="unreachable",
-            ) from exc
-        message = self._inbox.pop(key, None)
-        if message is None:
-            # A stream that ended is a different diagnosis from a reply that
-            # never came, and the caller has a different action for each: one is
-            # a server that went away, the other a server that is answering
-            # something this connection cannot match.
-            if self._ended:
-                raise TransportError(
-                    f"the server's stream ended before it answered {method!r}",
+                    f"the server did not answer {method!r} before the timeout",
                     kind="unreachable",
+                ) from exc
+            message = self._inbox.pop(key, None)
+            if message is None:
+                # A stream that ended is a different diagnosis from a reply that
+                # never came, and the caller has a different action for each: one is
+                # a server that went away, the other a server that is answering
+                # something this connection cannot match.
+                if self._ended:
+                    raise TransportError(
+                        f"the server's stream ended before it answered {method!r}",
+                        kind="unreachable",
+                    )
+                raise TransportError(
+                    f"the server's reply to {method!r} was lost", kind="protocol_incompatible"
                 )
-            raise TransportError(
-                f"the server's reply to {method!r} was lost", kind="protocol_incompatible"
-            )
-        return message.result()
+            return message.result()
+
+        finally:
+            self._waiters.pop(key, None)
+            self._inbox.pop(key, None)
 
     async def notify(self, method: str, params: Mapping[str, Any] | None = None) -> None:
         """Send one notification on the message endpoint."""
@@ -859,11 +880,21 @@ class LegacySseTransport(_HttpCore):
         """Read the GET stream until it ends, routing everything that arrives."""
         decoder = SseDecoder()
         try:
-            async for chunk in response.aiter_bytes():
-                for event in decoder.feed(chunk):
+            try:
+                async for chunk in iter_response_bytes(response):
+                    for event in decoder.feed(chunk):
+                        await self._handle_event(event)
+                for event in decoder.close():
                     await self._handle_event(event)
-            for event in decoder.close():
-                await self._handle_event(event)
+            except SseError as exc:
+                raise TransportError(
+                    "the server sent an invalid or oversized SSE event",
+                    kind="protocol_incompatible",
+                ) from exc
+        except BaseException as exc:
+            if self._announcement is not None and not self._announcement.done():
+                self._announcement.set_exception(exc)
+            raise
         finally:
             # Every waiter is released on stream end. Leaving one blocked would
             # hold a job's request open until its own timeout for a connection
@@ -905,6 +936,7 @@ class LegacySseTransport(_HttpCore):
         config = self._config_with_state()
         try:
             message_url = self._message_url or await self.announcement()
+            await self._guard(message_url)
             response = await self._client.send(
                 self._client.build_request(
                     "POST",
@@ -954,6 +986,7 @@ def build_client(config: RemoteTransportConfig) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         timeout=_http_timeout(config),
         follow_redirects=False,
+        headers=IDENTITY_ENCODING_HEADERS,
         transport=pinned_transport(),
     )
 
@@ -1187,15 +1220,14 @@ async def connect_legacy_sse(
         transport.attach_stream(stream_task)
         try:
             async with asyncio.timeout(_connect_timeout(config) * 3):
-                announced = await transport.announcement()
+                await transport.announcement()
         except TimeoutError as exc:
             raise TransportError(
                 "the server never announced a message endpoint on its stream",
                 kind="protocol_incompatible",
             ) from exc
-        # Validation must be inside the cleanup boundary too: an off-origin
-        # announcement must not leave its reader and credential pool alive.
-        transport.announced(_resolve_message_url(config, announced))
+        # The reader validates announcements before resolving the future. Its
+        # refusal stays inside this cleanup boundary, including later events.
         handshake = await initialize(transport)
     except httpx.HTTPError as exc:
         await transport.aclose()
@@ -1249,7 +1281,10 @@ class HttpMetadataFetcher(MetadataFetcher):
         headers: Mapping[str, str] | None = None,
     ) -> tuple[Mapping[str, Any], Mapping[str, str]]:
         """Fetch and decode one JSON document."""
-        endpoint = validate_endpoint(url, policy)
+        try:
+            endpoint = validate_endpoint(url, policy)
+        except EndpointRejected as exc:
+            raise TransportError(str(exc), kind=exc.kind) from exc
         try:
             loop = asyncio.get_running_loop()
             # The dialler's spelling again: a metadata document lives on the
@@ -1269,13 +1304,18 @@ class HttpMetadataFetcher(MetadataFetcher):
         client = self.client or httpx.AsyncClient(
             timeout=timeout,
             follow_redirects=False,
+            headers=IDENTITY_ENCODING_HEADERS,
             transport=pinned_transport(),
         )
         try:
             request = client.build_request(
                 "GET",
                 endpoint.url,
-                headers={"accept": "application/json", **dict(headers or {})},
+                headers={
+                    "accept": "application/json",
+                    **dict(headers or {}),
+                    **IDENTITY_ENCODING_HEADERS,
+                },
                 timeout=timeout,
             )
             response = await client.send(request, stream=True)
@@ -1307,7 +1347,7 @@ class HttpMetadataFetcher(MetadataFetcher):
 async def iter_sse(response: httpx.Response) -> AsyncIterator[Any]:
     """Yield decoded events from a streaming response, for callers that want them."""
     decoder = SseDecoder()
-    async for chunk in response.aiter_bytes():
+    async for chunk in iter_response_bytes(response):
         for event in decoder.feed(chunk):
             yield event
     for event in decoder.close():

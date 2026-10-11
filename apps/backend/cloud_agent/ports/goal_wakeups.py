@@ -81,6 +81,8 @@ class GoalWakeupRepository(Protocol):
         retry_in_seconds: float | None = None,
         detail: str | None = None,
         conn: Any | None = None,
+        lease_owner: str | None = None,
+        restore_attempt: bool = False,
     ) -> None:
         """Give a lease back, optionally parking it behind a turn.
 
@@ -89,7 +91,8 @@ class GoalWakeupRepository(Protocol):
         will clear ``waiting_job_id``. ``retry_in_seconds`` is for the other
         case — a temporary scheduling failure — and it defers the row's
         ``not_before`` rather than its lease, so a backoff and a dead worker's
-        expiry never look alike.
+        expiry never look alike. ``lease_owner`` fences a consumer's write;
+        ``restore_attempt`` preserves scheduling retries during access-service outages.
         """
         ...
 
@@ -100,12 +103,24 @@ class GoalWakeupRepository(Protocol):
         processed: bool = True,
         detail: str | None = None,
         conn: Any | None = None,
+        lease_owner: str | None = None,
     ) -> None:
         """Mark a wakeup processed, or record a permanent refusal.
 
         A refusal is still terminal: a goal that cannot be scheduled must be
         paused with a reason, not retried behind an "active" badge. The row
         stays as the audit record of what was decided.
+        """
+        ...
+
+    async def lock_wakeup(self, *, wakeup_id: str, lease_owner: str, conn: Any) -> bool:
+        """Fence a goal mutation on its live wakeup lease under the caller's transaction.
+
+        Call after locking the conversation, matching the goal-write lock order.
+        Holding this row lock makes the decision and wakeup completion atomic
+        against another consumer reclaiming an expired lease.
+        Check the wall clock: NOW() stays fixed while a transaction waits for
+        the conversation lock and can predate the lease's expiry.
         """
         ...
 

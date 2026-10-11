@@ -588,6 +588,8 @@ export const en = {
   'queue.attachmentsMany': '{count} attachments',
   // ── Shared ──────────────────────────────────────────────────────────────
   'common.loading': 'Loading…',
+  'common.retry': 'Retry',
+  'common.refreshFailed': 'Refresh failed — showing the last successful read.',
 } as const;
 
 export type TranslationKey = keyof typeof en;

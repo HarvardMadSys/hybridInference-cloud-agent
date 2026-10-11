@@ -1821,6 +1821,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         attempt_id: int,
         lease_generation: int | None = None,
         reason: str = "credential_unavailable",
+        retry_after_seconds: float = 0,
     ) -> bool:
         job = self.jobs.get(job_id)
         if job is None or job.get("current_attempt_id") != attempt_id:
@@ -1830,6 +1831,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         if job.get("admitted"):
             return False
         self.released.append((job_id, attempt_id, reason))
+        job["claim_retry_delay"] = retry_after_seconds
         job["state"] = "queued"
         job["current_attempt_id"] = None
         self.live_fence = None
@@ -5145,8 +5147,35 @@ async def test_a_legacy_row_gets_no_credential_at_claim(store: FakeStorage):
 
     assert claim.status_code == 403
     assert minted == [], "no credential may be minted for an unentitled repo"
-    # And the job went back to the queue rather than burning an attempt.
-    assert store.released
+    # A definitive refusal ends the oldest job so it cannot monopolize claims.
+    assert store.released == []
+    assert next(iter(store.jobs.values()))["state"] == "failed"
+
+
+async def test_a_definitively_unentitled_oldest_job_does_not_block_the_next_job(store: FakeStorage):
+    denied = await store.conversation_commands.create_job(
+        user_id=_OWNER,
+        repo="someone-else/private",
+        task_prompt="oldest",
+        runtime="claude-code",
+        model="m",
+    )
+    ready = await store.conversation_commands.create_job(
+        user_id=_OWNER,
+        repo="o/n",
+        task_prompt="ready",
+        runtime="claude-code",
+        model="m",
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=_build_app(store)), base_url="http://test"
+    ) as client:
+        refused = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        accepted = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    assert refused.status_code == 403
+    assert store.jobs[denied["id"]]["state"] == "failed"
+    assert accepted.status_code == 200
+    assert accepted.json()["job_id"] == ready["id"]
 
 
 async def test_spend_and_usage_come_from_the_ledger_not_the_agent(store: FakeStorage):
@@ -8140,6 +8169,7 @@ async def test_a_turn_that_never_started_goes_back_to_the_queue(store: FakeStora
     assert released.status_code == 200
     assert released.json() == {"ok": True, "state": "queued"}
     assert store.jobs[job_id]["state"] == "queued"
+    assert store.jobs[job_id]["claim_retry_delay"] == 30
     # And the reason travels, because "this host cannot start turns" is what an
     # operator reads the trail for.
     assert store.released[-1][2] == "launch_failed"

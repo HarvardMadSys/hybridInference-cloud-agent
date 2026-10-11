@@ -59,6 +59,8 @@ class _ClaimStore(EmptyAttachments, AllCapabilities):
         self.queued = queued
         self.fence_still_current = fence_still_current
         self.released: list[tuple[str, int]] = []
+        self.retry_delays: list[float] = []
+        self.failed: list[str] = []
         # Named apart from the capability: `store.linked` is now the grant
         # repository the route reaches for, not this fake's record of what it
         # linked.
@@ -101,9 +103,22 @@ class _ClaimStore(EmptyAttachments, AllCapabilities):
         return []
 
     async def release_claim(
-        self, *, job_id: str, attempt_id: int, lease_generation: int | None = None
+        self,
+        *,
+        job_id: str,
+        attempt_id: int,
+        lease_generation: int | None = None,
+        retry_after_seconds: float = 0,
     ) -> bool:
         self.released.append((job_id, attempt_id))
+        self.retry_delays.append(retry_after_seconds)
+        return True
+
+    async def transition(self, *, job_id: str, to_state: str, **kwargs: Any) -> bool:
+        if not self.fence_still_current:
+            return False
+        assert to_state == "failed"
+        self.failed.append(job_id)
         return True
 
     async def record_attempt_grant(
@@ -246,6 +261,7 @@ async def test_a_refused_grant_returns_the_job_to_the_queue(claim):
     assert response.status_code == 503
     assert response.json()["detail"]["error"]["type"] == "credential_unavailable"
     assert store.released == [(_JOB, _ATTEMPT)]
+    assert store.retry_delays == [30]
     assert store.linked == {}
 
 
@@ -311,12 +327,13 @@ async def test_a_grant_that_omits_the_job_model_is_refused(claim):
 
     response = await claim(store, grants)
 
-    assert response.status_code == 503
+    assert response.status_code == 403
     assert response.json()["detail"]["error"]["type"] == "model_not_granted"
     # Withdrawn, not left live: nothing will ever renew a grant whose claim
     # failed, but its TTL would otherwise keep it usable for minutes.
     assert grants.revoked == ["agr_7"]
-    assert store.released == [(_JOB, _ATTEMPT)]
+    assert store.released == []
+    assert store.failed == [_JOB]
 
 
 async def test_a_grant_with_no_scope_at_all_is_refused(claim):
@@ -330,9 +347,54 @@ async def test_a_grant_with_no_scope_at_all_is_refused(claim):
 
     response = await claim(store, grants)
 
-    assert response.status_code == 503
+    assert response.status_code == 403
     assert response.json()["detail"]["error"]["type"] == "model_not_granted"
     assert grants.revoked == ["agr_7"]
+    assert store.failed == [_JOB]
+
+
+async def test_an_unreadable_grant_scope_retries_without_ending_the_job(claim):
+    class UnreadableGrants(_Grants):
+        async def mint(self, **kwargs: Any) -> dict[str, Any]:
+            grant = await super().mint(**kwargs)
+            grant.pop("allowed_models")
+            return grant
+
+    store, grants = _ClaimStore(), UnreadableGrants()
+    response = await claim(store, grants)
+    assert response.status_code == 503
+    assert grants.revoked == ["agr_7"]
+    assert store.failed == []
+    assert store.retry_delays == [30]
+
+
+async def test_a_definitively_unavailable_subject_ends_the_job(claim):
+    class UnavailableSubjectGrants(_Grants):
+        async def mint(self, **kwargs: Any) -> dict[str, Any]:
+            raise GatewayError(
+                "subject unavailable", status_code=403, error_type="subject_unavailable"
+            )
+
+    store = _ClaimStore()
+    response = await claim(store, UnavailableSubjectGrants())
+    assert response.status_code == 403
+    assert store.failed == [_JOB]
+    assert store.released == []
+
+
+async def test_an_unavailable_repository_lookup_delays_the_claim(claim, monkeypatch):
+    from cloud_agent.entitlement import RepoAccessUnavailable
+
+    async def unavailable(*args: Any, **kwargs: Any) -> None:
+        raise RepoAccessUnavailable("GitHub is temporarily unavailable")
+
+    monkeypatch.setattr(agent_worker, "require_entitled_repo", unavailable)
+    store = _ClaimStore()
+    response = await claim(store, _Grants())
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"]["type"] == "source_control_unavailable"
+    assert store.failed == []
+    assert store.retry_delays == [30]
 
 
 @pytest.mark.parametrize("pending", [True, False])

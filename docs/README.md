@@ -25,7 +25,10 @@ guides run from the repository root unless the guide says otherwise.
 | [Release guide](../deploy/release/README.md) | Build immutable release artifacts and deploy their recipes in the required order |
 | [Compute resources](operations-compute.md) | Configure optional server provisioning, global sandbox placement, and CloudLab node replacement |
 | [Deployment reliability](deployment-reliability.md) | Drain runners safely, check schema compatibility, and detect stalled queues |
+| [Backup and recovery](disaster-recovery.md) | Define retention and recovery targets, preserve keys and coherent host state, and recover a previous artifact release |
 | [Runner lease troubleshooting](runner-lease-troubleshooting.md) | Diagnose expired attempts and repeated lease failures |
+| [Host runtime settings](runtime-settings.md) | Configure host defaults, server overrides, and the storage reserve |
+| [Host execution limits](host-execution-limits.md) | Understand command cleanup, output bounds, checkpoints, and storage admission |
 | [Single-host smoke](smoke.md) | Verify a deployment against a gateway and review the original smoke evidence |
 | [Security](../SECURITY.md) | Review deployment trust assumptions and report vulnerabilities privately |
 

@@ -125,20 +125,13 @@ jobs:
           # Web: the app itself.
           if matches '^apps/frontend/'; then web=true; else web=false; fi
 
-          # Docker: the deploy files and what they COPY. README.md is here
-          # because Dockerfile.agent-runner COPYs it alongside pyproject/uv.lock,
-          # so deleting or renaming it breaks the build and nothing else notices.
-          # apps/frontend/ is here because the console image is built from it plus
-          # deploy/control-plane/Dockerfile.web: a change to the app alone used
-          # to skip every docker job, which is how that image went unverified.
-          # apps/backend/cloud_agent_shared/ is here because *both* images
-          # COPY and import it, and "it imports in this checkout and not in
-          # the image" is the failure these jobs exist to catch. The set is
-          # pinned by test_a_change_to_what_both_images_ship_runs_the_image_
-          # jobs, which derives it from the two Dockerfiles rather than listing
-          # it here a second time.
-          if matches '^(deploy/|apps/backend/cloud_agent_host/|apps/backend/cloud_agent_shared/|apps/frontend/)' \
-             || matches '^(pyproject\.toml|uv\.lock|README\.md)$'; then
+          # Every source input to a release image must select image checks.
+          # Tests derive COPY inputs from every artifact's Dockerfile, including
+          # control-only code and migrations. .dockerignore changes every build
+          # context even though no Dockerfile explicitly COPYs it. External
+          # integration tests also select the jobs that provide their images.
+          if matches '^(deploy/|apps/backend/|apps/frontend/|migrations/|tests/external/)' \
+             || matches '^(pyproject\.toml|uv\.lock|README\.md|LICENSE|alembic\.ini|\.dockerignore)$'; then
             docker=true
           else
             docker=false
@@ -1268,6 +1261,24 @@ jobs:
               print("\n".join(failures)); sys.exit(1)
           print("rendered stack: one sandbox network, relays discoverable only, docker socket read-only")
           PY
+
+      - name: Upload limits match encoded attachments through nginx
+        timeout-minutes: 5
+        env:
+          AGENT_UPLOAD_TEST_NGINX_IMAGE: nginx:1.27.5-alpine
+        run: |
+          set -euo pipefail
+          docker --host=unix:///var/run/docker.sock pull "${AGENT_UPLOAD_TEST_NGINX_IMAGE}"
+          uv run --frozen pytest -q -m external tests/external/test_upload_edge_limits.py
+
+      - name: Retained commands clean up Docker siblings at execution limits
+        timeout-minutes: 5
+        env:
+          AGENT_COMMAND_TEST_IMAGE: postgres:15
+        run: |
+          set -euo pipefail
+          docker --host=unix:///var/run/docker.sock pull "${AGENT_COMMAND_TEST_IMAGE}"
+          uv run --frozen pytest -q -m external tests/external/test_retained_command_limits.py
 
   # -------------------------------------------------------------------- gate
   kata:

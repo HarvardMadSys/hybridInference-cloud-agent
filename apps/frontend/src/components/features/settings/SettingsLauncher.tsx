@@ -11,11 +11,8 @@ export function SettingsLauncher() {
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
 
-  // Closing has to hand focus back to the trigger. Without it focus falls to
-  // <body> and a keyboard user restarts from the top of the document.
   const close = useCallback(() => {
     setOpen(false);
-    trigger.current?.focus();
   }, []);
 
   return (
@@ -38,7 +35,7 @@ export function SettingsLauncher() {
         <span className="sr-only">{t('sidebar.openSettings')}</span>
       </button>
 
-      {open ? <SettingsDialog onClose={close} /> : null}
+      {open ? <SettingsDialog onClose={close} returnFocus={trigger} /> : null}
     </>
   );
 }

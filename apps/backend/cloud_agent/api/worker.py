@@ -20,7 +20,10 @@ import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 
 from cloud_agent.api._workspace_access import (
     _workspace_id,
@@ -40,8 +43,8 @@ from cloud_agent.application.residency import _mint_residency_grant, residency_t
 from cloud_agent.attachments.models import AttachmentLeaseLost, AttachmentView
 from cloud_agent.attachments.selection import prompt_with_attachments
 from cloud_agent.broker_routing import ENV_BROKER_TOKEN, broker_for_attempt, hydrate_shared_broker
-from cloud_agent.domain.execution import QUEUED, RUNNING, TERMINAL_STATES
-from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
+from cloud_agent.domain.execution import FAILED, QUEUED, RUNNING, TERMINAL_STATES
+from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.gateway import GatewayError
 from cloud_agent.github_app import AppNotInstalled
 from cloud_agent.goals.controller import continue_after_finish
@@ -108,6 +111,8 @@ from cloud_agent.workspace_errors import _workspace_broker_http_error
 from cloud_agent_host.runtimes import runtimes_supporting_mcp
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
     from cloud_agent.ports import (
         AttachmentRepository,
         AttemptCommands,
@@ -129,7 +134,76 @@ if TYPE_CHECKING:
     from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
 
 
-router = APIRouter(prefix="/v1/agent")
+#: Check the raw report before FastAPI parses JSON or validates its model.
+MAX_TURN_RESOURCES_BODY_BYTES = 16 * 1024
+
+
+class _BoundedTurnResourcesRoute(APIRoute):
+    """Limit turn-resource reports before parsing, including chunked requests."""
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        """Wrap only the resource-report endpoint before its normal handler."""
+        handler = super().get_route_handler()
+        if (
+            not self.path.endswith("/turn-resources")
+            or self.methods is None
+            or "POST" not in self.methods
+        ):
+            return handler
+
+        async def bounded_handler(request: Request) -> Response:
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_TURN_RESOURCES_BODY_BYTES:
+                    return JSONResponse(
+                        status_code=413,
+                        content={
+                            "detail": {
+                                "error": {
+                                    "type": "payload_too_large",
+                                    "message": (
+                                        "A turn resource snapshot is limited to "
+                                        f"{MAX_TURN_RESOURCES_BODY_BYTES} bytes."
+                                    ),
+                                }
+                            }
+                        },
+                        headers={"Cache-Control": "no-store"},
+                    )
+                chunks.append(chunk)
+            # Request.body() uses this same cache; give FastAPI only the bytes
+            # accepted above rather than asking it to consume the stream again.
+            request._body = b"".join(chunks)
+            try:
+                response = await handler(request)
+            except RequestValidationError:
+                # Missing fields otherwise repeat the entire input per error.
+                # A fixed response also keeps malformed reports out of logs
+                # and avoids returning any caller-supplied telemetry content.
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "detail": {
+                            "error": {
+                                "type": "invalid_request",
+                                "message": "Invalid turn resource snapshot.",
+                            }
+                        }
+                    },
+                    headers={"Cache-Control": "no-store"},
+                )
+            except HTTPException as exc:
+                exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+                raise
+            response.headers["Cache-Control"] = "no-store"
+            return response
+
+        return bounded_handler
+
+
+router = APIRouter(prefix="/v1/agent", route_class=_BoundedTurnResourcesRoute)
 
 #: The moved handlers keep logging under the aggregator's logger name: the
 #: deployment's log pipeline selects on ``cloud_agent.api.routes``, and a
@@ -175,14 +249,6 @@ def _require_store(store: _WorkerStorage | None) -> _WorkerStorage:
 # for less. Without this the runner would be handed push rights it must not
 # have, on a host that runs untrusted repository code.
 _CLONE_SCOPE = {"contents": "read"}
-
-
-#: One whole-turn resource snapshot, as UTF-8 bytes, exactly as the collection
-#: contract bounds it. The guest helper posts a fixed small shape, so this is
-#: not a tuning knob: it is the point past which the body is no longer the
-#: report it claims to be. Enforced on the raw body before parsing so an
-#: oversized post cannot allocate a model first.
-MAX_TURN_RESOURCES_BODY_BYTES = 16 * 1024
 
 
 #: Cheap structural check before touching the signing key: host credentials
@@ -404,12 +470,13 @@ async def _mint_sandbox_grant(
     gateway may narrow that further, and what comes back is what is handed
     over; the runner never sees what was asked for.
 
-    **Failure hands the job back.** A grant that could not be minted means the
+    **Transient failure hands the job back.** A grant that could not be minted means the
     sandbox has no way to call a model, so starting the attempt would burn one
     of the job's three tries producing an agent that fails at its first
     request. Releasing the claim costs nothing — a released claim is not a
-    spent attempt — and the runner idles until the gateway answers again. That
-    is the fail-closed direction: no grant, no run.
+    spent attempt — and its next claim waits briefly while later jobs can run.
+    A definitive refusal of the subject or requested model ends this job with
+    an actionable reason instead of retrying the same oldest row indefinitely.
 
     The grant id is recorded against the attempt under its own fence, because
     renewal and revocation both need to find it later, and because the fence is
@@ -434,6 +501,7 @@ async def _mint_sandbox_grant(
     Raises:
         HTTPException: 503, after releasing the claim, if no grant could be got
             or the one that was minted could not be linked to this attempt.
+            A definitive subject/model refusal returns 403 after ending the job.
     """
     try:
         grant = await grants.mint(
@@ -443,10 +511,29 @@ async def _mint_sandbox_grant(
             models=[claim["model"]],
         )
     except GatewayError as exc:
+        if exc.definitive and exc.error_type == "subject_unavailable":
+            await job_store.attempt_commands.transition(
+                job_id=claim["id"],
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                from_states=(RUNNING,),
+                to_state=FAILED,
+                detail="The gateway account can no longer run this job.",
+            )
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": {
+                        "type": "subject_unavailable",
+                        "message": ("The gateway account can no longer run this job."),
+                    }
+                },
+            ) from exc
         await job_store.attempt_commands.release_claim(
             job_id=claim["id"],
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
+            retry_after_seconds=30,
         )
         logger.warning(
             "agent_job_grant_unavailable",
@@ -477,9 +564,8 @@ async def _mint_sandbox_grant(
     # and the response reports the effective list.
     #
     # Unchecked, that lands as a sandbox that starts, spends an attempt, and
-    # fails on its first inference call with an authorization error the user
-    # cannot act on. Checked here, the job goes back to the queue with nothing
-    # spent, which is the same shape as every other credential failure above.
+    # fails on its first inference call. A definitive scope refusal ends this
+    # job so the same oldest row cannot monopolize every subsequent claim.
     #
     # Absence is refusal too. The contract says this field is returned; if it
     # is not, the scope cannot be verified, and "cannot verify" is not a reason
@@ -488,11 +574,23 @@ async def _mint_sandbox_grant(
     if not isinstance(granted_models, list) or claim["model"] not in granted_models:
         if grant_id:
             await grants.revoke(grant_id)
-        await job_store.attempt_commands.release_claim(
-            job_id=claim["id"],
-            attempt_id=claim["attempt_id"],
-            lease_generation=claim["lease_generation"],
-        )
+        definitive = isinstance(granted_models, list)
+        if definitive:
+            await job_store.attempt_commands.transition(
+                job_id=claim["id"],
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                from_states=(RUNNING,),
+                to_state=FAILED,
+                detail="The gateway no longer grants this job's model; choose an available model.",
+            )
+        else:
+            await job_store.attempt_commands.release_claim(
+                job_id=claim["id"],
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                retry_after_seconds=30,
+            )
         logger.warning(
             "agent_job_grant_scope_insufficient",
             extra={
@@ -503,13 +601,14 @@ async def _mint_sandbox_grant(
             },
         )
         raise HTTPException(
-            status_code=503,
+            status_code=403 if definitive else 503,
             detail={
                 "error": {
                     "type": "model_not_granted",
                     "message": (
-                        "The gateway did not grant this job's model; it has been "
-                        "returned to the queue and no attempt was spent."
+                        "The gateway no longer grants this job's model; choose an available model."
+                        if definitive
+                        else "The gateway returned an unreadable model scope; the job will retry shortly."
                     ),
                 }
             },
@@ -530,6 +629,7 @@ async def _mint_sandbox_grant(
             job_id=claim["id"],
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
+            retry_after_seconds=30,
         )
         logger.warning(
             "agent_job_grant_unlinked",
@@ -654,11 +754,23 @@ async def worker_claim(
             store=job_store.source_control,
             app_credentials=app_credentials,
         )
-    except RepoNotAllowed as exc:
+    except RepoAccessUnavailable as exc:
         await job_store.attempt_commands.release_claim(
             job_id=claim["id"],
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
+            retry_after_seconds=30,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"type": "source_control_unavailable", "message": str(exc)}},
+        ) from exc
+    except RepoNotAllowed as exc:
+        await job_store.attempt_commands.transition(
+            **fence,
+            from_states=(RUNNING,),
+            to_state=FAILED,
+            detail=str(exc),
         )
         logger.warning(
             "agent_job_repo_not_allowed",
@@ -700,6 +812,7 @@ async def worker_claim(
                 job_id=claim["id"],
                 attempt_id=claim["attempt_id"],
                 lease_generation=claim["lease_generation"],
+                retry_after_seconds=30,
             )
             logger.warning(
                 "agent_job_clone_token_error",
@@ -1371,7 +1484,6 @@ async def worker_report_resources(
 
 @router.post("/worker/jobs/{job_id}/turn-resources", response_model=WorkerAckResponse)
 async def worker_report_turn_resources(
-    request: Request,
     job_id: str,
     body: WorkerTurnResourcesRequest,
     authorization: str | None = Header(None),
@@ -1399,19 +1511,6 @@ async def worker_report_turn_resources(
     job_store = _require_store(store)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
-    if len(await request.body()) > MAX_TURN_RESOURCES_BODY_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail={
-                "error": {
-                    "type": "payload_too_large",
-                    "message": (
-                        "A turn resource snapshot is limited to "
-                        f"{MAX_TURN_RESOURCES_BODY_BYTES} bytes."
-                    ),
-                }
-            },
-        )
     result = await job_store.attempt_commands.record_attempt_turn_summary(
         attempt_id=claims["attempt_id"],
         lease_generation=claims["lease_generation"],
@@ -1560,6 +1659,9 @@ async def worker_release(
     has provably not begun and the person waiting on it should not wait out a
     lease that nothing is holding.
 
+    A short retry delay lets other queued work proceed while the host recovers
+    from a temporary refusal, including work that can resume an existing sandbox.
+
     **Not an escape hatch for a turn that is running.** The release is refused
     once the turn has been admitted to the CLI, and the check is the database's
     rather than the caller's: replaying an admitted prompt executes the same
@@ -1575,6 +1677,7 @@ async def worker_release(
         attempt_id=claims["attempt_id"],
         lease_generation=claims["lease_generation"],
         reason=body.reason,
+        retry_after_seconds=30,
     )
     if not released:
         # 409 rather than 400: the request was well formed and would have been

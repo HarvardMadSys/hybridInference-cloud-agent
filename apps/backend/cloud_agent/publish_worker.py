@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 
-from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
+from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.pr_titles import generate_pr_title
 from cloud_agent.publisher import PublishError, fetch_base_bundle, publish_patch
@@ -79,7 +79,7 @@ logger = get_logger(__name__)
 GITHUB_API = "https://api.github.com"
 POLL_INTERVAL_S = 15.0
 #: The longest an idle publisher that is told about new work sleeps. It wakes
-#: sooner for a notification or the earliest base import retry.
+#: sooner for a notification or the earliest publication/base import retry.
 PUBLISH_IDLE_S = 30.0
 
 # Exactly what publishing does: push one branch, open one draft PR. Notably not
@@ -491,8 +491,8 @@ async def _publish_due(
 ) -> None:
     """Publish every captured snapshot, past any that fails.
 
-    A failure marks its snapshot failed, so it is not claimed again, and the
-    snapshots behind it still go out in this pass rather than at the next.
+    A refusal marks its snapshot failed; a preflight entitlement outage delays
+    its next claim. Snapshots behind either still go out in this pass.
     """
     while (job := await store.snapshot.claim_for_publish()) is not None:
         await _publish_claimed(
@@ -539,6 +539,15 @@ async def _publish_claimed(
             store=store.source_control,
             app_credentials=app_credentials,
         )
+    except RepoAccessUnavailable as exc:
+        # No write credential, git push, or PR request has happened yet. Only
+        # this preflight failure can safely return the immutable artifact to
+        # the queue; later failures may have changed the remote repository.
+        await store.snapshot.defer_snapshot_publish(
+            snapshot_id=int(job["snapshot_id"]),
+            detail=f"repository access check unavailable; publication will retry: {exc}",
+        )
+        return None
     except RepoNotAllowed as exc:
         await fail(f"no longer entitled to publish to {job['repo']}: {exc}")
         return None
@@ -651,8 +660,9 @@ async def publish_loop(
 
     With ``wake`` a snapshot that is captured, published, or whose base is to
     be imported is handled at once, and an idle publisher sleeps until it is
-    woken or the earliest failed base import may be retried. While the App or
-    a credential is missing, which nothing announces, it looks on its clock.
+    woken or the earliest deferred publication or failed base import may be
+    retried. While the App or a credential is missing, which nothing announces,
+    it looks on its clock.
 
     ``credential_provider`` is called per job so a short-lived installation
     token is minted fresh rather than held for the lifetime of the process.
@@ -721,6 +731,10 @@ async def _next_look_s(store: PublishStorage) -> float:
     idle_s = number_setting("publish_idle_seconds", PUBLISH_IDLE_S)
     with contextlib.suppress(Exception):
         due = await store.snapshot.next_base_import_retry_due()
+        if due is not None:
+            idle_s = min(idle_s, (due - datetime.now(UTC)).total_seconds())
+    with contextlib.suppress(Exception):
+        due = await store.snapshot.next_snapshot_publish_retry_due()
         if due is not None:
             idle_s = min(idle_s, (due - datetime.now(UTC)).total_seconds())
     return max(idle_s, 0.0)

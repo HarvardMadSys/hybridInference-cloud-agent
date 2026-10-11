@@ -39,6 +39,7 @@ from cloud_agent_host.workspace_broker import (
     MAX_TERMINAL_BUFFER_BYTES,
     MAX_TERMINAL_BUFFER_EVENTS,
     MAX_TERMINAL_SESSIONS_PER_WORKSPACE,
+    SharedTurnRequest,
     TerminalRequest,
     _run_terminal,
     _terminal_sse_frame,
@@ -48,6 +49,46 @@ from cloud_agent_host.workspace_broker import (
     create_app,
 )
 from cloud_agent_shared.host_settings import BROKER_SETTING_KEYS, default_values
+
+
+@pytest.mark.asyncio
+async def test_resource_checkpoint_is_forwarded_before_any_native_event():
+    """A checkpoint persists during a silent tool invocation, before CLI output."""
+    gate = threading.Event()
+    turn_started = threading.Event()
+
+    class QuietTurn:
+        @staticmethod
+        def lines():
+            turn_started.set()
+            gate.wait(2)
+            yield SimpleNamespace(event_type="message", payload={"text": "done"}, raw_line="done")
+
+    supervisor = _SharedSupervisor()
+    supervisor.start_turn = lambda *_args, **_kw: QuietTurn()  # type: ignore[attr-defined]
+    pending = [{"measurement_id": "sample", "state": "collecting", "report_seq": 1}]
+    supervisor.take_reported_checkpoint = (  # type: ignore[attr-defined]
+        lambda _thread_id: pending.pop() if pending else None
+    )
+    supervisor.abort_turn = lambda *_args: gate.set()  # type: ignore[attr-defined]
+    app = _app(supervisor)
+    endpoint = next(
+        route.endpoint
+        for route in app.routes
+        if getattr(route, "path", None) == "/shared-sandboxes/{thread_id}/turn"
+    )
+    response = await endpoint(
+        "athr_source", SharedTurnRequest(token="lease", prompt="work", model="model")
+    )
+    try:
+        first = json.loads(await asyncio.wait_for(anext(response.body_iterator), timeout=1))
+        assert first["kind"] == "resource_checkpoint"
+        assert first["turn_resources"]["state"] == "collecting"
+        assert turn_started.wait(1)
+        assert not gate.is_set()
+    finally:
+        gate.set()
+        await response.body_iterator.aclose()
 
 
 class _TerminalProcess(TerminalProcess):

@@ -34,6 +34,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from cloud_agent_host import broker_profiling_policy
+from cloud_agent_host.bounded_output import OutputPump
 from cloud_agent_host.chat_sandbox import (
     CHAT_WORKDIR,
     ChatSandboxManager,
@@ -1253,40 +1254,41 @@ def _run_sandbox(
             env={**backend.base_env(), "GIT_CONFIG_NOSYSTEM": "1", **env},
         )
     )
-    lines: queue.Queue[str | None] = queue.Queue()
-
-    def pump() -> None:
-        try:
-            for line in process.lines():
-                lines.put(line)
-        finally:
-            lines.put(None)
-
-    threading.Thread(target=pump, daemon=True, name="workspace-command").start()
+    # Real sandbox adapters read fixed-size chunks; injected line-only adapters
+    # remain supported without turning protocol frames into command records.
+    chunks_source = getattr(process, "chunks", process.lines)
+    output = OutputPump(chunks_source(), name="workspace-command")
     deadline = time.monotonic() + timeout_s
     chunks: list[str] = []
     size = 0
-    while True:
-        if time.monotonic() > deadline:
-            process.kill()
-            raise HTTPException(status_code=408, detail="workspace command timed out")
-        try:
-            line = lines.get(timeout=0.2)
-        except queue.Empty:
-            continue
-        if line is None:
-            break
-        size += len(line.encode("utf-8", errors="replace"))
-        if size > max_output_bytes:
-            process.kill()
-            raise HTTPException(status_code=413, detail="workspace command output is too large")
-        chunks.append(line)
-    exit_code = process.wait()
-    stderr = process.stderr_text()
-    if len(stderr.encode("utf-8", errors="replace")) > max_output_bytes:
-        stderr = stderr.encode("utf-8", errors="replace")[-max_output_bytes:].decode(
-            "utf-8", errors="replace"
-        )
+    try:
+        while True:
+            if time.monotonic() > deadline:
+                output.close(drain=True)
+                process.kill()
+                process.wait()
+                raise HTTPException(status_code=408, detail="workspace command timed out")
+            try:
+                chunk = output.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if chunk is None:
+                break
+            size += len(chunk.encode("utf-8", errors="replace"))
+            if size > max_output_bytes:
+                output.close(drain=True)
+                process.kill()
+                process.wait()
+                raise HTTPException(status_code=413, detail="workspace command output is too large")
+            chunks.append(chunk)
+        exit_code = process.wait()
+        stderr = process.stderr_text()
+        if len(stderr.encode("utf-8", errors="replace")) > max_output_bytes:
+            stderr = stderr.encode("utf-8", errors="replace")[-max_output_bytes:].decode(
+                "utf-8", errors="replace"
+            )
+    finally:
+        output.close()
     if isinstance(workdir, Path):
         os.utime(workdir, None)
     return exit_code, "".join(chunks), stderr
@@ -1934,13 +1936,35 @@ def create_app(
                 resources = build_turn_resources(value, tool_windows, thread_id=thread_id)
                 return resources
 
-            try:
+            def observed_events() -> Iterator[Any]:
                 for event in turn.lines():
-                    tool_windows.observe(
-                        event.event_type,
-                        event.payload,
-                        mono=time.monotonic(),
-                    )
+                    # Timestamp at the native read boundary, before queueing:
+                    # backpressure must not move a tool's message window past
+                    # the trusted guest hook marks collected within it.
+                    tool_windows.observe(event.event_type, event.payload, mono=time.monotonic())
+                    yield event
+
+            events = OutputPump(observed_events(), name="shared-turn-events")
+            try:
+                while True:
+                    # Sampling and forwarding must both proceed while the CLI
+                    # is silent. A crash should retain its latest closed
+                    # checkpoint even during one long tool invocation.
+                    checkpoint = take_reported_checkpoint(owner, thread_id)
+                    if checkpoint is not None:
+                        yield (
+                            json.dumps(
+                                {"kind": "resource_checkpoint", "turn_resources": checkpoint},
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                        )
+                    try:
+                        event = events.get(timeout=0.25)
+                    except queue.Empty:
+                        continue
+                    if event is None:
+                        break
                     yield (
                         json.dumps(
                             {
@@ -1953,22 +1977,6 @@ def create_app(
                         )
                         + "\n"
                     )
-                    # A long turn crosses the checkpoint interval several
-                    # times. The sampler thread produces those checkpoints on
-                    # its own clock; this only forwards one that is waiting,
-                    # which costs a dictionary read per event.
-                    checkpoint = take_reported_checkpoint(owner, thread_id)
-                    if checkpoint is not None:
-                        yield (
-                            json.dumps(
-                                {
-                                    "kind": "resource_checkpoint",
-                                    "turn_resources": checkpoint,
-                                },
-                                separators=(",", ":"),
-                            )
-                            + "\n"
-                        )
                 result = turn.wait()
                 # The activation boundary is part of success, not cleanup
                 # after success. It reaps escaped background processes and
@@ -2022,6 +2030,7 @@ def create_app(
                     + "\n"
                 )
             finally:
+                events.close()
                 with contextlib.suppress(Exception):
                     if not turn_boundary_closed:
                         owner.abort_turn(thread_id, body.token, turn)

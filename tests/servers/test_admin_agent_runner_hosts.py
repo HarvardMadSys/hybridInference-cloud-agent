@@ -513,6 +513,7 @@ async def test_the_pool_lists_every_setting_an_admin_may_set_with_its_bounds(adm
         "agent_timeout_s",
         "chat_idle_timeout_s",
         "source_import_max_mib",
+        "storage_min_available_mib",
         "shared_resident_capacity",
         "terminal_idle_ttl_s",
         "terminal_hard_ttl_s",
@@ -538,6 +539,17 @@ async def test_the_pool_lists_every_setting_an_admin_may_set_with_its_bounds(adm
         "default": 1024,
         "minimum": 1,
         "maximum": 65536,
+        "scope": "runner",
+    }
+    assert definitions["storage_min_available_mib"] | {"label": None, "description": None} == {
+        "key": "storage_min_available_mib",
+        "env": "AGENT_STORAGE_MIN_AVAILABLE_MIB",
+        "label": None,
+        "description": None,
+        "unit": "MiB",
+        "default": 1024,
+        "minimum": 1,
+        "maximum": 1048576,
         "scope": "runner",
     }
 

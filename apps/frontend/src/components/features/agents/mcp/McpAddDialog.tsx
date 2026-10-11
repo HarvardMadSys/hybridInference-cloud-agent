@@ -1,6 +1,8 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useModalDialog } from '@/components/ui/useModalDialog';
+
+import { useRef, useState } from 'react';
 import { McpImportStep } from './McpImportStep';
 import { McpCatalogBrowser } from './McpCatalogBrowser';
 import { McpServerIcon } from './McpServerIcon';
@@ -37,11 +39,7 @@ export function McpAddDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
-    panel.current?.querySelector<HTMLElement>('button, textarea')?.focus();
-    return () => previous?.focus();
-  }, []);
+  useModalDialog(panel, { busy: saving, onClose });
 
   async function connect() {
     if (!selected || submission.current) return;
@@ -72,32 +70,7 @@ export function McpAddDialog({
   const notes = selected?.auth_kind === authKind ? selected.notes : [];
 
   return (
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center p-4"
-      onKeyDown={(event) => {
-        if (event.key === 'Escape' && !saving) {
-          event.stopPropagation();
-          onClose();
-        }
-        if (event.key === 'Tab') {
-          const controls = Array.from(
-            panel.current?.querySelectorAll<HTMLElement>(
-              'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href]',
-            ) ?? [],
-          ).filter((control) => !control.closest('[hidden]'));
-          if (!controls.length) return;
-          const first = controls[0];
-          const last = controls[controls.length - 1];
-          if (event.shiftKey && document.activeElement === first) {
-            event.preventDefault();
-            last.focus();
-          } else if (!event.shiftKey && document.activeElement === last) {
-            event.preventDefault();
-            first.focus();
-          }
-        }
-      }}
-    >
+    <div lang="en" className="fixed inset-0 z-[60] flex items-center justify-center p-4">
       <button
         type="button"
         aria-label="Close add server dialog"
@@ -109,6 +82,7 @@ export function McpAddDialog({
       <div
         ref={panel}
         role="dialog"
+        lang="en"
         aria-modal="true"
         aria-labelledby="mcp-add-title"
         className="relative flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 shadow-card"

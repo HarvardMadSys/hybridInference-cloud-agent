@@ -1,6 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useModalDialog } from '@/components/ui/useModalDialog';
+
+import { useEffect, useId, useRef, useState, type RefObject } from 'react';
 import { useFirstRun } from '@/components/features/agents/firstRun';
 import { useLocale, useTheme } from '@/components/providers';
 import { LOCALES, LOCALE_LABELS, isLocale } from '@/lib/i18n/locales';
@@ -23,11 +25,13 @@ const SECTION_TITLE =
   'text-[11px] font-semibold uppercase tracking-[0.08em] text-gray-400 dark:text-gray-500';
 const FIELD_LABEL = 'text-[13px] font-medium text-gray-800 dark:text-gray-200';
 
-/** Elements that can hold focus, for the tab cycle below. */
-const FOCUSABLE =
-  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-export function SettingsDialog({ onClose }: { onClose: () => void }) {
+export function SettingsDialog({
+  onClose,
+  returnFocus,
+}: {
+  onClose: () => void;
+  returnFocus?: RefObject<HTMLElement>;
+}) {
   const { t, locale, setLocale } = useLocale();
   const { preference, setPreference } = useTheme();
   const firstRun = useFirstRun();
@@ -45,9 +49,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   // Focus has to land inside the dialog, or a keyboard user's next Tab
   // continues through the page behind it — which is still rendered, just
   // covered.
-  useEffect(() => {
-    panel.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
-  }, []);
+  useModalDialog(panel, { onClose, returnFocus });
 
   // For the same reason, Show again hands its place to the note that replaces
   // it: a pressed button that disappears drops focus to <body>, and Escape
@@ -56,39 +58,8 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     if (gettingStartedShown) shownNote.current?.focus();
   }, [gettingStartedShown]);
 
-  const onKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (event.key === 'Escape') {
-        event.stopPropagation();
-        onClose();
-        return;
-      }
-      if (event.key !== 'Tab') return;
-      // Cycle within the dialog rather than trapping hard: the list is read
-      // fresh on every Tab, so a control that appears later (a longer language
-      // list, a section added below) joins the cycle without extra wiring.
-      const focusable = [...(panel.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])];
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      const active = document.activeElement;
-      if (event.shiftKey && active === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && active === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    },
-    [onClose],
-  );
-
   return (
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center p-4"
-      onKeyDown={onKeyDown}
-      role="presentation"
-    >
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" role="presentation">
       {/* The backdrop is a sibling button rather than a click handler on the
           wrapper: a click that starts inside the panel and ends on the overlay
           — a sloppy drag while selecting text — would otherwise close the

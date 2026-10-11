@@ -1042,6 +1042,7 @@ with no leader and no sharding.
 | `AGENT_HOST_SLOTS` | `3` | Turns at once until an admin sets a number on the Servers page; at least two, at most 128. `AGENT_RUNNER_REPLICAS` is no longer read |
 | `AGENT_RETAINED_DOCKER_DATA_ROOT` | `/var/lib/docker` | Expected daemon `DockerRootDir`; provision this root on durable storage. It is verified by the host and broker and is never mounted into a chat container |
 | `AGENT_HOST_STORAGE_PROBE` | `overlay_root` | Which probe measures the filesystem holding the sandbox writable layers, shown as the Servers page's Storage column. `off` stops measuring storage on that host and is the rollback; an unrecognized name reports `unsupported` rather than measuring something else. A reading is published only for a topology the host deployment has attested; see _How full is the sandbox storage?_ |
+| `AGENT_STORAGE_MIN_AVAILABLE_MIB` | `1024` | Bootstrap value for **Storage reserve for new sandboxes**; the admin runtime setting replaces it after the host's first settings heartbeat. Fresh verified available space below this reserve declines a new sandbox allocation without spending the turn. Existing sandboxes may resume; unknown capacity does not establish a pressure verdict. This is an admission guard, not a disk quota |
 | `AGENT_SANDBOX_UID` / `_GID` | `10001` | Only for a custom sandbox image; must match its user |
 | `AGENT_REPO_ALLOWLIST` | — | Comma-separated `owner/name`, or `owner/*`, for the single-tenant dogfood. Users who connect the App themselves do not need it; unset simply means the only entitlement is a user's own connection |
 | `AGENT_GITHUB_APP_CLIENT_ID` / `_CLIENT_SECRET` | — | The App's OAuth half. Only the user-facing connect flow needs it; minting installation tokens uses the private key alone |
@@ -1452,6 +1453,13 @@ deactivate a healthy group:
   create another inactivity clock;
 - no workspace-cleanup TTL addresses chat data. This phase never removes a
   retained sandbox; operators monitor Docker storage separately.
+
+A bounded workspace command's timeout or output overflow kills its own verified
+process group and preserves the sandbox's other resident sessions and terminals.
+Host output readers use fixed-size chunks, byte-bounded diagnostic tails, and
+bounded queues; oversized native CLI records stop the affected member. Resource
+checkpoints continue to reach the control plane while CLI output is silent. See
+[Host execution limits](host-execution-limits.md) for the limits and boundaries.
 
 #### Resume, Fork, and publication
 
@@ -1953,6 +1961,19 @@ containers are retained, not how much disk they hold — and it observes one
 filesystem, not one chat: a repository, its dependencies, uncommitted changes
 and the native CLI session all live in a container's writable layer, and
 stopping a container does not release it.
+
+**Storage reserve for new sandboxes** is a runtime setting in Admin Settings and
+each server's configuration. Its default is 1024 MiB. The runner uses a fresh
+attested reading before accepting a turn that would create a sandbox. Below the
+reserve it declines the handover, returns the untouched turn to the queue, and
+reports a launch error with the available space and suggested remedies. Existing
+retained sessions can resume and cleanup stays available. Free Docker storage or
+adjust the reserve to restore new allocation.
+
+The check does not reserve space or impose per-container quotas: existing or
+concurrent writers can consume space afterward. Disabled or unverified storage
+measurement remains explicitly unmeasured and does not block allocation; never
+substitute another filesystem's available space for Docker writable-layer capacity.
 
 #### What the reading measures
 

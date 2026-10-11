@@ -9,6 +9,8 @@ runner container crash-loops in production.
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import re
 import shutil
@@ -23,6 +25,11 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib
 
+from cloud_agent.attachments.models import (
+    MAX_ATTACHMENT_FILE_BYTES,
+    MAX_ATTACHMENT_PATH_LENGTH,
+    MAX_CONTENT_TYPE_LENGTH,
+)
 from cloud_agent_host.runner import build_parser
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -447,6 +454,54 @@ def test_the_standalone_edge_is_probed_before_a_deploy_succeeds():
     assert 'ACTIVE_SERVICES="$(compose config --services)"' in before_success
     assert 'wait_for "edge web route" "http://127.0.0.1:${EDGE_PORT}/"' in edge_checks
     assert 'wait_for "edge API route" "http://127.0.0.1:${EDGE_PORT}/api/healthz"' in edge_checks
+
+
+@pytest.mark.parametrize(
+    "file,prefix,upstream",
+    [
+        ("deploy/control-plane/edge.nginx.conf", "/api", "http://cloud_agent_api"),
+        ("deploy/local/nginx.conf", "/api", "http://cloud_agent_api"),
+        (
+            "deploy/reverse-proxy/agents-under-gateway.conf",
+            "/agents/api",
+            "http://127.0.0.1:8000",
+        ),
+    ],
+)
+def test_edge_allows_the_largest_supported_attachment_json(file, prefix, upstream):
+    """A valid base64 upload must fit the proxy limit and retain its API path."""
+    config = (REPO_ROOT / file).read_text()
+    route = f"{prefix}/v1/agent/uploads"
+    match = re.search(r"location " + re.escape(route) + r"\s*\{([^}]+)\}", config)
+    assert match is not None, "uploads need a distinct bounded proxy body limit"
+    block = match.group(1)
+    limit = re.search(r"client_max_body_size\s+(\d+)([km]?)\s*;", block)
+    assert limit is not None
+    maximum = int(limit.group(1)) * {"": 1, "k": 1024, "m": 1024 * 1024}[limit.group(2)]
+    body = json.dumps(
+        {
+            # Control characters/non-ASCII metadata can consume six JSON bytes
+            # per character; include that envelope rather than just base64.
+            "path": "\u0100" * MAX_ATTACHMENT_PATH_LENGTH,
+            "content_base64": base64.b64encode(bytes(MAX_ATTACHMENT_FILE_BYTES)).decode(),
+            "content_type": "\u0100" * MAX_CONTENT_TYPE_LENGTH,
+        }
+    ).encode()
+    assert len(body) <= maximum <= 8 * 1024 * 1024
+    assert f"proxy_pass {upstream}/v1/agent/uploads;" in block
+    assert config.count("client_max_body_size") == 1, "other routes retain the default"
+
+
+def test_control_and_runner_install_locked_production_dependencies():
+    """Both images consume uv.lock without an unlocked pip project install."""
+    for file in ("deploy/control-plane/Dockerfile", "deploy/host/Dockerfile.agent-runner"):
+        recipe = (REPO_ROOT / file).read_text()
+        assert "uv.lock" in recipe
+        assert "uv sync --frozen --no-dev --no-install-project" in recipe
+        assert '"uv==${UV_VERSION}"' in recipe
+        assert "pip install --no-cache-dir ." not in recipe
+    control = (REPO_ROOT / "deploy/control-plane/Dockerfile").read_text()
+    assert "uv sync --frozen --no-dev --no-editable" in control
 
 
 def test_root_mounted_web_build_accepts_an_explicit_empty_base_path():

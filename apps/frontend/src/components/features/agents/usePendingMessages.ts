@@ -58,6 +58,8 @@ export interface PendingQueue {
   pausedReason: QueuePausedReason | null;
   /** True once the first read has answered. */
   loaded: boolean;
+  /** A read failed; the last successfully read queue remains visible. */
+  refreshError?: string | null;
   /** Messages with a write in flight, so their card can wait. */
   busyIds: ReadonlySet<string>;
   resuming: boolean;
@@ -126,6 +128,7 @@ export function usePendingMessages({
   const [messages, setMessages] = useState<PendingMessageApi[]>([]);
   const [pausedReason, setPausedReason] = useState<QueuePausedReason | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set<string>());
   const [resuming, setResuming] = useState(false);
   const [canSendNow, setCanSendNow] = useState(false);
@@ -172,6 +175,7 @@ export function usePendingMessages({
           (queue.latest_job_state === 'running' || queue.latest_job_state === 'queued'),
       );
       setLoaded(true);
+      setRefreshError(null);
       if (
         previous &&
         queue.latest_job_id &&
@@ -186,13 +190,15 @@ export function usePendingMessages({
 
   const refresh = useCallback(async () => {
     const target = threadRef.current;
-    if (!target) return;
+    if (!target || document.visibilityState === 'hidden') return;
     const seq = ++readSeq.current;
     try {
       const queue = await getThreadQueue(target);
       if (mounted.current) applyRead(queue, seq);
-    } catch {
+    } catch (cause) {
       // A failed read keeps what is on screen; the next one tries again.
+      if (mounted.current && target === threadRef.current && seq >= appliedSeq.current)
+        setRefreshError(getErrorMessage(cause));
     }
   }, [applyRead]);
 
@@ -208,6 +214,7 @@ export function usePendingMessages({
     setPausedReason(null);
     setCanSendNow(false);
     setLoaded(false);
+    setRefreshError(null);
     setBusyIds(new Set<string>());
     if (threadId) void refresh();
   }, [refresh, threadId]);
@@ -438,6 +445,7 @@ export function usePendingMessages({
     messages,
     pausedReason,
     loaded,
+    refreshError,
     busyIds,
     resuming,
     canSendNow,

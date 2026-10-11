@@ -24,7 +24,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from cloud_agent.application.pending_messages import settle_queue
-from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
+from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.goals.decision import GoalAction, GoalContext, decide
 from cloud_agent.goals.models import (
     GOAL_REPORT_RUNTIMES,
@@ -137,6 +137,14 @@ async def run_goal_wakeups(
             await consume_wakeup(
                 store=store, wakeup=wakeup, app_credentials=app_credentials, gateway=gateway
             )
+        except RepoAccessUnavailable:
+            await store.goal_wakeups.release_wakeup(
+                wakeup_id=str(wakeup["id"]),
+                lease_owner=str(wakeup.get("lease_owner") or ""),
+                retry_in_seconds=30.0,
+                restore_attempt=True,
+                detail="repository access is temporarily unavailable; retrying",
+            )
         except Exception:
             logger.warning(
                 "agent_goal_wakeup_failed",
@@ -202,26 +210,38 @@ async def consume_wakeup(
         # Cleared, or never really there. Nothing to decide, and nothing that
         # could authorize work.
         await store.goal_wakeups.finish_wakeup(
-            wakeup_id=str(wakeup["id"]), processed=True, detail="no goal"
+            wakeup_id=str(wakeup["id"]),
+            processed=True,
+            detail="no goal",
+            lease_owner=str(wakeup.get("lease_owner") or ""),
         )
         return "none"
     if str(wakeup.get("goal_id") or "") != str(goal.get("goal_id") or ""):
         # The objective was replaced under this obligation: the wakeup belonged
         # to a goal that no longer exists.
         await store.goal_wakeups.finish_wakeup(
-            wakeup_id=str(wakeup["id"]), processed=True, detail="superseded goal"
+            wakeup_id=str(wakeup["id"]),
+            processed=True,
+            detail="superseded goal",
+            lease_owner=str(wakeup.get("lease_owner") or ""),
         )
         return "none"
     if int(wakeup.get("revision") or 0) != int(goal.get("revision") or 0):
         # The goal moved on — edited, paused, resumed or completed. Whatever
         # this wakeup was going to say has already been said by that write.
         await store.goal_wakeups.finish_wakeup(
-            wakeup_id=str(wakeup["id"]), processed=True, detail="superseded revision"
+            wakeup_id=str(wakeup["id"]),
+            processed=True,
+            detail="superseded revision",
+            lease_owner=str(wakeup.get("lease_owner") or ""),
         )
         return "none"
     if goal.get("state") != "active":
         await store.goal_wakeups.finish_wakeup(
-            wakeup_id=str(wakeup["id"]), processed=True, detail=f"goal {goal.get('state')}"
+            wakeup_id=str(wakeup["id"]),
+            processed=True,
+            detail=f"goal {goal.get('state')}",
+            lease_owner=str(wakeup.get("lease_owner") or ""),
         )
         return "none"
     # A person's waiting message goes first. The settlement is the same one
@@ -303,11 +323,13 @@ async def _park(store: _GoalStore, *, wakeup: dict[str, Any], job_id: str) -> No
         # parked on a dead job.
         await store.goal_wakeups.release_wakeup(
             wakeup_id=str(wakeup["id"]),
+            lease_owner=str(wakeup.get("lease_owner") or ""),
             detail="the turn it was waiting for had already ended",
         )
         return
     await store.goal_wakeups.release_wakeup(
         wakeup_id=str(wakeup["id"]),
+        lease_owner=str(wakeup.get("lease_owner") or ""),
         waiting_job_id=job_id,
         detail="waiting for the turn already in this conversation",
     )
@@ -526,7 +548,10 @@ async def _apply(
     action = decide(context)
     if action.kind == "none":
         await store.goal_wakeups.finish_wakeup(
-            wakeup_id=str(wakeup["id"]), processed=True, detail="nothing to do"
+            wakeup_id=str(wakeup["id"]),
+            processed=True,
+            detail="nothing to do",
+            lease_owner=str(wakeup.get("lease_owner") or ""),
         )
         return action.kind
     if action.kind in ("queue_work_round", "queue_repair_round"):
@@ -572,6 +597,12 @@ async def _stop(
         # goal after the scheduling attempt failed; that newer read must not
         # authorize pausing it for the old wakeup's failure.
         stale = await _superseded_in_transaction(store, conn=conn, thread_id=thread_id, goal=wakeup)
+        if not await store.goal_wakeups.lock_wakeup(
+            wakeup_id=str(wakeup["id"]),
+            lease_owner=str(wakeup.get("lease_owner") or ""),
+            conn=conn,
+        ):
+            return "none"
         if stale is None and action.kind == "complete":
             stale = await _completion_superseded(
                 store, conn=conn, thread_id=thread_id, context=context
@@ -580,7 +611,11 @@ async def _stop(
             # The owner got there first. Their write stands, and this decision
             # is stale — recorded as such rather than retried.
             await store.goal_wakeups.finish_wakeup(
-                wakeup_id=str(wakeup["id"]), processed=True, detail=stale, conn=conn
+                wakeup_id=str(wakeup["id"]),
+                processed=True,
+                detail=stale,
+                conn=conn,
+                lease_owner=str(wakeup.get("lease_owner") or ""),
             )
             return "none"
         written = await store.goals.apply_action(
@@ -594,11 +629,19 @@ async def _stop(
         )
         if written is None:
             await store.goal_wakeups.finish_wakeup(
-                wakeup_id=str(wakeup["id"]), processed=True, detail="superseded", conn=conn
+                wakeup_id=str(wakeup["id"]),
+                processed=True,
+                detail="superseded",
+                conn=conn,
+                lease_owner=str(wakeup.get("lease_owner") or ""),
             )
             return "none"
         await store.goal_wakeups.finish_wakeup(
-            wakeup_id=str(wakeup["id"]), processed=True, detail=action.kind, conn=conn
+            wakeup_id=str(wakeup["id"]),
+            processed=True,
+            detail=action.kind,
+            conn=conn,
+            lease_owner=str(wakeup.get("lease_owner") or ""),
         )
     logger.info(
         f"agent_goal_{action.kind}",
@@ -702,9 +745,19 @@ async def _queue_round(
         # built the context and this write, the owner can have paused the goal,
         # replaced the objective, or sent a message.
         stale = await _superseded_in_transaction(store, conn=conn, thread_id=thread_id, goal=goal)
+        if not await store.goal_wakeups.lock_wakeup(
+            wakeup_id=str(wakeup["id"]),
+            lease_owner=str(wakeup.get("lease_owner") or ""),
+            conn=conn,
+        ):
+            return "none"
         if stale is not None:
             await store.goal_wakeups.finish_wakeup(
-                wakeup_id=str(wakeup["id"]), processed=True, detail=stale, conn=conn
+                wakeup_id=str(wakeup["id"]),
+                processed=True,
+                detail=stale,
+                conn=conn,
+                lease_owner=str(wakeup.get("lease_owner") or ""),
             )
             return "none"
         if await store.goals.has_pending_turn(thread_id=thread_id, conn=conn):
@@ -712,6 +765,7 @@ async def _queue_round(
             # goes first; this wakeup waits behind it.
             await store.goal_wakeups.release_wakeup(
                 wakeup_id=str(wakeup["id"]),
+                lease_owner=str(wakeup.get("lease_owner") or ""),
                 waiting_job_id=await store.goals.live_turn_id(thread_id=thread_id, conn=conn),
                 detail="a person's turn arrived first",
                 conn=conn,
@@ -768,6 +822,7 @@ async def _retry_or_pause(store: _GoalStore, wakeup: dict[str, Any]) -> None:
     if not is_exhausted(attempts):
         await store.goal_wakeups.release_wakeup(
             wakeup_id=str(wakeup["id"]),
+            lease_owner=str(wakeup.get("lease_owner") or ""),
             retry_in_seconds=wakeup_backoff(attempts),
             detail="scheduling failed; retrying",
         )
@@ -775,7 +830,10 @@ async def _retry_or_pause(store: _GoalStore, wakeup: dict[str, Any]) -> None:
     goal = await store.goals.get_goal(thread_id=str(wakeup["thread_id"]))
     if goal is None or goal.get("state") != "active":
         await store.goal_wakeups.finish_wakeup(
-            wakeup_id=str(wakeup["id"]), processed=True, detail="scheduling failed"
+            wakeup_id=str(wakeup["id"]),
+            processed=True,
+            detail="scheduling failed",
+            lease_owner=str(wakeup.get("lease_owner") or ""),
         )
         return
     await _stop(

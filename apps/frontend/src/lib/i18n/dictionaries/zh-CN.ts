@@ -555,4 +555,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'queue.attachmentsMany': '{count} 个附件',
   // ── Shared ──────────────────────────────────────────────────────────────
   'common.loading': '加载中…',
+  'common.retry': '重试',
+  'common.refreshFailed': '刷新失败，正在显示上次成功读取的内容。',
 };

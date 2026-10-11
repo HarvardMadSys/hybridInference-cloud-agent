@@ -11,12 +11,14 @@ from __future__ import annotations
 import contextlib
 import json
 from typing import Any
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
 from tests.support.storage import AllCapabilities
 
 from cloud_agent import publish_worker
+from cloud_agent.entitlement import RepoAccessUnavailable
 from cloud_agent.publish_worker import (
     GitHubCredential,
     create_draft_pull_request,
@@ -65,6 +67,7 @@ class FakeStore(AllCapabilities):
         self.claims = 0
         self.snapshot_recorded: tuple[int, str, str] | None = None
         self.snapshot_failed: tuple[int, str] | None = None
+        self.snapshot_deferred: tuple[int, str] | None = None
         self.import_failed: tuple[int, str] | None = None
         self.import_completed: tuple[int, str] | None = None
         self._record_ok = record_ok
@@ -74,6 +77,10 @@ class FakeStore(AllCapabilities):
         job, self._job = self._job, None
         return job
 
+    async def list_repo_grants(self, *, user_id: str) -> list[dict[str, Any]]:
+        """The fixture has no connected installations beyond its allowlist."""
+        return []
+
     async def record_snapshot_publish(
         self, *, snapshot_id: int, pr_url: str, commit_sha: str
     ) -> bool:
@@ -82,6 +89,10 @@ class FakeStore(AllCapabilities):
 
     async def fail_snapshot_publish(self, *, snapshot_id: int, detail: str) -> None:
         self.snapshot_failed = (snapshot_id, detail)
+
+    async def defer_snapshot_publish(self, *, snapshot_id: int, detail: str) -> bool:
+        self.snapshot_deferred = (snapshot_id, detail)
+        return True
 
     async def pending_snapshot_base_import(self) -> dict[str, Any] | None:
         # No durable import is outstanding: these scenarios publish from a
@@ -782,6 +793,50 @@ async def test_publishing_stops_when_the_entitlement_was_withdrawn(monkeypatch):
     assert minted == [], "no credential may be minted for a repo no longer entitled"
     assert store.snapshot_failed is not None
     assert "entitled" in store.snapshot_failed[1]
+
+
+async def test_entitlement_outage_defers_before_any_publication_effect(monkeypatch):
+    store = FakeStore(dict(_JOB))
+    monkeypatch.setattr(
+        publish_worker,
+        "require_entitled_repo",
+        AsyncMock(side_effect=RepoAccessUnavailable("GitHub lookup unavailable")),
+    )
+    mint = AsyncMock()
+    push = Mock()
+    pull_request = AsyncMock()
+    monkeypatch.setattr(publish_worker, "publish_patch", push)
+    monkeypatch.setattr(publish_worker, "ensure_draft_pull_request", pull_request)
+
+    class App:
+        token_for = mint
+
+    assert await publish_one(store, app_credentials=App()) is None
+    assert store.snapshot_deferred == (
+        9,
+        "repository access check unavailable; publication will retry: GitHub lookup unavailable",
+    )
+    assert store.snapshot_failed is None
+    assert store.snapshot_recorded is None
+    mint.assert_not_awaited()
+    push.assert_not_called()
+    pull_request.assert_not_awaited()
+
+
+async def test_entitlement_error_after_publication_started_does_not_requeue(monkeypatch):
+    store = FakeStore(dict(_JOB))
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
+    )
+    monkeypatch.setattr(
+        publish_worker,
+        "ensure_draft_pull_request",
+        AsyncMock(side_effect=RepoAccessUnavailable("unavailable after push")),
+    )
+    assert await publish_one(store, credential=GitHubCredential("t")) is None
+    assert store.snapshot_deferred is None
+    assert store.snapshot_failed is not None
+    assert "unavailable after push" in store.snapshot_failed[1]
 
 
 @pytest.mark.parametrize(

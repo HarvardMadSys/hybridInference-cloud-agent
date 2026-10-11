@@ -31,9 +31,30 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse, PlainTextResponse
 
+from cloud_agent.entitlement import RepoAccessUnavailable
 from cloud_agent.logging_utils import configure_process_logging, get_logger
 
 logger = get_logger(__name__)
+
+
+def install_repository_access_errors(app: FastAPI) -> None:
+    """Return a retryable, bounded error when repository permissions are unknown."""
+
+    async def unavailable(request: Request, exc: Exception) -> Response:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "error": {
+                        "type": "repo_access_unavailable",
+                        "message": "Repository access is temporarily unavailable. Please try again.",
+                    }
+                }
+            },
+            headers={"Cache-Control": "no-store", "Retry-After": "30"},
+        )
+
+    app.add_exception_handler(RepoAccessUnavailable, unavailable)
 
 
 #: The admin observation reads. Their bodies are time-varying and describe
@@ -202,6 +223,7 @@ def create_app() -> FastAPI:
     # handler and read by this one page.
     app.include_router(admin_audit.router)
     install_admin_no_store(app)
+    install_repository_access_errors(app)
     # The gateway alert relay's way in: machine-to-machine on-call jobs, pinned
     # to one configured service account. Its own module because its caller is a
     # service holding a dispatch token, not a browser holding a session.

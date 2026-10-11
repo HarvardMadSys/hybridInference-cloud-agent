@@ -50,10 +50,15 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import protocol
 from cloud_agent.mcp.authorization import decide, visible_capabilities
 from cloud_agent.mcp.host import HostError, McpHost, SessionKey, arguments_digest
+from cloud_agent.mcp.http_body import (
+    IDENTITY_ENCODING_HEADERS,
+    iter_response_bytes,
+    require_identity_encoding,
+)
 from cloud_agent.mcp.invocations import deadline_for
 from cloud_agent.mcp.jsonrpc import INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, PARSE_ERROR
 from cloud_agent.mcp.models import CapabilityKind, McpServer
-from cloud_agent.mcp.net_policy import policy_from_environment
+from cloud_agent.mcp.net_policy import EndpointRejected, credential_headers, policy_from_environment
 from cloud_agent.mcp.refresh import RefreshRefused, ensure_fresh
 from cloud_agent.mcp.registry import (
     binding_from_row,
@@ -872,7 +877,14 @@ def _upstream_headers(request: Request, server: McpServer) -> dict[str, str]:
     }
     # The registry always wins over anything the sandbox sent under the same
     # name — now that the same name is actually recognized as the same name.
-    headers.update({key.lower(): value for key, value in server.headers.items()})
+    try:
+        safe_credentials = credential_headers(server.headers)
+    except EndpointRejected as exc:
+        raise _refused(
+            503, "server_error", "The MCP credential uses an invalid HTTP header."
+        ) from exc
+    headers.update({key.lower(): value for key, value in safe_credentials.items()})
+    headers.update(IDENTITY_ENCODING_HEADERS)
     return headers
 
 
@@ -897,6 +909,7 @@ def build_upstream_client(request_timeout_s: float | None = None) -> httpx.Async
             connect=number_setting("mcp_connect_timeout_s", _CONNECT_TIMEOUT_S),
         ),
         follow_redirects=False,
+        headers=IDENTITY_ENCODING_HEADERS,
         transport=pinned_transport(),
     )
 
@@ -935,12 +948,13 @@ async def _proxy(
             f"The {server.name!r} MCP connection could not be reached: {exc}",
         ) from exc
     assert server.url is not None
+    headers = _upstream_headers(request, server)
     client = build_upstream_client(server.request_timeout_s)
     upstream_request = client.build_request(
         method,
         server.url,
         content=body or None,
-        headers=_upstream_headers(request, server),
+        headers=headers,
     )
     try:
         upstream = await client.send(upstream_request, stream=True)
@@ -986,6 +1000,16 @@ async def _proxy(
         )
 
     content_type = upstream.headers.get("content-type", "")
+    try:
+        require_identity_encoding(upstream)
+    except httpx.DecodingError as exc:
+        await upstream.aclose()
+        await client.aclose()
+        raise _refused(
+            502,
+            "server_error",
+            "The MCP server sent a compressed response despite identity encoding.",
+        ) from exc
     if content_type.startswith("text/event-stream"):
         return StreamingResponse(
             _stream_sse(upstream, client, server),
@@ -997,7 +1021,7 @@ async def _proxy(
     try:
         chunks: list[bytes] = []
         total = 0
-        async for chunk in upstream.aiter_bytes():
+        async for chunk in iter_response_bytes(upstream):
             total += len(chunk)
             if total > MAX_BUFFERED_RESPONSE_BYTES:
                 raise HTTPException(
@@ -1047,7 +1071,7 @@ async def _stream_sse(
     """Relay an SSE reply, rewriting tool catalogues as they pass."""
     sse = SseFilter(server)
     try:
-        async for chunk in upstream.aiter_bytes():
+        async for chunk in iter_response_bytes(upstream):
             if out := sse.feed(chunk):
                 yield out
         if tail := sse.flush():

@@ -70,7 +70,7 @@ export function useNativeQuestions({
     }
 
     async function refresh() {
-      if (!current() || submitting) return;
+      if (!current() || submitting || document.visibilityState === 'hidden') return;
       if (reading) {
         readAgain = true;
         return;
@@ -151,10 +151,15 @@ export function useNativeQuestions({
     operations.current = { refresh, answer };
     void refresh();
     const interval = setInterval(() => void refresh(), QUESTION_POLL_MS);
+    const onVisible = () => {
+      if (document.visibilityState !== 'hidden') void refresh();
+    };
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       disposed = true;
       controller.abort();
       clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
     };
   }, [scope, active, threadId, jobId, attemptId]);
 

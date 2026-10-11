@@ -52,6 +52,7 @@ _ACTIVE_PINS: ContextVar[Mapping[str, tuple[str, ...]] | None] = ContextVar(
 FORBIDDEN_HEADER_NAMES: frozenset[str] = frozenset(
     {
         "host",
+        "accept-encoding",
         "connection",
         "content-length",
         "cookie",
@@ -448,6 +449,14 @@ def sanitize_headers(headers: Mapping[str, str], *, max_bytes: int = 8192) -> di
     return cleaned
 
 
+def credential_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Validate credential headers without silently dropping forbidden names."""
+    cleaned = sanitize_headers(headers)
+    if len(cleaned) != len(headers):
+        raise EndpointRejected("a credential cannot use a reserved or forwarding header")
+    return cleaned
+
+
 def resource_covers(resource: str | None, target: str) -> bool:
     """Whether an OAuth ``resource`` value covers the URL being dialled.
 
@@ -525,6 +534,7 @@ __all__ = [
     "NormalizedEndpoint",
     "UncheckedTarget",
     "check_addresses",
+    "credential_headers",
     "dial_host",
     "dial_spellings",
     "normalize_url",

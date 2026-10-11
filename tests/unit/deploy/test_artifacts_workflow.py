@@ -13,7 +13,11 @@ table, and the job is only the wiring that runs it.
 
 from __future__ import annotations
 
+import os
 import re
+import shlex
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -195,20 +199,41 @@ def test_the_build_passes_the_commit_every_image_must_name() -> None:
     assert "SOURCE_COMMIT=${{ github.sha }}" in str(build["with"]["build-args"])
 
 
-def _docker_patterns() -> list[str]:
-    """The regexes the classifier's docker decision is actually made of.
-
-    Read out of the `changes` job rather than restated here: a test that keeps
-    its own copy of the pattern stops testing the pattern the moment either one
-    is edited.
-    """
-    classify = str(step("Classify changed paths", job="changes")["run"])
-    block = classify.split("# Docker:", 1)[1].split("# A change to CI itself", 1)[0]
-    return re.findall(r"matches '([^']+)'", block)
-
-
 def _runs_the_image_jobs(path: str) -> bool:
-    return any(re.search(pattern, path) for pattern in _docker_patterns())
+    """Execute the classifier with one changed path and a local-only Git double."""
+    script = str(step("Classify changed paths", job="changes")["run"])
+    with tempfile.TemporaryDirectory(prefix="ci-classifier-") as directory:
+        temporary = Path(directory)
+        git = temporary / "git"
+        git.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            "cat-file) exit 0 ;;\n"
+            'diff) printf "%s\\n" "$CHANGED_PATH" ;;\n'
+            "*) exit 1 ;;\n"
+            "esac\n"
+        )
+        git.chmod(0o755)
+        output = temporary / "outputs"
+        environment = {
+            **os.environ,
+            "PATH": f"{temporary}{os.pathsep}{os.environ['PATH']}",
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_SHA": "b" * 40,
+            "BEFORE": "a" * 40,
+            "GITHUB_OUTPUT": str(output),
+            "CHANGED_PATH": path,
+        }
+        subprocess.run(
+            ["bash", "-c", script],
+            env=environment,
+            cwd=temporary,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    return values["docker"] == "true"
 
 
 def _copied_paths(dockerfile: Path) -> set[str]:
@@ -219,19 +244,70 @@ def _copied_paths(dockerfile: Path) -> set[str]:
     after the R5 move, and only the full path keeps the check meaningful in both.
     """
     sources = set()
-    for line in dockerfile.read_text().splitlines():
+    text = re.sub(r"\\\n\s*", " ", dockerfile.read_text())
+    for line in text.splitlines():
         if not line.startswith("COPY") or "--from=" in line:
             continue
-        source = line.split()[1]
-        if source.startswith("/"):  # a stage or an absolute path, not the context
-            continue
-        sources.add(source.rstrip("/"))
+        arguments = [word for word in shlex.split(line)[1:] if not word.startswith("--")]
+        for source in arguments[:-1]:
+            if not source.startswith("/"):
+                sources.add(source.rstrip("/"))
     return sources
 
 
 def _packages_both_images_ship() -> set[str]:
     """What the console and the runner images both COPY, read from the files."""
     return _copied_paths(CONSOLE_DOCKERFILE) & _copied_paths(RUNNER_DOCKERFILE)
+
+
+def _all_image_inputs() -> set[str]:
+    sources = {
+        ".dockerignore",
+        "tests/external/test_upload_edge_limits.py",
+        "tests/external/test_retained_command_limits.py",
+    }
+    for cell in cells():
+        dockerfile = Path(str(cell["dockerfile"]))
+        sources.add(dockerfile.as_posix())
+        sources.update(_copied_paths(REPO_ROOT / dockerfile))
+    return sources
+
+
+@pytest.mark.parametrize("entry", sorted(_all_image_inputs()))
+def test_every_release_image_input_selects_image_checks(entry: str) -> None:
+    """Control-only files and every source of a multi-file COPY need coverage."""
+    probe = f"{entry}/module.py" if (REPO_ROOT / entry).is_dir() else entry
+    assert _runs_the_image_jobs(probe), f"image input {entry} selects no image checks"
+
+
+@pytest.mark.parametrize("path", ["docs/operations.md", "tests/unit/test_identity.py"])
+def test_non_image_inputs_do_not_select_image_checks(path: str) -> None:
+    """Full input coverage should preserve useful classification of unrelated changes."""
+    assert not _runs_the_image_jobs(path)
+
+
+def test_new_external_tests_select_image_checks() -> None:
+    """New integration files need the image jobs without classifier edits."""
+    assert _runs_the_image_jobs("tests/external/test_new_container_integration.py")
+
+
+def test_real_upload_limits_are_checked_by_compose_ci() -> None:
+    """Static caps also need a real nginx syntax/path/body-limit regression."""
+    check = step("Upload limits match encoded attachments", job="compose")
+    assert check["env"]["AGENT_UPLOAD_TEST_NGINX_IMAGE"] == "nginx:1.27.5-alpine"
+    assert "docker --host=unix:///var/run/docker.sock pull" in check["run"]
+    assert "pytest -q -m external tests/external/test_upload_edge_limits.py" in check["run"]
+
+
+def test_real_command_cleanup_is_checked_by_compose_ci() -> None:
+    """Timeout and output bounds must reap actual Docker process siblings."""
+    check = step("Retained commands clean up Docker siblings", job="compose")
+    assert check["env"]["AGENT_COMMAND_TEST_IMAGE"] == "postgres:15"
+    assert "docker --host=unix:///var/run/docker.sock pull" in check["run"]
+    assert (
+        "uv run --frozen pytest -q -m external tests/external/test_retained_command_limits.py"
+        in check["run"]
+    )
 
 
 def test_a_change_to_the_console_runs_the_image_jobs() -> None:

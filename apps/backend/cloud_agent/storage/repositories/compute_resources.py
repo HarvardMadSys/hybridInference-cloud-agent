@@ -861,6 +861,9 @@ class PostgresComputeResourceRepository:
 
         An expired call retains its step/result for query recovery. The lease
         cannot cancel a remote request; adapters must never blindly replay it.
+        A waiting extension may coexist with recovery rotation: it only changes
+        the old resource's deadline, and no local provider call is still running.
+        Other mutations, especially retirement, still wait for confirmation.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             # Serialize the short dispatcher decision. Provider calls are outside
@@ -876,6 +879,8 @@ class PostgresComputeResourceRepository:
                   AND NOT EXISTS (SELECT 1 FROM agent_compute_operations busy
                     WHERE busy.allocation_id=o.allocation_id AND busy.id<>o.id
                       AND (busy.state='running' OR busy.state='unknown' OR (busy.state='waiting' AND busy.result->>'external_pending'='true'))
+                      AND NOT (o.kind='rotate' AND busy.kind='extend'
+                               AND busy.state='waiting')
                       AND NOT (busy.state='running' AND busy.lease_expires_at<=NOW()
                                AND o.state='running' AND o.created_at<busy.created_at))
                 ORDER BY (o.state='running') DESC,o.created_at LIMIT 1 FOR UPDATE OF o SKIP LOCKED""")

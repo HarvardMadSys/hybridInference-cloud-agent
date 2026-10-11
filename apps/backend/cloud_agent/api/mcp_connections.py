@@ -44,6 +44,7 @@ from cloud_agent.mcp import config_import, launch, oauth
 from cloud_agent.mcp.authorization import binding_from_selection
 from cloud_agent.mcp.binding_aliases import binding_aliases
 from cloud_agent.mcp.host import HostError, McpHost, SessionKey
+from cloud_agent.mcp.http_body import IDENTITY_ENCODING_HEADERS
 from cloud_agent.mcp.launch import LaunchPlanError, ManagedLaunchPolicy, build_launch_plan
 from cloud_agent.mcp.models import (
     AuthKind,
@@ -51,6 +52,7 @@ from cloud_agent.mcp.models import (
     ConnectionErrorKind,
     ConnectionStatus,
     ExecutionLocation,
+    HeaderAuth,
     InvocationStatus,
     LaunchSpec,
     ToolPolicy,
@@ -1288,7 +1290,10 @@ async def _post_json(
         raise _bad_request(f"that address could not be resolved: {exc}") from exc
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(15.0), follow_redirects=False, transport=pinned_transport()
+            timeout=httpx.Timeout(15.0),
+            follow_redirects=False,
+            headers=IDENTITY_ENCODING_HEADERS,
+            transport=pinned_transport(),
         ) as client:
             # Streamed, so the size limit is applied while the body arrives
             # rather than to a body the registration server already chose the
@@ -1299,7 +1304,7 @@ async def _post_json(
                     "POST",
                     endpoint.url,
                     json=dict(body),
-                    headers={"accept": "application/json"},
+                    headers={"accept": "application/json", **IDENTITY_ENCODING_HEADERS},
                 ),
                 stream=True,
             )
@@ -1523,14 +1528,20 @@ async def _post_form(request: oauth.TokenRequest, *, policy: EgressPolicy) -> Ma
 
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(20.0), follow_redirects=False, transport=pinned_transport()
+            timeout=httpx.Timeout(20.0),
+            follow_redirects=False,
+            headers=IDENTITY_ENCODING_HEADERS,
+            transport=pinned_transport(),
         ) as client:
             # Streamed for the same reason as everywhere else on this path: a
             # token response is a body a server chooses the size of, and this
             # one carries the access and refresh tokens.
             response = await client.send(
                 client.build_request(
-                    "POST", endpoint.url, data=request.form(), headers=request.headers()
+                    "POST",
+                    endpoint.url,
+                    data=request.form(),
+                    headers={**request.headers(), **IDENTITY_ENCODING_HEADERS},
                 ),
                 stream=True,
             )
@@ -2267,11 +2278,12 @@ def _build_auth(
             if header_scheme is not None
             else ("Bearer" if name.lower() == "authorization" else "")
         ).strip()
-        from cloud_agent.mcp.net_policy import sanitize_headers
-
         # Validated here rather than at dispatch time, so a header the platform
         # would refuse is reported while the user is still on the form.
-        sanitize_headers({name: "x"})
+        try:
+            HeaderAuth(header_name=name, scheme=scheme).render("x")
+        except EndpointRejected as exc:
+            raise _bad_request(str(exc)) from exc
         return kind, {"header_name": name, "scheme": scheme}
     if kind is AuthKind.OAUTH:
         return kind, {}
@@ -2340,6 +2352,10 @@ async def _store_static_secret(
     _kind, config = _build_auth(
         AuthKind.STATIC.value, header_name or _header_of(row), header_scheme
     )
+    try:
+        HeaderAuth(header_name=config["header_name"], scheme=config["scheme"]).render(secret)
+    except EndpointRejected as exc:
+        raise _bad_request(str(exc)) from exc
     # Two characters and two more, so a person can tell *which* credential is
     # stored without the page ever holding one it could be made to render.
     config["hint"] = f"{secret[:2]}{secret[-2:]}" if len(secret) > 4 else ""

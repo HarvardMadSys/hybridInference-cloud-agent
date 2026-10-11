@@ -48,6 +48,7 @@ import httpx
 
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import oauth
+from cloud_agent.mcp.http_body import IDENTITY_ENCODING_HEADERS
 from cloud_agent.mcp.models import AuthKind, ConnectionErrorKind
 from cloud_agent.mcp.net_policy import EgressPolicy
 from cloud_agent.mcp.transports import (
@@ -539,11 +540,17 @@ async def _post(
 
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(20.0), follow_redirects=False, transport=pinned_transport()
+            timeout=httpx.Timeout(20.0),
+            follow_redirects=False,
+            headers=IDENTITY_ENCODING_HEADERS,
+            transport=pinned_transport(),
         ) as client:
             response = await client.send(
                 client.build_request(
-                    "POST", endpoint.url, data=request.form(), headers=request.headers()
+                    "POST",
+                    endpoint.url,
+                    data=request.form(),
+                    headers={**request.headers(), **IDENTITY_ENCODING_HEADERS},
                 ),
                 stream=True,
             )

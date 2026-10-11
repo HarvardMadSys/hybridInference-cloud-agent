@@ -141,7 +141,10 @@ async def test_empty_deployment_starts_and_saves_missing_keys_through_recovery_s
     monkeypatch.setenv("ADMIN_TOKEN", "test-recovery-admin")
     user = quote(os.environ.get("TEST_DB_USER", "postgres"), safe="")
     password = quote(os.environ.get("TEST_DB_PASSWORD", "postgres"), safe="")
-    database = quote(os.environ.get("TEST_DB_NAME", "hybridinference_test_db"), safe="")
+    # Startup must use the database the fixture reset, including xdist's
+    # worker suffix. The unsuffixed database can retain an earlier run's keys.
+    async with db.acquire() as conn:
+        database = quote(await conn.fetchval("SELECT current_database()"), safe="")
     monkeypatch.setenv(
         "AGENT_DATABASE_URL",
         f"postgresql://{user}:{password}@{os.environ.get('TEST_DB_HOST', 'localhost')}:"

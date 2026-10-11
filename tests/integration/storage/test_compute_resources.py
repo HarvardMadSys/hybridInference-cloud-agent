@@ -412,6 +412,57 @@ async def test_waiting_external_call_serializes_until_positive_confirmation(stor
     assert await repo.claim_operation(worker_id="other") is None
 
 
+@pytest.mark.parametrize("renewal_state", ["waiting", "unknown", "running"])
+async def test_recovery_rotation_can_pass_only_a_waiting_extension(store, renewal_state):
+    """A lost renewal reply must not prevent moving the Host before expiry.
+
+    An in-flight local call or an unknown internal outcome remains exclusive;
+    retirement also stays blocked by an unresolved provider mutation.
+    """
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store)
+    renewal = await operation(repo, allocation_id, "extend")
+    if renewal_state != "running":
+        await repo.finish_operation(
+            **fence(renewal),
+            state=renewal_state,
+            step="confirming_extension",
+            result={"external_pending": True},
+            retry_after_seconds=3600,
+        )
+    rotation = await repo.create_operation(
+        request_id="recover-unconfirmed-renewal",
+        fingerprint="recover-unconfirmed-renewal",
+        kind="rotate",
+        allocation_id=allocation_id,
+        parameters={"trigger": "renewal_unconfirmed"},
+        requested_by="compute-rotation",
+    )
+    claimed = await repo.claim_operation(worker_id="rotation-worker")
+    if renewal_state != "waiting":
+        assert claimed is None
+        return
+    assert claimed["id"] == rotation["id"]
+    # No second provider call is dispatched while rotation itself is running.
+    assert await repo.claim_operation(worker_id="other") is None
+    await repo.finish_operation(
+        operation_id=claimed["id"],
+        generation=claimed["generation"],
+        worker_id="rotation-worker",
+        state="succeeded",
+        step="rotated",
+    )
+    await repo.create_operation(
+        request_id="retire-old-node",
+        fingerprint="retire-old-node",
+        kind="retire",
+        allocation_id=allocation_id,
+        parameters={},
+        requested_by="compute-rotation",
+    )
+    assert await repo.claim_operation(worker_id="release-worker") is None
+
+
 async def test_retirement_revision_check_is_atomic(store):
     repo = store.compute_resources
     allocation_id, _, _ = await resource(store)

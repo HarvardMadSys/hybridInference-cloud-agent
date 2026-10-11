@@ -223,6 +223,9 @@ class ComputeResourceRepository(Protocol):
 
         An expired call retains its step/result for query recovery. The lease
         cannot cancel a remote request; adapters must never blindly replay it.
+        A waiting extension may coexist with recovery rotation: it only changes
+        the old resource's deadline, and no local provider call is still running.
+        Other mutations, especially retirement, still wait for confirmation.
         """
         ...
 

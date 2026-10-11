@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
 import httpx
 
+from cloud_agent_host.bounded_output import OutputPump, TextTail
 from cloud_agent_host.chat_sandbox import (
     CHAT_UPLOADS_DIR,
     CHAT_WORKDIR,
@@ -128,6 +129,7 @@ from cloud_agent_host.shared_protocol import (
     shared_deployment_capability,
 )
 from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
+from cloud_agent_host.storage_admission import new_sandbox_storage_error
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
@@ -1133,38 +1135,36 @@ def _read_bounded(process: Any, *, deadline_s: float, max_bytes: int) -> str:
     """
     chunks: list[str] = []
     total = 0
-    lines: queue.Queue[str | None] = queue.Queue()
-
-    def _pump() -> None:
-        try:
-            for line in process.lines():
-                lines.put(line)
-        finally:
-            lines.put(None)
-
-    threading.Thread(target=_pump, daemon=True, name="agent-patch").start()
+    output = OutputPump(getattr(process, "chunks", process.lines)(), name="agent-patch")
     deadline = time.monotonic() + deadline_s
-    while True:
-        if time.monotonic() > deadline:
-            process.kill()
-            raise WorktreeError(
-                f"building the patch exceeded {deadline_s:.0f}s; the working tree's git "
-                "configuration is agent-controlled and may be hostile"
-            )
-        try:
-            line = lines.get(timeout=_POLL_INTERVAL_S)
-        except queue.Empty:
-            continue
-        if line is None:
-            break
-        total += len(line.encode())
-        if total > max_bytes:
-            process.kill()
-            raise WorktreeError(
-                f"the patch exceeded {max_bytes} bytes while being read; refusing to "
-                "buffer unbounded agent output"
-            )
-        chunks.append(line)
+    try:
+        while True:
+            if time.monotonic() > deadline:
+                output.close(drain=True)
+                process.kill()
+                process.wait()
+                raise WorktreeError(
+                    f"building the patch exceeded {deadline_s:.0f}s; the working tree's git "
+                    "configuration is agent-controlled and may be hostile"
+                )
+            try:
+                chunk = output.get(timeout=_POLL_INTERVAL_S)
+            except queue.Empty:
+                continue
+            if chunk is None:
+                break
+            total += len(chunk.encode())
+            if total > max_bytes:
+                output.close(drain=True)
+                process.kill()
+                process.wait()
+                raise WorktreeError(
+                    f"the patch exceeded {max_bytes} bytes while being read; refusing to "
+                    "buffer unbounded agent output"
+                )
+            chunks.append(chunk)
+    finally:
+        output.close()
 
     exit_code = process.wait()
     if exit_code != 0:
@@ -1863,20 +1863,9 @@ def _stream_shared_agent_turn(
     # grace period, which the endpoint correctly refuses.
     if measurement is not None and on_frozen is not None:
         on_frozen(measurement)
-    frames: queue.Queue[dict[str, Any] | None] = queue.Queue()
-
-    def pump() -> None:
-        try:
-            for frame in stream.frames():
-                frames.put(frame)
-        except Exception as exc:
-            frames.put({"kind": "client_error", "detail": str(exc)[:1000]})
-        finally:
-            frames.put(None)
-
-    reader = threading.Thread(target=pump, daemon=True, name="shared-agent-stream")
+    frames: OutputPump[dict[str, Any]] | None = None
     deadline = time.monotonic() + timeout_s
-    tail: list[str] = []
+    tail = TextTail()
     tool_errors: list[str] = []
     result_frame: dict[str, Any] | None = None
     forced_exit_code: int | None = None
@@ -1886,7 +1875,7 @@ def _stream_shared_agent_turn(
         # response stream. Resident follow-ups need not emit a native init
         # event, so report this shared boundary before waiting for CLI output.
         control.append_event(NormalizedEvent("lifecycle", {"phase": "turn_started"}))
-        reader.start()
+        frames = OutputPump(stream.frames(), name="shared-agent-stream")
         while True:
             if heart.lease_lost:
                 with contextlib.suppress(Exception):
@@ -1908,11 +1897,15 @@ def _stream_shared_agent_turn(
                 forced_exit_code = 124
                 interrupt_deadline = now + _SHARED_TURN_INTERRUPT_DRAIN_S
             if interrupt_deadline is not None and now > interrupt_deadline:
-                return forced_exit_code or 1, "".join(tail), tool_errors, result_frame
+                return forced_exit_code or 1, tail.text(), tool_errors, result_frame
             try:
                 frame = frames.get(timeout=_POLL_INTERVAL_S)
             except queue.Empty:
                 continue
+            except Exception as exc:
+                if result_frame is not None:
+                    break
+                raise SessionSupervisorError(502, str(exc)[:1000]) from exc
             if frame is None:
                 break
             kind = frame.get("kind")
@@ -1920,7 +1913,6 @@ def _stream_shared_agent_turn(
                 raw_line = frame.get("raw_line")
                 if isinstance(raw_line, str):
                     tail.append(raw_line)
-                    del tail[:-40]
                 event_type = str(frame.get("event_type") or "")
                 payload = frame.get("payload")
                 if not isinstance(payload, dict):
@@ -1950,7 +1942,7 @@ def _stream_shared_agent_turn(
                 result_frame = frame
                 detail = str(frame.get("detail") or "shared turn failed")
                 tail.append(detail[-2000:])
-                return forced_exit_code or 1, "".join(tail), tool_errors, result_frame
+                return forced_exit_code or 1, tail.text(), tool_errors, result_frame
             if kind == "client_error":
                 # The result may already have crossed the wire before the
                 # transport failed. Preserve that terminal frame rather than
@@ -1962,7 +1954,7 @@ def _stream_shared_agent_turn(
         if result_frame is None:
             raise SessionSupervisorError(502, "shared turn ended without a result")
         if forced_exit_code is not None:
-            return forced_exit_code, "".join(tail), tool_errors, result_frame
+            return forced_exit_code, tail.text(), tool_errors, result_frame
         status = str(result_frame.get("status") or "failed")
         exit_code = int(result_frame.get("exit_code") or 0)
         if status == "cancelled":
@@ -1979,8 +1971,10 @@ def _stream_shared_agent_turn(
                     },
                 )
             )
-        return exit_code, "".join(tail), tool_errors, result_frame
+        return exit_code, tail.text(), tool_errors, result_frame
     finally:
+        if frames is not None:
+            frames.close()
         stream.close()
 
 
@@ -3041,6 +3035,28 @@ def _run_turn(
         backend = build_backend_from_env()
         backend.preflight()
 
+    storage_error = _new_sandbox_storage_error(job, host_settings)
+    if storage_error:
+        logger.warning(
+            "agent_storage_admission_declined",
+            extra={
+                "event": "agent_storage_admission_declined",
+                "job_id": job.job_id,
+                "detail": storage_error,
+            },
+        )
+        operation_profiling.discard(measurement)
+        return (
+            0
+            if release_turn(
+                base_url=base_url,
+                worker_token=job.worker_token,
+                job_id=job.job_id,
+                reason="storage_pressure",
+            )
+            else 2
+        )
+
     print(f"claimed {job.job_id} attempt {job.attempt_no} runtime={job.runtime}")
     logger.info(
         "agent_attempt_claimed job_id=%s attempt_id=%s worker_id=%s host=%s",
@@ -3447,6 +3463,13 @@ def _serve_turn(
         write_handover(handover_fd, f"{HANDOVER_DECLINED} unusable turn ({type(exc).__name__})")
         return 0
 
+    host_settings = _turn_host_settings(payload.get("_host_settings"))
+    storage_error = _new_sandbox_storage_error(job, host_settings)
+    if storage_error:
+        operation_profiling.discard(measurement)
+        write_handover(handover_fd, f"{HANDOVER_DECLINED} {storage_error}")
+        return 2
+
     # Installed before the answer, so there is no window in which this process
     # owns a turn and SIGTERM would still kill it outright. From here the turn
     # is this process's: SIGTERM means the container is being replaced, the
@@ -3460,7 +3483,6 @@ def _serve_turn(
     # admin's values over the host's own. Fixed for the turn from here, so a
     # change on the admin page applies to the next turn, never halfway
     # through this one.
-    host_settings = _turn_host_settings(payload.get("_host_settings"))
     return run_turn(
         job,
         base_url=base_url,
@@ -4247,6 +4269,16 @@ def _sandbox_mcp_url() -> str:
     return (os.environ.get("AGENT_SANDBOX_MCP_URL") or "").strip()
 
 
+def _new_sandbox_storage_error(job: ClaimedJob, settings: Mapping[str, float] | None) -> str | None:
+    if job.thread_sandbox:
+        return None
+    definition = HOST_SETTINGS_BY_KEY["storage_min_available_mib"]
+    minimum = (settings or {}).get("storage_min_available_mib")
+    if minimum is None:
+        minimum = _env_float(definition.env, float(definition.default))
+    return new_sandbox_storage_error(minimum_mib=minimum)
+
+
 def _runner_local_settings(agent_timeout_s: float) -> dict[str, float]:
     """This host's own value for each setting the runner applies.
 
@@ -4258,6 +4290,10 @@ def _runner_local_settings(agent_timeout_s: float) -> dict[str, float]:
         "agent_timeout_s": agent_timeout_s,
         "chat_idle_timeout_s": _chat_idle_timeout_s(),
         "source_import_max_mib": source_import_max_bytes() // (1024 * 1024),
+        "storage_min_available_mib": _env_float(
+            "AGENT_STORAGE_MIN_AVAILABLE_MIB",
+            float(HOST_SETTINGS_BY_KEY["storage_min_available_mib"].default),
+        ),
         "shared_resident_capacity": int(
             os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY")
             or HOST_SETTINGS_BY_KEY["shared_resident_capacity"].default

@@ -8,6 +8,7 @@ they were, and only the class holding them changed.
 from __future__ import annotations
 
 import json
+import math
 from typing import TYPE_CHECKING, Any, Literal
 
 import asyncpg
@@ -202,6 +203,7 @@ class PostgresAttemptCommands:
                 JOIN agent_threads t ON t.id = j.thread_id
                 LEFT JOIN {THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
                 WHERE j.state = 'queued' AND j.cancel_requested = FALSE
+                  AND (j.claim_retry_at IS NULL OR j.claim_retry_at <= NOW())
                   AND NOT EXISTS (
                         SELECT 1 FROM agent_jobs earlier
                         WHERE earlier.thread_id = j.thread_id
@@ -366,6 +368,7 @@ class PostgresAttemptCommands:
             )
             await conn.execute(
                 "UPDATE agent_jobs SET state = 'running', current_attempt_id = $2, "
+                "claim_retry_at = NULL, "
                 "updated_at = NOW() WHERE id = $1",
                 job_id,
                 attempt["id"],
@@ -405,6 +408,7 @@ class PostgresAttemptCommands:
         attempt_id: int,
         lease_generation: int | None = None,
         reason: str = "credential_unavailable",
+        retry_after_seconds: float = 0,
     ) -> bool:
         """Hand a just-claimed job back to the queue without spending a retry.
 
@@ -431,7 +435,13 @@ class PostgresAttemptCommands:
         why: history is append-only, and "this one never started" is exactly
         the kind of thing an operator later needs to see. It simply does not
         count — see the retry budget in :meth:`reap_expired`.
+
+        ``retry_after_seconds`` delays eligibility after transient failures,
+        allowing later queued jobs to run while this job's dependency recovers.
+        Raises ``ValueError`` when the delay is not finite and nonnegative.
         """
+        if not math.isfinite(retry_after_seconds) or retry_after_seconds < 0:
+            raise ValueError("claim retry delay must be finite and nonnegative")
         async with self._pool.acquire() as conn, conn.transaction():
             released_row = await conn.fetchrow(
                 """
@@ -489,12 +499,15 @@ class PostgresAttemptCommands:
                     goal_report_outcome = CASE WHEN cancel_requested
                                                THEN goal_report_outcome END,
                     current_attempt_id = NULL,
+                    claim_retry_at = CASE WHEN cancel_requested OR $3::double precision = 0 THEN NULL
+                                         ELSE NOW() + make_interval(secs => $3) END,
                     updated_at = NOW()
                 WHERE id = $1 AND current_attempt_id = $2 AND state = 'running'
                 RETURNING state
                 """,
                 released,
                 attempt_id,
+                retry_after_seconds,
             )
             # All close-attempt paths take locks in attempt -> job -> host
             # order. Previously transition took job -> attempt while this path

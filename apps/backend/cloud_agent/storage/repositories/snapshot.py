@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 CAPTURE_RETRY_S = 5.0
 #: How long a published base whose import failed waits before it is retried.
 BASE_IMPORT_RETRY_S = 15.0
+#: A publication whose entitlement preflight failed waits before retrying.
+PUBLISH_RETRY_S = 30.0
 
 
 class PostgresSnapshotRepository:
@@ -369,6 +371,7 @@ class PostgresSnapshotRepository:
         preparation: a group snapshot may capture a succeeded boundary or a
         publisher may start mutating its lineage, but those operations cannot
         overlap. Returns the snapshot and its publication metadata, or ``None``.
+        Deferred publications are eligible only after their ``retry_at``.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             snapshot = await conn.fetchrow(
@@ -471,6 +474,7 @@ class PostgresSnapshotRepository:
                     LIMIT 1
                 ) prior ON TRUE
                 WHERE s.state = 'captured'
+                  AND (s.retry_at IS NULL OR s.retry_at <= NOW())
                   AND s.patch_content IS NOT NULL
                   AND NOT EXISTS (
                       SELECT 1 FROM agent_sandbox_snapshots earlier
@@ -487,7 +491,8 @@ class PostgresSnapshotRepository:
                 claimed = await conn.fetchval(
                     """
                     UPDATE agent_sandbox_snapshots
-                    SET state = 'publishing', last_error = NULL, updated_at = NOW()
+                    SET state = 'publishing', last_error = NULL, retry_at = NULL,
+                        updated_at = NOW()
                     WHERE id = $1 AND state = 'captured'
                     RETURNING id
                     """,
@@ -545,6 +550,29 @@ class PostgresSnapshotRepository:
                     "patch": snapshot["patch"],
                 }
             return None
+
+    async def defer_snapshot_publish(self, *, snapshot_id: int, detail: str) -> bool:
+        """Return an unstarted publication to captured with a 30-second retry.
+
+        Call only after an entitlement preflight failure, before minting a write
+        credential or performing external publication effects. Retains the patch
+        and included turns, and bounds the visible detail to 2,000 characters.
+        Returns ``False`` unless the snapshot is still ``publishing``.
+        """
+        async with self._pool.acquire() as conn:
+            changed = await conn.fetchval(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET state = 'captured', last_error = $2,
+                    retry_at = NOW() + make_interval(secs => $3), updated_at = NOW()
+                WHERE id = $1 AND state = 'publishing'
+                RETURNING id
+                """,
+                snapshot_id,
+                detail[:2000],
+                PUBLISH_RETRY_S,
+            )
+        return changed is not None
 
     async def record_snapshot_publish(
         self,
@@ -809,6 +837,19 @@ class PostgresSnapshotRepository:
             due: datetime | None = await conn.fetchval(
                 "SELECT MIN(retry_at) FROM agent_sandbox_snapshots "
                 "WHERE state = 'pending' AND retry_at > NOW()"
+            )
+        return due
+
+    async def next_snapshot_publish_retry_due(self) -> datetime | None:
+        """When the earliest deferred publication may be claimed again.
+
+        ``None`` when no captured snapshot waits for a future retry. Capture
+        completion announces other publication work through a notification.
+        """
+        async with self._pool.acquire() as conn:
+            due: datetime | None = await conn.fetchval(
+                "SELECT MIN(retry_at) FROM agent_sandbox_snapshots "
+                "WHERE state = 'captured' AND retry_at > NOW()"
             )
         return due
 

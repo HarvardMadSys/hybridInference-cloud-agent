@@ -634,11 +634,14 @@ function GitPanel({
   );
 }
 
+const NO_STORED_EVENTS: (AgentJobEventApi | AgentThreadEventApi)[] = [];
+const NO_THREAD_JOBS: AgentJobApi[] = [];
+
 export function JobDetail({
   job,
   userId,
-  events = [],
-  threadJobs = [],
+  events = NO_STORED_EVENTS,
+  threadJobs = NO_THREAD_JOBS,
   onReload,
 }: {
   job: AgentJob;
@@ -692,24 +695,33 @@ export function JobDetail({
   const [trajectoryQuery, setTrajectoryQuery] = useState('');
   const [focusJobId, setFocusJobId] = useState<string | null>(null);
   const inspectorTriggerRef = useRef<HTMLElement | null>(null);
-  const trajectorySteps = useMemo(() => {
-    const context = turnContextFromJobs(threadJobs);
-    if (
-      !context.inputs?.some((input) => input.jobId === job.id) &&
-      typeof job.prompt === 'string'
-    ) {
-      context.inputs = [
-        ...(context.inputs ?? []),
-        {
-          jobId: job.id,
-          turnNo: job.turnNo ?? 1,
-          text: job.prompt,
-          at: job.createdAt ?? null,
-        },
-      ];
-    }
-    return buildTrajectorySteps(events, context);
+  // Chat does not need a second projection of the entire stored stream. Build
+  // it on the first inspection or trajectory visit, and reuse it until the
+  // source changes. Activity links request it only when they have a subagent.
+  const getTrajectorySteps = useMemo(() => {
+    let cached: ReturnType<typeof buildTrajectorySteps> | undefined;
+    return () => {
+      if (cached) return cached;
+      const context = turnContextFromJobs(threadJobs);
+      if (
+        !context.inputs?.some((input) => input.jobId === job.id) &&
+        typeof job.prompt === 'string'
+      ) {
+        context.inputs = [
+          ...(context.inputs ?? []),
+          {
+            jobId: job.id,
+            turnNo: job.turnNo ?? 1,
+            text: job.prompt,
+            at: job.createdAt ?? null,
+          },
+        ];
+      }
+      cached = buildTrajectorySteps(events, context);
+      return cached;
+    };
   }, [events, threadJobs, job.id, job.prompt, job.turnNo, job.createdAt]);
+  const trajectorySteps = tab === 'trajectory' || inspector ? getTrajectorySteps() : [];
   const threadId = job.threadId ?? job.id;
   const draft = useComposerDraft({ userId, threadId });
   const { value: followUp, setValue: setFollowUp } = draft;
@@ -735,10 +747,30 @@ export function JobDetail({
   } | null>(null);
   const recordedFile =
     recordedSelection?.scope === workspaceScope ? recordedSelection.selection : null;
-  const recordedOutputs = useMemo(
-    () => new Map(threadJobs.map((turn) => [turn.id, recordedTurnOutputs(turn, events)])),
-    [threadJobs, events],
-  );
+  const recordedOutputs = useMemo(() => {
+    // Partition once rather than scanning every event again for every turn.
+    const byJob = new Map<string, (AgentJobEventApi | AgentThreadEventApi)[]>();
+    let hasUnlabeled = false;
+    for (const event of events) {
+      if (!('job_id' in event)) {
+        hasUnlabeled = true;
+        continue;
+      }
+      const group = byJob.get(event.job_id) ?? [];
+      group.push(event);
+      byJob.set(event.job_id, group);
+    }
+    return new Map(
+      threadJobs.map((turn) => {
+        const own = byJob.get(turn.id) ?? [];
+        return [
+          turn.id,
+          // Legacy unlabeled logs retain their original event order.
+          recordedTurnOutputs(turn, hasUnlabeled ? events : own),
+        ];
+      }),
+    );
+  }, [threadJobs, events]);
   const [chosenSkills, setChosenSkills] = useState<SelectedSkillApi[] | null>(null);
   // What to say when `/goal` was typed with nothing after it. Guidance, not a
   // failure: nothing was created and nothing was sent.
@@ -1033,7 +1065,7 @@ export function JobDetail({
 
   const selectStep = useCallback(
     (stepKey: string) => {
-      const step = trajectorySteps.find((candidate) => candidate.key === stepKey);
+      const step = getTrajectorySteps().find((candidate) => candidate.key === stepKey);
       rememberInspectorTrigger();
       setWorkspaceOpen(false);
       setInspector((current) => {
@@ -1042,12 +1074,12 @@ export function JobDetail({
         return { kind: 'step', stepKey, tab: step ? normalizeStepTab(step, tab) : 'summary' };
       });
     },
-    [rememberInspectorTrigger, trajectorySteps],
+    [rememberInspectorTrigger, getTrajectorySteps],
   );
 
   const inspectTranscriptEvent = useCallback(
     (event: AgentEvent, eventJobId: string) => {
-      const step = trajectorySteps.find(
+      const step = getTrajectorySteps().find(
         (candidate) =>
           candidate.jobId === eventJobId &&
           (candidate.sourceEvents.some((source) => source.id === event.sourceEventId) ||
@@ -1059,7 +1091,7 @@ export function JobDetail({
       );
       if (step) selectStep(step.key);
     },
-    [selectStep, trajectorySteps, threadJobs],
+    [selectStep, getTrajectorySteps, threadJobs],
   );
 
   const openRun = useCallback(
@@ -1365,11 +1397,14 @@ export function JobDetail({
   // Turns the transcript renders, described once. The Chat below and the rail
   // beside it read the same description, so a mark cannot address a turn the
   // body does not draw. The stored turns are memoized because they are
-  // immutable; the newest one is rebuilt every commit because its rows are what
-  // the transcript is drawing right now.
+  // immutable; the newest one is rebuilt when its source or selected attempt
+  // changes, so typing in the composer does not rescan the transcript.
   const currentAttemptNo = job.currentAttemptNo;
-  const historyTurns = describeHistoryTurns(job);
-  const currentTurn = describeCurrentTurn(job, { attemptNo, currentAttemptNo });
+  const historyTurns = useMemo(() => describeHistoryTurns(job), [job]);
+  const currentTurn = useMemo(
+    () => describeCurrentTurn(job, { attemptNo, currentAttemptNo }),
+    [job, attemptNo, currentAttemptNo],
+  );
   const threadMessages = currentTurn.messages;
   const visibleEvents = currentTurn.events;
   const activityOverview = useMemo(() => buildActivityOverview(visibleEvents), [visibleEvents]);
@@ -1391,14 +1426,14 @@ export function JobDetail({
   }, [activityVisible, closeActivity]);
   const activityStepKey = useCallback(
     (event: Extract<AgentEvent, { kind: 'tool_use' }>) =>
-      trajectorySteps.find(
+      getTrajectorySteps().find(
         (step) =>
           step.kind === 'tool' &&
           step.jobId === job.id &&
           event.sourceEventId !== undefined &&
           step.sourceEvents.some((source) => source.id === event.sourceEventId),
       )?.key,
-    [job.id, trajectorySteps],
+    [job.id, getTrajectorySteps],
   );
   useEffect(() => {
     if (!activityVisible) return;

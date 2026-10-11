@@ -21,6 +21,14 @@ import { requestGitHubAccess } from './githubReturn';
 import { TaskComposer } from './TaskComposer';
 
 const navigation = vi.hoisted(() => ({ push: vi.fn() }));
+const account = vi.hoisted(() => ({ id: undefined as string | undefined }));
+vi.mock('@/components/providers/AuthProvider', () => ({
+  useAuth: () => ({ state: { user: account.id ? { id: account.id } : null } }),
+}));
+beforeEach(() => {
+  account.id = undefined;
+  localStorage.clear();
+});
 
 vi.mock('next/navigation', () => ({
   useRouter: () => navigation,
@@ -1367,6 +1375,124 @@ describe('TaskComposer source-control onboarding', () => {
     expect(fireEvent.keyDown(composer, { key: 'Enter' })).toBe(false);
     expect(fireEvent.keyDown(composer, { key: 'Enter', shiftKey: true })).toBe(true);
     expect(createAgentJob).not.toHaveBeenCalled();
+  });
+});
+
+describe('durable new-task drafts', () => {
+  beforeEach(() => {
+    account.id = 'alice';
+    sessionStorage.clear();
+    navigation.push.mockReset();
+    vi.mocked(getAgentConfig).mockReset().mockResolvedValue(config());
+    vi.mocked(listRepoBranches)
+      .mockReset()
+      .mockResolvedValue({ default: 'dev', branches: ['dev', 'main'] });
+    vi.mocked(listSkills).mockResolvedValue([]);
+    vi.mocked(listMcpConnections).mockResolvedValue({ connections: [], templates: [] });
+    vi.mocked(getMcpConnectionCapabilities).mockResolvedValue([]);
+    vi.mocked(createAgentJob).mockReset();
+  });
+  afterEach(cleanup);
+
+  it('restores exact unsent text and validated repository and branch choices after navigation', async () => {
+    const first = render(<TaskComposer />);
+    await chooseRepository();
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: '  Review this change\ncarefully.  ' },
+    });
+    fireEvent.change(screen.getByLabelText('Branch'), { target: { value: 'main' } });
+    first.unmount();
+    render(<TaskComposer />);
+    expect(await screen.findByRole('textbox')).toHaveValue('  Review this change\ncarefully.  ');
+    await waitFor(() => expect(screen.getByLabelText('Branch')).toHaveValue('main'));
+    expect(await repositoryButton()).toHaveAccessibleName('Repository: owner/repository');
+  });
+
+  it('isolates accounts immediately and restores each account on return', async () => {
+    const view = render(<TaskComposer />);
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: 'Alice draft' } });
+    account.id = 'bob';
+    view.rerender(<TaskComposer />);
+    expect(await screen.findByRole('textbox')).toHaveValue('');
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Bob draft' } });
+    account.id = 'alice';
+    view.rerender(<TaskComposer />);
+    expect(await screen.findByRole('textbox')).toHaveValue('Alice draft');
+  });
+
+  it('preserves an unsent branch while its validation read is still pending', async () => {
+    const first = render(<TaskComposer />);
+    await chooseRepository();
+    fireEvent.change(screen.getByLabelText('Branch'), { target: { value: 'main' } });
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Original draft' } });
+    first.unmount();
+    vi.mocked(listRepoBranches).mockImplementationOnce(() => new Promise(() => undefined));
+    const second = render(<TaskComposer />);
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: 'Updated draft' } });
+    await waitFor(() => expect(listRepoBranches).toHaveBeenCalledTimes(2));
+    second.unmount();
+    render(<TaskComposer />);
+    expect(await screen.findByRole('textbox')).toHaveValue('Updated draft');
+    await waitFor(() => expect(screen.getByLabelText('Branch')).toHaveValue('main'));
+  });
+
+  it('does not navigate another account after an earlier account submission resolves', async () => {
+    let finish!: (job: AgentJobApi) => void;
+    vi.mocked(createAgentJob).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const view = render(<TaskComposer />);
+    await chooseRepository();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Alice task' } });
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await waitFor(() => expect(finish).toBeDefined());
+    account.id = 'bob';
+    view.rerender(<TaskComposer />);
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: 'Bob draft' } });
+    await act(async () => finish({ id: 'alice-task' } as AgentJobApi));
+    expect(navigation.push).not.toHaveBeenCalled();
+    expect(screen.getByRole('textbox')).toHaveValue('Bob draft');
+    account.id = 'alice';
+    view.rerender(<TaskComposer />);
+    expect(await screen.findByRole('textbox')).toHaveValue('');
+  });
+
+  it('clears an accepted draft while retaining a draft edited during an in-flight request', async () => {
+    let finish!: (job: AgentJobApi) => void;
+    vi.mocked(createAgentJob).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const first = render(<TaskComposer />);
+    await chooseRepository();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'First task' } });
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await waitFor(() => expect(finish).toBeDefined());
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Next task' } });
+    await act(async () => finish({ id: 'accepted-task' } as AgentJobApi));
+    first.unmount();
+    const second = render(<TaskComposer />);
+    expect(await screen.findByRole('textbox')).toHaveValue('Next task');
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'next-task' } as AgentJobApi);
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await waitFor(() => expect(navigation.push).toHaveBeenCalledWith('/next-task'));
+    second.unmount();
+    render(<TaskComposer />);
+    expect(await screen.findByRole('textbox')).toHaveValue('');
+  });
+
+  it('retries a failed initial configuration read without losing the draft', async () => {
+    vi.mocked(getAgentConfig).mockRejectedValueOnce(new Error('Unavailable'));
+    render(<TaskComposer />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+    await screen.findByRole('textbox');
+    await waitFor(() => expect(screen.queryByText('Unavailable')).not.toBeInTheDocument());
+    expect(getAgentConfig).toHaveBeenCalledWith({ fresh: true });
   });
 });
 

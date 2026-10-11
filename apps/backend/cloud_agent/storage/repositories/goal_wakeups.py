@@ -166,6 +166,8 @@ class PostgresGoalWakeupRepository:
         retry_in_seconds: float | None = None,
         detail: str | None = None,
         conn: Any | None = None,
+        lease_owner: str | None = None,
+        restore_attempt: bool = False,
     ) -> None:
         """Give a lease back, optionally parking it behind a turn.
 
@@ -174,7 +176,8 @@ class PostgresGoalWakeupRepository:
         will clear ``waiting_job_id``. ``retry_in_seconds`` is for the other
         case — a temporary scheduling failure — and it defers the row's
         ``not_before`` rather than its lease, so a backoff and a dead worker's
-        expiry never look alike.
+        expiry never look alike. ``lease_owner`` fences a consumer's write;
+        ``restore_attempt`` preserves scheduling retries during access-service outages.
         """
         if conn is not None:
             await _release_on(
@@ -183,6 +186,8 @@ class PostgresGoalWakeupRepository:
                 waiting_job_id=waiting_job_id,
                 retry_in_seconds=retry_in_seconds,
                 detail=detail,
+                lease_owner=lease_owner,
+                restore_attempt=restore_attempt,
             )
             return
         async with self._pool.acquire() as acquired:
@@ -192,6 +197,8 @@ class PostgresGoalWakeupRepository:
                 waiting_job_id=waiting_job_id,
                 retry_in_seconds=retry_in_seconds,
                 detail=detail,
+                lease_owner=lease_owner,
+                restore_attempt=restore_attempt,
             )
 
     async def finish_wakeup(
@@ -201,6 +208,7 @@ class PostgresGoalWakeupRepository:
         processed: bool = True,
         detail: str | None = None,
         conn: Any | None = None,
+        lease_owner: str | None = None,
     ) -> None:
         """Mark a wakeup processed, or record a permanent refusal.
 
@@ -215,12 +223,35 @@ class PostgresGoalWakeupRepository:
                 detail = COALESCE($3, detail),
                 updated_at = NOW()
             WHERE id = $1
+              AND ($4::text IS NULL OR (
+                  state = 'pending' AND lease_owner = $4 AND lease_expires_at > clock_timestamp()
+              ))
             """
         if conn is not None:
-            await conn.execute(sql, wakeup_id, processed, detail)
+            await conn.execute(sql, wakeup_id, processed, detail, lease_owner)
             return
         async with self._pool.acquire() as acquired:
-            await acquired.execute(sql, wakeup_id, processed, detail)
+            await acquired.execute(sql, wakeup_id, processed, detail, lease_owner)
+
+    async def lock_wakeup(self, *, wakeup_id: str, lease_owner: str, conn: Any) -> bool:
+        """Fence a goal mutation on its live wakeup lease under the caller's transaction.
+
+        Call after locking the conversation, matching the goal-write lock order.
+        Holding this row lock makes the decision and wakeup completion atomic
+        against another consumer reclaiming an expired lease.
+        Check the wall clock: NOW() stays fixed while a transaction waits for
+        the conversation lock and can predate the lease's expiry.
+        """
+        return bool(
+            await conn.fetchval(
+                """SELECT id FROM agent_goal_wakeups
+            WHERE id = $1 AND state = 'pending' AND lease_owner = $2
+              AND lease_expires_at > clock_timestamp()
+            FOR UPDATE""",
+                wakeup_id,
+                lease_owner,
+            )
+        )
 
     async def pending_wakeup(self, *, thread_id: str) -> dict[str, Any] | None:
         """The newest unprocessed wakeup of a conversation, if any."""
@@ -243,34 +274,38 @@ async def _release_on(
     waiting_job_id: str | None,
     retry_in_seconds: float | None,
     detail: str | None,
+    lease_owner: str | None,
+    restore_attempt: bool,
 ) -> None:
-    """The two statements a release is, on whichever connection owns them."""
+    """Release, back off and optionally restore the claim attempt in one fenced write."""
+    delay = (
+        min(
+            retry_in_seconds,
+            number_setting("goals.wakeup_backoff_max_seconds", WAKEUP_BACKOFF_MAX_S),
+        )
+        if retry_in_seconds is not None
+        else None
+    )
     await conn.execute(
         """
         UPDATE agent_goal_wakeups
         SET lease_owner = NULL, lease_expires_at = NULL,
             waiting_job_id = COALESCE($2, waiting_job_id),
             detail = COALESCE($3, detail),
+            not_before = CASE WHEN $4::double precision IS NULL THEN not_before
+                              ELSE NOW() + make_interval(secs => $4) END,
+            attempts = GREATEST(attempts - CASE WHEN $6 THEN 1 ELSE 0 END, 0),
             updated_at = NOW()
         WHERE id = $1 AND state = 'pending'
+          AND ($5::text IS NULL OR (lease_owner = $5 AND lease_expires_at > clock_timestamp()))
         """,
         wakeup_id,
         waiting_job_id,
         detail,
+        delay,
+        lease_owner,
+        restore_attempt,
     )
-    if retry_in_seconds is not None:
-        await conn.execute(
-            """
-            UPDATE agent_goal_wakeups
-            SET not_before = NOW() + make_interval(secs => $2)
-            WHERE id = $1 AND state = 'pending'
-            """,
-            wakeup_id,
-            min(
-                retry_in_seconds,
-                number_setting("goals.wakeup_backoff_max_seconds", WAKEUP_BACKOFF_MAX_S),
-            ),
-        )
 
 
 def wakeup_backoff(attempts: int) -> float:

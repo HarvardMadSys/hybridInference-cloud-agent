@@ -78,6 +78,17 @@ class SnapshotRepository(Protocol):
         preparation: a group snapshot may capture a succeeded boundary or a
         publisher may start mutating its lineage, but those operations cannot
         overlap. Returns the snapshot and its publication metadata, or ``None``.
+        Deferred publications are eligible only after their ``retry_at``.
+        """
+        ...
+
+    async def defer_snapshot_publish(self, *, snapshot_id: int, detail: str) -> bool:
+        """Return an unstarted publication to captured with a 30-second retry.
+
+        Call only after an entitlement preflight failure, before minting a write
+        credential or performing external publication effects. Retains the patch
+        and included turns, and bounds the visible detail to 2,000 characters.
+        Returns ``False`` unless the snapshot is still ``publishing``.
         """
         ...
 
@@ -116,6 +127,14 @@ class SnapshotRepository(Protocol):
 
         ``None`` when none waits. Everything else that makes a capture due is
         announced by a notification.
+        """
+        ...
+
+    async def next_snapshot_publish_retry_due(self) -> datetime | None:
+        """When the earliest deferred publication may be claimed again.
+
+        ``None`` when no captured snapshot waits for a future retry. Capture
+        completion announces other publication work through a notification.
         """
         ...
 

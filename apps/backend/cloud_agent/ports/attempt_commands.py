@@ -87,6 +87,7 @@ class AttemptCommands(Protocol):
         attempt_id: int,
         lease_generation: int | None = None,
         reason: str = "credential_unavailable",
+        retry_after_seconds: float = 0,
     ) -> bool:
         """Hand a just-claimed job back to the queue without spending a retry.
 
@@ -113,6 +114,10 @@ class AttemptCommands(Protocol):
         why: history is append-only, and "this one never started" is exactly
         the kind of thing an operator later needs to see. It simply does not
         count — see the retry budget in :meth:`reap_expired`.
+
+        ``retry_after_seconds`` delays eligibility after transient failures,
+        allowing later queued jobs to run while this job's dependency recovers.
+        Raises ``ValueError`` when the delay is not finite and nonnegative.
         """
         ...
 

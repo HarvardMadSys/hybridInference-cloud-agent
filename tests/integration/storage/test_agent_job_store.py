@@ -4124,6 +4124,69 @@ async def test_a_released_claim_costs_no_retry(pool, store: Storage):
     assert (await store.conversation_queries.get_job(job["id"]))["state"] == "queued"
 
 
+async def test_delayed_credential_retry_does_not_block_later_jobs(pool, store: Storage):
+    """A single executor can serve another owner while credentials recover."""
+    oldest = await _create_job(store)
+    later = await _create_job(store, user_id="another-owner")
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim["id"] == oldest["id"]
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE agent_runner_hosts SET slots_total=1 WHERE host='runner-a'")
+    assert await store.attempt_commands.release_claim(
+        job_id=oldest["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        retry_after_seconds=3600,
+    )
+    other = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert other["id"] == later["id"]
+    assert await store.attempt_commands.transition(
+        job_id=later["id"],
+        attempt_id=other["attempt_id"],
+        lease_generation=other["lease_generation"],
+        from_states=("running",),
+        to_state="failed",
+    )
+    assert await _claim(store, worker_id="w1", lease_ttl_seconds=60) is None
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM agent_attempts WHERE job_id=$1 AND status<>'aborted'",
+                oldest["id"],
+            )
+            == 0
+        )
+        await conn.execute(
+            "UPDATE agent_jobs SET claim_retry_at=NOW()-INTERVAL '1 second' WHERE id=$1",
+            oldest["id"],
+        )
+    retry = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert retry["id"] == oldest["id"]
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval("SELECT claim_retry_at FROM agent_jobs WHERE id=$1", oldest["id"])
+            is None
+        )
+
+
+async def test_cancel_during_a_delayed_claim_release_finishes_cancelled(pool, store: Storage):
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    await store.attempt_commands.request_cancel(job_id=job["id"])
+    assert await store.attempt_commands.release_claim(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        retry_after_seconds=3600,
+    )
+    assert (await store.conversation_queries.get_job(job["id"]))["state"] == "cancelled"
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval("SELECT claim_retry_at FROM agent_jobs WHERE id=$1", job["id"])
+            is None
+        )
+
+
 async def test_an_admitted_turn_is_never_handed_back_to_the_queue(store: Storage):
     """The guard that keeps a user's instruction from running twice.
 

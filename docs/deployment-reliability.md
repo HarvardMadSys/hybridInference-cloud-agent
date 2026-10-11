@@ -159,6 +159,10 @@ deployment owner configures the receiver and its credentials.
 
 ## Recovery boundaries
 
+The [backup and recovery runbook](disaster-recovery.md) defines initial retention
+and recovery targets, coordinated database/host recovery sets, encryption-key
+preservation, restore-drill acceptance, and previous artifact-release recovery.
+
 Inspect both machines' deployment markers and the failure reason, then retry
 the same verified target. A failed host rollout remains a failed rollout even
 if it restored the recorded generation. Control-plane failure leaves compatible

@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import setting_env
 from cloud_agent.workspace_broker_client import (
     WorkspaceBrokerClient,
@@ -34,6 +35,8 @@ from cloud_agent.workspace_broker_client import (
 
 if TYPE_CHECKING:
     from cloud_agent.ports import HostPoolRepository
+
+logger = get_logger(__name__)
 
 #: Hosts a broker URL may name. Empty means "any", which is the shape a
 #: single-host deployment runs in and the shape this had before the check.
@@ -166,14 +169,28 @@ async def close_broker_clients() -> None:
 
 
 def _client_for(host: dict[str, Any]) -> WorkspaceBrokerClient | None:
-    """Build a client for one host row, or ``None`` when it cannot be reached."""
-    url = (host.get("broker_url") or "").strip()
+    """Apply current address policy before lending a credential or cached pool."""
+    name = str(host.get("host") or "").strip()
+    try:
+        url = validate_broker_url(host.get("broker_url"))
+    except BrokerUrlRefused:
+        # Host rows can predate an administrator narrowing the allowlist.
+        # Refusing new clients is not enough if a pooled connection remains
+        # available for that same host; retire it and its cached health proof.
+        existing = _POOLS.pop(name, None)
+        if existing is not None:
+            _retire(existing[1])
+        _PROBE_CACHE.pop(name, None)
+        logger.warning(
+            "agent_workspace_broker_policy_refused",
+            extra={"event": "agent_workspace_broker_policy_refused", "host": name},
+        )
+        return None
     if not url:
         return None
     token = (setting_env(ENV_BROKER_TOKEN) or "").strip()
     if not token:
         return None
-    name = str(host.get("host") or "").strip()
     if not name:
         # Nothing to bound a pool by, so this row does not get one: a
         # connection per call is what it had before, and that is better than a
@@ -184,7 +201,6 @@ def _client_for(host: dict[str, Any]) -> WorkspaceBrokerClient | None:
 
 def broker_for_host(host: dict[str, Any]) -> WorkspaceBrokerClient | None:
     """Reach a registered Host for administrative readiness and inventory checks."""
-    validate_broker_url(host.get("broker_url"))
     return _client_for(host)
 
 
@@ -262,14 +278,17 @@ async def probe_broker(host: str, broker_url: str | None, *, force: bool = False
     if not url:
         return "host did not advertise a workspace broker URL"
 
+    # Revalidate even a cached successful probe after a live policy change.
+    client = _client_for({"host": host, "broker_url": url})
+    if client is None:
+        if not (setting_env(ENV_BROKER_TOKEN) or "").strip():
+            return "control plane has no workspace broker credential"
+        return "workspace broker is unavailable under the current configuration"
+
     now = time.monotonic()
     cached = _PROBE_CACHE.get(host)
     if not force and cached is not None and cached[0] > now and cached[1] == url:
         return None
-
-    client = _client_for({"host": host, "broker_url": url})
-    if client is None:
-        return "control plane has no workspace broker credential"
 
     try:
         await client.health()
