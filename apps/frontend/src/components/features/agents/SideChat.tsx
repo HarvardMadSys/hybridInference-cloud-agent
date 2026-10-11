@@ -483,7 +483,7 @@ function SideChatContent({
                 onRemove={attachments.remove}
                 disabled={unavailable || submitting}
               />
-              <div className="flex flex-wrap items-center gap-1 px-3 pb-2">
+              <div className="flex flex-wrap items-center gap-0.5 px-2.5 pb-1.5">
                 {models.length ? (
                   <>
                     <Picker

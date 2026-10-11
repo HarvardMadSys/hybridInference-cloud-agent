@@ -30,12 +30,15 @@ export function Picker({
     return null;
   }
   return (
-    <label className="relative inline-flex min-h-11 max-w-full items-center gap-2 rounded-lg border border-transparent px-2.5 py-1.5 text-[13px] font-medium text-foreground transition-colors hover:border-border hover:bg-surface-hover focus-within:border-accent/30 focus-within:bg-surface focus-within:ring-2 focus-within:ring-accent/15">
+    <label
+      title={`${label}: ${value}`}
+      className="relative inline-flex min-h-9 max-w-full items-center gap-1 rounded-md border border-transparent px-1.5 py-1 text-xs font-medium text-foreground transition-colors hover:border-border hover:bg-surface-hover focus-within:border-accent/30 focus-within:bg-surface focus-within:ring-2 focus-within:ring-accent/15 [@media(pointer:coarse)]:min-h-11"
+    >
       <span className="flex min-w-0 flex-col gap-0.5">
-        <span className="text-[11px] font-normal leading-none text-muted">{label}</span>
+        <span className="text-[10px] font-normal leading-none text-muted">{label}</span>
         {/* The width of the control follows the selection. Long identifiers
             truncate so the setting and its label stay inside narrow panes. */}
-        <span aria-hidden className="min-w-0 max-w-[13rem] truncate leading-5">
+        <span aria-hidden className="min-w-0 max-w-[13rem] truncate leading-4">
           {value}
         </span>
       </span>
@@ -45,7 +48,7 @@ export function Picker({
         fill="none"
         stroke="currentColor"
         strokeWidth={1.6}
-        className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-gray-500"
+        className="h-3 w-3 shrink-0 text-gray-400 dark:text-gray-500"
       >
         <path strokeLinecap="round" strokeLinejoin="round" d="m6 8 4 4 4-4" />
       </svg>

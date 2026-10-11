@@ -715,126 +715,120 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           />
         )}
 
-        <div className="border-t border-gray-100 dark:border-white/5">
-          <div className="flex flex-wrap items-center gap-1.5 px-3 py-2.5 sm:px-4">
-            {disconnected ? (
-              <span
-                aria-live="polite"
-                className={`inline-flex min-w-0 flex-1 items-center gap-2 text-[13px] ${
-                  connectNudged
-                    ? 'text-crimson-dark dark:text-crimson-light'
-                    : 'text-gray-400 dark:text-gray-500'
-                }`}
-              >
-                <svg
-                  className="h-4 w-4 shrink-0"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                  aria-hidden="true"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M8 10V7a4 4 0 0 1 8 0v3m-9 0h10a1 1 0 0 1 1 1v8H6v-8a1 1 0 0 1 1-1Z"
-                  />
-                </svg>
-                {connectNudged ? t('composer.connectToRunKept') : t('composer.connectToRun')}
-              </span>
-            ) : (
-              <>
-                <ComposerPlusMenu
-                  disabled={busy}
-                  onOpen={goalCommand.dismiss}
-                  onFiles={attachments.add}
-                  onOpenSkills={() => setSkillsOpen(true)}
-                  skillSummary={
-                    pendingSkillDefaults
-                      ? t('attach.skillsDefaults')
-                      : String(selectedSkills.length)
-                  }
-                  goalSummary={t('commands.goalHint')}
-                  onOpenGoal={insertGoalCommand}
-                  mcp={mcp}
-                  mcpBlockedReason={mcpBlockedReason}
-                />
-                <span className="h-4 w-px bg-gray-200 dark:bg-white/10" />
-                <RepositoryPicker
-                  repos={config?.repos ?? []}
-                  value={repo}
-                  onChange={chooseRepository}
-                  open={repoPickerOpen}
-                  onOpenChange={(next) => {
-                    if (next) openRepositoryPicker(false);
-                    else setRepoPickerOpen(false);
-                  }}
-                  onRefresh={() => void refreshRepositories()}
-                  refreshing={refreshing}
-                  onConfigure={
-                    config?.github_install_url ? () => void goToGitHub('manage') : undefined
-                  }
-                  onCreate={() => {
-                    if (!rewriting && !submitting) setCreateRepositoryOpen(true);
-                  }}
-                  createDisabled={rewriting || submitting}
-                  returnFocusTo={repoPickerFromTask ? taskBox : undefined}
-                />
-                <Picker
-                  label={t('composer.branch')}
-                  value={branch}
-                  options={branches}
-                  onChange={setBranch}
-                />
-              </>
-            )}
-          </div>
-          <div className="flex flex-col gap-3 rounded-b-2xl border-t border-gray-100 bg-gray-50/70 px-3 py-3 sm:flex-row sm:items-center sm:px-4 dark:border-white/5 dark:bg-white/[0.02]">
-            {!disconnected && (
-              <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
-                <Picker
-                  label={t('composer.agent')}
-                  value={runtime}
-                  options={config?.runtimes ?? []}
-                  onChange={setRuntime}
-                />
-                <Picker
-                  label={t('composer.model')}
-                  value={model}
-                  options={models}
-                  onChange={setModel}
-                />
-                <Picker
-                  label={t('composer.reasoning')}
-                  value={effort}
-                  options={efforts}
-                  onChange={setEffort}
-                />
-              </div>
-            )}
-
-            <button
-              type="button"
-              disabled={!canRun}
-              onClick={() => void run()}
-              title={missingRepository ? t('composer.chooseRepository') : t('composer.runTitle')}
-              className={`ml-auto inline-flex min-h-11 w-full shrink-0 items-center justify-center gap-2 rounded-xl bg-crimson px-5 py-2 text-sm font-semibold text-white shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/40 focus-visible:ring-offset-2 sm:w-auto dark:focus-visible:ring-offset-gray-900 ${
-                canRun ? 'hover:bg-crimson-dark' : 'cursor-not-allowed opacity-60'
+        <div className="flex flex-wrap items-center gap-0.5 rounded-b-2xl border-t border-gray-100 bg-gray-50/70 px-2.5 py-1.5 sm:px-3 dark:border-white/5 dark:bg-white/[0.02]">
+          {disconnected ? (
+            <span
+              aria-live="polite"
+              className={`inline-flex min-w-0 flex-1 items-center gap-2 text-[13px] ${
+                connectNudged
+                  ? 'text-crimson-dark dark:text-crimson-light'
+                  : 'text-gray-400 dark:text-gray-500'
               }`}
             >
-              {submitting || goalCommand.busy ? t('composer.starting') : t('composer.run')}
               <svg
-                aria-hidden="true"
-                className="h-3.5 w-3.5"
-                fill="none"
+                className="h-4 w-4 shrink-0"
                 viewBox="0 0 24 24"
+                fill="none"
                 stroke="currentColor"
                 strokeWidth={2}
+                aria-hidden="true"
               >
-                <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14m0 0-6-6m6 6-6 6" />
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M8 10V7a4 4 0 0 1 8 0v3m-9 0h10a1 1 0 0 1 1 1v8H6v-8a1 1 0 0 1 1-1Z"
+                />
               </svg>
-            </button>
-          </div>
+              {connectNudged ? t('composer.connectToRunKept') : t('composer.connectToRun')}
+            </span>
+          ) : (
+            <>
+              <ComposerPlusMenu
+                disabled={busy}
+                onOpen={goalCommand.dismiss}
+                onFiles={attachments.add}
+                onOpenSkills={() => setSkillsOpen(true)}
+                skillSummary={
+                  pendingSkillDefaults ? t('attach.skillsDefaults') : String(selectedSkills.length)
+                }
+                goalSummary={t('commands.goalHint')}
+                onOpenGoal={insertGoalCommand}
+                mcp={mcp}
+                mcpBlockedReason={mcpBlockedReason}
+              />
+              <span className="h-4 w-px bg-gray-200 dark:bg-white/10" />
+              <RepositoryPicker
+                repos={config?.repos ?? []}
+                value={repo}
+                onChange={chooseRepository}
+                open={repoPickerOpen}
+                onOpenChange={(next) => {
+                  if (next) openRepositoryPicker(false);
+                  else setRepoPickerOpen(false);
+                }}
+                onRefresh={() => void refreshRepositories()}
+                refreshing={refreshing}
+                onConfigure={
+                  config?.github_install_url ? () => void goToGitHub('manage') : undefined
+                }
+                onCreate={() => {
+                  if (!rewriting && !submitting) setCreateRepositoryOpen(true);
+                }}
+                createDisabled={rewriting || submitting}
+                returnFocusTo={repoPickerFromTask ? taskBox : undefined}
+              />
+              <Picker
+                label={t('composer.branch')}
+                value={branch}
+                options={branches}
+                onChange={setBranch}
+              />
+            </>
+          )}
+          {!disconnected && (
+            <>
+              <Picker
+                label={t('composer.agent')}
+                value={runtime}
+                options={config?.runtimes ?? []}
+                onChange={setRuntime}
+              />
+              <Picker
+                label={t('composer.model')}
+                value={model}
+                options={models}
+                onChange={setModel}
+              />
+              <Picker
+                label={t('composer.reasoning')}
+                value={effort}
+                options={efforts}
+                onChange={setEffort}
+              />
+            </>
+          )}
+
+          <button
+            type="button"
+            disabled={!canRun}
+            onClick={() => void run()}
+            title={missingRepository ? t('composer.chooseRepository') : t('composer.runTitle')}
+            className={`ml-auto inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-lg bg-crimson px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/40 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900 [@media(pointer:coarse)]:min-h-11 ${
+              canRun ? 'hover:bg-crimson-dark' : 'cursor-not-allowed opacity-60'
+            }`}
+          >
+            {submitting || goalCommand.busy ? t('composer.starting') : t('composer.run')}
+            <svg
+              aria-hidden="true"
+              className="h-3.5 w-3.5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14m0 0-6-6m6 6-6 6" />
+            </svg>
+          </button>
         </div>
       </div>
 

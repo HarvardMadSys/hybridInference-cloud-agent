@@ -2427,7 +2427,7 @@ export function JobDetail({
                           followUpBox.current?.focus();
                         }}
                       />
-                      <div className="flex flex-wrap items-center gap-1.5 border-t border-gray-100/90 dark:border-white/5 px-3 py-2.5">
+                      <div className="flex flex-wrap items-center gap-0.5 border-t border-gray-100/90 px-2.5 py-1.5 dark:border-white/5">
                         <ComposerPlusMenu
                           onFiles={attachments.add}
                           onOpenSkills={() => setSkillsOpen(true)}
