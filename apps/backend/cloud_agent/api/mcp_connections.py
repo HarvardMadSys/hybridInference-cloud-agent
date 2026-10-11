@@ -109,16 +109,17 @@ _TEMPLATES: tuple[dict[str, Any], ...] = (
         "name": "github",
         "label": "GitHub",
         "description": (
-            "Read issues, pull requests, code and releases across the repositories your "
-            "GitHub account can see."
+            "Read repositories, push file changes and create pull requests with your "
+            "GitHub account."
         ),
-        "url": "https://api.githubcopilot.com/mcp/readonly",
+        "url": "https://api.githubcopilot.com/mcp/",
         "transport": Transport.STREAMABLE_HTTP.value,
         "auth_kind": AuthKind.STATIC.value,
         "documentation_url": "https://github.com/github/github-mcp-server",
         "notes": [
-            "Use a personal access token with access to the repositories your agents should read.",
-            "This connection uses GitHub's read-only endpoint.",
+            "Use a personal access token with access to the repositories your agents need.",
+            "To push file changes and create pull requests, give a fine-grained token "
+            "Contents and Pull requests read and write permissions for those repositories.",
         ],
     },
     {

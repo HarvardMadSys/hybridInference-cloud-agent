@@ -165,11 +165,13 @@ attachments. Before watching can begin, every chat that shares the workspace
 must have no active work or waiting messages.
 
 The agent needs source-control tools that can read checks and reviews, mark
-drafts ready, and merge. The supplied GitHub MCP template is read-only, so
-merging requires a writable connection. The agent reports missing access and
-other blockers. Watching is limited by the agent turn's timeout. If the agent
-makes fixes, the turn ends so the platform can publish them. After publication,
-select the button again to continue watching.
+drafts ready, and merge. The supplied GitHub MCP template supports write tools.
+Use a token with Contents and Pull requests read and write permissions for the
+repositories the agent should update. Existing connections using `/mcp/readonly`
+need to be reconnected with the GitHub preset to enable write tools. The agent
+reports missing access and other blockers. Watching is limited by the agent turn's
+timeout. If the agent makes fixes, the turn ends so the platform can publish them.
+After publication, select the button again to continue watching.
 
 | Context status | Meaning |
 |---|---|

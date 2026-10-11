@@ -15,7 +15,11 @@ action after adding a server or returning from OAuth.
 - Add server opens built-in presets for GitHub, Slack, Google Drive, Linear,
   Notion and Context7, available independently of the directory sync. Each preset
   supplies the provider's remote endpoint and setup guidance. GitHub defaults to
-  a personal access token on its read-only endpoint and also offers OAuth.
+  a personal access token on `https://api.githubcopilot.com/mcp/` and also offers
+  OAuth. Its setup guidance explains the Contents and Pull requests read and
+  write permissions needed to push file changes and create pull requests.
+  Existing connections using `/mcp/readonly` can be disconnected and added
+  again with the GitHub preset; stored endpoints are not automatically changed.
 - MCP directory opens Recommended: a small editorial shortlist of GitHub, Context7,
   Playwright, Linear, Notion, Figma, Supabase and Sentry for common coding workflows.
   All servers opens the full synchronized directory; typing in search always searches

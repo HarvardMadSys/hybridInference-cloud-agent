@@ -612,7 +612,7 @@ class TestConnectionManagement:
         [
             (
                 "github",
-                "https://api.githubcopilot.com/mcp/readonly",
+                "https://api.githubcopilot.com/mcp/",
                 "static",
                 "https://github.com/github/github-mcp-server",
             ),
