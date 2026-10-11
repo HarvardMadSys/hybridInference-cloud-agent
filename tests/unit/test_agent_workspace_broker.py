@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import logging
+import os
+import re
+import signal
+import subprocess
 import threading
 import time
+import tracemalloc
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -19,12 +25,23 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
 from cloud_agent_host import workspace_broker as broker_mod
-from cloud_agent_host.chat_sandbox import RetainedChatBackend
+from cloud_agent_host.chat_sandbox import (
+    ACTIVATION_TMPFS,
+    ChatSandboxManager,
+    RetainedChatBackend,
+    _RetainedExecProcess,
+)
 from cloud_agent_host.drivers import InputOutcome
 from cloud_agent_host.guest_observer import GuestObservation, GuestProcess
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.runtimes import RuntimeEffortUnsupportedError, RuntimeMCPUnavailableError
-from cloud_agent_host.sandbox import ProcessBackend, SandboxError, TerminalProcess
+from cloud_agent_host.sandbox import (
+    ContainerBackend,
+    ProcessBackend,
+    SandboxError,
+    SandboxSpec,
+    TerminalProcess,
+)
 from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorClient,
     SessionSupervisorError,
@@ -119,7 +136,7 @@ class _WorkspaceBackend(RetainedChatBackend):
     def spawn(self, spec):
         self.spawned.append(spec)
         return SimpleNamespace(
-            lines=lambda: iter(()),
+            chunks=lambda: iter(()),
             kill=lambda: None,
             wait=lambda: 0,
             stderr_text=lambda: "",
@@ -1441,7 +1458,7 @@ async def test_lower_command_output_limit_stops_an_oversized_command(monkeypatch
 
     def spawn(_spec):
         return SimpleNamespace(
-            lines=lambda: iter(["x" * (1024 * 1024 + 1)]),
+            chunks=lambda: iter([b"x" * (1024 * 1024 + 1)]),
             kill=lambda: killed.append(True),
             wait=lambda: 0,
             stderr_text=lambda: "",
@@ -1465,6 +1482,236 @@ async def test_lower_command_output_limit_stops_an_oversized_command(monkeypatch
     assert configured.status_code == 200
     assert command.status_code == 413
     assert killed == [True]
+
+
+class _CommandReceiptManager:
+    """Stands in for the Docker manager behind a bounded retained command.
+
+    The command's process receipt names its own process group, as ``setsid``
+    makes it in the container, so honouring it stops exactly that group. The
+    container itself must never be stopped: siblings run in it.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.processes: list[subprocess.Popen[str]] = []
+
+    def kill_member_process(self, _spec, *, pidfile: str, user_uid: int, user_gid: int) -> None:
+        self.calls.append(("kill_member_process", pidfile))
+        for process in self.processes:
+            if process.poll() is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+
+    def stop(self, _spec) -> None:
+        self.calls.append(("stop", ""))
+
+
+class _LocalRetainedBackend:
+    """Run one bounded command as the retained exec production uses, on this host.
+
+    The pipes are opened exactly as ``ChatSandboxManager.spawn`` opens them for
+    ``docker exec``, so the broker reads the same text-mode pipe it reads in a
+    container; only the process runs here instead.
+    """
+
+    def __init__(self, workdir: str) -> None:
+        self.manager = _CommandReceiptManager()
+        self.spec = SimpleNamespace(container_name="freeinference-chat-local")
+        self.workdir = workdir
+
+    @staticmethod
+    def base_env() -> dict[str, str]:
+        return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8"}
+
+    def spawn(self, spec):
+        process = subprocess.Popen(
+            spec.argv,
+            cwd=self.workdir,
+            env=spec.env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+        self.manager.processes.append(process)
+        return _RetainedExecProcess(
+            process,
+            manager=self.manager,  # type: ignore[arg-type]
+            spec=self.spec,  # type: ignore[arg-type]
+            process_pidfile=f"{ACTIVATION_TMPFS}/command-{'0' * 32}.pid",
+            user_uid=10001,
+            user_gid=10001,
+        )
+
+
+def _finish_within(seconds: float, function):
+    """Run ``function`` on a thread, failing instead of hanging the suite."""
+    outcome: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            outcome["result"] = function()
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    assert not worker.is_alive(), f"the bounded command was still running after {seconds}s"
+    if "error" in outcome:
+        raise outcome["error"]  # type: ignore[misc]
+    return outcome["result"]
+
+
+def test_one_shot_command_output_survives_a_byte_that_is_not_utf8(tmp_path):
+    """A stray byte is replaced; it must not drop the output or wedge the read.
+
+    Enough output follows it to fill a pipe: had the read stopped at the byte,
+    the command could never exit and the broker would wait on it forever.
+    """
+    backend = _LocalRetainedBackend(str(tmp_path))
+    request = TerminalRequest(
+        command="printf 'hello\\n\\377'; head -c 400000 /dev/zero | tr '\\000' y",
+        cwd=str(tmp_path),
+        timeout_seconds=20,
+    )
+
+    result = _finish_within(30, lambda: _run_terminal(backend, str(tmp_path), request))  # type: ignore[arg-type]
+
+    assert result["exit_code"] == 0
+    assert result["output"] == "hello\n\ufffd" + "y" * 400000
+    assert backend.manager.calls == []
+
+
+def test_one_shot_command_deadline_covers_a_command_that_closed_its_output(tmp_path):
+    backend = _LocalRetainedBackend(str(tmp_path))
+    request = TerminalRequest(
+        command="exec >/dev/null; sleep 10", cwd=str(tmp_path), timeout_seconds=1
+    )
+    started = time.monotonic()
+
+    with pytest.raises(HTTPException) as timed_out:
+        _finish_within(8, lambda: _run_terminal(backend, str(tmp_path), request))  # type: ignore[arg-type]
+
+    assert timed_out.value.status_code == 408
+    assert time.monotonic() - started < 5
+    # Only the command's own process group is stopped, never the container.
+    assert [name for name, _ in backend.manager.calls] == ["kill_member_process"]
+
+
+def test_oversized_output_without_newlines_is_refused_before_it_is_buffered(tmp_path):
+    """The limit holds for what the broker holds, not just for what it returns."""
+    backend = _LocalRetainedBackend(str(tmp_path))
+    limit = 1024 * 1024
+    request = TerminalRequest(
+        command="head -c 33554432 /dev/zero | tr '\\000' x",
+        cwd=str(tmp_path),
+        timeout_seconds=20,
+    )
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(HTTPException) as refused:
+            _finish_within(
+                30,
+                lambda: _run_terminal(
+                    backend,  # type: ignore[arg-type]
+                    str(tmp_path),
+                    request,
+                    max_output_bytes=limit,
+                ),
+            )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert refused.value.status_code == 413
+    assert peak < 8 * limit
+    assert [name for name, _ in backend.manager.calls] == ["kill_member_process"]
+
+
+def test_a_broker_command_carries_its_own_process_receipt(monkeypatch):
+    """Stopping a timed-out or oversized command must never stop its group.
+
+    The group's container runs every sibling's turn, so a bounded command is
+    started under a process receipt of its own, and its kill is refused rather
+    than widened when there is none.
+    """
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    spawned: list[dict[str, object]] = []
+    monkeypatch.setattr(manager, "require_network", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        manager, "spawn", lambda _spec, _argv, **kwargs: spawned.append(kwargs) or "process"
+    )
+    retained = RetainedChatBackend(manager, SimpleNamespace(sandbox_image_digest=None))  # type: ignore[arg-type]
+
+    retained.spawn(SandboxSpec(argv=["/bin/true"], workdir="/workspace"))
+
+    assert re.fullmatch(
+        rf"{re.escape(ACTIVATION_TMPFS)}/command-[0-9a-f]{{32}}\.pid",
+        str(spawned[0]["process_pidfile"]),
+    )
+    unreceipted_manager = _CommandReceiptManager()
+    client = subprocess.Popen(
+        ["sleep", "30"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    unreceipted = _RetainedExecProcess(
+        client,
+        manager=unreceipted_manager,  # type: ignore[arg-type]
+        spec=SimpleNamespace(container_name="freeinference-chat-local"),  # type: ignore[arg-type]
+        process_pidfile=None,
+        user_uid=None,
+        user_gid=None,
+    )
+    with pytest.raises(SandboxError, match="no process-scoped kill receipt"):
+        unreceipted.kill()
+    assert unreceipted_manager.calls == []
+    assert client.wait(timeout=5) != 0
+
+
+def _repository(root) -> None:
+    """A one-commit repository, committed with a hermetic Git identity."""
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(root),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "T",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "T",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+    }
+    for argv in (
+        ["git", "init", "--quiet"],
+        ["git", "add", "notes.txt"],
+        ["git", "commit", "--quiet", "-m", "base"],
+    ):
+        subprocess.run(argv, cwd=root, env=env, check=True, capture_output=True)
+
+
+def test_git_inspection_shows_a_patch_that_is_not_utf8_but_never_captures_one(
+    tmp_path, monkeypatch
+):
+    """The Git tab may show a replacement character; a snapshot may not store one."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "notes.txt").write_text("plain\n")
+    _repository(tmp_path)
+    (tmp_path / "notes.txt").write_bytes(b"caf\xe9\n")
+    backend = ProcessBackend(acknowledged_unsafe=True)
+
+    shown = _finish_within(30, lambda: broker_mod._run_git(backend, str(tmp_path), timeout_s=20))
+    with pytest.raises(HTTPException) as refused:
+        _finish_within(
+            30,
+            lambda: broker_mod._run_git(backend, str(tmp_path), timeout_s=20, exact_patch=True),
+        )
+
+    assert "+caf\ufffd\n" in shown["patch"]
+    assert shown["changes"] == [{"code": " M", "path": "notes.txt"}]
+    assert refused.value.status_code == 502
+    assert refused.value.detail == "workspace patch is not UTF-8 text"
 
 
 def test_lower_terminal_total_output_limit_stops_the_process():

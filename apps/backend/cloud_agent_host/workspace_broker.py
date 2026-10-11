@@ -1349,8 +1349,16 @@ def _run_sandbox(
     env: dict[str, str],
     timeout_s: float,
     max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
-) -> tuple[int, str, str]:
-    """Run a bounded command and return status, stdout and stderr."""
+) -> tuple[int, bytes, str]:
+    """Run a bounded command and return its status, raw stdout and stderr.
+
+    Stdout is read as bytes, a bounded read at a time, and counted read by
+    read: neither a stream without newlines nor bytes that are not UTF-8 can
+    get past the limit or end the read early, and decoding it is the caller's
+    choice. The deadline covers the command's exit as well as its output, so
+    one that closes stdout and keeps running is stopped like one that never
+    closes it.
+    """
     process = backend.spawn(
         SandboxSpec(
             argv=["/bin/sh", "-lc", script],
@@ -1358,35 +1366,50 @@ def _run_sandbox(
             env={**backend.base_env(), "GIT_CONFIG_NOSYSTEM": "1", **env},
         )
     )
-    lines: queue.Queue[str | None] = queue.Queue()
+    # Output chunks, a read that failed, then the exit status once the
+    # command has been reaped.
+    events: queue.Queue[bytes | Exception | int] = queue.Queue()
 
     def pump() -> None:
+        size = 0
         try:
-            for line in process.lines():
-                lines.put(line)
-        finally:
-            lines.put(None)
+            for chunk in process.chunks():
+                events.put(chunk)
+                size += len(chunk)
+                if size > max_output_bytes:
+                    # Stop reading: the command is about to be stopped, and
+                    # what it writes meanwhile must not accumulate here.
+                    break
+        except Exception as exc:
+            # A read that failed is not the end of the output; partial output
+            # must not pass for the whole of it.
+            events.put(exc)
+        events.put(process.wait())
 
     threading.Thread(target=pump, daemon=True, name="workspace-command").start()
     deadline = time.monotonic() + timeout_s
-    chunks: list[str] = []
-    size = 0
+    stdout = bytearray()
     while True:
-        if time.monotonic() > deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             process.kill()
             raise HTTPException(status_code=408, detail="workspace command timed out")
         try:
-            line = lines.get(timeout=0.2)
+            event = events.get(timeout=remaining)
         except queue.Empty:
             continue
-        if line is None:
+        if isinstance(event, int):
+            exit_code = event
             break
-        size += len(line.encode("utf-8", errors="replace"))
-        if size > max_output_bytes:
+        if isinstance(event, Exception):
+            process.kill()
+            raise HTTPException(
+                status_code=502, detail="workspace command output could not be read"
+            ) from event
+        stdout += event
+        if len(stdout) > max_output_bytes:
             process.kill()
             raise HTTPException(status_code=413, detail="workspace command output is too large")
-        chunks.append(line)
-    exit_code = process.wait()
     stderr = process.stderr_text()
     if len(stderr.encode("utf-8", errors="replace")) > max_output_bytes:
         stderr = stderr.encode("utf-8", errors="replace")[-max_output_bytes:].decode(
@@ -1394,7 +1417,7 @@ def _run_sandbox(
         )
     if isinstance(workdir, Path):
         os.utime(workdir, None)
-    return exit_code, "".join(chunks), stderr
+    return exit_code, bytes(stdout), stderr
 
 
 def _run_terminal(
@@ -1413,7 +1436,7 @@ def _run_terminal(
         'eval "$WORKSPACE_COMMAND"; status=$?; '
         f'printf "\\n__HYI_{marker}_CWD__%s\\n__HYI_{marker}_STATUS__%s\\n" "$PWD" "$status"'
     )
-    process_status, stdout, stderr = _run_sandbox(
+    process_status, raw_stdout, stderr = _run_sandbox(
         backend,
         workdir=workdir,
         script=script,
@@ -1425,6 +1448,9 @@ def _run_terminal(
         ),
         max_output_bytes=max_output_bytes,
     )
+    # Shown to the owner as text: a byte that is not UTF-8 is replaced, and
+    # never costs the rest of the output.
+    stdout = raw_stdout.decode("utf-8", errors="replace")
     cwd_marker = f"\n__HYI_{marker}_CWD__"
     status_marker = f"\n__HYI_{marker}_STATUS__"
     cwd = request.cwd
@@ -1450,6 +1476,7 @@ def _run_git(
     *,
     timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S,
     max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
+    exact_patch: bool = False,
 ) -> dict[str, Any]:
     if base_sha and not _COMMIT_SHA.fullmatch(base_sha):
         raise HTTPException(status_code=400, detail="base SHA is not a commit hash")
@@ -1482,19 +1509,33 @@ def _run_git(
         timeout_s=timeout_s,
         max_output_bytes=max_output_bytes,
     )
-    status_text, separator, remainder = stdout.partition(f"\n{diff_tag}\n")
+    # Split on the ASCII markers before decoding anything: a file's bytes in
+    # the diff need not be UTF-8, and only the patch must keep them exactly.
+    raw_status, separator, remainder = stdout.partition(f"\n{diff_tag}\n".encode())
     if not separator:
         raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
-    patch, separator, commits_and_status = remainder.partition(f"\n{commits_tag}\n")
+    raw_patch, separator, commits_and_status = remainder.partition(f"\n{commits_tag}\n".encode())
     if not separator:
         raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
-    commits_text, _, git_status_text = commits_and_status.rpartition(f"\n{status_tag}")
+    raw_commits, _, raw_git_status = commits_and_status.rpartition(f"\n{status_tag}".encode())
     try:
-        git_status = int(git_status_text.strip().splitlines()[0])
+        git_status = int(raw_git_status.strip().splitlines()[0])
     except (ValueError, IndexError):
         git_status = process_status
     if git_status != 0:
         raise HTTPException(status_code=502, detail=stderr or "git workspace inspection failed")
+    try:
+        patch = raw_patch.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # A patch that will be applied must apply as the bytes it holds; one
+        # shown to the owner can show a replacement character instead.
+        if exact_patch:
+            raise HTTPException(
+                status_code=502, detail="workspace patch is not UTF-8 text"
+            ) from exc
+        patch = raw_patch.decode("utf-8", errors="replace")
+    status_text = raw_status.decode("utf-8", errors="replace")
+    commits_text = raw_commits.decode("utf-8", errors="replace")
 
     status_lines = [line for line in status_text.splitlines() if line]
     branch = ""
@@ -2685,6 +2726,7 @@ def create_app(
                     max_output_bytes=int(applied_settings["workspace_command_output_max_mib"])
                     * 1024
                     * 1024,
+                    exact_patch=True,
                 ),
             )
         except (SandboxError, ValueError) as exc:

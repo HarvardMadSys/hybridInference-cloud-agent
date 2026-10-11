@@ -64,6 +64,7 @@ from cloud_agent_host.sandbox import (
     SandboxProcess,
     SandboxSpec,
     TerminalProcess,
+    read_pipe_chunks,
 )
 from cloud_agent_host.tool_windows import MAX_TOOL_MARK_BYTES, TOOL_MARK_FILE, ToolMarkReader
 from cloud_agent_shared.operation_profiling import StageObserver, substage
@@ -5019,6 +5020,11 @@ finally:
             raise SandboxError(f"Docker archive command failed: {exc}") from exc
 
 
+#: How much of a retained command's stderr is kept: its end, where the error
+#: that explains a failure is.
+_STDERR_TAIL_BYTES = 64 * 1024
+
+
 class _RetainedExecProcess(SandboxProcess):
     """An attached ``docker exec`` with container- or member-scoped cleanup."""
 
@@ -5038,7 +5044,7 @@ class _RetainedExecProcess(SandboxProcess):
         self._process_pidfile = process_pidfile
         self._user_uid = user_uid
         self._user_gid = user_gid
-        self._stderr_chunks: builtins.list[str] = []
+        self._stderr_tail = bytearray()
         self._stderr_thread: threading.Thread | None = None
         if process.stderr is not None:
             self._stderr_thread = threading.Thread(
@@ -5054,13 +5060,20 @@ class _RetainedExecProcess(SandboxProcess):
 
     def _drain_stderr(self) -> None:
         assert self._process.stderr is not None
-        for line in self._process.stderr:
-            self._stderr_chunks.append(line)
-            del self._stderr_chunks[:-200]
+        # Raw bytes, not text lines: a line without its newline would grow
+        # without bound here, and a byte that is not UTF-8 would end the drain
+        # and leave the command blocked on a full stderr pipe.
+        for chunk in read_pipe_chunks(self._process.stderr.fileno()):
+            self._stderr_tail += chunk
+            del self._stderr_tail[:-_STDERR_TAIL_BYTES]
 
     def lines(self) -> Iterator[str]:
         assert self._process.stdout is not None
         yield from self._process.stdout
+
+    def chunks(self) -> Iterator[bytes]:
+        assert self._process.stdout is not None
+        yield from read_pipe_chunks(self._process.stdout.fileno())
 
     def write_line(self, text: str) -> None:
         if self._process.stdin is None:
@@ -5098,7 +5111,7 @@ class _RetainedExecProcess(SandboxProcess):
     def stderr_text(self) -> str:
         if self._stderr_thread is not None:
             self._stderr_thread.join(timeout=5)
-        return "".join(self._stderr_chunks)
+        return bytes(self._stderr_tail).decode("utf-8", errors="replace")
 
 
 def _set_pty_size(fd: int, rows: int, cols: int) -> None:

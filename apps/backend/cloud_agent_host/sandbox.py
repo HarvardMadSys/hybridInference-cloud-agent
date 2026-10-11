@@ -207,12 +207,34 @@ class SandboxSpec:
     live_input: bool = False
 
 
+#: The most one read takes from a command's pipe. A caller that bounds output
+#: counts it per read, so this is also how far one read can overshoot a limit.
+PIPE_CHUNK_BYTES = 64 * 1024
+
+
+def read_pipe_chunks(fd: int) -> Iterator[bytes]:
+    """Yield whatever one pipe delivers, a bounded read at a time, until EOF."""
+    while chunk := os.read(fd, PIPE_CHUNK_BYTES):
+        yield chunk
+
+
 class SandboxProcess(ABC):
     """A running agent, exposing a line stream and a kill switch."""
 
     @abstractmethod
     def lines(self) -> Iterator[str]:
         """Yield the agent's stdout, line by line, as it is produced."""
+
+    def chunks(self) -> Iterator[bytes]:
+        """Yield stdout as raw bytes, a bounded read at a time, as it is produced.
+
+        This is for a bounded command's output, not an agent's event stream.
+        A line exists only once its newline arrives, so a stream without one
+        would be buffered whole before a caller could apply any limit, and
+        the bytes need not be UTF-8 at all. Use this or :meth:`lines` on one
+        process, never both.
+        """
+        raise SandboxError("this sandbox process does not expose its output as bytes")
 
     @abstractmethod
     def kill(self) -> None:
@@ -434,6 +456,11 @@ class _PopenProcess(SandboxProcess):
         """Yield stdout lines from the child process."""
         assert self._process.stdout is not None
         yield from self._process.stdout
+
+    def chunks(self) -> Iterator[bytes]:
+        """Yield the child's stdout bytes, read straight from the pipe."""
+        assert self._process.stdout is not None
+        yield from read_pipe_chunks(self._process.stdout.fileno())
 
     def kill(self) -> None:
         """Kill the child process."""
