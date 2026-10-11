@@ -736,6 +736,92 @@ def test_settled_success_survives_a_failed_completion_event_upload(
         finish.assert_not_called()
 
 
+def _status_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://control.internal/v1/agent/worker/jobs/ajob_1/finish")
+    response = httpx.Response(status, request=request)
+    return httpx.HTTPStatusError(f"{status} for {request.url}", request=request, response=response)
+
+
+@pytest.mark.parametrize(
+    ("code", "frame", "state", "expected_code"),
+    [
+        (0, {"kind": "result", "status": "completed"}, "succeeded", 0),
+        (1, {"kind": "result", "status": "failed", "native_turn_settled": True}, "failed", 1),
+    ],
+)
+@pytest.mark.parametrize(
+    "failures",
+    [
+        [_status_error(503)],
+        [httpx.ReadTimeout("finish answer lost"), _status_error(502)],
+        [httpx.ReadTimeout("down")] * 3,
+        [_status_error(500)],
+    ],
+)
+def test_a_settled_turn_is_never_reported_failed_because_its_finish_was(
+    monkeypatch, caplog, code, frame, state, expected_code, failures
+):
+    """Settlement decided the outcome; a finish error is retried, never downgraded.
+
+    The closing transition used to be one request: a 503 there fell into the
+    generic handler, which reported the settled, successful turn as failed --
+    with the control plane's URL in the owner's detail.
+    """
+    monkeypatch.setattr(runner_mod.time, "sleep", lambda _seconds: None)
+    pending = list(failures)
+
+    def configure(_control, _supervisor, finish):
+        def answer(*_args, **_kwargs):
+            if pending:
+                raise pending.pop(0)
+
+        finish.side_effect = answer
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, code, frame, "claude-code", configure=configure
+    )
+
+    assert result == expected_code
+    supervisor.settle_shared.assert_called_once()
+    control.settle_chat_sandbox.assert_called_once()
+    supervisor.abandon_shared.assert_not_called()
+    control.abandon_chat_sandbox.assert_not_called()
+    # Every try reports the settled outcome itself, with its own detail.
+    assert {call.args[0] for call in finish.call_args_list} == {state}
+    assert len({call.args[1] for call in finish.call_args_list}) == 1
+    assert "control.internal" not in str(finish.call_args_list)
+    # A 500 is the control plane refusing the transition, not a lost answer.
+    retried = not any(
+        isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 500
+        for error in failures
+    )
+    assert finish.call_count == (min(len(failures) + 1, 3) if retried else 1)
+    if finish.call_count == len(failures):
+        assert "operation=finish " in caplog.text
+    for call in control.append_event.call_args_list:
+        assert call.args[0].event_type != "error"
+
+
+def test_a_settled_turn_whose_finish_is_fenced_on_retry_reports_nothing_more(monkeypatch):
+    """A retry refused by the fence is usually the first try having landed."""
+    monkeypatch.setattr(runner_mod.time, "sleep", lambda _seconds: None)
+
+    def configure(_control, _supervisor, finish):
+        finish.side_effect = [httpx.ReadTimeout("answer lost"), LeaseLost("finished")]
+
+    result, control, _supervisor, finish = _run_shared_boundary_case(
+        monkeypatch,
+        0,
+        {"kind": "result", "status": "completed"},
+        "claude-code",
+        configure=configure,
+    )
+
+    assert result == 3
+    assert [call.args[0] for call in finish.call_args_list] == ["succeeded", "succeeded"]
+    control.abandon_chat_sandbox.assert_not_called()
+
+
 @pytest.mark.parametrize("stage", ["admission", "supervisor_settle", "control_settle"])
 def test_lost_lifecycle_ack_recovers_without_repeating_the_agent_turn(monkeypatch, stage):
     from cloud_agent_host import runner as runner_mod

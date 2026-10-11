@@ -2423,6 +2423,24 @@ def _run_shared_live_attempt(
         except Exception as exc:
             _log_control_failure("finish", job.job_id, exc)
 
+    def finish_settled(state: str, detail: str, base_sha: str | None) -> None:
+        # Both settlements are durable, so the outcome is already decided.
+        # The receipt is retried through a brief control-plane error and never
+        # downgraded: an exhausted retry is logged and left to the control
+        # plane's settled-finalization path rather than reported as a failed
+        # turn. A fence refusing a retry (LeaseLost) is usually the earlier
+        # try having landed, and there is nothing left to report either way.
+        try:
+            _retry_lifecycle_receipt(
+                "finish_retry",
+                job.job_id,
+                lambda: finish_attempt(state, detail, base_sha=base_sha),
+            )
+        except LeaseLost:
+            raise
+        except Exception as exc:
+            _log_control_failure("finish", job.job_id, exc)
+
     try:
         if not has_context:
             # Clone into a host-local temporary archive while the activation
@@ -2960,8 +2978,8 @@ def _run_shared_live_attempt(
         if settled_failure:
             # Record the native turn ordinal before failing the job, so later
             # retries and historical forks keep matching the CLI transcript.
-            finish_attempt(
-                "failed", f"agent failed at native turn boundary: {tail[-500:]}", base_sha=base_sha
+            finish_settled(
+                "failed", f"agent failed at native turn boundary: {tail[-500:]}", base_sha
             )
             return 1
         try:
@@ -2981,10 +2999,10 @@ def _run_shared_live_attempt(
             # Both authoritative settlements succeeded. A missing UI notice
             # must not turn that success into a failed terminal transition.
             _log_control_failure("completion_event", job.job_id, exc)
-        finish_attempt(
+        finish_settled(
             "succeeded",
             "agent completed (shared workspace; publication snapshot pending)",
-            base_sha=base_sha,
+            base_sha,
         )
         return 0
     except LeaseLost:
