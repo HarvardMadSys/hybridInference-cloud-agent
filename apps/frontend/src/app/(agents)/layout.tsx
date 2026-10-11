@@ -62,11 +62,11 @@ function AgentsHeader({
           aria-controls="agents-sidebar"
           aria-keyshortcuts="Meta+B Control+B"
           title={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
-          className="-ml-1.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
+          className="-ml-1.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-gray-300/80 bg-gray-50 text-gray-600 shadow-sm transition-colors hover:border-crimson/40 hover:bg-crimson/5 hover:text-crimson focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/40 focus-visible:ring-offset-1 dark:border-white/15 dark:bg-white/5 dark:text-gray-300 dark:hover:border-crimson/40 dark:hover:bg-crimson/10 dark:hover:text-crimson-light"
         >
           <svg
             aria-hidden="true"
-            className="h-4 w-4"
+            className="h-5 w-5"
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"
