@@ -97,6 +97,14 @@ This repository publishes neutral releases. Each downstream operator owns its
 configuration, provisioning status, rollout record and recovery evidence. Keep
 secret material outside Git and back it up with the data it protects.
 
+## Local development tools
+
+These values are read by local tooling and are not saved application settings.
+
+| Variable | New? | Value / who provisions |
+|---|---|---|
+| `CI_LOG_DIR` | **NEW** | Optional output directory set by the developer invoking `scripts/ci-local.sh`. Defaults to a fresh gitignored `.local-ci/<tier>.XXXXXX` directory in the checkout for each run. Contains gate logs and the database JUnit report; no application secret is required. |
+
 ## Control plane (`cloud_agent`)
 
 ### Local and CI permission regression

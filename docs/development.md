@@ -128,6 +128,39 @@ make check
 | `make test-db` | The PostgreSQL-backed `dbtest` tier. |
 | `make test-all` | All tests except `external`, including `dbtest`. |
 
+### Run CI locally
+
+The portable launcher runs the backend, database, and frontend gates with
+check-only formatting and linting:
+
+```bash
+make ci
+# Or select a tier:
+make ci-backend
+make ci-database
+make ci-frontend
+```
+
+Install `uv` and Python 3.12 before running backend or database checks. Frontend
+checks require Node.js 22 and npm; database checks require a running Docker
+daemon. The launcher synchronizes locked dependencies with `uv sync --frozen`
+and `npm ci`, and uses the installed runtimes. Direct invocation works from any
+directory: `./scripts/ci-local.sh [all|backend|database|frontend]` from the
+checkout, or its absolute path elsewhere. The default tier is `all`.
+
+Backend checks run Ruff formatting and lint checks, pydocstyle, mypy, and pytest
+with four workers and `--dist loadfile`, excluding `external` and `dbtest`.
+The database tier starts a fresh PostgreSQL 15 container on a random loopback
+port, creates separate databases for all four workers, and removes the container
+on exit or interruption. It rejects a database run with skipped tests or fewer
+than 100 tests. Frontend checks run lint, format check, type-check, tests, and
+both server-only and runtime-site-config build guards.
+
+Each run saves logs in a fresh gitignored `.local-ci/<tier>.XXXXXX` directory.
+Set `CI_LOG_DIR` to choose an output directory. This local gate excludes external
+regressions, rolling upgrades, Gitleaks, Docker release-image builds, and Kata
+qualification; those remain part of the wider hosted CI gate.
+
 While this repository remains private, pull requests from branches in this same
 repository temporarily run on the existing self-hosted pools. This explicitly
 trusts everyone who can push such a branch with persistent-runner access; it is
@@ -211,10 +244,10 @@ node scripts/check-server-only-guard.mjs
 node scripts/check-runtime-site-config.mjs
 ```
 
-The Makefile covers backend checks. CI runs the frontend checks separately and,
-when image changes are selected, builds and smoke-tests both the root and
-`/agents` web variants. See [CONTRIBUTING.md](../CONTRIBUTING.md#continuous-integration)
-for the wider CI gate.
+The `make ci-frontend` target runs all six frontend checks above. Hosted CI also
+builds and smoke-tests both the root and `/agents` web variants when image
+changes are selected. See
+[CONTRIBUTING.md](../CONTRIBUTING.md#continuous-integration) for the wider CI gate.
 
 ## Changing an API
 
