@@ -420,7 +420,7 @@ function SideChatContent({
           role="region"
           aria-label={t('sideChat.messages')}
           tabIndex={0}
-          className="flex min-h-0 flex-1 flex-col overflow-y-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson/40"
+          className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-none [overflow-anchor:none] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson/40"
         >
           <div className="flex-1 px-5 pt-3">
             {active && turns.map((turn) => <HistoryTurn key={turn.key} turn={turn} busy={false} />)}

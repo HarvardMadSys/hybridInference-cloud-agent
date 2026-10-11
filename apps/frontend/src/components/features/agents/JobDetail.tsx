@@ -1976,7 +1976,7 @@ export function JobDetail({
             // and the one thing this feature must never do is move a reader
             // who is looking somewhere else.
             tabIndex={0}
-            className={`min-w-0 flex-1 flex-col overflow-y-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson/40 ${
+            className={`min-w-0 flex-1 flex-col overflow-y-auto overscroll-y-none [overflow-anchor:none] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson/40 ${
               panelOpen ? 'hidden lg:flex' : 'flex'
             }`}
           >
