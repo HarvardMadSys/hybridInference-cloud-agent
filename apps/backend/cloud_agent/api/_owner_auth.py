@@ -95,6 +95,11 @@ async def require_agent_owner(
 
     Identity selects the owner; the Gateway's explicit agent.use permission
     admits the request. Local ownership checks still fence every resource.
+
+    The owner identity carries no admin flag. Admin authority lives behind
+    ``verify_admin_access`` on the ``/admin`` surface, which asks the Gateway
+    itself — an ``is_admin`` here would be a second answer to that question,
+    and one every owner route could branch on.
     """
     from cloud_agent.api.deps import require_agent_access
 
@@ -102,7 +107,6 @@ async def require_agent_owner(
     return {
         **user,
         "agent_access": decision.public().model_dump(),
-        "is_admin": decision.permits("agent.admin"),
     }
 
 

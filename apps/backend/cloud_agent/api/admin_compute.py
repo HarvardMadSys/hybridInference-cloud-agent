@@ -123,7 +123,16 @@ class CredentialSafeRoute(APIRoute):
         return safe_handler
 
 
-router = APIRouter(prefix="/admin/agent", route_class=CredentialSafeRoute)
+# The guard is on the router, not only on each route: a route added to this
+# surface inherits it, so the next compute action cannot ship without one by
+# omission. Mutating routes keep their per-route ``actor`` parameter for the
+# audit trail — FastAPI runs a shared dependency once per request, so the two
+# do not double-ask the gateway.
+router = APIRouter(
+    prefix="/admin/agent",
+    route_class=CredentialSafeRoute,
+    dependencies=[Depends(verify_admin_access)],
+)
 
 
 def get_compute_commands(request: Request) -> ComputeCommands:
@@ -152,7 +161,6 @@ async def _audit(request: Request, actor: str, action: str, **identifiers: str) 
 
 @router.get("/compute-providers")
 async def providers(
-    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """List enabled resource providers and public deployment choices."""
@@ -161,7 +169,6 @@ async def providers(
 
 @router.get("/compute-connections")
 async def connections(
-    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """List connection metadata without plaintext credentials or ciphertext."""
@@ -210,7 +217,6 @@ async def validate_connection(
 
 @router.get("/servers")
 async def servers(
-    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """Read current allocations, Host bindings, and global placement from storage."""
@@ -333,7 +339,6 @@ async def retire(
 @router.get("/compute-allocations/{allocation_id}/retirement-impact")
 async def retirement_impact(
     allocation_id: str,
-    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """Read the full resource scope and blockers before requesting retirement."""
@@ -343,7 +348,6 @@ async def retirement_impact(
 @router.get("/compute-operations")
 async def operations(
     request_id: str | None = Query(default=None, max_length=128),
-    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """Recover recent operations or one request whose response was lost."""
@@ -360,7 +364,6 @@ async def _operation(commands: ComputeCommands, operation_id: str) -> dict[str, 
 @router.get("/compute-operations/{operation_id}")
 async def operation(
     operation_id: str,
-    _actor: str = Depends(verify_admin_access),
     commands: ComputeCommands = Depends(get_compute_commands),
 ) -> dict[str, Any]:
     """Read safe durable progress for a resource operation."""

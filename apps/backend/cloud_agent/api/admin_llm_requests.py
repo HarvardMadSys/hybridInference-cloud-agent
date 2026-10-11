@@ -59,7 +59,14 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/admin/agent/runs", dependencies=[Depends(_no_store)])
+# The guard is on the router, not only on each route: a route added to this
+# surface inherits it, so the next request read cannot ship without one by
+# omission. The routes that bind the actor into their cursors keep the
+# per-route ``admin`` parameter — FastAPI runs a shared dependency once per
+# request, so the two do not double-ask the gateway.
+router = APIRouter(
+    prefix="/admin/agent/runs", dependencies=[Depends(_no_store), Depends(verify_admin_access)]
+)
 
 #: Query parameters each route accepts. Anything else is refused rather than
 #: ignored: a silently dropped ``grant_id`` or ``since`` would let a caller

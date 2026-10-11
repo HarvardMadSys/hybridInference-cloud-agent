@@ -34,7 +34,12 @@ def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
 
 
-router = APIRouter(prefix="/admin/agent/conversations", dependencies=[Depends(_no_store)])
+# The guard is on the router, not each route: a route added to this surface
+# inherits it, so the next conversation read cannot ship without one by omission.
+router = APIRouter(
+    prefix="/admin/agent/conversations",
+    dependencies=[Depends(_no_store), Depends(verify_admin_access)],
+)
 
 
 def get_admin_conversation_queries(
@@ -51,7 +56,6 @@ async def list_admin_conversations(
     filters: RunFilters = Depends(),
     cursor: str | None = Query(None, max_length=2048),
     limit: int = Query(50, ge=1, le=200),
-    _admin: str = Depends(verify_admin_access),
     queries: AdminConversationQueries = Depends(get_admin_conversation_queries),
 ) -> AdminConversationList:
     """List distinct conversations in a bounded turn-creation cohort."""
@@ -79,7 +83,6 @@ async def get_admin_conversation(
     filters: RunFilters = Depends(),
     cursor: str | None = Query(None, max_length=2048),
     limit: int = Query(50, ge=1, le=200),
-    _admin: str = Depends(verify_admin_access),
     queries: AdminConversationQueries = Depends(get_admin_conversation_queries),
 ) -> AdminConversationDetail:
     """Read a conversation's full turn history with an optional match context."""

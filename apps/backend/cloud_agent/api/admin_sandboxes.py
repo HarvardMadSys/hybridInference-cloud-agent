@@ -32,14 +32,16 @@ def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
 
 
-router = APIRouter(prefix="/admin/agent/sandboxes", dependencies=[Depends(_no_store)])
+router = APIRouter(
+    prefix="/admin/agent/sandboxes",
+    dependencies=[Depends(_no_store), Depends(verify_admin_access)],
+)
 
 
 @router.get("", response_model=AdminSandboxList)
 async def list_admin_sandboxes(
     cursor: str | None = Query(None, max_length=2048),
     limit: int = Query(100, ge=1, le=200),
-    _admin: str = Depends(verify_admin_access),
     queries: AdminSandboxQueries = Depends(get_admin_sandbox_queries),
 ) -> AdminSandboxList:
     """List running containers, including retained groups between active turns."""

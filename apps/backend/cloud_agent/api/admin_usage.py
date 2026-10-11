@@ -62,7 +62,12 @@ def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
 
 
-router = APIRouter(prefix="/admin/agent/usage", dependencies=[Depends(_no_store)])
+# The guard is on the router, not each route: a route added to this surface
+# inherits it, so the next usage read cannot ship without one by omission.
+router = APIRouter(
+    prefix="/admin/agent/usage",
+    dependencies=[Depends(_no_store), Depends(verify_admin_access)],
+)
 
 
 def get_admin_usage_queries(
@@ -89,7 +94,6 @@ async def get_admin_usage(
     model: str | None = Query(None, max_length=256),
     runtime: str | None = Query(None, max_length=128),
     repo: str | None = Query(None, max_length=256),
-    _admin: str = Depends(verify_admin_access),
     queries: AdminUsageQueries = Depends(get_admin_usage_queries),
 ) -> AdminUsageResponse:
     """Aggregate cached usage for runs created in ``[since, until)``.
