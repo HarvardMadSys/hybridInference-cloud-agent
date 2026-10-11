@@ -540,6 +540,11 @@ class ClaudeCodeRuntime(AgentRuntime):
             # it. Unconditional, including for a job with no MCP servers —
             # which is where an injected one would be least expected.
             "--strict-mcp-config",
+            # Fork siblings share the repository, so its project/local
+            # settings are untrusted launch input. Only the member's private
+            # user settings (including platform-installed hooks) are loaded.
+            "--setting-sources",
+            "user",
             # The sandbox IS the boundary, so an interactive permission prompt
             # inside it has nothing left to protect — it only guarantees the
             # agent cannot do the work. Without this the CLI denies every write

@@ -31,6 +31,7 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatBackend,
     SandboxActionFacts,
     _RetainedTerminalProcess,
+    claude_member_config_dir,
 )
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
@@ -440,25 +441,28 @@ def test_retained_tool_hooks_are_installed_inside_docker_owned_state(monkeypatch
     def exec_capture(_spec, argv, **kwargs):
         captured["argv"] = list(argv)
         captured["input"] = kwargs["input_bytes"]
+        captured["uid"] = kwargs["user_uid"]
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(manager, "exec_capture", exec_capture)
     update = {"hooks": {"PreToolUse": [{"hooks": []}]}}
 
-    manager.install_tool_hooks(_spec(), update)
+    manager.install_tool_hooks(_spec(), update, slot_id=0, thread_id="athr_01")
 
     argv = captured["argv"]
     assert isinstance(argv, list)
     compile(argv[2], "<retained-tool-hooks>", "exec")
-    assert argv[-2:] == ["/agent-state/claude", "/agent-state/tool-marks.log"]
+    assert argv[-2:] == [claude_member_config_dir(0, "athr_01"), "/agent-state/tool-marks.log"]
     assert json.loads(captured["input"]) == update
+    assert captured["uid"] == MEMBER_UID_BASE
     assert "fcntl.flock" in argv[2]
     assert "os.O_APPEND" in argv[2]
 
-    config = tmp_path / "agent-state" / "claude"
+    config = tmp_path / "member-home" / ".claude"
     config.mkdir(parents=True)
     (config / "settings.json").write_text(json.dumps({"model": "keep-me"}))
     marks = tmp_path / "agent-state" / "tool-marks.log"
+    marks.parent.mkdir()
     subprocess.run(
         ["python3", "-c", argv[2], str(config), str(marks)],
         input=captured["input"],
@@ -467,6 +471,9 @@ def test_retained_tool_hooks_are_installed_inside_docker_owned_state(monkeypatch
     installed = json.loads((config / "settings.json").read_text())
     assert installed["model"] == "keep-me"
     assert installed["hooks"] == update["hooks"]
+    assert config.stat().st_mode & 0o777 == 0o700
+    assert (config / "settings.json").stat().st_mode & 0o777 == 0o600
+    assert (config / ".freeinference-hooks.lock").stat().st_mode & 0o777 == 0o600
     assert marks.exists()
     assert marks.stat().st_mode & 0o777 == 0o660
 
@@ -797,7 +804,10 @@ def test_member_permission_normalization_prunes_platform_and_sibling_provider_ho
 
     script = calls[0][0][2]
     assert script.count("-path /agent-state/.platform") == 2
-    assert script.count("-path /agent-state/claude/sessions") == 2
+    assert script.count("-path /agent-state/claude ") == 2
+    assert "normalize_dirs /agent-state/claude/projects" in script
+    assert "normalize_files /agent-state/claude/projects" in script
+    assert "/home/agent-member-" not in script
     assert script.count("-path /agent-state/codex-members") == 2
     assert script.count("-path /agent-state/opencode-members") == 2
     assert script.count("-path /agent-state/kilo-members") == 2

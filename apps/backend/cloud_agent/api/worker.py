@@ -37,7 +37,7 @@ from cloud_agent.api.deps import (
 )
 from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.application.residency import _mint_residency_grant, residency_ttl_s
-from cloud_agent.attachments.models import AttachmentView
+from cloud_agent.attachments.models import AttachmentLeaseLost, AttachmentView
 from cloud_agent.attachments.selection import prompt_with_attachments
 from cloud_agent.broker_routing import ENV_BROKER_TOKEN, broker_for_attempt, hydrate_shared_broker
 from cloud_agent.domain.execution import QUEUED, RUNNING, TERMINAL_STATES
@@ -986,8 +986,14 @@ async def worker_list_attachments(
     job_store = _require_store(store)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
-    thread_id = await _worker_thread_id(job_store.conversation_queries, job_id)
-    rows = await job_store.attachments.list_thread_attachments(thread_id=thread_id)
+    try:
+        rows = await job_store.attachments.list_worker_attachments(
+            job_id=job_id,
+            attempt_id=claims["attempt_id"],
+            lease_generation=claims["lease_generation"],
+        )
+    except AttachmentLeaseLost as exc:
+        raise _lease_lost() from exc
     return WorkerAttachmentListResponse(
         attachments=[AttachmentView.model_validate(row) for row in rows]
     )
@@ -1011,21 +1017,24 @@ async def worker_read_attachment(
     job_store = _require_store(store)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
-    thread_id = await _worker_thread_id(job_store.conversation_queries, job_id)
-    rows = await job_store.attachments.list_thread_attachments(thread_id=thread_id)
-    meta = next((row for row in rows if int(row["id"]) == attachment_id), None)
-    found = await job_store.attachments.read_attachment_content(
-        thread_id=thread_id, attachment_id=attachment_id
-    )
-    if meta is None or found is None:
+    try:
+        found = await job_store.attachments.read_worker_attachment(
+            job_id=job_id,
+            attempt_id=claims["attempt_id"],
+            lease_generation=claims["lease_generation"],
+            attachment_id=attachment_id,
+        )
+    except AttachmentLeaseLost as exc:
+        raise _lease_lost() from exc
+    if found is None:
         raise HTTPException(
             status_code=404,
             detail={"error": {"type": "upload_not_found", "message": "Upload not found."}},
         )
-    content, content_type = found
+    path, content, content_type = found
     return WorkerAttachmentContentResponse(
         id=attachment_id,
-        path=str(meta["path"]),
+        path=path,
         content_type=content_type,
         content_base64=base64.b64encode(content).decode("ascii"),
     )

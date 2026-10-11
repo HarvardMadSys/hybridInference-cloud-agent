@@ -28,8 +28,11 @@ from pathlib import Path
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting, setting_env
 from cloud_agent_shared.git.patch_gate import (
+    MAX_BLOB_BYTES,
+    MAX_CHANGED_BLOB_BYTES,
     PatchGateResult,
     branch_name_for,
+    scan_blob_secrets,
     validate_change_set,
     validate_patch,
 )
@@ -80,14 +83,9 @@ class PublishResult:
     base_bundle: bytes | None = None
 
 
-def _run_git(
-    args: list[str],
-    *,
-    cwd: Path | None = None,
-    env_extra: dict[str, str] | None = None,
-) -> str:
-    """Run one git command hermetically and return stdout."""
-    env = {
+def _git_env(env_extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Build the hermetic environment for text commands and binary blob reads."""
+    return {
         "PATH": "/usr/bin:/bin:/usr/local/bin",
         **_GIT_ENV,
         "GIT_COMMITTER_NAME": _identity_name(),
@@ -96,12 +94,21 @@ def _run_git(
         "GIT_AUTHOR_EMAIL": _identity_email(),
         **(env_extra or {}),
     }
+
+
+def _run_git(
+    args: list[str],
+    *,
+    cwd: Path | None = None,
+    env_extra: dict[str, str] | None = None,
+) -> str:
+    """Run one git command hermetically and return stdout."""
     timeout_s = number_setting("publish_git_timeout_s", _GIT_TIMEOUT_S)
     try:
         completed = subprocess.run(
             ["git", *args],
             cwd=str(cwd) if cwd else None,
-            env=env,
+            env=_git_env(env_extra),
             capture_output=True,
             text=True,
             timeout=timeout_s,
@@ -118,11 +125,21 @@ def _run_git(
 
 
 @dataclass
+class _StagedBlob:
+    """A regular staged file and its same-path object from the base commit."""
+
+    path: str
+    sha: str
+    base_sha: str | None
+
+
+@dataclass
 class _StagedChangeSet:
     """What git reports is staged, as opposed to what the patch text implied."""
 
     paths: list[str]
     symlinks: list[str]
+    blobs: list[_StagedBlob]
 
 
 def _remote_branch_tip(repo: Path, branch: str) -> str | None:
@@ -168,9 +185,10 @@ def _staged_change_set(repo: Path) -> _StagedChangeSet:
     quoting git applies in a *diff header* is exactly what a hostile patch used
     to hide a path from the pre-apply gate.
     """
-    raw = _run_git(["diff", "--cached", "--raw", "-z", "--no-renames"], cwd=repo)
+    raw = _run_git(["diff", "--cached", "--raw", "-z", "--no-renames", "--abbrev=64"], cwd=repo)
     paths: list[str] = []
     symlinks: list[str] = []
+    blobs: list[_StagedBlob] = []
     # `:<srcmode> <dstmode> <srcsha> <dstsha> <status>\0<path>\0`
     fields = raw.split("\0")
     index = 0
@@ -188,8 +206,72 @@ def _staged_change_set(repo: Path) -> _StagedChangeSet:
             paths.append(path)
             if dst_mode == "120000":
                 symlinks.append(path)
+            if dst_mode in ("100644", "100755"):
+                blobs.append(
+                    _StagedBlob(
+                        path=path,
+                        sha=parts[3],
+                        base_sha=parts[2] if parts[0] in ("100644", "100755") else None,
+                    )
+                )
         index += 2
-    return _StagedChangeSet(paths=paths, symlinks=symlinks)
+    return _StagedChangeSet(paths=paths, symlinks=symlinks, blobs=blobs)
+
+
+def _blob_size(repo: Path, sha: str) -> int:
+    """Check an immutable object's size before capturing any of its contents."""
+    size = int(_run_git(["cat-file", "-s", sha], cwd=repo).strip())
+    if size > MAX_BLOB_BYTES:
+        raise PublishError(
+            f"patch rejected after apply: blob exceeds the {MAX_BLOB_BYTES} byte limit"
+        )
+    return size
+
+
+def _read_blob(repo: Path, sha: str, size: int) -> bytes:
+    """Read a size-checked object as bytes, without ever logging its contents."""
+    timeout_s = number_setting("publish_git_timeout_s", _GIT_TIMEOUT_S)
+    try:
+        completed = subprocess.run(
+            ["git", "cat-file", "blob", sha],
+            cwd=str(repo),
+            env=_git_env(),
+            capture_output=True,
+            timeout=timeout_s,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise PublishError(f"git cat-file timed out after {timeout_s:.0f}s") from exc
+    if completed.returncode or len(completed.stdout) != size:
+        raise PublishError("could not read publication blob")
+    return completed.stdout
+
+
+def _validate_staged_blobs(repo: Path, blobs: list[_StagedBlob]) -> None:
+    """Reject new credentials in staged text or binary files before committing."""
+    sizes = [_blob_size(repo, blob.sha) for blob in blobs]
+    if sum(sizes) > MAX_CHANGED_BLOB_BYTES:
+        raise PublishError(
+            f"patch rejected after apply: blobs exceed the {MAX_CHANGED_BLOB_BYTES} total byte limit"
+        )
+    for blob, size in zip(blobs, sizes, strict=True):
+        content = _read_blob(repo, blob.sha, size)
+        # Most files need no baseline read. A match requires checking the same
+        # path's original object; deletion has no new blob and is never scanned.
+        if not scan_blob_secrets(content):
+            continue
+        baseline = (
+            _read_blob(repo, blob.base_sha, _blob_size(repo, blob.base_sha))
+            if blob.base_sha
+            else b""
+        )
+        secrets = scan_blob_secrets(content, baseline)
+        if secrets:
+            raise PublishError(
+                "patch rejected after apply: credential-shaped content in "
+                f"{blob.path!r}: {', '.join(secrets)}"
+            )
 
 
 def publish_patch(
@@ -209,6 +291,8 @@ def publish_patch(
     caller minted — it never leaves this process and never enters the sandbox.
     ``allow_workflow_changes`` is the explicit human release for patches that
     touch ``.github/``; it defaults to False so the gate holds by default.
+    Actual staged files, including binary assets, are size-checked and scanned
+    for newly introduced credentials before committing or pushing.
 
     Raises :class:`PublishError` with a reviewer-readable message on any gate
     violation or git failure.
@@ -267,6 +351,7 @@ def publish_patch(
         post = validate_change_set(staged.paths, staged.symlinks)
         if not _gate_permits(post, allow_workflow_changes=allow_workflow_changes):
             raise PublishError(f"patch rejected after apply: {post.reason}")
+        _validate_staged_blobs(repo, staged.blobs)
         gate = post
         _run_git(["commit", "--quiet", "--no-verify", "-m", commit_message], cwd=repo)
         commit_sha = _run_git(["rev-parse", "HEAD"], cwd=repo).strip()

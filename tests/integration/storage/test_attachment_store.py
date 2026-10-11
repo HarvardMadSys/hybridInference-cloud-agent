@@ -6,7 +6,10 @@ from __future__ import annotations
 # ruff: noqa: F811
 import pytest
 from tests.integration.storage.test_agent_job_store import (
+    _claim,
     _create_job,
+    _expire_attempt,
+    _settled,
     pool,  # noqa: F401 - pytest fixture
     store,  # noqa: F401 - pytest fixture
 )
@@ -14,6 +17,7 @@ from tests.integration.storage.test_agent_job_store import (
 from cloud_agent.attachments.models import (
     MAX_ATTACHMENT_FILE_BYTES,
     AttachmentError,
+    AttachmentLeaseLost,
 )
 from cloud_agent.attachments.selection import resolve_attachments
 
@@ -203,3 +207,144 @@ async def test_uploads_no_task_ever_claimed_are_collected(store, pool):
         await store.attachments.select_attachments(user_id="user-1", attachment_ids=[staged["id"]])
         == []
     )
+
+
+async def claimed_upload(store):
+    """Bind an upload and claim it through the production enrollment contract."""
+    upload = await stage(store, content=b"payload")
+    job = await _create_job(
+        store,
+        attachments=await resolve_attachments(
+            store.attachments, user_id="user-1", attachment_ids=[upload["id"]]
+        ),
+    )
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+    fence = {
+        "job_id": job["id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+    }
+    return job, upload, fence
+
+
+async def assert_worker_reads_rejected(store, fence, attachment_id):
+    """Neither a manifest nor bytes remain readable after authority is lost."""
+    with pytest.raises(AttachmentLeaseLost):
+        await store.attachments.list_worker_attachments(**fence)
+    with pytest.raises(AttachmentLeaseLost):
+        await store.attachments.read_worker_attachment(**fence, attachment_id=attachment_id)
+
+
+async def test_a_current_runner_can_restore_uploads_and_drain_without_losing_reads(store):
+    """Draining refuses new claims while allowing the current turn to finish."""
+    _job, upload, fence = await claimed_upload(store)
+    assert await store.host_pool.set_host_status(host="runner-a", status="draining") == "ok"
+    rows = await store.attachments.list_worker_attachments(**fence)
+    assert [row["id"] for row in rows] == [upload["id"]]
+    assert "content" not in rows[0]
+    assert await store.attachments.read_worker_attachment(**fence, attachment_id=upload["id"]) == (
+        "notes.md",
+        b"payload",
+        "text/plain",
+    )
+    foreign = await stage(store, user_id="user-2", path="foreign.txt", content=b"private")
+    assert (
+        await store.attachments.read_worker_attachment(**fence, attachment_id=foreign["id"]) is None
+    )
+
+
+async def test_a_current_runner_without_uploads_gets_an_empty_manifest(store):
+    """An empty conversation differs from an unauthorized attempt."""
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+    fence = {
+        "job_id": job["id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+    }
+    assert await store.attachments.list_worker_attachments(**fence) == []
+    assert await store.attachments.read_worker_attachment(**fence, attachment_id=123456) is None
+
+
+async def test_a_finished_runner_cannot_read_later_conversation_uploads(store, pool):
+    """A former turn's signed token must not expose uploads to later turns."""
+    job, _upload, fence = await claimed_upload(store)
+    await _settled(pool, store, job["id"])
+    assert await store.attempt_commands.transition(
+        **fence, from_states=("running",), to_state="succeeded"
+    )
+    later = await stage(store, path="later.txt", content=b"later private upload")
+    await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"],
+        user_id="user-1",
+        prompt="now read this",
+        attachments=await resolve_attachments(
+            store.attachments, user_id="user-1", attachment_ids=[later["id"]]
+        ),
+    )
+    await assert_worker_reads_rejected(store, fence, later["id"])
+
+
+async def test_an_expired_runner_is_refused_before_the_reaper_runs(store, pool):
+    """Token parsing and a still-running status cannot extend an expired lease."""
+    _job, upload, fence = await claimed_upload(store)
+    await _expire_attempt(pool, store, fence["attempt_id"])
+    await assert_worker_reads_rejected(store, fence, upload["id"])
+
+
+async def test_a_superseded_runner_is_refused_while_the_new_attempt_can_restore(store, pool):
+    """Retry recovery keeps thread-wide reads while rejecting the previous token."""
+    job, upload, fence = await claimed_upload(store)
+    await _expire_attempt(pool, store, fence["attempt_id"])
+    await store.attempt_commands.reap_expired()
+    replacement = await _claim(store, worker_id="w2", lease_ttl_seconds=60)
+    assert replacement is not None
+    current = {
+        "job_id": job["id"],
+        "attempt_id": replacement["attempt_id"],
+        "lease_generation": replacement["lease_generation"],
+    }
+    assert current["attempt_id"] != fence["attempt_id"]
+    await assert_worker_reads_rejected(store, fence, upload["id"])
+    assert await store.attachments.read_worker_attachment(
+        **current, attachment_id=upload["id"]
+    ) == ("notes.md", b"payload", "text/plain")
+
+
+@pytest.mark.parametrize("change", ["revoked", "disabled", "unassigned"])
+async def test_a_live_attempt_does_not_outlast_its_host_authority(store, pool, change):
+    """Even an unexpired current attempt needs an enrolled, authorized host."""
+    _job, upload, fence = await claimed_upload(store)
+    async with pool.acquire() as conn:
+        if change == "revoked":
+            await conn.execute(
+                "UPDATE agent_runner_hosts SET credential_hash = NULL WHERE host = 'runner-a'"
+            )
+        elif change == "disabled":
+            await conn.execute(
+                "UPDATE agent_runner_hosts SET status = 'disabled' WHERE host = 'runner-a'"
+            )
+        else:
+            await conn.execute(
+                "UPDATE agent_attempts SET host_id = NULL WHERE id = $1", fence["attempt_id"]
+            )
+    await assert_worker_reads_rejected(store, fence, upload["id"])
+
+
+@pytest.mark.parametrize("change", ["job", "generation", "current_attempt"])
+async def test_the_worker_fence_must_match_every_current_claim_component(store, pool, change):
+    """A live attempt id alone grants no authority over another job or generation."""
+    job, upload, fence = await claimed_upload(store)
+    if change == "job":
+        other = await _create_job(store)
+        fence["job_id"] = other["id"]
+    elif change == "generation":
+        fence["lease_generation"] += 1
+    else:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_jobs SET current_attempt_id = NULL WHERE id = $1", job["id"]
+            )
+    await assert_worker_reads_rejected(store, fence, upload["id"])

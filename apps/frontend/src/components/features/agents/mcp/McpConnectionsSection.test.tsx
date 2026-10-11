@@ -204,6 +204,28 @@ describe('McpConnectionsSection', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('authorized');
   });
 
+  it.each([
+    'javascript:alert(document.domain)',
+    'data:text/html,<script>alert(1)</script>',
+    '/authorize',
+    '//login.example.com/authorize',
+    'https://user@login.example.com/authorize',
+  ])('blocks an unsafe sign-in URL before browser navigation: %s', async (authorizationUrl) => {
+    const currentUrl = window.location.href;
+    mockedAuthorize.mockResolvedValueOnce({
+      authorization_url: authorizationUrl,
+      needs_client_id: false,
+      message: '',
+    });
+
+    render(<McpConnectionsSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('unsafe sign-in address');
+    expect(window.location.href).toBe(currentUrl);
+    expect(mockedList).toHaveBeenCalledTimes(2);
+  });
+
   it('disconnects a connection after confirming', async () => {
     mockedDisconnect.mockResolvedValue(undefined);
 

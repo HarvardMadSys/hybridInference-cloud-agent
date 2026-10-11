@@ -41,7 +41,27 @@ class AttachmentRepository(Protocol):
     async def read_attachment_content(
         self, *, thread_id: str, attachment_id: int
     ) -> tuple[bytes, str] | None:
-        """Read one claimed upload's bytes for the host that runs the turn."""
+        """Read one claimed upload's bytes for a trusted thread-scoped caller."""
+        ...
+
+    async def list_worker_attachments(
+        self, *, job_id: str, attempt_id: int, lease_generation: int
+    ) -> list[dict[str, Any]]:
+        """Read metadata under the current live attempt and enrolled-host fence.
+
+        Raise ``AttachmentLeaseLost`` if the fence is no longer authorized.
+        Authorization and the upload read must share one database snapshot.
+        """
+        ...
+
+    async def read_worker_attachment(
+        self, *, job_id: str, attempt_id: int, lease_generation: int, attachment_id: int
+    ) -> tuple[str, bytes, str] | None:
+        """Read path, bytes and type under the same fence as the worker listing.
+
+        Raise ``AttachmentLeaseLost`` for a lost fence; return ``None`` for an
+        upload outside the authorized conversation, including a missing id.
+        """
         ...
 
     async def purge_stale_staged(self, *, older_than_hours: int) -> int:

@@ -26,15 +26,12 @@ on:
   pull_request:
     branches: [main, dev]
 
-# While this repository is private, every event runs on the self-hosted pools.
-# GitHub-hosted minutes are billed to the organisation for a private repository,
-# and a pull request here can only come from somebody who already has push
-# access to this code, so routing pull requests away from our own machines
-# spends quota to remove a risk that does not exist yet. It exists the moment
-# this repository is public: a fork's pull request then executes unvetted code —
-# tests, package install hooks, Docker builds. That routing is prepared as its
-# own pull request and merges on the day this repository goes public.
-# `tests/unit/test_ci_workflow_policy.py` is what fails if it lands early.
+# Pull requests execute unreviewed repository code, including install hooks and
+# Dockerfiles. Every PR job uses a disposable GitHub-hosted VM, even for a PR
+# from this repository or a collaborator. Persistent pools are reserved for
+# pushes/manual dispatches; changing repository visibility needs no CI edit.
+# PRs receive only a read token and never log in to a registry. See the runner
+# group restrictions in docs/development.md before enabling public fork PRs.
 permissions:
   contents: read
 
@@ -51,7 +48,7 @@ env:
 jobs:
   changes:
     name: Classify Changes
-    runs-on: [self-hosted, Linux, ci-general]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     outputs:
       backend: ${{ steps.classify.outputs.backend }}
       web: ${{ steps.classify.outputs.web }}
@@ -63,6 +60,7 @@ jobs:
           # packs with missing delta bases have been failing random checkouts
           # on this pool.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Classify changed paths
         id: classify
@@ -172,7 +170,7 @@ jobs:
     name: Lint
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: [self-hosted, Linux, ci-general]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -180,6 +178,7 @@ jobs:
           # missing delta bases ("pack has N unresolved deltas"), which fails
           # random jobs at checkout on this pool. A full fetch is immune.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Isolate uv cache dir
         # Set via GITHUB_ENV because job-level env cannot use the runner
@@ -269,11 +268,12 @@ jobs:
     name: Tests
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: [self-hosted, Linux, ci-general]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Isolate uv and npm cache dirs
         run: |
@@ -370,7 +370,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.backend == 'true'
     # This pool can start service containers; postgres:15 supports ARM64.
-    runs-on: [self-hosted, Linux, ci-general]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
 
     services:
       postgres:
@@ -400,6 +400,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Isolate uv cache dir
         run: |
@@ -571,13 +572,14 @@ jobs:
     name: Web
     needs: changes
     if: needs.changes.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, ci-general]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     steps:
       - uses: actions/checkout@v6
         with:
           # Full fetch: shallow-clone packs with missing delta bases have been
           # failing random checkouts on this pool.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Isolate the npm cache dir
         # Off the shared ~/.npm and onto this runner process's own temp, which
@@ -676,11 +678,12 @@ jobs:
   # ------------------------------------------------------------------ secret
   gitleaks:
     name: Gitleaks
-    runs-on: [self-hosted, Linux, ci-general]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       # Installing the release binary rather than using gitleaks-action, which
       # requires a paid license for organization repositories.
@@ -747,7 +750,7 @@ jobs:
     name: ${{ matrix.artifact.name }} (${{ matrix.artifact.arch }})
     needs: changes
     if: needs.changes.outputs.docker == 'true'
-    runs-on: ${{ fromJSON(matrix.artifact.runner) }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && (matrix.artifact.arch == 'arm64' && '["ubuntu-24.04-arm"]' || '["ubuntu-24.04"]') || matrix.artifact.runner) }}
     # The builder lives in a config directory belonging to the *runner*, not to
     # this job, because its layer cache is the only thing between a cell and
     # re-downloading hundreds of megabytes. With a builder per job the cache
@@ -822,6 +825,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       # Named per run, so a retry and a concurrent attempt stay independently
       # diagnosable and a run that dies before cleanup leaves something
@@ -862,6 +866,9 @@ jobs:
       # `moby/buildkit` from Docker Hub too, and that was the first thing the
       # 429 blocked.
       - name: Log in to Docker Hub
+        # PRs use anonymous pulls and receive no registry credential, including
+        # same-repository PRs where GitHub would otherwise make secrets available.
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -883,11 +890,16 @@ jobs:
       - name: Reuse this runner's builder, or make one
         run: |
           set -euo pipefail
-          buildx_config="$(dirname "${RUNNER_WORKSPACE}")/buildx/${RUNNER_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            buildx_config="${RUNNER_TEMP}/buildx"
+            builder="ci-pr-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.artifact.name }}"
+          else
+            buildx_config="$(dirname "${RUNNER_WORKSPACE}")/buildx/${RUNNER_NAME}"
+            builder="ci-${RUNNER_NAME}"
+          fi
           mkdir -p "${buildx_config}"
           export BUILDX_CONFIG="${buildx_config}"
           echo "BUILDX_CONFIG=${buildx_config}" >> "${GITHUB_ENV}"
-          builder="ci-${RUNNER_NAME}"
           if ! docker buildx inspect "${builder}" --bootstrap >/dev/null 2>&1; then
             docker buildx rm "${builder}" >/dev/null 2>&1 || true
             docker buildx create --name "${builder}" --driver docker-container --use >/dev/null
@@ -1045,12 +1057,14 @@ jobs:
     if: needs.changes.outputs.docker == 'true'
     # The one docker job with no architecture to match: `docker compose config`
     # parses and interpolates, it does not build or start anything. Use the
-    # ARM64 pool so this does not queue behind the x64 image builds.
-    runs-on: [self-hosted, Linux, ARM64, image-verify-arm64]
+    # ARM64 pool for trusted events so this does not queue behind x64 builds;
+    # pull requests can parse these files on a disposable x64 hosted VM.
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ARM64","image-verify-arm64"]') }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Isolate uv cache dir
         run: |
@@ -1271,12 +1285,15 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Isolate build configuration
         run: |
           mkdir -p "${RUNNER_TEMP}/kata-docker" "${RUNNER_TEMP}/kata-buildx"
           echo "DOCKER_CONFIG=${RUNNER_TEMP}/kata-docker" >> "$GITHUB_ENV"
           echo "BUILDX_CONFIG=${RUNNER_TEMP}/kata-buildx" >> "$GITHUB_ENV"
       - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -1299,7 +1316,7 @@ jobs:
     # on this workflow's conclusion, so this is what stands between a merge to
     # dev and a consumable release.
     if: always()
-    runs-on: [self-hosted, Linux, ci-general]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     needs:
       - changes
       - lint
@@ -1311,6 +1328,11 @@ jobs:
       - compose
       - kata
     steps:
+      - name: Report the pull request qualification boundary
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "Kata host qualification is skipped for pull requests. It requires a trusted push or manual dispatch on dev; PR checks do not qualify a deployment host." >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Every job succeeded or was deliberately skipped
         env:
           RESULTS: >-

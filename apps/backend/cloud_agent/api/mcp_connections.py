@@ -1201,6 +1201,10 @@ async def authorize_connection(
         redirect_uri=_callback_url(base_url, connection_id),
         scopes=scopes,
     )
+    try:
+        authorization_url = flow.authorization_url()
+    except oauth.OAuthError as exc:
+        raise _bad_request(str(exc)) from exc
     cipher = oauth_cipher()
     await job_store.mcp.create_mcp_oauth_flow(
         state_hash=oauth.state_hash(flow.state),
@@ -1226,7 +1230,7 @@ async def authorize_connection(
         registration_endpoint=metadata.registration_endpoint,
         expires_at=datetime.now(timezone.utc) + oauth.FLOW_LIFETIME,
     )
-    return AuthorizeResponse(authorization_url=flow.authorization_url())
+    return AuthorizeResponse(authorization_url=authorization_url)
 
 
 async def _register_client(

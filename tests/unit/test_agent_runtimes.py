@@ -601,6 +601,7 @@ def test_claude_prepare_points_at_the_gateway_and_disables_telemetry():
     # Ignore both user-level and committed .mcp.json servers. Platform MCP is
     # supplied explicitly later; the effective set here must stay empty.
     assert "--strict-mcp-config" in argv
+    assert argv[argv.index("--setting-sources") + 1] == "user"
     assert env["ANTHROPIC_BASE_URL"] == "https://gateway.example.com"
     assert env["ANTHROPIC_API_KEY"] == "ajt.a.b"
     assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"

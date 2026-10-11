@@ -18,10 +18,12 @@ from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 from cloud_agent_host.chat_sandbox import (
     CHAT_STATE_DIR,
     CHAT_WORKDIR,
+    CLAUDE_SHARED_PROJECTS_DIR,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
     ChatSandboxManager,
     ChatSandboxSpec,
+    claude_member_config_dir,
 )
 from cloud_agent_host.drivers import (
     DialectRuntime,
@@ -270,10 +272,25 @@ class ResidentTransportFactory:
         runtime_id = launch.runtime_id
         driver = get_driver(runtime_id)
         state_dir = self._member_state_dir(launch)
-        if runtime_id in PRIVATE_MEMBER_STATE_ROOTS:
+        if runtime_id == "claude-code":
+            # A failed Fork can release a reserved slot. Reap that slot before
+            # preparing its next member's launch state, so an old same-UID
+            # process cannot race creation of the new private settings.
+            self._manager.reap_member_processes(
+                spec,
+                slot_id=launch.slot_id,
+                user_uid=MEMBER_UID_BASE + launch.slot_id,
+                user_gid=self._manager.backend.gid,
+            )
+            self._prepare_claude_member_state(spec, launch)
+        elif runtime_id in PRIVATE_MEMBER_STATE_ROOTS:
             self._prepare_member_state(spec, launch, state_dir)
         context = self._launch_context(
-            spec, launch, credential=launch.credential, state_dir=state_dir
+            spec,
+            launch,
+            credential=launch.credential,
+            state_dir=state_dir,
+            member_processes_reaped=runtime_id == "claude-code",
         )
         if launch.native_session_id:
             opener = getattr(driver, "launch_resident_live", None)
@@ -320,6 +337,65 @@ class ResidentTransportFactory:
             self._prepare_codex_member_state(spec, launch, state_dir)
             return
         self._prepare_http_member_state(spec, launch, state_dir)
+
+    def _prepare_claude_member_state(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> None:
+        """Share Claude native history while keeping launch input slot-private.
+
+        Old retained containers already have projects under the shared Claude
+        root. Link only that credential-free native history; never import its
+        settings, environment overrides, credentials, or process registry.
+        Member homes are image-created beneath root-owned /home, outside every
+        shared-state permission-normalization traversal.
+        """
+        script = (
+            "import os, pathlib, stat, sys\n"
+            "config = pathlib.Path(sys.argv[1])\n"
+            "shared = pathlib.Path(sys.argv[2])\n"
+            "uid = os.getuid()\n"
+            "for path in (config.parent.parent,):\n"
+            "    info = path.lstat()\n"
+            "    if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid:\n"
+            "        raise RuntimeError('Claude member home is not private')\n"
+            "    path.chmod(0o700)\n"
+            "os.umask(0o077)\n"
+            "for path in (config.parent, config):\n"
+            "    path.mkdir(exist_ok=True)\n"
+            "    info = path.lstat()\n"
+            "    if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid:\n"
+            "        raise RuntimeError('Claude config is not member-owned')\n"
+            "    path.chmod(0o700)\n"
+            "for path in (shared.parent, shared):\n"
+            "    path.mkdir(mode=0o2770, exist_ok=True)\n"
+            "    if not stat.S_ISDIR(path.lstat().st_mode):\n"
+            "        raise RuntimeError('Claude history path is not a directory')\n"
+            "    if path.stat().st_uid == uid:\n"
+            "        path.chmod(0o2770)\n"
+            "projects = config / 'projects'\n"
+            "try:\n"
+            "    projects.symlink_to(shared, target_is_directory=True)\n"
+            "except FileExistsError:\n"
+            "    if not projects.is_symlink() or os.readlink(projects) != str(shared):\n"
+            "        raise RuntimeError('Claude member history link is invalid')\n"
+        )
+        result = self._manager.exec_capture(
+            spec,
+            [
+                "python3",
+                "-c",
+                script,
+                claude_member_config_dir(launch.slot_id, launch.thread_id),
+                CLAUDE_SHARED_PROJECTS_DIR,
+            ],
+            workdir="/",
+            timeout_s=30,
+            user_uid=MEMBER_UID_BASE + launch.slot_id,
+            user_gid=self._manager.backend.gid,
+        )
+        if result.returncode != 0:
+            raise DriverError(
+                "Claude member state could not be prepared: "
+                + result.stderr.decode("utf-8", "replace")[-300:]
+            )
 
     def _prepare_http_member_state(
         self,
@@ -492,6 +568,7 @@ class ResidentTransportFactory:
         *,
         credential: str,
         state_dir: str | None = None,
+        member_processes_reaped: bool = False,
     ) -> LaunchContext:
         """Build one member-isolated launch seam used by live and fork probes."""
         uid = MEMBER_UID_BASE + launch.slot_id
@@ -521,12 +598,13 @@ class ResidentTransportFactory:
                 # A broker restart cannot reattach Docker-exec pipes. Remove
                 # any prior tree in this member's distinct uid before native
                 # resume opens the replacement transport.
-                self._manager.reap_member_processes(
-                    spec,
-                    slot_id=launch.slot_id,
-                    user_uid=uid,
-                    user_gid=self._manager.backend.gid,
-                )
+                if not member_processes_reaped:
+                    self._manager.reap_member_processes(
+                        spec,
+                        slot_id=launch.slot_id,
+                        user_uid=uid,
+                        user_gid=self._manager.backend.gid,
+                    )
                 # HTTP dialects always use the trusted live bridge, including
                 # turns without MCP. Refresh it from the host when resuming a
                 # retained container so new native-question commands are
@@ -566,7 +644,14 @@ class ResidentTransportFactory:
             state_dir=CHAT_STATE_DIR,
             session_state_dir=state_dir or CHAT_STATE_DIR,
             activation_dir=activation_dir,
-            install_tool_hooks=lambda update: self._manager.install_tool_hooks(spec, update),
+            install_tool_hooks=lambda update: self._manager.install_tool_hooks(
+                spec, update, slot_id=launch.slot_id, thread_id=launch.thread_id
+            ),
+            claude_config_dir=(
+                claude_member_config_dir(launch.slot_id, launch.thread_id)
+                if runtime_id == "claude-code"
+                else None
+            ),
         )
 
     def fork_native(
@@ -676,7 +761,7 @@ class ResidentTransportFactory:
             child_id = self._fork_claude(
                 spec,
                 source_id,
-                source.launch.slot_id,
+                source.launch,
                 source_native_turn_no,
             )
         elif not child_id:
@@ -852,16 +937,18 @@ print(json.dumps(sorted(children), separators=(",", ":")))
         self,
         spec: ChatSandboxSpec,
         source_id: str,
-        source_slot: int,
+        source_launch: ResidentLaunch,
         source_native_turn_no: int,
     ) -> str:
-        uid = MEMBER_UID_BASE + source_slot
+        uid = MEMBER_UID_BASE + source_launch.slot_id
         result = self._manager.exec_capture(
             spec,
             ["claude-session-fork", source_id, str(source_native_turn_no)],
             env={
-                "HOME": f"/home/agent-member-{source_slot}",
-                "CLAUDE_CONFIG_DIR": f"{CHAT_STATE_DIR}/claude",
+                "HOME": f"/home/agent-member-{source_launch.slot_id}",
+                "CLAUDE_CONFIG_DIR": claude_member_config_dir(
+                    source_launch.slot_id, source_launch.thread_id
+                ),
                 "PATH": SANDBOX_PATH,
             },
             workdir=CHAT_WORKDIR,

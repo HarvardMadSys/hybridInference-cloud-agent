@@ -15,9 +15,11 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent_host.chat_sandbox import (
+    MEMBER_UID_BASE,
     ChatSandboxInspection,
     ChatSandboxSpec,
     ChatSandboxStatus,
+    claude_member_config_dir,
 )
 from cloud_agent_host.drivers import InputOutcome
 from cloud_agent_host.guest_observer import (
@@ -743,6 +745,175 @@ def test_native_fork_journal_uses_the_docker_layer_owner_not_capabilityless_root
     )
 
 
+def test_claude_member_launch_shares_only_native_projects(monkeypatch, tmp_path):
+    calls: list[tuple[list[str], dict]] = []
+    manager = _Manager()
+    manager.backend.base_env = lambda: {}
+
+    def capture(_spec, argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", capture, raising=False)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    source = _launch("athr_source", native_session_id="native-source", slot=0)
+    child = _launch("athr_child", native_session_id="native-child", slot=1)
+    factory._prepare_claude_member_state(_spec(), source)
+    factory._prepare_claude_member_state(_spec(), child)
+
+    assert [call[0][-2] for call in calls] == [
+        claude_member_config_dir(0, source.thread_id),
+        claude_member_config_dir(1, child.thread_id),
+    ]
+    assert [call[1]["user_uid"] for call in calls] == [MEMBER_UID_BASE, MEMBER_UID_BASE + 1]
+
+    shared = tmp_path / "agent-state" / "claude"
+    shared.mkdir(parents=True)
+    (shared / "settings.json").write_text('{"env":{"ANTHROPIC_BASE_URL":"malicious"}}')
+    projects = shared / "projects"
+    projects.mkdir()
+    native = projects / "native-source.jsonl"
+    native.write_text('{"type":"assistant"}\n')
+    for slot in (0, 1):
+        home = tmp_path / f"member-{slot}"
+        home.mkdir()
+        config = home / ".claude-members" / f"member-{slot}"
+        # Exercise the actual preparation script twice, as a native resume
+        # after broker/container restart would do, against legacy state.
+        for _ in range(2):
+            subprocess.run(
+                ["python3", "-c", calls[slot][0][2], str(config), str(projects)], check=True
+            )
+        assert home.stat().st_mode & 0o777 == 0o700
+        assert config.stat().st_mode & 0o777 == 0o700
+        assert (config / "projects" / "native-source.jsonl").read_text() == native.read_text()
+        assert not (config / "settings.json").exists()
+        assert not (config / "sessions").exists()
+
+    context = factory._launch_context(_spec(), child, credential="child-grant")
+    assert context.claude_config_dir == claude_member_config_dir(1, child.thread_id)
+    assert context.base_env["HOME"] == "/home/agent-member-1"
+
+
+def test_claude_reassigned_slot_gets_fresh_member_settings(monkeypatch, tmp_path):
+    manager = _Manager()
+    calls: list[list[str]] = []
+
+    def capture(_spec, argv, **_kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", capture, raising=False)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    old = _launch("athr_old", native_session_id="old", slot=1)
+    new = _launch("athr_new", native_session_id="new", slot=1)
+    assert claude_member_config_dir(1, old.thread_id) != claude_member_config_dir(1, new.thread_id)
+    factory._prepare_claude_member_state(_spec(), old)
+    factory._prepare_claude_member_state(_spec(), new)
+    home = tmp_path / "member-home"
+    home.mkdir()
+    shared = tmp_path / "agent-state" / "claude"
+    shared.mkdir(parents=True)
+    projects = shared / "projects"
+    for launch, call in zip((old, new), calls, strict=True):
+        config = home / ".claude-members" / call[-2].rsplit("/", 1)[-1]
+        subprocess.run(["python3", "-c", call[2], str(config), str(projects)], check=True)
+        if launch == old:
+            (config / "settings.json").write_text('{"env":{"ANTHROPIC_BASE_URL":"old"}}')
+        else:
+            assert not (config / "settings.json").exists()
+
+
+def test_claude_slot_is_reaped_before_new_member_launch_state(monkeypatch):
+    manager = _Manager()
+    manager.backend.base_env = lambda: {}
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    events: list[str] = []
+    contexts: list[Any] = []
+    monkeypatch.setattr(
+        manager,
+        "reap_member_processes",
+        lambda *_args, **_kwargs: events.append("reap"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        factory, "_prepare_claude_member_state", lambda *_args: events.append("prepare")
+    )
+    monkeypatch.setattr(
+        manager, "spawn", lambda *_args, **_kwargs: events.append("spawn"), raising=False
+    )
+
+    def launch_live(context):
+        contexts.append(context)
+        return SimpleNamespace(
+            ensure_started=lambda **_kwargs: context.spawn_live(["claude"], {}),
+            process_alive=lambda: True,
+        )
+
+    monkeypatch.setattr(
+        "cloud_agent_host.resident_transport.get_driver",
+        lambda _runtime: SimpleNamespace(launch_live=launch_live),
+    )
+
+    factory.open(_spec(), _launch("athr_new", native_session_id=None, slot=1))
+
+    assert events == ["reap", "prepare", "spawn"]
+    assert contexts[0].claude_config_dir == claude_member_config_dir(1, "athr_new")
+
+
+@pytest.mark.parametrize("target", ["config", "history"])
+def test_claude_member_preparation_rejects_symlinked_state(monkeypatch, tmp_path, target):
+    manager = _Manager()
+    calls: list[list[str]] = []
+
+    def capture(_spec, argv, **_kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", capture, raising=False)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    factory._prepare_claude_member_state(
+        _spec(), _launch("athr_source", native_session_id="native-source", slot=0)
+    )
+    home = tmp_path / "member"
+    home.mkdir()
+    config = home / ".claude-members" / "member-id"
+    config.parent.mkdir()
+    shared = tmp_path / "shared" / "claude"
+    shared.mkdir(parents=True)
+    projects = shared / "projects"
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    (config if target == "config" else projects).symlink_to(attacker, target_is_directory=True)
+
+    result = subprocess.run(
+        ["python3", "-c", calls[0][2], str(config), str(projects)], capture_output=True
+    )
+
+    assert result.returncode != 0
+    assert not list(attacker.iterdir())
+
+
+def test_claude_native_fork_uses_the_source_private_config(monkeypatch):
+    manager = _Manager()
+    calls: list[tuple[list[str], dict]] = []
+
+    def capture(_spec, argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return subprocess.CompletedProcess(
+            [], 0, stdout=b'{"source_session_id":"source","session_id":"child"}', stderr=b""
+        )
+
+    monkeypatch.setattr(manager, "exec_capture", capture, raising=False)
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+
+    source_launch = _launch("athr_source", native_session_id="source", slot=1)
+    assert factory._fork_claude(_spec(), "source", source_launch, 2) == "child"
+    assert calls[0][0] == ["claude-session-fork", "source", "2"]
+    assert calls[0][1]["env"]["CLAUDE_CONFIG_DIR"] == claude_member_config_dir(1, "athr_source")
+    assert calls[0][1]["user_uid"] == MEMBER_UID_BASE + 1
+
+
 @pytest.mark.parametrize(
     ("runtime_id", "collection"),
     [
@@ -979,10 +1150,11 @@ def test_claude_fork_flushes_the_source_before_reading_its_historical_boundary(m
     monkeypatch.setattr(factory, "_read_fork_journal", lambda *_args: None)
     monkeypatch.setattr(factory, "_write_fork_journal", lambda *_args: None)
 
-    def fork_claude(spec, source_id, source_slot, source_native_turn_no):
+    def fork_claude(spec, source_id, launch, source_native_turn_no):
         assert lifecycle == ["flush"]
         assert spec == _spec()
-        lifecycle.append((source_id, source_slot, source_native_turn_no))
+        assert launch == source_launch
+        lifecycle.append((source_id, launch, source_native_turn_no))
         return "native-child"
 
     monkeypatch.setattr(factory, "_fork_claude", fork_claude)
@@ -996,7 +1168,7 @@ def test_claude_fork_flushes_the_source_before_reading_its_historical_boundary(m
     )
 
     assert child_id == "native-child"
-    assert lifecycle == ["flush", ("native-source", 0, 2)]
+    assert lifecycle == ["flush", ("native-source", source_launch, 2)]
 
 
 def test_pi_fork_exposes_the_source_owned_child_session_to_its_target(monkeypatch):

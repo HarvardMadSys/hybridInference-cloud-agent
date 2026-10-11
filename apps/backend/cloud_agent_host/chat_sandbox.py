@@ -131,12 +131,22 @@ CHAT_UPLOADS_DIR = "/uploads"
 #: a host that raised its source import limit.
 ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S = 120.0
 CHAT_STATE_DIR = "/agent-state"
+CLAUDE_SHARED_PROJECTS_DIR = f"{CHAT_STATE_DIR}/claude/projects"
 ACTIVATION_TMPFS = "/run/agent-activation"
 MEMBER_TMPFS_ROOT = "/run/agent-members"
 #: This module is a library boundary: it reports what it observed and
 #: leaves the decision to the caller, so a warning here is the only
 #: record an operator gets of a partially capable guest.
 logger = logging.getLogger(__name__)
+
+
+def claude_member_config_dir(slot_id: int, thread_id: str) -> str:
+    """Return durable Claude launch state under this member's private home."""
+    if slot_id < 0 or not thread_id:
+        raise ValueError("resident slot and member identity are required")
+    member_key = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()
+    return f"/home/agent-member-{slot_id}/.claude-members/{member_key}"
+
 
 #: How many times the guest observer probe may be tried before a host is
 #: refused. Three, because the probe is a race against a guest that has just
@@ -2410,10 +2420,9 @@ class ChatSandboxManager:
         # Codex can make temp files owner-only, while the HTTP runtimes keep
         # SQLite databases and per-project process locks. A sibling UID must
         # never traverse those homes merely to normalize its own writes.
-        # Claude's sessions/ is a process registry, not its projects/ JSONL
-        # history. The CLI resets that registry to 0700 on every start/resume.
-        # Leave it private even for its owner: widening it here would race a
-        # sibling's startup and make settlement fail after a successful reply.
+        # Claude now loads settings and its sessions/ process registry from
+        # /home/agent-member-N/.claude-members, outside this traversal. Only projects/
+        # remains shared; never widen other legacy shared Claude files.
         # Normalize shared roots while pruning every private-home collection,
         # then enter only direct children owned by this member.
         script = (
@@ -2425,18 +2434,21 @@ class ChatSandboxManager:
             f"normalize_dirs {CHAT_WORKDIR}; normalize_files {CHAT_WORKDIR}; "
             f"find {CHAT_STATE_DIR} -xdev "
             f"\\( -path {CHAT_STATE_DIR}/.platform "
-            f"-o -path {CHAT_STATE_DIR}/claude/sessions "
+            f"-o -path {CHAT_STATE_DIR}/claude "
             f"-o -path {CHAT_STATE_DIR}/codex-members "
             f"-o -path {CHAT_STATE_DIR}/opencode-members "
             f"-o -path {CHAT_STATE_DIR}/kilo-members \\) -prune -o "
             '-uid "$uid" -type d -exec chmod g+rwx,g+s -- {} +; '
             f"find {CHAT_STATE_DIR} -xdev "
             f"\\( -path {CHAT_STATE_DIR}/.platform "
-            f"-o -path {CHAT_STATE_DIR}/claude/sessions "
+            f"-o -path {CHAT_STATE_DIR}/claude "
             f"-o -path {CHAT_STATE_DIR}/codex-members "
             f"-o -path {CHAT_STATE_DIR}/opencode-members "
             f"-o -path {CHAT_STATE_DIR}/kilo-members \\) -prune -o "
             '-uid "$uid" -type f -exec chmod g+rw -- {} +; '
+            f"if test -d {CLAUDE_SHARED_PROJECTS_DIR}; then "
+            f"normalize_dirs {CLAUDE_SHARED_PROJECTS_DIR}; "
+            f"normalize_files {CLAUDE_SHARED_PROJECTS_DIR}; fi; "
             f"for collection in {CHAT_STATE_DIR}/codex-members "
             f"{CHAT_STATE_DIR}/opencode-members {CHAT_STATE_DIR}/kilo-members; do "
             'test -d "$collection" || continue; '
@@ -3547,20 +3559,24 @@ class ChatSandboxManager:
             remote_read=remote_read,
         )
 
-    def install_tool_hooks(self, spec: ChatSandboxSpec, update: dict[str, Any]) -> None:
-        """Atomically merge trusted Claude hook settings inside the container.
+    def install_tool_hooks(
+        self, spec: ChatSandboxSpec, update: dict[str, Any], *, slot_id: int, thread_id: str
+    ) -> None:
+        """Atomically merge Claude hooks into this member's private settings.
 
         Docker-owned retained state has no corresponding host path. Writing it
         with :mod:`pathlib` on the broker would configure the broker itself,
-        not the Agent CLI. A group-writable compatibility file supports trusted
-        non-Kata development. Kata ignores that file and accepts marks only in
-        the guest-root observer journal.
+        not the Agent CLI. Settings are never imported from the old shared
+        Claude root. The group-writable marks file supports trusted non-Kata
+        development; Kata accepts only its guest-root observer journal.
         """
+        uid = MEMBER_UID_BASE + slot_id
+        self._validate_member_identity(spec, slot_id=slot_id, user_uid=uid)
         payload = json.dumps(update, separators=(",", ":")).encode()
         if len(payload) > 64 * 1024:
             raise SandboxError("tool hook settings exceed their trusted bound")
         script = (
-            "import contextlib, fcntl, json, os, pathlib, sys\n"
+            "import contextlib, fcntl, json, os, pathlib, stat, sys, tempfile\n"
             "config = pathlib.Path(sys.argv[1])\n"
             "marks = pathlib.Path(sys.argv[2])\n"
             "raw = sys.stdin.buffer.read(65537)\n"
@@ -3569,30 +3585,36 @@ class ChatSandboxManager:
             "update = json.loads(raw)\n"
             "if not isinstance(update, dict):\n"
             "    raise RuntimeError('tool hook settings are not an object')\n"
-            "os.umask(0o007)\n"
-            "config.mkdir(parents=True, exist_ok=True)\n"
-            "marks.parent.mkdir(parents=True, exist_ok=True)\n"
-            "mark_fd = os.open(marks, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o660)\n"
-            "os.close(mark_fd)\n"
+            "os.umask(0o077)\n"
+            "info = config.lstat()\n"
+            "if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():\n"
+            "    raise RuntimeError('Claude config is not member-owned')\n"
+            "config.chmod(0o700)\n"
+            "mark_fd = os.open(marks, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o660)\n"
             "with contextlib.suppress(PermissionError):\n"
-            "    os.chmod(marks, 0o660)\n"
+            "    os.fchmod(mark_fd, 0o660)\n"
+            "os.close(mark_fd)\n"
             "lock_path = config / '.freeinference-hooks.lock'\n"
-            "lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o660)\n"
+            "lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)\n"
+            "os.fchmod(lock_fd, 0o600)\n"
             "with os.fdopen(lock_fd, 'r+') as lock:\n"
             "    fcntl.flock(lock, fcntl.LOCK_EX)\n"
             "    settings_path = config / 'settings.json'\n"
             "    settings = {}\n"
             "    try:\n"
-            "        candidate = json.loads(settings_path.read_text())\n"
+            "        fd = os.open(settings_path, os.O_RDONLY | os.O_NOFOLLOW)\n"
+            "        with os.fdopen(fd, 'r') as handle:\n"
+            "            candidate = json.load(handle)\n"
             "        if isinstance(candidate, dict):\n"
             "            settings = candidate\n"
             "    except (OSError, ValueError, TypeError):\n"
             "        pass\n"
             "    settings.update(update)\n"
-            "    temporary = config / f'.settings.{os.getpid()}.tmp'\n"
+            "    fd, filename = tempfile.mkstemp(prefix='.settings.', suffix='.tmp', dir=config)\n"
+            "    temporary = pathlib.Path(filename)\n"
             "    try:\n"
-            "        temporary.write_text(json.dumps(settings, indent=2))\n"
-            "        os.chmod(temporary, 0o660)\n"
+            "        with os.fdopen(fd, 'w') as handle:\n"
+            "            json.dump(settings, handle, indent=2)\n"
             "        os.replace(temporary, settings_path)\n"
             "    finally:\n"
             "        with contextlib.suppress(FileNotFoundError):\n"
@@ -3604,12 +3626,14 @@ class ChatSandboxManager:
                 "python3",
                 "-c",
                 script,
-                f"{CHAT_STATE_DIR}/claude",
+                claude_member_config_dir(slot_id, thread_id),
                 f"{CHAT_STATE_DIR}/{TOOL_MARK_FILE}",
             ],
             workdir="/",
             timeout_s=10,
             input_bytes=payload,
+            user_uid=uid,
+            user_gid=self.backend.gid,
         )
         if result.returncode != 0:
             raise SandboxError(

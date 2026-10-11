@@ -19,6 +19,7 @@ import {
   replaceMcpThreadBindings,
   saveMcpImport,
   testMcpConnection,
+  validateMcpAuthorizationUrl,
 } from '../mcp';
 import * as client from '../client';
 
@@ -28,6 +29,42 @@ function jsonResponse(body: unknown, status = 200): Response {
     headers: { 'Content-Type': 'application/json' },
   });
 }
+
+describe('MCP browser authorization URL validation', () => {
+  it.each([
+    'javascript:alert(document.domain)',
+    'JaVaScRiPt:alert(document.domain)',
+    'data:text/html,<script>alert(1)</script>',
+    'file:///tmp/authorize',
+    'http://localhost:8080/authorize',
+    '/authorize',
+    '//login.example.com/authorize',
+    'https:login.example.com/authorize',
+    'https:///authorize',
+    'https://login.example.com:invalid/authorize',
+    'https://login.example.com:65536/authorize',
+    'https://[invalid]/authorize',
+    'https://user:password@login.example.com/authorize',
+    'https://@login.example.com/authorize',
+    'https://login.example.com/authorize#fragment',
+    'https://login.example.com/authorize#',
+    'https://login.example.com\\authorize',
+    'https://login.\nexample.com/authorize',
+    ' https://login.example.com/authorize',
+    'https://login.example.com/authorize\u0000',
+  ])('rejects an unsafe or ambiguous redirect: %s', (value) => {
+    expect(() => validateMcpAuthorizationUrl(value)).toThrow('unsafe sign-in address');
+  });
+
+  it.each([
+    'https://auth.example.com/authorize',
+    'https://login.other.example:8443/oauth/authorize?audience=mcp%3Aread&state=state',
+    'HTTPS://Login.other.example/authorize?prompt=consent',
+    'https://[::1]:8443/authorize',
+  ])('preserves a valid absolute HTTPS destination: %s', (value) => {
+    expect(validateMcpAuthorizationUrl(value)).toBe(value);
+  });
+});
 
 describe('mcp api', () => {
   let fetchWithAuth: ReturnType<typeof vi.spyOn>;

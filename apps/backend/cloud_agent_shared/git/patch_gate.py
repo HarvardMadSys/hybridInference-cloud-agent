@@ -21,19 +21,28 @@ Four gates, in the order they matter:
    the cap, is refused rather than pushed — huge diffs are almost always a
    runaway agent, and they make review impossible anyway.
 
-The gate parses ``git format-patch`` / ``git diff`` output textually rather
-than applying it: it must be safe to run *before* the bytes touch a worktree.
+The gate checks ``git format-patch`` / ``git diff`` output before it touches a
+worktree, including bounded decoding of binary patch payloads. The publisher
+also checks actual staged blob contents before any commit or push.
 """
 
 from __future__ import annotations
 
+import base64
 import re
+import zlib
+from collections import Counter
 from dataclasses import dataclass, field
 
 # ── Limits ─────────────────────────────────────────────────────────────
 
 MAX_PATCH_BYTES = 1_000_000
 MAX_CHANGED_FILES = 200
+# Encoded binary diffs can be tiny while expanding into very large objects.
+# Bound both the pre-apply expansion and the decoded blobs scanned by the
+# publisher; legitimate images and other small binary assets remain supported.
+MAX_BLOB_BYTES = 10_000_000
+MAX_CHANGED_BLOB_BYTES = 20_000_000
 
 # ── Blocked paths ──────────────────────────────────────────────────────
 
@@ -60,6 +69,9 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b")),
     ("private_key_block", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----")),
 )
+_BLOB_SECRET_PATTERNS = tuple(
+    (name, re.compile(pattern.pattern.encode("ascii"))) for name, pattern in SECRET_PATTERNS
+)
 
 # ── Diff parsing ───────────────────────────────────────────────────────
 
@@ -72,6 +84,112 @@ _NEW_MODE = re.compile(r"^(?:new|new file) mode (?P<mode>\d{6})$")
 # so a parser that keys solely off the header sees an empty change set.
 _NAME_LINE = re.compile(r"^(?:---|\+\+\+) (?P<path>.+?)(?:\t.*)?$")
 _SYMLINK_MODE = "120000"
+_BINARY_BLOCK = re.compile(r"^(literal|delta) ([0-9]+)$")
+
+
+def scan_blob_secrets(content: bytes, baseline: bytes = b"") -> list[str]:
+    """Find newly introduced credential matches in actual Git blob bytes.
+
+    Byte patterns also inspect non-UTF-8 files. Compare exact matches and
+    occurrence counts to the same file's base, so retaining an existing token
+    is allowed while introducing another token or duplicating one is blocked.
+    Return pattern names only: credential values must never reach job details.
+    """
+    violations: list[str] = []
+    for name, pattern in _BLOB_SECRET_PATTERNS:
+        added = Counter(match.group() for match in pattern.finditer(content))
+        if added and added - Counter(match.group() for match in pattern.finditer(baseline)):
+            violations.append(name)
+    return violations
+
+
+def _delta_sizes(payload: bytes) -> tuple[int, int]:
+    """Read the source and result lengths from Git's delta instruction header."""
+    index = 0
+    sizes: list[int] = []
+    for _ in range(2):
+        size = 0
+        for shift in range(0, 70, 7):
+            if index >= len(payload):
+                raise ValueError("truncated binary delta header")
+            value = payload[index]
+            index += 1
+            size |= (value & 0x7F) << shift
+            if not value & 0x80:
+                sizes.append(size)
+                break
+        else:
+            raise ValueError("invalid binary delta size")
+    return sizes[0], sizes[1]
+
+
+def _binary_expansion_violations(
+    patch: str, *, max_blob_bytes: int, max_decoded_bytes: int
+) -> list[str]:
+    """Bound binary literals and delta results before Git allocates them.
+
+    Both forward and reverse blocks are decoded because Git reads both, and a
+    delta's declared block length is its instruction size, not its result size.
+    The index is independently checked after apply as the authoritative pass.
+    """
+    lines = patch.splitlines()
+    total = 0
+    for index, line in enumerate(lines):
+        if line != "GIT binary patch":
+            continue
+        index += 1
+        blocks = 0
+        try:
+            while index < len(lines) and (header := _BINARY_BLOCK.fullmatch(lines[index])):
+                kind, declared = header.groups()
+                declared_size = int(declared)
+                if declared_size > max_blob_bytes:
+                    return [f"binary patch exceeds the {max_blob_bytes} decoded blob byte limit"]
+                index += 1
+                compressed = bytearray()
+                while index < len(lines) and lines[index]:
+                    encoded = lines[index]
+                    prefix = encoded[0]
+                    if "A" <= prefix <= "Z":
+                        size = ord(prefix) - ord("A") + 1
+                    elif "a" <= prefix <= "z":
+                        size = ord(prefix) - ord("a") + 27
+                    else:
+                        raise ValueError("invalid binary patch line length")
+                    if len(encoded) != 1 + ((size + 3) // 4) * 5:
+                        raise ValueError("invalid binary patch encoding")
+                    compressed.extend(base64.b85decode(encoded[1:])[:size])
+                    index += 1
+                decoder = zlib.decompressobj()
+                payload = decoder.decompress(bytes(compressed), max_blob_bytes + 1)
+                if len(payload) > max_blob_bytes:
+                    return [f"binary patch exceeds the {max_blob_bytes} decoded blob byte limit"]
+                if not decoder.eof or decoder.unused_data or len(payload) != declared_size:
+                    raise ValueError("invalid binary patch compressed size")
+                expanded = len(payload)
+                if kind == "delta":
+                    source_size, expanded = _delta_sizes(payload)
+                    if source_size > max_blob_bytes or expanded > max_blob_bytes:
+                        return [
+                            f"binary patch exceeds the {max_blob_bytes} decoded blob byte limit"
+                        ]
+                total += max(expanded, len(payload))
+                if total > max_decoded_bytes:
+                    return [
+                        f"binary patch exceeds the {max_decoded_bytes} total decoded byte limit"
+                    ]
+                blocks += 1
+                index += 1  # blank separator between forward and reverse blocks
+            if not blocks:
+                raise ValueError("binary patch contains no data blocks")
+            if index < len(lines) and lines[index].startswith(("literal ", "delta ")):
+                # Git's numeric parser accepts suffixes and signs that the
+                # strict header parser above refuses. A reverse block must
+                # not disappear from our bounds because of that difference.
+                raise ValueError("invalid binary patch block header")
+        except (ValueError, zlib.error):
+            return ["patch contains malformed binary data"]
+    return []
 
 
 def _unquote_path(raw: str) -> str:
@@ -257,6 +375,10 @@ def validate_change_set(
     if symlink_paths:
         violations.append(f"patch introduces symlinks: {', '.join(symlink_paths)}")
 
+    secrets = _scan_secrets("", unique_files)
+    if secrets:
+        violations.append(f"patch contains credential-shaped paths: {', '.join(secrets)}")
+
     return PatchGateResult(
         ok=not violations,
         violations=violations,
@@ -270,6 +392,8 @@ def validate_patch(
     *,
     max_bytes: int = MAX_PATCH_BYTES,
     max_files: int = MAX_CHANGED_FILES,
+    max_blob_bytes: int = MAX_BLOB_BYTES,
+    max_decoded_bytes: int = MAX_CHANGED_BLOB_BYTES,
 ) -> PatchGateResult:
     """Validate an agent-produced patch before it is allowed near git.
 
@@ -286,6 +410,12 @@ def validate_patch(
     size = len(patch.encode("utf-8"))
     if size > max_bytes:
         violations.append(f"patch is {size} bytes, over the {max_bytes} byte limit")
+    else:
+        violations.extend(
+            _binary_expansion_violations(
+                patch, max_blob_bytes=max_blob_bytes, max_decoded_bytes=max_decoded_bytes
+            )
+        )
 
     changed, symlinks = _collect_paths(patch)
     unique_files = sorted({path for path in changed if path != "/dev/null"})
@@ -296,7 +426,7 @@ def validate_patch(
     violations.extend(path_result.violations)
     requires_human_release = path_result.requires_human_release
 
-    secrets = _scan_secrets(patch, unique_files)
+    secrets = _scan_secrets(patch, [])
     if secrets:
         violations.append(f"patch contains credential-shaped content: {', '.join(secrets)}")
 

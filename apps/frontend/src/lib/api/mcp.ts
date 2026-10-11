@@ -215,6 +215,37 @@ export interface McpAuthorizeApi {
   message: string;
 }
 
+/** Check an untrusted sign-in destination immediately before browser navigation. */
+export function validateMcpAuthorizationUrl(value: string): string {
+  const error = new Error('This server returned an unsafe sign-in address.');
+  if (
+    typeof value !== 'string' ||
+    !/^https:\/\//i.test(value) ||
+    /\s|\\/.test(value) ||
+    Array.from(value).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+  ) {
+    throw error;
+  }
+  let url: URL;
+  try {
+    // No base URL: relative and protocol-relative addresses are not accepted.
+    url = new URL(value);
+  } catch {
+    throw error;
+  }
+  const authority = value.slice(value.indexOf('://') + 3).split(/[/?#]/, 1)[0];
+  if (
+    url.protocol !== 'https:' ||
+    !url.hostname ||
+    !authority ||
+    authority.includes('@') ||
+    value.includes('#')
+  ) {
+    throw error;
+  }
+  return value;
+}
+
 /** One session's selection for one connection. */
 export interface McpBindingApi {
   connection_id: number;

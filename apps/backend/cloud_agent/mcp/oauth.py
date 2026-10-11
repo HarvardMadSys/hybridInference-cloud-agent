@@ -199,6 +199,7 @@ def parse_authorization_server_metadata(
         raise OAuthError(
             "the authorization server metadata is missing an authorization or token endpoint"
         )
+    _validate_authorization_endpoint(authorization_endpoint)
     return AuthorizationServerMetadata(
         issuer=issuer,
         authorization_endpoint=authorization_endpoint,
@@ -223,6 +224,33 @@ def parse_authorization_server_metadata(
         ),
         raw=dict(payload),
     )
+
+
+def _validate_authorization_endpoint(endpoint: str) -> None:
+    """Accept only unambiguous HTTPS destinations for browser authorization.
+
+    This endpoint is navigated by the browser, rather than dialled through the
+    server's egress checks. It can live on another origin, but must not inherit
+    an insecure connector policy or contain browser/Python parsing ambiguities.
+    """
+    try:
+        if any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in endpoint):
+            raise EndpointRejected("whitespace and control characters are not allowed")
+        if "\\" in endpoint:
+            raise EndpointRejected("backslashes are not allowed")
+        normalized = normalize_url(endpoint)
+        parts = urlsplit(endpoint)
+        if normalized.scheme != "https":
+            raise EndpointRejected("an absolute HTTPS URL is required")
+        if parts.username is not None or parts.password is not None:
+            raise EndpointRejected("URL credentials are not allowed")
+        if "#" in endpoint:
+            raise EndpointRejected("URL fragments are not allowed")
+    except EndpointRejected as exc:
+        raise OAuthError(
+            f"the authorization server has an invalid authorization endpoint: {exc}",
+            kind="protocol_incompatible",
+        ) from exc
 
 
 def resource_metadata_from_challenge(header: str | None) -> str | None:
@@ -467,6 +495,7 @@ class OAuthFlow:
 
     def authorization_url(self) -> str:
         """Build the URL the user's browser is sent to."""
+        _validate_authorization_endpoint(self.metadata.authorization_endpoint)
         params: dict[str, str] = {
             "response_type": "code",
             "client_id": self.client.client_id,

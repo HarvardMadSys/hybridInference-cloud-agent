@@ -128,6 +128,32 @@ make check
 | `make test-db` | The PostgreSQL-backed `dbtest` tier. |
 | `make test-all` | All tests except `external`, including `dbtest`. |
 
+Every pull request runs on disposable GitHub-hosted VMs, including PRs from
+collaborators and branches in this repository. Backend, web, database, Compose,
+secret scans, and image build/start checks run there with a read-only token;
+checkout does not persist it, and image jobs use anonymous registry pulls.
+ARM64 artifacts use `ubuntu-24.04-arm`, and AMD64 artifacts use `ubuntu-24.04`.
+Hosted runner availability, billing, disk capacity, and anonymous pull limits can
+fail these checks; they must not fall back to persistent pools. Pushes to `dev`
+and `main`, and authorized manual dispatches, keep the existing self-hosted
+pools. Real Kata host qualification runs only on trusted `dev` events and is
+explicitly reported as skipped on PRs.
+
+Before enabling public fork workflows, configure GitHub's runner groups to allow
+persistent pools only for the trusted workflow references on `refs/heads/dev`
+and `refs/heads/main`, including the publication and manual synchronization
+workflows. Deny PR merge/head refs and other workflow files. Verify those rules
+with an untrusted fork workflow edit that requests a persistent runner: it must
+remain ineligible. A fork can edit its workflow YAML, so the checked-in runner
+expressions cannot enforce this restriction themselves. If the organization
+cannot restrict runner groups by workflow reference, remove these persistent
+runners from the repository's eligible groups and run trusted CI/publication
+in a separate restricted repository, or replace them with credential-free
+single-job disposable runners. Fork approval settings alone are insufficient:
+allowing a test run must never grant access to publication's hosts or credentials.
+These are GitHub administrator settings; repository tests cannot configure or
+verify them.
+
 CI runs the default test tier with four workers and keeps each test file on one
 worker. To use the same execution mode for the local backend gate:
 

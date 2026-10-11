@@ -794,6 +794,49 @@ class TestAuthorization:
     """Starting a browser flow, including the client a server expects us to bring."""
 
     @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "javascript:alert(document.domain)",
+            "data:text/html,<script>alert(1)</script>",
+            "/authorize",
+            "//login.example.com/authorize",
+            "https://user@login.example.com/authorize",
+        ],
+    )
+    async def test_unsafe_redirect_is_refused_before_the_flow_is_persisted(
+        self, monkeypatch: pytest.MonkeyPatch, endpoint: str
+    ) -> None:
+        """The API also guards metadata loaded without its discovery parser."""
+        from fastapi import HTTPException
+
+        from cloud_agent.mcp import oauth
+
+        monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", "https://api.example.com")
+        metadata = oauth.AuthorizationServerMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint=endpoint,
+            token_endpoint="https://auth.example.com/token",
+        )
+        monkeypatch.setattr(
+            oauth, "discover_authorization_server", AsyncMock(return_value=(None, metadata))
+        )
+        store = FakeStore()
+        connection_id = _seed(
+            store, auth_kind="oauth", auth_config={"client_id": "registered-client"}
+        )
+        persist = AsyncMock()
+        monkeypatch.setattr(store, "create_mcp_oauth_flow", persist, raising=False)
+        with pytest.raises(HTTPException) as raised:
+            await mcp_connections.authorize_connection(
+                connection_id=connection_id,
+                user={"user_id": _OWNER},
+                store=store,
+            )
+        assert raised.value.status_code == 400
+        assert "invalid authorization endpoint" in str(raised.value.detail)
+        persist.assert_not_called()
+
+    @pytest.mark.parametrize(
         "session_base,override,expected_base",
         [
             ("https://agents.example.com/api", "", "https://agents.example.com/api"),

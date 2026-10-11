@@ -18,8 +18,10 @@ the part under test and the HTTP call under it is already covered.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -73,6 +75,94 @@ def _server_metadata(**overrides: Any) -> dict[str, Any]:
     }
     document.update(overrides)
     return document
+
+
+class TestBrowserAuthorizationEndpoint:
+    """Discovery must never turn server metadata into executable navigation."""
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "javascript:alert(document.domain)",
+            "JaVaScRiPt:alert(document.domain)",
+            "data:text/html,<script>alert(1)</script>",
+            "file:///tmp/authorize",
+            "http://localhost:8080/authorize",
+            "/authorize",
+            "//login.example.com/authorize",
+            "https:login.example.com/authorize",
+            "https:///authorize",
+            "https://login.example.com:invalid/authorize",
+            "https://login.example.com:65536/authorize",
+            "https://[invalid]/authorize",
+            "https://user:password@login.example.com/authorize",
+            "https://@login.example.com/authorize",
+            "https://login.example.com/authorize#fragment",
+            "https://login.example.com/authorize#",
+            "https://login.example.com\\authorize",
+            "https://login.\nexample.com/authorize",
+            " https://login.example.com/authorize",
+            "https://login.example.com/authorize\x00",
+        ],
+    )
+    def test_discovery_refuses_unsafe_browser_destinations(self, endpoint: str) -> None:
+        """Scheme checks also cover malformed URLs and parser ambiguities."""
+        with pytest.raises(oauth.OAuthError, match="invalid authorization endpoint") as raised:
+            oauth.parse_authorization_server_metadata(
+                _server_metadata(authorization_endpoint=endpoint), expected_issuer=_ISSUER
+            )
+        assert raised.value.kind == "protocol_incompatible"
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            f"{_ISSUER}/authorize",
+            "https://login.other.example:8443/oauth/authorize?audience=mcp%3Aread",
+            "HTTPS://Login.other.example/authorize?prompt=consent",
+            "https://[::1]:8443/authorize",
+        ],
+    )
+    def test_cross_origin_https_and_existing_queries_remain_valid(self, endpoint: str) -> None:
+        """Provider discovery does not imply that the login shares the issuer origin."""
+        metadata = oauth.parse_authorization_server_metadata(
+            _server_metadata(
+                authorization_endpoint=endpoint, token_endpoint="http://connector.internal/token"
+            ),
+            expected_issuer=_ISSUER,
+        )
+        flow = oauth.OAuthFlow(
+            versions=oauth.FlowVersions("7", 1, 1, 1),
+            state="state",
+            pkce=oauth.PkcePair.generate(),
+            client=oauth.ClientIdentity(client_id="client", registration="preregistered"),
+            metadata=metadata,
+            resource=_RESOURCE,
+            redirect_uri="http://127.0.0.1:13002/api/v1/agent/mcp/oauth/callback/7",
+        )
+        result = flow.authorization_url()
+        assert result.startswith(endpoint + ("&" if urlsplit(endpoint).query else "?"))
+        query = parse_qs(urlsplit(result).query)
+        assert query["client_id"] == ["client"]
+        assert query["state"] == ["state"]
+        assert query["redirect_uri"] == [flow.redirect_uri]
+        assert metadata.token_endpoint == "http://connector.internal/token"
+
+    def test_url_construction_rechecks_metadata_that_bypassed_discovery(self) -> None:
+        """An old or directly constructed metadata object is not a browser capability."""
+        metadata = oauth.parse_authorization_server_metadata(
+            _server_metadata(), expected_issuer=_ISSUER
+        )
+        flow = oauth.OAuthFlow(
+            versions=oauth.FlowVersions("7", 1, 1, 1),
+            state="state",
+            pkce=oauth.PkcePair.generate(),
+            client=oauth.ClientIdentity(client_id="client", registration="preregistered"),
+            metadata=replace(metadata, authorization_endpoint="javascript:alert(1)"),
+            resource=_RESOURCE,
+            redirect_uri="https://agents.example.com/callback",
+        )
+        with pytest.raises(oauth.OAuthError, match="invalid authorization endpoint"):
+            flow.authorization_url()
 
 
 class TestDiscovery:

@@ -77,6 +77,16 @@ Chat data lives only in the retained container's Docker writable layer:
 - member-private provider homes where a CLI cannot safely share one home
   between concurrent processes.
 
+Claude's launch settings and process registry live under each execution slot's
+private `/home/agent-member-N/.claude-members/<thread-hash>` directory. Only
+`projects/` links to the group's `/agent-state/claude/projects` native history, preserving Fork and resume
+without loading the old shared settings. Claude loads only private user settings;
+project and local settings in the shared repository cannot configure a sibling's
+credential-bearing process. Private homes and settings are never widened by the
+shared-workspace permission-normalization pass.
+The thread key prevents a reassigned execution slot from inheriting a previous
+member's settings; old slot processes are reaped before launch-state preparation.
+
 No chat workspace, Agent CLI state directory, snapshot directory, named
 volume, or per-chat host path is mounted into the sandbox. The host services
 mount the Docker socket so they can address the container through Docker's

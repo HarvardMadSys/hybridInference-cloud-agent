@@ -7,6 +7,7 @@ import {
   disconnectMcpConnection,
   listMcpConnections,
   testMcpConnection,
+  validateMcpAuthorizationUrl,
   enableMcpOAuth,
   setMcpConnectionEnabled,
   type McpConnectionApi,
@@ -158,7 +159,7 @@ export function McpConnectionsSection({
       if (connection.auth_kind === 'none') await enableMcpOAuth(connection);
       const result = await authorizeMcpConnection(connection.id, suppliedClientId);
       if (result.authorization_url) {
-        window.location.assign(result.authorization_url);
+        window.location.assign(validateMcpAuthorizationUrl(result.authorization_url));
         return;
       }
       if (result.needs_client_id) {

@@ -392,6 +392,9 @@ class LaunchContext:
     #: path. They provide this trusted writer so Claude's passive hooks are
     #: installed in the filesystem the CLI will actually read.
     install_tool_hooks: Callable[[dict[str, Any]], None] | None = None
+    #: Claude launch settings and its process registry are member-private;
+    #: only native project history is linked to the group's shared store.
+    claude_config_dir: str | None = None
 
 
 class HarnessTurn(Generic[_RuntimeT]):
@@ -2339,7 +2342,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
             credential=context.credential,
             provides_isolation=context.provides_isolation,
             mcp_config=context.mcp_config,
-            config_dir=CLAUDE_STATE_CONFIG_DIR,
+            config_dir=context.claude_config_dir or CLAUDE_STATE_CONFIG_DIR,
             resume_session_id=self._resume_session_id,
         )
         self._argv_template = argv

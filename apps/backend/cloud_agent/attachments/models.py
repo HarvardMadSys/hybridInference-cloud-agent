@@ -29,6 +29,10 @@ class AttachmentError(ValueError):
     """An upload the owner can correct."""
 
 
+class AttachmentLeaseLost(PermissionError):
+    """A worker no longer authorized to read its conversation's uploads."""
+
+
 class AttachmentLimits(BaseModel):
     """Advertise the server's upload bounds to clients."""
 

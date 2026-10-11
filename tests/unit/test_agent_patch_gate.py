@@ -6,6 +6,9 @@ untrusted agent can influence passes through it before becoming a git object.
 
 from __future__ import annotations
 
+import base64
+import zlib
+
 import pytest
 
 from cloud_agent_host.patch_gate import (
@@ -13,6 +16,12 @@ from cloud_agent_host.patch_gate import (
     MAX_PATCH_BYTES,
     branch_name_for,
     validate_patch,
+)
+from cloud_agent_shared.git.patch_gate import (
+    MAX_BLOB_BYTES,
+    MAX_CHANGED_BLOB_BYTES,
+    scan_blob_secrets,
+    validate_change_set,
 )
 
 _CLEAN_PATCH = """diff --git a/src/app.py b/src/app.py
@@ -392,3 +401,118 @@ def test_an_ordinary_patch_is_unaffected():
 
     assert result.ok
     assert result.changed_files == ["src/app.py"]
+
+
+def _binary_patch_block(kind: str, payload: bytes, declared_size: int | None = None) -> str:
+    compressed = zlib.compress(payload)
+    lines: list[str] = []
+    for offset in range(0, len(compressed), 52):
+        chunk = compressed[offset : offset + 52]
+        size = len(chunk)
+        prefix = chr(ord("A") + size - 1) if size <= 26 else chr(ord("a") + size - 27)
+        padded = chunk + b"\0" * (-size % 4)
+        lines.append(prefix + base64.b85encode(padded).decode())
+    declared = len(payload) if declared_size is None else declared_size
+    return f"{kind} {declared}\n" + "\n".join(lines) + "\n\n"
+
+
+def _binary_patch(*blocks: str) -> str:
+    return "diff --git a/asset.bin b/asset.bin\nGIT binary patch\n" + "".join(blocks)
+
+
+def test_decoded_blob_limits_are_pinned():
+    assert MAX_BLOB_BYTES == 10_000_000
+    assert MAX_CHANGED_BLOB_BYTES == 20_000_000
+
+
+def test_binary_literal_decoded_limit_boundary():
+    patch = _binary_patch(_binary_patch_block("literal", b"\0" * 32))
+    assert validate_patch(patch, max_blob_bytes=32).ok
+    result = validate_patch(patch, max_blob_bytes=31)
+    assert not result.ok
+    assert "decoded blob byte limit" in result.reason
+
+
+def test_binary_declared_size_cannot_hide_larger_decoded_payload():
+    patch = _binary_patch(_binary_patch_block("literal", b"\0" * 33, declared_size=16))
+    result = validate_patch(patch, max_blob_bytes=32)
+    assert not result.ok
+    assert "decoded blob byte limit" in result.reason
+
+
+@pytest.mark.parametrize("sizes", [b"\x01\x21", b"\x21\x01"])
+def test_binary_delta_source_and_result_sizes_are_bounded(sizes):
+    """A tiny delta can name a much larger source or result object."""
+    patch = _binary_patch(_binary_patch_block("delta", sizes + b"\x01x"))
+    result = validate_patch(patch, max_blob_bytes=32)
+    assert not result.ok
+    assert "decoded blob byte limit" in result.reason
+
+
+def test_binary_delta_size_header_uses_multibyte_varints():
+    # 129 is encoded as 0x81, 0x01, not as either individual byte's value.
+    patch = _binary_patch(_binary_patch_block("delta", b"\x01\x81\x01\x01x"))
+    result = validate_patch(patch, max_blob_bytes=128)
+    assert not result.ok
+    assert "decoded blob byte limit" in result.reason
+
+
+def test_binary_reverse_block_is_also_bounded():
+    patch = _binary_patch(
+        _binary_patch_block("literal", b"\0"),
+        _binary_patch_block("delta", b"\x01\x21\x01x"),
+    )
+    assert not validate_patch(patch, max_blob_bytes=32).ok
+
+
+@pytest.mark.parametrize("header", ["literal 100000000 extra", "literal +100000000"])
+def test_loose_git_reverse_header_cannot_hide_expansion(header):
+    patch = _binary_patch(_binary_patch_block("literal", b"\0")) + header + "\n\n"
+    result = validate_patch(patch)
+    assert not result.ok
+    assert "malformed binary data" in result.reason
+
+
+def test_total_binary_expansion_limit():
+    patch = _binary_patch(
+        _binary_patch_block("literal", b"\0" * 16),
+        _binary_patch_block("literal", b"\0" * 16),
+    )
+    assert validate_patch(patch, max_decoded_bytes=32).ok
+    result = validate_patch(patch, max_decoded_bytes=31)
+    assert not result.ok
+    assert "total decoded byte limit" in result.reason
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "literal 1\n!invalid\n\n",
+        _binary_patch_block("literal", b"\0", declared_size=2),
+        _binary_patch_block("delta", b"\x80"),
+        _binary_patch_block("delta", b"\x80" * 20),
+        "",
+    ],
+)
+def test_malformed_binary_data_is_refused(block):
+    result = validate_patch(_binary_patch(block))
+    assert not result.ok
+    assert "malformed binary data" in result.reason
+
+
+def test_non_utf8_blob_secrets_compare_exact_matches_and_counts():
+    credential = ("gh" + "p_" + "a" * 36).encode()
+    baseline = b"\xff" + credential + b"\0"
+    assert scan_blob_secrets(baseline) == ["github_token"]
+    assert scan_blob_secrets(baseline + b"safe", baseline) == []
+    assert scan_blob_secrets(b"\0safe", baseline) == []
+    assert scan_blob_secrets(baseline + credential, baseline) == ["github_token"]
+    assert scan_blob_secrets(b"\0" + credential.replace(b"a", b"b"), baseline) == ["github_token"]
+
+
+def test_actual_staged_paths_are_also_scanned_for_credentials():
+    credential = "gh" + "p_" + "a" * 36
+    result = validate_change_set([f"{credential}.bin"])
+    assert not result.ok
+    assert "github_token" in result.reason
+    assert credential not in result.reason
