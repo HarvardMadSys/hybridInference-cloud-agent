@@ -582,8 +582,12 @@ def test_broker_reconcile_blocks_an_unmarked_running_orphan_before_accepting_req
     spec = replace(_spec(), disk_limit_mib=disk_limit_mib)
     manager.items[spec.container_name] = manager._inspection(spec, running=True)
     archived: list[tuple] = []
+    markerless_checks: list[bool] = []
     supervisor = SharedChatSessionSupervisor(
         manager,
+        markerless_final_prepare_hook=lambda _spec, inspection: (
+            markerless_checks.append(inspection.running) or False
+        ),
         stopped_archive_hook=lambda *args: archived.append(args),
     )
 
@@ -595,9 +599,112 @@ def test_broker_reconcile_blocks_an_unmarked_running_orphan_before_accepting_req
     assert manager.items[spec.container_name].running is False
     assert manager.items[spec.container_name].networks == ("agent-net",)
     assert manager.pruned_specs == [spec]
+    assert markerless_checks == [True]
     assert descriptors[0].running is False
     with pytest.raises(SessionBusy, match="native flush failure"):
         supervisor.operation_opened(spec.thread_id)
+
+
+@pytest.mark.parametrize("running", [True, False])
+def test_disabled_policy_reconcile_cleans_a_markerless_orphan(running: bool) -> None:
+    class MarkerManager(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.marker: bytes | None = None
+            self.running_marker_writes = 0
+            self.stopped_marker_writes = 0
+            self.marker_clears = 0
+
+        def read_running_final_archive_marker(self, spec, *, expected_container_id):
+            assert self.items[spec.container_name].container_id == expected_container_id
+            return self.marker
+
+        def read_stopped_final_archive_marker_optional(
+            self,
+            spec,
+            *,
+            expected_container_id,
+        ):
+            assert self.items[spec.container_name].container_id == expected_container_id
+            return self.marker
+
+        def read_final_archive_marker(self, spec, *, expected_container_id):
+            assert self.items[spec.container_name].container_id == expected_container_id
+            if self.marker is None:
+                raise SandboxError("final archive marker is missing")
+            return self.marker
+
+        def write_final_archive_marker(self, spec, payload, *, expected_container_id) -> None:
+            current = self.items[spec.container_name]
+            assert current.container_id == expected_container_id
+            assert current.running is True
+            self.marker = payload
+            self.running_marker_writes += 1
+
+        def write_stopped_final_archive_marker(
+            self,
+            spec,
+            payload,
+            *,
+            expected_container_id,
+        ) -> None:
+            current = self.items[spec.container_name]
+            assert current.container_id == expected_container_id
+            assert current.running is False
+            self.marker = payload
+            self.stopped_marker_writes += 1
+
+        def clear_final_archive_marker(self, spec, *, expected_container_id) -> None:
+            assert self.items[spec.container_name].container_id == expected_container_id
+            self.marker = None
+            self.marker_clears += 1
+
+    manager = MarkerManager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=running)
+    controller = SandboxArchiveController(
+        manager,  # type: ignore[arg-type]
+        namespace="pool-east",
+    )
+    controller.start()
+    controller.apply(SandboxArchivePolicy(enabled=False, revision=1).as_dict())
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=controller.prepare_final,
+        stopped_archive_invalidate_hook=controller.invalidate_final,
+        starting_archive_prepare_hook=controller.prepare_start,
+        started_archive_hook=controller.complete_start,
+        markerless_final_prepare_hook=controller.prepare_markerless_final_if_disabled,
+        stopped_archive_hook=controller.queue_final,
+    )
+
+    descriptors = supervisor.reconcile()
+
+    assert descriptors[0].running is False
+    assert manager.items[spec.container_name].networks == ()
+    assert manager.stop_count == 2
+    assert manager.running_marker_writes == int(running)
+    assert manager.stopped_marker_writes == int(not running)
+    assert manager.marker is not None
+    group = supervisor._members[spec.thread_id]
+    assert group.stop_archive_pending is False
+    assert group.stop_archive_blocked is False
+
+    lease = supervisor.acquire(
+        spec,
+        thread_id=spec.thread_id,
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+
+    assert lease.token
+    assert manager.items[spec.container_name].running is True
+    assert manager.marker is None
+    assert manager.marker_clears == 1
+    controller.close()
 
 
 def test_reconcile_does_not_finalize_a_registered_never_started_container() -> None:

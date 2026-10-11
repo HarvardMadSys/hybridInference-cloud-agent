@@ -350,6 +350,7 @@ StoppedArchivePrepareHook = Callable[
     None,
 ]
 ArchiveInspectionHook = Callable[[ChatSandboxSpec, ChatSandboxInspection], None]
+MarkerlessFinalPrepareHook = Callable[[ChatSandboxSpec, ChatSandboxInspection], bool]
 
 #: How long a message sent into a turn that has not started here is kept for
 #: it. Long past any sandbox preparation; a turn that never starts leaves its
@@ -385,6 +386,7 @@ class SharedChatSessionSupervisor:
         stopped_archive_invalidate_hook: ArchiveInspectionHook | None = None,
         starting_archive_prepare_hook: ArchiveInspectionHook | None = None,
         started_archive_hook: ArchiveInspectionHook | None = None,
+        markerless_final_prepare_hook: MarkerlessFinalPrepareHook | None = None,
         stopped_archive_hook: StoppedArchiveHook | None = None,
     ) -> None:
         if idle_timeout_s <= 0 or sweep_interval_s <= 0:
@@ -413,6 +415,7 @@ class SharedChatSessionSupervisor:
         self._stopped_archive_invalidate_hook = stopped_archive_invalidate_hook
         self._starting_archive_prepare_hook = starting_archive_prepare_hook
         self._started_archive_hook = started_archive_hook
+        self._markerless_final_prepare_hook = markerless_final_prepare_hook
         self._stopped_archive_hook = stopped_archive_hook
         self._groups: dict[str, _Group] = {}
         self._members: dict[str, _Group] = {}
@@ -489,9 +492,15 @@ class SharedChatSessionSupervisor:
         invalidate_final: ArchiveInspectionHook,
         prepare_start: ArchiveInspectionHook,
         complete_start: ArchiveInspectionHook,
+        prepare_markerless_final: MarkerlessFinalPrepareHook,
     ) -> None:
         """Bind marker transitions that bracket start and failed native flush."""
-        hooks = (invalidate_final, prepare_start, complete_start)
+        hooks = (
+            invalidate_final,
+            prepare_start,
+            complete_start,
+            prepare_markerless_final,
+        )
         if not all(callable(hook) for hook in hooks):
             raise TypeError("shared sandbox archive transition hooks must be callable")
         with self._lock:
@@ -499,6 +508,7 @@ class SharedChatSessionSupervisor:
                 self._stopped_archive_invalidate_hook,
                 self._starting_archive_prepare_hook,
                 self._started_archive_hook,
+                self._markerless_final_prepare_hook,
             )
             if any(hook is not None for hook in current):
                 if current != hooks:
@@ -514,7 +524,35 @@ class SharedChatSessionSupervisor:
                 self._stopped_archive_invalidate_hook,
                 self._starting_archive_prepare_hook,
                 self._started_archive_hook,
+                self._markerless_final_prepare_hook,
             ) = hooks
+
+    def _prepare_markerless_final_locked(
+        self,
+        spec: ChatSandboxSpec,
+        inspection: ChatSandboxInspection,
+    ) -> bool:
+        """Ask the dynamic policy owner to authorize markerless cleanup.
+
+        A static archive service has no such authority and therefore keeps the
+        conservative quarantine behavior.  The dynamic controller writes the
+        disabled-policy marker atomically before returning ``True``.
+        """
+        hook = self._markerless_final_prepare_hook
+        if self._stopped_archive_hook is None or hook is None:
+            return False
+        try:
+            return hook(spec, inspection)
+        except Exception:
+            logger.exception(
+                "markerless sandbox policy fence could not be prepared",
+                extra={
+                    "event": "sandbox_markerless_final_prepare_failed",
+                    "sandbox_id": spec.sandbox_id,
+                    "generation": spec.generation,
+                },
+            )
+            return False
 
     def start(self) -> None:
         """Reconstruct shared containers and start the group idle sweep."""
@@ -1083,6 +1121,15 @@ class SharedChatSessionSupervisor:
                         )
                     else:
                         marker_present = marker_payload is not None
+                        if (
+                            not marker_present
+                            and inspection.status is not ChatSandboxStatus.CREATED
+                            and (inspection.running or owned_bridge in inspection.networks)
+                        ):
+                            marker_present = self._prepare_markerless_final_locked(
+                                spec,
+                                inspection,
+                            )
                         unknown_unflushed = (
                             self._stopped_archive_hook is not None
                             and not marker_present
@@ -1143,6 +1190,15 @@ class SharedChatSessionSupervisor:
                         else:
                             group.orphan_marker_unreadable = False
                             marker_present = marker_payload is not None
+                            if (
+                                not marker_present
+                                and inspection.status is not ChatSandboxStatus.CREATED
+                                and (inspection.running or owned_bridge in inspection.networks)
+                            ):
+                                marker_present = self._prepare_markerless_final_locked(
+                                    spec,
+                                    inspection,
+                                )
                             unknown_unflushed = (
                                 self._stopped_archive_hook is not None
                                 and not marker_present
@@ -1215,7 +1271,13 @@ class SharedChatSessionSupervisor:
                             )
                         else:
                             members = self._archive_members_locked(group)
-                            if marker_payload is None and self._stopped_archive_hook is not None:
+                            marker_present = marker_payload is not None
+                            if not marker_present:
+                                marker_present = self._prepare_markerless_final_locked(
+                                    spec,
+                                    inspection,
+                                )
+                            if not marker_present and self._stopped_archive_hook is not None:
                                 group.stop_archive_pending = True
                                 group.stop_archive_blocked = True
                                 group.stop_archive_members = members
@@ -3423,6 +3485,11 @@ class SharedChatSessionSupervisor:
                     created_cleanup = True
                     group.orphan_finalization_pending = False
                     retry_pending = False
+                elif self._prepare_markerless_final_locked(group.spec, current):
+                    # The dynamic controller atomically wrote an explicit
+                    # disabled-policy marker.  Finish that no-upload lifecycle
+                    # through the normal retry path and release its bridge.
+                    retry_pending = True
                 else:
                     # A stopped non-CREATED container with no durable record is
                     # unclassified native history. Persist the blocked state and

@@ -540,6 +540,39 @@ class SandboxArchiveController:
         """
         self._prepare_final_marker(spec, inspection, stopped=False)
 
+    def prepare_markerless_final_if_disabled(
+        self,
+        spec: ChatSandboxSpec,
+        inspection: ChatSandboxInspection,
+    ) -> bool:
+        """Fence a recovered markerless lifecycle only under explicit disabled policy.
+
+        A running group normally has no final marker: ``complete_start`` removes
+        its start fail-stop fence.  After a broker restart, that absence is safe
+        to clean up only when the delivered policy explicitly disables archives.
+        Hold the policy lock through the durable marker write so a concurrent
+        enable cannot turn unknown native history into an enabled archive.
+
+        ``True`` means a durable marker now authorizes ordinary finalization.
+        ``False`` means the policy is enabled (or has not been delivered), so
+        the supervisor must quarantine the markerless group instead.
+        """
+        with self._condition:
+            if self._closed or not self._started:
+                raise SandboxError("sandbox archive controller is not running")
+            policy = self._policy
+            if policy is None or policy.enabled:
+                return False
+            # Condition uses an RLock.  Keeping this outer acquisition while
+            # the shared helper re-enters it freezes the disabled revision
+            # until its marker is fsynced.
+            self._prepare_final_marker(
+                spec,
+                inspection,
+                stopped=not inspection.running,
+            )
+            return True
+
     def prepare_start(self, spec: ChatSandboxSpec, inspection: ChatSandboxInspection) -> None:
         """Arm a policy fence while stopped in case container start fail-stops."""
         self._prepare_final_marker(spec, inspection, stopped=True)

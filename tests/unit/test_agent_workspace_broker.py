@@ -179,6 +179,7 @@ class _SharedSupervisor:
         self.archive_invalidate_hook = None
         self.archive_prepare_start_hook = None
         self.archive_complete_start_hook = None
+        self.archive_markerless_prepare_hook = None
         self.threads = {"athr_source", "athr_child"}
 
     def start(self):
@@ -215,10 +216,12 @@ class _SharedSupervisor:
         invalidate_final,
         prepare_start,
         complete_start,
+        prepare_markerless_final,
     ):
         self.archive_invalidate_hook = invalidate_final
         self.archive_prepare_start_hook = prepare_start
         self.archive_complete_start_hook = complete_start
+        self.archive_markerless_prepare_hook = prepare_markerless_final
 
     def owns(self, thread_id: str) -> bool:
         return thread_id in self.threads
@@ -420,6 +423,9 @@ class _ArchiveController(_ArchiveService):
     def complete_start(self, *_args, **_kwargs) -> None:
         return
 
+    def prepare_markerless_final_if_disabled(self, *_args, **_kwargs) -> bool:
+        return self.revision is not None and not self.enabled
+
 
 @pytest.mark.asyncio
 async def test_broker_lifespan_preflights_without_a_host_worktree():
@@ -519,6 +525,8 @@ async def test_disabled_dynamic_policy_still_strictly_stops_on_clean_broker_shut
             )
         assert response.status_code == 200
         assert supervisor.started is True
+        assert supervisor.archive_markerless_prepare_hook is not None
+        assert supervisor.archive_markerless_prepare_hook(None, None) is True
 
     assert supervisor.shutdown_stopped is True
     assert supervisor.shutdown_include_running is True
